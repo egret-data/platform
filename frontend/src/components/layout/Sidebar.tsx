@@ -12,13 +12,15 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAuth } from "@/auth/useAuth";
+import { appForPath } from "@/auth/appAccess";
 import { useWorkspaceFeatures } from "@/hooks/useWorkspaceFeatures";
 import { EXPLORE_MODULES } from "@/lib/exploreModules";
 
 /** `perm` is the fine-grained read permission that unlocks this item in the
- * Control Plane; items with no `perm` (e.g. Workspaces) are platform_admin-only.
- * `feature` is the workspace entitlement key (e.g. `notebooks`) that unlocks an
- * Explore item; items with no `feature` are unaffected by entitlements. */
+ * Control Plane or Governance; items with no `perm` (e.g. Workspaces, Audit log)
+ * are platform_admin-only. `feature` is the workspace entitlement key (e.g.
+ * `notebooks`) that unlocks an Explore item; items with no `feature` are
+ * unaffected by entitlements. */
 type NavItem = { label: string; icon: LucideIcon; perm?: string; feature?: string; to?: string };
 type NavGroup = { heading: string; items: NavItem[] };
 
@@ -54,11 +56,29 @@ const EXPLORE_GROUPS: NavGroup[] = [
   },
 ];
 
-// Control Plane = global-admin only. Grouped by a mental model, not a feature
-// list, so admins know where to go: Overview (posture hub) → Identity (who) →
-// Access (what they can do/see) → Data governance (data-plane rules) →
-// Infrastructure (the platform itself). Every route is unchanged; only the
-// grouping/ordering moved (Access-UX IA redesign).
+// Governance = the data-plane rules a data steward manages (SP2: split out of the
+// Control Plane). Headings must stay distinct from every other app's headings —
+// collapsed-group state is one localStorage key across all three apps.
+const GOVERNANCE_GROUPS: NavGroup[] = [
+  {
+    heading: "Policies",
+    items: [{ label: "Policies", icon: ShieldCheck, perm: "policy:read", to: "policies" }],
+  },
+  {
+    heading: "Classification",
+    items: [{ label: "Classifications", icon: Tags, perm: "tag:read", to: "classifications" }],
+  },
+  {
+    heading: "Lineage",
+    // Platform-wide (cross-workspace), so it lives here rather than inside a single
+    // workspace. Admin-only until the real feature + its permission land.
+    items: [{ label: "Data Lineage", icon: Share2, to: "data-lineage" }],
+  },
+];
+
+// Control Plane = system administration. Grouped by a mental model, not a feature
+// list: Overview (posture hub) → Identity (who) → Access (what they can do/see) →
+// Infrastructure (the platform itself) → System (the platform's own records).
 const CONTROL_PLANE_GROUPS: NavGroup[] = [
   {
     heading: "Overview",
@@ -80,18 +100,6 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
     ],
   },
   {
-    heading: "Data governance",
-    items: [
-      { label: "Policies", icon: ShieldCheck, perm: "policy:read" },
-      { label: "Classifications", icon: Tags, perm: "tag:read", to: "classifications" },
-      // Lineage is a platform-wide (cross-workspace) governance view, so it lives
-      // here rather than inside a single workspace. Admin-only until the real
-      // feature + its permission land.
-      { label: "Data Lineage", icon: Share2, to: "data-lineage" },
-      { label: "Audit log", icon: ScrollText },
-    ],
-  },
-  {
     heading: "Infrastructure",
     items: [
       { label: "Workspaces", icon: FolderKanban },
@@ -100,6 +108,12 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
       { label: "Storage", icon: HardDrive, perm: "storage:read" },
       { label: "Secrets", icon: KeyRound, perm: "secret:read" },
     ],
+  },
+  {
+    heading: "System",
+    // API-layer authorization decisions and admin mutations — a system log, not a
+    // data access log, so it stays here and not in Governance.
+    items: [{ label: "Audit log", icon: ScrollText }],
   },
 ];
 
@@ -123,21 +137,23 @@ interface SidebarProps {
 }
 
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
-  const isAdmin = useLocation().pathname.startsWith("/control-plane");
+  const app = appForPath(useLocation().pathname);
   const { workspace } = useParams();
   const { me } = useAuth();
   const isPlatformAdmin = me?.platform_roles.includes("platform_admin") ?? false;
   const permissions = me?.permissions ?? [];
   const enabledFeatures = useWorkspaceFeatures();
 
-  // Control-plane items are permission-gated: platform_admin sees everything,
-  // everyone else sees only items whose `perm` they hold. Items with no `perm`
-  // (Workspaces) are platform_admin-only. Explore items are entitlement-gated:
-  // an item with a `feature` only shows when the workspace has it switched on
+  // Governance and Control Plane items are permission-gated: platform_admin sees
+  // everything, everyone else sees only items whose `perm` they hold. Items with
+  // no `perm` are platform_admin-only. Explore items are entitlement-gated: an item
+  // with a `feature` only shows when the workspace has it switched on
   // (entitlements apply to everyone, admins included — no bypass). Either way,
   // groups left with no visible items are dropped entirely (heading included).
-  const groups = isAdmin
-    ? CONTROL_PLANE_GROUPS.map((group) => ({
+  const permissionGroups =
+    app === "governance" ? GOVERNANCE_GROUPS : app === "control-plane" ? CONTROL_PLANE_GROUPS : null;
+  const groups = permissionGroups
+    ? permissionGroups.map((group) => ({
         ...group,
         items: group.items.filter(
           (item) => isPlatformAdmin || (item.perm !== undefined && permissions.includes(item.perm)),
@@ -147,7 +163,8 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         ...group,
         items: group.items.filter((item) => !item.feature || enabledFeatures.includes(item.feature)),
       })).filter((group) => group.items.length > 0);
-  const base = isAdmin ? "/control-plane" : `/explore/${workspace ?? ""}`;
+  const base =
+    app === "governance" ? "/governance" : app === "control-plane" ? "/control-plane" : `/explore/${workspace ?? ""}`;
 
   // Per-group collapse (only meaningful when the sidebar itself is expanded).
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(loadCollapsedGroups);

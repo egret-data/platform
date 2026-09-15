@@ -152,7 +152,7 @@ describe("Sidebar – workspace zones", () => {
       "href",
       "/explore/eng/data-api/activity",
     );
-    // Data Lineage is no longer a workspace item (moved to the Control Plane).
+    // Data Lineage is not a workspace item (it lives in the Governance app).
     expect(screen.queryByRole("link", { name: "Data Lineage" })).not.toBeInTheDocument();
   });
 
@@ -242,8 +242,8 @@ describe("Sidebar – Infrastructure group", () => {
 
 /**
  * The `Access` heading belongs to `CONTROL_PLANE_GROUPS`, and `groups` is a
- * hard either/or on `isAdmin` — control-plane groups OR Explore groups, never
- * both. So on an Explore route there is no `Access` heading at all, for anyone,
+ * hard either/or on the app (`appForPath`) — permission groups OR Explore
+ * groups, never both. So on an Explore route there is no `Access` heading at all, for anyone,
  * admin included.
  *
  * This is asserted because its ABSENCE was load-bearing and nobody had written
@@ -315,58 +315,100 @@ describe("Sidebar – Identity + Access groups", () => {
   });
 });
 
-describe("Sidebar – Control Plane Data Governance group", () => {
-  test("renders the Policies item at /control-plane/policies", () => {
+describe("Sidebar – Control Plane System group", () => {
+  test("Audit log sits under System and the governance items are gone from the Control Plane", () => {
     renderSidebar("/control-plane/workspaces");
-    expect(screen.getByText("Data governance")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Policies" })).toHaveAttribute(
-      "href",
-      "/control-plane/policies",
-    );
+    const auditLog = screen.getByRole("link", { name: "Audit log" });
     // Audit log has no `perm` → platform_admin-only, slugified to `audit-log`.
-    expect(screen.getByRole("link", { name: "Audit log" })).toHaveAttribute(
-      "href",
-      "/control-plane/audit-log",
-    );
-    // Data Lineage now lives here (moved out of the workspace), admin-only.
-    expect(screen.getByRole("link", { name: "Data Lineage" })).toHaveAttribute(
-      "href",
-      "/control-plane/data-lineage",
-    );
+    expect(auditLog).toHaveAttribute("href", "/control-plane/audit-log");
+    expect(screen.getByRole("button", { name: /^System$/i }).parentElement).toContainElement(auditLog);
+
+    // The link above proves this is the Control Plane sidebar, so these absences mean something.
+    for (const moved of ["Policies", "Classifications", "Data Lineage"]) {
+      expect(screen.queryByRole("link", { name: moved })).not.toBeInTheDocument();
+    }
+    expect(screen.queryByText(/data governance/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("Sidebar – Governance app", () => {
+  const groupOf = (heading: string) =>
+    screen.getByRole("button", { name: new RegExp(`^${heading}$`, "i") }).parentElement;
+
+  test("renders Policies, Classification and Lineage groups at /governance routes", () => {
+    renderSidebar("/governance/policies");
+    const policies = screen.getByRole("link", { name: "Policies" });
+    const classifications = screen.getByRole("link", { name: "Classifications" });
+    const lineage = screen.getByRole("link", { name: "Data Lineage" });
+
+    expect(policies).toHaveAttribute("href", "/governance/policies");
+    expect(classifications).toHaveAttribute("href", "/governance/classifications");
+    expect(lineage).toHaveAttribute("href", "/governance/data-lineage");
+
+    expect(groupOf("Policies")).toContainElement(policies);
+    expect(groupOf("Classification")).toContainElement(classifications);
+    expect(groupOf("Lineage")).toContainElement(lineage);
   });
 
-  test("renders the Classifications item at /control-plane/classifications", () => {
-    renderSidebar("/control-plane/workspaces");
+  test("renders neither Control Plane nor Explore items", () => {
+    renderSidebar("/governance/classifications");
+    expect(screen.getByRole("link", { name: "Classifications" })).toBeInTheDocument();
+    for (const label of ["Engines", "Users", "Audit log", "Workspaces", "SQL Lab", "Workspace settings"]) {
+      expect(screen.queryByRole("link", { name: label })).not.toBeInTheDocument();
+    }
+  });
+
+  test("a tag-only user sees Classifications and nothing else", () => {
+    renderSidebar("/governance/classifications", {
+      user_id: "4",
+      email: "tags@example.com",
+      platform_roles: [],
+      permissions: ["tag:read"],
+    });
     expect(screen.getByRole("link", { name: "Classifications" })).toHaveAttribute(
       "href",
-      "/control-plane/classifications",
+      "/governance/classifications",
     );
+    expect(screen.queryByRole("link", { name: "Policies" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Data Lineage" })).not.toBeInTheDocument();
+    // Groups left with no visible items are dropped, heading included.
+    expect(screen.queryByRole("button", { name: /^Policies$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Lineage$/i })).not.toBeInTheDocument();
+  });
+
+  test("a policy-only user sees Policies and not Classifications", () => {
+    renderSidebar("/governance/policies", {
+      user_id: "5",
+      email: "policies@example.com",
+      platform_roles: [],
+      permissions: ["policy:read"],
+    });
+    expect(screen.getByRole("link", { name: "Policies" })).toHaveAttribute("href", "/governance/policies");
+    expect(screen.queryByRole("link", { name: "Classifications" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Classification$/i })).not.toBeInTheDocument();
   });
 });
 
 describe("Sidebar – permission-based filtering", () => {
-  test("a scoped (non platform_admin) user with only policy:read sees Policies but not Engines/Users/Roles/Workspaces", () => {
-    renderSidebar("/control-plane/workspaces", {
+  test("a scoped (non platform_admin) user with only engine:read sees Engines and nothing gated elsewhere", () => {
+    renderSidebar("/control-plane/engines", {
       user_id: "2",
       email: "scoped@example.com",
       platform_roles: [],
-      permissions: ["policy:read"],
+      permissions: ["engine:read"],
     });
 
-    expect(screen.getByRole("link", { name: "Policies" })).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Engines" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Users" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Roles" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Workspaces" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Engines" })).toBeInTheDocument();
+    for (const label of ["Users", "Roles", "Workspaces", "Secrets", "Audit log"]) {
+      expect(screen.queryByRole("link", { name: label })).not.toBeInTheDocument();
+    }
 
-    // Groups with no visible items are dropped entirely, heading included:
-    // Identity + Access need user/group/role:read; Infrastructure needs
-    // engine/warehouse/storage/secret:read — none visible for a policy:read user.
+    // Groups with no visible items are dropped entirely, heading included.
     expect(screen.queryByText("Identity")).not.toBeInTheDocument();
     expect(screen.queryByText("Access")).not.toBeInTheDocument();
-    expect(screen.queryByText("Infrastructure")).not.toBeInTheDocument();
-    // Only the Data governance group (Policies) survives.
-    expect(screen.getByText("Data governance")).toBeInTheDocument();
+    // System holds only the admin-only Audit log.
+    expect(screen.queryByText("System")).not.toBeInTheDocument();
+    expect(screen.getByText("Infrastructure")).toBeInTheDocument();
   });
 
   test("a platform_admin sees every Control Plane item regardless of permissions", () => {
@@ -378,18 +420,17 @@ describe("Sidebar – permission-based filtering", () => {
     });
 
     for (const label of [
+      "Access overview",
+      "Users",
+      "Groups",
+      "Roles",
+      "Access Explorer",
+      "Permissions",
       "Workspaces",
       "Engines",
       "Warehouses",
       "Storage",
       "Secrets",
-      "Users",
-      "Groups",
-      "Roles",
-      "Permissions",
-      "Policies",
-      "Classifications",
-      "Data Lineage",
       "Audit log",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
