@@ -168,7 +168,7 @@ impl EngineMgmtStore {
     pub fn new(db: Db) -> Self {
         Self { db }
     }
-    fn pool(&self) -> &sqlx::PgPool {
+    pub(crate) fn pool(&self) -> &sqlx::PgPool {
         &self.db.pool
     }
 
