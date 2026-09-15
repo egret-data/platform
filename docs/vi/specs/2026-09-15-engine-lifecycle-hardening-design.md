@@ -32,7 +32,7 @@ Thứ tự hiện tại (`engines.rs:3884-3894`): xoá Kubernetes → `DELETE FR
 | D9 | Không có gì được dọn dẹp: Ranger profile và `<name>_tag` service được tạo tự động, các secret (`delegator_secret_id`, `tls_secret_id`, `tls_cert_secret_ref`, `root_secret_id`), và việc thu hồi bỏ qua `is_minted_client`. Tạo lại một engine cùng tên sẽ gặp `AlreadyExists` trong `create_service`, chỉ log warning rồi tiếp tục **không được gắn (unbound) → Trino allow-all trong khi Ranger vẫn bật**. | |
 | D10 | Bỏ gán (unassign) một engine khỏi workspace (`DELETE …/workspaces/{ws}`, `PUT /engines/{id}/workspaces`) sẽ xoá database đã materialize → cùng lỗi 500 D1/D2. `PUT` không nguyên tử (non-atomic) (có thể áp dụng phần assign rồi mới fail ở phần unassign). Gán vào một workspace không tồn tại trả về 500 thay vì 404. | |
 
-**Không có cơ chế purge nào cho Data API endpoint đã bị trash** (không có `DELETE FROM dataapi.endpoints` ở production; chỉ có trong test). Vì vậy việc chặn trên các endpoint đã trash cần một hành động purge, nếu không một engine từng có endpoint trong quá khứ sẽ không bao giờ xoá được. Xem §3.3. **V**
+**Sửa lại (review kế hoạch):** một cơ chế purge đã có sẵn — `DELETE /api/ws/{ws}/data-api/endpoints/{id}` hard-delete (`EndpointStore::delete`, `endpoints.rs:1215`) và trang trash đã có "Delete permanently". Kiểm tra "không có purge" trước đó đọc phải một kết quả grep bị cắt cụt. §3.3 được rút gọn thành một test pin lại những gì purge xoá.
 
 ### 2.2 Provisioning
 
@@ -80,7 +80,7 @@ Planner phải liệt kê lại cây FK còn sống (`pg_constraint`) và fail m
 4. Set `status = 'deleting'`.
 5. **Xoá Kubernetes**, theo từng object. `KubeClient::delete` trả về `Ok` khi gặp 404. Bất kỳ lỗi nào khác →
    **502** `engine_cluster_delete_failed` kèm nguyên nhân; row giữ nguyên `deleting` và request có thể retry. Cả Trino và StarRocks đều propagate lỗi khác 404.
-6. **Một transaction DB duy nhất:** chạy lại preflight chặn bên trong transaction (race với một endpoint được tạo đồng thời → 409, row giữ `deleting`, cluster đã mất — chấp nhận được, lần retry tiếp theo sẽ thành công một khi dependent đã được xử lý); xoá row engine (cascade như hiện tại); xoá các row secret của engine; xoá Ranger profile và tag service của nó **khi được tạo tự động cho engine này và không có engine nào khác đang gắn vào**.
+6. **Một transaction DB duy nhất:** chạy lại preflight chặn bên trong transaction (race với một endpoint được tạo đồng thời → 409, row giữ `deleting`, cluster đã mất — chấp nhận được, lần retry tiếp theo sẽ thành công một khi dependent đã được xử lý); xoá row engine (cascade như hiện tại); xoá các row secret của engine (`delegator_secret_id`, `root_secret_id`, `tls_secret_id` — không bao giờ xoá `tls_cert_secret_ref` do admin cung cấp). **Ranger profile và tag service không bao giờ bị xoá** (quyết định của user ngày 2026-09-15): việc xoá row chỉ gỡ gắn (unbind); Part B tái sử dụng một profile mồ côi khi tạo lại.
 7. Sau khi commit: thu hồi catalog client nơi `is_minted_client`; lỗi chỉ được log, không được trả về.
 8. **204.**
 
@@ -88,7 +88,7 @@ Backstop: `From<EngineMgmtError>` / `From<CpError>` log `sqlx::Error` ở mức 
 
 ### 3.3 Purge các Data API endpoint đã bị trash
 
-Route mới `DELETE /api/ws/{ws}/data-api/endpoints/{id}/permanent`, được gate giống các route trash hiện có (`data_api_endpoint:manage`), chỉ cho phép khi `deleted_at IS NOT NULL` (nếu không thì 409). Hard-delete endpoint; các con của nó cascade theo (version, grant, schedule `dataapi_alert` qua `dataapi_endpoint_id ON DELETE CASCADE`; planner xác minh hành vi của `access_log`). Audit `data_api_endpoint:purge`. Trang trash của Data API có thêm hành động "Delete permanently" với xác nhận gõ đúng tên.
+Route và UI purge đã có sẵn (xem phần sửa lại ở §2.1). Part A chỉ thêm một test pin lại việc purge xoá các version và schedule `dataapi_alert` của endpoint, đồng thời giữ nguyên các row `access_log` (không có FK, theo thiết kế).
 
 ### 3.4 Unassign
 
@@ -120,10 +120,10 @@ Route mới `DELETE /api/ws/{ws}/data-api/endpoints/{id}/permanent`, được ga
 - **Test bảo vệ cây FK**: query `pg_constraint` để lấy các con của `query.databases`; assert tập (table, on_delete) bằng đúng tập mà preflight phân loại.
 - **FakeKube**: delete trả 404 → thành công; trả 500 → 502 và `status = deleting`; retry sau khi sửa → 204.
 - **Error mapping**: cố tình gây vi phạm FK → 409 `constraint_violation`, và log chứa SQLSTATE.
-- **Route purge** (`crates/egret-dataapi/tests/trash.rs`): purge một endpoint còn sống → 409; purge một endpoint đã trash → mất cùng các con; viewer bị từ chối quyền.
+- **Purge** (`crates/egret-dataapi/tests/trash.rs`): purge một endpoint đã trash sẽ xoá các version và schedule `dataapi_alert` của nó, đồng thời giữ nguyên các row `access_log`. Xoá engine giữ nguyên Ranger profile (pin lại).
 - **Part B**: tạo lại cùng tên gắn vào profile mồ côi (regression cho allow-all); rotate-secrets đổi env secret đã render và hash của password.db; update thất bại khôi phục spec; `remove_catalog` thất bại giữ nguyên row và client; redaction cho catalog `postgresql` có mật khẩu inline; thêm catalog `mysql` thành công sau migration.
-- **Frontend**: render bảng dependent từ fixture 409; badge retry-delete; hành động purge.
-- **Live trên kind**: `DELETE` `demo-trino` → 409 liệt kê 26 endpoint và các alert (không phải 500). Không có dữ liệu nào trên cluster bị thay đổi mà không có quyết định của người dùng.
+- **Frontend**: render bảng dependent từ fixture 409; badge retry-delete.
+- **Live trên kind**: đếm dependent của `demo-trino` theo kiểu read-only trước; sau đó `DELETE` → 409 liệt kê chúng (không phải 500). Không có dữ liệu nào trên cluster bị thay đổi mà không có quyết định của người dùng.
 
 ## 6. Ngoài phạm vi
 
