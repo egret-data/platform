@@ -67,8 +67,9 @@ Các item tương lai (chưa render trong SP2): Governance → *Data permissions
   - `data-lineage` — `RequireGlobalAdmin` (placeholder)
   - index → mục đầu tiên mà user có thể thấy (`policy:read` → policies, `tag:read` → classifications)
 - Bị xoá khỏi `ControlPlaneRoutes`: bảy route tương tự. `audit-log` vẫn ở lại.
-- **Redirect** (bên trong `ControlPlaneRoutes`): `policies/*`, `classifications/*`, `data-lineage` → đúng subpath tương ứng dưới `/governance`, giữ nguyên `search` và `hash` (vd: `?scope=tag`), với `replace`.
-- `FIRST_SECTION_BY_PERM` (trang landing Control Plane) bỏ `policy:read`; một user chỉ có quyền governance mà mở `/control-plane` sẽ được redirect sang `/governance`.
+- **Redirect** (route cấp cao nhất, đứng cạnh `/control-plane/*`, KHÔNG nằm trong `ControlPlaneRoutes` — cây đó nằm sau `RequireControlPlaneAccess`, mà user chỉ có quyền governance sẽ không qua được): `/control-plane/policies/*`, `/control-plane/classifications/*`, `/control-plane/data-lineage` → đúng subpath tương ứng dưới `/governance`, giữ nguyên `search` và `hash` (vd: `?scope=tag`), với `replace`.
+- `FIRST_SECTION_BY_PERM` (trang landing Control Plane) bỏ `policy:read`; user chỉ có quyền governance mở đúng trang landing `/control-plane` sẽ được chính `RequireControlPlaneAccess` redirect sang `/governance` (link sâu trong Control Plane vẫn 403).
+- `HomeRedirect` (`/`): user chưa thuộc workspace nào được đưa sang `/governance` nếu vào được, nếu không thì `/control-plane` nếu vào được, còn lại hiện dòng "No workspaces yet" như cũ — trang đó không có header nên steward chưa có workspace sẽ bị kẹt.
 
 ### 3.5 Trang và link
 

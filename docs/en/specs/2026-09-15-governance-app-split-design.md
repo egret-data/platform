@@ -73,11 +73,15 @@ Future items (not rendered in SP2): Governance → *Data permissions* (SP4), *Da
   - `data-lineage` — `RequireGlobalAdmin` (placeholder)
   - index → first section the user may see (`policy:read` → policies, `tag:read` → classifications)
 - Removed from `ControlPlaneRoutes`: the same seven routes. `audit-log` stays.
-- **Redirects** (inside `ControlPlaneRoutes`): `policies/*`, `classifications/*`, `data-lineage` →
+- **Redirects** (top-level siblings of `/control-plane/*`, NOT inside `ControlPlaneRoutes` — that tree is behind `RequireControlPlaneAccess`, which a governance-only user fails): `/control-plane/policies/*`, `/control-plane/classifications/*`, `/control-plane/data-lineage` →
   the same subpath under `/governance`, preserving `search` and `hash` (e.g. `?scope=tag`), with
   `replace`.
 - `FIRST_SECTION_BY_PERM` (Control Plane landing) drops `policy:read`; a user with only governance
-  permissions who opens `/control-plane` is redirected to `/governance`.
+  permissions who opens the bare `/control-plane` landing is redirected to `/governance` by
+  `RequireControlPlaneAccess` itself (deep Control Plane links still 403).
+- `HomeRedirect` (`/`): a user with no workspace membership is sent to `/governance` if they can enter
+  it, else to `/control-plane` if they can enter that, else the existing "No workspaces yet" text —
+  that page has no header, so a workspace-less steward would otherwise be stranded.
 
 ### 3.5 Pages and links
 
