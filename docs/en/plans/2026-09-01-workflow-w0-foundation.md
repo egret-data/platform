@@ -4,7 +4,7 @@
 
 **Goal:** Stand up the `egret-workflow` crate pair with a Kestra-mirroring module tree and its first faithfully ported type, register the `workflows` entitlement, delete the two dead nav placeholders, and rename `egret-orchestrator` so it stops colliding with the workflow orchestrator.
 
-**Architecture:** W0 ships no routes and no tables. It creates the seams the rest of the programme (W1–W9) lands in: a workspace entitlement key that fails closed before any route exists, two crates whose module names mirror Kestra's Java packages, and a rename done as its own mechanical change so no later diff carries it.
+**Architecture:** W0 ships no routes and no tables. It creates the seams the rest of the programme (W1–W12; the table ran to W9 when this plan was written, and W10, W11 and W12 were added on 2026-09-14) lands in: a workspace entitlement key that fails closed before any route exists, two crates whose module names mirror Kestra's Java packages, and a rename done as its own mechanical change so no later diff carries it.
 
 **Tech Stack:** Rust 1.85 / edition 2021, axum + sqlx (not used in W0), React 18 + react-router 7 + Vitest, `just` recipes.
 

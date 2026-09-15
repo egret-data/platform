@@ -25542,6 +25542,260 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/executions": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "list_executions",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "query",
+            "description": "Only executions started from this draft. A trashed draft still matches:\n`FlowRepo`'s delete is soft, so the column keeps pointing at it.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "flow_key",
+            "in": "query",
+            "description": "The YAML's own `id` — the only filter that still finds an execution\nwhose `flow_id` was `NULL`ed by a real `DELETE`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "One or more states, **comma-separated** (`RUNNING,FAILED`): a run list\nshows failures beside what is in flight.\n\nComma-separated rather than a repeated `state=` key because axum's\n`Query` decodes with `serde_urlencoded`, which silently keeps only the\nLAST value of a repeated key — a caller selecting two chips would have\nbeen filtered by one of them with no error anywhere.\n\n**Present but empty (`?state=`) matches nothing**, which is what a UI\nthat has deselected every chip means. Absent means \"every state\".",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Window over the execution's `created_at`, **inclusive**.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "description": "Window over the execution's `created_at`, **exclusive**, so consecutive\nwindows tile without double-counting the row on the boundary.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many rows to return. Default 50, maximum 200; a larger value is\nclamped rather than refused, and the clamped value comes back in the\nresponse's own `limit`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "How many rows to skip. Negative is clamped to zero.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the workspace's executions, newest first, with the total behind it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionPageDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/executions/{id}": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "operationId": "get_execution",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The execution, its frozen source, and every task run in run_ix order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace. **An execution belonging to another workspace answers exactly this**, indistinguishably from one that never existed: a 403 would confirm the id is real.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/flows": {
       "get": {
         "tags": [
@@ -31330,6 +31584,182 @@
           }
         }
       },
+      "ExecutionDto": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ExecutionListItemDto"
+          },
+          {
+            "type": "object",
+            "required": [
+              "source",
+              "runs"
+            ],
+            "properties": {
+              "source": {
+                "type": "string",
+                "description": "The flow source this execution runs, frozen at start. The plan is pure\nover it, which is why a detail page can draw the topology from this\nstring alone."
+              },
+              "runs": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/TaskRunDto"
+                },
+                "description": "Every task run, in `run_ix` order — the executor's creation order."
+              }
+            }
+          }
+        ],
+        "description": "One execution in full: every list field, plus the two things only a detail\npage needs — the frozen `source` and every task run, ordered by `run_ix`."
+      },
+      "ExecutionListItemDto": {
+        "type": "object",
+        "description": "One execution as `GET /executions` lists it.\n\n**No `source`.** It is the whole frozen flow YAML — one document per row —\nand a fifty-row page would carry fifty of them to show a column that does\nnot exist. The field is not merely omitted here: [`ExecutionRow`] does not\nhave it at all, so no future edit to this DTO can put it back by accident.\n`GET /executions/{id}` carries it, because a detail page draws the topology\nfrom it.\n\n`workspace_id` is dropped for the reason every other DTO in this module\ndrops it: the `{workspace}` path segment already named it, and a body field\nthat merely echoes the URL is a second place for it to be wrong.",
+        "required": [
+          "id",
+          "namespace",
+          "flow_key",
+          "state",
+          "history",
+          "inputs",
+          "seq",
+          "execution_trigger",
+          "attempt_number",
+          "origin_offset_ms",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "flow_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The draft this execution came from, and `NULL` only if something\noutside this crate issued a real `DELETE` — **trashing a flow does not\nclear it**, because `FlowRepo`'s delete is soft and nothing in\n`egret-workflow/src` issues a `DELETE FROM`. A trashed flow's\nexecutions are still listed, and still findable by `flow_id`."
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "flow_key": {
+            "type": "string",
+            "description": "The YAML's own `id`; `flow_id` is taken by the draft's uuid above."
+          },
+          "state": {
+            "type": "string",
+            "description": "Kestra's wire spelling — `RUNNING`, `SUCCESS`, `FAILED`, …"
+          },
+          "history": {
+            "type": "object",
+            "description": "The state timeline, as stored: an array of state NAMES, e.g.\n`[\"CREATED\",\"RUNNING\",\"SUCCESS\"]`. It carries no timestamps — see\n[`TaskRunDto::history`], which is written by the same function."
+          },
+          "inputs": {
+            "type": "object"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "execution_trigger": {
+            "type": "object",
+            "description": "The trigger record, `NULL` for an API start."
+          },
+          "trigger_execution_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "trigger_run_ix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "parent_execution_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "parent_run_ix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "loop_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "loop_value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attempt_number": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "origin_offset_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ExecutionPageDto": {
+        "type": "object",
+        "description": "One page of executions, with the size of the whole match behind it and the\nwindow that was actually served.\n\n**`limit`/`offset` are echoed because they are CLAMPED**, and a clamp\nnobody can see is the indefensible one (the same reasoning\n`egret-dataapi`'s `ActivityCallsQuery::limit` states). A caller that asks\nfor 1000 rows is told it was served 200 rather than having to infer it from\na short page — which it could not, since a short page is also what the last\npage looks like.",
+        "required": [
+          "rows",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExecutionListItemDto"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Every execution matching the filter, not just this page's. Counted by a\nsecond statement carrying the same predicates, workspace one included."
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The page size actually used, after the clamp."
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The offset actually used, after the clamp."
+          }
+        }
+      },
       "FeatureDto": {
         "type": "object",
         "description": "One module and whether this workspace has it switched on.",
@@ -35922,6 +36352,144 @@
           },
           "status": {
             "type": "string"
+          }
+        }
+      },
+      "TaskRunDto": {
+        "type": "object",
+        "description": "One task run, whole — all twenty-two columns.\n\nUnlike the execution's own row there is nothing dropped here: a detail page\nreads ONE execution's runs, so there is no page-sized multiplier the way\n`executions.source` has one.\n\n**These are the fields a gantt is drawn from**, and\n`tests/executions_routes.rs::a_gantt_row_is_computable_from_the_execution_\ndto_alone` computes one from this DTO and nothing else, so W7 cannot\ndiscover a missing field after this package closes. What it uses:\n[`Self::task_id`] and [`Self::parent_ix`] for the label and the nesting,\n[`Self::state`] for the bar, [`Self::created_seq`]/[`Self::ended_seq`] for\nLOGICAL time, and [`Self::created_at`]/[`Self::updated_at`] plus\n`attempts[].started_at` for WALL-CLOCK time.",
+        "required": [
+          "id",
+          "execution_id",
+          "run_ix",
+          "task_ix",
+          "task_id",
+          "state",
+          "history",
+          "attempts",
+          "outputs",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "execution_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "run_ix": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The `RunIx` — the executor's creation order, and the order the detail\nroute returns these in."
+          },
+          "task_ix": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The `TaskIx` — the index into the plan's task list."
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "type_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The task's `type:`, and `NULL` exactly when the planned kind is not\nrunnable — i.e. a flowable the executor drives itself, which is why\nsuch a run has no `attempts` for a gantt to read a start from."
+          },
+          "parent_ix": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The parent run's `run_ix` — a gantt's nesting, `NULL` at the top level."
+          },
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rendered": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rendered_run_if": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "history": {
+            "type": "object",
+            "description": "**An array of state NAMES and nothing else** — `[\"CREATED\",\"RUNNING\",\n\"SUCCESS\"]` — written by `worker::claim`'s `states_json`, which maps\neach `RunState` to its wire spelling. It is **not** Kestra's\n`State.History`, and it carries **no dates**: a timeline drawn from\nthis alone has an order but no clock. The wall-clock instants are\n[`Self::created_at`], [`Self::updated_at`], and `attempts[].started_at`\n(milliseconds after the EXECUTION's `created_at`, which is what a\n`Tick` is in this engine)."
+          },
+          "attempts": {
+            "type": "object",
+            "description": "One entry per attempt: `{\"history\": [...], \"started_at\": <ms>}`, where\n`started_at` is milliseconds after the execution's `created_at`."
+          },
+          "not_before_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "claimed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The lease. `NULL` means unclaimed."
+          },
+          "outputs": {
+            "type": "object"
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The executor round this run was created in — LOGICAL time. Two bars\nwhose wall-clock spans are microseconds apart are still ordered by\nthis, which is why a gantt wants it beside the timestamps."
+          },
+          "ended_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The executor round this run terminated in; `NULL` while it has not."
+          },
+          "resume_with": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },

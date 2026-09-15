@@ -199,8 +199,12 @@ workflow.flows          draft: yaml source + parsed plan, state draft/live/disab
 workflow.flow_versions  frozen snapshot: yaml + normalised plan + RESOLVED references
 workflow.executions     one run, pinned to a flow_version_id; never reads the draft
 workflow.task_runs      one attempt of one node: attempt, state, not_before, deadline_at, output
-workflow.triggers       cron/webhook rows, claimable
+workflow.triggers       cron/webhook rows, claimable -- NOT BUILT: W12 (see the
+                        table in section 9). W6 shipped the trigger as a pure
+                        function over injected state and built no table;
+                        `TriggerState` is constructed only in tests
 workflow.task_logs      log lines, with retention_days as automation.schedules has
+                        -- NOT BUILT: W11 (see the table in section 9)
 ```
 
 ### 6.2 References are resolved at publish, not at run
@@ -237,7 +241,9 @@ each becomes a unit test on a struct — no Postgres, no Trino, no pod.
 The durable loop is thin and reuses the statement already proven in
 `egret-automation/src/scheduler.rs`:
 
-- **trigger loop** — claim due triggers, create executions and root task runs;
+- **trigger loop** — claim due triggers, create executions and root task runs.
+  **Not built: W12.** W6 shipped the trigger predicate as a pure function over
+  injected state and no `workflow.triggers` table, so nothing claims here yet;
 - **worker loop** — claim `task_runs` where `state='pending' AND not_before <= now()`
   with `FOR UPDATE SKIP LOCKED`, run the handler, and in the *same transaction*
   record the result, call `advance()`, and insert the successors. No third loop,
@@ -369,13 +375,20 @@ W7 — a screen inventory is not a UX review.
 | **W1** Model & language | `models/{flows,tasks,executions,triggers,property}`; YAML parse/validate; draft/version tables; publish + reference resolution | W0 |
 | **W2** Expressions | minijinja + 37 filters + 40 functions + `??`/`?:` rewrite + **the Pebble differential oracle** | W0 |
 | **W3a** Executor state machine | `advance()`; `sequential/parallel/if/switch/dag/loop`; retry/timeout/`errors:`; the Kestra execution-trace oracle. No I/O | W1, W2 |
-| **W3b** Durable executor | claim loops; reaper; `SpawnExecution`; handlers `core.log`, `core.debug.Return`, `core.execution.Fail`, `core.flow.Sleep`, `egret.sql`; the oracle re-pointed at the real driver | W3a |
+| **W3b** Durable executor | claim loops; reaper; `SpawnExecution`; handlers `core.log`, `core.debug.Return`, `core.execution.Fail`, `core.flow.Sleep`, `egret.sql`; the oracle re-pointed at the real driver. **Correction, 2026-09-14 (see the W10 spec §1): the claim loop and the reaper shipped as functions with no production caller.** A grep for `tick(`, `reap(` and `start_execution(` over every `crates/*/src` finds no call site, and `egret-bin` builds a `WorkflowState` — the flow repo and its refs — and no loop, so the only things that drive the loop are `oracle-exec/driver.rs` and this crate's own tests. That is a correction of the record rather than a criticism of W3b — it is already item 15 of `oracle-exec/README.md`'s coverage statement — and **W10 is the row that closes it** | W3a |
 | **W4** Runner & container | the `RETRYING` waker, task-level `timeout:`, the kill path — the three holes W3b handed forward, **worth ~0 baselined entries, not the 20 this row first claimed** (that figure was a union of three declaration greps; see the W4 spec §1.1); then `TaskCommands`, `egret.container`, `egret.script.python`, which reach ZERO corpus entries and carry their own tests. **`egret.python` is NOT W4's** — §6.4 gives that name to the notebook `KernelLauncher`, and `TASK_TYPES` has held it since W1 | W3b |
 | **W5** Kestra plugin host | the JVM image, `ShimRunContext`, `StorageInterface` bridge, `kestra.<FQCN>` dispatch, plugin jar resolution | W4 |
 | **W6** Triggers & subflow | `subflow` + `CREATE_NEW_EXECUTION` replay (**13–15 baselined entries, one migration**); then cron, webhook, flow trigger and backfill — which reach **0** baselined entries and carry their own tests. Written before the corpus was measured: four of those five words are worth **zero**, and backfill has **no live declaration in 345 flows**. See the W6 spec §1. **Outcome, measured: the bankable half banked 16** — 12 `Subflow` + 4 replay, so the 13–15 estimate was low by one at the top end — **and the four trigger words banked 0, as predicted.** The mechanism of each zero is in `oracle-exec/README.md`, *The coverage statement* → the W6 section | W3b |
-| **W7** Frontend | Workflows nav group; YAML editor; read-only topology; execution gantt and logs | W1, W3b |
+| **W7** Frontend | Workflows nav group; YAML editor; read-only topology; execution gantt and logs. **Blocked on W10**: the gantt and the topology need a process that advances executions and an execution REST surface, and neither existed when this row was written. **The logs panel needs W11** and is out of W7's first cut, stated rather than discovered | W1, W3b, W10 |
 | **W8** Advanced semantics | `pause`/`resume` **with** `loopUntil` (one state, must not be split), `allowFailure`, and `sla:`'s two `EXECUTION_ASSERTION` entries — **18 baselined entries strict**, measured. **Concurrency limits reach 0 and `labels` reaches 0**; `WorkingDirectory` reaches 1, not the 4 its declarations suggest. The residual table's `concurrency:` → `CANCELLED` is a **misattribution** (`CANCELLED` is 2 `sla:` + 1 `Exit`, never a limit's) and the row is deleted, not lowered. Written before the corpus was measured. See the W8 spec §1 | W3b, W6 |
 | **W9** Remaining Kestra infrastructure | KV store, namespace files, internal storage, outputs | W4 |
+| **W10** Runtime & execution surface | the worker ticker in `egret-bin` — config-gated, `MissedTickBehavior::Skip`, cancellation-aware, with a written per-call safety statement for `tick`, `wake`, `due_retries` and `reap`; the reaper on its own interval with `working_timeout_s` stated; an execution REST surface (list, get with task runs, start, resume, kill, replay) — workspace-scoped structurally, feature-gated, utoipa-documented, regenerated into the frontend client with `npm run gen:api`; **one end-to-end test that publishes, starts and observes a flow to a terminal state with no harness driving the tick**; and **this table's own correction**, so the **four** deliverables W7 needs have an owner — two of them W10's own, and two named as W11 and W12. **The ratchet cannot judge this package in either direction**: `oracle-exec/driver.rs:884` calls `worker::tick` directly with its own registry, so the oracle already exercises the loop's body and is blind to the binary's wiring by construction — expect **109 before and 109 after**. See the W10 spec §1 | W3b, W4 |
+| **W11** Execution logs | `workflow.task_logs`, a `LogSink` that persists, a retention window (§11 open question 1) and a paginated read API. **Deferred out of W10 with the measurement rather than by omission:** no `task_logs` table exists in any migration — schema `workflow` holds exactly four tables, `flows`, `flow_versions`, `executions` and `task_runs`; `LogSink` has **three** implementations under `crates/egret-workflow/src/` — `TracingSink` (writes to `tracing`), a `#[cfg(test)]` `Recorder` (an in-memory `Vec`) and `NameHintSink` (annotates and forwards) — and **none of the three persists a line**; and the container handler records `stdOutLineCount` and `stdErrLineCount`, **counts, not content**. Until this lands, **W7 ships without a logs panel** | W10 |
+| **W12** Trigger loop | `workflow.triggers` — the claimable cron/webhook rows §6.1 already designs — the loop that claims and fires them, and **its own concurrency safety argument** rather than one inherited from the worker's claim. **Deferred out of W10 with the measurement, exactly as W11 was:** **no migration anywhere creates `workflow.triggers`** (control: `workflow.executions` appears in **three** migration files, so the search reaches migrations, and schema `workflow` holds exactly four tables); `trigger::tick` has **no caller outside `crates/egret-workflow/src/trigger/`**; `TriggerState::initialise` has **exactly one** caller and it is a `#[cfg(test)]` helper; and `crates/egret-bin/src/main.rs` contains the string `trigger` **zero** times (control: `egret_workflow` appears **5** times in that file). **So a `cron:` trigger cannot fire in production today, and W10 does not change that**: W10 wires the *worker* loop, which has a table to claim from, and the trigger loop has none. Until W12 lands a flow runs by **manual API start or by webhook**, both of which work — stated rather than discovered | W6, W10 |
+
+**W10, W11 and W12 were added on 2026-09-14, after W7 turned out to be blocked, and the reason is worth keeping.** **Four** things W7's row needs — a process that advances executions, an execution REST surface, `workflow.task_logs`, and a loop that fires `cron:` triggers — are designed in §6.1 and §6.3 of this document and were owned by **no row of this table**. The fourth was found while measuring the schema for W11's row, not by reading the table, which is why it is stated separately below. Machine-checked rather than read: grepping this table **as it stood before the W10, W11 and W12 rows below** for `task_logs|execution api|ExecutionController|wire|binary|daemon` returned **0** while `reaper` returned 1 and `W3b` returned 6 in the same pass, and `ExecutionController` appears **exactly once** in this spec — in §8, *"Not ported, but required reading before W7"*, where it is named as a **shape to study**, never as a deliverable. A row that names a thing in the architecture and never in the plan reads, to anyone checking coverage, exactly like a row that is done. The full derivation is in `docs/{en,vi}/specs/2026-09-14-workflow-w10-runtime-and-execution-surface-design.md` §1.
+
+**The trigger loop, the fourth, is W12 above.** That leaves **two names owned by no row of this table**, recorded here rather than left to be rediscovered: the `secret` and `http` expression functions, which `crates/egret-workflow/src/runners/functions.rs`'s `REFUSED` table assigns to W9 **only so its refusal message can name an owner**, by that file's own admission — *"`secret` and `http` are in no package's contents at all"*. **No owner is assigned to them here**, deliberately: reassigning a name a second time makes the message churn without making it true. They are flagged for whoever writes the next programme-level review, and they are the same shape as the four W10 §1 records.
 
 Each package gets its own spec and plan, as the DBAPI-parity programme did.
 
@@ -389,7 +402,8 @@ already written.
 ## 11. Open questions
 
 1. Log lines live in Postgres with a retention window in v1; object storage is
-   W9. Confirm that is enough.
+   W9. Confirm that is enough. **The Postgres half is W11** — §9's row carries
+   the measurement showing nothing persists a log line today.
 2. Publish-time reference resolution makes a published flow rigid: renaming a
    dataset does not re-point it. This is believed correct but is a real
    trade-off.

@@ -182,6 +182,12 @@ là thứ validate (và về sau, thi hành) đọc. Chỉ giữ `source` thì p
 Cố ý **không** có trong W1: `workflow.executions`, `workflow.task_runs`, `workflow.triggers`,
 `workflow.task_logs`. Chưa gì chạy, và một bảng không có người ghi là bề mặt chưa được kiểm.
 
+**Đo ngày 2026-09-14, vì chữ "hoãn" dễ bị đọc thành "sau đó đã có", mà với hai
+bảng trong số này thì không:** `workflow.executions` và `workflow.task_runs` đã
+có ở migration 0134, còn **`workflow.task_logs` và `workflow.triggers` đến nay
+vẫn không tồn tại trong bất kỳ migration nào.** Chúng là **W11** và **W12** ở §9
+của spec chương trình, mỗi cái được ghi ở đó kèm phép đo.
+
 ## 8. Publish, và mối nối bảo mật
 
 **Mọi tham chiếu từ flow tới object của egret đều được giải và kiểm workspace tại publish, rồi đóng băng

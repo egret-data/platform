@@ -199,6 +199,12 @@ pub(super) fn register(env: &mut Environment<'static>) {
 /// assigned to W9 here so the message can name an owner, and the task report
 /// says so — a wrong owner in a message is correctable, a message with no
 /// owner is not.
+///
+/// **Updated 2026-09-14 (W10 Task 1).** `errorLogs` moved from `W3` to `W11`:
+/// W3 is merged and ships no log store, and the programme spec's §9 now gives
+/// `workflow.task_logs` to W11. `secret` and `http` are still in no package's
+/// contents — the same residue of the finding W10 §1 records, left open here
+/// deliberately rather than reassigned a second time.
 const REFUSED: &[(&str, &str, &str)] = &[
     // Registered with a null backing on the built engine.
     ("secret", "the secret backend", "W9"),
@@ -212,7 +218,7 @@ const REFUSED: &[(&str, &str, &str)] = &[
     // Not registered at all on the built engine: `@Inject @Nullable`, guarded.
     ("render", "an execution context to render against", "W3"),
     ("renderOnce", "an execution context to render against", "W3"),
-    ("errorLogs", "the running execution's logs", "W3"),
+    ("errorLogs", "the running execution's logs", "W11"),
     ("subflow", "subflow execution", "W6"),
 ];
 
@@ -3098,7 +3104,7 @@ mod tests {
             ("http", "an outbound HTTP client", "W9"),
             ("render", "an execution context to render against", "W3"),
             ("renderOnce", "an execution context to render against", "W3"),
-            ("errorLogs", "the running execution's logs", "W3"),
+            ("errorLogs", "the running execution's logs", "W11"),
             ("subflow", "subflow execution", "W6"),
         ];
         assert_eq!(expected.len(), REFUSED.len(), "a name was added or dropped");

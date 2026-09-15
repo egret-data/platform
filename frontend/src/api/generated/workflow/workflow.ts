@@ -28,6 +28,8 @@ import type {
   Ack,
   CreateFlowRequest,
   ErrorBody,
+  ExecutionDto,
+  ExecutionPageDto,
   FlowDto,
   FlowListItemDto,
   FlowVersionDto,
@@ -35,6 +37,7 @@ import type {
   UpdateFlowRequest,
   ValidateFlowRequest,
   ValidationReportDto,
+  WorkflowListExecutionsParams,
   WorkflowListFlowsParams
 } from '../model';
 
@@ -59,6 +62,285 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export type workflowListExecutionsResponse200 = {
+  data: ExecutionPageDto
+  status: 200
+}
+
+export type workflowListExecutionsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowListExecutionsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowListExecutionsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowListExecutionsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowListExecutionsResponseSuccess = (workflowListExecutionsResponse200) & {
+  headers: Headers;
+};
+export type workflowListExecutionsResponseError = (workflowListExecutionsResponse401 | workflowListExecutionsResponse403 | workflowListExecutionsResponse404 | workflowListExecutionsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowListExecutionsResponse = (workflowListExecutionsResponseSuccess | workflowListExecutionsResponseError)
+
+export const getWorkflowListExecutionsUrl = (workspace: string,
+    params?: WorkflowListExecutionsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions`
+}
+
+export const workflowListExecutions = async (workspace: string,
+    params?: WorkflowListExecutionsParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowListExecutionsResponse> => {
+
+  return customInstance<workflowListExecutionsResponse>(getWorkflowListExecutionsUrl(workspace,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowListExecutionsQueryKey = (workspace: string,
+    params?: WorkflowListExecutionsParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowListExecutionsQueryOptions = <TData = Awaited<ReturnType<typeof workflowListExecutions>>, TError = ErrorBody>(workspace: string,
+    params?: WorkflowListExecutionsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutions>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowListExecutionsQueryKey(workspace,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowListExecutions>>> = ({ signal }) => workflowListExecutions(workspace,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutions>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowListExecutionsQueryResult = NonNullable<Awaited<ReturnType<typeof workflowListExecutions>>>
+export type WorkflowListExecutionsQueryError = ErrorBody
+
+
+export function useWorkflowListExecutions<TData = Awaited<ReturnType<typeof workflowListExecutions>>, TError = ErrorBody>(
+ workspace: string,
+    params: undefined |  WorkflowListExecutionsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutions>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListExecutions>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListExecutions>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListExecutions<TData = Awaited<ReturnType<typeof workflowListExecutions>>, TError = ErrorBody>(
+ workspace: string,
+    params?: WorkflowListExecutionsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutions>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListExecutions>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListExecutions>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListExecutions<TData = Awaited<ReturnType<typeof workflowListExecutions>>, TError = ErrorBody>(
+ workspace: string,
+    params?: WorkflowListExecutionsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutions>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowListExecutions<TData = Awaited<ReturnType<typeof workflowListExecutions>>, TError = ErrorBody>(
+ workspace: string,
+    params?: WorkflowListExecutionsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutions>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowListExecutionsQueryOptions(workspace,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowGetExecutionResponse200 = {
+  data: ExecutionDto
+  status: 200
+}
+
+export type workflowGetExecutionResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowGetExecutionResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowGetExecutionResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowGetExecutionResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowGetExecutionResponseSuccess = (workflowGetExecutionResponse200) & {
+  headers: Headers;
+};
+export type workflowGetExecutionResponseError = (workflowGetExecutionResponse401 | workflowGetExecutionResponse403 | workflowGetExecutionResponse404 | workflowGetExecutionResponse500) & {
+  headers: Headers;
+};
+
+export type workflowGetExecutionResponse = (workflowGetExecutionResponseSuccess | workflowGetExecutionResponseError)
+
+export const getWorkflowGetExecutionUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}`
+}
+
+export const workflowGetExecution = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowGetExecutionResponse> => {
+
+  return customInstance<workflowGetExecutionResponse>(getWorkflowGetExecutionUrl(workspace,id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowGetExecutionQueryKey = (workspace: string,
+    id: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}`
+    ] as const;
+    }
+
+
+export const getWorkflowGetExecutionQueryOptions = <TData = Awaited<ReturnType<typeof workflowGetExecution>>, TError = ErrorBody>(workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecution>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowGetExecutionQueryKey(workspace,id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowGetExecution>>> = ({ signal }) => workflowGetExecution(workspace,id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecution>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowGetExecutionQueryResult = NonNullable<Awaited<ReturnType<typeof workflowGetExecution>>>
+export type WorkflowGetExecutionQueryError = ErrorBody
+
+
+export function useWorkflowGetExecution<TData = Awaited<ReturnType<typeof workflowGetExecution>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecution>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowGetExecution>>,
+          TError,
+          Awaited<ReturnType<typeof workflowGetExecution>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowGetExecution<TData = Awaited<ReturnType<typeof workflowGetExecution>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecution>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowGetExecution>>,
+          TError,
+          Awaited<ReturnType<typeof workflowGetExecution>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowGetExecution<TData = Awaited<ReturnType<typeof workflowGetExecution>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecution>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowGetExecution<TData = Awaited<ReturnType<typeof workflowGetExecution>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecution>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowGetExecutionQueryOptions(workspace,id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
 
 export type workflowListFlowsResponse200 = {
   data: FlowListItemDto[]

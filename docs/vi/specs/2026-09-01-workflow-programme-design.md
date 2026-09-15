@@ -196,8 +196,12 @@ workflow.flows          draft: yaml nguồn + plan đã parse, state draft/live/
 workflow.flow_versions  snapshot đóng băng: yaml + plan chuẩn hoá + tham chiếu ĐÃ GIẢI
 workflow.executions     một lần chạy, ghim flow_version_id; không bao giờ đọc draft
 workflow.task_runs      một lần thử của một node: attempt, state, not_before, deadline_at, output
-workflow.triggers       cron/webhook, hàng claim được
+workflow.triggers       cron/webhook, hàng claim được -- CHƯA DỰNG: W12 (xem
+                        bảng ở mục 9). W6 ship trigger dưới dạng hàm thuần trên
+                        state được tiêm vào và không xây bảng nào; `TriggerState`
+                        chỉ được dựng trong test
 workflow.task_logs      dòng log, có retention_days như automation.schedules
+                        -- CHƯA DỰNG: W11 (xem bảng ở mục 9)
 ```
 
 ### 6.2 Tham chiếu được giải lúc publish, không phải lúc chạy
@@ -233,7 +237,9 @@ Trino, không pod.
 Vòng bền vững thì mỏng và mượn nguyên câu lệnh đã chứng minh trong
 `egret-automation/src/scheduler.rs`:
 
-- **vòng trigger** — claim trigger tới hạn, tạo execution và task_run gốc;
+- **vòng trigger** — claim trigger tới hạn, tạo execution và task_run gốc.
+  **Chưa dựng: W12.** W6 ship vị từ trigger dưới dạng hàm thuần trên state được
+  tiêm vào và không có bảng `workflow.triggers`, nên ở đây chưa có gì claim cả;
 - **vòng worker** — claim `task_runs` có `state='pending' AND not_before <= now()`
   bằng `FOR UPDATE SKIP LOCKED`, chạy handler, và **trong cùng transaction** ghi
   kết quả, gọi `advance()`, chèn các node kế tiếp. Không cần vòng thứ ba, và
@@ -362,13 +368,20 @@ W7 — một bản kiểm kê màn hình không phải một cuộc khảo sát 
 | **W1** Model & ngôn ngữ | `models/{flows,tasks,executions,triggers,property}`; parse/validate YAML; bảng draft/version; publish + giải tham chiếu | W0 |
 | **W2** Biểu thức | minijinja + 37 filter + 40 function + viết lại `??`/`?:` + **oracle differential Pebble** | W0 |
 | **W3a** Máy trạng thái executor | `advance()`; `sequential/parallel/if/switch/dag/loop`; retry/timeout/`errors:`; oracle vết thực thi Kestra. Không I/O | W1, W2 |
-| **W3b** Executor bền vững | vòng claim; reaper; `SpawnExecution`; handler `core.log`, `core.debug.Return`, `core.execution.Fail`, `core.flow.Sleep`, `egret.sql`; nối oracle vào driver thật | W3a |
+| **W3b** Executor bền vững | vòng claim; reaper; `SpawnExecution`; handler `core.log`, `core.debug.Return`, `core.execution.Fail`, `core.flow.Sleep`, `egret.sql`; nối oracle vào driver thật. **Đính chính, 2026-09-14 (xem W10 spec §1): vòng claim và reaper ship ra dưới dạng hàm KHÔNG có caller production nào.** Grep `tick(`, `reap(` và `start_execution(` trên mọi `crates/*/src` không tìm ra lấy một call site, và `egret-bin` dựng một `WorkflowState` — flow repo cùng refs của nó — chứ không dựng vòng nào, nên thứ duy nhất đẩy vòng ấy chạy là `oracle-exec/driver.rs` và test của chính crate này. Đây là đính chính hồ sơ chứ không phải chê W3b — mục 15 trong *The coverage statement* của `oracle-exec/README.md` đã nói điều đó — và **W10 là dòng khép lại nó** | W3a |
 | **W4** Runner & container | bộ đánh thức `RETRYING`, `timeout:` cấp task, đường kill — ba lỗ W3b chuyển giao, **đáng ~0 mục baseline, KHÔNG phải 20 như dòng này viết ban đầu** (con số ấy là hợp của ba lần grep khai báo; xem W4 spec §1.1); rồi mới tới `TaskCommands`, `egret.container`, `egret.script.python`, vốn chạm KHÔNG mục corpus nào và có test riêng. **`egret.python` KHÔNG phải của W4** — §6.4 giao tên ấy cho `KernelLauncher` của notebook, và `TASK_TYPES` giữ nó từ W1 | W3b |
 | **W5** Kestra plugin host | image JVM, `ShimRunContext`, cầu `StorageInterface`, điều phối `kestra.<FQCN>`, giải jar plugin | W4 |
 | **W6** Trigger & subflow | `subflow` + replay `CREATE_NEW_EXECUTION` (**13–15 mục baseline, chung một migration**); rồi mới cron, webhook, flow trigger và backfill — vốn chạm **0** mục baseline và có test riêng. Dòng này viết TRƯỚC khi corpus được đo: bốn trong năm chữ ấy đáng **KHÔNG** mục nào, và backfill **không có lấy một dòng khai báo sống trong 345 flow**. Xem W6 spec §1. **Kết quả, đã đo: nửa bank được đã bank 16 mục** — 12 `Subflow` + 4 replay, tức ước lượng 13–15 thiếu một ở cận trên — **và bốn chữ trigger bank 0, đúng như dự đoán.** Cơ chế của từng con 0 nằm ở `oracle-exec/README.md`, *The coverage statement* → mục W6 | W3b |
-| **W7** Frontend | nhóm nav Workflows; editor YAML; topology chỉ-đọc; gantt và log của execution | W1, W3b |
+| **W7** Frontend | nhóm nav Workflows; editor YAML; topology chỉ-đọc; gantt và log của execution. **Bị chặn bởi W10**: gantt và topology cần một tiến trình đẩy execution đi tiếp cùng một bề mặt REST execution, và lúc viết dòng này chưa có cái nào. **Panel log cần W11** và nằm ngoài lát cắt đầu của W7 — nói ra chứ không để phát hiện muộn | W1, W3b, W10 |
 | **W8** Ngữ nghĩa nâng cao | `pause`/`resume` **cùng** `loopUntil` (MỘT trạng thái, không được tách), `allowFailure`, và hai mục `EXECUTION_ASSERTION` của `sla:` — **18 mục baseline, số chặt**, đã đo. **Concurrency limit chạm 0 và `labels` chạm 0**; `WorkingDirectory` chạm 1 chứ không phải 4 như khai báo gợi ý. Dòng `concurrency:` → `CANCELLED` trong bảng residual là **quy sai** (`CANCELLED` là 2 của `sla:` + 1 của `Exit`, chưa bao giờ của một limit) nên dòng ấy bị XOÁ, không phải hạ số. Dòng này viết TRƯỚC khi corpus được đo. Xem W8 spec §1 | W3b, W6 |
 | **W9** Hạ tầng Kestra còn lại | KV store, namespace file, internal storage, output | W4 |
+| **W10** Runtime & bề mặt execution | bộ ticker worker trong `egret-bin` — đóng/mở bằng config, `MissedTickBehavior::Skip`, biết huỷ, kèm **một phát biểu an toàn cho mỗi lần gọi** `tick`, `wake`, `due_retries` và `reap`; reaper trên interval riêng, nêu rõ `working_timeout_s`; một bề mặt REST execution (list, get kèm task run, start, resume, kill, replay) — phạm vi workspace theo cấu trúc, có feature gate, tài liệu utoipa, sinh lại client frontend bằng `npm run gen:api`; **một test end-to-end publish, start và quan sát một flow tới trạng thái kết thúc mà KHÔNG có harness nào đẩy tick**; và **chính đính chính của bảng này**, để **bốn** hạng mục W7 cần có chủ — hai cái là của chính W10, hai cái được gọi tên là W11 và W12. **Ratchet không phán xét được gói này theo cả hai chiều**: `oracle-exec/driver.rs:884` gọi thẳng `worker::tick` với registry của riêng nó, nên oracle vốn đã chạy phần thân của vòng và mù với phần nối dây của binary **do chính cấu tạo** — dự kiến **109 trước và 109 sau**. Xem W10 spec §1 | W3b, W4 |
+| **W11** Log execution | `workflow.task_logs`, một `LogSink` có ghi xuống, cửa sổ retention (§11 câu hỏi mở 1) và một API đọc có phân trang. **Hoãn khỏi W10 kèm PHÉP ĐO chứ không phải bỏ quên:** không migration nào tạo bảng `task_logs` — schema `workflow` có đúng bốn bảng: `flows`, `flow_versions`, `executions`, `task_runs`; `LogSink` có **ba** implementation dưới `crates/egret-workflow/src/` — `TracingSink` (ghi ra `tracing`), một `Recorder` `#[cfg(test)]` (một `Vec` trong bộ nhớ) và `NameHintSink` (chú thích rồi chuyển tiếp) — và **không cái nào ghi xuống lấy một dòng**; còn handler container ghi `stdOutLineCount` và `stdErrLineCount`, tức **đếm dòng chứ không phải nội dung**. Chừng nào chưa có, **W7 ship mà không có panel log** | W10 |
+| **W12** Vòng trigger | `workflow.triggers` — đúng những hàng cron/webhook claim được mà §6.1 đã thiết kế — vòng lặp claim và kích hoạt chúng, cùng **lập luận an toàn concurrency của riêng nó** chứ không mượn lại lập luận của claim ở worker. **Hoãn khỏi W10 kèm phép đo, y như W11:** **không migration nào tạo `workflow.triggers`** (control: `workflow.executions` xuất hiện trong **ba** file migration, nên phép tìm có chạm tới migration, và schema `workflow` có đúng bốn bảng); `trigger::tick` **không có caller nào ngoài `crates/egret-workflow/src/trigger/`**; `TriggerState::initialise` có **đúng một** caller và đó là helper `#[cfg(test)]`; và `crates/egret-bin/src/main.rs` chứa chuỗi `trigger` **không lần nào** (control: `egret_workflow` xuất hiện **5** lần trong file đó). **Nên hôm nay một trigger `cron:` không thể nổ trong production, và W10 không đổi điều đó**: W10 nối vòng *worker*, vốn có bảng để claim; vòng trigger thì không có bảng nào. Chừng nào chưa có W12, một flow chạy bằng **start thủ công qua API hoặc bằng webhook**, cả hai đều hoạt động — nói ra chứ không để phát hiện muộn | W6, W10 |
+
+**W10, W11 và W12 được thêm ngày 2026-09-14, sau khi W7 hoá ra bị chặn, và lý do đáng giữ lại.** **Bốn** thứ dòng W7 cần — một tiến trình đẩy execution đi tiếp, một bề mặt REST execution, `workflow.task_logs`, và một vòng kích hoạt trigger `cron:` — đều được thiết kế ở §6.1 và §6.3 của chính tài liệu này mà **không dòng nào của bảng sở hữu**. Thứ tư tìm ra trong lúc đo schema cho dòng W11 chứ không phải bằng cách đọc bảng, nên nó được nêu riêng ở dưới. Kiểm bằng máy chứ không đọc bằng mắt: grep bảng này **ở trạng thái TRƯỚC khi có ba dòng W10, W11 và W12 bên trên** với `task_logs|execution api|ExecutionController|wire|binary|daemon` trả về **0**, trong khi cùng lượt đó `reaper` trả về 1 và `W3b` trả về 6; còn `ExecutionController` xuất hiện **đúng một lần** trong spec này — ở §8, *"Không port, nhưng bắt buộc đọc trước W7"*, nơi nó được nêu như một **hình dạng để nghiên cứu**, chưa bao giờ như một hạng mục phải giao. Một dòng gọi tên một thứ trong kiến trúc mà không bao giờ gọi tên nó trong kế hoạch, với người đi soát coverage, đọc y hệt một dòng đã xong. Suy dẫn đầy đủ nằm ở `docs/{en,vi}/specs/2026-09-14-workflow-w10-runtime-and-execution-surface-design.md` §1.
+
+**Vòng trigger — thứ tư — chính là W12 ở trên.** Còn lại **hai cái tên không dòng nào trong bảng này sở hữu**, ghi ở đây thay vì để người sau phát hiện lại: hai function biểu thức `secret` và `http`, mà bảng `REFUSED` trong `crates/egret-workflow/src/runners/functions.rs` gán cho W9 **chỉ để thông điệp từ chối có một cái tên chủ sở hữu**, theo đúng lời chính file ấy — *"`secret` và `http` không nằm trong nội dung của gói nào cả"*. **Ở đây cố ý KHÔNG gán chủ cho chúng**: gán tên một lần nữa chỉ làm thông điệp thay đổi mà không làm nó đúng hơn. Chúng được đánh dấu cho ai viết bản review cấp chương trình tiếp theo, và chúng cùng một hình dạng với bốn thứ mà §1 của W10 ghi lại.
 
 Mỗi gói có spec và plan riêng, như chương trình DBAPI-parity đã làm.
 
@@ -382,7 +395,8 @@ thứ đều là phần **cộng thêm** trong YAML, nên hoãn chúng không b�
 ## 11. Câu hỏi mở
 
 1. Dòng log nằm trong Postgres kèm cửa sổ retention ở v1; object storage là W9.
-   Xác nhận như vậy là đủ.
+   Xác nhận như vậy là đủ. **Nửa Postgres là W11** — dòng W11 ở §9 mang phép đo
+   cho thấy hôm nay không có gì ghi xuống lấy một dòng log.
 2. Giải tham chiếu lúc publish làm flow đã publish trở nên cứng: đổi tên một
    dataset sẽ không trỏ lại. Tin là đúng nhưng đây là đánh đổi thật.
 3. `kestra-plugin-host` cần chính sách về jar plugin nào được phép và ai được

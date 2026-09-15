@@ -161,6 +161,7 @@ pub async fn app(db: &Db) -> App {
     let state = egret_workflow::WorkflowState {
         db: db.clone(),
         repo: egret_workflow::FlowRepo::new(db.clone()),
+        executions: egret_workflow::ExecutionRepo::new(db.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
@@ -259,6 +260,30 @@ async fn send(
 
 pub async fn get(app: &App, path: &str, user: UserId) -> axum::response::Response {
     send(app, "GET", path, user, None).await
+}
+
+/// A request to the **authenticated** app carrying **no session cookie at
+/// all** — the 401 case.
+///
+/// Separate from [`get`] rather than an `Option<UserId>` parameter on it,
+/// because every other caller in this crate wants a session minted for it and
+/// an `Option` would put a `Some(user)` on ~40 call sites to serve the three
+/// tests that want `None`. [`anon`] is the same idea for the *webhook* app,
+/// which is a different router; this one deliberately hits the `/api` mount,
+/// where `Auth` is supposed to refuse before `WsContext` resolves anything.
+pub async fn anon_get(app: &App, path: &str) -> axum::response::Response {
+    use tower::ServiceExt;
+    app.router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(path)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
 }
 
 pub async fn post(
@@ -373,6 +398,7 @@ pub async fn webhook_app_with_guard(
     let state = egret_workflow::WorkflowState {
         db: db.clone(),
         repo: egret_workflow::FlowRepo::new(db.clone()),
+        executions: egret_workflow::ExecutionRepo::new(db.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),

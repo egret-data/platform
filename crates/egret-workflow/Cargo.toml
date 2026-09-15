@@ -201,6 +201,13 @@ base64.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+# W10 Task 2: `runtime::spawn` is cancelled by a `CancellationToken`, which is
+# the same shape `egret-automation`'s ticker and `egret-kernel`'s reaper already
+# take from `egret-bin` -- one token cancelled on SIGINT stops every background
+# loop the binary started. Already a workspace dependency (egret-automation and
+# egret-kernel both take it), so this is a direct edge and no new crate.
+tokio-util.workspace = true
+
 [dev-dependencies]
 # minijinja moved to [dependencies] in W2 Task 3 (`runners::env` builds the
 # real environment). `runners::rewrite`'s tests still reach it as
@@ -242,6 +249,16 @@ egret-analytics-api.workspace = true
 # `EGRET_TEST_STARROCKS_URL` is a URL, parsed the same way `egret-dataapi`'s live
 # suite parses it.
 url.workspace = true
+
+# W10 Task 2, `tests/runtime.rs` ONLY, and for exactly one assertion:
+# `the_config_default_working_timeout_equals_the_workers_own`. The two numbers
+# it compares live in crates that cannot see each other -- `egret-config` sits
+# BELOW this one, so `DEFAULT_WORKING_TIMEOUT` cannot be named from there and
+# the config's `3600` would otherwise be a second copy nothing compares to the
+# first. A dev-only edge does not link into the library, cannot be reached from
+# `src/`, and creates no cycle (`egret-config` does not depend on this crate) --
+# the same argument this file already makes for `egret-query`.
+egret-config.workspace = true
 
 # `tests/container_docker_live.rs` runs WITHOUT libtest, and that is fix round
 # 1's reviewer plan item 2 rather than a preference.

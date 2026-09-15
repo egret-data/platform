@@ -9,15 +9,22 @@
 //! Modules arrive with their package:
 //!
 //! - `models`    — W0 (this crate's first type) and W1
-//! - `repo`      — W1 (`workflow.flows` + `workflow.flow_versions`)
+//! - `repo`      — W1 (`workflow.flows` + `workflow.flow_versions`) and W10
+//!   Task 3 (`ExecutionRepo`, the READ layer over `workflow.executions` +
+//!   `workflow.task_runs`; the writes stay in `worker::claim`, which holds the
+//!   `FOR UPDATE` this one deliberately does not)
 //! - `refs`      — W1 Task 7 (`WorkflowRefs`, the real `WorkflowRefPort`)
 //! - `routes`    — W1 Task 7 (the nine management routes, spec §10)
 //! - `runners`   — W2 (expression rendering)
 //! - `executor`  — W3 (`advance()`, the pure state machine)
-//! - `worker`    — W4 (claim loops, handlers, reaper)
+//! - `worker`    — W3b (the claim loop and the reaper) and W4 (the handlers
+//!   and the runner). W3b's half shipped with no production caller; **W10**
+//!   is the package that calls it from `egret-bin` (spec §9)
 //! - `sla`       — W8 Task 6 (`sla:` evaluation; `EXECUTION_ASSERTION` only)
 //! - `trigger`   — W6 (the schedule trigger, backfill, the injected clock, and
-//!   the flow trigger's window-free arm)
+//!   the flow trigger's window-free arm). W6 built the predicate as a pure
+//!   function and no table, so nothing here fires in production; **W12** builds
+//!   `workflow.triggers` and the loop that claims it (spec §9)
 //! - `plugins`   — W5 (handler registry)
 //!
 //! `models`, `runners`, and `executor` must never touch the database or the
@@ -34,6 +41,12 @@ pub mod refs;
 pub mod repo;
 pub mod routes;
 pub mod runners;
+/// W10 Task 2: the two background tickers that give
+/// [`worker::tick`](worker::tick) and [`worker::reap`](worker::reap) their
+/// first production caller, and the per-statement concurrency argument the
+/// `SKIP LOCKED` sentence does not cover. `pub` because `egret-bin` starts it
+/// and `tests/runtime.rs` drives it.
+pub mod runtime;
 /// W8 Task 6: `sla:` — `EXECUTION_ASSERTION` evaluated, `MAX_DURATION` refused
 /// by name with the measurement. `pub` so `tests/executor.rs` (an integration
 /// test) can drive the predicate, the same reason `executor` and `worker` are.
@@ -56,9 +69,13 @@ pub mod worker;
 
 pub use publish::publish;
 pub use refs::WorkflowRefs;
-pub use repo::{CreateFlowInput, FlowRepo, FlowRow, FlowVersionRow, ListFilter, UpdateFlowInput};
+pub use repo::{
+    CreateFlowInput, ExecutionDetail, ExecutionFilter, ExecutionPage, ExecutionRepo, ExecutionRow,
+    FlowRepo, FlowRow, FlowVersionRow, ListFilter, Page, TaskRunRow, UpdateFlowInput,
+};
 pub use routes::{management_router, openapi, WorkflowState};
 pub use runners::{render_str, rewrite, RenderContext, RenderError, RewriteError};
+pub use runtime::RuntimeConfig;
 pub use webhook_routes::{
     webhook_router, webhook_router_with_guard, WebhookGuard, WebhookResponse,
     MAX_WEBHOOK_BODY_BYTES, WEBHOOK_ATTEMPTS_PER_WINDOW, WEBHOOK_ATTEMPT_WINDOW,

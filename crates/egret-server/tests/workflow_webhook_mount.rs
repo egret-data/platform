@@ -110,6 +110,7 @@ fn composed_app_with_workflow() -> axum::Router {
     let state = egret_workflow::WorkflowState {
         db: db.clone(),
         repo: egret_workflow::FlowRepo::new(db.clone()),
+        executions: egret_workflow::ExecutionRepo::new(db.clone()),
         refs: Arc::new(UnreachableRefs),
         sessions: egret_auth::session::SessionService::new(
             db.clone(),
@@ -138,6 +139,7 @@ fn composed_app_with_workflow_webhooks_off() -> axum::Router {
     let state = egret_workflow::WorkflowState {
         db: db.clone(),
         repo: egret_workflow::FlowRepo::new(db.clone()),
+        executions: egret_workflow::ExecutionRepo::new(db.clone()),
         refs: Arc::new(UnreachableRefs),
         sessions: egret_auth::session::SessionService::new(
             db.clone(),

@@ -30,6 +30,23 @@ data:
   #
   # It gates only that group: flow authoring under /api/ws/… is unaffected.
   EGRET_WORKFLOW__WEBHOOKS_ENABLED: "{{ .Values.workflow.webhooksEnabled }}"
+  # W10 Task 2 — THE SWITCH THAT MAKES THE WORKFLOW ENGINE RUN. Off by default.
+  #
+  # With it off, a webhook or an API call creates an execution row and nothing
+  # ever advances it: that is exactly how every release before W10 behaved, which
+  # is what makes `false` the safe value rather than merely the cautious one. On,
+  # it starts two per-replica tickers — the claim loop and the lease reaper. No
+  # leader election is needed, but NOT for one reason repeated: see
+  # `egret_workflow::runtime`'s module doc, which gives a separate safety
+  # statement for each of the four statements those loops issue.
+  #
+  # The tuning knobs beside it — EGRET_WORKFLOW__TICK_INTERVAL_SECS (1),
+  # EGRET_WORKFLOW__BATCH (8), EGRET_WORKFLOW__REAPER_INTERVAL_SECS (60) and
+  # EGRET_WORKFLOW__WORKING_TIMEOUT_S (3600) — are deliberately NOT chart values:
+  # they reach the same config through the same EGRET_<SECTION>__<KEY> convention
+  # when a deployment actually needs them, and a chart key nobody has a reason to
+  # set is surface with no reader.
+  EGRET_WORKFLOW__WORKER_ENABLED: "{{ .Values.workflow.workerEnabled }}"
   EGRET_RANGER__AUTH_TOKEN: ""
   EGRET_ADMIN_EMAIL: "{{ .Values.admin.email }}"
   # Package 4 — HOW MANY OF ME THERE ARE. A pod cannot discover this: the count

@@ -89,6 +89,10 @@ workflow:
   # URL is the whole credential, the surface's own security review says it is
   # not approved for exposure, and the in-process bounds are per replica.
   webhooksEnabled: false
+  # The claim loop and the lease reaper. Off by default: until W10 nothing in any
+  # binary called them, so a deployment that says nothing keeps behaving exactly
+  # as it did. Turn it on and executions actually advance.
+  workerEnabled: false
 
 ranger:
   enabled: false

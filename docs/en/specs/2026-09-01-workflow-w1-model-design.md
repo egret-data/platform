@@ -181,6 +181,12 @@ re-parsing on every read; keeping only `plan` would lose the author's comments a
 Deliberately **not** in W1: `workflow.executions`, `workflow.task_runs`, `workflow.triggers`,
 `workflow.task_logs`. Nothing runs yet, and a table with no writer is untested surface.
 
+**Measured 2026-09-14, because "deferred" reads like "arrived later" and for two of
+these it did not:** `workflow.executions` and `workflow.task_runs` landed in
+migration 0134, and **`workflow.task_logs` and `workflow.triggers` still do not
+exist in any migration.** They are **W11** and **W12** in the programme spec's §9,
+each recorded there with its measurement.
+
 ## 8. Publish, and the security seam
 
 **Every reference a flow makes to an egret object is resolved and workspace-checked at publish, then

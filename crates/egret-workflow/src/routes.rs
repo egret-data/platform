@@ -11,6 +11,8 @@
 //! POST   /api/ws/{workspace}/workflows/flows/{id}/publish
 //! GET    /api/ws/{workspace}/workflows/flows/{id}/versions
 //! GET    /api/ws/{workspace}/workflows/flows/{id}/versions/{version}
+//! GET    /api/ws/{workspace}/workflows/executions
+//! GET    /api/ws/{workspace}/workflows/executions/{id}
 //! ```
 //!
 //! Mounted under `/ws/{workspace}/workflows/...` here, **not**
@@ -64,7 +66,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::repo::{
-    CreateFlowInput, FlowRepo, FlowRow, FlowVersionRow, ListFilter, UpdateFlowInput,
+    CreateFlowInput, ExecutionDetail, ExecutionFilter, ExecutionRepo, ExecutionRow, FlowRepo,
+    FlowRow, FlowVersionRow, ListFilter, Page, TaskRunRow, UpdateFlowInput, DEFAULT_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
 };
 use crate::spec::{parse, validate, Finding, ValidationReport};
 use egret_workflow_api::WorkflowRefPort;
@@ -92,6 +96,14 @@ pub struct WorkflowState {
     /// through instead.
     pub db: egret_metastore::Db,
     pub repo: FlowRepo,
+    /// The READ layer over `workflow.executions` / `workflow.task_runs`
+    /// (W10 Task 3). A field beside `repo` rather than an `ExecutionRepo::new`
+    /// per request, for the reason `repo` is one: the handler must not have to
+    /// reach into `db` to build it, and `db` is documented above as being here
+    /// for `analytics.folders` and nothing else. It writes nothing -- the
+    /// writes stay in `worker::claim`, which holds the `FOR UPDATE` this type
+    /// deliberately does not.
+    pub executions: ExecutionRepo,
     /// The seam `publish` resolves every reference through — see
     /// [`crate::refs::WorkflowRefs`] for the real implementation and which
     /// `RefKind`s it can and cannot answer for today.
@@ -751,6 +763,396 @@ async fn get_flow_version(
     Ok(Json(FlowVersionDto::from(row)))
 }
 
+// ---------- Executions (W10 Task 4) ----------
+//
+// The READ surface over `workflow.executions` / `workflow.task_runs`, and the
+// first time an execution is visible outside the database. Two routes, both
+// [`WF_READ`]:
+//
+// ```text
+// GET /api/ws/{workspace}/workflows/executions
+// GET /api/ws/{workspace}/workflows/executions/{id}
+// ```
+//
+// **Start, resume, kill and replay are deliberately absent** — they are W10
+// Task 5's, and [`ExecutionRepo`] has no method that writes for a handler here
+// to reach for.
+//
+// **A foreign execution is a 404 and never a 403.** [`ExecutionRepo::get`]
+// answers `NotFound` to a foreign id as well as an unknown one, and
+// `egret_core::http` maps that to 404. A 403 would confirm the id is real,
+// which is the same disclosure as serving the row — the `chart_id` class
+// migration 0128 shipped and spec §8 records.
+//
+// **No join to `workflow.flows`, and that is a decision rather than an
+// omission.** A list row carries `namespace` and `flow_key` — the flow's human
+// identity, FROZEN into the execution at start — so nothing here needs the
+// `flows` table to name what ran. Joining it would cost three things and buy
+// one: `executions_flow_id_fkey` is SINGLE-column with no workspace component
+// (unlike the composite parent/trigger FKs), so the join would need its own
+// `f.workspace_id = $n` or it would reach across workspaces; an INNER join
+// would drop every execution whose `flow_id` is `NULL`, making `rows` disagree
+// with the `total` counted by the second, unjoined statement, and a pager
+// cannot draw a last page it can never reach; and `flows.flow_id` is TODAY's
+// name for a draft that may have been renamed since, so a joined label would
+// misreport what an old execution ran. `namespace`/`flow_key` cannot: they are
+// what this execution actually ran, and they survive the draft being trashed.
+
+/// One execution as `GET /executions` lists it.
+///
+/// **No `source`.** It is the whole frozen flow YAML — one document per row —
+/// and a fifty-row page would carry fifty of them to show a column that does
+/// not exist. The field is not merely omitted here: [`ExecutionRow`] does not
+/// have it at all, so no future edit to this DTO can put it back by accident.
+/// `GET /executions/{id}` carries it, because a detail page draws the topology
+/// from it.
+///
+/// `workspace_id` is dropped for the reason every other DTO in this module
+/// drops it: the `{workspace}` path segment already named it, and a body field
+/// that merely echoes the URL is a second place for it to be wrong.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ExecutionListItemDto {
+    pub id: Uuid,
+    /// The draft this execution came from, and `NULL` only if something
+    /// outside this crate issued a real `DELETE` — **trashing a flow does not
+    /// clear it**, because `FlowRepo`'s delete is soft and nothing in
+    /// `egret-workflow/src` issues a `DELETE FROM`. A trashed flow's
+    /// executions are still listed, and still findable by `flow_id`.
+    pub flow_id: Option<Uuid>,
+    pub namespace: String,
+    /// The YAML's own `id`; `flow_id` is taken by the draft's uuid above.
+    pub flow_key: String,
+    /// Kestra's wire spelling — `RUNNING`, `SUCCESS`, `FAILED`, …
+    pub state: String,
+    /// The state timeline, as stored: an array of state NAMES, e.g.
+    /// `["CREATED","RUNNING","SUCCESS"]`. It carries no timestamps — see
+    /// [`TaskRunDto::history`], which is written by the same function.
+    #[schema(value_type = Object)]
+    pub history: serde_json::Value,
+    #[schema(value_type = Object)]
+    pub inputs: serde_json::Value,
+    pub seq: i64,
+    /// The trigger record, `NULL` for an API start.
+    #[schema(value_type = Object)]
+    pub execution_trigger: Option<serde_json::Value>,
+    pub trigger_execution_id: Option<Uuid>,
+    pub trigger_run_ix: Option<i32>,
+    pub parent_execution_id: Option<Uuid>,
+    pub parent_run_ix: Option<i32>,
+    pub loop_index: Option<i32>,
+    pub loop_value: Option<String>,
+    pub attempt_number: i32,
+    pub origin_offset_ms: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<ExecutionRow> for ExecutionListItemDto {
+    fn from(r: ExecutionRow) -> Self {
+        Self {
+            id: r.id,
+            flow_id: r.flow_id,
+            namespace: r.namespace,
+            flow_key: r.flow_key,
+            state: r.state,
+            history: r.history,
+            inputs: r.inputs,
+            seq: r.seq,
+            execution_trigger: r.execution_trigger,
+            trigger_execution_id: r.trigger_execution_id,
+            trigger_run_ix: r.trigger_run_ix,
+            parent_execution_id: r.parent_execution_id,
+            parent_run_ix: r.parent_run_ix,
+            loop_index: r.loop_index,
+            loop_value: r.loop_value,
+            attempt_number: r.attempt_number,
+            origin_offset_ms: r.origin_offset_ms,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
+/// One task run, whole — all twenty-two columns.
+///
+/// Unlike the execution's own row there is nothing dropped here: a detail page
+/// reads ONE execution's runs, so there is no page-sized multiplier the way
+/// `executions.source` has one.
+///
+/// **These are the fields a gantt is drawn from**, and
+/// `tests/executions_routes.rs::a_gantt_row_is_computable_from_the_execution_
+/// dto_alone` computes one from this DTO and nothing else, so W7 cannot
+/// discover a missing field after this package closes. What it uses:
+/// [`Self::task_id`] and [`Self::parent_ix`] for the label and the nesting,
+/// [`Self::state`] for the bar, [`Self::created_seq`]/[`Self::ended_seq`] for
+/// LOGICAL time, and [`Self::created_at`]/[`Self::updated_at`] plus
+/// `attempts[].started_at` for WALL-CLOCK time.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TaskRunDto {
+    pub id: Uuid,
+    pub execution_id: Uuid,
+    /// The `RunIx` — the executor's creation order, and the order the detail
+    /// route returns these in.
+    pub run_ix: i32,
+    /// The `TaskIx` — the index into the plan's task list.
+    pub task_ix: i32,
+    pub task_id: String,
+    /// The task's `type:`, and `NULL` exactly when the planned kind is not
+    /// runnable — i.e. a flowable the executor drives itself, which is why
+    /// such a run has no `attempts` for a gantt to read a start from.
+    pub type_id: Option<String>,
+    /// The parent run's `run_ix` — a gantt's nesting, `NULL` at the top level.
+    pub parent_ix: Option<i32>,
+    pub value: Option<String>,
+    pub rendered: Option<String>,
+    pub rendered_run_if: Option<String>,
+    pub state: String,
+    /// **An array of state NAMES and nothing else** — `["CREATED","RUNNING",
+    /// "SUCCESS"]` — written by `worker::claim`'s `states_json`, which maps
+    /// each `RunState` to its wire spelling. It is **not** Kestra's
+    /// `State.History`, and it carries **no dates**: a timeline drawn from
+    /// this alone has an order but no clock. The wall-clock instants are
+    /// [`Self::created_at`], [`Self::updated_at`], and `attempts[].started_at`
+    /// (milliseconds after the EXECUTION's `created_at`, which is what a
+    /// `Tick` is in this engine).
+    #[schema(value_type = Object)]
+    pub history: serde_json::Value,
+    /// One entry per attempt: `{"history": [...], "started_at": <ms>}`, where
+    /// `started_at` is milliseconds after the execution's `created_at`.
+    #[schema(value_type = Object)]
+    pub attempts: serde_json::Value,
+    pub not_before_ms: Option<i64>,
+    /// The lease. `NULL` means unclaimed.
+    pub claimed_at: Option<DateTime<Utc>>,
+    #[schema(value_type = Object)]
+    pub outputs: Option<serde_json::Value>,
+    pub message: Option<String>,
+    /// The executor round this run was created in — LOGICAL time. Two bars
+    /// whose wall-clock spans are microseconds apart are still ordered by
+    /// this, which is why a gantt wants it beside the timestamps.
+    pub created_seq: Option<i64>,
+    /// The executor round this run terminated in; `NULL` while it has not.
+    pub ended_seq: Option<i64>,
+    pub resume_with: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<TaskRunRow> for TaskRunDto {
+    fn from(r: TaskRunRow) -> Self {
+        Self {
+            id: r.id,
+            execution_id: r.execution_id,
+            run_ix: r.run_ix,
+            task_ix: r.task_ix,
+            task_id: r.task_id,
+            type_id: r.type_id,
+            parent_ix: r.parent_ix,
+            value: r.value,
+            rendered: r.rendered,
+            rendered_run_if: r.rendered_run_if,
+            state: r.state,
+            history: r.history,
+            attempts: r.attempts,
+            not_before_ms: r.not_before_ms,
+            claimed_at: r.claimed_at,
+            outputs: r.outputs,
+            message: r.message,
+            created_seq: r.created_seq,
+            ended_seq: r.ended_seq,
+            resume_with: r.resume_with,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
+/// One execution in full: every list field, plus the two things only a detail
+/// page needs — the frozen `source` and every task run, ordered by `run_ix`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ExecutionDto {
+    #[serde(flatten)]
+    pub execution: ExecutionListItemDto,
+    /// The flow source this execution runs, frozen at start. The plan is pure
+    /// over it, which is why a detail page can draw the topology from this
+    /// string alone.
+    pub source: String,
+    /// Every task run, in `run_ix` order — the executor's creation order.
+    pub runs: Vec<TaskRunDto>,
+}
+
+impl From<ExecutionDetail> for ExecutionDto {
+    fn from(d: ExecutionDetail) -> Self {
+        Self {
+            execution: ExecutionListItemDto::from(d.execution),
+            source: d.source,
+            runs: d.runs.into_iter().map(TaskRunDto::from).collect(),
+        }
+    }
+}
+
+/// One page of executions, with the size of the whole match behind it and the
+/// window that was actually served.
+///
+/// **`limit`/`offset` are echoed because they are CLAMPED**, and a clamp
+/// nobody can see is the indefensible one (the same reasoning
+/// `egret-dataapi`'s `ActivityCallsQuery::limit` states). A caller that asks
+/// for 1000 rows is told it was served 200 rather than having to infer it from
+/// a short page — which it could not, since a short page is also what the last
+/// page looks like.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ExecutionPageDto {
+    pub rows: Vec<ExecutionListItemDto>,
+    /// Every execution matching the filter, not just this page's. Counted by a
+    /// second statement carrying the same predicates, workspace one included.
+    pub total: i64,
+    /// The page size actually used, after the clamp.
+    pub limit: i64,
+    /// The offset actually used, after the clamp.
+    pub offset: i64,
+}
+
+/// `GET /executions`'s query parameters. Each is optional and each is ANDed
+/// with the workspace predicate [`ExecutionRepo::list`] itself carries — never
+/// a way to reach another workspace's executions: every filter narrows within
+/// `ctx.workspace_id`, and there is no filter that widens past it.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ListExecutionsQuery {
+    /// Only executions started from this draft. A trashed draft still matches:
+    /// `FlowRepo`'s delete is soft, so the column keeps pointing at it.
+    pub flow_id: Option<Uuid>,
+    pub namespace: Option<String>,
+    /// The YAML's own `id` — the only filter that still finds an execution
+    /// whose `flow_id` was `NULL`ed by a real `DELETE`.
+    pub flow_key: Option<String>,
+    /// One or more states, **comma-separated** (`RUNNING,FAILED`): a run list
+    /// shows failures beside what is in flight.
+    ///
+    /// Comma-separated rather than a repeated `state=` key because axum's
+    /// `Query` decodes with `serde_urlencoded`, which silently keeps only the
+    /// LAST value of a repeated key — a caller selecting two chips would have
+    /// been filtered by one of them with no error anywhere.
+    ///
+    /// **Present but empty (`?state=`) matches nothing**, which is what a UI
+    /// that has deselected every chip means. Absent means "every state".
+    pub state: Option<String>,
+    /// Window over the execution's `created_at`, **inclusive**.
+    pub since: Option<DateTime<Utc>>,
+    /// Window over the execution's `created_at`, **exclusive**, so consecutive
+    /// windows tile without double-counting the row on the boundary.
+    pub until: Option<DateTime<Utc>>,
+    /// How many rows to return. Default 50, maximum 200; a larger value is
+    /// clamped rather than refused, and the clamped value comes back in the
+    /// response's own `limit`.
+    #[serde(default = "default_execution_limit")]
+    pub limit: i64,
+    /// How many rows to skip. Negative is clamped to zero.
+    #[serde(default)]
+    pub offset: i64,
+}
+
+fn default_execution_limit() -> i64 {
+    DEFAULT_PAGE_LIMIT
+}
+
+/// Split the `state` query parameter into the repository's `Option<Vec<String>>`.
+///
+/// `None` (absent) and `Some(vec![])` (present and empty) are DIFFERENT
+/// filters and both are reachable: absent lists every state, empty matches
+/// nothing. Blank segments are dropped so `?state=RUNNING,` is one state and
+/// not one state plus an unmatchable empty one.
+fn parse_state_filter(raw: Option<String>) -> Option<Vec<String>> {
+    raw.map(|s| {
+        s.split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/executions",
+    tag = "workflow",
+    params(WorkspacePath, ListExecutionsQuery),
+    responses(
+        (status = 200, description = "One page of the workspace's executions, newest first, with the total behind it", body = ExecutionPageDto),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn list_executions(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ListExecutionsQuery>,
+) -> EgretResult<Json<ExecutionPageDto>> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    // Clamped HERE as well as in the repository, so the window this response
+    // reports is the window that was served. The repository clamps too and
+    // must keep doing so -- it is a public type with callers of its own, and a
+    // negative `LIMIT` is an ERROR in Postgres rather than an empty page -- but
+    // clamping an already-clamped value is a no-op, so the two cannot disagree
+    // the way a duplicated predicate could.
+    let page = Page {
+        limit: q.limit.clamp(1, MAX_PAGE_LIMIT),
+        offset: q.offset.max(0),
+    };
+    let filter = ExecutionFilter {
+        flow_id: q.flow_id,
+        namespace: q.namespace,
+        flow_key: q.flow_key,
+        states: parse_state_filter(q.state),
+        since: q.since,
+        until: q.until,
+    };
+    let found = st
+        .executions
+        .list(ctx.workspace_id.0, &filter, page)
+        .await?;
+    Ok(Json(ExecutionPageDto {
+        rows: found
+            .rows
+            .into_iter()
+            .map(ExecutionListItemDto::from)
+            .collect(),
+        total: found.total,
+        limit: page.limit,
+        offset: page.offset,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/executions/{id}",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+    ),
+    responses(
+        (status = 200, description = "The execution, its frozen source, and every task run in run_ix order", body = ExecutionDto),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace. **An execution belonging to another workspace answers exactly this**, indistinguishably from one that never existed: a 403 would confirm the id is real.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn get_execution(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> EgretResult<Json<ExecutionDto>> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    // No containment pre-check the way `list_flow_versions` needs one: this is
+    // a SINGLE call that already answers `NotFound` for a foreign id, so there
+    // is no second statement whose empty result could be mistaken for one.
+    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    Ok(Json(ExecutionDto::from(detail)))
+}
+
 /// The Workflow management router. Mount under `/api` so the live paths are
 /// `/api/ws/{workspace}/workflows/...` — see this module's doc comment for
 /// the feature-gate convention that depends on it.
@@ -780,6 +1182,11 @@ pub fn management_router() -> Router<WorkflowState> {
             "/ws/{workspace}/workflows/flows/{id}/versions/{version}",
             get(get_flow_version),
         )
+        .route("/ws/{workspace}/workflows/executions", get(list_executions))
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}",
+            get(get_execution),
+        )
 }
 
 #[derive(utoipa::OpenApi)]
@@ -794,6 +1201,8 @@ pub fn management_router() -> Router<WorkflowState> {
         publish_flow,
         list_flow_versions,
         get_flow_version,
+        list_executions,
+        get_execution,
     ),
     components(schemas(
         FindingDto,
@@ -805,6 +1214,10 @@ pub fn management_router() -> Router<WorkflowState> {
         UpdateFlowRequest,
         ValidateFlowRequest,
         PublishFlowRequest,
+        ExecutionListItemDto,
+        TaskRunDto,
+        ExecutionDto,
+        ExecutionPageDto,
     )),
     tags((name = "workflow", description = "Flow drafts and published versions (W1)"))
 )]

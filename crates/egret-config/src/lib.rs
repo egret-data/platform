@@ -401,7 +401,8 @@ pub struct Config {
 /// `[workflow]` — what a deployment may switch on or off about the workflow
 /// engine.
 ///
-/// One key today. It is a section rather than a bare env var because
+/// Six keys: the webhook exposure lever (W6 Task 7) and the five the runtime
+/// loops read (W10 Task 2). It is a section rather than a bare env var because
 /// **`EGRET_<SECTION>__<KEY>` is this deployment's convention**
 /// (`EGRET_CATALOG__ENABLED`, `EGRET_OIDC__ENABLED`, `EGRET_RANGER__ENABLED`
 /// in `deploy/helm/egret/templates/configmap-env.yaml`), and W6 Task 7 fix
@@ -428,16 +429,122 @@ pub struct WorkflowConfig {
     /// unaffected.
     #[serde(default)]
     pub webhooks_enabled: bool,
+
+    /// **The switch that makes the workflow engine actually run, and it
+    /// defaults to `false` for [`WorkflowConfig::webhooks_enabled`]'s own
+    /// argument.**
+    ///
+    /// Until W10 Task 2 `worker::claim::tick` had **no production caller** at
+    /// all: a webhook or an API call created an execution row and nothing ever
+    /// advanced it. This flag is what starts the two tickers in
+    /// `egret_workflow::runtime::spawn` — the claim loop and the lease reaper —
+    /// so with it off the engine behaves exactly as it did before, which is the
+    /// property that makes `false` the safe value rather than merely the
+    /// conservative one.
+    ///
+    /// Off is the only safe default for a loop that has never run in
+    /// production; an operator who wants it says so once, deliberately.
+    /// `EGRET_WORKFLOW__WORKER_ENABLED=true`.
+    ///
+    /// It gates **both** tickers. The reaper exists only to hand back leases
+    /// the claim loop took, so a replica with the worker off has nothing for it
+    /// to reclaim and a reaper running alone would be a statement with no
+    /// counterparty.
+    #[serde(default = "default_worker_enabled")]
+    pub worker_enabled: bool,
+
+    /// Seconds between claim ticks — the floor on how promptly a runnable task
+    /// run reaches a handler.
+    ///
+    /// Deliberately much finer than `[automation] tick_interval_secs` (30):
+    /// that one's floor is a crontab minute, and nothing about a workflow task
+    /// is scheduled on a calendar. A task whose predecessor has just committed
+    /// is runnable *now*, and this interval is the whole of the latency between
+    /// those two facts.
+    #[serde(default = "default_tick_interval_secs")]
+    pub tick_interval_secs: u64,
+
+    /// How many task runs one claim tick may take.
+    ///
+    /// It is `tick`'s `n`, which bounds **both** statements it runs: the waker
+    /// names at most this many executions and the claim takes at most this many
+    /// runs. A larger batch is more work per round trip and a longer worst-case
+    /// tick; there is no correctness edge either way, because every run's result
+    /// commits in its own transaction.
+    #[serde(default = "default_batch")]
+    pub batch: usize,
+
+    /// Seconds between reaper passes. Coarser than the claim tick on purpose: a
+    /// pass reclaims only leases already past `working_timeout_s`, so running it
+    /// more often cannot reclaim anything sooner.
+    #[serde(default = "default_reaper_interval_secs")]
+    pub reaper_interval_secs: u64,
+
+    /// How long a lease may go unreleased before the reaper takes it back.
+    ///
+    /// **Both directions matter**, which is `worker::reaper::reap`'s own point:
+    /// too long and a replica that died mid-run leaves its task stuck for that
+    /// duration; too short and a live worker still inside a slow handler has its
+    /// run handed to a second handler. The default is
+    /// `worker::DEFAULT_WORKING_TIMEOUT` (3600s) — the value that crate already
+    /// ships as the timeout a run is measured against.
+    #[serde(default = "default_working_timeout_s")]
+    pub working_timeout_s: u64,
+}
+
+/// `false` — see [`WorkflowConfig::worker_enabled`]. A named function rather
+/// than `#[serde(default)]`'s `bool::default()` so that the safe side of the
+/// switch is a literal a reader can see, exactly as [`default_workflow`] does
+/// for `webhooks_enabled`.
+fn default_worker_enabled() -> bool {
+    false
+}
+
+/// `1` — see [`WorkflowConfig::tick_interval_secs`].
+fn default_tick_interval_secs() -> u64 {
+    1
+}
+
+/// `8` — see [`WorkflowConfig::batch`].
+fn default_batch() -> usize {
+    8
+}
+
+/// `60` — see [`WorkflowConfig::reaper_interval_secs`].
+fn default_reaper_interval_secs() -> u64 {
+    60
+}
+
+/// `3600` — see [`WorkflowConfig::working_timeout_s`]. Equal to
+/// `egret_workflow::worker::DEFAULT_WORKING_TIMEOUT`, which this crate cannot
+/// name: `egret-config` is below `egret-workflow`, not above it. The two are
+/// pinned together by `egret-workflow`'s `tests/runtime.rs`,
+/// `the_config_default_working_timeout_equals_the_workers_own`, rather than by a
+/// shared constant -- without that assertion this `3600` would be a second copy
+/// of a constant no compiler compares to the first.
+fn default_working_timeout_s() -> u64 {
+    3600
 }
 
 /// Serde's fallback for a `[workflow]` section a deployment's TOML predates.
 ///
-/// `webhooks_enabled: false` — the same value `Default` gives, written out
-/// rather than derived so that the safe side of the security verdict is a
-/// literal a reader can see rather than a property of `bool`.
+/// Every value is the field's own `default_*` function, so the defaults layer
+/// (`Config::default()`) and a partially-written `[workflow]` section in TOML
+/// cannot disagree about any key — there is one literal per field and both
+/// paths read it.
+///
+/// `webhooks_enabled: false` is written out rather than derived so that the safe
+/// side of the security verdict is a literal a reader can see rather than a
+/// property of `bool`; `worker_enabled` is `false` for the same reason and is
+/// the one key that goes through `default_worker_enabled` to say so.
 fn default_workflow() -> WorkflowConfig {
     WorkflowConfig {
         webhooks_enabled: false,
+        worker_enabled: default_worker_enabled(),
+        tick_interval_secs: default_tick_interval_secs(),
+        batch: default_batch(),
+        reaper_interval_secs: default_reaper_interval_secs(),
+        working_timeout_s: default_working_timeout_s(),
     }
 }
 
@@ -1336,5 +1443,113 @@ mod tests {
         assert_eq!(accepted, 2, "arm 2 did not run for both spellings");
         assert_eq!(refused, 12, "arm 3 did not run for every refused spelling");
         assert_eq!(padded, 3, "arm 3b did not run");
+    }
+
+    /// **The OTHER lever, W10 Task 2: `worker_enabled` defaults off, is read
+    /// through the section convention, and the chart can emit it.**
+    ///
+    /// A second test rather than a widened first one, because the two levers
+    /// gate different things and a shared test would make "which one is off"
+    /// unreadable in a failure message.
+    ///
+    /// The strictness arm is the same parser as above — `bool` via figment —
+    /// and is spot-checked rather than re-enumerated: what is worth asserting
+    /// separately is that the **key spelling** works, because W6 Task 7 fix
+    /// round 2 shipped its sibling as a flat `EGRET_WORKFLOW_WEBHOOKS_ENABLED`
+    /// read with `std::env::var`, outside the config type and outside the
+    /// chart. A key that is silently never read looks exactly like a key an
+    /// operator set to `false`.
+    ///
+    /// **The four tuning knobs are asserted here too**, and for a reason the
+    /// lever does not need: each has a `#[serde(default = ...)]` of its own, so
+    /// an `[workflow]` section that names only `webhooks_enabled` must still
+    /// produce all five. That is the arm a plain field would fail.
+    #[test]
+    fn the_worker_lever_defaults_off_and_is_read_through_the_section_convention() {
+        let mut accepted = 0usize;
+
+        // 1. The default, and the ruling: a loop that has never run in
+        //    production is opt-in, for the webhook lever's own reason.
+        figment::Jail::expect_with(|_jail| {
+            let c: Config = Config::figment().extract().expect("defaults");
+            assert!(
+                !c.workflow.worker_enabled,
+                "the claim loop must default to OFF"
+            );
+            assert_eq!(c.workflow.tick_interval_secs, 1);
+            assert_eq!(c.workflow.batch, 8);
+            assert_eq!(c.workflow.reaper_interval_secs, 60);
+            assert_eq!(c.workflow.working_timeout_s, 3600);
+            Ok(())
+        });
+
+        // 2. Both spellings, through `EGRET_<SECTION>__<KEY>`.
+        for (spelling, expected) in [("true", true), ("false", false)] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("EGRET_WORKFLOW__WORKER_ENABLED", spelling);
+                let c: Config = Config::figment()
+                    .extract()
+                    .unwrap_or_else(|e| panic!("`{spelling}` must parse: {e}"));
+                assert_eq!(
+                    c.workflow.worker_enabled, expected,
+                    "EGRET_WORKFLOW__WORKER_ENABLED={spelling} was not read"
+                );
+                // ...and it must not have disturbed the lever beside it.
+                assert!(!c.workflow.webhooks_enabled);
+                accepted += 1;
+                Ok(())
+            });
+        }
+
+        // 3. A junk value is a STARTUP ERROR, not a silent `false`, exactly as
+        //    for the webhook lever: an operator who mistyped finds out at boot
+        //    rather than by wondering why nothing runs.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_WORKFLOW__WORKER_ENABLED", "yes");
+            match Config::figment().extract::<Config>() {
+                Err(_) => {}
+                Ok(c) => panic!(
+                    "`yes` was ACCEPTED as {} -- it must be a startup error",
+                    c.workflow.worker_enabled
+                ),
+            }
+            Ok(())
+        });
+
+        // 4. A `[workflow]` section that names only ONE key still produces all
+        //    six. This is what the per-field `#[serde(default = ...)]`s buy and
+        //    a plain field would fail here.
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("egret.toml", "[workflow]\nwebhooks_enabled = true\n")?;
+            let c: Config = Config::figment().extract().expect("partial section");
+            assert!(c.workflow.webhooks_enabled, "the key that WAS named");
+            assert!(!c.workflow.worker_enabled, "and the five that were not");
+            assert_eq!(c.workflow.batch, 8);
+            Ok(())
+        });
+
+        // 5. The chart can emit it, and its default is off. Same argument as
+        //    the webhook lever's arm 4: strict parsing is only safe when the
+        //    one producer a deployment has can only emit a legal spelling.
+        let chart = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/helm/egret/templates/configmap-env.yaml");
+        let src = std::fs::read_to_string(&chart)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", chart.display()));
+        assert!(
+            src.contains(
+                r#"EGRET_WORKFLOW__WORKER_ENABLED: "{{ .Values.workflow.workerEnabled }}""#
+            ),
+            "the chart must carry the worker lever -- a switch reachable only by \
+             hand-written env is the shape fix round 2 shipped and round 3 undid"
+        );
+        let values = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/helm/egret/values.yaml");
+        let vsrc = std::fs::read_to_string(&values).expect("values.yaml");
+        assert!(
+            vsrc.contains("workerEnabled: false"),
+            "and the chart's default must be off"
+        );
+
+        assert_eq!(accepted, 2, "arm 2 did not run for both spellings");
     }
 }
