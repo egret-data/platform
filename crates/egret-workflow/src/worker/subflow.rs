@@ -402,6 +402,41 @@ async fn spawn_one(
             .await;
         }
     };
+    // **The THIRD door, and it has to be here rather than in [`resolve`].**
+    //
+    // A flow can be switched off two ways -- the `state` column the management
+    // UI writes, and the YAML's own `disabled: true` -- and until W10 Task 5 fix
+    // round 2 this path honoured only the first. `resolve`'s SQL tests
+    // `deleted_at IS NULL AND state <> 'disabled'`; `disabled:` is not a column,
+    // so no predicate can see it and the check cannot live there. It lives here
+    // because this is the first line at which the parsed flow exists.
+    //
+    // **The failure it closes was concrete**: an operator writes
+    // `disabled: true`, `POST .../flows/{id}/executions` answers 409, and a
+    // sibling flow naming that flow as a `Subflow` target ran it anyway.
+    // `routes::startable_flow` closed both doors for the API in fix round 1 and
+    // its comment claimed this function agreed -- it did not, and that claim is
+    // corrected there.
+    //
+    // **The message is `resolve`'s miss verbatim, deliberately.** Both other
+    // doors already answer "unable to find flow": they are inside `resolve`,
+    // which returns `Option` and cannot distinguish. Giving this door its own
+    // wording would mean an operator who typed `disabled: true` and an operator
+    // who set the column got DIFFERENT answers for the same intent. One switch,
+    // one answer. **It is a divergence from the artifact and a deliberate one**
+    // -- `ExecutableUtils` raises a distinct error for `isDisabled()` -- but the
+    // divergence is pre-existing on the column door and this keeps it at one
+    // rather than two.
+    if child.disabled {
+        return fail_run(
+            conn,
+            ctx,
+            r.run,
+            &format!("unable to find flow '{namespace}'.'{flow_id}'"),
+        )
+        .await;
+    }
+
     let plan = match build_plan(&source) {
         Ok(p) => p,
         Err(e) => {
@@ -976,9 +1011,22 @@ async fn fail_run(
 /// load-bearing — and this repository has already shipped a cross-workspace
 /// read once, on a column whose guard everyone assumed existed.
 ///
-/// A trashed or disabled flow does not resolve, which is Kestra's own pair of
-/// refusals one step earlier: `if (flow.isDisabled())` and
-/// `if (flow instanceof FlowWithException)` (`ExecutableUtils.java:192-205`).
+/// **This function closes TWO of the three doors, and the third is not here.**
+/// The SQL tests `deleted_at IS NULL` (the trash) and `state <> 'disabled'` (the
+/// column). It does **not** test the YAML's own `disabled: true`, and it cannot:
+/// that field is inside `source`, not a column, so no predicate can reach it.
+/// [`spawn_one`] parses the source and checks it there, with the same refusal
+/// message these two produce.
+///
+/// The sentence here used to read *"a trashed or disabled flow does not
+/// resolve"*, which papered over exactly that gap -- "disabled" names two
+/// different switches and this function sees one of them. W10 Task 5 fix round 2
+/// found the YAML half honoured nowhere on this path at all.
+///
+/// Kestra makes the pair of refusals one step earlier:
+/// `if (flow.isDisabled())` -- which reads the YAML field, `Flow::disabled` at
+/// `models/flow.rs` -- and `if (flow instanceof FlowWithException)`
+/// (`ExecutableUtils.java:192-205`).
 async fn resolve(
     conn: &mut PgConnection,
     workspace_id: Uuid,

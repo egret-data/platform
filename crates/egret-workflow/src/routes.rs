@@ -1332,10 +1332,36 @@ pub struct StartExecutionRequest {
 /// same fixtures so a fourth door added to one is added to both or the test
 /// says so.
 ///
-/// It agrees with `worker::subflow::resolve`, which closes the same two doors
-/// in SQL (`AND deleted_at IS NULL AND state <> 'disabled'`) — a flow egret
-/// will not start from an API is a flow egret will not reach as a `Subflow`
-/// target either.
+/// # The sentence that used to be here was false, and the rule it cost
+///
+/// It read: *"It agrees with `worker::subflow::resolve`, which closes the same
+/// two doors in SQL — a flow egret will not start from an API is a flow egret
+/// will not reach as a `Subflow` target either."* **`resolve` did not close the
+/// same two doors.** Its SQL tests `deleted_at IS NULL AND state <> 'disabled'`
+/// — the trash and the **column** — and it never parses the YAML, so
+/// `disabled: true` was honoured here and nowhere on the subflow path.
+/// Measured: `.disabled` occurred **0** times under `src/worker/` (positive
+/// control: `.namespace`, 11 occurrences across 4 files). The failure was
+/// concrete — an operator writes `disabled: true`, this route answers 409, and a
+/// sibling flow naming that flow as a `Subflow` target ran it.
+///
+/// **What is true now**, after W10 Task 5 fix round 2: all three doors are
+/// closed on both paths, but by **different code in different places**.
+/// `resolve` closes the trash and the column in SQL; `subflow::spawn_one`
+/// closes the YAML door after `spec::parse`, because `disabled:` is not a
+/// column and no predicate can reach it. Each of the three has a test of its
+/// own in `tests/worker.rs` — they had **none** before, and deleting either SQL
+/// predicate left `--test worker` green.
+///
+/// **THE RULE, stated here because this is where the next person will write the
+/// next such sentence: if your comment asserts what a DIFFERENT function does,
+/// that assertion needs its own test, in that function.** A claim about your
+/// own code is checked by the tests around it. A claim about somebody else's is
+/// checked by nothing at all, and it is read as licence not to look. This is the
+/// fourth time in this package that a correct decision was defended by a false
+/// mechanism and the first where the false mechanism was a claim about another
+/// component — which is the variety that survives review longest, because it
+/// reads like a cross-reference rather than an assertion.
 ///
 /// **Refusals, and why each has the status it has**
 ///

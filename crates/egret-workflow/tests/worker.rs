@@ -3750,6 +3750,176 @@ async fn a_subflow_target_in_another_workspace_does_not_resolve(pool: sqlx::PgPo
     );
 }
 
+/// **A `Subflow` target switched off by its own YAML does not run.** W10 Task 5
+/// fix round 2's Critical.
+///
+/// A flow can be switched off two ways and this path honoured only one. The
+/// failure was concrete: an operator writes `disabled: true`, the API's
+/// `POST .../flows/{id}/executions` answers 409, and a sibling flow naming that
+/// flow as a `Subflow` target **ran it anyway**. `worker::subflow::resolve`
+/// tests `state <> 'disabled'` -- the column -- and never parses the YAML;
+/// `.disabled` occurred **0** times under `src/worker/` (positive control:
+/// `.namespace`, 11 occurrences across 4 files).
+///
+/// **The control is the same source with the line removed**, so a failure here
+/// is `disabled:` and not the fixture: one flow runs, the other does not, and
+/// nothing else differs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_target_disabled_by_its_own_yaml_does_not_run(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(
+        &db,
+        ws,
+        user,
+        &format!("{}disabled: true\n", one_task("child")),
+    )
+    .await;
+
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        (
+            children_by_trigger(&pool, parent).await.len(),
+            run_state(&pool, parent, "sub").await,
+            run_message(&pool, parent, "sub").await,
+        ),
+        (
+            0,
+            Some("FAILED".to_string()),
+            Some("unable to find flow 't'.'child'".to_string()),
+        ),
+        "a flow whose own YAML says `disabled: true` must not be reachable as a \
+         Subflow target -- and it answers exactly what the column door answers, \
+         because one switch must give one answer"
+    );
+
+    // The control: the SAME fixture without the `disabled:` line spawns a child
+    // and reaches SUCCESS. Without it, a spawn broken for any other reason would
+    // pass the assertion above.
+    let (ws2, user2) = common::seed_workspace(&db).await;
+    file_flow(&db, ws2, user2, &one_task("child")).await;
+    let ok = start_execution(
+        &pool,
+        ws2,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    assert_eq!(
+        (
+            children_by_trigger(&pool, ok).await.len(),
+            run_state(&pool, ok, "sub").await,
+        ),
+        (1, Some("SUCCESS".to_string())),
+        "the control: the identical flow without `disabled:` runs"
+    );
+}
+
+/// **A `Subflow` target switched off by the `state` COLUMN does not run.**
+///
+/// `resolve`'s `state <> 'disabled'` predicate. It had **no test**: W10 Task 5
+/// fix round 2 measured that deleting the predicate left `--test worker` at
+/// **59 passed / 0 failed**, while the positive control on the same statement
+/// (dropping `workspace_id = $1`) failed one test -- so the instrument reached
+/// that SQL and the predicate was simply undefended.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_target_disabled_by_the_state_column_does_not_run(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let child = file_flow(&db, ws, user, &one_task("child")).await;
+    sqlx::query("UPDATE workflow.flows SET state = 'disabled' WHERE id = $1")
+        .bind(child)
+        .execute(&pool)
+        .await
+        .expect("disable the flow by column");
+
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        (
+            children_by_trigger(&pool, parent).await.len(),
+            run_state(&pool, parent, "sub").await,
+            run_message(&pool, parent, "sub").await,
+        ),
+        (
+            0,
+            Some("FAILED".to_string()),
+            Some("unable to find flow 't'.'child'".to_string()),
+        ),
+        "the state column is the management UI's switch and it must reach this \
+         path too"
+    );
+}
+
+/// **A TRASHED `Subflow` target does not run.**
+///
+/// `resolve`'s `deleted_at IS NULL` predicate, and it had no test either --
+/// removing it as well still left `--test worker` at **59 passed / 0 failed**.
+/// `FlowRepo`'s delete is soft, so without this predicate a flow an author put
+/// in the trash stays executable by name for ever.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_trashed_subflow_target_does_not_run(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let child = file_flow(&db, ws, user, &one_task("child")).await;
+    sqlx::query("UPDATE workflow.flows SET deleted_at = now() WHERE id = $1")
+        .bind(child)
+        .execute(&pool)
+        .await
+        .expect("trash the flow");
+
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        (
+            children_by_trigger(&pool, parent).await.len(),
+            run_state(&pool, parent, "sub").await,
+            run_message(&pool, parent, "sub").await,
+        ),
+        (
+            0,
+            Some("FAILED".to_string()),
+            Some("unable to find flow 't'.'child'".to_string()),
+        ),
+        "a trashed flow is as invisible to a Subflow target as one that never \
+         existed"
+    );
+}
+
 /// **`wait: false` does not wait, and what the parent sees is the child's state
 /// at SPAWN time.**
 ///

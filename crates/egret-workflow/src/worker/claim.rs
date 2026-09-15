@@ -745,6 +745,51 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// **2. Pick `n` deliberately.** `n = 1` makes the property above unreachable
 /// and is what `oracle-exec/driver.rs` uses.
 ///
+/// # Two ways a run HANGS FOR EVER, both shipped and neither bounded
+///
+/// Recorded by W10 Task 5 fix round 2 at the whole-branch review's request, and
+/// **deliberately not fixed there** — they are liveness, not correctness, and
+/// the fix for either changes this function's contract.
+///
+/// **Correctness is fenced; liveness is not.** Everything below is safe in the
+/// sense that no wrong value is ever written: `apply_outcome`'s
+/// `claimed_at = $3` fence rejects the stale worker every time. What no fence
+/// does is make the run finish, or make anything *notice* that it has not.
+///
+/// **3. A publishable type with no handler is claimed and never completed.**
+/// `Handlers::with_core_tasks` registers **4** handlers (`log`, `ret`, `fail`,
+/// `sleep`); `spec::registry::TASK_TYPES` holds **13** rows, every one of which
+/// `publish` accepts. So **9 of 13 publishable types** produce a run that
+/// `claim` leases, finds no handler for, and leaves `RUNNING`. [`reap`] then
+/// clears `claimed_at` and **nothing else** — its statement is
+/// `SET claimed_at = NULL, updated_at = now()`, so the state stays `RUNNING` and
+/// the attempt stays open — and `claim`'s own predicate is
+/// `state = 'RUNNING' AND claimed_at IS NULL`, which that row now satisfies
+/// again. It is re-claimed, re-missed, re-reaped, for ever.
+///
+/// **Nothing bounds it and nothing counts it.** `attempts.push` occurs in
+/// exactly **one file** (`executor/state.rs`, 2 sites) and neither is on this
+/// path, so **no counter moves**: the run's `attempts` array is the same length
+/// on the ten-thousandth cycle as on the first. The only signal in existence is
+/// one `warn` per cycle. A fix needs somewhere to put "this has been tried and
+/// there is no handler" — which is a schema question, not a patch here.
+///
+/// **4. A handler that OUTRUNS `working_timeout` does the same thing, and this
+/// cause is not the same as 3.** [`DEFAULT_WORKING_TIMEOUT`](super::DEFAULT_WORKING_TIMEOUT)
+/// is 3600 s. `Sleep::new()` sets `cap: None` — uncapped — and it is one of the
+/// **four registered** handlers, so this is reachable with the shipped registry
+/// and a flow anyone may publish. `duration: PT2H`: the run is claimed, sleeps,
+/// is reaped at 1 h, is **re-claimed**, starts a *new* two-hour sleep, and when
+/// the first handler finally returns it hits the fence with `LeaseLost`. The
+/// second is reaped at its own 1 h mark, and so on. The run never completes and
+/// each cycle costs a fresh handler.
+///
+/// The distinction matters for whoever fixes it: cause 3 is a **missing**
+/// handler and cause 4 is a **slow** one, so a "give up after N tries" rule
+/// would close 3 and quietly convert 4 into a wrongly-failed run. `Sleep` has a
+/// bounded constructor already — `Sleep::capped(cap)` — which is the shape of
+/// the answer for 4 and does nothing for 3.
+///
 /// # An `Err` from one run does NOT abandon the others
 ///
 /// Stated because the phrase *"aborts the tick"* is used loosely throughout this
