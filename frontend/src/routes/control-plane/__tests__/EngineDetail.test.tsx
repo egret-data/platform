@@ -169,6 +169,37 @@ describe("EngineDetail — Workspaces tab", () => {
     await screen.findByText("Engineering");
     expect(screen.getByRole("button", { name: /add workspace/i })).toBeDisabled();
   });
+
+  test("a blocked Remove shows what still uses the engine instead of a toast", async () => {
+    setMutate.mockImplementationOnce(
+      (_vars: unknown, opts?: { onError?: (e: unknown) => void }) =>
+        opts?.onError?.(
+          new ApiError(409, "engine is still in use", "engine_has_dependents", {
+            error: "engine is still in use",
+            code: "engine_has_dependents",
+            dependents: [
+              {
+                workspaceId: WS_A.id,
+                workspaceName: WS_A.name,
+                workspaceSlug: WS_A.slug,
+                kind: "dataset",
+                count: 3,
+                sample: ["orders", "refunds", "revenue"],
+              },
+            ],
+          }),
+        ),
+    );
+    const user = await openWorkspacesTab();
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+
+    expect(await screen.findByText(/not removed/i)).toBeInTheDocument();
+    const table = screen.getByRole("table");
+    expect(within(table).getByText("Datasets")).toBeInTheDocument();
+    expect(within(table).getByText("orders, refunds, revenue")).toBeInTheDocument();
+    // Still assigned: the list row is untouched.
+    expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+  });
 });
 
 describe("EngineDetail — StarRocks engine", () => {

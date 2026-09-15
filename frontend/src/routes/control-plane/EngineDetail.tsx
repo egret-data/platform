@@ -1475,29 +1475,39 @@ function WorkspacesCard({ engine }: { engine: EngineWithStatus }) {
   const assignedIds = new Set(assigned.map((w) => w.workspaceId));
   const [addOpen, setAddOpen] = useState(false);
 
+  const [blockedBy, setBlockedBy] = useState<EngineDependentDto[] | null>(null);
+
   const setMut = useControlPlaneEnginesSetEngineWorkspaces({
     mutation: {
       onSuccess: () => {
+        setBlockedBy(null);
         queryClient.invalidateQueries({
           queryKey: getControlPlaneEnginesListEngineWorkspacesQueryKey(engineId),
         });
       },
-      onError: (e) =>
-        toast.error(
-          (e as { message?: string })?.message ?? "Failed to update workspaces.",
-        ),
     },
   });
+
+  // Per call rather than on the hook, so a 409 renders the dependents table and
+  // is not ALSO toasted by a hook-level handler.
+  const onSetError = (e: unknown) => {
+    const dependents = dependentsFromError(e);
+    if (dependents) {
+      setBlockedBy(dependents);
+      return;
+    }
+    toast.error((e as { message?: string })?.message ?? "Failed to update workspaces.");
+  };
 
   const addWorkspace = (wsId: string) =>
     setMut.mutate(
       { id: engineId, data: { workspaceIds: [...assignedIds, wsId] } },
-      { onSuccess: () => toast.success("Workspace assigned") },
+      { onSuccess: () => toast.success("Workspace assigned"), onError: onSetError },
     );
   const removeWorkspace = (wsId: string) =>
     setMut.mutate(
       { id: engineId, data: { workspaceIds: [...assignedIds].filter((x) => x !== wsId) } },
-      { onSuccess: () => toast.success("Workspace removed") },
+      { onSuccess: () => toast.success("Workspace removed"), onError: onSetError },
     );
 
   return (
@@ -1522,6 +1532,17 @@ function WorkspacesCard({ engine }: { engine: EngineWithStatus }) {
           <Plus className="mr-1 h-4 w-4" /> Add workspace
         </Button>
       </div>
+      {blockedBy && (
+        <div className="space-y-2 rounded-md border border-destructive/50 p-3">
+          <p className="text-sm font-medium text-destructive">
+            Not removed — the workspace still uses this engine
+          </p>
+          <p className="text-sm text-muted-foreground">
+            Remove or move these first, then try again.
+          </p>
+          <EngineDependentsTable dependents={blockedBy} />
+        </div>
+      )}
       <div>
         {assignedQ.isError ? (
           <Alert variant="destructive">
