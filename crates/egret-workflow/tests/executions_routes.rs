@@ -1615,6 +1615,28 @@ async fn a_start_runs_the_drafts_source_with_the_inputs_the_caller_sent() {
     assert_eq!(inputs, serde_json::json!({ "who": "world", "n": 3 }));
     assert!(seq > 0, "the first settle ran; seq is {seq}");
     assert_eq!(runs, 1, "the first settle created the Log run");
+
+    // **The audit record, asserted rather than emitted into the void.** Mutation
+    // M11 replaced this whole payload with `{"mutated": …}` and the suite stayed
+    // `ok. 24 passed; 0 failed` — byte-identical to the control — because
+    // nothing read the sink. The MAPPING is asserted, not the key set: three
+    // keys with their values swapped would satisfy a key-set assertion.
+    let audit = common::audit_mutations(&app);
+    assert_eq!(audit.len(), 1, "one start, one audit record");
+    assert_eq!(audit[0].0, "workflow_execution:start");
+    assert_eq!(
+        audit[0].1.as_deref(),
+        Some(id.to_string().as_str()),
+        "the record names the execution that was created"
+    );
+    assert_eq!(
+        audit[0].2,
+        serde_json::json!({
+            "flow_id": flow,
+            "namespace": "a.write",
+            "flow_key": "start-shape",
+        })
+    );
 }
 
 /// **`inputs` that is not an object is REFUSED, not coerced to `{}`.**
@@ -1819,6 +1841,18 @@ async fn resume_on_a_non_paused_execution_is_a_conflict_not_a_silent_success() {
         .status(),
         200
     );
+
+    // The start above and this resume, in that order, and nothing from the two
+    // 409s — a refused write must leave no trace in the trail either.
+    let audit = common::audit_mutations(&app);
+    let actions: Vec<&str> = audit.iter().map(|(a, _, _)| a.as_str()).collect();
+    assert_eq!(
+        actions,
+        vec!["workflow_execution:start", "workflow_execution:resume"],
+        "the two refusals emitted nothing; the start and the resume emitted one each"
+    );
+    assert_eq!(audit[1].1.as_deref(), Some(paused.to_string().as_str()));
+    assert_eq!(audit[1].2, serde_json::json!({ "from_state": "PAUSED" }));
 }
 
 /// **A replay runs the replayed execution's FROZEN source and inputs, not the
@@ -1893,6 +1927,26 @@ async fn a_replay_runs_the_frozen_source_and_inputs_and_not_the_drafts() {
         state_of(&db, done).await,
         "SUCCESS",
         "the replayed execution itself is untouched"
+    );
+
+    // **This assertion is what makes `replay_execution`'s doc falsifiable.**
+    // That doc says the relationship between a manual replay and what it
+    // replays *"is in the audit trail and nowhere in the data"* — and the
+    // `parent` assertion just above proves the "nowhere in the data" half. With
+    // nothing reading the trail, the other half was a sentence no test could
+    // contradict. Both ids, in the right roles: a payload that swapped them
+    // would name the replacement as the thing replayed.
+    let audit = common::audit_mutations(&app);
+    assert_eq!(audit.len(), 1, "one replay, one audit record");
+    assert_eq!(audit[0].0, "workflow_execution:replay");
+    assert_eq!(
+        audit[0].1.as_deref(),
+        Some(replacement.to_string().as_str()),
+        "the record is filed against the NEW execution"
+    );
+    assert_eq!(
+        audit[0].2,
+        serde_json::json!({ "replayed_from": done, "replacement": replacement })
     );
 }
 
@@ -2192,6 +2246,10 @@ async fn replay_closes_the_same_two_doors_start_does() {
         common::execution_count(&db, ws).await,
         seeded,
         "six refusals, and not one of them created an execution"
+    );
+    assert!(
+        common::audit_mutations(&app).is_empty(),
+        "nor did any of them write an audit record"
     );
 
     // **An execution whose flow was hard-deleted names no flow, so neither door

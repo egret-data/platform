@@ -136,6 +136,23 @@ pub async fn create_folder(db: &Db, ws: Uuid, owner: UserId, entity_type: &str) 
 pub struct App {
     router: axum::Router,
     sessions: egret_auth::session::SessionService,
+    /// **The audit sink's receiving end, kept rather than dropped.**
+    ///
+    /// It used to be dropped on the line that built the sink
+    /// (`AuditSink::new(16).0`), and W10 Task 5's mutation **M11** is what that
+    /// cost: replacing a route's entire audit payload with `{"mutated": …}`
+    /// left the suite at `test result: ok. 24 passed; 0 failed` -- byte-identical
+    /// to the control. Every `audit.emit` in this crate was unasserted.
+    ///
+    /// It is load-bearing for one claim in particular: `replay_execution`'s doc
+    /// says the relationship between a manual replay and what it replays *"is in
+    /// the audit trail and nowhere in the data"*. With nothing reading the
+    /// trail, that sentence was unfalsifiable.
+    ///
+    /// `Mutex` because [`audit_mutations`] takes `&App` -- every other helper
+    /// here does, and threading `&mut` through them to serve one assertion is
+    /// the tail wagging the dog.
+    audit: std::sync::Mutex<tokio::sync::mpsc::Receiver<egret_audit::AuditEvent>>,
 }
 
 /// Build [`App`] against a REAL `CedarPdp` (never a stub) -- an entitlement
@@ -158,6 +175,7 @@ pub async fn app(db: &Db) -> App {
             .await
             .expect("build CedarPdp"),
     );
+    let (audit_sink, audit_rx) = egret_audit::AuditSink::new(16);
     let state = egret_workflow::WorkflowState {
         db: db.clone(),
         repo: egret_workflow::FlowRepo::new(db.clone()),
@@ -171,12 +189,45 @@ pub async fn app(db: &Db) -> App {
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp,
-        audit: egret_audit::AuditSink::new(16).0,
+        audit: audit_sink,
     };
     let router = axum::Router::new()
         .nest("/api", egret_workflow::management_router())
         .with_state(state);
-    App { router, sessions }
+    App {
+        router,
+        sessions,
+        audit: std::sync::Mutex::new(audit_rx),
+    }
+}
+
+/// The `(action, resource_id, detail)` of every audit mutation emitted since the
+/// last call, drained.
+///
+/// `try_recv` rather than `recv().await`: `AuditSink::emit` is synchronous and
+/// non-blocking (`try_send`), so by the time an HTTP response has been awaited
+/// the event is already in the channel -- and a helper that *awaited* would hang
+/// for ever on the assertion that matters most, "this route emitted NOTHING".
+///
+/// The sink is built with capacity 16 and `emit` DROPS on a full channel with
+/// only a `warn`, so a test that drives more than 16 mutations without draining
+/// sees silent loss. Every caller here drains after a handful; a test that needs
+/// more must drain as it goes.
+pub fn audit_mutations(app: &App) -> Vec<(String, Option<String>, serde_json::Value)> {
+    let mut rx = app.audit.lock().expect("audit receiver");
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            egret_audit::AuditEvent::Mutation {
+                action,
+                resource_id,
+                detail,
+                ..
+            } => out.push((action, resource_id, detail)),
+            other => panic!("unexpected audit event shape: {other:?}"),
+        }
+    }
+    out
 }
 
 /// A port that must never be consulted -- every reference-resolving test in
