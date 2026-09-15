@@ -34,6 +34,7 @@ import type {
   CreateEngineBody,
   EngineCatalogDetailDto,
   EngineCatalogDto,
+  EngineConflictBody,
   EngineDetailDto,
   EngineDto,
   EngineWorkspaceDto,
@@ -310,6 +311,16 @@ export type controlPlaneEnginesUnassignWorkspaceEngineResponse403 = {
   status: 403
 }
 
+export type controlPlaneEnginesUnassignWorkspaceEngineResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesUnassignWorkspaceEngineResponse409 = {
+  data: EngineConflictBody
+  status: 409
+}
+
 export type controlPlaneEnginesUnassignWorkspaceEngineResponse500 = {
   data: ErrorBody
   status: 500
@@ -318,7 +329,7 @@ export type controlPlaneEnginesUnassignWorkspaceEngineResponse500 = {
 export type controlPlaneEnginesUnassignWorkspaceEngineResponseSuccess = (controlPlaneEnginesUnassignWorkspaceEngineResponse204) & {
   headers: Headers;
 };
-export type controlPlaneEnginesUnassignWorkspaceEngineResponseError = (controlPlaneEnginesUnassignWorkspaceEngineResponse401 | controlPlaneEnginesUnassignWorkspaceEngineResponse403 | controlPlaneEnginesUnassignWorkspaceEngineResponse500) & {
+export type controlPlaneEnginesUnassignWorkspaceEngineResponseError = (controlPlaneEnginesUnassignWorkspaceEngineResponse401 | controlPlaneEnginesUnassignWorkspaceEngineResponse403 | controlPlaneEnginesUnassignWorkspaceEngineResponse404 | controlPlaneEnginesUnassignWorkspaceEngineResponse409 | controlPlaneEnginesUnassignWorkspaceEngineResponse500) & {
   headers: Headers;
 };
 
@@ -349,7 +360,7 @@ export const controlPlaneEnginesUnassignWorkspaceEngine = async (id: string,
 
 
 
-export const getControlPlaneEnginesUnassignWorkspaceEngineMutationOptions = <TError = ErrorBody,
+export const getControlPlaneEnginesUnassignWorkspaceEngineMutationOptions = <TError = ErrorBody | EngineConflictBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesUnassignWorkspaceEngine>>, TError,{id: string;engineId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
 ): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesUnassignWorkspaceEngine>>, TError,{id: string;engineId: string}, TContext> => {
 
@@ -378,9 +389,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type ControlPlaneEnginesUnassignWorkspaceEngineMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesUnassignWorkspaceEngine>>>
 
-    export type ControlPlaneEnginesUnassignWorkspaceEngineMutationError = ErrorBody
+    export type ControlPlaneEnginesUnassignWorkspaceEngineMutationError = ErrorBody | EngineConflictBody
 
-    export const useControlPlaneEnginesUnassignWorkspaceEngine = <TError = ErrorBody,
+    export const useControlPlaneEnginesUnassignWorkspaceEngine = <TError = ErrorBody | EngineConflictBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesUnassignWorkspaceEngine>>, TError,{id: string;engineId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof controlPlaneEnginesUnassignWorkspaceEngine>>,
@@ -873,15 +884,25 @@ export type controlPlaneEnginesDeleteEngineResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesDeleteEngineResponse409 = {
+  data: EngineConflictBody
+  status: 409
+}
+
 export type controlPlaneEnginesDeleteEngineResponse500 = {
   data: ErrorBody
   status: 500
 }
 
+export type controlPlaneEnginesDeleteEngineResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
 export type controlPlaneEnginesDeleteEngineResponseSuccess = (controlPlaneEnginesDeleteEngineResponse204) & {
   headers: Headers;
 };
-export type controlPlaneEnginesDeleteEngineResponseError = (controlPlaneEnginesDeleteEngineResponse400 | controlPlaneEnginesDeleteEngineResponse401 | controlPlaneEnginesDeleteEngineResponse403 | controlPlaneEnginesDeleteEngineResponse404 | controlPlaneEnginesDeleteEngineResponse500) & {
+export type controlPlaneEnginesDeleteEngineResponseError = (controlPlaneEnginesDeleteEngineResponse400 | controlPlaneEnginesDeleteEngineResponse401 | controlPlaneEnginesDeleteEngineResponse403 | controlPlaneEnginesDeleteEngineResponse404 | controlPlaneEnginesDeleteEngineResponse409 | controlPlaneEnginesDeleteEngineResponse500 | controlPlaneEnginesDeleteEngineResponse502) & {
   headers: Headers;
 };
 
@@ -910,7 +931,7 @@ export const controlPlaneEnginesDeleteEngine = async (id: string, options?: Para
 
 
 
-export const getControlPlaneEnginesDeleteEngineMutationOptions = <TError = ErrorBody,
+export const getControlPlaneEnginesDeleteEngineMutationOptions = <TError = ErrorBody | EngineConflictBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesDeleteEngine>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
 ): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesDeleteEngine>>, TError,{id: string}, TContext> => {
 
@@ -939,9 +960,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type ControlPlaneEnginesDeleteEngineMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesDeleteEngine>>>
 
-    export type ControlPlaneEnginesDeleteEngineMutationError = ErrorBody
+    export type ControlPlaneEnginesDeleteEngineMutationError = ErrorBody | EngineConflictBody
 
-    export const useControlPlaneEnginesDeleteEngine = <TError = ErrorBody,
+    export const useControlPlaneEnginesDeleteEngine = <TError = ErrorBody | EngineConflictBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesDeleteEngine>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof controlPlaneEnginesDeleteEngine>>,
@@ -2942,6 +2963,11 @@ export type controlPlaneEnginesSetEngineWorkspacesResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesSetEngineWorkspacesResponse409 = {
+  data: EngineConflictBody
+  status: 409
+}
+
 export type controlPlaneEnginesSetEngineWorkspacesResponse500 = {
   data: ErrorBody
   status: 500
@@ -2950,7 +2976,7 @@ export type controlPlaneEnginesSetEngineWorkspacesResponse500 = {
 export type controlPlaneEnginesSetEngineWorkspacesResponseSuccess = (controlPlaneEnginesSetEngineWorkspacesResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesSetEngineWorkspacesResponseError = (controlPlaneEnginesSetEngineWorkspacesResponse400 | controlPlaneEnginesSetEngineWorkspacesResponse401 | controlPlaneEnginesSetEngineWorkspacesResponse403 | controlPlaneEnginesSetEngineWorkspacesResponse404 | controlPlaneEnginesSetEngineWorkspacesResponse500) & {
+export type controlPlaneEnginesSetEngineWorkspacesResponseError = (controlPlaneEnginesSetEngineWorkspacesResponse400 | controlPlaneEnginesSetEngineWorkspacesResponse401 | controlPlaneEnginesSetEngineWorkspacesResponse403 | controlPlaneEnginesSetEngineWorkspacesResponse404 | controlPlaneEnginesSetEngineWorkspacesResponse409 | controlPlaneEnginesSetEngineWorkspacesResponse500) & {
   headers: Headers;
 };
 
@@ -2980,7 +3006,7 @@ export const controlPlaneEnginesSetEngineWorkspaces = async (id: string,
 
 
 
-export const getControlPlaneEnginesSetEngineWorkspacesMutationOptions = <TError = ErrorBody,
+export const getControlPlaneEnginesSetEngineWorkspacesMutationOptions = <TError = ErrorBody | EngineConflictBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesSetEngineWorkspaces>>, TError,{id: string;data: SetWorkspacesBody}, TContext>, request?: SecondParameter<typeof customInstance>}
 ): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesSetEngineWorkspaces>>, TError,{id: string;data: SetWorkspacesBody}, TContext> => {
 
@@ -3009,9 +3035,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type ControlPlaneEnginesSetEngineWorkspacesMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesSetEngineWorkspaces>>>
     export type ControlPlaneEnginesSetEngineWorkspacesMutationBody = SetWorkspacesBody
-    export type ControlPlaneEnginesSetEngineWorkspacesMutationError = ErrorBody
+    export type ControlPlaneEnginesSetEngineWorkspacesMutationError = ErrorBody | EngineConflictBody
 
-    export const useControlPlaneEnginesSetEngineWorkspaces = <TError = ErrorBody,
+    export const useControlPlaneEnginesSetEngineWorkspaces = <TError = ErrorBody | EngineConflictBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesSetEngineWorkspaces>>, TError,{id: string;data: SetWorkspacesBody}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof controlPlaneEnginesSetEngineWorkspaces>>,
