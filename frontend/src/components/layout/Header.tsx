@@ -92,13 +92,14 @@ export function Header() {
       <div className="flex-1" />
 
       {showSwitcher && (
-        <>
+        <nav aria-label="Apps" className={`flex items-center ${narrow ? "gap-2" : "gap-3"}`}>
           <Button
             variant={variantFor("explore")}
             size={entrySize}
             className={entryClass}
             aria-label="Explorer"
             aria-current={current("explore")}
+            title="Explorer"
             onClick={handleExplorer}
           >
             <Compass className="h-4 w-4" />
@@ -106,7 +107,7 @@ export function Header() {
           </Button>
           {showGovernance && (
             <Button asChild variant={variantFor("governance")} size={entrySize} className={entryClass}>
-              <Link to="/governance" aria-label="Governance" aria-current={current("governance")}>
+              <Link to="/governance" aria-label="Governance" aria-current={current("governance")} title="Governance">
                 <ShieldCheck className="h-4 w-4" />
                 {!narrow && "Governance"}
               </Link>
@@ -114,13 +115,18 @@ export function Header() {
           )}
           {showControlPlane && (
             <Button asChild variant={variantFor("control-plane")} size={entrySize} className={entryClass}>
-              <Link to="/control-plane" aria-label="Control Plane" aria-current={current("control-plane")}>
+              <Link
+                to="/control-plane"
+                aria-label="Control Plane"
+                aria-current={current("control-plane")}
+                title="Control Plane"
+              >
                 <Settings className="h-4 w-4" />
                 {!narrow && "Control Plane"}
               </Link>
             </Button>
           )}
-        </>
+        </nav>
       )}
 
       <Button
