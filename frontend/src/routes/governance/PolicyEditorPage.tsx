@@ -39,7 +39,7 @@ import { PermissionTable } from "@/components/policy/PermissionTable";
 import { ResourceSelector } from "@/components/policy/ResourceSelector";
 import { RowFilterItemTable } from "@/components/policy/RowFilterItemTable";
 import { ConfigSection } from "@/components/form/ConfigSection";
-import { FieldLabel } from "./config/FieldLabel";
+import { FieldLabel } from "@/routes/control-plane/config/FieldLabel";
 
 type PolicyKind = "access" | "masking" | "rowfilter";
 

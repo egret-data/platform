@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-import TagDetail from "@/routes/control-plane/governance/TagDetail";
+import TagDetail from "@/routes/governance/TagDetail";
 import * as tagsApi from "@/api/tags";
 import * as accessApi from "@/api/access";
 import { useAuth } from "@/auth/useAuth";

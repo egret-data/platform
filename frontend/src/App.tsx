@@ -72,9 +72,9 @@ import StorageDetail from "@/routes/control-plane/StorageDetail";
 import StorageBrowser from "@/routes/control-plane/StorageBrowser";
 import ControlPlaneSecrets from "@/routes/control-plane/ControlPlaneSecrets";
 import SecretDetail from "@/routes/control-plane/SecretDetail";
-import Policies from "@/routes/control-plane/Policies";
-import ProfileDetailPage from "@/routes/control-plane/ProfileDetailPage";
-import PolicyEditorPage from "@/routes/control-plane/PolicyEditorPage";
+import Policies from "@/routes/governance/Policies";
+import ProfileDetailPage from "@/routes/governance/ProfileDetailPage";
+import PolicyEditorPage from "@/routes/governance/PolicyEditorPage";
 import Warehouses from "@/routes/control-plane/Warehouses";
 import WarehouseDetail from "@/routes/control-plane/WarehouseDetail";
 import AuditLog from "@/routes/control-plane/AuditLog";
@@ -88,8 +88,8 @@ import PermissionsPage from "@/routes/control-plane/access/PermissionsPage";
 import AccessExplorer from "@/routes/control-plane/access/AccessExplorer";
 import AccessOverview from "@/routes/control-plane/access/AccessOverview";
 import WhoCanAccess from "@/routes/control-plane/access/WhoCanAccess";
-import Classifications from "@/routes/control-plane/governance/Classifications";
-import TagDetail from "@/routes/control-plane/governance/TagDetail";
+import Classifications from "@/routes/governance/Classifications";
+import TagDetail from "@/routes/governance/TagDetail";
 import { LegacyGovernanceRedirect } from "@/routes/governance/LegacyGovernanceRedirect";
 
 function HomeRedirect() {
