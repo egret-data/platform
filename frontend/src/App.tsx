@@ -15,6 +15,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { LoginPage } from "@/auth/LoginPage";
 import { NotFound } from "@/routes/NotFound";
 import { useAuth } from "@/auth/useAuth";
+import { canEnterControlPlane, canEnterGovernance } from "@/auth/appAccess";
 import { useMyWorkspaces } from "@/api/hooks";
 import { queryClient } from "@/api/queryClient";
 import { RequireFeature } from "@/components/explore/RequireFeature";
@@ -93,9 +94,18 @@ import { LegacyGovernanceRedirect } from "@/routes/governance/LegacyGovernanceRe
 
 function HomeRedirect() {
   const { me, isLoading } = useAuth();
-  const { data } = useMyWorkspaces(!!me);
+  const { data, isLoading: wsLoading } = useMyWorkspaces(!!me);
   if (isLoading) return <div className="p-10">Loading…</div>;
+  // Wait for the workspace list to settle (loaded or errored) before deciding
+  // where a workspace-less user goes — otherwise a member with workspaces
+  // would flash a Governance/Control Plane redirect while the fetch is
+  // still in flight.
+  if (wsLoading) return <div className="p-10">Loading…</div>;
   if (data && data.length > 0) return <Navigate to={`/explore/${data[0].slug}`} replace />;
+  // No workspace yet. A steward or infra operator still has somewhere to go —
+  // this page renders no header, so without the redirect they would be stranded.
+  if (canEnterGovernance(me)) return <Navigate to="/governance" replace />;
+  if (canEnterControlPlane(me)) return <Navigate to="/control-plane" replace />;
   return <div className="p-10">No workspaces yet. Ask an admin to add you to one.</div>;
 }
 

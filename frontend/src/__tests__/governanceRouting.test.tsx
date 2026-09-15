@@ -44,6 +44,33 @@ function openApp(url: string, as: Me) {
   render(<App />);
 }
 
+/**
+ * Like `openApp`, but also answers `/api/me/workspaces` (the real endpoint
+ * behind `useMyWorkspaces`) so a `HomeRedirect` test can exercise the
+ * has-workspaces branch instead of `useMyWorkspaces` rejecting.
+ */
+function openWithWorkspaces(url: string, as: Me, workspaces: { id: string; slug: string; name: string; features: string[] }[]) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: RequestInfo | URL) => {
+      const s = String(input);
+      if (s === "/api/auth/me") {
+        return Promise.resolve(
+          new Response(JSON.stringify(as), { status: 200, headers: { "content-type": "application/json" } }),
+        );
+      }
+      if (s === "/api/me/workspaces") {
+        return Promise.resolve(
+          new Response(JSON.stringify(workspaces), { status: 200, headers: { "content-type": "application/json" } }),
+        );
+      }
+      return Promise.reject(new Error("no network in test"));
+    }),
+  );
+  window.history.pushState({}, "", url);
+  render(<App />);
+}
+
 const currentUrl = () => `${window.location.pathname}${window.location.search}${window.location.hash}`;
 
 afterEach(() => {
@@ -100,5 +127,26 @@ describe("Governance routing in App", () => {
   it("still lands an infra-only user on their first Control Plane section", async () => {
     openApp("/control-plane", INFRA_ONLY);
     await waitFor(() => expect(currentUrl()).toBe("/control-plane/engines"), TIMEOUT);
+  }, 15_000);
+
+  it("sends a user with no workspace but Governance access from / to Governance", async () => {
+    openApp("/", GOVERNANCE_ONLY);
+    await waitFor(() => expect(currentUrl()).toBe("/governance/policies"), TIMEOUT);
+  }, 15_000);
+
+  it("sends a user with no workspace but only Control Plane access from / to Control Plane", async () => {
+    openApp("/", INFRA_ONLY);
+    await waitFor(() => expect(currentUrl().startsWith("/control-plane")).toBe(true), TIMEOUT);
+  }, 15_000);
+
+  it("still tells a plain user with no workspace to ask an admin", async () => {
+    openApp("/", me([]));
+    expect(await screen.findByText(/No workspaces yet/, {}, TIMEOUT)).toBeInTheDocument();
+    expect(currentUrl()).toBe("/");
+  }, 15_000);
+
+  it("does not bounce a member with workspaces to Governance while the workspace list is still loading", async () => {
+    openWithWorkspaces("/", me(["policy:read"]), [{ id: "w1", slug: "w1", name: "W1", features: [] }]);
+    await waitFor(() => expect(currentUrl()).toBe("/explore/w1"), TIMEOUT);
   }, 15_000);
 });
