@@ -797,6 +797,45 @@ async fn pdp_backed_engine_reader_reads_but_cannot_create() {
     );
 }
 
+/// M6 (SP1 Part B final review): `rotate_engine_secrets` had no authz test —
+/// deleting its `require(..., "engine:update")` call failed nothing. Mirrors
+/// `pdp_backed_engine_reader_reads_but_cannot_create`: a real PDP-backed
+/// `engine:read`-only principal must be refused. The check is the handler's
+/// first line, before any engine lookup, so an unknown id is enough to prove
+/// it fires.
+#[tokio::test]
+async fn pdp_backed_engine_reader_cannot_rotate_secrets() {
+    let Some(mut f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let reader = session_for_with_permission(&f, "pdp_engine_reader_rotate", "engine:read").await;
+    attach_real_pdp(&mut f).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{}/rotate-secrets", Uuid::new_v4()),
+            &reader,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "PDP-backed engine:read alone must not rotate secrets (needs engine:update)"
+    );
+}
+
 #[tokio::test]
 async fn create_and_get_engine() {
     let Some(f) = setup_full(
