@@ -780,15 +780,25 @@ export type controlPlaneEnginesUpdateEngineResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesUpdateEngineResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesUpdateEngineResponse500 = {
   data: ErrorBody
   status: 500
 }
 
+export type controlPlaneEnginesUpdateEngineResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
 export type controlPlaneEnginesUpdateEngineResponseSuccess = (controlPlaneEnginesUpdateEngineResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesUpdateEngineResponseError = (controlPlaneEnginesUpdateEngineResponse400 | controlPlaneEnginesUpdateEngineResponse401 | controlPlaneEnginesUpdateEngineResponse403 | controlPlaneEnginesUpdateEngineResponse404 | controlPlaneEnginesUpdateEngineResponse500) & {
+export type controlPlaneEnginesUpdateEngineResponseError = (controlPlaneEnginesUpdateEngineResponse400 | controlPlaneEnginesUpdateEngineResponse401 | controlPlaneEnginesUpdateEngineResponse403 | controlPlaneEnginesUpdateEngineResponse404 | controlPlaneEnginesUpdateEngineResponse409 | controlPlaneEnginesUpdateEngineResponse500 | controlPlaneEnginesUpdateEngineResponse502) & {
   headers: Headers;
 };
 
@@ -1125,6 +1135,11 @@ export type controlPlaneEnginesAddCatalogResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesAddCatalogResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesAddCatalogResponse500 = {
   data: ErrorBody
   status: 500
@@ -1133,7 +1148,7 @@ export type controlPlaneEnginesAddCatalogResponse500 = {
 export type controlPlaneEnginesAddCatalogResponseSuccess = (controlPlaneEnginesAddCatalogResponse201) & {
   headers: Headers;
 };
-export type controlPlaneEnginesAddCatalogResponseError = (controlPlaneEnginesAddCatalogResponse400 | controlPlaneEnginesAddCatalogResponse401 | controlPlaneEnginesAddCatalogResponse403 | controlPlaneEnginesAddCatalogResponse404 | controlPlaneEnginesAddCatalogResponse500) & {
+export type controlPlaneEnginesAddCatalogResponseError = (controlPlaneEnginesAddCatalogResponse400 | controlPlaneEnginesAddCatalogResponse401 | controlPlaneEnginesAddCatalogResponse403 | controlPlaneEnginesAddCatalogResponse404 | controlPlaneEnginesAddCatalogResponse409 | controlPlaneEnginesAddCatalogResponse500) & {
   headers: Headers;
 };
 
@@ -1365,6 +1380,11 @@ export type controlPlaneEnginesUpdateCatalogResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesUpdateCatalogResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesUpdateCatalogResponse500 = {
   data: ErrorBody
   status: 500
@@ -1373,7 +1393,7 @@ export type controlPlaneEnginesUpdateCatalogResponse500 = {
 export type controlPlaneEnginesUpdateCatalogResponseSuccess = (controlPlaneEnginesUpdateCatalogResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesUpdateCatalogResponseError = (controlPlaneEnginesUpdateCatalogResponse400 | controlPlaneEnginesUpdateCatalogResponse401 | controlPlaneEnginesUpdateCatalogResponse403 | controlPlaneEnginesUpdateCatalogResponse404 | controlPlaneEnginesUpdateCatalogResponse500) & {
+export type controlPlaneEnginesUpdateCatalogResponseError = (controlPlaneEnginesUpdateCatalogResponse400 | controlPlaneEnginesUpdateCatalogResponse401 | controlPlaneEnginesUpdateCatalogResponse403 | controlPlaneEnginesUpdateCatalogResponse404 | controlPlaneEnginesUpdateCatalogResponse409 | controlPlaneEnginesUpdateCatalogResponse500) & {
   headers: Headers;
 };
 
@@ -1471,6 +1491,11 @@ export type controlPlaneEnginesRemoveCatalogResponse404 = {
   status: 404
 }
 
+export type controlPlaneEnginesRemoveCatalogResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneEnginesRemoveCatalogResponse500 = {
   data: ErrorBody
   status: 500
@@ -1479,7 +1504,7 @@ export type controlPlaneEnginesRemoveCatalogResponse500 = {
 export type controlPlaneEnginesRemoveCatalogResponseSuccess = (controlPlaneEnginesRemoveCatalogResponse200) & {
   headers: Headers;
 };
-export type controlPlaneEnginesRemoveCatalogResponseError = (controlPlaneEnginesRemoveCatalogResponse400 | controlPlaneEnginesRemoveCatalogResponse401 | controlPlaneEnginesRemoveCatalogResponse403 | controlPlaneEnginesRemoveCatalogResponse404 | controlPlaneEnginesRemoveCatalogResponse500) & {
+export type controlPlaneEnginesRemoveCatalogResponseError = (controlPlaneEnginesRemoveCatalogResponse400 | controlPlaneEnginesRemoveCatalogResponse401 | controlPlaneEnginesRemoveCatalogResponse403 | controlPlaneEnginesRemoveCatalogResponse404 | controlPlaneEnginesRemoveCatalogResponse409 | controlPlaneEnginesRemoveCatalogResponse500) & {
   headers: Headers;
 };
 
@@ -2809,6 +2834,145 @@ export const useControlPlaneEnginesRestartEngine = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getControlPlaneEnginesRestartEngineMutationOptions(options), queryClient);
+    }
+    export type controlPlaneEnginesRotateEngineSecretsResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponseSuccess = (controlPlaneEnginesRotateEngineSecretsResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesRotateEngineSecretsResponseError = (controlPlaneEnginesRotateEngineSecretsResponse400 | controlPlaneEnginesRotateEngineSecretsResponse401 | controlPlaneEnginesRotateEngineSecretsResponse403 | controlPlaneEnginesRotateEngineSecretsResponse404 | controlPlaneEnginesRotateEngineSecretsResponse409 | controlPlaneEnginesRotateEngineSecretsResponse500 | controlPlaneEnginesRotateEngineSecretsResponse502) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesRotateEngineSecretsResponse = (controlPlaneEnginesRotateEngineSecretsResponseSuccess | controlPlaneEnginesRotateEngineSecretsResponseError)
+
+export const getControlPlaneEnginesRotateEngineSecretsUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/rotate-secrets`
+}
+
+/**
+ * @summary `POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication
+secret and `egret-monitor` password and re-apply the engine (pods roll). The
+new pair is recorded on the row even if the apply fails — the cluster may
+already have received it — so a failed rotation's pair is kept resolvable,
+never deleted, alongside whatever it superseded. A later successful
+rotation deletes only the ONE pair its own apply superseded; anything
+further back (left by an earlier failed rotation, or by a losing
+concurrent apply) stays orphaned but resolvable until the engine itself is
+deleted — a wider sweep here could destroy a pair a DIFFERENT, still
+in-flight apply on this engine just minted, which is the one thing this
+route must never do.
+ */
+export const controlPlaneEnginesRotateEngineSecrets = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRotateEngineSecretsResponse> => {
+
+  return customInstance<controlPlaneEnginesRotateEngineSecretsResponse>(getControlPlaneEnginesRotateEngineSecretsUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesRotateEngineSecretsMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>, TError,{id: string}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesRotateEngineSecrets'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>, {id: string}> = (props) => {
+          const {id} = props ?? {};
+
+          return  controlPlaneEnginesRotateEngineSecrets(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesRotateEngineSecretsMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>>
+
+    export type ControlPlaneEnginesRotateEngineSecretsMutationError = ErrorBody
+
+    /**
+ * @summary `POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication
+secret and `egret-monitor` password and re-apply the engine (pods roll). The
+new pair is recorded on the row even if the apply fails — the cluster may
+already have received it — so a failed rotation's pair is kept resolvable,
+never deleted, alongside whatever it superseded. A later successful
+rotation deletes only the ONE pair its own apply superseded; anything
+further back (left by an earlier failed rotation, or by a losing
+concurrent apply) stays orphaned but resolvable until the engine itself is
+deleted — a wider sweep here could destroy a pair a DIFFERENT, still
+in-flight apply on this engine just minted, which is the one thing this
+route must never do.
+ */
+export const useControlPlaneEnginesRotateEngineSecrets = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>,
+        TError,
+        {id: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesRotateEngineSecretsMutationOptions(options), queryClient);
     }
     export type controlPlaneEnginesListEngineWorkspacesResponse200 = {
   data: EngineWorkspaceDto[]

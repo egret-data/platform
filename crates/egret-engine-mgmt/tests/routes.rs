@@ -27,6 +27,7 @@ struct Fixture {
     db: Db,
     engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
     kube: Option<Arc<dyn KubeClient>>,
+    ranger_enabled: bool,
 }
 
 /// Incidental PDP for `EngineMgmtState`: every existing route test authenticates
@@ -59,6 +60,7 @@ fn build_app(
     engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
     kube: Option<Arc<dyn KubeClient>>,
     pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+    ranger_enabled: bool,
 ) -> axum::Router {
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
@@ -87,7 +89,7 @@ fn build_app(
             engine_egret_url: "http://egret:8080".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
-            ranger_enabled: false,
+            ranger_enabled,
         })
 }
 
@@ -107,6 +109,7 @@ async fn attach_real_pdp(f: &mut Fixture) {
         f.engine_provisioner.clone(),
         f.kube.clone(),
         pdp,
+        f.ranger_enabled,
     );
 }
 
@@ -122,6 +125,16 @@ async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
 async fn setup_full(
     engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
     kube: Option<Arc<dyn KubeClient>>,
+) -> Option<Fixture> {
+    setup_with_ranger(engine_provisioner, kube, false).await
+}
+
+/// `setup_full` with `config.ranger.enabled` under the test's control: the Trino
+/// create path auto-creates (or reuses) a Ranger profile only when it is on.
+async fn setup_with_ranger(
+    engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
+    kube: Option<Arc<dyn KubeClient>>,
+    ranger_enabled: bool,
 ) -> Option<Fixture> {
     let dsn = egret_test_db::url().await?;
     let db = Db::connect(&dsn, 5).await.expect("connect");
@@ -143,6 +156,7 @@ async fn setup_full(
         engine_provisioner.clone(),
         kube.clone(),
         std::sync::Arc::new(AllowAllPdp),
+        ranger_enabled,
     );
 
     Some(Fixture {
@@ -152,6 +166,7 @@ async fn setup_full(
         db,
         engine_provisioner,
         kube,
+        ranger_enabled,
     })
 }
 
@@ -373,28 +388,74 @@ async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
 
 // ── Engines ────────────────────────────────────────────────────────────────────
 
-/// Kube-free `EngineProvisioningPort` fake: provision/update/delete are no-ops,
-/// `status` reports a single running pod named "coordinator-0" (so the
-/// pod-ownership check in `pod_logs`/`pod_exec` passes for that name), and
-/// `restart` records `(namespace, name)` pairs (shared via `Arc` so a test can
-/// hold onto the fake and inspect it after the request completes). The
+/// Kube-free `EngineProvisioningPort` fake. `status` reports a single running,
+/// ready pod named "coordinator-0" (so the pod-ownership check in
+/// `pod_logs`/`pod_exec` passes for that name). Every other call is RECORDED in
+/// shared `Arc` state, so a test that keeps a clone of the fake can inspect
+/// exactly what the app asked the cluster to do. `fail_provision`/`fail_update`
+/// make the matching call record its spec and then fail, standing in for a
+/// Kubernetes API error; `delete_error`, when `Some`, makes `delete` fail with
+/// that message instead (and record nothing) — for the 502/retry tests. The
 /// kube-shaped ops (exec/pod-logs/coordinator-request) are NOT on this trait —
 /// `egret_provisioner::kube_client::FakeKube` covers those, passed separately as the
-/// fixture's `kube` field. `deleted` records each successful `delete` as
-/// `(kind, namespace, name)`; `delete_error`, when `Some`, makes `delete` fail
-/// with that message instead (and record nothing) — for the 502/retry tests.
+/// fixture's `kube` field.
 #[derive(Clone, Default)]
 struct FakeEnginePort {
     restarted: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    provisioned: Arc<std::sync::Mutex<Vec<egret_engine_mgmt_api::EngineSpec>>>,
+    updated: Arc<std::sync::Mutex<Vec<egret_engine_mgmt_api::EngineSpec>>>,
     /// `(kind, namespace, name)` per successful `delete`.
     deleted: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
     /// When `Some`, `delete` fails with this message and records nothing.
     delete_error: Arc<std::sync::Mutex<Option<String>>>,
+    fail_provision: Arc<std::sync::atomic::AtomicBool>,
+    fail_update: Arc<std::sync::atomic::AtomicBool>,
+    /// When `Some`, `status` returns this instead of the hard-coded
+    /// all-pods-ready `running` default — so a test can drive a not-ready /
+    /// crash-looping cluster through `GET /engines/{id}` (I1).
+    status_response: Arc<std::sync::Mutex<Option<egret_engine_mgmt_api::EngineStatus>>>,
+}
+
+impl FakeEnginePort {
+    fn set_status(&self, status: egret_engine_mgmt_api::EngineStatus) {
+        *self.status_response.lock().unwrap() = Some(status);
+    }
+    fn last_provisioned(&self) -> egret_engine_mgmt_api::EngineSpec {
+        self.provisioned
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("provision was called")
+    }
+    fn last_updated(&self) -> egret_engine_mgmt_api::EngineSpec {
+        self.updated
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("update was called")
+    }
+    fn set_fail_update(&self, fail: bool) {
+        self.fail_update
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn set_fail_provision(&self, fail: bool) {
+        self.fail_provision
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[async_trait::async_trait]
 impl EngineProvisioningPort for FakeEnginePort {
-    async fn provision(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+    async fn provision(&self, req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+        self.provisioned.lock().unwrap().push(req.clone());
+        if self
+            .fail_provision
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("injected provision failure".into());
+        }
         Ok(())
     }
     async fn status(
@@ -403,6 +464,9 @@ impl EngineProvisioningPort for FakeEnginePort {
         _ns: &str,
         _name: &str,
     ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+        if let Some(s) = self.status_response.lock().unwrap().clone() {
+            return Ok(s);
+        }
         Ok(egret_engine_mgmt_api::EngineStatus {
             phase: "running".into(),
             message: None,
@@ -413,7 +477,11 @@ impl EngineProvisioningPort for FakeEnginePort {
             }],
         })
     }
-    async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+    async fn update(&self, req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+        self.updated.lock().unwrap().push(req.clone());
+        if self.fail_update.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("injected update failure".into());
+        }
         Ok(())
     }
     async fn delete(&self, kind: &str, ns: &str, name: &str) -> Result<(), String> {
@@ -726,6 +794,45 @@ async fn pdp_backed_engine_reader_reads_but_cannot_create() {
         resp.status(),
         StatusCode::FORBIDDEN,
         "PDP-backed engine:read alone must not create an engine (needs engine:create)"
+    );
+}
+
+/// M6 (SP1 Part B final review): `rotate_engine_secrets` had no authz test —
+/// deleting its `require(..., "engine:update")` call failed nothing. Mirrors
+/// `pdp_backed_engine_reader_reads_but_cannot_create`: a real PDP-backed
+/// `engine:read`-only principal must be refused. The check is the handler's
+/// first line, before any engine lookup, so an unknown id is enough to prove
+/// it fires.
+#[tokio::test]
+async fn pdp_backed_engine_reader_cannot_rotate_secrets() {
+    let Some(mut f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let reader = session_for_with_permission(&f, "pdp_engine_reader_rotate", "engine:read").await;
+    attach_real_pdp(&mut f).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{}/rotate-secrets", Uuid::new_v4()),
+            &reader,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "PDP-backed engine:read alone must not rotate secrets (needs engine:update)"
     );
 }
 
@@ -1440,6 +1547,373 @@ async fn seed_secret(f: &Fixture, value: &str) -> Uuid {
         )
         .await
         .expect("create password secret")
+}
+
+/// The app's named-secret store, built with the SAME test crypto key as
+/// `build_app`, so a test can read back what the handlers sealed.
+fn secret_store(f: &Fixture) -> egret_secrets::WorkspaceSecretStore {
+    egret_secrets::WorkspaceSecretStore::new(
+        f.db.clone(),
+        egret_secrets::SecretStore::new(
+            f.db.clone(),
+            Some(egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("crypto")),
+        ),
+    )
+}
+
+/// `(internal_secret_id, monitor_secret_id)` straight off the engine row.
+async fn engine_secret_ids(f: &Fixture, engine_id: Uuid) -> (Option<Uuid>, Option<Uuid>) {
+    sqlx::query_as(
+        "SELECT internal_secret_id, monitor_secret_id FROM engine_mgmt.engines WHERE id = $1",
+    )
+    .bind(engine_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("engine secret ids")
+}
+
+/// `POST /engines` for a Trino engine with the wizard defaults and the given
+/// `trinoConfig`; returns the status and body.
+async fn create_engine_via_api(
+    f: &Fixture,
+    token: &str,
+    name: &str,
+    wh_id: Uuid,
+    trino_config: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "trinoConfig": trino_config,
+            })),
+        ))
+        .await
+        .unwrap();
+    into_json(resp).await
+}
+
+/// `TRINO_INTERNAL_SECRET` exactly as the env Secret renders it.
+fn rendered_internal_secret(spec: &egret_engine_mgmt_api::EngineSpec) -> String {
+    egret_provisioner::trino::trino_env_secret(spec)["stringData"]["TRINO_INTERNAL_SECRET"]
+        .as_str()
+        .expect("TRINO_INTERNAL_SECRET rendered")
+        .to_string()
+}
+
+/// The `egret-monitor` bcrypt hash exactly as `password.db` renders it,
+/// relabelled `$2y$`→`$2b$` for `bcrypt::verify`.
+fn monitor_hash(spec: &egret_engine_mgmt_api::EngineSpec) -> String {
+    let cm = egret_provisioner::trino::trino_config_map(spec);
+    let db = cm["data"]["password.db"]
+        .as_str()
+        .expect("password.db rendered");
+    let line = db
+        .lines()
+        .find(|l| l.starts_with("egret-monitor:"))
+        .expect("egret-monitor entry");
+    line["egret-monitor:".len()..].replacen("$2y$", "$2b$", 1)
+}
+
+/// Names of every internal/monitor secret minted for this engine.
+async fn internal_secret_names(f: &Fixture, engine_id: Uuid) -> Vec<String> {
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM workspace_secrets WHERE workspace_id IS NULL")
+            .fetch_all(&f.db.pool)
+            .await
+            .expect("list global secret names");
+    let (a, b) = (
+        format!("engine-internal-{engine_id}-"),
+        format!("engine-monitor-{engine_id}-"),
+    );
+    names
+        .into_iter()
+        .filter(|n| n.starts_with(&a) || n.starts_with(&b))
+        .collect()
+}
+
+/// P1: a new Trino engine gets random stored secrets; the rendered env Secret
+/// and password.db carry them, not the id-derived values.
+#[tokio::test]
+async fn create_renders_stored_random_internal_secrets() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p1_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let (internal_id, monitor_id) = engine_secret_ids(&f, id).await;
+    let secrets = secret_store(&f);
+    let internal = secrets
+        .resolve_plaintext(None, internal_id.expect("internal secret recorded"))
+        .await
+        .unwrap();
+    let monitor = secrets
+        .resolve_plaintext(None, monitor_id.expect("monitor secret recorded"))
+        .await
+        .unwrap();
+
+    let spec = port.last_provisioned();
+    let rendered = rendered_internal_secret(&spec);
+    assert_eq!(rendered, internal);
+    assert_ne!(rendered, format!("egret-internal-{id}"));
+    let hash = monitor_hash(&spec);
+    assert!(bcrypt::verify(&monitor, &hash).unwrap());
+    assert!(!bcrypt::verify(format!("egret-monitor-{id}"), &hash).unwrap());
+}
+
+/// P1 transition + F1 fix: an engine rendered before this change (no secret
+/// ids) adopts stored secrets on its FIRST apply attempt EVEN WHEN that
+/// attempt fails. `TrinoProvisioner::apply_all` writes the env Secret and the
+/// `password.db` ConfigMap before the Deployments and does not roll those
+/// back on a later failure, so a failed apply may already have handed the
+/// cluster the new pair — discarding it would risk deleting a value the
+/// running pods carry. The row therefore COMMITS the pending pair on both the
+/// success and the failure path, and the NEXT apply (successful or not)
+/// REUSES that same committed pair rather than minting a third generation.
+#[tokio::test]
+async fn legacy_engine_adopts_internal_secrets_even_from_a_failed_apply() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p1_legacy_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let trino_config = serde_json::json!({ "delegationMode": "impersonate", "auth": {} });
+    let engine = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .create_engine(
+            &name,
+            "trino",
+            "egret-engines",
+            wh_id,
+            &serde_json::json!({
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "imageVersion": "470", "trinoConfig": trino_config.clone(),
+            }),
+            None,
+        )
+        .await
+        .expect("seed legacy engine row");
+    let put_body = serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "trinoConfig": trino_config,
+    });
+
+    port.set_fail_update(true);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{}", engine.id),
+            &token,
+            Some(put_body.clone()),
+        ))
+        .await
+        .unwrap();
+    assert!(!resp.status().is_success(), "injected failure must surface");
+    let (internal_id, monitor_id) = engine_secret_ids(&f, engine.id).await;
+    assert!(
+        internal_id.is_some() && monitor_id.is_some(),
+        "a failed apply still COMMITS the pending pair — the cluster may already carry it"
+    );
+    assert_eq!(
+        internal_secret_names(&f, engine.id).await.len(),
+        2,
+        "exactly one generation exists after the failed attempt"
+    );
+
+    port.set_fail_update(false);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{}", engine.id),
+            &token,
+            Some(put_body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let (internal_id2, monitor_id2) = engine_secret_ids(&f, engine.id).await;
+    assert_eq!(
+        internal_id2, internal_id,
+        "the next apply REUSES the already-committed pair"
+    );
+    assert_eq!(monitor_id2, monitor_id);
+    let secrets = secret_store(&f);
+    let internal = secrets
+        .resolve_plaintext(None, internal_id2.unwrap())
+        .await
+        .unwrap();
+    let monitor = secrets
+        .resolve_plaintext(None, monitor_id2.unwrap())
+        .await
+        .unwrap();
+    let spec = port.last_updated();
+    assert_eq!(rendered_internal_secret(&spec), internal);
+    assert!(bcrypt::verify(&monitor, &monitor_hash(&spec)).unwrap());
+    assert_eq!(
+        internal_secret_names(&f, engine.id).await.len(),
+        2,
+        "no third generation minted — the pair was reused, not rotated"
+    );
+}
+
+/// Reviewer coverage: a SECOND successful apply on the same (new, this-side-of-
+/// the-change) engine reuses the already-committed pair — no third generation
+/// minted, ids unchanged.
+#[tokio::test]
+async fn second_successful_apply_reuses_the_same_internal_secret_pair() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p1_reuse_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (internal_id, monitor_id) = engine_secret_ids(&f, id).await;
+    assert!(internal_id.is_some() && monitor_id.is_some());
+    assert_eq!(internal_secret_names(&f, id).await.len(), 2);
+
+    let put_body = serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 2,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "trinoConfig": { "delegationMode": "impersonate", "auth": {} },
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{id}"),
+            &token,
+            Some(put_body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (internal_id2, monitor_id2) = engine_secret_ids(&f, id).await;
+    assert_eq!(
+        internal_id2, internal_id,
+        "ids unchanged across the second apply"
+    );
+    assert_eq!(monitor_id2, monitor_id);
+    assert_eq!(
+        internal_secret_names(&f, id).await.len(),
+        2,
+        "no third generation minted"
+    );
+    let secrets = secret_store(&f);
+    let internal = secrets
+        .resolve_plaintext(None, internal_id2.unwrap())
+        .await
+        .unwrap();
+    let spec = port.last_updated();
+    assert_eq!(rendered_internal_secret(&spec), internal);
+}
+
+/// A jwt-delegation engine has no PASSWORD authenticator (`is_jwt_delegation`
+/// skips `inject_monitor_user`, so `password.db` carries no `egret-monitor`
+/// entry), but it still needs a `TRINO_INTERNAL_SECRET` for coordinator↔worker
+/// traffic — and `resolve_internal_secrets` always mints/commits the pair
+/// together, so a monitor secret is still recorded even though nothing
+/// references it in the rendered spec.
+#[tokio::test]
+async fn jwt_delegation_engine_mints_and_commits_internal_secret_without_a_monitor_user() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p1_jwt_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name,
+        wh_id,
+        serde_json::json!({ "delegationMode": "jwt" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let (internal_id, monitor_id) = engine_secret_ids(&f, id).await;
+    let secrets = secret_store(&f);
+    let internal = secrets
+        .resolve_plaintext(None, internal_id.expect("internal secret recorded"))
+        .await
+        .unwrap();
+    monitor_id.expect("monitor secret is still minted+committed alongside the internal one");
+
+    let spec = port.last_provisioned();
+    assert_eq!(rendered_internal_secret(&spec), internal);
+    let cm = egret_provisioner::trino::trino_config_map(&spec);
+    assert!(
+        cm["data"].get("password.db").is_none(),
+        "jwt-only engines render no password.db at all (no PASSWORD authenticator users)"
+    );
 }
 
 #[tokio::test]
@@ -3408,5 +3882,1313 @@ async fn unknown_workspaces_are_404_and_apply_nothing() {
         resp.status(),
         StatusCode::NOT_FOUND,
         "unassign from unknown workspace (was 204)"
+    );
+}
+
+/// C1: `add_catalog` is connector-first — any non-blank kind is a Trino
+/// connector name. The 0057 CHECK (`egret-warehouse|postgresql|tpch|tpcds|generic`)
+/// turned a `mysql` catalog into a 500.
+#[tokio::test]
+async fn add_catalog_accepts_a_connector_kind_outside_the_legacy_enum() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_c1_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            Some(serde_json::json!({
+                "name": "shop",
+                "kind": "mysql",
+                "config": { "properties": {
+                    "connection-url": "jdbc:mysql://db:3306",
+                    "connection-user": "reader"
+                } }
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "add mysql catalog; body={j}");
+    assert_eq!(j["kind"], "mysql", "stored kind; body={j}");
+}
+
+/// P8: an inline password on a non-warehouse catalog is masked on read, and
+/// re-saving the form (which PUTs the masked config back) keeps the real value
+/// in the row AND in what reaches the cluster.
+#[tokio::test]
+async fn catalog_detail_masks_inline_secrets_and_a_resave_keeps_them() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p8_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            Some(serde_json::json!({
+                "name": "pg", "kind": "postgresql",
+                "config": { "properties": {
+                    "connection-url": "jdbc:postgresql://db:5432/x",
+                    "connection-user": "u",
+                    "connection-password": "hunter2"
+                } }
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "add pg catalog; body={j}");
+    let cat_id = j["id"].as_str().expect("catalog id").to_string();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/catalogs/{cat_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, detail) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "catalog detail; body={detail}");
+    assert_eq!(
+        detail["config"]["properties"]["connection-password"],
+        "********"
+    );
+    assert_eq!(detail["config"]["properties"]["connection-user"], "u");
+    assert!(
+        !detail.to_string().contains("hunter2"),
+        "no plaintext in GET; body={detail}"
+    );
+
+    // Re-save exactly what the form received.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}/catalogs/{cat_id}"),
+            &token,
+            Some(serde_json::json!({ "config": detail["config"].clone() })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "re-save catalog; body={j}");
+
+    let stored = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .get_engine_catalog(Uuid::parse_str(&cat_id).unwrap())
+        .await
+        .expect("get catalog")
+        .expect("catalog row");
+    assert_eq!(
+        stored.config["properties"]["connection-password"],
+        "hunter2"
+    );
+    let rendered = port
+        .last_updated()
+        .catalogs
+        .into_iter()
+        .find(|c| c.name == "pg")
+        .expect("pg catalog rendered");
+    assert_eq!(rendered.properties["connection-password"], "hunter2");
+}
+
+async fn stored_status(f: &Fixture, engine_id: &str) -> String {
+    sqlx::query_scalar("SELECT status FROM engine_mgmt.engines WHERE id = $1")
+        .bind(Uuid::parse_str(engine_id).unwrap())
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("engine status")
+}
+
+/// P6: `GET /engines/{id}` records `running` once live status reports every pod
+/// ready, and never overwrites `deleting`. Also (I1: `FakeEnginePort::status`
+/// used to be hard-coded to always report `running`/ready, so the guard at
+/// `get_engine` gating the write on `s.phase == RUNNING` could never actually
+/// be exercised) — a not-ready live status must leave a `provisioning` row
+/// alone.
+#[tokio::test]
+async fn get_engine_records_running_and_leaves_deleting_alone() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p6_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = j["id"].as_str().unwrap().to_string();
+    assert_eq!(stored_status(&f, &id).await, "provisioning");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{id}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        stored_status(&f, &id).await,
+        "running",
+        "all pods ready ⇒ running recorded"
+    );
+
+    let name2 = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name2, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create 2; body={j}");
+    let id2 = j["id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE engine_mgmt.engines SET status = 'deleting' WHERE id = $1")
+        .bind(Uuid::parse_str(&id2).unwrap())
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{id2}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(stored_status(&f, &id2).await, "deleting");
+
+    // A crash-looping (not-ready) live status must NOT flip a `provisioning`
+    // row to `running` — only an all-pods-ready `running` phase may.
+    let name3 = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name3, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create 3; body={j}");
+    let id3 = j["id"].as_str().unwrap().to_string();
+    assert_eq!(stored_status(&f, &id3).await, "provisioning");
+    port.set_status(egret_engine_mgmt_api::EngineStatus {
+        phase: "provisioning".into(),
+        message: Some("waiting for pods".into()),
+        pods: vec![egret_engine_mgmt_api::PodStatus {
+            name: "coordinator-0".into(),
+            phase: "CrashLoopBackOff".into(),
+            ready: false,
+        }],
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{id3}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        stored_status(&f, &id3).await,
+        "provisioning",
+        "a not-ready live status must not record running"
+    );
+}
+
+/// Rotate: `apply_built` commits the pending pair on BOTH the success and the
+/// failure path (Task 7's reviewed decision), so a failed apply replaces the
+/// row's ids — but F2 (standing rule: never delete a value the cluster may
+/// still hold) means it must NOT delete the pair it superseded, because a
+/// failure can happen either before or after the cluster actually received
+/// it. A LATER successful apply deletes ONLY the one pair its own
+/// compare-and-set displaced (never a wider sweep — that could catch a
+/// DIFFERENT, concurrently in-flight apply's freshly-minted pair, see
+/// `commit_internal_secrets`'s doc comment), so a generation left behind by a
+/// failed rotation survives as a permanent orphan until engine delete (Task
+/// 15) — `internal_secret_names` count asserted at each step to pin exactly
+/// which pairs are deleted and which survive. Non-Trino → 400, unknown → 404.
+#[tokio::test]
+async fn rotate_secrets_replaces_both_values_only_on_a_successful_apply() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_rotate_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let secrets = secret_store(&f);
+    let (old_internal_id, old_monitor_id) = engine_secret_ids(&f, id).await;
+    let (old_internal_id, old_monitor_id) = (old_internal_id.unwrap(), old_monitor_id.unwrap());
+    let old_internal = secrets
+        .resolve_plaintext(None, old_internal_id)
+        .await
+        .unwrap();
+    let old_monitor = secrets
+        .resolve_plaintext(None, old_monitor_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        internal_secret_names(&f, id).await.len(),
+        2,
+        "baseline: one generation exists"
+    );
+    let rotate = || {
+        req(
+            "POST",
+            &format!("/engines/{id}/rotate-secrets"),
+            &token,
+            None,
+        )
+    };
+
+    port.set_fail_update(true);
+    let (status, j) = into_json(f.app.clone().oneshot(rotate()).await.unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "body={j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap()
+            .contains("injected update failure"),
+        "body={j}"
+    );
+    // F2 (standing rule: never delete a value the cluster may still hold): the
+    // failed apply still commits the pair it attempted to hand the cluster
+    // (the row moves on), but it must NOT delete the pair it superseded — the
+    // failure could have happened before OR after the cluster received the
+    // new pair, so both must stay resolvable until a later success proves
+    // which one the cluster actually converged on.
+    let (failed_internal_id, failed_monitor_id) = engine_secret_ids(&f, id).await;
+    let (failed_internal_id, failed_monitor_id) =
+        (failed_internal_id.unwrap(), failed_monitor_id.unwrap());
+    assert_ne!(failed_internal_id, old_internal_id);
+    assert_ne!(failed_monitor_id, old_monitor_id);
+    assert_eq!(
+        internal_secret_names(&f, id).await.len(),
+        4,
+        "both generations on record: the failed apply deleted nothing"
+    );
+    assert_eq!(
+        secrets
+            .resolve_plaintext(None, old_internal_id)
+            .await
+            .expect("the superseded pair must still resolve after a failed apply"),
+        old_internal
+    );
+    assert_eq!(
+        secrets
+            .resolve_plaintext(None, old_monitor_id)
+            .await
+            .expect("the superseded pair must still resolve after a failed apply"),
+        old_monitor
+    );
+
+    port.set_fail_update(false);
+    let resp = f.app.clone().oneshot(rotate()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let (new_internal_id, new_monitor_id) = engine_secret_ids(&f, id).await;
+    let (new_internal_id, new_monitor_id) = (new_internal_id.unwrap(), new_monitor_id.unwrap());
+    assert_ne!(new_internal_id, old_internal_id);
+    assert_ne!(new_monitor_id, old_monitor_id);
+    assert_ne!(new_internal_id, failed_internal_id);
+    assert_ne!(new_monitor_id, failed_monitor_id);
+    let new_internal = secrets
+        .resolve_plaintext(None, new_internal_id)
+        .await
+        .unwrap();
+    let new_monitor = secrets
+        .resolve_plaintext(None, new_monitor_id)
+        .await
+        .unwrap();
+    assert_ne!(new_internal, old_internal);
+
+    let spec = port.last_updated();
+    assert_eq!(rendered_internal_secret(&spec), new_internal);
+    let hash = monitor_hash(&spec);
+    // bcrypt salts every hash, so "the hash changed" proves nothing; verify.
+    assert!(bcrypt::verify(&new_monitor, &hash).unwrap());
+    assert!(!bcrypt::verify(&old_monitor, &hash).unwrap());
+    // F2 round 2 (re-review): the successful apply's own compare-and-set only
+    // displaces the ONE pair it read as `expected` — the failed rotation's
+    // pair, since that is what the row named when THIS build started. It must
+    // NOT reach further back and delete the original pair too: a wider,
+    // prefix-based sweep was tried in round 1 and reverted because it could
+    // just as easily catch a DIFFERENT, concurrently in-flight apply's
+    // freshly-minted (not-yet-committed) pair — see `commit_internal_secrets`'s
+    // doc comment. So the original pair survives as a permanent orphan here;
+    // only engine delete (Task 15) is a safe place to sweep it.
+    assert_eq!(
+        secrets
+            .resolve_plaintext(None, old_internal_id)
+            .await
+            .expect("the original pair is NOT this commit's `expected` — it must survive"),
+        old_internal
+    );
+    assert_eq!(
+        secrets
+            .resolve_plaintext(None, old_monitor_id)
+            .await
+            .expect("the original pair is NOT this commit's `expected` — it must survive"),
+        old_monitor
+    );
+    assert!(
+        matches!(
+            secrets.resolve_plaintext(None, failed_internal_id).await,
+            Err(egret_secrets::SecretsError::NotFound)
+        ),
+        "the failed rotation's pair WAS this commit's `expected` — it is deleted"
+    );
+    assert!(matches!(
+        secrets.resolve_plaintext(None, failed_monitor_id).await,
+        Err(egret_secrets::SecretsError::NotFound)
+    ));
+    assert_eq!(
+        internal_secret_names(&f, id).await.len(),
+        4,
+        "the original pair is an orphan (2 rows) alongside the current pair (2 rows) — \
+         narrowing the delete to only what this apply superseded means it is NOT swept here"
+    );
+
+    let sr = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .create_engine(
+            &format!("sr-{}", Uuid::new_v4().simple()),
+            "starrocks",
+            "egret-engines",
+            wh_id,
+            &serde_json::json!({ "starrocksConfig": {} }),
+            None,
+        )
+        .await
+        .unwrap();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{}/rotate-secrets", sr.id),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{}/rotate-secrets", Uuid::new_v4()),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+async fn stored_spec(f: &Fixture, id: &str) -> serde_json::Value {
+    sqlx::query_scalar("SELECT spec FROM engine_mgmt.engines WHERE id = $1")
+        .bind(Uuid::parse_str(id).unwrap())
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("engine spec")
+}
+
+/// P3: a rejected apply restores the stored spec and is a 502 carrying the cause;
+/// a body whose trinoConfig omits delegationMode keeps the stored mode.
+#[tokio::test]
+async fn trino_update_failure_restores_the_spec_and_keeps_delegation_mode() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p3_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = j["id"].as_str().unwrap().to_string();
+    let before = stored_spec(&f, &id).await;
+    assert_eq!(before["trinoConfig"]["delegationMode"], "jwt");
+
+    port.set_fail_update(true);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 5,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "body={j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap()
+            .contains("injected update failure"),
+        "body={j}"
+    );
+    assert_eq!(stored_spec(&f, &id).await, before, "spec restored");
+
+    port.set_fail_update(false);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "trinoConfig": {
+                    "coordinator": { "replicas": 1 },
+                    "worker": { "replicas": 1 },
+                    "auth": { "jwt": {} }
+                }
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "update; body={j}");
+    assert_eq!(
+        stored_spec(&f, &id).await["trinoConfig"]["delegationMode"],
+        "jwt",
+        "omitted delegationMode must keep the stored mode"
+    );
+}
+
+/// P4: a Trino update re-materializes the connections of assigned workspaces.
+#[tokio::test]
+async fn trino_update_rematerializes_assigned_workspace_connections() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p4_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let ws = seed_workspace(&f).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{id}/workspaces"),
+            &token,
+            Some(serde_json::json!({ "workspaceIds": [ws] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Make the materialized connection stale.
+    sqlx::query(
+        "UPDATE query.databases SET options = '{}'::jsonb WHERE workspace_id = $1 AND engine_id = $2",
+    )
+    .bind(ws)
+    .bind(id)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let scheme: Option<String> = sqlx::query_scalar(
+        "SELECT options->>'http_scheme' FROM query.databases WHERE workspace_id = $1 AND engine_id = $2",
+    )
+    .bind(ws)
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        scheme.as_deref(),
+        Some("https"),
+        "connection re-materialized"
+    );
+}
+
+/// P5: removing a catalog applies the cluster WITHOUT it first; a rejected apply
+/// leaves the row and its minted client in place so a retry can act.
+#[tokio::test]
+async fn remove_catalog_applies_before_deleting_and_revoking() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p5_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            Some(serde_json::json!({
+                "name": "extra", "kind": "egret-warehouse",
+                "config": { "warehouseId": wh_id }
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "add warehouse catalog; body={j}"
+    );
+    let cat_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let store = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
+    let client_id = store
+        .get_engine_catalog(cat_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .config["clientRowId"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .expect("minted client id");
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let remove = || {
+        req(
+            "DELETE",
+            &format!("/engines/{engine_id}/catalogs/{cat_id}"),
+            &token,
+            None,
+        )
+    };
+
+    port.set_fail_update(true);
+    let resp = f.app.clone().oneshot(remove()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        port.last_updated()
+            .catalogs
+            .iter()
+            .all(|c| c.name != "extra"),
+        "the apply rendered the engine without the catalog"
+    );
+    assert!(
+        store.get_engine_catalog(cat_id).await.unwrap().is_some(),
+        "row kept"
+    );
+    assert!(
+        catalog_store
+            .list_clients(wh_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.id == client_id),
+        "client not revoked"
+    );
+
+    port.set_fail_update(false);
+    let resp = f.app.clone().oneshot(remove()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        store.get_engine_catalog(cat_id).await.unwrap().is_none(),
+        "row deleted"
+    );
+    assert!(
+        !catalog_store
+            .list_clients(wh_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.id == client_id),
+        "minted client revoked"
+    );
+}
+
+/// P2: a create whose provision fails leaves no engine row and no catalog client,
+/// and asks the cluster to delete what it may have applied — for both kinds.
+#[tokio::test]
+async fn failed_provision_rolls_back_row_client_and_cluster() {
+    let port = FakeEnginePort::default();
+    port.set_fail_provision(true);
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p2_admin", true).await;
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let row_exists = |name: String| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM engine_mgmt.engines WHERE name = $1)",
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert!(!row_exists(name.clone()).await, "Trino row rolled back");
+    assert!(
+        catalog_store.list_clients(wh_id).await.unwrap().is_empty(),
+        "Trino client revoked"
+    );
+    assert!(port.deleted.lock().unwrap().contains(&(
+        "trino".to_string(),
+        "egret-engines".to_string(),
+        name.clone()
+    )));
+
+    let sr_wh = seed_provisioned_warehouse_with_secret(&f).await;
+    let sr_name = format!("sr-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": sr_name, "warehouseId": sr_wh, "kind": "starrocks",
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !row_exists(sr_name.clone()).await,
+        "StarRocks row rolled back"
+    );
+    assert!(
+        catalog_store.list_clients(sr_wh).await.unwrap().is_empty(),
+        "StarRocks client revoked"
+    );
+    assert!(port.deleted.lock().unwrap().contains(&(
+        "starrocks".to_string(),
+        "egret-engines".to_string(),
+        sr_name
+    )));
+}
+
+/// P2 regression: the resource-group validation move (now ahead of the
+/// catalog-client mint, alongside the "kubernetes configured" check) actually
+/// runs before anything is minted — both an invalid `resourceGroups` selector
+/// and an unconfigured provisioner 400 with no catalog client and no engine
+/// row left behind. Without this test, moving either check back to AFTER the
+/// client mint would leave every other test in this file green.
+#[tokio::test]
+async fn invalid_resource_groups_and_unconfigured_kubernetes_leak_nothing() {
+    let Some(f) = setup_full(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p2_validation_admin", true).await;
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let row_exists = |name: String| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM engine_mgmt.engines WHERE name = $1)",
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    // Invalid resource-group selector: 400 with nothing minted. `setup_full`
+    // was given no provisioner at all, so this also proves resource-group
+    // validation runs BEFORE the "kubernetes configured" check, not after.
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let bad_name = format!("trino-bad-rg-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &bad_name,
+        wh_id,
+        serde_json::json!({
+            "resourceGroups": { "selectors": [{ "group": "nope" }] },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert!(
+        !row_exists(bad_name.clone()).await,
+        "no row for an invalid resource-group spec"
+    );
+    assert!(
+        catalog_store.list_clients(wh_id).await.unwrap().is_empty(),
+        "no client minted for an invalid resource-group spec"
+    );
+
+    // A valid spec but no provisioner configured: 400 with nothing minted either.
+    let wh_id2 = seed_provisioned_warehouse(&f).await;
+    let name2 = format!("trino-no-k8s-{}", Uuid::new_v4().simple());
+    let (status2, j2) = create_engine_via_api(
+        &f,
+        &token,
+        &name2,
+        wh_id2,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status2, StatusCode::BAD_REQUEST, "body={j2}");
+    assert!(
+        !row_exists(name2.clone()).await,
+        "no row without kubernetes configured"
+    );
+    assert!(
+        catalog_store.list_clients(wh_id2).await.unwrap().is_empty(),
+        "no client minted without kubernetes configured"
+    );
+
+    // Same "no provisioner configured" check, moved earlier in the StarRocks
+    // path too (right after `validate_sr_autoscaling`): 400 with nothing
+    // minted there either.
+    let sr_wh = seed_provisioned_warehouse_with_secret(&f).await;
+    let sr_name = format!("sr-no-k8s-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": sr_name, "warehouseId": sr_wh, "kind": "starrocks",
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !row_exists(sr_name.clone()).await,
+        "no StarRocks row without kubernetes configured"
+    );
+    assert!(
+        catalog_store.list_clients(sr_wh).await.unwrap().is_empty(),
+        "no StarRocks client minted without kubernetes configured"
+    );
+}
+
+async fn authz_service_of(f: &Fixture, name: &str) -> Option<i64> {
+    sqlx::query_scalar("SELECT authz_service_id FROM engine_mgmt.engines WHERE name = $1")
+        .bind(name)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("engine row")
+}
+
+/// D9 regression: re-creating an engine whose same-name profile survived (no
+/// engine bound) reuses that profile, and the FIRST provision is already bound —
+/// never an allow-all window.
+#[tokio::test]
+async fn recreate_with_same_name_binds_the_orphan_profile_before_provisioning() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_d9_orphan_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    egret_policy_api::PolicyPort::ensure_trino_def(&policy)
+        .await
+        .unwrap();
+    let orphan = egret_policy_api::PolicyPort::create_service(
+        &policy,
+        &name,
+        "trino",
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "body={j}");
+    assert_eq!(authz_service_of(&f, &name).await, Some(orphan.id));
+    let provisioned = port.provisioned.lock().unwrap().clone();
+    assert_eq!(provisioned.len(), 1, "one provision, no unbound first pass");
+    assert_eq!(
+        provisioned[0]
+            .ranger
+            .as_ref()
+            .map(|r| r.service_name.clone()),
+        Some(name.clone())
+    );
+}
+
+/// D9: a same-name profile already bound to another engine is a 409 before
+/// anything is minted.
+#[tokio::test]
+async fn create_whose_profile_is_bound_elsewhere_is_409_and_mints_nothing() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_d9_bound_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    egret_policy_api::PolicyPort::ensure_trino_def(&policy)
+        .await
+        .unwrap();
+    let profile = egret_policy_api::PolicyPort::create_service(
+        &policy,
+        &name,
+        "trino",
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let other = format!("trino-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": other, "warehouseId": wh_id, "authzServiceId": profile.id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(authz_service_of(&f, &other).await, Some(profile.id));
+    let provisions_before = port.provisioned.lock().unwrap().len();
+
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM engine_mgmt.engines WHERE name = $1)")
+            .bind(&name)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert!(!exists);
+    let clients = egret_catalog_engine::CatalogStore::new(f.db.clone())
+        .list_clients(wh_id)
+        .await
+        .unwrap();
+    assert!(!clients.iter().any(|c| c.name == format!("engine-{name}")));
+    assert_eq!(port.provisioned.lock().unwrap().len(), provisions_before);
+}
+
+/// R1 (SP1 Part B final review, security gap): an engine created while
+/// Ranger was DISABLED keeps `authz_service_id = NULL` forever —
+/// `set_engine_authz_service` has one caller, reachable only from create — so
+/// once an operator turns Ranger back on, every later apply used to keep
+/// re-rendering explicit allow-all with no operator-accessible remedy.
+/// `build_provision_req_with` now late-binds a profile (create / adopt-orphan
+/// / 409-if-bound-elsewhere, same as create) on any apply once Ranger is on.
+#[tokio::test]
+async fn apply_late_binds_ranger_once_it_is_enabled_after_an_unbound_create() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        false, // created while Ranger is OFF
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_r1_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    assert_eq!(
+        authz_service_of(&f, &name).await,
+        None,
+        "created unbound while Ranger was off"
+    );
+    assert!(
+        port.last_provisioned().ranger.is_none(),
+        "the initial provision rendered allow-all"
+    );
+    let id = j["id"].as_str().unwrap().to_string();
+
+    // Operator turns Ranger back on.
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        true,
+    );
+    f.ranger_enabled = true;
+
+    // The smallest apply route (rotate) must now late-bind a profile.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{id}/rotate-secrets"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "rotate must succeed");
+    assert_eq!(
+        port.last_updated()
+            .ranger
+            .as_ref()
+            .map(|r| r.service_name.clone()),
+        Some(name.clone()),
+        "the apply must now be bound to a profile named after the engine"
+    );
+    assert!(
+        authz_service_of(&f, &name).await.is_some(),
+        "the row itself must record the newly-bound profile"
+    );
+}
+
+/// D9 + P2: a create that auto-created its profile removes it again on failure.
+#[tokio::test]
+async fn failed_create_removes_the_profile_it_created() {
+    let port = FakeEnginePort::default();
+    port.set_fail_provision(true);
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_d9_undo_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert_eq!(
+        port.last_provisioned()
+            .ranger
+            .as_ref()
+            .map(|r| r.service_name.clone()),
+        Some(name.clone()),
+        "the attempted provision was already bound to THIS engine's own profile"
+    );
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    assert!(
+        egret_policy_api::PolicyPort::get_service_opt(&policy, &name)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        egret_policy_api::PolicyPort::get_service_opt(&policy, &format!("{name}_tag"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Deleting an engine removes every secret egret minted for it, including the
+/// internal/monitor secrets.
+#[tokio::test]
+async fn delete_engine_removes_internal_and_monitor_secrets() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_delete_secrets_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (internal_id, monitor_id) = engine_secret_ids(&f, id).await;
+    let (internal_id, monitor_id) = (internal_id.unwrap(), monitor_id.unwrap());
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("/engines/{id}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let secrets = secret_store(&f);
+    for sid in [internal_id, monitor_id] {
+        assert!(
+            matches!(
+                secrets.resolve_plaintext(None, sid).await,
+                Err(egret_secrets::SecretsError::NotFound)
+            ),
+            "secret {sid} must be deleted with the engine"
+        );
+    }
+}
+
+/// A failed rotation (`commit_internal_secrets`'s `Supersede::Keep` path, or a
+/// lost compare-and-set) leaves an `engine-internal-{id}-*` /
+/// `engine-monitor-{id}-*` pair that is no longer referenced by the row —
+/// nothing sweeps it while the engine might still have an apply in flight
+/// (see that function's doc comment). Engine delete is the one place that
+/// orphan sweep is safe, since by then no apply can still be racing this
+/// engine id. The sweep must be scoped to THIS engine's id: a look-alike pair
+/// minted for a different engine (same naming scheme, different id) must
+/// survive.
+#[tokio::test]
+async fn delete_engine_sweeps_orphaned_internal_secret_generations() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_delete_orphan_sweep_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    let name_a = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name_a,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create a; body={j}");
+    let id_a = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    // A different engine, minted through the same naming scheme, must never
+    // be touched by engine A's sweep.
+    let name_b = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name_b,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create b; body={j}");
+    let id_b = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (b_internal_id, b_monitor_id) = engine_secret_ids(&f, id_b).await;
+    let (b_internal_id, b_monitor_id) = (b_internal_id.unwrap(), b_monitor_id.unwrap());
+
+    // Simulate the orphan a failed rotation on engine A leaves: a fresh
+    // generation minted under A's id, never recorded on the row (a `Keep` or
+    // a lost CAS never gets here).
+    let secrets = secret_store(&f);
+    let generation = Uuid::new_v4().simple();
+    let orphan_internal_id = secrets
+        .create(
+            None,
+            &format!("engine-internal-{id_a}-{generation}"),
+            None,
+            "orphan-internal-value",
+        )
+        .await
+        .expect("mint orphan internal secret");
+    let orphan_monitor_id = secrets
+        .create(
+            None,
+            &format!("engine-monitor-{id_a}-{generation}"),
+            None,
+            "orphan-monitor-value",
+        )
+        .await
+        .expect("mint orphan monitor secret");
+
+    // M5: the sweep predicate is `starts_with(prefix)`, not `contains(prefix)` —
+    // a secret whose name merely CONTAINS engine A's prefix as a substring,
+    // without starting with it, must survive. Catches a `starts_with` →
+    // `contains` regression the fixtures above (which only ever start with the
+    // prefix or belong to an unrelated id) cannot.
+    let lookalike_id = secrets
+        .create(
+            None,
+            &format!("other-engine-internal-{id_a}-x"),
+            None,
+            "lookalike-value",
+        )
+        .await
+        .expect("mint lookalike secret");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("/engines/{id_a}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    for sid in [orphan_internal_id, orphan_monitor_id] {
+        assert!(
+            matches!(
+                secrets.resolve_plaintext(None, sid).await,
+                Err(egret_secrets::SecretsError::NotFound)
+            ),
+            "orphaned generation {sid} must be swept with the engine"
+        );
+    }
+    for sid in [b_internal_id, b_monitor_id] {
+        assert!(
+            secrets.resolve_plaintext(None, sid).await.is_ok(),
+            "a different engine's secret {sid} must survive engine A's sweep"
+        );
+    }
+    assert!(
+        secrets.resolve_plaintext(None, lookalike_id).await.is_ok(),
+        "a secret whose name only CONTAINS the prefix, without starting with it, \
+         must survive the sweep"
     );
 }

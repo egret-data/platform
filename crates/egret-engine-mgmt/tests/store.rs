@@ -316,6 +316,8 @@ fn coordinator_host_and_jwt_check() {
         tls_secret_id: None,
         coordinator_cert: None,
         tls_cert_secret_ref: None,
+        internal_secret_id: None,
+        monitor_secret_id: None,
         created_at: chrono::Utc::now(),
     };
     assert_eq!(e.coordinator_host(), "trino-prod-trino.engines.svc");
@@ -335,4 +337,126 @@ fn coordinator_host_and_jwt_check() {
         ..e.clone()
     };
     assert!(!e3.supports_jwt_delegation());
+}
+
+#[tokio::test]
+async fn engine_status_is_constrained_and_transitions_only_from_the_expected_value() {
+    let Some((catalog, engine_mgmt)) = stores().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let (wh_id, _) = seed_warehouse(&catalog, "status").await;
+    let e = engine_mgmt
+        .create_engine(
+            &format!("status-{}", Uuid::new_v4().simple()),
+            "trino",
+            "egret-engines",
+            wh_id,
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(e.status, egret_engine_mgmt::engine_status::PROVISIONING);
+
+    let err = sqlx::query("UPDATE engine_mgmt.engines SET status = 'ready' WHERE id = $1")
+        .bind(e.id)
+        .execute(catalog.pool())
+        .await
+        .expect_err("'ready' is not a lifecycle status");
+    assert_eq!(
+        err.as_database_error().and_then(|d| d.constraint()),
+        Some("engines_status_check")
+    );
+
+    assert!(engine_mgmt
+        .transition_engine_status(e.id, "provisioning", "running")
+        .await
+        .unwrap());
+    assert!(
+        !engine_mgmt
+            .transition_engine_status(e.id, "provisioning", "running")
+            .await
+            .unwrap(),
+        "the row is no longer provisioning"
+    );
+    engine_mgmt
+        .set_engine_status(e.id, "deleting")
+        .await
+        .unwrap();
+    assert!(!engine_mgmt
+        .transition_engine_status(e.id, "running", "running")
+        .await
+        .unwrap());
+    assert_eq!(
+        engine_mgmt.get_engine(e.id).await.unwrap().unwrap().status,
+        "deleting"
+    );
+}
+
+#[tokio::test]
+async fn internal_secret_ids_round_trip_on_the_engine_row() {
+    let Some((catalog, engine_mgmt)) = stores().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let (wh_id, _) = seed_warehouse(&catalog, "isec").await;
+    let e = engine_mgmt
+        .create_engine(
+            &format!("isec-{}", Uuid::new_v4().simple()),
+            "trino",
+            "egret-engines",
+            wh_id,
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(e.internal_secret_id.is_none() && e.monitor_secret_id.is_none());
+
+    let (internal, monitor) = (Uuid::new_v4(), Uuid::new_v4());
+    let committed = engine_mgmt
+        .set_internal_secret_ids(e.id, None, None, internal, monitor)
+        .await
+        .unwrap();
+    assert!(
+        committed,
+        "the row was still NULL, matching the expected previous pair"
+    );
+    let got = engine_mgmt.get_engine(e.id).await.unwrap().unwrap();
+    assert_eq!(got.internal_secret_id, Some(internal));
+    assert_eq!(got.monitor_secret_id, Some(monitor));
+    let listed = engine_mgmt.list_engines().await.unwrap();
+    let row = listed.iter().find(|x| x.id == e.id).expect("listed");
+    assert_eq!(row.monitor_secret_id, Some(monitor));
+
+    // A stale caller — still expecting the row to be NULL — loses the race and
+    // writes nothing.
+    let (internal2, monitor2) = (Uuid::new_v4(), Uuid::new_v4());
+    let committed2 = engine_mgmt
+        .set_internal_secret_ids(e.id, None, None, internal2, monitor2)
+        .await
+        .unwrap();
+    assert!(
+        !committed2,
+        "the row no longer matches the stale expected pair"
+    );
+    let got = engine_mgmt.get_engine(e.id).await.unwrap().unwrap();
+    assert_eq!(
+        got.internal_secret_id,
+        Some(internal),
+        "the winner's pair must survive"
+    );
+    assert_eq!(got.monitor_secret_id, Some(monitor));
+
+    // The caller that reads the CURRENT pair as its expectation succeeds.
+    let (internal3, monitor3) = (Uuid::new_v4(), Uuid::new_v4());
+    let committed3 = engine_mgmt
+        .set_internal_secret_ids(e.id, Some(internal), Some(monitor), internal3, monitor3)
+        .await
+        .unwrap();
+    assert!(committed3);
+    let got = engine_mgmt.get_engine(e.id).await.unwrap().unwrap();
+    assert_eq!(got.internal_secret_id, Some(internal3));
+    assert_eq!(got.monitor_secret_id, Some(monitor3));
 }

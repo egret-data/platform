@@ -2773,7 +2773,7 @@
             }
           },
           "409": {
-            "description": "An engine with this name already exists",
+            "description": "An engine with this name already exists, or its same-name policy profile is bound to another engine",
             "content": {
               "application/json": {
                 "schema": {
@@ -2905,7 +2905,7 @@
             }
           },
           "400": {
-            "description": "Invalid config or engine update failed",
+            "description": "Invalid config, Kubernetes not configured, or re-materializing workspace connections failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -2944,8 +2944,28 @@
               }
             }
           },
+          "409": {
+            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Kubernetes rejected the update; the previous spec was restored",
             "content": {
               "application/json": {
                 "schema": {
@@ -3202,6 +3222,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -3384,6 +3414,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -3425,10 +3465,10 @@
         ],
         "responses": {
           "200": {
-            "description": "Catalog removed and engine re-provisioned"
+            "description": "Catalog removed from the cluster, then its row deleted and its minted client revoked"
           },
           "400": {
-            "description": "Cannot delete the primary catalog or engine update failed",
+            "description": "Cannot delete the primary catalog, Kubernetes not configured, or the engine update failed (the catalog is kept)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3459,6 +3499,16 @@
           },
           "404": {
             "description": "No such engine or catalog (or catalog not on this engine)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
             "content": {
               "application/json": {
                 "schema": {
@@ -4278,6 +4328,102 @@
           },
           "500": {
             "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/engines/{id}/rotate-secrets": {
+      "post": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "summary": "`POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication\nsecret and `egret-monitor` password and re-apply the engine (pods roll). The\nnew pair is recorded on the row even if the apply fails — the cluster may\nalready have received it — so a failed rotation's pair is kept resolvable,\nnever deleted, alongside whatever it superseded. A later successful\nrotation deletes only the ONE pair its own apply superseded; anything\nfurther back (left by an earlier failed rotation, or by a losing\nconcurrent apply) stays orphaned but resolvable until the engine itself is\ndeleted — a wider sweep here could destroy a pair a DIFFERENT, still\nin-flight apply on this engine just minted, which is the one thing this\nroute must never do.",
+        "operationId": "rotate_engine_secrets",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "New internal secrets applied; the engine's pods restart"
+          },
+          "400": {
+            "description": "Not a Trino engine, or Kubernetes not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Kubernetes rejected the apply; the engine row now names the new secret pair (the cluster may already hold it), and the previous pair is kept — not deleted — until a later successful apply supersedes it",
             "content": {
               "application/json": {
                 "schema": {
@@ -31641,7 +31787,7 @@
       },
       "EngineCatalogDetailDto": {
         "type": "object",
-        "description": "`GET /engines/{id}/catalogs/{cid}` payload: full stored config + secretRef,\nwith system-minted secret material redacted (see [`redact_catalog_config`]).",
+        "description": "`GET /engines/{id}/catalogs/{cid}` payload: full stored config + secretRef,\nwith secret material removed or masked (see [`redact_catalog_config`]).",
         "required": [
           "id",
           "name",

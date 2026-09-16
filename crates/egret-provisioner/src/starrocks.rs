@@ -839,7 +839,10 @@ impl EngineProvisioner for StarRocksProvisioner {
         Ok(())
     }
     async fn update(&self, spec: &EngineSpec) -> anyhow::Result<()> {
-        self.provision(spec).await?;
+        // Apply WITHOUT `provision`'s delete-on-failure: that cleanup is right for a
+        // brand-new engine, but on an update it would tear down a running cluster
+        // because one manifest was rejected. The caller restores the stored spec.
+        self.apply_all(spec).await?;
         // `apply_all` only applies the Ranger ConfigMap when bound, so toggling a
         // RangerBinding OFF would otherwise leave `{name}-ranger-cm` orphaned (the
         // CR's `configMaps` mount is dropped, but the ConfigMap lingers).
@@ -1872,5 +1875,28 @@ mod tests {
         assert!(vols
             .iter()
             .any(|v| v["configMap"]["name"] == "sr1-initpwd-shell"));
+    }
+
+    /// An update whose CR apply fails must leave the running cluster alone:
+    /// only `provision` (a brand-new engine) may clean up after a failed apply.
+    /// `update` tears down 11 objects total across its various toggle-off
+    /// cleanups (Ranger/CN/TLS ConfigMaps, etc.) — a bare "the CR specifically
+    /// wasn't deleted" check would miss a regression that reaches one of THOSE
+    /// deletes despite the early `?` return on a failed apply, so this asserts
+    /// `delete` was never called at all (M1).
+    #[tokio::test]
+    async fn update_failure_keeps_the_running_cluster() {
+        use crate::kube_client::FakeKube;
+
+        let spec = sample_sr_spec();
+        let kube = Arc::new(FakeKube::default());
+        *kube.fail_apply_kind.lock().unwrap() = Some("StarRocksCluster".to_string());
+        let res = StarRocksProvisioner::new(kube.clone()).update(&spec).await;
+        assert!(res.is_err(), "the injected CR apply failure must surface");
+        let deleted = kube.deleted.lock().unwrap();
+        assert!(
+            deleted.is_empty(),
+            "a failed update must not delete anything at all; deleted: {deleted:?}"
+        );
     }
 }

@@ -39,6 +39,11 @@ pub trait PolicyPort: Send + Sync {
         config: &Value,
     ) -> Result<PolicyService, PolicyError>;
 
+    /// Delete a policy profile (service) and, by cascade, its policies. Errors
+    /// `NotFound` when no such id exists. Used to undo a profile an engine create
+    /// minted before failing.
+    async fn delete_service(&self, id: i64) -> Result<(), PolicyError>;
+
     /// Look up a policy profile by name; `None` when it doesn't exist (unlike a
     /// hard-error lookup). Used by engine provisioning to seed delegator policies
     /// onto a bound Ranger service without failing when the engine is unbound.

@@ -61,6 +61,10 @@ impl PolicyPort for PolicyStore {
         Ok(self.get_service_opt(name).await?.map(Into::into))
     }
 
+    async fn delete_service(&self, id: i64) -> Result<(), PolicyError> {
+        Ok(self.delete_service(id).await?)
+    }
+
     async fn policy_exists(&self, service_id: i64, name: &str) -> Result<bool, PolicyError> {
         Ok(self.policy_exists(service_id, name).await?)
     }

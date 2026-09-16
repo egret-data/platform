@@ -21,7 +21,7 @@ pub use engines::workspace_engines_router;
 pub use error::EngineMgmtError;
 pub use http_error::EngineHttpError;
 pub use state::EngineMgmtState;
-pub use store::{Engine, EngineCatalog, EngineMgmtStore};
+pub use store::{engine_status, Engine, EngineCatalog, EngineMgmtStore};
 
 /// Aggregated OpenAPI fragment for the engine-provisioning seam (E0·P4b-9):
 /// the engines CRUD/lifecycle/catalog/pod-logs-exec router

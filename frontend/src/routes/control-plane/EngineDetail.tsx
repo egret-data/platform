@@ -94,6 +94,7 @@ import { ValidityProvider } from "./config/validityRegistry";
 import { ReviewChangesDialog } from "./config/ReviewChangesDialog";
 import { EngineAutoscaling } from "./EngineAutoscaling";
 import { EngineSecurity } from "./EngineSecurity";
+import { RotateSecretsSection } from "./RotateSecretsSection";
 import EngineMonitor from "./EngineMonitor";
 import PodLogsDialog from "./PodLogsDialog";
 import PodTerminalDialog from "./PodTerminalDialog";
@@ -540,7 +541,11 @@ function EngineTabs({
         {isStarRocks ? (
           <StarRocksConfigTab cfg={srCfg} />
         ) : (
-          <ConfigurationTab cfg={cfg} imageVersion={engine.spec.imageVersion} />
+          <ConfigurationTab
+            cfg={cfg}
+            imageVersion={engine.spec.imageVersion}
+            engineId={engineId}
+          />
         )}
       </TabsContent>
 
@@ -987,10 +992,16 @@ export function TrinoConfigEditor({
   cfg,
   imageVersion,
   onInvalidChange,
+  engineId,
 }: {
   cfg: EngineConfigForm;
   imageVersion: string;
   onInvalidChange?: (invalid: boolean) => void;
+  /**
+   * The saved engine's id. Present on the detail Settings tab (enables Rotate
+   * secrets); absent in the create wizard, which has nothing to rotate yet.
+   */
+  engineId?: string;
 }) {
   const {
     autoscaleMode,
@@ -1092,7 +1103,9 @@ export function TrinoConfigEditor({
               setKeda={setAutoscaleKeda}
             />
           )}
-          {section === "security" && <SecuritySection cfg={cfg} />}
+          {section === "security" && (
+            <SecuritySection cfg={cfg} engineId={engineId} />
+          )}
         </div>
       </ValidityProvider>
     </div>
@@ -1102,9 +1115,11 @@ export function TrinoConfigEditor({
 function ConfigurationTab({
   cfg,
   imageVersion,
+  engineId,
 }: {
   cfg: EngineConfigForm;
   imageVersion: string;
+  engineId: string;
 }) {
   // Goes true when any raw-JSON override fails to parse; blocks Save.
   const [rawInvalid, setRawInvalid] = useState(false);
@@ -1123,6 +1138,7 @@ function ConfigurationTab({
           cfg={cfg}
           imageVersion={imageVersion}
           onInvalidChange={setRawInvalid}
+          engineId={engineId}
         />
         <SaveBar cfg={cfg} disabled={rawInvalid} review />
       </div>
@@ -1136,7 +1152,13 @@ function ConfigurationTab({
  * the merged Settings left-nav. It carries NO Card or SaveBar of its own — the
  * single {@link ConfigurationTab} `SaveBar` (same `cfg`) covers security edits too.
  */
-function SecuritySection({ cfg }: { cfg: EngineConfigForm }) {
+function SecuritySection({
+  cfg,
+  engineId,
+}: {
+  cfg: EngineConfigForm;
+  engineId?: string;
+}) {
   const {
     passwordUsers,
     setPasswordUsers,
@@ -1164,31 +1186,34 @@ function SecuritySection({ cfg }: { cfg: EngineConfigForm }) {
   } = cfg;
 
   return (
-    <EngineSecurity
-      passwordUsers={passwordUsers}
-      setPasswordUsers={setPasswordUsers}
-      jwtEnabled={jwtEnabled}
-      setJwtEnabled={setJwtEnabled}
-      delegationMode={delegationMode}
-      setDelegationMode={setDelegationMode}
-      storedDelegationMode={storedDelegationMode}
-      jwksUri={jwksUri}
-      setJwksUri={setJwksUri}
-      requiredAudience={requiredAudience}
-      setRequiredAudience={setRequiredAudience}
-      ingressEnabled={ingressEnabled}
-      setIngressEnabled={setIngressEnabled}
-      ingressHost={ingressHost}
-      setIngressHost={setIngressHost}
-      ingressClassName={ingressClassName}
-      setIngressClassName={setIngressClassName}
-      ingressTlsSecret={ingressTlsSecret}
-      setIngressTlsSecret={setIngressTlsSecret}
-      ingressTlsCertSecretRef={ingressTlsCertSecretRef}
-      setIngressTlsCertSecretRef={setIngressTlsCertSecretRef}
-      ingressAnnotations={ingressAnnotations}
-      setIngressAnnotations={setIngressAnnotations}
-    />
+    <div className="space-y-5">
+      <EngineSecurity
+        passwordUsers={passwordUsers}
+        setPasswordUsers={setPasswordUsers}
+        jwtEnabled={jwtEnabled}
+        setJwtEnabled={setJwtEnabled}
+        delegationMode={delegationMode}
+        setDelegationMode={setDelegationMode}
+        storedDelegationMode={storedDelegationMode}
+        jwksUri={jwksUri}
+        setJwksUri={setJwksUri}
+        requiredAudience={requiredAudience}
+        setRequiredAudience={setRequiredAudience}
+        ingressEnabled={ingressEnabled}
+        setIngressEnabled={setIngressEnabled}
+        ingressHost={ingressHost}
+        setIngressHost={setIngressHost}
+        ingressClassName={ingressClassName}
+        setIngressClassName={setIngressClassName}
+        ingressTlsSecret={ingressTlsSecret}
+        setIngressTlsSecret={setIngressTlsSecret}
+        ingressTlsCertSecretRef={ingressTlsCertSecretRef}
+        setIngressTlsCertSecretRef={setIngressTlsCertSecretRef}
+        ingressAnnotations={ingressAnnotations}
+        setIngressAnnotations={setIngressAnnotations}
+      />
+      {engineId && <RotateSecretsSection engineId={engineId} />}
+    </div>
   );
 }
 

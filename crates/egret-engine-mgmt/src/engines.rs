@@ -39,7 +39,6 @@ use egret_core::http::ErrorBody;
 use crate::dependents::{
     DeleteEngineOutcome, EngineConflictBody, EngineDependentDto, EngineDependentKind,
 };
-use crate::store::ENGINE_STATUS_DELETING;
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
 use crate::{Engine, EngineCatalog};
@@ -107,6 +106,7 @@ pub fn router() -> Router<CpState> {
         .route("/engines/{id}/pods/{pod}/logs/follow", get(pod_logs_follow))
         .route("/engines/{id}/pods/{pod}/exec", get(pod_exec))
         .route("/engines/{id}/restart", post(restart_engine))
+        .route("/engines/{id}/rotate-secrets", post(rotate_engine_secrets))
         // Engine↔workspace assignment (P1): list + set-full-assignment-set.
         .route(
             "/engines/{id}/workspaces",
@@ -297,7 +297,7 @@ impl From<EngineCatalog> for EngineCatalogDto {
 }
 
 /// `GET /engines/{id}/catalogs/{cid}` payload: full stored config + secretRef,
-/// with system-minted secret material redacted (see [`redact_catalog_config`]).
+/// with secret material removed or masked (see [`redact_catalog_config`]).
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct EngineCatalogDetailDto {
@@ -310,17 +310,80 @@ struct EngineCatalogDetailDto {
     config: serde_json::Value,
 }
 
-/// Strip system-minted secret material from a catalog config before returning it
-/// to clients. egret-warehouse configs carry a client credential; nothing else
-/// should ever be exposed.
-fn redact_catalog_config(kind: &str, mut config: serde_json::Value) -> serde_json::Value {
-    if kind == "egret-warehouse" {
-        if let Some(obj) = config.as_object_mut() {
-            obj.remove("credential");
-            obj.remove("clientRowId");
+/// What `GET /engines/{id}/catalogs/{cid}` returns in place of a sensitive
+/// value. The edit form PUTs the config back verbatim, so `update_catalog`
+/// treats this exact string as "unchanged" (see [`restore_redacted_properties`]).
+const REDACTED_VALUE: &str = "********";
+
+/// Whether a catalog config key names secret material (spec SP1 §4.9).
+fn is_sensitive_config_key(key: &str) -> bool {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            regex::Regex::new(
+                r"(?i)(password|secret|token|credential|private[-_.]?key|access[-_.]?key)",
+            )
+            .expect("static sensitive-key pattern compiles")
+        })
+        .is_match(key)
+}
+
+/// Strip or mask secret material before a catalog config leaves the server.
+/// For every kind: the minted client's `credential` and `clientRowId` are
+/// removed, and every top-level or `properties` value whose key matches
+/// [`is_sensitive_config_key`] becomes [`REDACTED_VALUE`]. `secretProperties`
+/// is left intact: its values are secret IDs, and its own key contains
+/// "secret".
+fn redact_catalog_config(mut config: serde_json::Value) -> serde_json::Value {
+    let Some(obj) = config.as_object_mut() else {
+        return config;
+    };
+    obj.remove("credential");
+    obj.remove("clientRowId");
+    for (k, v) in obj.iter_mut() {
+        if k != "properties" && k != "secretProperties" && is_sensitive_config_key(k) {
+            *v = serde_json::Value::String(REDACTED_VALUE.into());
+        }
+    }
+    if let Some(props) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
+        for (k, v) in props.iter_mut() {
+            if is_sensitive_config_key(k) {
+                *v = serde_json::Value::String(REDACTED_VALUE.into());
+            }
         }
     }
     config
+}
+
+/// Undo [`redact_catalog_config`] on a PUT body: a sensitive key whose value is
+/// still exactly [`REDACTED_VALUE`] gets the stored value back, so re-saving
+/// the edit form never overwrites a password with the mask.
+fn restore_redacted_properties(config: &mut serde_json::Value, stored: &serde_json::Value) {
+    fn restore_level(
+        new: &mut serde_json::Map<String, serde_json::Value>,
+        old: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) {
+        for (k, v) in new.iter_mut() {
+            if v.as_str() == Some(REDACTED_VALUE) && is_sensitive_config_key(k) {
+                if let Some(prev) = old.and_then(|o| o.get(k)) {
+                    *v = prev.clone();
+                }
+            }
+        }
+    }
+    let Some(new_obj) = config.as_object_mut() else {
+        return;
+    };
+    restore_level(new_obj, stored.as_object());
+    if let Some(new_props) = new_obj
+        .get_mut("properties")
+        .and_then(|p| p.as_object_mut())
+    {
+        restore_level(
+            new_props,
+            stored.get("properties").and_then(|p| p.as_object()),
+        );
+    }
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -544,8 +607,34 @@ fn catalog_props_and_secrets(cat: &EngineCatalog) -> CatalogPropsAndSecrets {
     (connector, plain, secrets)
 }
 
+/// Knobs for one spec assembly.
+#[derive(Clone, Copy, Debug, Default)]
+struct BuildOpts {
+    /// Render the catalogs WITHOUT this row (`remove_catalog` applies first and
+    /// deletes the row only after Kubernetes dropped the catalog).
+    exclude_catalog: Option<Uuid>,
+    /// Mint new internal secrets even when the engine already has some.
+    rotate_internal_secrets: bool,
+}
+
+/// An assembled provisioning request plus the internal secrets it rendered
+/// (Trino only). Hand it to [`apply_built`], which settles those secrets.
+struct BuiltReq {
+    req: EngineProvisionReq,
+    internal: Option<EngineInternalSecrets>,
+}
+
 /// Build the full provisioning request from the engine + its stored catalogs + config.
-async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProvisionReq, CpError> {
+async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<BuiltReq, CpError> {
+    build_provision_req_with(st, engine, BuildOpts::default()).await
+}
+
+/// [`build_provision_req`] with explicit [`BuildOpts`].
+async fn build_provision_req_with(
+    st: &CpState,
+    engine: &Engine,
+    opts: BuildOpts,
+) -> Result<BuiltReq, CpError> {
     // StarRocks engines assemble an entirely different `EngineSpec` (FE/CN roles
     // + builtin storage volume, no Trino catalogs/auth). Dispatch to the shared
     // StarRocks assembler so ANY generic caller of `build_provision_req` is
@@ -559,9 +648,18 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
             .await?
             .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
         let (req, _bootstrap) = build_starrocks_provision_req(st, engine, &wh).await?;
-        return Ok(req);
+        return Ok(BuiltReq {
+            req,
+            internal: None,
+        });
     }
-    let cats = st.engine_mgmt.list_engine_catalogs(engine.id).await?;
+    let cats: Vec<EngineCatalog> = st
+        .engine_mgmt
+        .list_engine_catalogs(engine.id)
+        .await?
+        .into_iter()
+        .filter(|c| Some(c.id) != opts.exclude_catalog)
+        .collect();
     let mut catalogs = Vec::new();
     for (i, c) in cats.iter().enumerate() {
         catalogs.push(build_catalog_req(st, engine, c, &format!("C{i}")).await?);
@@ -574,15 +672,6 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
     // Resolve the RAW auth block (password secrets → bcrypt hashes, JWKS default),
     // mirroring the fault-tolerant storage resolution. Ingress is parsed inline.
     config.auth = resolve_auth(st, &engine.spec["trinoConfig"]).await?;
-    // When the engine ALREADY has auth on, inject the derived `egret-monitor`
-    // system user so the native Trino monitor can authenticate. Guarded on
-    // `auth.is_some()` (inside the helper) so a no-auth engine stays auth-free.
-    // Skipped for jwt-delegation engines: their coordinator is JWT-only (no
-    // PASSWORD authenticator), so a basic-auth monitor user can't authenticate —
-    // the monitor degrades on jwt engines (acceptable).
-    if !engine.is_jwt_delegation() {
-        inject_monitor_user(&mut config.auth, engine.id)?;
-    }
     // TLS for ANY delegation-capable engine (both modes): generate/reuse a
     // self-signed coordinator cert + mount the keystore so the coordinator serves
     // https and the connector can pin the cert. impersonate: encrypts the wire so
@@ -619,13 +708,42 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
             config.image_pull_secrets.push(pull);
         }
     }
+    // Late-bind (R1): an engine created while Ranger was disabled keeps
+    // `authz_service_id = NULL` forever — `set_engine_authz_service` has one
+    // caller, reachable only from create — so once an operator turns Ranger
+    // back on, every later apply would otherwise keep re-rendering explicit
+    // allow-all with no operator-accessible remedy. Reuses the SAME
+    // plan/bind a create uses (create / adopt-orphan / 409-if-bound-
+    // elsewhere); best-effort — any failure here just leaves the engine
+    // unbound, exactly as it was, and never fails the apply itself.
+    let mut authz_service_id = engine.authz_service_id;
+    if st.ranger_enabled && authz_service_id.is_none() {
+        match plan_trino_profile(st, &engine.name, None).await {
+            Ok(plan) => {
+                let mut undo = CreateUndo::default();
+                match bind_trino_profile(st, engine.id, &engine.name, &plan, &mut undo).await {
+                    Ok(()) => {
+                        authz_service_id = match plan {
+                            ProfilePlan::Existing(id) => Some(id),
+                            ProfilePlan::Create => undo.created_profile_id,
+                            ProfilePlan::Unbound => None,
+                        }
+                    }
+                    Err(e) => tracing::warn!(engine = %engine.name, error = %e,
+                        "late Ranger bind failed; engine stays unbound"),
+                }
+            }
+            Err(e) => tracing::warn!(engine = %engine.name, error = %e,
+                "late Ranger bind plan failed; engine stays unbound"),
+        }
+    }
     // Impersonate-mode delegation: when auth is on, provision the `egret_delegator`
     // service user (generate + store its password once, inject its bcrypt into the
     // auth block so it lands in `password.db`) and seed the impersonate + query-
     // timeout Ranger policies onto the bound Trino service. Guarded on auth being
     // enabled — without a `password.db` the delegator can't basic-auth, so
     // impersonate delegation is meaningless (and `inject_delegator_user` no-ops).
-    let ranger_service_name = engine.authz_service_id.map(|_| engine.name.clone());
+    let ranger_service_name = authz_service_id.map(|_| engine.name.clone());
     if config.auth.is_some() && engine.is_impersonate_delegation() {
         let (_secret_id, pw) = ensure_delegator_secret(st, engine).await?;
         inject_delegator_user(&mut config.auth, &pw)?;
@@ -655,13 +773,25 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
             }
         }
     }
-    // Trino requires a coordinator<->worker shared secret whenever auth is enabled.
-    // Derive a stable per-engine value (both roles read it from the env Secret).
+    // Internal secrets come LAST: minting writes new secret rows, so every
+    // fallible step above has already passed, and a failure below cleans up
+    // after itself. `apply_built` records or discards them.
+    let internal = resolve_internal_secrets(st, engine, opts.rotate_internal_secrets).await?;
+    // The native monitor signs in as `egret-monitor`. Skipped for jwt-delegation
+    // engines: their coordinator is JWT-only (no PASSWORD authenticator), so a
+    // basic-auth monitor user can't authenticate — the monitor degrades there.
+    if !engine.is_jwt_delegation() {
+        if let Err(e) = inject_monitor_user(&mut config.auth, &internal.monitor) {
+            discard_internal_secrets(st, &internal).await;
+            return Err(e);
+        }
+    }
+    // Trino requires a coordinator<->worker shared secret whenever auth is
+    // enabled; both roles read it from the env Secret.
     if config.auth.is_some() {
-        config.env.insert(
-            "TRINO_INTERNAL_SECRET".into(),
-            format!("egret-internal-{}", engine.id),
-        );
+        config
+            .env
+            .insert("TRINO_INTERNAL_SECRET".into(), internal.internal.clone());
     }
     // When the engine is bound to a Ranger profile (its trino profile is named
     // after the engine), template the apache-ranger access-control config so the
@@ -674,19 +804,157 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
                 egret_url: st.engine_egret_url.clone(),
                 poll_interval_ms: 30_000,
             });
-    Ok(EngineProvisionReq {
-        name: engine.name.clone(),
-        namespace: engine.namespace.clone(),
-        image_version: engine.spec["imageVersion"]
-            .as_str()
-            .unwrap_or(DEFAULT_IMAGE_VERSION)
-            .into(),
-        catalogs,
-        config,
-        ranger,
-        kind: egret_engine_mgmt_api::EngineKind::Trino,
-        starrocks: None,
+    Ok(BuiltReq {
+        req: EngineProvisionReq {
+            name: engine.name.clone(),
+            namespace: engine.namespace.clone(),
+            image_version: engine.spec["imageVersion"]
+                .as_str()
+                .unwrap_or(DEFAULT_IMAGE_VERSION)
+                .into(),
+            catalogs,
+            config,
+            ranger,
+            kind: egret_engine_mgmt_api::EngineKind::Trino,
+            starrocks: None,
+        },
+        internal: Some(internal),
     })
+}
+
+/// Which provisioning call an [`apply_built`] makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApplyOp {
+    Provision,
+    Update,
+}
+
+/// Apply an assembled request and settle the internal secrets it rendered:
+/// recorded on the row on BOTH the success and the failure path. `engine` must
+/// be the row the request was built from.
+///
+/// This does NOT discard on a failed apply. `TrinoProvisioner::apply_all`
+/// writes the env Secret and the `password.db` ConfigMap BEFORE the
+/// Deployments and does not roll those back on a later failure (e.g. a bad
+/// Deployment spec, or the API server timing out on the last object) — so a
+/// failed `provision`/`update` call may still have left the CLUSTER holding
+/// the fresh pair. Discarding it in that case would delete a secret the
+/// running pods already carry, and the next pod roll would then 401 the
+/// monitor with no successful apply left to recover it. Committing
+/// unconditionally means the row always names the pair the apply ATTEMPTED to
+/// hand the cluster; the failure mode this trades for is the opposite one — an
+/// apply that failed before touching the Secret at all leaves the row naming a
+/// value no pod has yet, so the monitor may 401 until the NEXT successful
+/// apply, which resolves the already-committed pair (`resolve_internal_secrets`
+/// reuses it) and converges. A failure to record is logged, not returned — the
+/// cluster attempt already happened either way.
+///
+/// Standing rule: egret never deletes a secret value the cluster may still
+/// hold. `apply_all` may write the fresh pair to the live env Secret before
+/// failing on a LATER step (a bad Deployment spec, an admission webhook, a
+/// timeout) — but it can just as easily fail BEFORE touching the Secret at
+/// all (an RBAC denial or a timeout on `trino_env_secret` itself), in which
+/// case the cluster never saw the fresh pair and still runs on the pair this
+/// call is about to supersede. `apply_built` cannot tell those two failures
+/// apart from here, so on ANY `Err` it keeps the superseded pair (passes
+/// [`Supersede::Keep`]) rather than risk deleting a value the running pods
+/// still carry. The row still names the new pair either way (see above) — a
+/// failed apply therefore leaves EVERY pair still on record resolvable
+/// (including ones left behind by an earlier failed apply on this same
+/// engine), and only the next successful apply deletes anything — and even
+/// then ONLY the pair its own compare-and-set displaced
+/// (`commit_internal_secrets`'s doc comment explains why a wider,
+/// prefix-based sweep is unsafe: a concurrent apply's already-minted, not-yet-
+/// committed pair could be caught in it). A run of failed rotations can
+/// therefore leave orphaned generations behind indefinitely; only engine
+/// delete (Task 15) is a safe place to sweep them, since by then no apply can
+/// still be in flight for this engine.
+/// Failure from [`apply_built`]: either the row was gone or `deleting` when
+/// re-checked, before the provisioner was touched, or the provisioner itself
+/// rejected the apply. Kept distinct so every caller can turn the former into
+/// `CpError::Conflict` (409, retry) instead of the apply-failure shape it uses
+/// for the latter.
+#[derive(Debug)]
+enum ApplyBuiltError {
+    /// The row is gone, or is `deleting` (a concurrent DELETE), or re-reading
+    /// it to check failed outright. Either way `apply_built` cannot confirm
+    /// it is still safe to call the provisioner, so it never does.
+    Conflict,
+    Failed(String),
+}
+
+/// Re-checked immediately before the provisioner call, because every caller
+/// does real work between reading `engine` and this point — long enough for
+/// a concurrent DELETE to mark the row `deleting` and tear the cluster down.
+/// `prov.provision`/`prov.update` is server-side apply: called on a deleted
+/// engine it would RE-CREATE every object DELETE just removed, including
+/// minting a fresh internal-secret pair the row can never reference again
+/// (SP1 Part B final review, C1). Refusing here is the one place all six
+/// apply routes share, so it is the one place this guard needs to live.
+///
+/// The guard refuses ONLY on `deleting` or a missing row — NOT on any other
+/// status change. An earlier version demanded the row still be at the exact
+/// status the caller had observed, which 409'd a legitimate apply landing
+/// between `GET /engines/{id}` recording `provisioning → running` (the
+/// detail page polls that every 5 seconds) and the apply's own re-check —
+/// reachable in the first minute of an engine's life, exactly when an admin
+/// adds catalogs (round-2 review finding N1). `deleting` is the one
+/// transition that actually means "the cluster this apply is about to touch
+/// may already be gone"; every other transition (`provisioning → running`,
+/// `running → provisioning` on a later apply, etc.) is a live engine that
+/// this apply is still allowed to reach.
+async fn apply_built(
+    st: &CpState,
+    prov: &dyn egret_engine_mgmt_api::EngineProvisioningPort,
+    engine: &Engine,
+    built: &BuiltReq,
+    op: ApplyOp,
+) -> Result<(), ApplyBuiltError> {
+    match st.engine_mgmt.get_engine(engine.id).await {
+        Ok(Some(current)) if current.status != crate::engine_status::DELETING => {}
+        _ => {
+            // N2 (round-2 review): nothing has been applied at this point —
+            // this guard runs BEFORE the provisioner is ever touched — so a
+            // pair `build_provision_req_with` minted for this attempt
+            // (`built.internal`, present only when it minted a fresh one; a
+            // reused recorded pair is `fresh: false` and this is a no-op) is
+            // safe to discard HERE and ONLY here: once a request reaches the
+            // provisioner, `commit_internal_secrets` takes over and must
+            // record it instead, because a failed-but-possibly-delivered
+            // apply may have already handed it to the cluster (see that
+            // function's doc comment). Discarding on this path prevents an
+            // orphaned secret-store row nothing will ever reference — the row
+            // this apply was building against is gone or already `deleting`,
+            // so no other apply for this engine id can pick it up either.
+            if let Some(secrets) = &built.internal {
+                discard_internal_secrets(st, secrets).await;
+            }
+            return Err(ApplyBuiltError::Conflict);
+        }
+    }
+    let res = match op {
+        ApplyOp::Provision => prov.provision(&built.req).await,
+        ApplyOp::Update => prov.update(&built.req).await,
+    };
+    if let Some(secrets) = &built.internal {
+        let superseded = if res.is_ok() {
+            Supersede::Delete
+        } else {
+            Supersede::Keep
+        };
+        if let Err(e) = commit_internal_secrets(st, engine, secrets, superseded).await {
+            tracing::error!(engine = %engine.name, error = ?e,
+                "minted internal secrets but could not record them; \
+                 the monitor fails until the next successful apply");
+        }
+    }
+    res.map_err(ApplyBuiltError::Failed)
+}
+
+/// `CpError::Conflict` with the wording every apply route uses when
+/// [`apply_built`] reports a lost race against a concurrent status change.
+fn apply_conflict() -> CpError {
+    CpError::Conflict("engine changed while the update was being applied; retry".into())
 }
 
 /// Resolve the stored `trinoConfig.faultTolerant`
@@ -1454,23 +1722,39 @@ async fn resolve_auth(st: &CpState, tc: &serde_json::Value) -> Result<Option<Aut
 }
 
 /// System user the native Trino monitor (Phase 1.6b) authenticates as against a
-/// coordinator that has auth enabled. The password is DERIVED from the engine id
-/// (no storage): both provisioning (bcrypt into `password.db`, [`inject_monitor_user`])
-/// and the monitor's Basic auth header re-derive the same value.
-pub fn monitor_password(id: Uuid) -> String {
+/// coordinator that has auth enabled.
+///
+/// The legacy password, derived from the engine id. Valid ONLY for an engine
+/// whose row has no `monitor_secret_id`: its pods were rendered before internal
+/// secrets were stored and still carry this value in `password.db`. Everything
+/// else must go through [`monitor_password_for`].
+pub(crate) fn legacy_monitor_password(id: Uuid) -> String {
     format!("egret-monitor-{id}")
 }
 
-/// Inject the derived `egret-monitor` password entry into an engine's auth block
-/// so the native monitor can authenticate. No-op when `auth` is `None`: this must
-/// NOT turn auth on for engines that have none — it only rides along when auth is
+/// The `egret-monitor` password to present to this engine's coordinator: the
+/// stored secret once an apply has recorded one, else the legacy value.
+pub(crate) async fn monitor_password_for(st: &CpState, engine: &Engine) -> Result<String, CpError> {
+    match engine.monitor_secret_id {
+        Some(id) => st
+            .secrets
+            .resolve_plaintext(None, id)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("resolve monitor secret: {e}"))),
+        None => Ok(legacy_monitor_password(engine.id)),
+    }
+}
+
+/// Inject the `egret-monitor` password entry into an engine's auth block so the
+/// native monitor can authenticate. No-op when `auth` is `None`: this must NOT
+/// turn auth on for engines that have none — it only rides along when auth is
 /// already enabled. Uses the same `$2b$`→`$2y$` relabel as the human users so
 /// Trino's jBCrypt file authenticator accepts the hash.
-fn inject_monitor_user(auth: &mut Option<AuthReq>, engine_id: Uuid) -> Result<(), CpError> {
+fn inject_monitor_user(auth: &mut Option<AuthReq>, password: &str) -> Result<(), CpError> {
     let Some(auth) = auth.as_mut() else {
         return Ok(());
     };
-    let bcrypt_hash = bcrypt::hash(monitor_password(engine_id), bcrypt::DEFAULT_COST)
+    let bcrypt_hash = bcrypt::hash(password, bcrypt::DEFAULT_COST)
         .map_err(|e| CpError::BadRequest(format!("bcrypt monitor password: {e}")))?
         .replacen("$2b$", "$2y$", 1);
     auth.password_users.push(PasswordEntryReq {
@@ -1626,6 +1910,255 @@ async fn ensure_root_password_secret(
     };
     st.engine_mgmt.set_root_secret(engine.id, id).await?;
     Ok((id, pw))
+}
+
+/// A Trino engine's coordinator↔worker shared secret (`TRINO_INTERNAL_SECRET`)
+/// and `egret-monitor` password, as resolved for ONE apply.
+struct EngineInternalSecrets {
+    internal_id: Uuid,
+    internal: String,
+    monitor_id: Uuid,
+    monitor: String,
+    /// Minted for this apply and not yet on the engine row. [`apply_built`]
+    /// records it after Kubernetes accepted the spec and deletes it otherwise,
+    /// so the row only ever names what the running pods were given.
+    fresh: bool,
+}
+
+/// Redacts the plaintext fields — this struct carries live credentials and
+/// must never show up verbatim in a log line via a stray `{:?}`.
+impl std::fmt::Debug for EngineInternalSecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineInternalSecrets")
+            .field("internal_id", &self.internal_id)
+            .field("internal", &"<redacted>")
+            .field("monitor_id", &self.monitor_id)
+            .field("monitor", &"<redacted>")
+            .field("fresh", &self.fresh)
+            .finish()
+    }
+}
+
+/// 32 random bytes, URL-safe base64 without padding — no `:`, so it is also
+/// safe as a Basic-auth password.
+fn random_internal_secret() -> String {
+    use base64::Engine as _;
+    use rand::RngCore;
+    let mut b = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut b);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+}
+
+/// Resolve both secrets of an already-recorded pair. `Ok(None)` when either
+/// has been deleted out-of-band (e.g. an admin deleting the secret row
+/// directly) rather than failing every future apply on this engine forever —
+/// the caller mints a fresh pair instead.
+async fn resolve_stored_pair(
+    st: &CpState,
+    internal_id: Uuid,
+    monitor_id: Uuid,
+) -> Result<Option<EngineInternalSecrets>, CpError> {
+    let internal = match st.secrets.resolve_plaintext(None, internal_id).await {
+        Ok(v) => v,
+        Err(egret_secrets::SecretsError::NotFound) => return Ok(None),
+        Err(e) => return Err(CpError::BadRequest(format!("resolve internal secret: {e}"))),
+    };
+    let monitor = match st.secrets.resolve_plaintext(None, monitor_id).await {
+        Ok(v) => v,
+        Err(egret_secrets::SecretsError::NotFound) => return Ok(None),
+        Err(e) => return Err(CpError::BadRequest(format!("resolve monitor secret: {e}"))),
+    };
+    Ok(Some(EngineInternalSecrets {
+        internal_id,
+        internal,
+        monitor_id,
+        monitor,
+        fresh: false,
+    }))
+}
+
+/// Reuse the engine's recorded internal secrets, or mint a new pending pair when
+/// the row has none, `rotate` is set, or a recorded secret has vanished
+/// out-of-band. Minting never writes the row.
+async fn resolve_internal_secrets(
+    st: &CpState,
+    engine: &Engine,
+    rotate: bool,
+) -> Result<EngineInternalSecrets, CpError> {
+    if !rotate {
+        if let (Some(internal_id), Some(monitor_id)) =
+            (engine.internal_secret_id, engine.monitor_secret_id)
+        {
+            if let Some(existing) = resolve_stored_pair(st, internal_id, monitor_id).await? {
+                return Ok(existing);
+            }
+            // One or both rows are gone (deleted out-of-band). Fall through and
+            // mint a fresh pair rather than bricking every future apply.
+        }
+    }
+    // A per-generation suffix keeps a rotation from colliding with the names of
+    // the secrets it replaces (those stay until the new apply commits).
+    let generation = Uuid::new_v4().simple();
+    let internal = random_internal_secret();
+    let internal_id = st
+        .secrets
+        .create(
+            None,
+            &format!("engine-internal-{}-{generation}", engine.id),
+            Some("Trino internal-communication shared secret"),
+            &internal,
+        )
+        .await
+        .map_err(|e| CpError::BadRequest(format!("store internal secret: {e}")))?;
+    let monitor = random_internal_secret();
+    let monitor_id = match st
+        .secrets
+        .create(
+            None,
+            &format!("engine-monitor-{}-{generation}", engine.id),
+            Some("egret-monitor password for the native Trino monitor"),
+            &monitor,
+        )
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            if let Err(del) = st.secrets.delete(None, internal_id).await {
+                tracing::warn!(engine = %engine.name, secret_id = %internal_id, error = %del,
+                    "could not delete a half-minted internal secret");
+            }
+            return Err(CpError::BadRequest(format!("store monitor secret: {e}")));
+        }
+    };
+    Ok(EngineInternalSecrets {
+        internal_id,
+        internal,
+        monitor_id,
+        monitor,
+        fresh: true,
+    })
+}
+
+/// Whether [`commit_internal_secrets`], after winning its compare-and-set, may
+/// delete the pair it superseded. `Delete` only when the apply that rendered
+/// the new pair actually reached the cluster successfully — see
+/// [`apply_built`]'s doc comment for why a failed apply passes `Keep` instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Supersede {
+    Delete,
+    Keep,
+}
+
+/// Record a fresh pair on the row — called on BOTH the success and the
+/// failure path of an apply that rendered one (see [`apply_built`]) — and,
+/// when `superseded` is [`Supersede::Delete`], delete the pair it superseded:
+/// `engine.internal_secret_id`/`engine.monitor_secret_id`, i.e. the exact ids
+/// the compare-and-set used as `expected`. `engine` is the row as loaded
+/// BEFORE the build (its ids are the ones the caller's build read). No-op for
+/// a reused pair.
+///
+/// `Supersede::Keep` (a failed apply) still commits the new pair onto the row
+/// — that part is unconditional, see `apply_built` — but deletes nothing: the
+/// cluster may be trusting the pair this call is about to supersede, so
+/// nothing is destroyed until a LATER successful apply confirms convergence.
+///
+/// `Supersede::Delete` (a successful apply) deletes ONLY
+/// `engine.internal_secret_id`/`engine.monitor_secret_id` — the pair this
+/// exact commit displaces — never anything wider. Round 1 of this fix swept
+/// EVERY other secret row matching this engine's name prefix on a successful
+/// commit, reasoning that a success proves convergence on the new pair; that
+/// was wrong; a re-review reproduced the failure: `A` and `B` both build
+/// concurrently, `A` commits successfully and swept `B`'s already-minted (but
+/// not yet committed) pair — deleting a secret the cluster's next reconcile
+/// with `B`'s in-flight request could still be about to receive, in direct
+/// violation of the standing "never delete a secret the cluster may still
+/// hold" rule (see `apply_built`'s doc comment). Only the CAS's own
+/// `expected` pair is provably superseded by THIS commit; any other row
+/// (e.g. one a run of `Keep`s left behind, or one a losing concurrent commit
+/// left orphaned below) may belong to an apply still in flight and must be
+/// left alone here.
+///
+/// **Consequence — those orphans are a known, intentional gap, not a bug**:
+/// a pair left behind by a `Keep` (or by a lost CAS below) is referenced by
+/// nothing once a LATER apply supersedes the row again, and nothing in this
+/// module ever sweeps it — no concurrent apply on the same engine can be
+/// ruled out at any point `commit_internal_secrets` runs, so no prefix-wide
+/// delete is ever safe here. The one place that IS safe is engine delete
+/// (Task 15): by then the row and every apply path to it are gone, so
+/// nothing can still be "in flight" for this engine. Task 15 must (a) delete
+/// the row's current `internal_secret_id`/`monitor_secret_id`, and (b)
+/// prefix-sweep any remaining `engine-internal-{id}-*` / `engine-monitor-
+/// {id}-*` rows this function's `Keep` path left behind.
+///
+/// When the compare-and-set loses (a concurrent apply on the same engine
+/// already committed a different pair since `engine` was read), this writes
+/// nothing and does NOT delete `s` either, regardless of `superseded`: `s` may
+/// have just been applied to the cluster by THIS call's own
+/// `provision`/`update`, so deleting it would risk the same "delete a secret
+/// the cluster may hold" failure `apply_built` avoids. It is left as an
+/// orphaned secret-store row — see the "Consequence" note above; only Task
+/// 15's engine-delete sweep reclaims it.
+async fn commit_internal_secrets(
+    st: &CpState,
+    engine: &Engine,
+    s: &EngineInternalSecrets,
+    superseded: Supersede,
+) -> Result<(), CpError> {
+    if !s.fresh {
+        return Ok(());
+    }
+    let committed = st
+        .engine_mgmt
+        .set_internal_secret_ids(
+            engine.id,
+            engine.internal_secret_id,
+            engine.monitor_secret_id,
+            s.internal_id,
+            s.monitor_id,
+        )
+        .await?;
+    if !committed {
+        tracing::warn!(engine = %engine.name, internal_id = %s.internal_id, monitor_id = %s.monitor_id,
+            "lost the race to record internal secrets; a concurrent apply on this engine \
+             already committed a different pair — this pair is left unreferenced");
+        return Ok(());
+    }
+    if superseded == Supersede::Keep {
+        return Ok(());
+    }
+    for old in [engine.internal_secret_id, engine.monitor_secret_id]
+        .into_iter()
+        .flatten()
+    {
+        if old != s.internal_id && old != s.monitor_id {
+            if let Err(e) = st.secrets.delete(None, old).await {
+                tracing::warn!(engine = %engine.name, secret_id = %old, error = %e,
+                    "could not delete a superseded internal secret");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Delete a freshly-minted pair that was never handed to the provisioner at
+/// all — the ONLY safe place to discard, because nothing has been applied to
+/// the cluster yet. Used when minting succeeds but a later step BEFORE any
+/// `provision`/`update` call fails: either a later step in the SAME build
+/// (e.g. [`inject_monitor_user`] erroring on a malformed password), or
+/// [`apply_built`]'s own pre-provisioner status re-check losing a race (round-2
+/// review, N2). Once a request has actually been handed to the provisioner,
+/// [`apply_built`]/[`commit_internal_secrets`] takes over and never discards —
+/// see their doc comments for why. No-op for a reused pair.
+async fn discard_internal_secrets(st: &CpState, s: &EngineInternalSecrets) {
+    if !s.fresh {
+        return;
+    }
+    for id in [s.internal_id, s.monitor_id] {
+        if let Err(e) = st.secrets.delete(None, id).await {
+            tracing::warn!(secret_id = %id, error = %e,
+                "could not delete an unapplied internal secret");
+        }
+    }
 }
 
 /// Extract the leading `-----BEGIN CERTIFICATE-----`…`-----END CERTIFICATE-----`
@@ -1840,11 +2373,10 @@ async fn list_engines(
     Auth(p): Auth,
 ) -> Result<Json<Vec<EngineDto>>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
-    // The stored `status` column is only ever the create-time value
-    // ("provisioning") — nothing writes it back, so it would show every engine
-    // as forever-provisioning on the list. Recompute the LIVE phase per engine
-    // from the provisioner (same source `get_engine` uses), falling back to the
-    // stored value if the live read fails or no provisioner is configured.
+    // The stored `status` only advances when `get_engine` observes all pods
+    // ready, so recompute the LIVE phase per engine from the provisioner (same
+    // source `get_engine` uses), falling back to the stored value if the live
+    // read fails or no provisioner is configured.
     let engines = st.engine_mgmt.list_engines().await?;
     let prov = st.engine_provisioner.as_ref();
     let mut out = Vec::with_capacity(engines.len());
@@ -1917,6 +2449,277 @@ fn is_minted_client(config: &serde_json::Value) -> bool {
     config.get("mintedClient").and_then(|v| v.as_bool()) != Some(false)
 }
 
+/// What an engine create has minted so far; [`compensate_failed_create`]
+/// undoes exactly this and nothing else.
+#[derive(Debug, Default)]
+struct CreateUndo {
+    /// The auto-wired Catalog Client.
+    client_id: Option<Uuid>,
+    /// The engine row (its owned secrets are read off it at undo time).
+    engine_id: Option<Uuid>,
+    /// `(kind, namespace, name)` once a provision has been attempted.
+    cluster: Option<(String, String, String)>,
+    /// A Ranger profile THIS create made (never a pre-existing one).
+    created_profile_id: Option<i64>,
+    /// A tag service THIS create made (never a pre-existing one).
+    created_tag_service_id: Option<i64>,
+}
+
+/// Secret rows egret minted for this engine and owns outright. Reused by both
+/// [`compensate_failed_create`] (a create that fails) and, per the standing
+/// "never delete a secret the cluster may still hold" rule, by engine delete
+/// (Task 15) for the exact same set of ids.
+/// `tls_cert_secret_ref` is deliberately absent: it points at an admin-provided
+/// `kubernetes.io/tls` secret that other engines may share.
+fn engine_owned_secret_ids(engine: &Engine) -> Vec<Uuid> {
+    [
+        engine.delegator_secret_id,
+        engine.tls_secret_id,
+        engine.root_secret_id,
+        engine.internal_secret_id,
+        engine.monitor_secret_id,
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Undo a failed engine create. Every step logs its own failure and continues,
+/// with ONE exception: if the cluster delete itself fails, this stops right
+/// there (mirroring the real `DELETE /engines/{id}` handler, which returns
+/// `ClusterDeleteFailed` and leaves the row `deleting` the moment its own
+/// cluster delete errors, touching nothing else). Order: cluster, row (then
+/// the secrets it referenced — a row that cannot be deleted keeps its secrets
+/// and is marked `failed`), profiles this create made (their policies
+/// cascade), catalog client. Policies seeded into a PRE-EXISTING profile are
+/// left alone: other engines may be bound to it.
+///
+/// Deleting `engine_owned_secret_ids(&engine)` here is safe under the standing
+/// "never delete a secret the cluster may still hold" rule because (a) these
+/// are secrets THIS create minted (a brand-new engine id no other in-flight
+/// create or apply can be racing), and (b) reaching the row/secret deletes
+/// below REQUIRES either that the cluster was never touched (the failure hit
+/// before `apply_built`/`prov.provision`, so `undo.cluster` is `None`) or that
+/// its delete just succeeded — see the early return below for the third case.
+/// So whatever the apply rendered from these secrets into the cluster is
+/// either confirmed gone or was never written, before this ever removes the
+/// secret-store rows backing it; nothing here can outlive its cluster copy.
+/// This includes `internal_secret_id`/`monitor_secret_id`: `commit_internal_secrets`
+/// commits a freshly-minted pair onto the row on BOTH the success and the
+/// failure path of an apply that rendered one, so by the time compensation
+/// reads the row those ids are exactly the pair (if any) this create's own,
+/// and only this create's own, apply attempted — never one a concurrent apply
+/// might still be relying on.
+///
+/// When the cluster delete FAILS, the opposite must hold: the apply may have
+/// already written live cluster objects from these very secrets (e.g. the
+/// Trino env Secret rendering `TRINO_INTERNAL_SECRET`, or the password.db
+/// `ConfigMap`) that this call could not remove. Deleting the row or its
+/// secrets at that point would orphan those objects with nothing left to name
+/// them and no way back in through the API — kubectl would be the only route
+/// to clean them up. So on that path this marks the row `failed` (§4.7) and
+/// returns immediately, deleting nothing: the row stays visible and
+/// deletable, and a later `DELETE /engines/{id}` retries the SAME cluster
+/// delete this call just attempted, then does its own row/secret/client
+/// cleanup once that retry succeeds.
+async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
+    if let (Some((kind, namespace, name)), Some(prov)) =
+        (&undo.cluster, st.engine_provisioner.as_ref())
+    {
+        if let Err(e) = prov.delete(kind, namespace, name).await {
+            tracing::error!(engine = %name, error = %e,
+                "create compensation: cluster delete failed; row kept (marked failed) \
+                 so DELETE /engines/{{id}} can retry it — no row or secret removed");
+            if let Some(engine_id) = undo.engine_id {
+                if let Err(e) = st
+                    .engine_mgmt
+                    .set_engine_status(engine_id, crate::engine_status::FAILED)
+                    .await
+                {
+                    tracing::error!(%engine_id, error = %e,
+                        "create compensation: could not mark the engine failed");
+                }
+            }
+            return;
+        }
+    }
+    if let Some(engine_id) = undo.engine_id {
+        match st.engine_mgmt.get_engine(engine_id).await {
+            Ok(Some(engine)) => {
+                let owned = engine_owned_secret_ids(&engine);
+                match st.engine_mgmt.delete_engine(engine_id).await {
+                    Ok(()) => {
+                        for secret_id in owned {
+                            if let Err(e) = st.secrets.delete(None, secret_id).await {
+                                tracing::error!(engine = %engine.name, %secret_id, error = %e,
+                                    "create compensation: secret delete failed");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(engine = %engine.name, error = %e,
+                            "create compensation: engine row delete failed; marking it failed");
+                        if let Err(e) = st
+                            .engine_mgmt
+                            .set_engine_status(engine_id, crate::engine_status::FAILED)
+                            .await
+                        {
+                            tracing::error!(engine = %engine.name, error = %e,
+                                "create compensation: could not mark the engine failed");
+                        }
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::error!(%engine_id, error = %e,
+                "create compensation: could not load the engine row"),
+        }
+    }
+    for (what, id) in [
+        ("policy profile", undo.created_profile_id),
+        ("tag service", undo.created_tag_service_id),
+    ] {
+        if let Some(id) = id {
+            if let Err(e) = st.authz.delete_service(id).await {
+                tracing::error!(service_id = id, error = %e,
+                    "create compensation: {what} delete failed");
+            }
+        }
+    }
+    if let Some(client_id) = undo.client_id {
+        if let Err(e) = st.catalog.revoke_client(client_id).await {
+            tracing::error!(%client_id, error = ?e,
+                "create compensation: catalog client revoke failed");
+        }
+    }
+}
+
+/// How a new Trino engine gets its Ranger profile — decided before anything is
+/// minted, so a conflict is a clean 409.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProfilePlan {
+    /// No binding: Ranger is disabled and no valid profile was chosen. Trino
+    /// defaults to allow-all, which is what delegated impersonation needs there.
+    Unbound,
+    /// Bind to a profile that already exists (chosen, or an orphan left by a
+    /// deleted same-name engine). Compensation never deletes it.
+    Existing(i64),
+    /// Create `<name>` (trino) and `<name>_tag` (tag) during the create.
+    Create,
+}
+
+/// Decide the profile for a Trino create named `name`.
+async fn plan_trino_profile(
+    st: &CpState,
+    name: &str,
+    requested: Option<i64>,
+) -> Result<ProfilePlan, CpError> {
+    if let Some(sid) = requested {
+        let services = st
+            .authz
+            .list_services()
+            .await
+            .map_err(|e| CpError::BadRequest(format!("list policy profiles: {e}")))?;
+        if services.iter().any(|s| s.id == sid) {
+            return Ok(ProfilePlan::Existing(sid));
+        }
+        tracing::warn!(sid, "authz_service_id not found");
+    }
+    if !st.ranger_enabled {
+        tracing::info!(
+            engine = %name,
+            "ranger disabled; Trino engine provisioned without Ranger access-control (allow-all)"
+        );
+        return Ok(ProfilePlan::Unbound);
+    }
+    match st
+        .authz
+        .get_service_opt(name)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("resolve policy profile: {e}")))?
+    {
+        None => Ok(ProfilePlan::Create),
+        Some(svc) if svc.r#type != "trino" => Err(CpError::Conflict(format!(
+            "a policy profile named {name} already exists with type {}",
+            svc.r#type
+        ))),
+        Some(svc) => match st
+            .engine_mgmt
+            .count_engines_bound_to_authz_service(svc.id)
+            .await?
+        {
+            0 => Ok(ProfilePlan::Existing(svc.id)),
+            bound => Err(CpError::Conflict(format!(
+                "policy profile {name} is already bound to {bound} other engine(s)"
+            ))),
+        },
+    }
+}
+
+/// Carry out a [`ProfilePlan`] for the new engine row, recording anything it
+/// creates in `undo`.
+async fn bind_trino_profile(
+    st: &CpState,
+    engine_id: Uuid,
+    name: &str,
+    plan: &ProfilePlan,
+    undo: &mut CreateUndo,
+) -> Result<(), CpError> {
+    let profile_id = match plan {
+        ProfilePlan::Unbound => return Ok(()),
+        ProfilePlan::Existing(id) => *id,
+        ProfilePlan::Create => {
+            st.authz
+                .ensure_trino_def()
+                .await
+                .map_err(|e| CpError::BadRequest(format!("seed trino service-def: {e}")))?;
+            // A TAG service alongside the trino profile (Access P3.2), linked by
+            // the profile's `tagService` config, so tag-based masking/row-filter
+            // policies have a service. Best-effort: the profile works untagged.
+            let tag_service_name = format!("{name}_tag");
+            if let Err(e) = st.authz.ensure_tag_def().await {
+                tracing::warn!(error = %e, "ensure_tag_def failed during auto-bind");
+            }
+            let tag_wired = match st
+                .authz
+                .create_service(&tag_service_name, "tag", &serde_json::json!({}))
+                .await
+            {
+                Ok(svc) => {
+                    undo.created_tag_service_id = Some(svc.id);
+                    true
+                }
+                // Left by a deleted same-name engine: reuse, never delete.
+                Err(egret_policy_api::PolicyError::AlreadyExists(_)) => true,
+                Err(e) => {
+                    tracing::warn!(error = %e, "create tag service failed during auto-bind");
+                    false
+                }
+            };
+            let config = if tag_wired {
+                serde_json::json!({ "tagService": tag_service_name })
+            } else {
+                serde_json::json!({})
+            };
+            let svc = match st.authz.create_service(name, "trino", &config).await {
+                Ok(svc) => svc,
+                Err(egret_policy_api::PolicyError::AlreadyExists(_)) => {
+                    return Err(CpError::Conflict(format!(
+                        "policy profile {name} was created concurrently; retry the create"
+                    )))
+                }
+                Err(e) => return Err(CpError::BadRequest(format!("create policy profile: {e}"))),
+            };
+            undo.created_profile_id = Some(svc.id);
+            svc.id
+        }
+    };
+    st.engine_mgmt
+        .set_engine_authz_service(engine_id, Some(profile_id))
+        .await?;
+    Ok(())
+}
+
 #[utoipa::path(
     post,
     path = "/api/control-plane/engines",
@@ -1927,7 +2730,7 @@ fn is_minted_client(config: &serde_json::Value) -> bool {
         (status = 400, description = "Unknown/unprovisioned warehouse, invalid input, or provisioning failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:create permission", body = ErrorBody),
-        (status = 409, description = "An engine with this name already exists", body = ErrorBody),
+        (status = 409, description = "An engine with this name already exists, or its same-name policy profile is bound to another engine", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -2069,22 +2872,8 @@ async fn create_engine(
         }
     }
 
-    // 4. Auto-wire: mint a fresh Catalog Client for the warehouse. Minted only
-    //    AFTER delegation resolves (step 3), so a resolver 400 leaks no client.
-    let role_id = ensure_engine_role(&st, wh.id).await?;
-    let client = st
-        .catalog
-        .create_client(NewClient {
-            name: format!("engine-{}", b.name),
-            consumer_type: "engine".into(),
-            workspace_id: wh.workspace_id,
-            warehouse_id: wh.id,
-            catalog_role_id: role_id,
-        })
-        .await?;
-
-    // 5. Record the intent row (status `provisioning`). The auto-wired client id
-    //    lives on the PRIMARY catalog row now, not in the engine spec.
+    // 4. Assemble and validate the stored spec BEFORE minting anything, so an
+    //    invalid resource-group config 400s with nothing to roll back.
     let image_version = b
         .image_version
         .clone()
@@ -2101,6 +2890,37 @@ async fn create_engine(
     });
     spec["trinoConfig"] = trino_config;
     validate_spec_resource_groups(&spec)?;
+    // Kubernetes must be configured before anything is minted or rendered.
+    let Some(prov) = st.engine_provisioner.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+
+    // Decide the Ranger profile BEFORE minting anything: a same-name profile
+    // bound to another engine is a 409 with nothing to roll back.
+    let profile_plan = plan_trino_profile(&st, &b.name, b.authz_service_id).await?;
+
+    // 5. Auto-wire: mint a fresh Catalog Client for the warehouse. Minted only
+    //    AFTER delegation resolves (step 3) and the spec validates (step 4), so
+    //    neither a resolver 400 nor a resource-group 400 leaks a client. From
+    //    here on, every failure runs `compensate_failed_create`.
+    let role_id = ensure_engine_role(&st, wh.id).await?;
+    let client = st
+        .catalog
+        .create_client(NewClient {
+            name: format!("engine-{}", b.name),
+            consumer_type: "engine".into(),
+            workspace_id: wh.workspace_id,
+            warehouse_id: wh.id,
+            catalog_role_id: role_id,
+        })
+        .await?;
+    let mut undo = CreateUndo {
+        client_id: Some(client.id),
+        ..CreateUndo::default()
+    };
+
+    // 6. Record the intent row (status `provisioning`). The auto-wired client id
+    //    lives on the PRIMARY catalog row, not in the engine spec.
     let engine = match st
         .engine_mgmt
         .create_engine(
@@ -2115,12 +2935,13 @@ async fn create_engine(
     {
         Ok(e) => e,
         Err(e) => {
-            let _ = st.catalog.revoke_client(client.id).await;
+            compensate_failed_create(&st, undo).await;
             return Err(e.into());
         }
     };
+    undo.engine_id = Some(engine.id);
 
-    // 5. Record the PRIMARY catalog row (the auto-wired egret warehouse).
+    // 7. Record the PRIMARY catalog row (the auto-wired egret warehouse).
     let cat_config = serde_json::json!({
         "warehouse": wh.name,
         "s3_endpoint": s3_endpoint,
@@ -2139,150 +2960,49 @@ async fn create_engine(
         )
         .await
     {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.catalog.revoke_client(client.id).await;
+        compensate_failed_create(&st, undo).await;
         return Err(e.into());
     }
 
-    // 6. Build the provisioning request from the stored engine + catalogs.
-    let req = match build_provision_req(&st, &engine).await {
-        Ok(r) => r,
+    // 8. Bind the Ranger profile BEFORE the first provision, so a governed
+    //    engine never runs unbound (allow-all) — not even between two applies.
+    if let Err(e) = bind_trino_profile(&st, engine.id, &b.name, &profile_plan, &mut undo).await {
+        compensate_failed_create(&st, undo).await;
+        return Err(e);
+    }
+    let engine = match st.engine_mgmt.get_engine(engine.id).await {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            compensate_failed_create(&st, undo).await;
+            return Err(CpError::NotFound);
+        }
         Err(e) => {
-            let _ = st.engine_mgmt.delete_engine(engine.id).await; // CASCADE removes the catalog
-            let _ = st.catalog.revoke_client(client.id).await;
+            compensate_failed_create(&st, undo).await;
+            return Err(e.into());
+        }
+    };
+
+    // 9. Build from the stored (bound) engine + catalogs and provision once.
+    let built = match build_provision_req(&st, &engine).await {
+        Ok(built) => built,
+        Err(e) => {
+            compensate_failed_create(&st, undo).await;
             return Err(e);
         }
     };
-
-    // 7. Provision on Kubernetes; roll back the engine row (+ cascade catalog) +
-    //    client on any failure.
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.catalog.revoke_client(client.id).await;
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
-    };
-    if let Err(msg) = prov.provision(&req).await {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.catalog.revoke_client(client.id).await;
-        return Err(CpError::BadRequest(format!(
-            "engine provisioning failed: {msg}"
-        )));
-    }
-
-    // 8. Auto-bind the engine to a Ranger policy profile: link the admin-chosen
-    // existing service, or create a fresh one named after the engine. Runs ONLY
-    // here on the success path — after provisioning succeeded and every rollback
-    // path above is passed — so a failed provision never creates an orphan
-    // profile and a same-name retry stays clean. Best-effort: a binding failure
-    // must not fail provisioning (the engine still works; the admin can relink
-    // later), so we log and continue.
-    let profile_id: Option<i64> = match b.authz_service_id {
-        Some(sid) => match st.authz.list_services().await {
-            Ok(svcs) if svcs.iter().any(|s| s.id == sid) => Some(sid),
-            Ok(_) => {
-                tracing::warn!(sid, "authz_service_id not found; leaving engine unlinked");
-                None
+    undo.cluster = Some((
+        engine.r#type.clone(),
+        engine.namespace.clone(),
+        engine.name.clone(),
+    ));
+    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Provision).await {
+        compensate_failed_create(&st, undo).await;
+        return Err(match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::Failed(msg) => {
+                CpError::BadRequest(format!("engine provisioning failed: {msg}"))
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "list_services failed during auto-bind");
-                None
-            }
-        },
-        // No admin-chosen service. Auto-create a fresh Ranger profile ONLY when
-        // the platform Ranger integration is enabled. When it is off (the
-        // default), leave the engine UNBOUND: the provisioner then writes no
-        // `access-control.properties`, Trino defaults to allow-all, and per-user
-        // delegated impersonation queries work (a Ranger-bound-but-unpolicied
-        // Trino denies `egret_delegator` becoming the target user).
-        None if !st.ranger_enabled => {
-            tracing::info!(
-                engine = %b.name,
-                "ranger disabled; Trino engine provisioned without Ranger access-control (allow-all)"
-            );
-            None
-        }
-        None => {
-            if let Err(e) = st.authz.ensure_trino_def().await {
-                tracing::warn!(error = %e, "ensure_trino_def failed during auto-bind");
-            }
-            // Provision a TAG service alongside the trino profile (Access P3.2),
-            // one tag service per trino profile, so tag-based masking/row-filter
-            // policies can exist and `download_tags` has a service to serve. The
-            // trino profile's config carries `tagService = <name>_tag`, the
-            // standard Ranger field linking a resource service to its tag service.
-            //
-            // LIVE-ONLY: the `tagService` config key + any `ranger.plugin.tag.*`
-            // download wiring are validated against the real Ranger tag plugin at
-            // runtime, NOT in CI. If the plugin doesn't pick up tags, THIS is the
-            // tuning spot. Best-effort like the rest of auto-bind: a failure here
-            // never fails provisioning (the profile still works untagged).
-            let tag_service_name = format!("{}_tag", b.name);
-            let tag_wired = {
-                if let Err(e) = st.authz.ensure_tag_def().await {
-                    tracing::warn!(error = %e, "ensure_tag_def failed during auto-bind");
-                }
-                match st
-                    .authz
-                    .create_service(&tag_service_name, "tag", &serde_json::json!({}))
-                    .await
-                {
-                    Ok(_) => true,
-                    // A same-name tag service already exists (retry) — still wire it.
-                    Err(egret_policy_api::PolicyError::AlreadyExists(_)) => true,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "create tag service failed during auto-bind");
-                        false
-                    }
-                }
-            };
-            let trino_config = if tag_wired {
-                serde_json::json!({ "tagService": tag_service_name })
-            } else {
-                serde_json::json!({})
-            };
-            match st
-                .authz
-                .create_service(&b.name, "trino", &trino_config)
-                .await
-            {
-                Ok(svc) => Some(svc.id),
-                Err(e) => {
-                    tracing::warn!(error = %e, "create_service failed during auto-bind");
-                    None
-                }
-            }
-        }
-    };
-    if let Some(pid) = profile_id {
-        if let Err(e) = st
-            .engine_mgmt
-            .set_engine_authz_service(engine.id, Some(pid))
-            .await
-        {
-            tracing::warn!(error = %e, "set_engine_authz_service failed during auto-bind");
-        } else {
-            // Re-provision now that the engine is bound. The first `provision`
-            // above ran BEFORE auto-bind set `authz_service_id`, so its spec had
-            // no `RangerBinding` → the pod got no `access-control.properties`.
-            // `build_provision_req` reads `authz_service_id`, so re-building here
-            // and `update`-ing lands the Ranger plugin config (Access P3.2). Best
-            // effort: a failure leaves a working-but-unenforced engine an admin
-            // can re-provision. Refetch to pick up the freshly-set binding.
-            match st.engine_mgmt.get_engine(engine.id).await {
-                Ok(Some(bound)) => match build_provision_req(&st, &bound).await {
-                    Ok(req2) => {
-                        if let Err(msg) = prov.update(&req2).await {
-                            tracing::warn!(engine = %bound.name, %msg,
-                                "re-provision after auto-bind failed; engine unenforced until next update");
-                        }
-                    }
-                    Err(e) => tracing::warn!(error = ?e,
-                        "rebuild provision req after auto-bind failed"),
-                },
-                Ok(None) => {}
-                Err(e) => tracing::warn!(error = %e, "refetch engine after auto-bind failed"),
-            }
-        }
+        });
     }
 
     Ok((StatusCode::CREATED, Json(engine.into())))
@@ -2867,11 +3587,17 @@ async fn create_starrocks_engine(
     // the admin gets a clean 400 instead of a deferred HPA-create failure.
     validate_sr_autoscaling(&sr_body)?;
 
+    // Kubernetes must be configured before anything is minted.
+    let Some(prov) = st.engine_provisioner.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+
     // ── Iceberg external-catalog auto-wire (T6), step 1: mint a Catalog Client
     // for the warehouse — the EXACT same call the Trino path uses
     // (`ensure_engine_role` + `catalog.create_client`). Minted BEFORE the
     // engine row exists, so a mint failure here needs no rollback (nothing to
-    // roll back yet), matching the Trino path's ordering.
+    // roll back yet), matching the Trino path's ordering. From here on, every
+    // failure runs `compensate_failed_create`.
     let role_id = ensure_engine_role(&st, wh.id).await?;
     let client = st
         .catalog
@@ -2883,6 +3609,10 @@ async fn create_starrocks_engine(
             catalog_role_id: role_id,
         })
         .await?;
+    let mut undo = CreateUndo {
+        client_id: Some(client.id),
+        ..CreateUndo::default()
+    };
 
     let namespace = DEFAULT_NAMESPACE.to_string();
     // Stored spec (identical builder create and update share). The delegation
@@ -2917,10 +3647,11 @@ async fn create_starrocks_engine(
     {
         Ok(e) => e,
         Err(e) => {
-            let _ = st.catalog.revoke_client(client.id).await;
+            compensate_failed_create(&st, undo).await;
             return Err(e.into());
         }
     };
+    undo.engine_id = Some(engine.id);
 
     // Step 2: record the PRIMARY catalog row — same shape/kind Trino's
     // auto-wire uses (`egret-warehouse`), so `delete_engine`/list/detail/
@@ -2946,8 +3677,7 @@ async fn create_starrocks_engine(
         )
         .await
     {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await; // CASCADE removes the catalog
-        let _ = st.catalog.revoke_client(client.id).await;
+        compensate_failed_create(&st, undo).await;
         return Err(e.into());
     }
 
@@ -2982,21 +3712,18 @@ async fn create_starrocks_engine(
     // `StarRocksConfig.root_password` (which Task 2's provisioner applies via
     // initpwd). Legacy engines (no `root_secret_id`) stay passwordless.
     if let Err(e) = ensure_root_password_secret(&st, &engine).await {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.catalog.revoke_client(client.id).await;
+        compensate_failed_create(&st, undo).await;
         return Err(e);
     }
 
     let engine = match st.engine_mgmt.get_engine(engine.id).await {
         Ok(Some(e)) => e,
         Ok(None) => {
-            let _ = st.engine_mgmt.delete_engine(engine.id).await;
-            let _ = st.catalog.revoke_client(client.id).await;
+            compensate_failed_create(&st, undo).await;
             return Err(CpError::NotFound);
         }
         Err(e) => {
-            let _ = st.engine_mgmt.delete_engine(engine.id).await;
-            let _ = st.catalog.revoke_client(client.id).await;
+            compensate_failed_create(&st, undo).await;
             return Err(e.into());
         }
     };
@@ -3011,20 +3738,18 @@ async fn create_starrocks_engine(
     let (req, delegation_bootstrap) = match build_starrocks_provision_req(&st, &engine, &wh).await {
         Ok(v) => v,
         Err(e) => {
-            let _ = st.engine_mgmt.delete_engine(engine.id).await;
-            let _ = st.catalog.revoke_client(client.id).await;
+            compensate_failed_create(&st, undo).await;
             return Err(e);
         }
     };
 
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.catalog.revoke_client(client.id).await;
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
-    };
+    undo.cluster = Some((
+        engine.r#type.clone(),
+        engine.namespace.clone(),
+        engine.name.clone(),
+    ));
     if let Err(msg) = prov.provision(&req).await {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.catalog.revoke_client(client.id).await;
+        compensate_failed_create(&st, undo).await;
         return Err(CpError::BadRequest(format!(
             "engine provisioning failed: {msg}"
         )));
@@ -3044,6 +3769,8 @@ async fn create_starrocks_engine(
     let root_password = req.starrocks.as_ref().and_then(|s| s.root_password.clone());
     spawn_starrocks_catalog_wire(
         prov.clone(),
+        st.engine_mgmt.clone(),
+        engine.id,
         engine.namespace.clone(),
         engine.name.clone(),
         st.engine_egret_url.clone(),
@@ -3340,9 +4067,87 @@ struct StarRocksDelegationBootstrap {
 /// (`<name>-fe-service.<namespace>.svc`) is the kube-starrocks operator's
 /// documented convention; UNVERIFIED against a live operator install as of
 /// this change (flagged for the Task 8 / S3-T4 live smoke — see plan doc).
+/// Returns the spawned task's `JoinHandle` purely so a test can `.await` it
+/// for a deterministic "the bootstrap has finished" signal instead of a
+/// guessed sleep (P7's `bootstrap_stops_before_any_provisioner_call_when_*`
+/// test does this); both production call sites ignore it.
+/// Whether a background StarRocks bootstrap may still write to the engine it
+/// was spawned for: the row must still exist under the same id and name and
+/// not be on its way out (`DELETING`) or already given up on (`FAILED` —
+/// Task 12's compensation may not have been able to remove it, and its
+/// cluster objects may already be gone). A delete, a delete plus same-name
+/// re-create (new id), or a status flip to `DELETING`/`FAILED` all stop the
+/// bootstrap instead of running DDL against a cluster it no longer owns.
+fn bootstrap_target_is_current(found: Option<&Engine>, engine_name: &str) -> bool {
+    matches!(found, Some(e) if e.name == engine_name
+        && e.status != crate::engine_status::DELETING
+        && e.status != crate::engine_status::FAILED)
+}
+
+/// How many consecutive `get_engine` read failures [`engine_still_current`]
+/// tolerates before it gives up on the bootstrap. A single blip must not
+/// permanently abandon a healthy bootstrap that checks in up to ~60 times
+/// over its ~10-minute budget (30 FE-ready polls + 30 root-login polls, each
+/// a checkpoint) — but a store that is genuinely unreachable must not spin
+/// the task forever either. 5 is chosen so a handful of back-to-back
+/// failures (more than one bad connection acquisition in a row, fewer than a
+/// whole poll cycle) is what it takes to conclude the store, not the
+/// network, is the problem.
+const MAX_CONSECUTIVE_ENGINE_READ_ERRORS: u32 = 5;
+
+/// Re-read the engine and apply [`bootstrap_target_is_current`]. A DEFINITE
+/// answer — the row is gone, renamed, deleting or failed — stops the
+/// bootstrap immediately. A `get_engine` READ ERROR does NOT: it is
+/// tolerated (logged at `warn`, this checkpoint treated as "still current")
+/// like the existing tolerant cluster-poll arms elsewhere in
+/// `spawn_starrocks_catalog_wire`, unless it has now failed
+/// [`MAX_CONSECUTIVE_ENGINE_READ_ERRORS`] times in a row, at which point it
+/// also stops — an endless loop against a truly dead store must still end.
+/// `consecutive_read_errors` is owned by the caller: one counter per spawned
+/// bootstrap, threaded through every checkpoint, so only BACK-TO-BACK
+/// failures count — any successful read (whatever verdict it carries)
+/// resets it to 0.
+async fn engine_still_current(
+    store: &crate::EngineMgmtStore,
+    engine_id: Uuid,
+    engine_name: &str,
+    consecutive_read_errors: &mut u32,
+) -> bool {
+    let current = match store.get_engine(engine_id).await {
+        Ok(found) => {
+            *consecutive_read_errors = 0;
+            bootstrap_target_is_current(found.as_ref(), engine_name)
+        }
+        Err(e) => {
+            *consecutive_read_errors += 1;
+            if *consecutive_read_errors >= MAX_CONSECUTIVE_ENGINE_READ_ERRORS {
+                tracing::warn!(engine = %engine_name, error = %e,
+                    consecutive_errors = *consecutive_read_errors,
+                    "starrocks bootstrap: could not re-read the engine after \
+                     several consecutive attempts; stopping");
+                false
+            } else {
+                tracing::warn!(engine = %engine_name, error = %e,
+                    consecutive_errors = *consecutive_read_errors,
+                    "starrocks bootstrap: could not re-read the engine; \
+                     tolerating and retrying at the next checkpoint");
+                true
+            }
+        }
+    };
+    if !current {
+        tracing::info!(engine = %engine_name, %engine_id,
+            "starrocks bootstrap: engine deleted, re-created, failed, deleting, \
+             or unreachable too many times in a row; stopping");
+    }
+    current
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_starrocks_catalog_wire(
     prov: Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
+    store: crate::EngineMgmtStore,
+    engine_id: Uuid,
     namespace: String,
     engine_name: String,
     egret_url: String,
@@ -3351,12 +4156,26 @@ fn spawn_starrocks_catalog_wire(
     client_secret: String,
     root_password: Option<String>,
     delegation: Option<StarRocksDelegationBootstrap>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         const MAX_POLLS: u32 = 30;
         const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+        // One counter for the whole bootstrap, threaded through every
+        // `engine_still_current` checkpoint: see
+        // `MAX_CONSECUTIVE_ENGINE_READ_ERRORS`.
+        let mut consecutive_read_errors: u32 = 0;
         let mut fe_ready = false;
         for _ in 0..MAX_POLLS {
+            if !engine_still_current(
+                &store,
+                engine_id,
+                &engine_name,
+                &mut consecutive_read_errors,
+            )
+            .await
+            {
+                return;
+            }
             match prov.status("starrocks", &namespace, &engine_name).await {
                 Ok(s) => {
                     if s.pods.iter().any(|p| p.name.contains("-fe-") && p.ready) {
@@ -3389,6 +4208,16 @@ fn spawn_starrocks_catalog_wire(
         // DDL below runs only once initpwd has won. Bounded like the pod poll.
         let mut auth_ready = false;
         for _ in 0..MAX_POLLS {
+            if !engine_still_current(
+                &store,
+                engine_id,
+                &engine_name,
+                &mut consecutive_read_errors,
+            )
+            .await
+            {
+                return;
+            }
             match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, "SELECT 1", root_pw, None)
                 .await
             {
@@ -3410,6 +4239,16 @@ fn spawn_starrocks_catalog_wire(
             return;
         }
 
+        if !engine_still_current(
+            &store,
+            engine_id,
+            &engine_name,
+            &mut consecutive_read_errors,
+        )
+        .await
+        {
+            return;
+        }
         // The OAuth2 credential is the SAME `client_id:client_secret` the Trino
         // path stores (see `build_catalog_req`'s egret-warehouse arm); StarRocks
         // exchanges it for an access token itself and refreshes on expiry.
@@ -3447,6 +4286,16 @@ fn spawn_starrocks_catalog_wire(
             // StarRocks has no `CREATE … IF NOT EXISTS` for this object (measured:
             // it is a syntax error, as is `DROP … IF EXISTS`), so converging from
             // either starting state takes two statements, not one.
+            if !engine_still_current(
+                &store,
+                engine_id,
+                &engine_name,
+                &mut consecutive_read_errors,
+            )
+            .await
+            {
+                return;
+            }
             let create_integration = stmts.remove(0);
             match run_starrocks_ddl(
                 &fe_host,
@@ -3459,6 +4308,16 @@ fn spawn_starrocks_catalog_wire(
             {
                 Ok(()) => {}
                 Err(e) if sr_already_exists(&e) => {
+                    if !engine_still_current(
+                        &store,
+                        engine_id,
+                        &engine_name,
+                        &mut consecutive_read_errors,
+                    )
+                    .await
+                    {
+                        return;
+                    }
                     let repair =
                         starrocks_jwt_integration_repair_sql(&d.jwks_url, &d.issuer, &d.audience);
                     match run_starrocks_ddl(
@@ -3489,6 +4348,16 @@ fn spawn_starrocks_catalog_wire(
             }
 
             for stmt in &stmts {
+                if !engine_still_current(
+                    &store,
+                    engine_id,
+                    &engine_name,
+                    &mut consecutive_read_errors,
+                )
+                .await
+                {
+                    return;
+                }
                 if let Err(e) = run_starrocks_ddl(
                     &fe_host,
                     STARROCKS_FE_MYSQL_PORT,
@@ -3508,7 +4377,7 @@ fn spawn_starrocks_catalog_wire(
                     "starrocks delegation bootstrap: JWT integration + impersonation user wired");
             }
         }
-    });
+    })
 }
 
 #[utoipa::path(
@@ -3530,14 +4399,14 @@ async fn get_engine(
     Path(id): Path<Uuid>,
 ) -> Result<Json<EngineDetailDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
-    let engine = st
+    let mut engine = st
         .engine_mgmt
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
     // A `deleting` row is the retry state of an unfinished delete; the live
     // status of a half-deleted cluster would hide it, so it wins.
-    let status = if engine.status == ENGINE_STATUS_DELETING {
+    let status = if engine.status == crate::engine_status::DELETING {
         EngineStatusDto {
             phase: engine.status.clone(),
             message: Some("a previous delete did not finish; retry the delete".into()),
@@ -3549,19 +4418,41 @@ async fn get_engine(
                 .status(&engine.r#type, &engine.namespace, &engine.name)
                 .await
             {
-                Ok(s) => EngineStatusDto {
-                    phase: s.phase,
-                    message: s.message,
-                    pods: s
-                        .pods
-                        .into_iter()
-                        .map(|p| EnginePodDto {
-                            name: p.name,
-                            phase: p.phase,
-                            ready: p.ready,
-                        })
-                        .collect(),
-                },
+                Ok(s) => {
+                    // Record the first all-pods-ready observation. Conditional on the
+                    // row still being `provisioning`, so `deleting`/`failed` stay put.
+                    if s.phase == crate::engine_status::RUNNING
+                        && engine.status == crate::engine_status::PROVISIONING
+                    {
+                        match st
+                            .engine_mgmt
+                            .transition_engine_status(
+                                engine.id,
+                                crate::engine_status::PROVISIONING,
+                                crate::engine_status::RUNNING,
+                            )
+                            .await
+                        {
+                            Ok(true) => engine.status = crate::engine_status::RUNNING.to_string(),
+                            Ok(false) => {}
+                            Err(e) => tracing::warn!(engine = %engine.name, error = %e,
+                                "could not record running status"),
+                        }
+                    }
+                    EngineStatusDto {
+                        phase: s.phase,
+                        message: s.message,
+                        pods: s
+                            .pods
+                            .into_iter()
+                            .map(|p| EnginePodDto {
+                                name: p.name,
+                                phase: p.phase,
+                                ready: p.ready,
+                            })
+                            .collect(),
+                    }
+                }
                 // A live-status read failure shouldn't hide the engine; fall back to
                 // the recorded row status with the error as a message.
                 Err(msg) => EngineStatusDto {
@@ -3583,6 +4474,84 @@ async fn get_engine(
     }))
 }
 
+/// Carry the stored Trino `delegationMode` into a new spec whose `trinoConfig`
+/// omits it. An absent key reads back as `impersonate`
+/// (`store::Engine::delegation_mode`), so dropping it would silently change the
+/// engine's delegation mode.
+fn preserve_trino_delegation_mode(spec: &mut serde_json::Value, stored: &serde_json::Value) {
+    let Some(mode) = stored
+        .get("trinoConfig")
+        .and_then(|t| t.get("delegationMode"))
+        .cloned()
+    else {
+        return;
+    };
+    if let Some(tc) = spec.get_mut("trinoConfig").and_then(|t| t.as_object_mut()) {
+        tc.entry("delegationMode").or_insert(mode);
+    }
+}
+
+/// Put back the spec an update persisted before its build or apply failed.
+/// `update_engine` never writes `status` (see its doc comment), so there is no
+/// status to restore — only the spec. Logged, not returned: the caller is
+/// already returning that failure.
+///
+/// The restore is gated the same way the original write was:
+/// `expect_status` is the status observed right before that write (and so
+/// still the row's status if nothing else has touched it since). If the row
+/// has since moved to a different status — typically a concurrent delete —
+/// the restore matches zero rows and is a no-op; that is logged as an error
+/// (not a warning), since the caller's 502 and its OpenAPI description both
+/// promise the previous spec was restored, and here it was not.
+///
+/// This restores the STORED SPEC only. A pair of internal secrets `apply_built`
+/// may have committed on the failed apply attempt (Task 7's
+/// `commit_internal_secrets`, called unconditionally on both the success and
+/// failure path) is NOT rolled back here, by design: the cluster's live
+/// Secret/ConfigMap may already carry the fresh pair even though the apply as a
+/// whole failed on a later object, and deleting the committed pair in that case
+/// would strand the running pods on a value no longer on record. See
+/// `apply_built`'s doc comment for the full argument.
+async fn restore_engine_spec(
+    st: &CpState,
+    id: Uuid,
+    spec: &serde_json::Value,
+    expect_status: &str,
+) {
+    match st.engine_mgmt.update_engine(id, spec, expect_status).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::error!(
+                engine_id = %id,
+                expect_status,
+                "could not restore the engine spec after a failed update: the row's status \
+                 changed before the restore could run (likely a concurrent delete); \
+                 the stored spec is ahead of the cluster"
+            );
+        }
+        Err(e) => {
+            tracing::error!(engine_id = %id, expect_status, error = %e,
+                "could not restore the engine spec after a failed update; \
+                 the stored spec is ahead of the cluster");
+        }
+    }
+}
+
+/// Re-materialize every workspace assigned to `engine_id`, shared by both
+/// update paths so they can't drift on the mapping. The CR was already
+/// applied by the time this runs, so a failure here must surface loudly
+/// (400) rather than silently leave stale connection options behind.
+async fn rematerialize_or_400(st: &CpState, engine_id: Uuid) -> Result<(), CpError> {
+    st.assignment
+        .rematerialize_for_engine(engine_id)
+        .await
+        .map_err(|e| {
+            CpError::BadRequest(format!(
+                "engine updated but re-materializing workspace connections failed: {e}"
+            ))
+        })
+}
+
 #[utoipa::path(
     put,
     path = "/api/control-plane/engines/{id}",
@@ -3591,10 +4560,12 @@ async fn get_engine(
     request_body = CreateEngineBody,
     responses(
         (status = 200, description = "Engine spec updated and pods rolled", body = EngineDto),
-        (status = 400, description = "Invalid config or engine update failed", body = ErrorBody),
+        (status = 400, description = "Invalid config, Kubernetes not configured, or re-materializing workspace connections failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
+        (status = 502, description = "Kubernetes rejected the update; the previous spec was restored", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -3621,6 +4592,25 @@ async fn update_engine(
             "update not supported for this engine kind".into(),
         ));
     }
+    update_trino_engine(st, engine, b).await
+}
+
+/// Trino update path, split out from [`update_engine`] (which only does the
+/// auth check, the fetch, and the type dispatch) so it takes the `Engine` it
+/// was dispatched with directly — the same shape [`update_starrocks_engine`]
+/// already has — and can be driven in a test with a snapshot read before a
+/// simulated concurrent change, without needing true task interleaving.
+async fn update_trino_engine(
+    st: CpState,
+    engine: Engine,
+    b: CreateEngineBody,
+) -> Result<Json<EngineDto>, CpError> {
+    let id = engine.id;
+    // An update is only meaningful if it can be applied: refuse BEFORE
+    // persisting, so the stored spec never runs ahead of the cluster.
+    let Some(prov) = st.engine_provisioner.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
 
     // Rebuild the spec from the body + config. The primary Catalog Client is NOT
     // re-minted (its credential lives on the primary catalog row), so nothing is
@@ -3643,6 +4633,7 @@ async fn update_engine(
     } else if let Some(tc) = engine.spec.get("trinoConfig") {
         spec["trinoConfig"] = tc.clone();
     }
+    preserve_trino_delegation_mode(&mut spec, &engine.spec);
     validate_spec_resource_groups(&spec)?;
     // Validate an optional ingress-TLS secret reference (400 on a missing /
     // non-TLS / incomplete secret) before persisting, mirroring create.
@@ -3660,22 +4651,59 @@ async fn update_engine(
     {
         resolve_dockerconfigjson_secret(&st, ref_id).await?;
     }
-    st.engine_mgmt
-        .update_engine(id, &spec, &engine.status)
-        .await?;
+
+    // Snapshot what is stored so a failed build or apply can put it back — the
+    // same contract `update_catalog` keeps for a catalog row.
+    let snapshot_spec = engine.spec.clone();
+    let expected_status = engine.status.clone();
+    // Compare-and-set on the status just read. A miss means the row changed
+    // since (typically a concurrent delete) — stop here, BEFORE the
+    // provisioner is touched at all, so a lost race can never re-create the
+    // CR of an engine whose row is already gone (the orphaned-cluster class
+    // this programme closes).
+    if !st
+        .engine_mgmt
+        .update_engine(id, &spec, &expected_status)
+        .await?
+    {
+        return Err(CpError::Conflict(
+            "engine changed while the update was being applied; retry".into(),
+        ));
+    }
+    let engine = match st.engine_mgmt.get_engine(id).await {
+        Ok(Some(e)) => e,
+        Ok(None) => return Err(CpError::NotFound),
+        Err(e) => {
+            restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
+            return Err(e.into());
+        }
+    };
+    let built = match build_provision_req(&st, &engine).await {
+        Ok(built) => built,
+        Err(e) => {
+            restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
+            return Err(e);
+        }
+    };
+    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
+        restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
+        return Err(match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
+        });
+    }
+
+    // Re-materialize every assigned workspace's connection so a delegation-mode
+    // or TLS change reaches the query path — as `update_starrocks_engine` does,
+    // and unconditionally for the same reason: a retried PUT must heal a
+    // previous partial re-materialization, which a diff against the
+    // already-persisted spec cannot see. Idempotent and cheap when unchanged.
+    rematerialize_or_400(&st, id).await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-
-    let req = build_provision_req(&st, &engine).await?;
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
-    };
-    if let Err(msg) = prov.update(&req).await {
-        return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
-    }
     Ok(Json(engine.into()))
 }
 
@@ -3743,30 +4771,53 @@ async fn update_starrocks_engine(
     // match-miss only costs an idempotent no-op re-bootstrap. This gates ONLY the
     // FE re-bootstrap — re-materialization runs unconditionally below.
     let deleg_changed = old_delegation != sr_delegation_block(&spec);
-    st.engine_mgmt
-        .update_engine(engine.id, &spec, &engine.status)
-        .await?;
-    let engine = st
-        .engine_mgmt
-        .get_engine(engine.id)
-        .await?
-        .ok_or(CpError::NotFound)?;
-
+    // Refuse BEFORE persisting when nothing can apply the update.
+    let Some(prov) = st.engine_provisioner.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
     // Re-resolve the warehouse (same resolver create uses) so the FE/CN builtin
-    // storage volume is fed the SAME S3 coords, and grab the delegation bootstrap
-    // (unused today, consumed by the later delegation-change task).
+    // storage volume is fed the SAME S3 coords. It does not depend on the new
+    // spec, so resolve it before persisting too.
     let wh = st
         .catalog
         .get_warehouse(engine.warehouse_id)
         .await?
         .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
-    let (req, bootstrap) = build_starrocks_provision_req(&st, &engine, &wh).await?;
 
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    // Snapshot for restore on a failed build or apply (see `update_engine`).
+    let snapshot_spec = engine.spec.clone();
+    let expected_status = engine.status.clone();
+    let engine_id = engine.id;
+    // Compare-and-set on the status just read. A miss means the row changed
+    // since (typically a concurrent delete) — stop here, BEFORE the
+    // provisioner is touched at all (see `update_engine`'s matching guard).
+    if !st
+        .engine_mgmt
+        .update_engine(engine_id, &spec, &expected_status)
+        .await?
+    {
+        return Err(CpError::Conflict(
+            "engine changed while the update was being applied; retry".into(),
+        ));
+    }
+    let engine = match st.engine_mgmt.get_engine(engine_id).await {
+        Ok(Some(e)) => e,
+        Ok(None) => return Err(CpError::NotFound),
+        Err(e) => {
+            restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
+            return Err(e.into());
+        }
+    };
+    let (req, bootstrap) = match build_starrocks_provision_req(&st, &engine, &wh).await {
+        Ok(v) => v,
+        Err(e) => {
+            restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
+            return Err(e);
+        }
     };
     if let Err(msg) = prov.update(&req).await {
-        return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
+        restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
+        return Err(CpError::ClusterApplyFailed(msg));
     }
 
     // Two follow-up steps, deliberately DECOUPLED so a partial failure converges
@@ -3803,6 +4854,8 @@ async fn update_starrocks_engine(
                         req.starrocks.as_ref().and_then(|s| s.root_password.clone());
                     spawn_starrocks_catalog_wire(
                         prov.clone(),
+                        st.engine_mgmt.clone(),
+                        engine.id,
                         engine.namespace.clone(),
                         engine.name.clone(),
                         st.engine_egret_url.clone(),
@@ -3823,17 +4876,8 @@ async fn update_starrocks_engine(
             }
         }
     }
-    // (b) Re-materialize the per-workspace connections unconditionally. The CR
-    // was already updated, so a failure here must surface loudly (400) rather
-    // than silently leave stale connection options behind.
-    st.assignment
-        .rematerialize_for_engine(engine.id)
-        .await
-        .map_err(|e| {
-            CpError::BadRequest(format!(
-                "engine updated but re-materializing workspace connections failed: {e}"
-            ))
-        })?;
+    // (b) Re-materialize the per-workspace connections unconditionally.
+    rematerialize_or_400(&st, engine.id).await?;
     Ok(Json(engine.into()))
 }
 
@@ -3910,7 +4954,7 @@ async fn delete_engine(
 
     // 3. Visible, retryable state for everything below that can fail.
     st.engine_mgmt
-        .set_engine_status(id, ENGINE_STATUS_DELETING)
+        .set_engine_status(id, crate::engine_status::DELETING)
         .await?;
 
     // 4. The cluster. A 404 is already success inside the provisioners.
@@ -3956,21 +5000,51 @@ async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, cats: &[EngineCat
             tracing::warn!(engine = %engine.name, client = %cid, error = %e, "revoke engine catalog client failed");
         }
     }
-    // Secrets egret generated for this engine. `tls_cert_secret_ref` is an
-    // admin-provided secret and is deliberately not here.
-    for sid in [
-        engine.delegator_secret_id,
-        engine.root_secret_id,
-        engine.tls_secret_id,
-    ]
-    .into_iter()
-    .flatten()
-    {
+    // Secrets egret generated for this engine — the same ownership list create
+    // compensation uses (Task 12's `engine_owned_secret_ids`). This already
+    // covers `internal_secret_id`/`monitor_secret_id` (Task 6). Never
+    // `tls_cert_secret_ref`: admin-provided and possibly shared with other
+    // engines.
+    for sid in engine_owned_secret_ids(engine) {
         match st.secrets.delete(None, sid).await {
             Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
             Err(e) => {
                 tracing::warn!(engine = %engine.name, secret = %sid, error = %e, "delete engine secret failed")
             }
+        }
+    }
+    // Orphan generations a failed rotation leaves behind. `commit_internal_secrets`
+    // mints a fresh `engine-internal-{id}-{generation}` / `engine-monitor-{id}-
+    // {generation}` pair on every rotation; when the apply that carried it never
+    // reaches the cluster (`Supersede::Keep`), or the compare-and-set that would
+    // record it on the row loses a race, that pair's rows are never referenced by
+    // anything and nothing sweeps them — see that function's doc comment for why
+    // no earlier point is safe to do so (a concurrent apply on this engine could
+    // still be relying on them). Sweeping by a prefix of the engine's id is safe
+    // HERE and ONLY here: the engine row is already gone and its delete already
+    // went through `deleting`, so no apply for this engine id can still be in
+    // flight to race this sweep.
+    let internal_prefix = format!("engine-internal-{}-", engine.id);
+    let monitor_prefix = format!("engine-monitor-{}-", engine.id);
+    match st.secrets.list(None).await {
+        Ok(all) => {
+            for meta in all {
+                if !meta.name.starts_with(&internal_prefix)
+                    && !meta.name.starts_with(&monitor_prefix)
+                {
+                    continue;
+                }
+                match st.secrets.delete(None, meta.id).await {
+                    Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
+                    Err(e) => {
+                        tracing::warn!(engine = %engine.name, secret = %meta.id, error = %e,
+                            "delete orphaned engine secret generation failed")
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(engine = %engine.name, error = %e, "list secrets for orphan generation sweep failed")
         }
     }
 }
@@ -4024,6 +5098,79 @@ async fn restart_engine(
         .await
         .map_err(|e| CpError::BadRequest(format!("engine restart failed: {e}")))?;
     Ok(StatusCode::OK)
+}
+
+/// `POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication
+/// secret and `egret-monitor` password and re-apply the engine (pods roll). The
+/// new pair is recorded on the row even if the apply fails — the cluster may
+/// already have received it — so a failed rotation's pair is kept resolvable,
+/// never deleted, alongside whatever it superseded. A later successful
+/// rotation deletes only the ONE pair its own apply superseded; anything
+/// further back (left by an earlier failed rotation, or by a losing
+/// concurrent apply) stays orphaned but resolvable until the engine itself is
+/// deleted — a wider sweep here could destroy a pair a DIFFERENT, still
+/// in-flight apply on this engine just minted, which is the one thing this
+/// route must never do.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/engines/{id}/rotate-secrets",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 204, description = "New internal secrets applied; the engine's pods restart"),
+        (status = 400, description = "Not a Trino engine, or Kubernetes not configured", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
+        (status = 502, description = "Kubernetes rejected the apply; the engine row now names the new secret pair (the cluster may already hold it), and the previous pair is kept — not deleted — until a later successful apply supersedes it", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn rotate_engine_secrets(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    // A concurrent DELETE already marked the row and may have torn the cluster
+    // down; 409 the common case here, before doing any work, rather than only
+    // catching it in `apply_built`'s re-read right before the provisioner call.
+    if engine.status == crate::engine_status::DELETING {
+        return Err(apply_conflict());
+    }
+    // Only Trino has these two secrets; StarRocks' analogues (root and
+    // delegator passwords) are separate and not rotated here.
+    if engine.r#type != "trino" {
+        return Err(CpError::BadRequest(format!(
+            "rotating internal secrets is not supported for {} engines",
+            engine.r#type
+        )));
+    }
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    let built = build_provision_req_with(
+        &st,
+        &engine,
+        BuildOpts {
+            rotate_internal_secrets: true,
+            ..BuildOpts::default()
+        },
+    )
+    .await?;
+    apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update)
+        .await
+        .map_err(|e| match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
+        })?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ── engine ↔ workspace assignment ────────────────────────────────────────────────
@@ -4339,6 +5486,7 @@ async fn list_catalogs(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:create permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -4354,6 +5502,12 @@ async fn add_catalog(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    // A concurrent DELETE already marked the row and may have torn the cluster
+    // down; 409 the common case here, before minting a client or a Ranger
+    // profile, rather than only catching it in `apply_built`'s re-read.
+    if engine.status == crate::engine_status::DELETING {
+        return Err(apply_conflict());
+    }
     // The stored `kind` IS the Trino connector name (or `egret-warehouse`); the
     // control-plane no longer gates on a fixed enum — any non-blank kind is a
     // valid connector. The frontend's own catalog-kind list (a UX hint, not a
@@ -4476,20 +5630,25 @@ async fn add_catalog(
             let _ = st.catalog.revoke_client(cid).await;
         }
     };
-    let req = match build_provision_req(&st, &engine).await {
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        rollback(st.clone(), cat.id, minted_client).await;
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    let built = match build_provision_req(&st, &engine).await {
         Ok(r) => r,
         Err(e) => {
             rollback(st.clone(), cat.id, minted_client).await;
             return Err(e);
         }
     };
-    let Some(prov) = st.engine_provisioner.as_ref() else {
+    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
         rollback(st.clone(), cat.id, minted_client).await;
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
-    };
-    if let Err(msg) = prov.update(&req).await {
-        rollback(st.clone(), cat.id, minted_client).await;
-        return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
+        return Err(match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::Failed(msg) => {
+                CpError::BadRequest(format!("engine update failed: {msg}"))
+            }
+        });
     }
 
     Ok((StatusCode::CREATED, Json(cat.into())))
@@ -4536,7 +5695,7 @@ async fn get_catalog(
         kind: cat.kind.clone(),
         is_primary: cat.is_primary,
         secret_ref: cat.secret_ref,
-        config: redact_catalog_config(&cat.kind, cat.config.clone()),
+        config: redact_catalog_config(cat.config.clone()),
     }))
 }
 
@@ -4708,11 +5867,12 @@ async fn test_catalog(
         ("cid" = Uuid, Path, description = "Catalog id"),
     ),
     responses(
-        (status = 200, description = "Catalog removed and engine re-provisioned"),
-        (status = 400, description = "Cannot delete the primary catalog or engine update failed", body = ErrorBody),
+        (status = 200, description = "Catalog removed from the cluster, then its row deleted and its minted client revoked"),
+        (status = 400, description = "Cannot delete the primary catalog, Kubernetes not configured, or the engine update failed (the catalog is kept)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:delete permission", body = ErrorBody),
         (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -4741,24 +5901,47 @@ async fn remove_catalog(
             "cannot delete the primary catalog".into(),
         ));
     }
-    st.engine_mgmt.delete_engine_catalog(cat.id).await?;
-    // Best-effort: retire a minted Catalog Client (egret-warehouse catalogs).
-    // Gated on `mintedClient` so a client we did NOT mint (config explicitly
-    // sets `mintedClient: false`) is never revoked out from under its owner.
-    // `add_catalog` always mints its own client today (even when inheriting an
-    // existing client's role via `config.clientId`), so this is always `true`
-    // in practice — the guard exists for forward-compat with a future
-    // "adopt an existing client verbatim" path.
-    if let Some(clientid) = client_row_id(&cat.config) {
-        if is_minted_client(&cat.config) {
-            let _ = st.catalog.revoke_client(clientid).await;
-        }
+    // A concurrent DELETE already marked the row and may have torn the cluster
+    // down; 409 the common case here, rather than only catching it in
+    // `apply_built`'s re-read right before the provisioner call.
+    if engine.status == crate::engine_status::DELETING {
+        return Err(apply_conflict());
     }
-    // Re-render + roll.
-    let req = build_provision_req(&st, &engine).await?;
-    if let Some(prov) = st.engine_provisioner.as_ref() {
-        if let Err(msg) = prov.update(&req).await {
-            return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    // Drop the catalog from the cluster FIRST. Only once Kubernetes accepted
+    // the spec without it are the row deleted and the credential revoked, so a
+    // failure leaves row, client and running catalog consistent — and a retry
+    // still has a row to act on.
+    let built = build_provision_req_with(
+        &st,
+        &engine,
+        BuildOpts {
+            exclude_catalog: Some(cat.id),
+            ..BuildOpts::default()
+        },
+    )
+    .await?;
+    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
+        return Err(match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::Failed(msg) => {
+                CpError::BadRequest(format!("engine update failed: {msg}"))
+            }
+        });
+    }
+    st.engine_mgmt.delete_engine_catalog(cat.id).await?;
+    // Retire a minted Catalog Client (egret-warehouse catalogs). Gated on
+    // `mintedClient` so a client we did NOT mint is never revoked out from
+    // under its owner. The cluster no longer uses it, so a failed revoke is
+    // logged rather than failing a removal that already happened.
+    if let Some(client_id) = client_row_id(&cat.config) {
+        if is_minted_client(&cat.config) {
+            if let Err(e) = st.catalog.revoke_client(client_id).await {
+                tracing::warn!(engine = %engine.name, %client_id, error = ?e,
+                    "catalog removed but its minted client could not be revoked");
+            }
         }
     }
     Ok(StatusCode::OK)
@@ -4779,6 +5962,7 @@ async fn remove_catalog(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -4813,12 +5997,21 @@ async fn update_catalog(
             "egret-warehouse catalogs are managed and not editable".into(),
         ));
     }
+    // A concurrent DELETE already marked the row and may have torn the cluster
+    // down; 409 the common case here, before writing the new config, rather
+    // than only catching it in `apply_built`'s re-read.
+    if engine.status == crate::engine_status::DELETING {
+        return Err(apply_conflict());
+    }
 
     // Persist the new config, then re-provision. If re-provisioning fails, restore
     // the previous config/secret so the stored row never leads the running cluster.
+    // The form echoes what GET returned; keep stored values the admin left masked.
+    let mut config = b.config.clone();
+    restore_redacted_properties(&mut config, &prev.config);
     let updated = st
         .engine_mgmt
-        .update_engine_catalog(cid, &b.config, b.secret_ref)
+        .update_engine_catalog(cid, &config, b.secret_ref)
         .await?
         .ok_or(CpError::NotFound)?;
 
@@ -4829,20 +6022,25 @@ async fn update_catalog(
             .await;
     };
 
-    let req = match build_provision_req(&st, &engine).await {
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        restore(st.clone(), prev).await;
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    let built = match build_provision_req(&st, &engine).await {
         Ok(r) => r,
         Err(e) => {
             restore(st.clone(), prev).await;
             return Err(e);
         }
     };
-    let Some(prov) = st.engine_provisioner.as_ref() else {
+    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
         restore(st.clone(), prev).await;
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
-    };
-    if let Err(msg) = prov.update(&req).await {
-        restore(st.clone(), prev).await;
-        return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
+        return Err(match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::Failed(msg) => {
+                CpError::BadRequest(format!("engine update failed: {msg}"))
+            }
+        });
     }
 
     Ok(Json(updated.into()))
@@ -5248,6 +6446,7 @@ async fn bridge_exec(
         update_engine,
         delete_engine,
         restart_engine,
+        rotate_engine_secrets,
         list_engine_workspaces,
         set_engine_workspaces,
         list_workspace_engines,
@@ -5370,16 +6569,15 @@ mod tests {
     }
 
     #[test]
-    fn monitor_password_is_derived_from_id() {
+    fn legacy_monitor_password_is_derived_from_id() {
         assert_eq!(
-            monitor_password(Uuid::nil()),
+            legacy_monitor_password(Uuid::nil()),
             "egret-monitor-00000000-0000-0000-0000-000000000000"
         );
     }
 
     #[test]
     fn inject_monitor_user_adds_egret_monitor_when_auth_on() {
-        let id = Uuid::new_v4();
         // An engine WITH auth (one human password user).
         let mut auth = Some(AuthReq {
             password_users: vec![PasswordEntryReq {
@@ -5388,7 +6586,7 @@ mod tests {
             }],
             jwt: None,
         });
-        inject_monitor_user(&mut auth, id).unwrap();
+        inject_monitor_user(&mut auth, "pw-123").unwrap();
 
         let users = &auth.unwrap().password_users;
         // Both the human user AND egret-monitor are present.
@@ -5401,14 +6599,14 @@ mod tests {
         assert!(mon.bcrypt_hash.starts_with("$2y$"));
         // `bcrypt::verify` wants the `$2b$` prefix; relabel back for the check.
         let hash = mon.bcrypt_hash.replacen("$2y$", "$2b$", 1);
-        assert!(bcrypt::verify(monitor_password(id), &hash).unwrap());
+        assert!(bcrypt::verify("pw-123", &hash).unwrap());
     }
 
     #[test]
     fn inject_monitor_user_noop_when_no_auth() {
         // A no-auth engine must NOT gain an auth block (egret-monitor not forced on).
         let mut auth: Option<AuthReq> = None;
-        inject_monitor_user(&mut auth, Uuid::new_v4()).unwrap();
+        inject_monitor_user(&mut auth, "pw").unwrap();
         assert!(auth.is_none());
     }
 
@@ -5546,13 +6744,133 @@ mod tests {
             "warehouse": "wh1", "s3_endpoint": "http://minio:9000",
             "credential": "id:secret", "clientRowId": "abc"
         });
-        let out = redact_catalog_config("egret-warehouse", cfg);
+        let out = redact_catalog_config(cfg);
         assert!(out.get("credential").is_none());
         assert!(out.get("clientRowId").is_none());
         assert_eq!(out["warehouse"], "wh1");
-        // Non-warehouse kinds pass through untouched.
-        let pg = serde_json::json!({"host": "db", "user": "u"});
-        assert_eq!(redact_catalog_config("postgresql", pg.clone()), pg);
+    }
+
+    #[test]
+    fn redact_masks_inline_secrets_for_every_kind() {
+        let cfg = serde_json::json!({
+            "host": "db", "user": "u", "password": "legacy-top-level",
+            "properties": {
+                "connection-url": "jdbc:postgresql://db:5432/x",
+                "connection-user": "u",
+                "connection-password": "hunter2",
+                "iceberg.rest-catalog.oauth2.token": "t0k",
+                "s3.aws-access-key": "AKIA",
+                "s3.aws-secret-key": "shh",
+                "bigquery.credentials-key": "json",
+                "gcs.json-private.key": "pem",
+                "hive.s3.accesskey": "AKIA2",
+                "tokenless-setting": "kept? no — contains token"
+            },
+            "secretProperties": { "connection-password": "0b3f5c0e-1111-4222-8333-944455556666" }
+        });
+        let out = redact_catalog_config(cfg);
+        assert_eq!(out["password"], REDACTED_VALUE);
+        assert_eq!(out["host"], "db");
+        assert_eq!(out["user"], "u");
+        let p = &out["properties"];
+        assert_eq!(p["connection-url"], "jdbc:postgresql://db:5432/x");
+        assert_eq!(p["connection-user"], "u");
+        for k in [
+            "connection-password",
+            "iceberg.rest-catalog.oauth2.token",
+            "s3.aws-access-key",
+            "s3.aws-secret-key",
+            "bigquery.credentials-key",
+            "gcs.json-private.key",
+            "hive.s3.accesskey",
+            "tokenless-setting",
+        ] {
+            assert_eq!(p[k], REDACTED_VALUE, "{k} must be masked");
+        }
+        // secretProperties maps a property to a secret ID, not to secret
+        // material; masking it would unbind the secret on the next save.
+        assert_eq!(
+            out["secretProperties"]["connection-password"],
+            "0b3f5c0e-1111-4222-8333-944455556666"
+        );
+    }
+
+    #[test]
+    fn sensitive_key_matcher_follows_the_spec_pattern() {
+        for k in [
+            "PASSWORD",
+            "x.Secret",
+            "oauth-token",
+            "credentials",
+            "private_key",
+            "privatekey",
+            "private.key",
+            "private-key",
+            "access_key",
+            "accesskey",
+        ] {
+            assert!(is_sensitive_config_key(k), "{k} should match");
+        }
+        for k in [
+            "connection-url",
+            "user",
+            "host",
+            "private--key",
+            "keyaccess",
+            "properties",
+        ] {
+            assert!(!is_sensitive_config_key(k), "{k} should not match");
+        }
+    }
+
+    #[test]
+    fn restore_redacted_properties_puts_back_only_masked_sensitive_values() {
+        let stored = serde_json::json!({
+            "password": "old-top",
+            // Non-sensitive key that could ALSO happen to hold the literal
+            // mask string (e.g. an admin genuinely typed asterisks as a
+            // placeholder host). M2: every masked key in the old fixture was
+            // sensitive, so dropping `&& is_sensitive_config_key(k)` from
+            // `restore_level` still passed — this key pins that a
+            // non-sensitive key is never "restored" no matter what its
+            // incoming value looks like.
+            "connection-url": "jdbc:postgresql://old-host/db",
+            // `secretProperties` holds secret IDs, not sensitive-config text
+            // (`redact_catalog_config` explicitly excludes it, see its `k !=
+            // "secretProperties"` guard) — pin that restore leaves it exactly
+            // as submitted too, even though the key name itself contains
+            // "secret" and would match `is_sensitive_config_key`.
+            "secretProperties": { "connection-password": "old-secret-id" },
+            "properties": { "connection-password": "hunter2", "connection-user": "u" }
+        });
+        let mut incoming = serde_json::json!({
+            "password": REDACTED_VALUE,
+            "connection-url": REDACTED_VALUE,
+            "secretProperties": { "connection-password": REDACTED_VALUE },
+            "properties": {
+                "connection-password": REDACTED_VALUE,
+                "connection-user": "u2",
+                "api-token": REDACTED_VALUE
+            }
+        });
+        restore_redacted_properties(&mut incoming, &stored);
+        assert_eq!(incoming["password"], "old-top");
+        assert_eq!(
+            incoming["connection-url"], REDACTED_VALUE,
+            "a non-sensitive key must never be treated as a mask to restore"
+        );
+        assert_eq!(
+            incoming["secretProperties"]["connection-password"], REDACTED_VALUE,
+            "secretProperties is excluded from restore; it holds secret ids, not text"
+        );
+        assert_eq!(incoming["properties"]["connection-password"], "hunter2");
+        assert_eq!(incoming["properties"]["connection-user"], "u2");
+        // Nothing stored to restore from: the mask stays as typed.
+        assert_eq!(incoming["properties"]["api-token"], REDACTED_VALUE);
+        // A NEW value replaces the stored one.
+        let mut changed = serde_json::json!({ "properties": { "connection-password": "new" } });
+        restore_redacted_properties(&mut changed, &stored);
+        assert_eq!(changed["properties"]["connection-password"], "new");
     }
 
     // ── build_starrocks_spec: omitted-field-preserves + delegation rule ─────
@@ -5820,6 +7138,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -5930,6 +7250,209 @@ mod tests {
             .expect("get_warehouse")
             .expect("warehouse present");
         (wh, secret_plain)
+    }
+
+    /// P2: compensation deletes the engine row, every secret egret minted for it
+    /// (including pending internal secrets already recorded), and the catalog
+    /// client — and never the admin-provided coordinator TLS secret.
+    #[tokio::test]
+    async fn compensate_failed_create_removes_everything_it_minted() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping compensate_failed_create_removes_everything_it_minted: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let mut tls = std::collections::BTreeMap::new();
+        tls.insert("tls.crt".to_string(), "CERTPEM".to_string());
+        tls.insert("tls.key".to_string(), "KEYPEM".to_string());
+        let admin_tls = st
+            .secrets
+            .create_typed(
+                None,
+                &format!("company-tls-{}", Uuid::new_v4().simple()),
+                None,
+                egret_secrets::secret_type::TLS,
+                &tls,
+            )
+            .await
+            .expect("admin tls secret");
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                "egret-engines",
+                wh.id,
+                &serde_json::json!({ "trinoConfig": { "delegationMode": "impersonate", "auth": {} } }),
+                Some(admin_tls),
+            )
+            .await
+            .expect("engine row");
+        let (delegator_id, _) = ensure_delegator_secret(&st, &engine)
+            .await
+            .expect("delegator");
+        let engine = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        let internal = resolve_internal_secrets(&st, &engine, false)
+            .await
+            .expect("internal");
+        commit_internal_secrets(&st, &engine, &internal, Supersede::Keep)
+            .await
+            .expect("commit");
+        let role_id = ensure_engine_role(&st, wh.id).await.expect("role");
+        let client = st
+            .catalog
+            .create_client(NewClient {
+                name: format!("engine-{}", engine.name),
+                consumer_type: "engine".into(),
+                workspace_id: wh.workspace_id,
+                warehouse_id: wh.id,
+                catalog_role_id: role_id,
+            })
+            .await
+            .expect("client");
+
+        compensate_failed_create(
+            &st,
+            CreateUndo {
+                client_id: Some(client.id),
+                engine_id: Some(engine.id),
+                ..CreateUndo::default()
+            },
+        )
+        .await;
+
+        assert!(st
+            .engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .unwrap()
+            .is_none());
+        for id in [delegator_id, internal.internal_id, internal.monitor_id] {
+            assert!(
+                matches!(
+                    st.secrets.resolve_plaintext(None, id).await,
+                    Err(egret_secrets::SecretsError::NotFound)
+                ),
+                "secret {id} must be deleted"
+            );
+        }
+        assert!(
+            st.secrets.resolve_typed(None, admin_tls).await.is_ok(),
+            "an admin-provided TLS secret is never deleted"
+        );
+        assert!(!st
+            .catalog
+            .list_clients(wh.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.id == client.id));
+    }
+
+    #[test]
+    fn engine_owned_secret_ids_excludes_the_admin_tls_reference() {
+        let mut e = dummy_engine();
+        let ids: Vec<Uuid> = (0..6).map(|_| Uuid::new_v4()).collect();
+        e.delegator_secret_id = Some(ids[0]);
+        e.tls_secret_id = Some(ids[1]);
+        e.root_secret_id = Some(ids[2]);
+        e.internal_secret_id = Some(ids[3]);
+        e.monitor_secret_id = Some(ids[4]);
+        e.tls_cert_secret_ref = Some(ids[5]);
+        assert_eq!(engine_owned_secret_ids(&e), ids[..5].to_vec());
+    }
+
+    /// I1 fix: when the cluster delete `compensate_failed_create` itself
+    /// attempts ALSO fails, the row must be kept (marked `failed`, not
+    /// deleted) and none of its secrets removed — the apply may already have
+    /// written live cluster objects from them that this call could not clean
+    /// up, and deleting the row would strand those objects with no way back
+    /// in through the API. The create's ORIGINAL error (the injected
+    /// provisioning failure) must still be what the caller sees, not a
+    /// compensation-failure error.
+    #[tokio::test]
+    async fn create_keeps_the_row_failed_when_compensations_cluster_delete_also_fails() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping create_keeps_the_row_failed_when_compensations_cluster_delete_also_fails: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(FailingProvisionAndDeleteProvisioner));
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        // Engines only provision against a lakekeeper-backed warehouse.
+        egret_catalog_engine::CatalogStore::new(db.clone())
+            .set_lakekeeper_warehouse_id(wh.id, "lk-test")
+            .await
+            .expect("mark warehouse provisioned");
+
+        let name = format!("trino-{}", Uuid::new_v4().simple());
+        let body = CreateEngineBody {
+            name: name.clone(),
+            warehouse_id: wh.id,
+            image_version: None,
+            coordinator_replicas: 1,
+            worker_replicas: 1,
+            cpu_min: "1".into(),
+            cpu_max: "1".into(),
+            memory: "1Gi".into(),
+            // Impersonate delegation so the create also mints a delegator +
+            // TLS secret, not just the internal/monitor pair — exercises the
+            // full `engine_owned_secret_ids` set.
+            trino_config: Some(serde_json::json!({ "delegationMode": "impersonate", "auth": {} })),
+            authz_service_id: None,
+            kind: "trino".into(),
+            starrocks: None,
+            tls_cert_secret_ref: None,
+        };
+        let principal = egret_core::context::Principal {
+            user_id: egret_core::ids::UserId::new(),
+            email: "admin@egret.local".into(),
+            platform_roles: vec!["platform_admin".into()],
+            permissions: vec![],
+            group_ids: vec![],
+            impersonator: None,
+        };
+
+        let msg = match create_engine(State(st.clone()), Auth(principal), Json(body)).await {
+            Err(CpError::BadRequest(msg)) => msg,
+            Err(other) => panic!("expected BadRequest, got {other:?}"),
+            Ok(_) => panic!("expected the injected provision failure to surface"),
+        };
+        assert!(
+            msg.contains("injected provision failure"),
+            "the response must still be the create's ORIGINAL error, got: {msg}"
+        );
+
+        let engine = st
+            .engine_mgmt
+            .list_engines()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == name)
+            .expect("row kept, not deleted");
+        assert_eq!(
+            engine.status,
+            crate::engine_status::FAILED,
+            "row marked failed, not left provisioning"
+        );
+        let owned = engine_owned_secret_ids(&engine);
+        assert!(!owned.is_empty(), "delegation should have minted secrets");
+        for id in owned {
+            assert!(
+                st.secrets.resolve_typed(None, id).await.is_ok(),
+                "secret {id} must still resolve (compensation's own cluster delete failed)"
+            );
+        }
     }
 
     /// `build_starrocks_provision_req` (Task 1) rebuilds the provisioner
@@ -6061,6 +7584,91 @@ mod tests {
         }
         async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
             Ok(())
+        }
+        async fn restart(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// Like `NoopProvisioner`, but `update` fails — a Kubernetes rejection.
+    struct FailingUpdateProvisioner;
+    #[async_trait::async_trait]
+    impl egret_engine_mgmt_api::EngineProvisioningPort for FailingUpdateProvisioner {
+        async fn provision(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn status(
+            &self,
+            _kind: &str,
+            _namespace: &str,
+            _name: &str,
+        ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+            Ok(egret_engine_mgmt_api::EngineStatus::default())
+        }
+        async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Err("injected update failure".into())
+        }
+        async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn restart(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// Counts `update` calls, so a test can assert the provisioner was never
+    /// touched (e.g. a CAS miss must bail before it).
+    #[derive(Default)]
+    struct CountingProvisioner {
+        updates: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl egret_engine_mgmt_api::EngineProvisioningPort for CountingProvisioner {
+        async fn provision(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn status(
+            &self,
+            _kind: &str,
+            _namespace: &str,
+            _name: &str,
+        ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+            Ok(egret_engine_mgmt_api::EngineStatus::default())
+        }
+        async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            self.updates
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn restart(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// `provision` AND `delete` both fail — a cluster compensation can't reach
+    /// the cluster at all (I1: the compensation's OWN cluster delete fails).
+    struct FailingProvisionAndDeleteProvisioner;
+    #[async_trait::async_trait]
+    impl egret_engine_mgmt_api::EngineProvisioningPort for FailingProvisionAndDeleteProvisioner {
+        async fn provision(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Err("injected provision failure".into())
+        }
+        async fn status(
+            &self,
+            _kind: &str,
+            _namespace: &str,
+            _name: &str,
+        ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+            Ok(egret_engine_mgmt_api::EngineStatus::default())
+        }
+        async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Err("injected delete failure".into())
         }
         async fn restart(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
             Ok(())
@@ -6958,16 +8566,786 @@ mod tests {
             .expect("create engine row")
     }
 
+    #[test]
+    fn bootstrap_stops_when_the_engine_is_gone_renamed_deleting_or_failed() {
+        let mut e = dummy_engine();
+        e.name = "sr1".into();
+        e.status = crate::engine_status::RUNNING.into();
+        assert!(bootstrap_target_is_current(Some(&e), "sr1"));
+        assert!(
+            !bootstrap_target_is_current(None, "sr1"),
+            "deleted (or re-created under a new id)"
+        );
+        assert!(
+            !bootstrap_target_is_current(Some(&e), "sr2"),
+            "not the engine it was spawned for"
+        );
+        e.status = crate::engine_status::DELETING.into();
+        assert!(
+            !bootstrap_target_is_current(Some(&e), "sr1"),
+            "delete in progress"
+        );
+        e.status = crate::engine_status::FAILED.into();
+        assert!(
+            !bootstrap_target_is_current(Some(&e), "sr1"),
+            "Task 12's compensation may not have removed it; cluster objects may already be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_still_current_reads_the_row() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping engine_still_current_reads_the_row: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        let mut errors = 0u32;
+        assert!(engine_still_current(&st.engine_mgmt, engine.id, &engine.name, &mut errors).await);
+        assert_eq!(
+            errors, 0,
+            "a successful read must not touch the error counter"
+        );
+        st.engine_mgmt.delete_engine(engine.id).await.unwrap();
+        assert!(!engine_still_current(&st.engine_mgmt, engine.id, &engine.name, &mut errors).await);
+    }
+
+    /// A transient DB read failure must not permanently abandon a healthy
+    /// bootstrap (F3): fewer than [`MAX_CONSECUTIVE_ENGINE_READ_ERRORS`]
+    /// consecutive `get_engine` errors are tolerated (treated as "still
+    /// current"), the threshold-th consecutive one stops it, and a
+    /// subsequent successful read resets the counter — proven against a real
+    /// `EngineMgmtStore` whose pool has been closed, so every read
+    /// deterministically errors.
+    #[tokio::test]
+    async fn engine_still_current_tolerates_a_few_consecutive_read_errors_then_stops() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping engine_still_current_tolerates_a_few_consecutive_read_errors_then_stops: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+
+        // A store whose pool is already closed: every `get_engine` call
+        // errors deterministically, standing in for a transient DB blip
+        // without any real network flakiness in the test.
+        let broken_db = egret_metastore::Db::connect(&dsn, 1)
+            .await
+            .expect("connect (before closing)");
+        broken_db.pool.close().await;
+        let broken_store = crate::EngineMgmtStore::new(broken_db);
+
+        let mut consecutive = 0u32;
+        for i in 0..MAX_CONSECUTIVE_ENGINE_READ_ERRORS - 1 {
+            assert!(
+                engine_still_current(&broken_store, engine.id, &engine.name, &mut consecutive)
+                    .await,
+                "read error #{i} (below the threshold) must be tolerated"
+            );
+        }
+        assert_eq!(consecutive, MAX_CONSECUTIVE_ENGINE_READ_ERRORS - 1);
+
+        // The threshold-th CONSECUTIVE failure gives up.
+        assert!(
+            !engine_still_current(&broken_store, engine.id, &engine.name, &mut consecutive).await,
+            "the {MAX_CONSECUTIVE_ENGINE_READ_ERRORS}th consecutive read error must stop the bootstrap"
+        );
+
+        // A later successful read against the real store resets the
+        // counter — failures only count when back-to-back.
+        let mut consecutive2 = MAX_CONSECUTIVE_ENGINE_READ_ERRORS - 1;
+        assert!(
+            engine_still_current(&st.engine_mgmt, engine.id, &engine.name, &mut consecutive2).await,
+            "the still-current engine must read back true"
+        );
+        assert_eq!(
+            consecutive2, 0,
+            "a successful read must reset the consecutive-error counter"
+        );
+    }
+
+    /// Counts `.status()` calls — proves a checkpoint trips BEFORE the
+    /// provisioner is ever touched, rather than merely reasoning about it.
+    #[derive(Default)]
+    struct CountingStatusProvisioner {
+        status_calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl egret_engine_mgmt_api::EngineProvisioningPort for CountingStatusProvisioner {
+        async fn provision(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn status(
+            &self,
+            _kind: &str,
+            _namespace: &str,
+            _name: &str,
+        ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+            self.status_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(egret_engine_mgmt_api::EngineStatus::default())
+        }
+        async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn restart(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// F4 (Task 14 round-1 review): prove — by actually running
+    /// `spawn_starrocks_catalog_wire`, not just its helpers — that the FIRST
+    /// checkpoint stops the bootstrap before it ever calls the provisioner.
+    /// Deleting that checkpoint would make `.status()` get called at least
+    /// once; that regression would NOT be caught by the two helper-level
+    /// unit tests above it, only by driving the real spawned task.
+    ///
+    /// The remaining five checkpoints are not exercised behaviorally here:
+    /// they only run after a real FE reports ready over
+    /// `EngineProvisioningPort::status`, at which point the function starts
+    /// making real MySQL-protocol connections via `run_starrocks_ddl` to a
+    /// `<name>-fe-service.<namespace>.svc` host that doesn't exist in a unit
+    /// test sandbox — DNS resolution failing (or hanging, environment
+    /// dependent) would be what stops the test, not the guard being proven.
+    /// Making that deterministic and fast would mean threading an injectable
+    /// DDL-runner through five call sites that each have different
+    /// retry/error-handling (the plain catalog DDL, the
+    /// create-then-repair-on-`already exists` JWT integration branch, and
+    /// the loop over the remaining delegation statements) — a materially
+    /// larger refactor of an already-large function that wasn't attempted
+    /// here. `spawn_starrocks_catalog_wire_keeps_all_six_guard_checkpoints`
+    /// below is the fallback the brief allows instead: a structural
+    /// regression guard so dropping any of the six calls fails the build.
+    #[tokio::test]
+    async fn bootstrap_stops_before_any_provisioner_call_when_engine_already_gone() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping bootstrap_stops_before_any_provisioner_call_when_engine_already_gone: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        st.engine_mgmt.delete_engine(engine.id).await.unwrap();
+
+        let counting = std::sync::Arc::new(CountingStatusProvisioner::default());
+        let prov: Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort> = counting.clone();
+
+        let handle = spawn_starrocks_catalog_wire(
+            prov,
+            st.engine_mgmt.clone(),
+            engine.id,
+            "egret-engines".into(),
+            engine.name.clone(),
+            "https://egret.example".into(),
+            wh.name.clone(),
+            "client".into(),
+            "secret".into(),
+            None,
+            None,
+        );
+        handle.await.expect("bootstrap task did not panic");
+
+        assert_eq!(
+            counting
+                .status_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the engine was already deleted before spawn; the first checkpoint must stop the \
+             task before it ever calls the provisioner"
+        );
+    }
+
+    /// Regression guard for the five checkpoints
+    /// `bootstrap_stops_before_any_provisioner_call_when_engine_already_gone`
+    /// above doesn't drive (it exercises only the first) — see that test's
+    /// doc comment for why a full behavioral seam wasn't added. Fails the
+    /// build if a checkpoint call is ever added to, or removed from,
+    /// `spawn_starrocks_catalog_wire`'s body.
+    #[test]
+    fn spawn_starrocks_catalog_wire_keeps_all_six_guard_checkpoints() {
+        let src = include_str!("engines.rs");
+        let start = src
+            .find("fn spawn_starrocks_catalog_wire(")
+            .expect("function present");
+        let end = src[start..]
+            .find("\nasync fn get_engine(")
+            .map(|i| start + i)
+            .expect("next handler present, bounding the search");
+        let body = &src[start..end];
+        let count = body.matches("engine_still_current(").count();
+        assert_eq!(
+            count, 6,
+            "expected 6 `engine_still_current(...)` checkpoints inside \
+             spawn_starrocks_catalog_wire; found {count} instead — a guard was added or removed"
+        );
+    }
+
+    #[test]
+    fn preserve_trino_delegation_mode_keeps_the_stored_mode_only_when_omitted() {
+        let stored = serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } });
+        let mut omitted = serde_json::json!({ "trinoConfig": { "worker": {} } });
+        preserve_trino_delegation_mode(&mut omitted, &stored);
+        assert_eq!(omitted["trinoConfig"]["delegationMode"], "jwt");
+        let mut explicit = serde_json::json!({ "trinoConfig": { "delegationMode": "none" } });
+        preserve_trino_delegation_mode(&mut explicit, &stored);
+        assert_eq!(explicit["trinoConfig"]["delegationMode"], "none");
+        let mut from_legacy = serde_json::json!({ "trinoConfig": {} });
+        preserve_trino_delegation_mode(&mut from_legacy, &serde_json::json!({}));
+        assert!(from_legacy["trinoConfig"].get("delegationMode").is_none());
+    }
+
+    /// P3 (StarRocks): a rejected apply restores the stored spec and is a 502.
+    #[tokio::test]
+    async fn update_starrocks_engine_failure_restores_spec() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping update_starrocks_engine_failure_restores_spec: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(FailingUpdateProvisioner));
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        let body = sr_update_body(Some(StarRocksConfigBody {
+            fe_replicas: Some(3),
+            ..Default::default()
+        }));
+        let err = update_starrocks_engine(st.clone(), engine.clone(), body)
+            .await
+            .err()
+            .expect("the apply failure must surface");
+        assert!(matches!(err, CpError::ClusterApplyFailed(_)), "got {err:?}");
+        let reloaded = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.spec, engine.spec, "stored spec restored");
+    }
+
+    /// Without Kubernetes an update is refused before anything is persisted.
+    #[tokio::test]
+    async fn update_starrocks_engine_without_kubernetes_changes_nothing() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping update_starrocks_engine_without_kubernetes_changes_nothing: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        let body = sr_update_body(Some(StarRocksConfigBody {
+            fe_replicas: Some(3),
+            ..Default::default()
+        }));
+        let err = update_starrocks_engine(st.clone(), engine.clone(), body)
+            .await
+            .err()
+            .map(|e| e.to_string());
+        assert!(
+            matches!(&err, Some(m) if m.contains("kubernetes not configured")),
+            "got {err:?}"
+        );
+        let reloaded = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.spec["starrocksConfig"]["feReplicas"], 1);
+    }
+
+    /// Carried finding: `EngineMgmtStore::update_engine` must not clobber a
+    /// concurrent DELETE's `deleting` marker. Simulates a PUT that read the
+    /// engine as `provisioning` (the status seeded on it) racing a DELETE that
+    /// has since moved it to `deleting`: the stale-status write must match zero
+    /// rows, leaving BOTH the status and the spec exactly as the DELETE left
+    /// them.
+    #[tokio::test]
+    async fn update_engine_cannot_move_a_row_out_of_deleting() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping update_engine_cannot_move_a_row_out_of_deleting: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        assert_eq!(engine.status, crate::engine_status::PROVISIONING);
+
+        // Concurrent DELETE flips the row to `deleting`.
+        st.engine_mgmt
+            .set_engine_status(engine.id, crate::engine_status::DELETING)
+            .await
+            .unwrap();
+
+        // A stale PUT, still holding the pre-delete `provisioning` it read
+        // earlier, tries to persist a new spec.
+        let new_spec = serde_json::json!({ "starrocksConfig": { "feReplicas": 9 } });
+        let matched = st
+            .engine_mgmt
+            .update_engine(engine.id, &new_spec, &engine.status)
+            .await
+            .unwrap();
+        assert!(!matched, "the stale-status write must match zero rows");
+
+        let reloaded = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.status,
+            crate::engine_status::DELETING,
+            "status must not be clobbered back"
+        );
+        assert_eq!(
+            reloaded.spec, engine.spec,
+            "spec must not be overwritten either"
+        );
+    }
+
+    /// Handler-level version of the above, through `update_starrocks_engine`
+    /// itself: a PUT whose `Engine` snapshot was read before a concurrent
+    /// status change (simulated with a direct `set_engine_status` between the
+    /// seed and the call, standing in for a delete that raced the handler's own
+    /// read) must 409 BEFORE touching the provisioner at all — never build a
+    /// request or call `update`, which on a real cluster would re-create the CR
+    /// of an engine whose row is already gone.
+    #[tokio::test]
+    async fn update_starrocks_engine_conflict_stops_before_the_provisioner() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping update_starrocks_engine_conflict_stops_before_the_provisioner: DATABASE_URL not set"
+            );
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        st.engine_provisioner = Some(counting.clone());
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+
+        // Simulate a concurrent change (e.g. a delete) that landed after this
+        // handler call's `Engine` was already read.
+        st.engine_mgmt
+            .set_engine_status(engine.id, crate::engine_status::DELETING)
+            .await
+            .unwrap();
+
+        let body = sr_update_body(Some(StarRocksConfigBody {
+            fe_replicas: Some(9),
+            ..Default::default()
+        }));
+        let err = update_starrocks_engine(st.clone(), engine.clone(), body)
+            .await
+            .err()
+            .expect("a lost race must surface as an error, not a silent 200");
+        assert!(matches!(err, CpError::Conflict(_)), "got {err:?}");
+        assert!(
+            err.to_string().contains("retry"),
+            "message should tell the caller to retry; got {err}"
+        );
+
+        let reloaded = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.spec, engine.spec, "stored spec untouched");
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the provisioner must never be called on a lost race"
+        );
+    }
+
+    /// Trino counterpart of `update_starrocks_engine_conflict_stops_before_the_provisioner`
+    /// above, through `update_trino_engine` (the ordering is separately written
+    /// code for the two engine kinds, so it needs its own regression guard): a
+    /// PUT whose `Engine` snapshot was read before a concurrent status change
+    /// (simulated with a direct `set_engine_status` between the seed and the
+    /// call) must 409 BEFORE touching the provisioner at all.
+    #[tokio::test]
+    async fn update_trino_engine_conflict_stops_before_the_provisioner() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping update_trino_engine_conflict_stops_before_the_provisioner: DATABASE_URL not set"
+            );
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        st.engine_provisioner = Some(counting.clone());
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                DEFAULT_NAMESPACE,
+                wh.id,
+                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+
+        // Simulate a concurrent change (e.g. a delete) that landed after this
+        // handler call's `Engine` was already read.
+        st.engine_mgmt
+            .set_engine_status(engine.id, crate::engine_status::DELETING)
+            .await
+            .unwrap();
+
+        let body = CreateEngineBody {
+            name: engine.name.clone(),
+            warehouse_id: wh.id,
+            image_version: None,
+            coordinator_replicas: 2,
+            worker_replicas: 5,
+            cpu_min: "1".into(),
+            cpu_max: "2".into(),
+            memory: "4Gi".into(),
+            trino_config: None,
+            authz_service_id: None,
+            kind: "trino".into(),
+            starrocks: None,
+            tls_cert_secret_ref: None,
+        };
+        let err = update_trino_engine(st.clone(), engine.clone(), body)
+            .await
+            .err()
+            .expect("a lost race must surface as an error, not a silent 200");
+        assert!(matches!(err, CpError::Conflict(_)), "got {err:?}");
+        assert!(
+            err.to_string().contains("retry"),
+            "message should tell the caller to retry; got {err}"
+        );
+
+        let reloaded = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.spec, engine.spec, "stored spec untouched");
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the provisioner must never be called on a lost race"
+        );
+    }
+
+    /// Critical (SP1 Part B final review, C1) — the guard `apply_built` itself
+    /// carries. `rotate_engine_secrets`, `add_catalog`, `remove_catalog` and
+    /// `update_catalog` all fetch the engine, do real work (build a request,
+    /// sometimes mint a client), and only THEN call `apply_built`, which is
+    /// server-side apply: called on an engine a concurrent DELETE has already
+    /// torn down, it would RE-CREATE every object DELETE just removed. This
+    /// proves the re-read `apply_built` does immediately before the provisioner
+    /// call — independent of any earlier per-route check — refuses once the row
+    /// is `deleting`, never calling the provisioner. Simulated the same way the
+    /// CAS tests above simulate a race: build the request from a `provisioning`
+    /// engine snapshot, then flip the row to `deleting` (as a concurrent DELETE
+    /// would) before calling `apply_built`.
+    #[tokio::test]
+    async fn apply_built_refuses_when_the_row_is_deleting() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping apply_built_refuses_when_the_row_is_deleting: DATABASE_URL not set"
+            );
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                DEFAULT_NAMESPACE,
+                wh.id,
+                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        assert_eq!(engine.status, crate::engine_status::PROVISIONING);
+
+        let built = build_provision_req(&st, &engine)
+            .await
+            .expect("build request");
+
+        // Concurrent DELETE lands after this snapshot was read (the same
+        // interleaving the four routes are exposed to between their own
+        // `get_engine` and their `apply_built` call).
+        st.engine_mgmt
+            .set_engine_status(engine.id, crate::engine_status::DELETING)
+            .await
+            .unwrap();
+
+        let err = apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+            .await
+            .expect_err(
+                "a lost race against a delete must surface as an error, not a silent apply",
+            );
+        assert!(
+            matches!(err, ApplyBuiltError::Conflict),
+            "expected Conflict"
+        );
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the provisioner must never be called once the row is deleting"
+        );
+    }
+
+    /// N1 (round-2 review, from the C1 fix): the opposite direction of the
+    /// test above. `apply_built`'s guard must NOT demand the row still be at
+    /// the exact status the caller observed — only that it isn't gone or
+    /// `deleting`. A concurrent `GET /engines/{id}` recording
+    /// `provisioning → running` (the detail page polls it every 5 seconds) is
+    /// NOT a reason to refuse a legitimate apply landing in the same window —
+    /// reachable in the first minute of an engine's life, exactly when an
+    /// admin is likely to add a catalog. Same simulated-race shape as the test
+    /// above, but the concurrent change is `provisioning → running` instead of
+    /// a delete, and the apply must SUCCEED (provisioner called once).
+    #[tokio::test]
+    async fn apply_built_succeeds_when_the_row_merely_advanced_to_running() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping apply_built_succeeds_when_the_row_merely_advanced_to_running: DATABASE_URL not set"
+            );
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                DEFAULT_NAMESPACE,
+                wh.id,
+                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        assert_eq!(engine.status, crate::engine_status::PROVISIONING);
+
+        let built = build_provision_req(&st, &engine)
+            .await
+            .expect("build request");
+
+        // A concurrent GET /engines/{id} records the live `running` status
+        // (the same transition `get_engine`'s guard writes) in the window
+        // between this snapshot's read and the apply below.
+        st.engine_mgmt
+            .transition_engine_status(
+                engine.id,
+                crate::engine_status::PROVISIONING,
+                crate::engine_status::RUNNING,
+            )
+            .await
+            .unwrap();
+
+        apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+            .await
+            .expect("an apply must succeed when the row merely advanced to running");
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the provisioner must be called exactly once"
+        );
+    }
+
+    /// N2 (round-2 review, from the C1 fix): on the `Conflict` path
+    /// `apply_built` must discard a freshly-minted internal/monitor pair
+    /// rather than leak two unreferenced secret-store rows — nothing was
+    /// applied at that point, so nothing else can be relying on it.
+    #[tokio::test]
+    async fn apply_built_discards_a_fresh_pair_on_conflict() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping apply_built_discards_a_fresh_pair_on_conflict: DATABASE_URL not set"
+            );
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                DEFAULT_NAMESPACE,
+                wh.id,
+                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+
+        // Force a fresh pair to be minted (mirrors what `rotate_engine_secrets`
+        // asks `build_provision_req_with` for).
+        let built = build_provision_req_with(
+            &st,
+            &engine,
+            BuildOpts {
+                rotate_internal_secrets: true,
+                ..BuildOpts::default()
+            },
+        )
+        .await
+        .expect("build request");
+        let (internal_id, monitor_id) = {
+            let secrets = built.internal.as_ref().expect("a fresh pair was minted");
+            (secrets.internal_id, secrets.monitor_id)
+        };
+
+        // Concurrent DELETE lands before the apply's own re-check.
+        st.engine_mgmt
+            .set_engine_status(engine.id, crate::engine_status::DELETING)
+            .await
+            .unwrap();
+
+        apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+            .await
+            .expect_err("must refuse once the row is deleting");
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the provisioner must never be called"
+        );
+        for (label, id) in [("internal", internal_id), ("monitor", monitor_id)] {
+            assert!(
+                matches!(
+                    st.secrets.resolve_plaintext(None, id).await,
+                    Err(egret_secrets::SecretsError::NotFound)
+                ),
+                "the unapplied {label} secret must be discarded, not leaked"
+            );
+        }
+    }
+
+    /// Critical (SP1 Part B final review, C1) — handler level, the review's
+    /// suggested regression: seed an engine, mark it `deleting` directly (as a
+    /// concurrent DELETE would just before these land), then call
+    /// `rotate_engine_secrets` and `add_catalog` (one representative of the two
+    /// remaining apply routes, `remove_catalog`/`update_catalog`, which share the
+    /// same early reject). Both must 409 and the fake port must record no
+    /// update.
+    #[tokio::test]
+    async fn rotate_and_add_catalog_reject_a_deleting_engine() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping rotate_and_add_catalog_reject_a_deleting_engine: DATABASE_URL not set"
+            );
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        st.engine_provisioner = Some(counting.clone());
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                DEFAULT_NAMESPACE,
+                wh.id,
+                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+
+        // A DELETE has already moved the row before either request lands.
+        st.engine_mgmt
+            .set_engine_status(engine.id, crate::engine_status::DELETING)
+            .await
+            .unwrap();
+
+        let principal = egret_core::context::Principal {
+            user_id: egret_core::ids::UserId::new(),
+            email: "admin@egret.local".into(),
+            platform_roles: vec!["platform_admin".into()],
+            permissions: vec![],
+            group_ids: vec![],
+            impersonator: None,
+        };
+
+        let err =
+            rotate_engine_secrets(State(st.clone()), Auth(principal.clone()), Path(engine.id))
+                .await
+                .expect_err("rotate on a deleting engine must fail");
+        assert!(matches!(err, CpError::Conflict(_)), "got {err:?}");
+
+        let cat_body = AddCatalogBody {
+            name: "extra".into(),
+            kind: "postgresql".into(),
+            config: serde_json::json!({}),
+            secret_ref: None,
+        };
+        let err = add_catalog(
+            State(st.clone()),
+            Auth(principal),
+            Path(engine.id),
+            Json(cat_body),
+        )
+        .await
+        .err()
+        .expect("add_catalog on a deleting engine must fail");
+        assert!(matches!(err, CpError::Conflict(_)), "got {err:?}");
+
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the provisioner must never be called on a deleting engine"
+        );
+    }
+
     /// A PUT that bumps `feReplicas` + sets `feResources` re-persists those into
     /// the stored spec while preserving the untouched `cnReplicas`/`feImage`.
-    /// `test_state` has no k8s provisioner, so the update persists the spec then
-    /// fails at the provision step — the DB-visible spec change is what matters.
+    /// The fake provisioner accepts the apply, so the spec stays persisted.
     #[tokio::test]
     async fn update_starrocks_engine_rescales() {
-        let Some(st) = test_state().await else {
+        let Some(mut st) = test_state().await else {
             eprintln!("skipping update_starrocks_engine_rescales: DATABASE_URL not set");
             return;
         };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
         let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
@@ -6980,15 +9358,9 @@ mod tests {
             fe_resources: Some(serde_json::json!({ "memRequest": "2Gi", "memLimit": "4Gi" })),
             ..Default::default()
         }));
-        // Ok(Json<EngineDto>) isn't Debug, so map to the error message first.
-        let err = update_starrocks_engine(st.clone(), engine.clone(), body)
-            .await
-            .err()
-            .map(|e| e.to_string());
-        assert!(
-            matches!(&err, Some(m) if m.contains("kubernetes not configured")),
-            "expected k8s-not-configured after persist, got {err:?}"
-        );
+        if let Err(e) = update_starrocks_engine(st.clone(), engine.clone(), body).await {
+            panic!("update failed: {e}");
+        }
 
         let reloaded = st
             .engine_mgmt
@@ -7009,10 +9381,11 @@ mod tests {
     /// warehouse (`<bucket>/starrocks/<engine>`), unchanged by the config edit.
     #[tokio::test]
     async fn update_starrocks_engine_preserves_storage() {
-        let Some(st) = test_state().await else {
+        let Some(mut st) = test_state().await else {
             eprintln!("skipping update_starrocks_engine_preserves_storage: DATABASE_URL not set");
             return;
         };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
         let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
@@ -7024,7 +9397,9 @@ mod tests {
             cn_replicas: Some(4),
             ..Default::default()
         }));
-        let _ = update_starrocks_engine(st.clone(), engine.clone(), body).await; // fails at prov; spec persisted
+        if let Err(e) = update_starrocks_engine(st.clone(), engine.clone(), body).await {
+            panic!("update failed: {e}");
+        }
 
         let reloaded = st
             .engine_mgmt
@@ -7069,10 +9444,283 @@ mod tests {
 
         let req = build_provision_req(&st, &engine)
             .await
-            .expect("build_provision_req");
+            .expect("build_provision_req")
+            .req;
         assert_eq!(req.kind, egret_engine_mgmt_api::EngineKind::StarRocks);
         assert!(req.starrocks.is_some());
         assert!(req.catalogs.is_empty());
+    }
+
+    /// P1: internal secrets are random, stay OFF the row until committed, are
+    /// reused when present, and a discarded or superseded generation is deleted.
+    /// The monitor presents the legacy value exactly until a commit.
+    #[tokio::test]
+    async fn internal_secrets_are_pending_until_committed() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping internal_secrets_are_pending_until_committed: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                "egret-engines",
+                wh.id,
+                &serde_json::json!({ "trinoConfig": {} }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        let not_found = |r: Result<String, egret_secrets::SecretsError>| {
+            matches!(r, Err(egret_secrets::SecretsError::NotFound))
+        };
+
+        let first = resolve_internal_secrets(&st, &engine, false)
+            .await
+            .expect("mint");
+        assert!(first.fresh);
+        assert_ne!(first.internal, first.monitor);
+        {
+            use base64::Engine as _;
+            let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(&first.internal)
+                .expect("url-safe base64");
+            assert_eq!(raw.len(), 32);
+        }
+        let row = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert!(row.internal_secret_id.is_none() && row.monitor_secret_id.is_none());
+        assert_eq!(
+            monitor_password_for(&st, &row).await.unwrap(),
+            legacy_monitor_password(engine.id),
+            "uncommitted ⇒ the pods still have the legacy password"
+        );
+
+        commit_internal_secrets(&st, &row, &first, Supersede::Delete)
+            .await
+            .expect("commit");
+        let row = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(row.internal_secret_id, Some(first.internal_id));
+        assert_eq!(row.monitor_secret_id, Some(first.monitor_id));
+        assert_eq!(
+            monitor_password_for(&st, &row).await.unwrap(),
+            first.monitor
+        );
+
+        let reused = resolve_internal_secrets(&st, &row, false)
+            .await
+            .expect("reuse");
+        assert!(!reused.fresh);
+        assert_eq!(reused.internal, first.internal);
+
+        let rotated = resolve_internal_secrets(&st, &row, true)
+            .await
+            .expect("rotate");
+        assert!(rotated.fresh);
+        assert_ne!(rotated.internal, first.internal);
+        discard_internal_secrets(&st, &rotated).await;
+        assert!(not_found(
+            st.secrets
+                .resolve_plaintext(None, rotated.internal_id)
+                .await
+        ));
+        assert!(not_found(
+            st.secrets.resolve_plaintext(None, rotated.monitor_id).await
+        ));
+        assert_eq!(
+            st.engine_mgmt
+                .get_engine(engine.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .monitor_secret_id,
+            Some(first.monitor_id),
+            "a discard never touches the row"
+        );
+
+        let rotated = resolve_internal_secrets(&st, &row, true)
+            .await
+            .expect("rotate again");
+        commit_internal_secrets(&st, &row, &rotated, Supersede::Delete)
+            .await
+            .expect("commit rotation");
+        assert!(not_found(
+            st.secrets.resolve_plaintext(None, first.internal_id).await
+        ));
+        assert!(not_found(
+            st.secrets.resolve_plaintext(None, first.monitor_id).await
+        ));
+    }
+
+    /// F2 fix: two concurrent applies on the same NULL-secret-ids engine each
+    /// mint their own pair; only the FIRST commit may write the row — the
+    /// second, still holding the stale (both-`None`) snapshot it minted
+    /// against, must not clobber the winner. The loser's pair is left
+    /// unreferenced (never deleted — see `commit_internal_secrets`'s doc
+    /// comment for why), and the next apply on the now-current row reuses the
+    /// winner.
+    #[tokio::test]
+    async fn concurrent_applies_do_not_clobber_each_others_commit() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping concurrent_applies_do_not_clobber_each_others_commit: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                "egret-engines",
+                wh.id,
+                &serde_json::json!({ "trinoConfig": {} }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+
+        // Two concurrent builds both read the same NULL row.
+        let a = resolve_internal_secrets(&st, &engine, false)
+            .await
+            .expect("mint a");
+        let b = resolve_internal_secrets(&st, &engine, false)
+            .await
+            .expect("mint b");
+        assert_ne!(a.internal_id, b.internal_id);
+
+        // The first apply's commit wins.
+        commit_internal_secrets(&st, &engine, &a, Supersede::Delete)
+            .await
+            .expect("commit a");
+        let after_a = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(after_a.internal_secret_id, Some(a.internal_id));
+        assert_eq!(after_a.monitor_secret_id, Some(a.monitor_id));
+
+        // F2 round 2 regression guard: A's `Supersede::Delete` commit deletes
+        // ONLY the pair its own compare-and-set displaced (here: nothing —
+        // `engine`'s pre-build ids were both `None`) and must NEVER reach for
+        // B's already-minted, not-yet-committed pair just because it happens
+        // to share this engine's secret-name prefix. Round 1 of this fix used
+        // a prefix-wide sweep on a successful commit and a re-review
+        // reproduced exactly this: A's sweep deleted B's pair before B ever
+        // got to commit it, even though B's apply might be the one that lands
+        // on the cluster last. Assert B's pair is untouched.
+        assert!(
+            st.secrets
+                .resolve_plaintext(None, b.internal_id)
+                .await
+                .is_ok(),
+            "A's commit must not delete B's still-in-flight pair"
+        );
+        assert!(
+            st.secrets
+                .resolve_plaintext(None, b.monitor_id)
+                .await
+                .is_ok(),
+            "A's commit must not delete B's still-in-flight pair"
+        );
+
+        // The second apply's commit, still holding the STALE (both-`None`)
+        // `engine` snapshot, must not overwrite it.
+        commit_internal_secrets(&st, &engine, &b, Supersede::Delete)
+            .await
+            .expect("commit b (loses the race, but does not error)");
+        let after_b = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(
+            after_b.internal_secret_id,
+            Some(a.internal_id),
+            "the winner's pair must survive"
+        );
+        assert_eq!(after_b.monitor_secret_id, Some(a.monitor_id));
+
+        // Losing the race must not delete B's own pair either — it is left
+        // orphaned (unreferenced by the row) but resolvable, exactly like a
+        // `Supersede::Keep`'d pair; only engine delete (Task 15) reclaims it.
+        assert!(
+            st.secrets
+                .resolve_plaintext(None, b.internal_id)
+                .await
+                .is_ok(),
+            "a losing commit must not delete its own pair"
+        );
+        assert!(
+            st.secrets
+                .resolve_plaintext(None, b.monitor_id)
+                .await
+                .is_ok(),
+            "a losing commit must not delete its own pair"
+        );
+
+        // The next apply on the now-current row reuses the committed winner.
+        let reused = resolve_internal_secrets(&st, &after_b, false)
+            .await
+            .expect("reuse");
+        assert!(!reused.fresh);
+        assert_eq!(reused.internal_id, a.internal_id);
+        assert_eq!(reused.monitor_id, a.monitor_id);
+    }
+
+    /// Minor fix: an admin (or anything else) deleting a recorded secret
+    /// out-of-band must not brick every future apply on the engine — the next
+    /// `resolve_internal_secrets` mints a fresh pair instead of propagating
+    /// `SecretsError::NotFound` forever.
+    #[tokio::test]
+    async fn resolve_internal_secrets_remints_when_a_stored_secret_is_gone() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping resolve_internal_secrets_remints_when_a_stored_secret_is_gone: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                "egret-engines",
+                wh.id,
+                &serde_json::json!({ "trinoConfig": {} }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        let first = resolve_internal_secrets(&st, &engine, false)
+            .await
+            .expect("mint");
+        commit_internal_secrets(&st, &engine, &first, Supersede::Delete)
+            .await
+            .expect("commit");
+        let row = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+
+        // Delete the internal secret out-of-band (not through this module).
+        st.secrets
+            .delete(None, first.internal_id)
+            .await
+            .expect("delete internal secret directly");
+
+        let reminted = resolve_internal_secrets(&st, &row, false)
+            .await
+            .expect("must remint instead of erroring");
+        assert!(reminted.fresh);
+        assert_ne!(reminted.internal_id, first.internal_id);
     }
 
     /// WITHOUT a `secret_ref` the generic arm must render exactly as before:

@@ -49,6 +49,14 @@ async fn ensure_trino_def_is_idempotent_and_create_service_returns_policyservice
         .unwrap_err();
     assert!(matches!(err, PolicyError::AlreadyExists(_)), "got {err:?}");
 
-    // cleanup (inherent method — fine, not part of the port).
-    s.delete_service(svc.id).await.unwrap();
+    // delete_service, through the PORT (not the inherent method `PolicyStore`
+    // also has under the same name): the impl is `Ok(self.delete_service(id).await?)`,
+    // which type-checks identically whether `self.delete_service` resolves to
+    // the inherent method (correct) or back to this same trait method (infinite
+    // recursion) — only a call through `&dyn PolicyPort` forces the real vtable
+    // dispatch that would hang/stack-overflow on the latter, so this has to run
+    // through `port`, not `s`, to mean anything.
+    port.delete_service(svc.id).await.unwrap();
+    let err = port.delete_service(svc.id).await.unwrap_err();
+    assert!(matches!(err, PolicyError::NotFound(_)), "got {err:?}");
 }

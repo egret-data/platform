@@ -7,10 +7,17 @@ use uuid::Uuid;
 
 use crate::error::EngineMgmtError;
 
-/// Stored lifecycle status written when an engine delete starts. A row still in
-/// this state means the cluster delete or the row delete did not finish, and the
-/// delete can be retried.
-pub const ENGINE_STATUS_DELETING: &str = "deleting";
+/// The values `engine_mgmt.engines.status` may hold (`engines_status_check`).
+pub mod engine_status {
+    /// Created; the cluster has not yet reported every pod ready.
+    pub const PROVISIONING: &str = "provisioning";
+    /// Live status reported every pod ready at least once.
+    pub const RUNNING: &str = "running";
+    /// A create failed and its rollback could not remove the row.
+    pub const FAILED: &str = "failed";
+    /// A delete is in progress (written by the delete handler).
+    pub const DELETING: &str = "deleting";
+}
 
 /// A provisioned query engine (control-plane, platform-global) wired to a
 /// warehouse. `spec` holds the desired provisioning parameters; `status` tracks
@@ -30,6 +37,12 @@ pub struct Engine {
     pub tls_secret_id: Option<Uuid>,
     pub coordinator_cert: Option<String>,
     pub tls_cert_secret_ref: Option<Uuid>,
+    /// Named secret holding `TRINO_INTERNAL_SECRET`, as last applied. `None`:
+    /// the pods still carry the legacy id-derived value.
+    pub internal_secret_id: Option<Uuid>,
+    /// Named secret holding the `egret-monitor` password, as last applied.
+    /// `None`: the pods still carry the legacy id-derived value.
+    pub monitor_secret_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -190,7 +203,7 @@ impl EngineMgmtStore {
     ) -> Result<Engine, EngineMgmtError> {
         sqlx::query_as::<_, Engine>(
             "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, tls_cert_secret_ref) VALUES ($1,$2,$3,$4,$5,$6) \
-             RETURNING id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, created_at",
+             RETURNING id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at",
         )
         .bind(name)
         .bind(r#type)
@@ -210,7 +223,7 @@ impl EngineMgmtStore {
 
     pub async fn list_engines(&self) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, created_at \
+            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at \
              FROM engine_mgmt.engines ORDER BY created_at",
         )
         .fetch_all(self.pool())
@@ -219,7 +232,7 @@ impl EngineMgmtStore {
 
     pub async fn get_engine(&self, id: Uuid) -> Result<Option<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, created_at \
+            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at \
              FROM engine_mgmt.engines WHERE id = $1",
         )
         .bind(id)
@@ -227,19 +240,36 @@ impl EngineMgmtStore {
         .await?)
     }
 
+    /// Persist a new spec, gated on the row still being at the caller's last
+    /// observed `status` — a compare-and-set (mirrors
+    /// [`Self::transition_engine_status`]'s `Ok(bool)`) that does NOT itself
+    /// write `status`. Only [`Self::set_engine_status`] and
+    /// [`Self::transition_engine_status`] own that column. Returns whether the
+    /// row was still at `status` (and so was updated); the caller MUST check
+    /// this — a `false` means something else changed the row (typically a
+    /// concurrent delete) since it was read, and the new spec was NOT written.
+    ///
+    /// Every caller reads an [`Engine`], derives a new spec from it, then calls
+    /// this passing the status it just read. Without the `AND status = $3`
+    /// guard, a PUT racing a concurrent DELETE could read `running`, and DELETE
+    /// could flip the row to `deleting` before the PUT's write lands — silently
+    /// erasing the `deleting` retry marker `delete_engine` depends on. With the
+    /// guard, that write matches zero rows and is a no-op: the row stays
+    /// exactly as DELETE left it.
     pub async fn update_engine(
         &self,
         id: Uuid,
         spec: &serde_json::Value,
         status: &str,
-    ) -> Result<(), EngineMgmtError> {
-        sqlx::query("UPDATE engine_mgmt.engines SET spec = $2, status = $3 WHERE id = $1")
-            .bind(id)
-            .bind(spec)
-            .bind(status)
-            .execute(self.pool())
-            .await?;
-        Ok(())
+    ) -> Result<bool, EngineMgmtError> {
+        let res =
+            sqlx::query("UPDATE engine_mgmt.engines SET spec = $2 WHERE id = $1 AND status = $3")
+                .bind(id)
+                .bind(spec)
+                .bind(status)
+                .execute(self.pool())
+                .await?;
+        Ok(res.rows_affected() == 1)
     }
 
     pub async fn set_engine_status(&self, id: Uuid, status: &str) -> Result<(), EngineMgmtError> {
@@ -249,6 +279,25 @@ impl EngineMgmtStore {
             .execute(self.pool())
             .await?;
         Ok(())
+    }
+
+    /// Move `status` from `from` to `to` only if it is still `from`; returns
+    /// whether a row moved. Conditional so a reader recording `running` can
+    /// never overwrite a concurrent `deleting`.
+    pub async fn transition_engine_status(
+        &self,
+        id: Uuid,
+        from: &str,
+        to: &str,
+    ) -> Result<bool, EngineMgmtError> {
+        let res =
+            sqlx::query("UPDATE engine_mgmt.engines SET status = $3 WHERE id = $1 AND status = $2")
+                .bind(id)
+                .bind(from)
+                .bind(to)
+                .execute(self.pool())
+                .await?;
+        Ok(res.rows_affected() == 1)
     }
 
     /// Bind (or detach with `None`) an engine to a Ranger policy profile.
@@ -263,6 +312,19 @@ impl EngineMgmtStore {
             .execute(self.pool())
             .await?;
         Ok(())
+    }
+
+    /// How many engines are bound to a Ranger profile.
+    pub async fn count_engines_bound_to_authz_service(
+        &self,
+        service_id: i64,
+    ) -> Result<i64, EngineMgmtError> {
+        Ok(sqlx::query_scalar(
+            "SELECT count(*) FROM engine_mgmt.engines WHERE authz_service_id = $1",
+        )
+        .bind(service_id)
+        .fetch_one(self.pool())
+        .await?)
     }
 
     /// Persist the generated delegator secret id for an engine (idempotent bookkeeping).
@@ -310,6 +372,37 @@ impl EngineMgmtStore {
         .execute(self.pool())
         .await?;
         Ok(())
+    }
+
+    /// Record the internal/monitor secrets an apply attempted to render,
+    /// compare-and-set against the pair the caller's build read
+    /// (`prev_internal_secret_id`/`prev_monitor_secret_id`, i.e. `Engine::{internal_secret_id,monitor_secret_id}`
+    /// as loaded BEFORE that build). Writes only when the row still names that
+    /// exact pair (`IS NOT DISTINCT FROM` so two `NULL`s also match); returns
+    /// `false` and writes nothing otherwise. This closes the race between two
+    /// concurrent applies on the same engine: whichever commits first wins,
+    /// and the loser does not clobber it with its own (possibly stale) pair.
+    pub async fn set_internal_secret_ids(
+        &self,
+        engine_id: Uuid,
+        prev_internal_secret_id: Option<Uuid>,
+        prev_monitor_secret_id: Option<Uuid>,
+        internal_secret_id: Uuid,
+        monitor_secret_id: Uuid,
+    ) -> Result<bool, EngineMgmtError> {
+        let res = sqlx::query(
+            "UPDATE engine_mgmt.engines SET internal_secret_id = $4, monitor_secret_id = $5 \
+             WHERE id = $1 AND internal_secret_id IS NOT DISTINCT FROM $2 \
+             AND monitor_secret_id IS NOT DISTINCT FROM $3",
+        )
+        .bind(engine_id)
+        .bind(prev_internal_secret_id)
+        .bind(prev_monitor_secret_id)
+        .bind(internal_secret_id)
+        .bind(monitor_secret_id)
+        .execute(self.pool())
+        .await?;
+        Ok(res.rows_affected() == 1)
     }
 
     pub async fn delete_engine(&self, id: Uuid) -> Result<(), EngineMgmtError> {
@@ -493,7 +586,7 @@ impl EngineMgmtStore {
         workspace_id: Uuid,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT e.id, e.name, e.type, e.namespace, e.warehouse_id, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.created_at \
+            "SELECT e.id, e.name, e.type, e.namespace, e.warehouse_id, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at \
              FROM engine_mgmt.engines e JOIN engine_mgmt.engine_workspaces ew ON ew.engine_id = e.id \
              WHERE ew.workspace_id = $1 ORDER BY e.name",
         )
@@ -523,6 +616,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         };
         assert_eq!(e.delegation_mode(), "impersonate");
@@ -546,6 +641,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         };
         assert_eq!(e.delegation_mode(), "jwt");
@@ -569,6 +666,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         };
         assert!(e.is_jwt_delegation());
@@ -594,6 +693,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -628,6 +729,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         };
         assert_eq!(e.coordinator_host(), "trino1-trino.engines.svc");

@@ -285,6 +285,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -330,6 +332,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: Some("PEMCERT".into()),
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         };
         let (opts, secret) = delegated_conn_options(&e);
@@ -356,6 +360,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: Some("PEMCERT".into()),
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         };
         let (opts, secret) = delegated_conn_options(&e);
@@ -389,6 +395,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: Some("SRPEMCERT".into()),
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         }
     }

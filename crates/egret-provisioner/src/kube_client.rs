@@ -135,6 +135,9 @@ pub struct FakeKube {
     /// `"kind/name"` → error message. A `delete` of a listed object fails with
     /// that message and is NOT recorded in `deleted`. Set with [`FakeKube::fail_delete`].
     pub delete_failures: Mutex<BTreeMap<String, String>>,
+    /// When `Some(kind)`, `apply` of an object of that `kind` fails (and is not
+    /// recorded) — stands in for the API server rejecting a manifest.
+    pub fail_apply_kind: Mutex<Option<String>>,
 }
 
 impl Default for FakeKube {
@@ -147,6 +150,7 @@ impl Default for FakeKube {
             restarted: Mutex::new(Vec::new()),
             patched: Mutex::new(Vec::new()),
             delete_failures: Mutex::new(BTreeMap::new()),
+            fail_apply_kind: Mutex::new(None),
         }
     }
 }
@@ -169,6 +173,11 @@ impl FakeKube {
 #[async_trait::async_trait]
 impl KubeClient for FakeKube {
     async fn apply(&self, obj: &Value) -> anyhow::Result<()> {
+        if let Some(kind) = self.fail_apply_kind.lock().unwrap().as_deref() {
+            if obj["kind"].as_str() == Some(kind) {
+                anyhow::bail!("injected apply failure for {kind}");
+            }
+        }
         let key = format!(
             "{}/{}",
             obj["kind"].as_str().unwrap_or(""),

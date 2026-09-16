@@ -9,7 +9,7 @@ import type { EngineCatalogDetailDtoConfig } from './engineCatalogDetailDtoConfi
 
 /**
  * `GET /engines/{id}/catalogs/{cid}` payload: full stored config + secretRef,
- * with system-minted secret material redacted (see [`redact_catalog_config`]).
+ * with secret material removed or masked (see [`redact_catalog_config`]).
  */
 export interface EngineCatalogDetailDto {
   id: string;
