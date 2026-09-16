@@ -3927,6 +3927,10 @@ async fn delete_engine(
     match st.engine_mgmt.delete_engine_unless_blocked(id).await? {
         DeleteEngineOutcome::Deleted | DeleteEngineOutcome::NotFound => {}
         DeleteEngineOutcome::Blocked(dependents) => {
+            tracing::warn!(
+                engine = %engine.name,
+                "dependents appeared after the cluster delete; row left deleting"
+            );
             return Err(CpError::HasDependents(dependents));
         }
     }

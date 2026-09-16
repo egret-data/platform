@@ -243,14 +243,16 @@ function EngineActions({
     mutationFn: deleteEngine,
     onSuccess: () => navigate("/control-plane/engines"),
     onError: (e) => {
+      // Either branch can leave the engine `deleting` (a 409 here means the
+      // cluster was already torn down and a dependent appeared after the
+      // preflight check — see the route's step 5): refetch so the header
+      // shows the retry state rather than the last live phase.
+      queryClient.invalidateQueries({ queryKey: ["cp", "engine", engineId] });
       const dependents = dependentsFromError(e);
       if (dependents) {
         setBlockedBy(dependents);
         return;
       }
-      // A failed cluster delete leaves the engine `deleting`: refetch so the
-      // header shows the retry state rather than the last live phase.
-      queryClient.invalidateQueries({ queryKey: ["cp", "engine", engineId] });
       toast.error(e.message ?? "Failed to delete the engine.");
     },
   });

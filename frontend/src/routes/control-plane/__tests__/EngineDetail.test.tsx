@@ -892,6 +892,28 @@ describe("EngineDetail — delete", () => {
     expect(vi.mocked(api.deleteEngine).mock.calls[0][0]).toBe("e1");
   });
 
+  test("a 409 also refetches the engine, so a row left `deleting` by the race shows the retry state", async () => {
+    vi.mocked(api.deleteEngine).mockRejectedValue(
+      new ApiError(409, "engine is still in use", "engine_has_dependents", {
+        error: "engine is still in use",
+        code: "engine_has_dependents",
+        dependents: BLOCKERS,
+      }),
+    );
+    const { user, dialog } = await openDeleteDialog();
+    const callsBeforeDelete = vi.mocked(api.getEngine).mock.calls.length;
+    await user.type(within(dialog).getByPlaceholderText("analytics-trino"), "analytics-trino");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await screen.findByRole("alertdialog", { name: /still in use/i });
+
+    // The 409 leaves the engine `deleting` when it arrives after the cluster
+    // was already torn down (route step 5) — the header must refetch on ANY
+    // delete failure, dependents included, not just a non-dependents one.
+    await waitFor(() =>
+      expect(vi.mocked(api.getEngine).mock.calls.length).toBeGreaterThan(callsBeforeDelete),
+    );
+  });
+
   test("a deleting engine shows the retry state and Retry delete deletes again", async () => {
     vi.mocked(api.getEngine).mockResolvedValue({
       ...ENGINE,
