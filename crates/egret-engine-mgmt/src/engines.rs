@@ -5122,6 +5122,7 @@ async fn restart_engine(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
         (status = 502, description = "Kubernetes rejected the apply; the engine row now names the new secret pair (the cluster may already hold it), and the previous pair is kept — not deleted — until a later successful apply supersedes it", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -5485,6 +5486,7 @@ async fn list_catalogs(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:create permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -5870,6 +5872,7 @@ async fn test_catalog(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:delete permission", body = ErrorBody),
         (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -5959,6 +5962,7 @@ async fn remove_catalog(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

@@ -3222,6 +3222,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -3404,6 +3414,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -3479,6 +3499,16 @@
           },
           "404": {
             "description": "No such engine or catalog (or catalog not on this engine)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
             "content": {
               "application/json": {
                 "schema": {
@@ -4364,6 +4394,16 @@
           },
           "404": {
             "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
             "content": {
               "application/json": {
                 "schema": {
