@@ -6818,10 +6818,26 @@ mod tests {
     fn restore_redacted_properties_puts_back_only_masked_sensitive_values() {
         let stored = serde_json::json!({
             "password": "old-top",
+            // Non-sensitive key that could ALSO happen to hold the literal
+            // mask string (e.g. an admin genuinely typed asterisks as a
+            // placeholder host). M2: every masked key in the old fixture was
+            // sensitive, so dropping `&& is_sensitive_config_key(k)` from
+            // `restore_level` still passed — this key pins that a
+            // non-sensitive key is never "restored" no matter what its
+            // incoming value looks like.
+            "connection-url": "jdbc:postgresql://old-host/db",
+            // `secretProperties` holds secret IDs, not sensitive-config text
+            // (`redact_catalog_config` explicitly excludes it, see its `k !=
+            // "secretProperties"` guard) — pin that restore leaves it exactly
+            // as submitted too, even though the key name itself contains
+            // "secret" and would match `is_sensitive_config_key`.
+            "secretProperties": { "connection-password": "old-secret-id" },
             "properties": { "connection-password": "hunter2", "connection-user": "u" }
         });
         let mut incoming = serde_json::json!({
             "password": REDACTED_VALUE,
+            "connection-url": REDACTED_VALUE,
+            "secretProperties": { "connection-password": REDACTED_VALUE },
             "properties": {
                 "connection-password": REDACTED_VALUE,
                 "connection-user": "u2",
@@ -6830,6 +6846,14 @@ mod tests {
         });
         restore_redacted_properties(&mut incoming, &stored);
         assert_eq!(incoming["password"], "old-top");
+        assert_eq!(
+            incoming["connection-url"], REDACTED_VALUE,
+            "a non-sensitive key must never be treated as a mask to restore"
+        );
+        assert_eq!(
+            incoming["secretProperties"]["connection-password"], REDACTED_VALUE,
+            "secretProperties is excluded from restore; it holds secret ids, not text"
+        );
         assert_eq!(incoming["properties"]["connection-password"], "hunter2");
         assert_eq!(incoming["properties"]["connection-user"], "u2");
         // Nothing stored to restore from: the mask stays as typed.
