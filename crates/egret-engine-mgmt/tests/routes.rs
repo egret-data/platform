@@ -1520,9 +1520,6 @@ fn secret_store(f: &Fixture) -> egret_secrets::WorkspaceSecretStore {
 
 /// `POST /engines` for a Trino engine with the wizard defaults and the given
 /// `trinoConfig`; returns the status and body.
-// No caller yet within this task — later Part B tasks drive engine creation
-// through this shared helper.
-#[allow(dead_code)]
 async fn create_engine_via_api(
     f: &Fixture,
     token: &str,
@@ -3516,4 +3513,48 @@ async fn unknown_workspaces_are_404_and_apply_nothing() {
         StatusCode::NOT_FOUND,
         "unassign from unknown workspace (was 204)"
     );
+}
+
+/// C1: `add_catalog` is connector-first — any non-blank kind is a Trino
+/// connector name. The 0057 CHECK (`egret-warehouse|postgresql|tpch|tpcds|generic`)
+/// turned a `mysql` catalog into a 500.
+#[tokio::test]
+async fn add_catalog_accepts_a_connector_kind_outside_the_legacy_enum() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_c1_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            Some(serde_json::json!({
+                "name": "shop",
+                "kind": "mysql",
+                "config": { "properties": {
+                    "connection-url": "jdbc:mysql://db:3306",
+                    "connection-user": "reader"
+                } }
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "add mysql catalog; body={j}");
+    assert_eq!(j["kind"], "mysql", "stored kind; body={j}");
 }
