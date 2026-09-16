@@ -27,6 +27,7 @@ struct Fixture {
     db: Db,
     engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
     kube: Option<Arc<dyn KubeClient>>,
+    ranger_enabled: bool,
 }
 
 /// Incidental PDP for `EngineMgmtState`: every existing route test authenticates
@@ -59,6 +60,7 @@ fn build_app(
     engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
     kube: Option<Arc<dyn KubeClient>>,
     pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+    ranger_enabled: bool,
 ) -> axum::Router {
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
@@ -87,7 +89,7 @@ fn build_app(
             engine_egret_url: "http://egret:8080".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
-            ranger_enabled: false,
+            ranger_enabled,
         })
 }
 
@@ -107,6 +109,7 @@ async fn attach_real_pdp(f: &mut Fixture) {
         f.engine_provisioner.clone(),
         f.kube.clone(),
         pdp,
+        f.ranger_enabled,
     );
 }
 
@@ -122,6 +125,16 @@ async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
 async fn setup_full(
     engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
     kube: Option<Arc<dyn KubeClient>>,
+) -> Option<Fixture> {
+    setup_with_ranger(engine_provisioner, kube, false).await
+}
+
+/// `setup_full` with `config.ranger.enabled` under the test's control: the Trino
+/// create path auto-creates (or reuses) a Ranger profile only when it is on.
+async fn setup_with_ranger(
+    engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
+    kube: Option<Arc<dyn KubeClient>>,
+    ranger_enabled: bool,
 ) -> Option<Fixture> {
     let dsn = egret_test_db::url().await?;
     let db = Db::connect(&dsn, 5).await.expect("connect");
@@ -143,6 +156,7 @@ async fn setup_full(
         engine_provisioner.clone(),
         kube.clone(),
         std::sync::Arc::new(AllowAllPdp),
+        ranger_enabled,
     );
 
     Some(Fixture {
@@ -152,6 +166,7 @@ async fn setup_full(
         db,
         engine_provisioner,
         kube,
+        ranger_enabled,
     })
 }
 
@@ -373,28 +388,70 @@ async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
 
 // ── Engines ────────────────────────────────────────────────────────────────────
 
-/// Kube-free `EngineProvisioningPort` fake: provision/update/delete are no-ops,
-/// `status` reports a single running pod named "coordinator-0" (so the
-/// pod-ownership check in `pod_logs`/`pod_exec` passes for that name), and
-/// `restart` records `(namespace, name)` pairs (shared via `Arc` so a test can
-/// hold onto the fake and inspect it after the request completes). The
+/// Kube-free `EngineProvisioningPort` fake. `status` reports a single running,
+/// ready pod named "coordinator-0" (so the pod-ownership check in
+/// `pod_logs`/`pod_exec` passes for that name). Every other call is RECORDED in
+/// shared `Arc` state, so a test that keeps a clone of the fake can inspect
+/// exactly what the app asked the cluster to do. `fail_provision`/`fail_update`
+/// make the matching call record its spec and then fail, standing in for a
+/// Kubernetes API error; `delete_error`, when `Some`, makes `delete` fail with
+/// that message instead (and record nothing) — for the 502/retry tests. The
 /// kube-shaped ops (exec/pod-logs/coordinator-request) are NOT on this trait —
 /// `egret_provisioner::kube_client::FakeKube` covers those, passed separately as the
-/// fixture's `kube` field. `deleted` records each successful `delete` as
-/// `(kind, namespace, name)`; `delete_error`, when `Some`, makes `delete` fail
-/// with that message instead (and record nothing) — for the 502/retry tests.
+/// fixture's `kube` field.
 #[derive(Clone, Default)]
 struct FakeEnginePort {
     restarted: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    provisioned: Arc<std::sync::Mutex<Vec<egret_engine_mgmt_api::EngineSpec>>>,
+    updated: Arc<std::sync::Mutex<Vec<egret_engine_mgmt_api::EngineSpec>>>,
     /// `(kind, namespace, name)` per successful `delete`.
     deleted: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
     /// When `Some`, `delete` fails with this message and records nothing.
     delete_error: Arc<std::sync::Mutex<Option<String>>>,
+    fail_provision: Arc<std::sync::atomic::AtomicBool>,
+    fail_update: Arc<std::sync::atomic::AtomicBool>,
+}
+
+// These accessors have no caller yet within this task — later Part B tasks
+// (create/update route tests) call them to inspect what the fake recorded.
+#[allow(dead_code)]
+impl FakeEnginePort {
+    fn last_provisioned(&self) -> egret_engine_mgmt_api::EngineSpec {
+        self.provisioned
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("provision was called")
+    }
+    fn last_updated(&self) -> egret_engine_mgmt_api::EngineSpec {
+        self.updated
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("update was called")
+    }
+    fn set_fail_update(&self, fail: bool) {
+        self.fail_update
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn set_fail_provision(&self, fail: bool) {
+        self.fail_provision
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[async_trait::async_trait]
 impl EngineProvisioningPort for FakeEnginePort {
-    async fn provision(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+    async fn provision(&self, req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+        self.provisioned.lock().unwrap().push(req.clone());
+        if self
+            .fail_provision
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("injected provision failure".into());
+        }
         Ok(())
     }
     async fn status(
@@ -413,7 +470,11 @@ impl EngineProvisioningPort for FakeEnginePort {
             }],
         })
     }
-    async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+    async fn update(&self, req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+        self.updated.lock().unwrap().push(req.clone());
+        if self.fail_update.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("injected update failure".into());
+        }
         Ok(())
     }
     async fn delete(&self, kind: &str, ns: &str, name: &str) -> Result<(), String> {
@@ -1440,6 +1501,52 @@ async fn seed_secret(f: &Fixture, value: &str) -> Uuid {
         )
         .await
         .expect("create password secret")
+}
+
+/// The app's named-secret store, built with the SAME test crypto key as
+/// `build_app`, so a test can read back what the handlers sealed.
+// No caller yet within this task — later Part B tasks read back secrets the
+// handlers sealed.
+#[allow(dead_code)]
+fn secret_store(f: &Fixture) -> egret_secrets::WorkspaceSecretStore {
+    egret_secrets::WorkspaceSecretStore::new(
+        f.db.clone(),
+        egret_secrets::SecretStore::new(
+            f.db.clone(),
+            Some(egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("crypto")),
+        ),
+    )
+}
+
+/// `POST /engines` for a Trino engine with the wizard defaults and the given
+/// `trinoConfig`; returns the status and body.
+// No caller yet within this task — later Part B tasks drive engine creation
+// through this shared helper.
+#[allow(dead_code)]
+async fn create_engine_via_api(
+    f: &Fixture,
+    token: &str,
+    name: &str,
+    wh_id: Uuid,
+    trino_config: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "trinoConfig": trino_config,
+            })),
+        ))
+        .await
+        .unwrap();
+    into_json(resp).await
 }
 
 #[tokio::test]
