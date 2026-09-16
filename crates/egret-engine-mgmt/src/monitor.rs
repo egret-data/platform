@@ -481,4 +481,131 @@ mod tests {
         assert_eq!(c.queued, 1);
         assert_eq!(c.nodes.len(), 1);
     }
+
+    /// Allow-all `Pdp`, only so `CpState` can be constructed — `monitor_headers`
+    /// never touches `st.pdp`.
+    struct AllowAllPdp;
+    #[async_trait::async_trait]
+    impl egret_core::authz::Pdp for AllowAllPdp {
+        async fn authorize(
+            &self,
+            _s: &egret_core::authz::Subject,
+            _a: &str,
+            _r: &egret_core::authz::Resource,
+        ) -> egret_core::Result<egret_core::authz::Decision> {
+            Ok(egret_core::authz::Decision {
+                allow: true,
+                reasons: vec![],
+            })
+        }
+    }
+
+    /// Build a real `CpState` against the local dev Postgres, mirroring
+    /// `engines::tests::test_state`. `None` when `DATABASE_URL` isn't set so this
+    /// suite doesn't fail in environments without a database.
+    async fn test_state() -> Option<CpState> {
+        let dsn = egret_test_db::url().await?;
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        db.migrate().await.expect("migrate");
+        let crypto = egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef")
+            .expect("build test crypto");
+        let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
+        let workspace_secrets =
+            egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
+        let databases =
+            egret_query::DatabaseRepo::new(db.clone(), secrets, workspace_secrets.clone());
+        Some(CpState {
+            engine_mgmt: crate::EngineMgmtStore::new(db.clone()),
+            assignment: crate::EngineAssignmentService::new(
+                crate::EngineMgmtStore::new(db.clone()),
+                databases,
+            ),
+            catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
+            storage_registry: egret_storage::StorageRegistry::new(db.clone()),
+            authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
+            secrets: workspace_secrets,
+            sessions: egret_auth::session::SessionService::new(
+                db.clone(),
+                chrono::Duration::hours(24),
+                chrono::Duration::minutes(60),
+            ),
+            users: egret_auth::users::UserRepo::new(db.clone()),
+            roles: egret_auth::roles::RoleRepo::new(db.clone(), egret_events::EventBus::new()),
+            pdp: std::sync::Arc::new(AllowAllPdp),
+            engine_provisioner: None,
+            kube: None,
+            engine_egret_url: "http://egret:8080".into(),
+            engine_jwks_uri: "https://idp/jwks".into(),
+            engine_oidc_issuer: "https://idp/realms/egret".into(),
+            ranger_enabled: false,
+        })
+    }
+
+    /// Decode a `headers` list's `Authorization: Basic <b64>` entry back to
+    /// `user:pass`.
+    fn decoded_basic_credential(headers: &[(String, String)]) -> String {
+        let (_, v) = headers
+            .iter()
+            .find(|(k, _)| k == "Authorization")
+            .expect("Authorization header present");
+        let b64 = v.strip_prefix("Basic ").expect("Basic scheme");
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .expect("valid base64");
+        String::from_utf8(raw).expect("valid utf8")
+    }
+
+    /// I3 (SP1 Part B final review): `monitor_headers` is the only consumer of
+    /// the rotated monitor password — nothing pinned the credential it actually
+    /// builds, so reverting it to always use `legacy_monitor_password(engine.id)`
+    /// (the original P1 bug, ignoring any rotated/stored pair) was a green
+    /// build. Pins both cases: an engine with a stored `monitor_secret_id` must
+    /// present THAT secret's plaintext, and one with none (legacy/NULL column)
+    /// must present `legacy_monitor_password(engine.id)`.
+    #[tokio::test]
+    async fn monitor_headers_uses_the_stored_secret_or_falls_back_to_legacy() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping monitor_headers_uses_the_stored_secret_or_falls_back_to_legacy: DATABASE_URL not set"
+            );
+            return;
+        };
+
+        // (a) Stored pair: `monitor_secret_id` resolves to a known plaintext —
+        // the header must carry THAT password, not the legacy formula.
+        let secret_name = format!("egret-monitor-test-{}", Uuid::new_v4());
+        let secret_id = st
+            .secrets
+            .create(None, &secret_name, None, "s3cr3t-rotated-pw")
+            .await
+            .expect("create test secret");
+        let mut stored = engine_with_spec(json!({ "trinoConfig": { "auth": {} } }));
+        stored.monitor_secret_id = Some(secret_id);
+        let headers = monitor_headers(&st, &stored).await.expect("headers");
+        assert_eq!(
+            decoded_basic_credential(&headers),
+            "egret-monitor:s3cr3t-rotated-pw"
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "X-Forwarded-Proto" && v == "https"),
+            "Basic auth over the proxied hop needs X-Forwarded-Proto: https"
+        );
+
+        // (b) Legacy: no stored secret (NULL `monitor_secret_id`, e.g. an
+        // engine that predates rotation) falls back to the derived password.
+        let legacy = engine_with_spec(json!({ "trinoConfig": { "auth": {} } }));
+        assert_eq!(legacy.monitor_secret_id, None);
+        let headers = monitor_headers(&st, &legacy).await.expect("headers");
+        assert_eq!(
+            decoded_basic_credential(&headers),
+            format!(
+                "egret-monitor:{}",
+                crate::engines::legacy_monitor_password(legacy.id)
+            )
+        );
+    }
 }
