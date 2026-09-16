@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Header } from "../Header";
@@ -56,8 +56,21 @@ describe("Header on a narrow viewport", () => {
     // control that is merely narrower, not a control that is gone.
     expect(screen.queryByText("Control Plane")).toBeNull();
     expect(screen.getByRole("link", { name: "Control Plane" })).toBeInTheDocument();
+    // Same for the other two switcher entries.
+    expect(screen.queryByText("Governance")).toBeNull();
+    expect(screen.getByRole("link", { name: "Governance" })).toBeInTheDocument();
+    expect(screen.queryByText("Explorer")).toBeNull();
+    expect(screen.getByRole("button", { name: "Explorer" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Toggle theme" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "User menu" })).toBeInTheDocument();
+  });
+
+  it("gives each icon-only switcher entry a visible tooltip naming it", () => {
+    stubMatchMedia(true);
+    renderHeader();
+    expect(screen.getByRole("button", { name: "Explorer" })).toHaveAttribute("title", "Explorer");
+    expect(screen.getByRole("link", { name: "Governance" })).toHaveAttribute("title", "Governance");
+    expect(screen.getByRole("link", { name: "Control Plane" })).toHaveAttribute("title", "Control Plane");
   });
 
   it("lets the workspace switcher shrink instead of holding a fixed 224px", () => {
@@ -70,11 +83,22 @@ describe("Header on a narrow viewport", () => {
     expect(trigger.className).toContain("min-w-0");
   });
 
-  it("keeps the desktop row exactly as it was", () => {
+  it("renders the wordmark and full switcher labels at desktop width", () => {
     stubMatchMedia(false);
     renderHeader();
     expect(screen.getByText("Egret")).toBeInTheDocument();
     expect(screen.getByText("Control Plane")).toBeInTheDocument();
+    expect(screen.getByText("Governance")).toBeInTheDocument();
+    expect(screen.getByText("Explorer")).toBeInTheDocument();
     expect(screen.getByLabelText("Workspace").className).toContain("w-56");
+  });
+
+  it("groups the three switcher entries under an Apps navigation landmark", () => {
+    stubMatchMedia(false);
+    renderHeader();
+    const nav = screen.getByRole("navigation", { name: "Apps" });
+    expect(within(nav).getByRole("button", { name: "Explorer" })).toBeInTheDocument();
+    expect(within(nav).getByRole("link", { name: "Governance" })).toBeInTheDocument();
+    expect(within(nav).getByRole("link", { name: "Control Plane" })).toBeInTheDocument();
   });
 });

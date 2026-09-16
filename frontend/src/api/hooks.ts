@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, apiJson } from "./client";
+import { clearUserScopedCache } from "./queryClient";
 
 export interface Me {
   user_id: string;
@@ -47,7 +48,14 @@ export function useLogin() {
   return useMutation({
     mutationFn: (body: { email: string; password: string }) =>
       apiFetch("/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["me"] }),
+    // Clear the previous identity's cache (e.g. `["my-workspaces"]`) before
+    // refetching `me` — and await the refetch, since `LoginPage` navigates
+    // right after `await login.mutateAsync(...)` and must see the new
+    // identity's data, not whatever an unawaited invalidate left behind.
+    onSuccess: async () => {
+      clearUserScopedCache(qc);
+      await qc.invalidateQueries({ queryKey: ["me"] });
+    },
   });
 }
 
@@ -55,7 +63,13 @@ export function useLogout() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => apiFetch("/auth/logout", { method: "POST" }),
-    onSuccess: () => qc.setQueryData(["me"], null),
+    onSuccess: () => {
+      // No network round-trip needed to know we're unauthenticated, but the
+      // previous user's other cached queries (e.g. `["my-workspaces"]`) must
+      // still go — otherwise the next login in this tab can render off them.
+      clearUserScopedCache(qc);
+      qc.setQueryData(["me"], null);
+    },
   });
 }
 
@@ -65,9 +79,9 @@ export function useExitImpersonation() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => apiFetch("/auth/impersonation/exit", { method: "POST" }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["me"] });
-      qc.invalidateQueries({ queryKey: ["my-workspaces"] });
+    onSuccess: async () => {
+      clearUserScopedCache(qc);
+      await qc.invalidateQueries({ queryKey: ["me"] });
     },
   });
 }

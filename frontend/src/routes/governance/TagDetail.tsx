@@ -41,7 +41,7 @@ import { Textarea } from "@/components/ui/textarea";
 const DEFAULT_COLOR = "#6366f1";
 
 /**
- * Control Plane → Data Governance → Classifications → a single tag.
+ * Governance → Classifications → a single tag.
  *
  * A deep-linkable detail page (mirrors the user/role detail pages): identity +
  * key, an auto-saving Details form, and clearance managed as two add-by-search
@@ -329,7 +329,7 @@ export default function TagDetail() {
           deleteTag.mutate(id, {
             onSuccess: () => {
               toast.success("Tag deleted");
-              navigate("/control-plane/classifications");
+              navigate("/governance/classifications");
             },
             onError: (e) => toast.error((e as Error).message ?? "Failed to delete tag."),
           });
@@ -343,7 +343,7 @@ export default function TagDetail() {
 function BackLink() {
   return (
     <Link
-      to="/control-plane/classifications"
+      to="/governance/classifications"
       className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
     >
       <ArrowLeft className="h-4 w-4" />

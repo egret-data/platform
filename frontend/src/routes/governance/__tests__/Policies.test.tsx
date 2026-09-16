@@ -4,6 +4,8 @@ import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, it, expect, vi } from "vitest";
 import Policies from "../Policies";
+import { AuthContext } from "@/auth/useAuth";
+import type { Me } from "@/api/hooks";
 
 const createProfile = vi.fn((_name: string, _type: string) =>
   Promise.resolve({ id: 3, name: "sr", type: "starrocks" }),
@@ -34,20 +36,31 @@ vi.mock("@/api/policies", () => ({
   deleteProfile: (name: string) => deleteProfile(name),
 }));
 
-function wrap(ui: React.ReactNode) {
+function wrap(ui: React.ReactNode, me: Me | null = null) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>{ui}</MemoryRouter>
+      <AuthContext.Provider value={{ me, isLoading: false }}>
+        <MemoryRouter>{ui}</MemoryRouter>
+      </AuthContext.Provider>
     </QueryClientProvider>,
   );
 }
+
+const STEWARD: Me = { user_id: "u1", email: "steward@egret.local", platform_roles: [], permissions: ["policy:read"] };
+const ADMIN: Me = { user_id: "u2", email: "admin@egret.local", platform_roles: ["platform_admin"], permissions: [] };
+const ENGINE_CREATOR: Me = {
+  user_id: "u3",
+  email: "infra@egret.local",
+  platform_roles: [],
+  permissions: ["policy:read", "engine:create"],
+};
 
 describe("Policies page (profiles landing)", () => {
   it("renders each profile as a link to its detail page", async () => {
     wrap(<Policies />);
     const link = await screen.findByRole("link", { name: "trino" });
-    expect(link).toHaveAttribute("href", "/control-plane/policies/trino");
+    expect(link).toHaveAttribute("href", "/governance/policies/trino");
   });
 
   it("renders the profile type badge", async () => {
@@ -126,5 +139,29 @@ describe("Policies page (profiles landing)", () => {
     expect(within(dialog).getByLabelText("Name")).toBeInTheDocument();
     expect(within(dialog).getByLabelText("Type")).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: /Create profile/i })).toBeInTheDocument();
+  });
+
+  it("hides Provision an engine from a steward with no engine:create", async () => {
+    wrap(<Policies />, STEWARD);
+    await screen.findByRole("link", { name: "trino" });
+    expect(screen.queryByRole("link", { name: /Provision an engine/i })).not.toBeInTheDocument();
+  });
+
+  it("shows Provision an engine for a platform_admin", async () => {
+    wrap(<Policies />, ADMIN);
+    await screen.findByRole("link", { name: "trino" });
+    expect(screen.getByRole("link", { name: /Provision an engine/i })).toHaveAttribute(
+      "href",
+      "/control-plane/engines",
+    );
+  });
+
+  it("shows Provision an engine for a user holding engine:create", async () => {
+    wrap(<Policies />, ENGINE_CREATOR);
+    await screen.findByRole("link", { name: "trino" });
+    expect(screen.getByRole("link", { name: /Provision an engine/i })).toHaveAttribute(
+      "href",
+      "/control-plane/engines",
+    );
   });
 });

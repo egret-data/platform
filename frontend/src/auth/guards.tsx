@@ -1,12 +1,13 @@
 import type { ReactNode } from "react";
-import { Navigate, useParams } from "react-router-dom";
+import { Navigate, useLocation, useParams } from "react-router-dom";
 import { useAuth } from "./useAuth";
+import { canEnterControlPlane, canEnterGovernance } from "./appAccess";
 import { useMyWorkspaces } from "@/api/hooks";
 import { Forbidden } from "@/routes/Forbidden";
 import { ImpersonationBanner } from "@/components/layout/ImpersonationBanner";
 
 /**
- * Outer gate for every authenticated route (`/`, `/explore/*`, `/control-plane/*`
+ * Outer gate for every authenticated route (`/`, `/explore/*`, `/governance/*`, `/control-plane/*`
  * in `App.tsx`). Mounts `ImpersonationBanner` HERE — above `RequireControlPlaneAccess`
  * / `RequireGlobalAdmin` / `RequirePermission` / `RequireWorkspace`, which only wrap
  * the inner route content — so the Exit affordance survives even when one of those
@@ -61,28 +62,35 @@ export function RequirePermission({ perm, children }: { perm: string | string[];
   return <>{children}</>;
 }
 
-/** The read permissions that grant entry to the Control Plane area at all. */
-const CONTROL_PLANE_PERMS = [
-  "engine:read",
-  "warehouse:read",
-  "storage:read",
-  "secret:read",
-  "policy:read",
-  "user:read",
-  "group:read",
-  "role:read",
-  "workspace:read",
-];
-
 /**
  * Outer gate for the whole `/control-plane/*` area: `platform_admin` OR any
- * fine-grained control-plane permission may enter. Per-route guards
- * (`RequirePermission`, `RequireGlobalAdmin`) then apply within.
+ * Control Plane read permission (`CONTROL_PLANE_PERMS`) may enter. Per-route
+ * guards (`RequirePermission`, `RequireGlobalAdmin`) then apply within.
+ *
+ * One exception to the 403: a user who cannot enter Control Plane but can
+ * enter Governance, standing on the bare landing, is sent to `/governance`.
+ * Policies used to live here, so that is where such a user's muscle memory and
+ * bookmarks point. Deep links still 403 — `/control-plane/audit-log` is not a
+ * Governance page, and silently landing somewhere else would hide that. The
+ * moved pages' own old URLs are redirected earlier, in `App`, outside this guard.
  */
 export function RequireControlPlaneAccess({ children }: { children: ReactNode }) {
   const { me } = useAuth();
-  const ok = !!me && (me.platform_roles.includes("platform_admin") || CONTROL_PLANE_PERMS.some((k) => me.permissions.includes(k)));
-  if (!ok) return <Forbidden />;
+  const { pathname } = useLocation();
+  if (canEnterControlPlane(me)) return <>{children}</>;
+  const onLanding = pathname === "/control-plane" || pathname === "/control-plane/";
+  if (onLanding && canEnterGovernance(me)) return <Navigate to="/governance" replace />;
+  return <Forbidden />;
+}
+
+/**
+ * Outer gate for the whole `/governance/*` area: `platform_admin` OR any
+ * Governance read permission (`GOVERNANCE_PERMS`) may enter. Per-route guards
+ * then apply within, exactly as in Control Plane.
+ */
+export function RequireGovernanceAccess({ children }: { children: ReactNode }) {
+  const { me } = useAuth();
+  if (!canEnterGovernance(me)) return <Forbidden />;
   return <>{children}</>;
 }
 

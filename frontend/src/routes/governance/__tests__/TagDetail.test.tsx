@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-import TagDetail from "@/routes/control-plane/governance/TagDetail";
+import TagDetail from "@/routes/governance/TagDetail";
 import * as tagsApi from "@/api/tags";
 import * as accessApi from "@/api/access";
 import { useAuth } from "@/auth/useAuth";
@@ -82,6 +82,12 @@ describe("TagDetail", () => {
     expect(screen.getByText("pii")).toBeInTheDocument();
     // Key input is present and read-only.
     expect(screen.getByLabelText("Key")).toHaveAttribute("readonly");
+  });
+
+  test("links back to Governance → Classifications", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "PII" });
+    expect(screen.getByRole("link", { name: "Classifications" })).toHaveAttribute("href", "/governance/classifications");
   });
 
   test("picking a role and clicking Add persists the clearance", async () => {

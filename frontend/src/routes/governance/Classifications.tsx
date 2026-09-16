@@ -59,7 +59,7 @@ function TagSwatch({ color }: { color: string }) {
 }
 
 /**
- * Control Plane → Data Governance → Classifications.
+ * Governance → Classifications.
  *
  * Lists the org-wide catalog of classification tags used to classify data
  * and BI objects. Create/edit/delete are gated on `platform_admin` or the
@@ -103,7 +103,7 @@ export default function Classifications() {
         <span className="flex items-center gap-2">
           <TagSwatch color={t.color} />
           <Link
-            to={`/control-plane/classifications/${t.id}`}
+            to={`/governance/classifications/${t.id}`}
             className="font-medium text-primary hover:underline"
           >
             {t.name}
@@ -178,7 +178,7 @@ export default function Classifications() {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem asChild>
-                <Link to={`/control-plane/classifications/${t.id}`}>
+                <Link to={`/governance/classifications/${t.id}`}>
                   <Pencil className="mr-2 h-4 w-4" />
                   Edit
                 </Link>

@@ -10,3 +10,17 @@ import { QueryClient } from "@tanstack/react-query";
 export const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1, staleTime: 30000 } },
 });
+
+/**
+ * Drops every cached query except `["me"]`. Call this at every point where
+ * the authenticated identity changes in the same tab — login, logout,
+ * impersonation start/end — so the next render can't reuse a *different*
+ * user's cached data (e.g. `["my-workspaces"]`, which `HomeRedirect` reads
+ * straight from cache) past its `staleTime` (SP2 final review finding F1).
+ * `me` itself is left for each caller to handle directly: `setQueryData` on
+ * logout (no network needed — we already know we're unauthenticated) or
+ * `invalidateQueries` elsewhere (so an active observer refetches it fresh).
+ */
+export function clearUserScopedCache(qc: QueryClient) {
+  qc.removeQueries({ predicate: (query) => query.queryKey[0] !== "me" });
+}

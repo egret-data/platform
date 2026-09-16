@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { Compass, Feather, LogOut, Moon, Settings, Sun } from "lucide-react";
+import { Compass, Feather, LogOut, Moon, Settings, ShieldCheck, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useTheme } from "@/components/theme-provider";
 import { useAuth } from "@/auth/useAuth";
+import { type AppArea, appForPath, canEnterControlPlane, canEnterGovernance } from "@/auth/appAccess";
 import { useLogout } from "@/api/hooks";
 import { useIsNarrowViewport } from "@/lib/useIsNarrowViewport";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
@@ -34,21 +35,22 @@ export function Header() {
   const location = useLocation();
   const navigate = useNavigate();
   const { workspace } = useParams<{ workspace?: string }>();
-  const isAdmin = location.pathname.startsWith("/control-plane");
+  const app = appForPath(location.pathname);
   // Same source of truth as the sidebar rule — one viewport breakpoint for the whole shell.
   // At 390px the row below is 441px of fixed-width children, which is what puts a horizontal
   // scrollbar on the document no matter how narrow the dashboard grid itself gets.
   const narrow = useIsNarrowViewport();
-  // The Control Plane entry shows for platform_admin OR anyone holding a
-  // control-plane permission (so scoped roles can reach the sections they're
-  // allowed — matching RequireControlPlaneAccess). Empty for everyone else.
-  const CONTROL_PLANE_PERMS = [
-    "engine:read", "warehouse:read", "storage:read", "secret:read",
-    "policy:read", "user:read", "group:read", "role:read", "workspace:read",
-  ];
-  const canAdmin =
-    (me?.platform_roles?.includes("platform_admin") ?? false) ||
-    (me?.permissions?.some((p) => CONTROL_PLANE_PERMS.includes(p)) ?? false);
+  // Governance and Control Plane each show for platform_admin OR anyone holding one of that
+  // app's read permissions — the same predicates as RequireGovernanceAccess /
+  // RequireControlPlaneAccess. Explorer is shown beside them so the three read as one
+  // switcher; with neither app reachable there is nothing to switch to, so none render.
+  const showGovernance = canEnterGovernance(me);
+  const showControlPlane = canEnterControlPlane(me);
+  const showSwitcher = showGovernance || showControlPlane;
+  const entrySize = narrow ? "icon" : "sm";
+  const entryClass = narrow ? undefined : "gap-2";
+  const current = (area: AppArea): "page" | undefined => (app === area ? "page" : undefined);
+  const variantFor = (area: AppArea): "secondary" | "ghost" => (app === area ? "secondary" : "ghost");
 
   // Persist the current workspace slug so Explorer can be restored from Admin
   useEffect(() => {
@@ -85,30 +87,46 @@ export function Header() {
 
       {/* `min-w-0 flex-1` lets the workspace name truncate instead of forcing the row wider
           than the viewport — a fixed w-56 trigger cannot shrink and pushes everything right. */}
-      {!isAdmin && <WorkspaceSwitcher className={narrow ? "w-auto min-w-0 flex-1" : undefined} />}
+      {app === "explore" && <WorkspaceSwitcher className={narrow ? "w-auto min-w-0 flex-1" : undefined} />}
 
       <div className="flex-1" />
 
-      {canAdmin && !isAdmin && (
-        <Button asChild variant="ghost" size={narrow ? "icon" : "sm"} className={narrow ? undefined : "gap-2"}>
-          <Link to="/control-plane" aria-label="Control Plane">
-            <Settings className="h-4 w-4" />
-            {!narrow && "Control Plane"}
-          </Link>
-        </Button>
-      )}
-
-      {isAdmin && (
-        <Button
-          variant="default"
-          size={narrow ? "icon" : "sm"}
-          className={narrow ? undefined : "gap-2"}
-          aria-label="Explorer"
-          onClick={handleExplorer}
-        >
-          <Compass className="h-4 w-4" />
-          {!narrow && "Explorer"}
-        </Button>
+      {showSwitcher && (
+        <nav aria-label="Apps" className={`flex items-center ${narrow ? "gap-2" : "gap-3"}`}>
+          <Button
+            variant={variantFor("explore")}
+            size={entrySize}
+            className={entryClass}
+            aria-label="Explorer"
+            aria-current={current("explore")}
+            title="Explorer"
+            onClick={handleExplorer}
+          >
+            <Compass className="h-4 w-4" />
+            {!narrow && "Explorer"}
+          </Button>
+          {showGovernance && (
+            <Button asChild variant={variantFor("governance")} size={entrySize} className={entryClass}>
+              <Link to="/governance" aria-label="Governance" aria-current={current("governance")} title="Governance">
+                <ShieldCheck className="h-4 w-4" />
+                {!narrow && "Governance"}
+              </Link>
+            </Button>
+          )}
+          {showControlPlane && (
+            <Button asChild variant={variantFor("control-plane")} size={entrySize} className={entryClass}>
+              <Link
+                to="/control-plane"
+                aria-label="Control Plane"
+                aria-current={current("control-plane")}
+                title="Control Plane"
+              >
+                <Settings className="h-4 w-4" />
+                {!narrow && "Control Plane"}
+              </Link>
+            </Button>
+          )}
+        </nav>
       )}
 
       <Button

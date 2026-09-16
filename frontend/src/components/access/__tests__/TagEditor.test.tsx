@@ -85,7 +85,7 @@ describe("TagEditor", () => {
     renderEditor();
 
     expect(
-      screen.getByText(/create them in Control Plane.*Classifications/i),
+      screen.getByText(/create them in Governance.*Classifications/i),
     ).toBeInTheDocument();
   });
 

@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-import Classifications from "@/routes/control-plane/governance/Classifications";
+import Classifications from "@/routes/governance/Classifications";
 import * as tagsApi from "@/api/tags";
 import * as accessApi from "@/api/access";
 import { useAuth } from "@/auth/useAuth";
@@ -179,6 +179,11 @@ describe("Classifications", () => {
 
     expect(screen.getByText("Internal")).toBeInTheDocument();
     expect(screen.getByText("internal")).toBeInTheDocument();
+  });
+
+  test("links each tag name to its Governance detail page", async () => {
+    renderPage();
+    expect(await screen.findByRole("link", { name: "PII" })).toHaveAttribute("href", "/governance/classifications/t1");
   });
 
   test('"New tag" opens a create dialog and submitting calls useCreateTag with the entered fields', async () => {

@@ -3,11 +3,19 @@ import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router-
 import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider } from "@/auth/AuthProvider";
-import { RequireAuth, RequireControlPlaneAccess, RequireGlobalAdmin, RequirePermission, RequireWorkspace } from "@/auth/guards";
+import {
+  RequireAuth,
+  RequireControlPlaneAccess,
+  RequireGlobalAdmin,
+  RequireGovernanceAccess,
+  RequirePermission,
+  RequireWorkspace,
+} from "@/auth/guards";
 import { AppShell } from "@/components/layout/AppShell";
 import { LoginPage } from "@/auth/LoginPage";
 import { NotFound } from "@/routes/NotFound";
 import { useAuth } from "@/auth/useAuth";
+import { canEnterControlPlane, canEnterGovernance } from "@/auth/appAccess";
 import { useMyWorkspaces } from "@/api/hooks";
 import { queryClient } from "@/api/queryClient";
 import { RequireFeature } from "@/components/explore/RequireFeature";
@@ -64,9 +72,9 @@ import StorageDetail from "@/routes/control-plane/StorageDetail";
 import StorageBrowser from "@/routes/control-plane/StorageBrowser";
 import ControlPlaneSecrets from "@/routes/control-plane/ControlPlaneSecrets";
 import SecretDetail from "@/routes/control-plane/SecretDetail";
-import Policies from "@/routes/control-plane/Policies";
-import ProfileDetailPage from "@/routes/control-plane/ProfileDetailPage";
-import PolicyEditorPage from "@/routes/control-plane/PolicyEditorPage";
+import Policies from "@/routes/governance/Policies";
+import ProfileDetailPage from "@/routes/governance/ProfileDetailPage";
+import PolicyEditorPage from "@/routes/governance/PolicyEditorPage";
 import Warehouses from "@/routes/control-plane/Warehouses";
 import WarehouseDetail from "@/routes/control-plane/WarehouseDetail";
 import AuditLog from "@/routes/control-plane/AuditLog";
@@ -80,14 +88,24 @@ import PermissionsPage from "@/routes/control-plane/access/PermissionsPage";
 import AccessExplorer from "@/routes/control-plane/access/AccessExplorer";
 import AccessOverview from "@/routes/control-plane/access/AccessOverview";
 import WhoCanAccess from "@/routes/control-plane/access/WhoCanAccess";
-import Classifications from "@/routes/control-plane/governance/Classifications";
-import TagDetail from "@/routes/control-plane/governance/TagDetail";
+import Classifications from "@/routes/governance/Classifications";
+import TagDetail from "@/routes/governance/TagDetail";
+import { LegacyGovernanceRedirect } from "@/routes/governance/LegacyGovernanceRedirect";
 
 function HomeRedirect() {
   const { me, isLoading } = useAuth();
-  const { data } = useMyWorkspaces(!!me);
+  const { data, isLoading: wsLoading } = useMyWorkspaces(!!me);
   if (isLoading) return <div className="p-10">Loading…</div>;
+  // Wait for the workspace list to settle (loaded or errored) before deciding
+  // where a workspace-less user goes — otherwise a member with workspaces
+  // would flash a Governance/Control Plane redirect while the fetch is
+  // still in flight.
+  if (wsLoading) return <div className="p-10">Loading…</div>;
   if (data && data.length > 0) return <Navigate to={`/explore/${data[0].slug}`} replace />;
+  // No workspace yet. A steward or infra operator still has somewhere to go —
+  // this page renders no header, so without the redirect they would be stranded.
+  if (canEnterGovernance(me)) return <Navigate to="/governance" replace />;
+  if (canEnterControlPlane(me)) return <Navigate to="/control-plane" replace />;
   return <div className="p-10">No workspaces yet. Ask an admin to add you to one.</div>;
 }
 
@@ -259,7 +277,6 @@ const FIRST_SECTION_BY_PERM: { path: string; perm: string }[] = [
   { path: "warehouses", perm: "warehouse:read" },
   { path: "storage", perm: "storage:read" },
   { path: "secrets", perm: "secret:read" },
-  { path: "policies", perm: "policy:read" },
   { path: "users", perm: "user:read" },
   { path: "groups", perm: "group:read" },
   { path: "roles", perm: "role:read" },
@@ -271,7 +288,14 @@ function ControlPlaneIndex() {
   if (me?.platform_roles.includes("platform_admin")) return <Navigate to="workspaces" replace />;
   const perms = me?.permissions ?? [];
   const first = FIRST_SECTION_BY_PERM.find((s) => perms.includes(s.perm));
-  return <Navigate to={first ? first.path : "workspaces"} replace />;
+  if (first) return <Navigate to={first.path} replace />;
+  // `RequireControlPlaneAccess` admits anyone holding a Control Plane read
+  // permission (see `CONTROL_PLANE_PERMS`), but not every one of those unlocks
+  // a section above (e.g. `workspace:read` alone) — so a non-admin can land
+  // here matching nothing and 403 on the platform_admin-only "workspaces"
+  // fallback. If they can also enter Governance, send them there instead.
+  if (canEnterGovernance(me)) return <Navigate to="/governance" replace />;
+  return <Navigate to="workspaces" replace />;
 }
 
 function ControlPlaneRoutes() {
@@ -292,13 +316,6 @@ function ControlPlaneRoutes() {
           <Route path="storage/:id/browse" element={<RequirePermission perm="storage:read"><StorageBrowser /></RequirePermission>} />
           <Route path="secrets" element={<RequirePermission perm="secret:read"><ControlPlaneSecrets /></RequirePermission>} />
           <Route path="secrets/:id" element={<RequirePermission perm="secret:read"><SecretDetail /></RequirePermission>} />
-          <Route path="policies" element={<RequirePermission perm="policy:read"><Policies /></RequirePermission>} />
-          <Route path="policies/:service" element={<RequirePermission perm="policy:read"><ProfileDetailPage /></RequirePermission>} />
-          <Route path="policies/:service/:kind/new" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
-          <Route path="policies/:service/:kind/:id" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
-          <Route path="classifications" element={<RequirePermission perm="tag:read"><Classifications /></RequirePermission>} />
-          <Route path="classifications/:id" element={<RequirePermission perm="tag:read"><TagDetail /></RequirePermission>} />
-          <Route path="data-lineage" element={<RequireGlobalAdmin><Placeholder title="Data Lineage" /></RequireGlobalAdmin>} />
           <Route path="users" element={<RequirePermission perm="user:read"><UsersPage /></RequirePermission>} />
           <Route path="users/:id" element={<RequirePermission perm="user:read"><UserDetail /></RequirePermission>} />
           <Route path="groups" element={<RequirePermission perm="group:read"><GroupsPage /></RequirePermission>} />
@@ -317,6 +334,48 @@ function ControlPlaneRoutes() {
   );
 }
 
+// Governance (SP2): the data-plane rules a data steward manages, split out of
+// the system-admin Control Plane. Same shape as `ControlPlaneRoutes` — one area
+// gate, then a per-route permission. First section (in preference order) each
+// Governance read permission unlocks, for the landing below.
+const GOVERNANCE_FIRST_SECTION: { path: string; perm: string }[] = [
+  { path: "/governance/policies", perm: "policy:read" },
+  { path: "/governance/classifications", perm: "tag:read" },
+];
+
+function GovernanceIndex() {
+  const { me } = useAuth();
+  if (me?.platform_roles.includes("platform_admin")) return <Navigate to="/governance/policies" replace />;
+  const perms = me?.permissions ?? [];
+  const first = GOVERNANCE_FIRST_SECTION.find((s) => perms.includes(s.perm));
+  // Absolute targets: this also renders for the `*` catch-all, where react-router 7
+  // resolves a relative target against the unmatched URL and loops (see
+  // `exploreRedirectTo`). `RequireGovernanceAccess` already admitted this user,
+  // so `first` exists; the fallback only satisfies the type.
+  return <Navigate to={first ? first.path : "/governance/policies"} replace />;
+}
+
+function GovernanceRoutes() {
+  return (
+    <RequireGovernanceAccess>
+      <AppShell>
+        <Routes>
+          <Route index element={<GovernanceIndex />} />
+          <Route path="policies" element={<RequirePermission perm="policy:read"><Policies /></RequirePermission>} />
+          <Route path="policies/:service" element={<RequirePermission perm="policy:read"><ProfileDetailPage /></RequirePermission>} />
+          <Route path="policies/:service/:kind/new" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
+          <Route path="policies/:service/:kind/:id" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
+          <Route path="classifications" element={<RequirePermission perm="tag:read"><Classifications /></RequirePermission>} />
+          <Route path="classifications/:id" element={<RequirePermission perm="tag:read"><TagDetail /></RequirePermission>} />
+          {/* Platform-wide (cross-workspace) placeholder; admin-only until the real feature and its permission land. */}
+          <Route path="data-lineage" element={<RequireGlobalAdmin><Placeholder title="Data Lineage" /></RequireGlobalAdmin>} />
+          <Route path="*" element={<GovernanceIndex />} />
+        </Routes>
+      </AppShell>
+    </RequireGovernanceAccess>
+  );
+}
+
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -332,7 +391,17 @@ export default function App() {
               <Route path="/embed/print/:kind/:id" element={<PrintObject />} />
               <Route path="/" element={<RequireAuth><HomeRedirect /></RequireAuth>} />
               <Route path="/explore/:workspace/*" element={<RequireAuth><ExploreRoutes /></RequireAuth>} />
+              <Route path="/governance/*" element={<RequireAuth><GovernanceRoutes /></RequireAuth>} />
               <Route path="/control-plane/*" element={<RequireAuth><ControlPlaneRoutes /></RequireAuth>} />
+              {/* Old Control Plane URLs of the pages that moved to Governance. Mounted
+                  here, not inside ControlPlaneRoutes: that tree is behind
+                  RequireControlPlaneAccess, which a governance-only user fails, so
+                  they would get a 403 for their own bookmark. More static segments
+                  outrank `/control-plane/*` in react-router 7, so order does not
+                  matter. No RequireAuth: the destination carries it. */}
+              <Route path="/control-plane/policies/*" element={<LegacyGovernanceRedirect />} />
+              <Route path="/control-plane/classifications/*" element={<LegacyGovernanceRedirect />} />
+              <Route path="/control-plane/data-lineage" element={<LegacyGovernanceRedirect />} />
               <Route path="*" element={<NotFound />} />
             </Routes>
           </AuthProvider>

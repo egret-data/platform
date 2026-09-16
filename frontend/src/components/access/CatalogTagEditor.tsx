@@ -132,7 +132,7 @@ export function CatalogTagEditor({ warehouseId, schema, table, column }: Resourc
 
       {catalog.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          No tags defined — create them in Control Plane → Classifications.
+          No tags defined — create them in Governance → Classifications.
         </p>
       ) : (
         <AddCatalogTagSelect
