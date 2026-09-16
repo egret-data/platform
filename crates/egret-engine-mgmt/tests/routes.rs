@@ -410,9 +410,16 @@ struct FakeEnginePort {
     delete_error: Arc<std::sync::Mutex<Option<String>>>,
     fail_provision: Arc<std::sync::atomic::AtomicBool>,
     fail_update: Arc<std::sync::atomic::AtomicBool>,
+    /// When `Some`, `status` returns this instead of the hard-coded
+    /// all-pods-ready `running` default — so a test can drive a not-ready /
+    /// crash-looping cluster through `GET /engines/{id}` (I1).
+    status_response: Arc<std::sync::Mutex<Option<egret_engine_mgmt_api::EngineStatus>>>,
 }
 
 impl FakeEnginePort {
+    fn set_status(&self, status: egret_engine_mgmt_api::EngineStatus) {
+        *self.status_response.lock().unwrap() = Some(status);
+    }
     fn last_provisioned(&self) -> egret_engine_mgmt_api::EngineSpec {
         self.provisioned
             .lock()
@@ -457,6 +464,9 @@ impl EngineProvisioningPort for FakeEnginePort {
         _ns: &str,
         _name: &str,
     ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+        if let Some(s) = self.status_response.lock().unwrap().clone() {
+            return Ok(s);
+        }
         Ok(egret_engine_mgmt_api::EngineStatus {
             phase: "running".into(),
             message: None,
@@ -3989,11 +3999,16 @@ async fn stored_status(f: &Fixture, engine_id: &str) -> String {
 }
 
 /// P6: `GET /engines/{id}` records `running` once live status reports every pod
-/// ready, and never overwrites `deleting`.
+/// ready, and never overwrites `deleting`. Also (I1: `FakeEnginePort::status`
+/// used to be hard-coded to always report `running`/ready, so the guard at
+/// `get_engine` gating the write on `s.phase == RUNNING` could never actually
+/// be exercised) — a not-ready live status must leave a `provisioning` row
+/// alone.
 #[tokio::test]
 async fn get_engine_records_running_and_leaves_deleting_alone() {
+    let port = FakeEnginePort::default();
     let Some(f) = setup_full(
-        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(port.clone())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
@@ -4040,6 +4055,35 @@ async fn get_engine_records_running_and_leaves_deleting_alone() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(stored_status(&f, &id2).await, "deleting");
+
+    // A crash-looping (not-ready) live status must NOT flip a `provisioning`
+    // row to `running` — only an all-pods-ready `running` phase may.
+    let name3 = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name3, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create 3; body={j}");
+    let id3 = j["id"].as_str().unwrap().to_string();
+    assert_eq!(stored_status(&f, &id3).await, "provisioning");
+    port.set_status(egret_engine_mgmt_api::EngineStatus {
+        phase: "provisioning".into(),
+        message: Some("waiting for pods".into()),
+        pods: vec![egret_engine_mgmt_api::PodStatus {
+            name: "coordinator-0".into(),
+            phase: "CrashLoopBackOff".into(),
+            ready: false,
+        }],
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{id3}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        stored_status(&f, &id3).await,
+        "provisioning",
+        "a not-ready live status must not record running"
+    );
 }
 
 /// Rotate: `apply_built` commits the pending pair on BOTH the success and the
