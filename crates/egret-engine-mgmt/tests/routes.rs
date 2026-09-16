@@ -4513,3 +4513,89 @@ async fn remove_catalog_applies_before_deleting_and_revoking() {
         "minted client revoked"
     );
 }
+
+/// P2: a create whose provision fails leaves no engine row and no catalog client,
+/// and asks the cluster to delete what it may have applied — for both kinds.
+#[tokio::test]
+async fn failed_provision_rolls_back_row_client_and_cluster() {
+    let port = FakeEnginePort::default();
+    port.set_fail_provision(true);
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p2_admin", true).await;
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let row_exists = |name: String| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM engine_mgmt.engines WHERE name = $1)",
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert!(!row_exists(name.clone()).await, "Trino row rolled back");
+    assert!(
+        catalog_store.list_clients(wh_id).await.unwrap().is_empty(),
+        "Trino client revoked"
+    );
+    assert!(port.deleted.lock().unwrap().contains(&(
+        "trino".to_string(),
+        "egret-engines".to_string(),
+        name.clone()
+    )));
+
+    let sr_wh = seed_provisioned_warehouse_with_secret(&f).await;
+    let sr_name = format!("sr-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": sr_name, "warehouseId": sr_wh, "kind": "starrocks",
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !row_exists(sr_name.clone()).await,
+        "StarRocks row rolled back"
+    );
+    assert!(
+        catalog_store.list_clients(sr_wh).await.unwrap().is_empty(),
+        "StarRocks client revoked"
+    );
+    assert!(port.deleted.lock().unwrap().contains(&(
+        "starrocks".to_string(),
+        "egret-engines".to_string(),
+        sr_name
+    )));
+}

@@ -2357,6 +2357,120 @@ fn is_minted_client(config: &serde_json::Value) -> bool {
     config.get("mintedClient").and_then(|v| v.as_bool()) != Some(false)
 }
 
+/// What an engine create has minted so far; [`compensate_failed_create`]
+/// undoes exactly this and nothing else.
+#[derive(Debug, Default)]
+struct CreateUndo {
+    /// The auto-wired Catalog Client.
+    client_id: Option<Uuid>,
+    /// The engine row (its owned secrets are read off it at undo time).
+    engine_id: Option<Uuid>,
+    /// `(kind, namespace, name)` once a provision has been attempted.
+    cluster: Option<(String, String, String)>,
+    /// A Ranger profile THIS create made (never a pre-existing one).
+    created_profile_id: Option<i64>,
+    /// A tag service THIS create made (never a pre-existing one).
+    created_tag_service_id: Option<i64>,
+}
+
+/// Secret rows egret minted for this engine and owns outright. Reused by both
+/// [`compensate_failed_create`] (a create that fails) and, per the standing
+/// "never delete a secret the cluster may still hold" rule, by engine delete
+/// (Task 15) for the exact same set of ids.
+/// `tls_cert_secret_ref` is deliberately absent: it points at an admin-provided
+/// `kubernetes.io/tls` secret that other engines may share.
+fn engine_owned_secret_ids(engine: &Engine) -> Vec<Uuid> {
+    [
+        engine.delegator_secret_id,
+        engine.tls_secret_id,
+        engine.root_secret_id,
+        engine.internal_secret_id,
+        engine.monitor_secret_id,
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Undo a failed engine create. Every step logs its own failure and continues.
+/// Order: cluster, row (then the secrets it referenced — a row that cannot be
+/// deleted keeps its secrets and is marked `failed`), profiles this create made
+/// (their policies cascade), catalog client. Policies seeded into a PRE-EXISTING
+/// profile are left alone: other engines may be bound to it.
+///
+/// Deleting `engine_owned_secret_ids(&engine)` here is safe under the standing
+/// "never delete a secret the cluster may still hold" rule because (a) these are
+/// secrets THIS create minted (a brand-new engine id no other in-flight create or
+/// apply can be racing), and (b) the cluster delete above runs FIRST and is
+/// attempted for every path that reaches this point with `undo.cluster` set —
+/// so whatever the apply rendered from these secrets into the cluster is being
+/// removed in the same compensation, not left as a dangling reference. This
+/// includes `internal_secret_id`/`monitor_secret_id`: `commit_internal_secrets`
+/// commits a freshly-minted pair onto the row on BOTH the success and the
+/// failure path of an apply that rendered one, so by the time compensation
+/// reads the row those ids are exactly the pair (if any) this create's own,
+/// and only this create's own, apply attempted — never one a concurrent apply
+/// might still be relying on.
+async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
+    if let (Some((kind, namespace, name)), Some(prov)) =
+        (&undo.cluster, st.engine_provisioner.as_ref())
+    {
+        if let Err(e) = prov.delete(kind, namespace, name).await {
+            tracing::error!(engine = %name, error = %e,
+                "create compensation: cluster delete failed; objects may remain");
+        }
+    }
+    if let Some(engine_id) = undo.engine_id {
+        match st.engine_mgmt.get_engine(engine_id).await {
+            Ok(Some(engine)) => {
+                let owned = engine_owned_secret_ids(&engine);
+                match st.engine_mgmt.delete_engine(engine_id).await {
+                    Ok(()) => {
+                        for secret_id in owned {
+                            if let Err(e) = st.secrets.delete(None, secret_id).await {
+                                tracing::error!(engine = %engine.name, %secret_id, error = %e,
+                                    "create compensation: secret delete failed");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(engine = %engine.name, error = %e,
+                            "create compensation: engine row delete failed; marking it failed");
+                        if let Err(e) = st
+                            .engine_mgmt
+                            .set_engine_status(engine_id, crate::engine_status::FAILED)
+                            .await
+                        {
+                            tracing::error!(engine = %engine.name, error = %e,
+                                "create compensation: could not mark the engine failed");
+                        }
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::error!(%engine_id, error = %e,
+                "create compensation: could not load the engine row"),
+        }
+    }
+    for (what, id) in [
+        ("policy profile", undo.created_profile_id),
+        ("tag service", undo.created_tag_service_id),
+    ] {
+        if let Some(id) = id {
+            if let Err(e) = st.authz.delete_service(id).await {
+                tracing::error!(service_id = id, error = %e,
+                    "create compensation: {what} delete failed");
+            }
+        }
+    }
+    if let Some(client_id) = undo.client_id {
+        if let Err(e) = st.catalog.revoke_client(client_id).await {
+            tracing::error!(%client_id, error = ?e,
+                "create compensation: catalog client revoke failed");
+        }
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/api/control-plane/engines",
@@ -2509,22 +2623,8 @@ async fn create_engine(
         }
     }
 
-    // 4. Auto-wire: mint a fresh Catalog Client for the warehouse. Minted only
-    //    AFTER delegation resolves (step 3), so a resolver 400 leaks no client.
-    let role_id = ensure_engine_role(&st, wh.id).await?;
-    let client = st
-        .catalog
-        .create_client(NewClient {
-            name: format!("engine-{}", b.name),
-            consumer_type: "engine".into(),
-            workspace_id: wh.workspace_id,
-            warehouse_id: wh.id,
-            catalog_role_id: role_id,
-        })
-        .await?;
-
-    // 5. Record the intent row (status `provisioning`). The auto-wired client id
-    //    lives on the PRIMARY catalog row now, not in the engine spec.
+    // 4. Assemble and validate the stored spec BEFORE minting anything, so an
+    //    invalid resource-group config 400s with nothing to roll back.
     let image_version = b
         .image_version
         .clone()
@@ -2541,6 +2641,33 @@ async fn create_engine(
     });
     spec["trinoConfig"] = trino_config;
     validate_spec_resource_groups(&spec)?;
+    // Kubernetes must be configured before anything is minted or rendered.
+    let Some(prov) = st.engine_provisioner.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+
+    // 5. Auto-wire: mint a fresh Catalog Client for the warehouse. Minted only
+    //    AFTER delegation resolves (step 3) and the spec validates (step 4), so
+    //    neither a resolver 400 nor a resource-group 400 leaks a client. From
+    //    here on, every failure runs `compensate_failed_create`.
+    let role_id = ensure_engine_role(&st, wh.id).await?;
+    let client = st
+        .catalog
+        .create_client(NewClient {
+            name: format!("engine-{}", b.name),
+            consumer_type: "engine".into(),
+            workspace_id: wh.workspace_id,
+            warehouse_id: wh.id,
+            catalog_role_id: role_id,
+        })
+        .await?;
+    let mut undo = CreateUndo {
+        client_id: Some(client.id),
+        ..CreateUndo::default()
+    };
+
+    // 6. Record the intent row (status `provisioning`). The auto-wired client id
+    //    lives on the PRIMARY catalog row, not in the engine spec.
     let engine = match st
         .engine_mgmt
         .create_engine(
@@ -2555,12 +2682,13 @@ async fn create_engine(
     {
         Ok(e) => e,
         Err(e) => {
-            let _ = st.catalog.revoke_client(client.id).await;
+            compensate_failed_create(&st, undo).await;
             return Err(e.into());
         }
     };
+    undo.engine_id = Some(engine.id);
 
-    // 5. Record the PRIMARY catalog row (the auto-wired egret warehouse).
+    // 7. Record the PRIMARY catalog row (the auto-wired egret warehouse).
     let cat_config = serde_json::json!({
         "warehouse": wh.name,
         "s3_endpoint": s3_endpoint,
@@ -2579,37 +2707,31 @@ async fn create_engine(
         )
         .await
     {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.catalog.revoke_client(client.id).await;
+        compensate_failed_create(&st, undo).await;
         return Err(e.into());
     }
 
-    // 6. Kubernetes must be configured before anything is rendered (a build
-    //    mints internal secrets that only an apply settles).
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.catalog.revoke_client(client.id).await;
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
-    };
-    // 7. Build from the stored engine + catalogs, then provision; roll back the
-    //    engine row (+ cascade catalog) + client on any failure.
+    // 8. Build from the stored engine + catalogs and provision.
     let built = match build_provision_req(&st, &engine).await {
-        Ok(r) => r,
+        Ok(built) => built,
         Err(e) => {
-            let _ = st.engine_mgmt.delete_engine(engine.id).await; // CASCADE removes the catalog
-            let _ = st.catalog.revoke_client(client.id).await;
+            compensate_failed_create(&st, undo).await;
             return Err(e);
         }
     };
+    undo.cluster = Some((
+        engine.r#type.clone(),
+        engine.namespace.clone(),
+        engine.name.clone(),
+    ));
     if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Provision).await {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.catalog.revoke_client(client.id).await;
+        compensate_failed_create(&st, undo).await;
         return Err(CpError::BadRequest(format!(
             "engine provisioning failed: {msg}"
         )));
     }
 
-    // 8. Auto-bind the engine to a Ranger policy profile: link the admin-chosen
+    // 9. Auto-bind the engine to a Ranger policy profile: link the admin-chosen
     // existing service, or create a fresh one named after the engine. Runs ONLY
     // here on the success path — after provisioning succeeded and every rollback
     // path above is passed — so a failed provision never creates an orphan
@@ -3309,11 +3431,17 @@ async fn create_starrocks_engine(
     // the admin gets a clean 400 instead of a deferred HPA-create failure.
     validate_sr_autoscaling(&sr_body)?;
 
+    // Kubernetes must be configured before anything is minted.
+    let Some(prov) = st.engine_provisioner.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+
     // ── Iceberg external-catalog auto-wire (T6), step 1: mint a Catalog Client
     // for the warehouse — the EXACT same call the Trino path uses
     // (`ensure_engine_role` + `catalog.create_client`). Minted BEFORE the
     // engine row exists, so a mint failure here needs no rollback (nothing to
-    // roll back yet), matching the Trino path's ordering.
+    // roll back yet), matching the Trino path's ordering. From here on, every
+    // failure runs `compensate_failed_create`.
     let role_id = ensure_engine_role(&st, wh.id).await?;
     let client = st
         .catalog
@@ -3325,6 +3453,10 @@ async fn create_starrocks_engine(
             catalog_role_id: role_id,
         })
         .await?;
+    let mut undo = CreateUndo {
+        client_id: Some(client.id),
+        ..CreateUndo::default()
+    };
 
     let namespace = DEFAULT_NAMESPACE.to_string();
     // Stored spec (identical builder create and update share). The delegation
@@ -3359,10 +3491,11 @@ async fn create_starrocks_engine(
     {
         Ok(e) => e,
         Err(e) => {
-            let _ = st.catalog.revoke_client(client.id).await;
+            compensate_failed_create(&st, undo).await;
             return Err(e.into());
         }
     };
+    undo.engine_id = Some(engine.id);
 
     // Step 2: record the PRIMARY catalog row — same shape/kind Trino's
     // auto-wire uses (`egret-warehouse`), so `delete_engine`/list/detail/
@@ -3388,8 +3521,7 @@ async fn create_starrocks_engine(
         )
         .await
     {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await; // CASCADE removes the catalog
-        let _ = st.catalog.revoke_client(client.id).await;
+        compensate_failed_create(&st, undo).await;
         return Err(e.into());
     }
 
@@ -3424,21 +3556,18 @@ async fn create_starrocks_engine(
     // `StarRocksConfig.root_password` (which Task 2's provisioner applies via
     // initpwd). Legacy engines (no `root_secret_id`) stay passwordless.
     if let Err(e) = ensure_root_password_secret(&st, &engine).await {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.catalog.revoke_client(client.id).await;
+        compensate_failed_create(&st, undo).await;
         return Err(e);
     }
 
     let engine = match st.engine_mgmt.get_engine(engine.id).await {
         Ok(Some(e)) => e,
         Ok(None) => {
-            let _ = st.engine_mgmt.delete_engine(engine.id).await;
-            let _ = st.catalog.revoke_client(client.id).await;
+            compensate_failed_create(&st, undo).await;
             return Err(CpError::NotFound);
         }
         Err(e) => {
-            let _ = st.engine_mgmt.delete_engine(engine.id).await;
-            let _ = st.catalog.revoke_client(client.id).await;
+            compensate_failed_create(&st, undo).await;
             return Err(e.into());
         }
     };
@@ -3453,20 +3582,18 @@ async fn create_starrocks_engine(
     let (req, delegation_bootstrap) = match build_starrocks_provision_req(&st, &engine, &wh).await {
         Ok(v) => v,
         Err(e) => {
-            let _ = st.engine_mgmt.delete_engine(engine.id).await;
-            let _ = st.catalog.revoke_client(client.id).await;
+            compensate_failed_create(&st, undo).await;
             return Err(e);
         }
     };
 
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.catalog.revoke_client(client.id).await;
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
-    };
+    undo.cluster = Some((
+        engine.r#type.clone(),
+        engine.namespace.clone(),
+        engine.name.clone(),
+    ));
     if let Err(msg) = prov.provision(&req).await {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.catalog.revoke_client(client.id).await;
+        compensate_failed_create(&st, undo).await;
         return Err(CpError::BadRequest(format!(
             "engine provisioning failed: {msg}"
         )));
@@ -6718,6 +6845,120 @@ mod tests {
             .expect("get_warehouse")
             .expect("warehouse present");
         (wh, secret_plain)
+    }
+
+    /// P2: compensation deletes the engine row, every secret egret minted for it
+    /// (including pending internal secrets already recorded), and the catalog
+    /// client — and never the admin-provided coordinator TLS secret.
+    #[tokio::test]
+    async fn compensate_failed_create_removes_everything_it_minted() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping compensate_failed_create_removes_everything_it_minted: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let mut tls = std::collections::BTreeMap::new();
+        tls.insert("tls.crt".to_string(), "CERTPEM".to_string());
+        tls.insert("tls.key".to_string(), "KEYPEM".to_string());
+        let admin_tls = st
+            .secrets
+            .create_typed(
+                None,
+                &format!("company-tls-{}", Uuid::new_v4().simple()),
+                None,
+                egret_secrets::secret_type::TLS,
+                &tls,
+            )
+            .await
+            .expect("admin tls secret");
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                "egret-engines",
+                wh.id,
+                &serde_json::json!({ "trinoConfig": { "delegationMode": "impersonate", "auth": {} } }),
+                Some(admin_tls),
+            )
+            .await
+            .expect("engine row");
+        let (delegator_id, _) = ensure_delegator_secret(&st, &engine)
+            .await
+            .expect("delegator");
+        let engine = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        let internal = resolve_internal_secrets(&st, &engine, false)
+            .await
+            .expect("internal");
+        commit_internal_secrets(&st, &engine, &internal, Supersede::Keep)
+            .await
+            .expect("commit");
+        let role_id = ensure_engine_role(&st, wh.id).await.expect("role");
+        let client = st
+            .catalog
+            .create_client(NewClient {
+                name: format!("engine-{}", engine.name),
+                consumer_type: "engine".into(),
+                workspace_id: wh.workspace_id,
+                warehouse_id: wh.id,
+                catalog_role_id: role_id,
+            })
+            .await
+            .expect("client");
+
+        compensate_failed_create(
+            &st,
+            CreateUndo {
+                client_id: Some(client.id),
+                engine_id: Some(engine.id),
+                ..CreateUndo::default()
+            },
+        )
+        .await;
+
+        assert!(st
+            .engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .unwrap()
+            .is_none());
+        for id in [delegator_id, internal.internal_id, internal.monitor_id] {
+            assert!(
+                matches!(
+                    st.secrets.resolve_plaintext(None, id).await,
+                    Err(egret_secrets::SecretsError::NotFound)
+                ),
+                "secret {id} must be deleted"
+            );
+        }
+        assert!(
+            st.secrets.resolve_typed(None, admin_tls).await.is_ok(),
+            "an admin-provided TLS secret is never deleted"
+        );
+        assert!(!st
+            .catalog
+            .list_clients(wh.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.id == client.id));
+    }
+
+    #[test]
+    fn engine_owned_secret_ids_excludes_the_admin_tls_reference() {
+        let mut e = dummy_engine();
+        let ids: Vec<Uuid> = (0..6).map(|_| Uuid::new_v4()).collect();
+        e.delegator_secret_id = Some(ids[0]);
+        e.tls_secret_id = Some(ids[1]);
+        e.root_secret_id = Some(ids[2]);
+        e.internal_secret_id = Some(ids[3]);
+        e.monitor_secret_id = Some(ids[4]);
+        e.tls_cert_secret_ref = Some(ids[5]);
+        assert_eq!(engine_owned_secret_ids(&e), ids[..5].to_vec());
     }
 
     /// `build_starrocks_provision_req` (Task 1) rebuilds the provisioner
