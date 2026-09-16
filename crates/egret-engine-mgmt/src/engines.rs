@@ -840,13 +840,42 @@ enum ApplyOp {
 /// therefore leave orphaned generations behind indefinitely; only engine
 /// delete (Task 15) is a safe place to sweep them, since by then no apply can
 /// still be in flight for this engine.
+/// Failure from [`apply_built`]: either the row moved out from under the
+/// caller before the provisioner was touched, or the provisioner itself
+/// rejected the apply. Kept distinct so every caller can turn the former into
+/// `CpError::Conflict` (409, retry) instead of the apply-failure shape it uses
+/// for the latter.
+enum ApplyBuiltError {
+    /// The row is no longer at the status the caller observed when it read
+    /// `engine` (typically a concurrent delete), or re-reading it to check
+    /// failed outright. Either way `apply_built` cannot confirm it is still
+    /// safe to call the provisioner, so it never does.
+    Conflict,
+    Failed(String),
+}
+
+/// `expected_status`: the status the caller observed on `engine` when it read
+/// the row (before building `built`, minting anything, etc.). Re-checked here,
+/// immediately before the provisioner call, because every caller does real
+/// work between that read and this point — long enough for a concurrent
+/// DELETE to mark the row `deleting` and tear the cluster down. `prov.provision`
+/// / `prov.update` is server-side apply: called on a deleted engine it would
+/// RE-CREATE every object DELETE just removed, including minting a fresh
+/// internal-secret pair the row can never reference again (SP1 Part B final
+/// review, C1). Refusing here is the one place all six apply routes share, so
+/// it is the one place this guard needs to live.
 async fn apply_built(
     st: &CpState,
     prov: &dyn egret_engine_mgmt_api::EngineProvisioningPort,
     engine: &Engine,
     built: &BuiltReq,
     op: ApplyOp,
-) -> Result<(), String> {
+    expected_status: &str,
+) -> Result<(), ApplyBuiltError> {
+    match st.engine_mgmt.get_engine(engine.id).await {
+        Ok(Some(current)) if current.status == expected_status => {}
+        _ => return Err(ApplyBuiltError::Conflict),
+    }
     let res = match op {
         ApplyOp::Provision => prov.provision(&built.req).await,
         ApplyOp::Update => prov.update(&built.req).await,
@@ -863,7 +892,13 @@ async fn apply_built(
                  the monitor fails until the next successful apply");
         }
     }
-    res
+    res.map_err(ApplyBuiltError::Failed)
+}
+
+/// `CpError::Conflict` with the wording every apply route uses when
+/// [`apply_built`] reports a lost race against a concurrent status change.
+fn apply_conflict() -> CpError {
+    CpError::Conflict("engine changed while the update was being applied; retry".into())
 }
 
 /// Resolve the stored `trinoConfig.faultTolerant`
@@ -2903,11 +2938,23 @@ async fn create_engine(
         engine.namespace.clone(),
         engine.name.clone(),
     ));
-    if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Provision).await {
+    if let Err(e) = apply_built(
+        &st,
+        prov.as_ref(),
+        &engine,
+        &built,
+        ApplyOp::Provision,
+        &engine.status,
+    )
+    .await
+    {
         compensate_failed_create(&st, undo).await;
-        return Err(CpError::BadRequest(format!(
-            "engine provisioning failed: {msg}"
-        )));
+        return Err(match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::Failed(msg) => {
+                CpError::BadRequest(format!("engine provisioning failed: {msg}"))
+            }
+        });
     }
 
     Ok((StatusCode::CREATED, Json(engine.into())))
@@ -4590,9 +4637,21 @@ async fn update_trino_engine(
             return Err(e);
         }
     };
-    if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
+    if let Err(e) = apply_built(
+        &st,
+        prov.as_ref(),
+        &engine,
+        &built,
+        ApplyOp::Update,
+        &expected_status,
+    )
+    .await
+    {
         restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
-        return Err(CpError::ClusterApplyFailed(msg));
+        return Err(match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
+        });
     }
 
     // Re-materialize every assigned workspace's connection so a delegation-mode
@@ -5039,6 +5098,12 @@ async fn rotate_engine_secrets(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    // A concurrent DELETE already marked the row and may have torn the cluster
+    // down; 409 the common case here, before doing any work, rather than only
+    // catching it in `apply_built`'s re-read right before the provisioner call.
+    if engine.status == crate::engine_status::DELETING {
+        return Err(apply_conflict());
+    }
     // Only Trino has these two secrets; StarRocks' analogues (root and
     // delegator passwords) are separate and not rotated here.
     if engine.r#type != "trino" {
@@ -5059,9 +5124,19 @@ async fn rotate_engine_secrets(
         },
     )
     .await?;
-    apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update)
-        .await
-        .map_err(CpError::ClusterApplyFailed)?;
+    apply_built(
+        &st,
+        prov.as_ref(),
+        &engine,
+        &built,
+        ApplyOp::Update,
+        &engine.status,
+    )
+    .await
+    .map_err(|e| match e {
+        ApplyBuiltError::Conflict => apply_conflict(),
+        ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -5393,6 +5468,12 @@ async fn add_catalog(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    // A concurrent DELETE already marked the row and may have torn the cluster
+    // down; 409 the common case here, before minting a client or a Ranger
+    // profile, rather than only catching it in `apply_built`'s re-read.
+    if engine.status == crate::engine_status::DELETING {
+        return Err(apply_conflict());
+    }
     // The stored `kind` IS the Trino connector name (or `egret-warehouse`); the
     // control-plane no longer gates on a fixed enum — any non-blank kind is a
     // valid connector. The frontend's own catalog-kind list (a UX hint, not a
@@ -5526,9 +5607,23 @@ async fn add_catalog(
             return Err(e);
         }
     };
-    if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
+    if let Err(e) = apply_built(
+        &st,
+        prov.as_ref(),
+        &engine,
+        &built,
+        ApplyOp::Update,
+        &engine.status,
+    )
+    .await
+    {
         rollback(st.clone(), cat.id, minted_client).await;
-        return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
+        return Err(match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::Failed(msg) => {
+                CpError::BadRequest(format!("engine update failed: {msg}"))
+            }
+        });
     }
 
     Ok((StatusCode::CREATED, Json(cat.into())))
@@ -5780,6 +5875,12 @@ async fn remove_catalog(
             "cannot delete the primary catalog".into(),
         ));
     }
+    // A concurrent DELETE already marked the row and may have torn the cluster
+    // down; 409 the common case here, rather than only catching it in
+    // `apply_built`'s re-read right before the provisioner call.
+    if engine.status == crate::engine_status::DELETING {
+        return Err(apply_conflict());
+    }
     let Some(prov) = st.engine_provisioner.as_ref() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
@@ -5796,8 +5897,22 @@ async fn remove_catalog(
         },
     )
     .await?;
-    if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
-        return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
+    if let Err(e) = apply_built(
+        &st,
+        prov.as_ref(),
+        &engine,
+        &built,
+        ApplyOp::Update,
+        &engine.status,
+    )
+    .await
+    {
+        return Err(match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::Failed(msg) => {
+                CpError::BadRequest(format!("engine update failed: {msg}"))
+            }
+        });
     }
     st.engine_mgmt.delete_engine_catalog(cat.id).await?;
     // Retire a minted Catalog Client (egret-warehouse catalogs). Gated on
@@ -5864,6 +5979,12 @@ async fn update_catalog(
             "egret-warehouse catalogs are managed and not editable".into(),
         ));
     }
+    // A concurrent DELETE already marked the row and may have torn the cluster
+    // down; 409 the common case here, before writing the new config, rather
+    // than only catching it in `apply_built`'s re-read.
+    if engine.status == crate::engine_status::DELETING {
+        return Err(apply_conflict());
+    }
 
     // Persist the new config, then re-provision. If re-provisioning fails, restore
     // the previous config/secret so the stored row never leads the running cluster.
@@ -5894,9 +6015,23 @@ async fn update_catalog(
             return Err(e);
         }
     };
-    if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
+    if let Err(e) = apply_built(
+        &st,
+        prov.as_ref(),
+        &engine,
+        &built,
+        ApplyOp::Update,
+        &engine.status,
+    )
+    .await
+    {
         restore(st.clone(), prev).await;
-        return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
+        return Err(match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::Failed(msg) => {
+                CpError::BadRequest(format!("engine update failed: {msg}"))
+            }
+        });
     }
 
     Ok(Json(updated.into()))
@@ -8880,6 +9015,160 @@ mod tests {
             counting.updates.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "the provisioner must never be called on a lost race"
+        );
+    }
+
+    /// Critical (SP1 Part B final review, C1) — the guard `apply_built` itself
+    /// carries. `rotate_engine_secrets`, `add_catalog`, `remove_catalog` and
+    /// `update_catalog` all fetch the engine, do real work (build a request,
+    /// sometimes mint a client), and only THEN call `apply_built`, which is
+    /// server-side apply: called on an engine a concurrent DELETE has already
+    /// torn down, it would RE-CREATE every object DELETE just removed. This
+    /// proves the re-read `apply_built` does immediately before the provisioner
+    /// call — independent of any earlier per-route check — refuses once the row
+    /// has left the status the caller observed, never calling the provisioner.
+    /// Simulated the same way the CAS tests above simulate a race: build the
+    /// request from an engine snapshot taken while `provisioning`, then flip the
+    /// row to `deleting` (as a concurrent DELETE would) before calling
+    /// `apply_built` with that stale snapshot's status.
+    #[tokio::test]
+    async fn apply_built_refuses_when_the_row_left_expected_status() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping apply_built_refuses_when_the_row_left_expected_status: DATABASE_URL not set"
+            );
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                DEFAULT_NAMESPACE,
+                wh.id,
+                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        assert_eq!(engine.status, crate::engine_status::PROVISIONING);
+
+        let built = build_provision_req(&st, &engine)
+            .await
+            .expect("build request");
+
+        // Concurrent DELETE lands after this snapshot's status was read (the
+        // same interleaving the four routes are exposed to between their own
+        // `get_engine` and their `apply_built` call).
+        st.engine_mgmt
+            .set_engine_status(engine.id, crate::engine_status::DELETING)
+            .await
+            .unwrap();
+
+        let err = apply_built(
+            &st,
+            counting.as_ref(),
+            &engine,
+            &built,
+            ApplyOp::Update,
+            &engine.status,
+        )
+        .await
+        .expect_err("a lost race must surface as an error, not a silent apply");
+        assert!(
+            matches!(err, ApplyBuiltError::Conflict),
+            "expected Conflict"
+        );
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the provisioner must never be called once the row left the expected status"
+        );
+    }
+
+    /// Critical (SP1 Part B final review, C1) — handler level, the review's
+    /// suggested regression: seed an engine, mark it `deleting` directly (as a
+    /// concurrent DELETE would just before these land), then call
+    /// `rotate_engine_secrets` and `add_catalog` (one representative of the two
+    /// remaining apply routes, `remove_catalog`/`update_catalog`, which share the
+    /// same early reject). Both must 409 and the fake port must record no
+    /// update.
+    #[tokio::test]
+    async fn rotate_and_add_catalog_reject_a_deleting_engine() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping rotate_and_add_catalog_reject_a_deleting_engine: DATABASE_URL not set"
+            );
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        st.engine_provisioner = Some(counting.clone());
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                DEFAULT_NAMESPACE,
+                wh.id,
+                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+
+        // A DELETE has already moved the row before either request lands.
+        st.engine_mgmt
+            .set_engine_status(engine.id, crate::engine_status::DELETING)
+            .await
+            .unwrap();
+
+        let principal = egret_core::context::Principal {
+            user_id: egret_core::ids::UserId::new(),
+            email: "admin@egret.local".into(),
+            platform_roles: vec!["platform_admin".into()],
+            permissions: vec![],
+            group_ids: vec![],
+            impersonator: None,
+        };
+
+        let err =
+            rotate_engine_secrets(State(st.clone()), Auth(principal.clone()), Path(engine.id))
+                .await
+                .expect_err("rotate on a deleting engine must fail");
+        assert!(matches!(err, CpError::Conflict(_)), "got {err:?}");
+
+        let cat_body = AddCatalogBody {
+            name: "extra".into(),
+            kind: "postgresql".into(),
+            config: serde_json::json!({}),
+            secret_ref: None,
+        };
+        let err = add_catalog(
+            State(st.clone()),
+            Auth(principal),
+            Path(engine.id),
+            Json(cat_body),
+        )
+        .await
+        .err()
+        .expect("add_catalog on a deleting engine must fail");
+        assert!(matches!(err, CpError::Conflict(_)), "got {err:?}");
+
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the provisioner must never be called on a deleting engine"
         );
     }
 
