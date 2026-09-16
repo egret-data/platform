@@ -2392,32 +2392,63 @@ fn engine_owned_secret_ids(engine: &Engine) -> Vec<Uuid> {
     .collect()
 }
 
-/// Undo a failed engine create. Every step logs its own failure and continues.
-/// Order: cluster, row (then the secrets it referenced — a row that cannot be
-/// deleted keeps its secrets and is marked `failed`), profiles this create made
-/// (their policies cascade), catalog client. Policies seeded into a PRE-EXISTING
-/// profile are left alone: other engines may be bound to it.
+/// Undo a failed engine create. Every step logs its own failure and continues,
+/// with ONE exception: if the cluster delete itself fails, this stops right
+/// there (mirroring the real `DELETE /engines/{id}` handler, which returns
+/// `ClusterDeleteFailed` and leaves the row `deleting` the moment its own
+/// cluster delete errors, touching nothing else). Order: cluster, row (then
+/// the secrets it referenced — a row that cannot be deleted keeps its secrets
+/// and is marked `failed`), profiles this create made (their policies
+/// cascade), catalog client. Policies seeded into a PRE-EXISTING profile are
+/// left alone: other engines may be bound to it.
 ///
 /// Deleting `engine_owned_secret_ids(&engine)` here is safe under the standing
-/// "never delete a secret the cluster may still hold" rule because (a) these are
-/// secrets THIS create minted (a brand-new engine id no other in-flight create or
-/// apply can be racing), and (b) the cluster delete above runs FIRST and is
-/// attempted for every path that reaches this point with `undo.cluster` set —
-/// so whatever the apply rendered from these secrets into the cluster is being
-/// removed in the same compensation, not left as a dangling reference. This
-/// includes `internal_secret_id`/`monitor_secret_id`: `commit_internal_secrets`
+/// "never delete a secret the cluster may still hold" rule because (a) these
+/// are secrets THIS create minted (a brand-new engine id no other in-flight
+/// create or apply can be racing), and (b) reaching the row/secret deletes
+/// below REQUIRES either that the cluster was never touched (the failure hit
+/// before `apply_built`/`prov.provision`, so `undo.cluster` is `None`) or that
+/// its delete just succeeded — see the early return below for the third case.
+/// So whatever the apply rendered from these secrets into the cluster is
+/// either confirmed gone or was never written, before this ever removes the
+/// secret-store rows backing it; nothing here can outlive its cluster copy.
+/// This includes `internal_secret_id`/`monitor_secret_id`: `commit_internal_secrets`
 /// commits a freshly-minted pair onto the row on BOTH the success and the
 /// failure path of an apply that rendered one, so by the time compensation
 /// reads the row those ids are exactly the pair (if any) this create's own,
 /// and only this create's own, apply attempted — never one a concurrent apply
 /// might still be relying on.
+///
+/// When the cluster delete FAILS, the opposite must hold: the apply may have
+/// already written live cluster objects from these very secrets (e.g. the
+/// Trino env Secret rendering `TRINO_INTERNAL_SECRET`, or the password.db
+/// `ConfigMap`) that this call could not remove. Deleting the row or its
+/// secrets at that point would orphan those objects with nothing left to name
+/// them and no way back in through the API — kubectl would be the only route
+/// to clean them up. So on that path this marks the row `failed` (§4.7) and
+/// returns immediately, deleting nothing: the row stays visible and
+/// deletable, and a later `DELETE /engines/{id}` retries the SAME cluster
+/// delete this call just attempted, then does its own row/secret/client
+/// cleanup once that retry succeeds.
 async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
     if let (Some((kind, namespace, name)), Some(prov)) =
         (&undo.cluster, st.engine_provisioner.as_ref())
     {
         if let Err(e) = prov.delete(kind, namespace, name).await {
             tracing::error!(engine = %name, error = %e,
-                "create compensation: cluster delete failed; objects may remain");
+                "create compensation: cluster delete failed; row kept (marked failed) \
+                 so DELETE /engines/{{id}} can retry it — no row or secret removed");
+            if let Some(engine_id) = undo.engine_id {
+                if let Err(e) = st
+                    .engine_mgmt
+                    .set_engine_status(engine_id, crate::engine_status::FAILED)
+                    .await
+                {
+                    tracing::error!(%engine_id, error = %e,
+                        "create compensation: could not mark the engine failed");
+                }
+            }
+            return;
         }
     }
     if let Some(engine_id) = undo.engine_id {
@@ -6961,6 +6992,95 @@ mod tests {
         assert_eq!(engine_owned_secret_ids(&e), ids[..5].to_vec());
     }
 
+    /// I1 fix: when the cluster delete `compensate_failed_create` itself
+    /// attempts ALSO fails, the row must be kept (marked `failed`, not
+    /// deleted) and none of its secrets removed — the apply may already have
+    /// written live cluster objects from them that this call could not clean
+    /// up, and deleting the row would strand those objects with no way back
+    /// in through the API. The create's ORIGINAL error (the injected
+    /// provisioning failure) must still be what the caller sees, not a
+    /// compensation-failure error.
+    #[tokio::test]
+    async fn create_keeps_the_row_failed_when_compensations_cluster_delete_also_fails() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping create_keeps_the_row_failed_when_compensations_cluster_delete_also_fails: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(FailingProvisionAndDeleteProvisioner));
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        // Engines only provision against a lakekeeper-backed warehouse.
+        egret_catalog_engine::CatalogStore::new(db.clone())
+            .set_lakekeeper_warehouse_id(wh.id, "lk-test")
+            .await
+            .expect("mark warehouse provisioned");
+
+        let name = format!("trino-{}", Uuid::new_v4().simple());
+        let body = CreateEngineBody {
+            name: name.clone(),
+            warehouse_id: wh.id,
+            image_version: None,
+            coordinator_replicas: 1,
+            worker_replicas: 1,
+            cpu_min: "1".into(),
+            cpu_max: "1".into(),
+            memory: "1Gi".into(),
+            // Impersonate delegation so the create also mints a delegator +
+            // TLS secret, not just the internal/monitor pair — exercises the
+            // full `engine_owned_secret_ids` set.
+            trino_config: Some(serde_json::json!({ "delegationMode": "impersonate", "auth": {} })),
+            authz_service_id: None,
+            kind: "trino".into(),
+            starrocks: None,
+            tls_cert_secret_ref: None,
+        };
+        let principal = egret_core::context::Principal {
+            user_id: egret_core::ids::UserId::new(),
+            email: "admin@egret.local".into(),
+            platform_roles: vec!["platform_admin".into()],
+            permissions: vec![],
+            group_ids: vec![],
+            impersonator: None,
+        };
+
+        let msg = match create_engine(State(st.clone()), Auth(principal), Json(body)).await {
+            Err(CpError::BadRequest(msg)) => msg,
+            Err(other) => panic!("expected BadRequest, got {other:?}"),
+            Ok(_) => panic!("expected the injected provision failure to surface"),
+        };
+        assert!(
+            msg.contains("injected provision failure"),
+            "the response must still be the create's ORIGINAL error, got: {msg}"
+        );
+
+        let engine = st
+            .engine_mgmt
+            .list_engines()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == name)
+            .expect("row kept, not deleted");
+        assert_eq!(
+            engine.status,
+            crate::engine_status::FAILED,
+            "row marked failed, not left provisioning"
+        );
+        let owned = engine_owned_secret_ids(&engine);
+        assert!(!owned.is_empty(), "delegation should have minted secrets");
+        for id in owned {
+            assert!(
+                st.secrets.resolve_typed(None, id).await.is_ok(),
+                "secret {id} must still resolve (compensation's own cluster delete failed)"
+            );
+        }
+    }
+
     /// `build_starrocks_provision_req` (Task 1) rebuilds the provisioner
     /// `EngineSpec` from a STORED engine row's `spec.starrocksConfig` + the
     /// warehouse storage — the shared assembly create and (later) update both
@@ -7148,6 +7268,33 @@ mod tests {
         }
         async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
             Ok(())
+        }
+        async fn restart(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// `provision` AND `delete` both fail — a cluster compensation can't reach
+    /// the cluster at all (I1: the compensation's OWN cluster delete fails).
+    struct FailingProvisionAndDeleteProvisioner;
+    #[async_trait::async_trait]
+    impl egret_engine_mgmt_api::EngineProvisioningPort for FailingProvisionAndDeleteProvisioner {
+        async fn provision(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Err("injected provision failure".into())
+        }
+        async fn status(
+            &self,
+            _kind: &str,
+            _namespace: &str,
+            _name: &str,
+        ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+            Ok(egret_engine_mgmt_api::EngineStatus::default())
+        }
+        async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Err("injected delete failure".into())
         }
         async fn restart(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
             Ok(())

@@ -433,7 +433,6 @@ impl FakeEnginePort {
         self.fail_update
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
-    #[allow(dead_code)]
     fn set_fail_provision(&self, fail: bool) {
         self.fail_provision
             .store(fail, std::sync::atomic::Ordering::SeqCst);
@@ -4598,4 +4597,109 @@ async fn failed_provision_rolls_back_row_client_and_cluster() {
         "egret-engines".to_string(),
         sr_name
     )));
+}
+
+/// P2 regression: the resource-group validation move (now ahead of the
+/// catalog-client mint, alongside the "kubernetes configured" check) actually
+/// runs before anything is minted — both an invalid `resourceGroups` selector
+/// and an unconfigured provisioner 400 with no catalog client and no engine
+/// row left behind. Without this test, moving either check back to AFTER the
+/// client mint would leave every other test in this file green.
+#[tokio::test]
+async fn invalid_resource_groups_and_unconfigured_kubernetes_leak_nothing() {
+    let Some(f) = setup_full(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p2_validation_admin", true).await;
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let row_exists = |name: String| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM engine_mgmt.engines WHERE name = $1)",
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    // Invalid resource-group selector: 400 with nothing minted. `setup_full`
+    // was given no provisioner at all, so this also proves resource-group
+    // validation runs BEFORE the "kubernetes configured" check, not after.
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let bad_name = format!("trino-bad-rg-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &bad_name,
+        wh_id,
+        serde_json::json!({
+            "resourceGroups": { "selectors": [{ "group": "nope" }] },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert!(
+        !row_exists(bad_name.clone()).await,
+        "no row for an invalid resource-group spec"
+    );
+    assert!(
+        catalog_store.list_clients(wh_id).await.unwrap().is_empty(),
+        "no client minted for an invalid resource-group spec"
+    );
+
+    // A valid spec but no provisioner configured: 400 with nothing minted either.
+    let wh_id2 = seed_provisioned_warehouse(&f).await;
+    let name2 = format!("trino-no-k8s-{}", Uuid::new_v4().simple());
+    let (status2, j2) = create_engine_via_api(
+        &f,
+        &token,
+        &name2,
+        wh_id2,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status2, StatusCode::BAD_REQUEST, "body={j2}");
+    assert!(
+        !row_exists(name2.clone()).await,
+        "no row without kubernetes configured"
+    );
+    assert!(
+        catalog_store.list_clients(wh_id2).await.unwrap().is_empty(),
+        "no client minted without kubernetes configured"
+    );
+
+    // Same "no provisioner configured" check, moved earlier in the StarRocks
+    // path too (right after `validate_sr_autoscaling`): 400 with nothing
+    // minted there either.
+    let sr_wh = seed_provisioned_warehouse_with_secret(&f).await;
+    let sr_name = format!("sr-no-k8s-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": sr_name, "warehouseId": sr_wh, "kind": "starrocks",
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !row_exists(sr_name.clone()).await,
+        "no StarRocks row without kubernetes configured"
+    );
+    assert!(
+        catalog_store.list_clients(sr_wh).await.unwrap().is_empty(),
+        "no StarRocks client minted without kubernetes configured"
+    );
 }
