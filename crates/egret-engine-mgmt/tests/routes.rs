@@ -4409,3 +4409,107 @@ async fn trino_update_rematerializes_assigned_workspace_connections() {
         "connection re-materialized"
     );
 }
+
+/// P5: removing a catalog applies the cluster WITHOUT it first; a rejected apply
+/// leaves the row and its minted client in place so a retry can act.
+#[tokio::test]
+async fn remove_catalog_applies_before_deleting_and_revoking() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p5_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            Some(serde_json::json!({
+                "name": "extra", "kind": "egret-warehouse",
+                "config": { "warehouseId": wh_id }
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "add warehouse catalog; body={j}"
+    );
+    let cat_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let store = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
+    let client_id = store
+        .get_engine_catalog(cat_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .config["clientRowId"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .expect("minted client id");
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let remove = || {
+        req(
+            "DELETE",
+            &format!("/engines/{engine_id}/catalogs/{cat_id}"),
+            &token,
+            None,
+        )
+    };
+
+    port.set_fail_update(true);
+    let resp = f.app.clone().oneshot(remove()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        port.last_updated()
+            .catalogs
+            .iter()
+            .all(|c| c.name != "extra"),
+        "the apply rendered the engine without the catalog"
+    );
+    assert!(
+        store.get_engine_catalog(cat_id).await.unwrap().is_some(),
+        "row kept"
+    );
+    assert!(
+        catalog_store
+            .list_clients(wh_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.id == client_id),
+        "client not revoked"
+    );
+
+    port.set_fail_update(false);
+    let resp = f.app.clone().oneshot(remove()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        store.get_engine_catalog(cat_id).await.unwrap().is_none(),
+        "row deleted"
+    );
+    assert!(
+        !catalog_store
+            .list_clients(wh_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.id == client_id),
+        "minted client revoked"
+    );
+}

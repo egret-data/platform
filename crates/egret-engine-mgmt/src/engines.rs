@@ -5383,8 +5383,8 @@ async fn test_catalog(
         ("cid" = Uuid, Path, description = "Catalog id"),
     ),
     responses(
-        (status = 200, description = "Catalog removed and engine re-provisioned"),
-        (status = 400, description = "Cannot delete the primary catalog or engine update failed", body = ErrorBody),
+        (status = 200, description = "Catalog removed from the cluster, then its row deleted and its minted client revoked"),
+        (status = 400, description = "Cannot delete the primary catalog, Kubernetes not configured, or the engine update failed (the catalog is kept)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:delete permission", body = ErrorBody),
         (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
@@ -5416,24 +5416,36 @@ async fn remove_catalog(
             "cannot delete the primary catalog".into(),
         ));
     }
-    st.engine_mgmt.delete_engine_catalog(cat.id).await?;
-    // Best-effort: retire a minted Catalog Client (egret-warehouse catalogs).
-    // Gated on `mintedClient` so a client we did NOT mint (config explicitly
-    // sets `mintedClient: false`) is never revoked out from under its owner.
-    // `add_catalog` always mints its own client today (even when inheriting an
-    // existing client's role via `config.clientId`), so this is always `true`
-    // in practice — the guard exists for forward-compat with a future
-    // "adopt an existing client verbatim" path.
-    if let Some(clientid) = client_row_id(&cat.config) {
-        if is_minted_client(&cat.config) {
-            let _ = st.catalog.revoke_client(clientid).await;
-        }
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    // Drop the catalog from the cluster FIRST. Only once Kubernetes accepted
+    // the spec without it are the row deleted and the credential revoked, so a
+    // failure leaves row, client and running catalog consistent — and a retry
+    // still has a row to act on.
+    let built = build_provision_req_with(
+        &st,
+        &engine,
+        BuildOpts {
+            exclude_catalog: Some(cat.id),
+            ..BuildOpts::default()
+        },
+    )
+    .await?;
+    if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
+        return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
     }
-    // Re-render + roll. (Task 11 reorders this to apply before deleting.)
-    if let Some(prov) = st.engine_provisioner.as_ref() {
-        let built = build_provision_req(&st, &engine).await?;
-        if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
-            return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
+    st.engine_mgmt.delete_engine_catalog(cat.id).await?;
+    // Retire a minted Catalog Client (egret-warehouse catalogs). Gated on
+    // `mintedClient` so a client we did NOT mint is never revoked out from
+    // under its owner. The cluster no longer uses it, so a failed revoke is
+    // logged rather than failing a removal that already happened.
+    if let Some(client_id) = client_row_id(&cat.config) {
+        if is_minted_client(&cat.config) {
+            if let Err(e) = st.catalog.revoke_client(client_id).await {
+                tracing::warn!(engine = %engine.name, %client_id, error = ?e,
+                    "catalog removed but its minted client could not be revoked");
+            }
         }
     }
     Ok(StatusCode::OK)

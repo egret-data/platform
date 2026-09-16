@@ -3445,10 +3445,10 @@
         ],
         "responses": {
           "200": {
-            "description": "Catalog removed and engine re-provisioned"
+            "description": "Catalog removed from the cluster, then its row deleted and its minted client revoked"
           },
           "400": {
-            "description": "Cannot delete the primary catalog or engine update failed",
+            "description": "Cannot delete the primary catalog, Kubernetes not configured, or the engine update failed (the catalog is kept)",
             "content": {
               "application/json": {
                 "schema": {
