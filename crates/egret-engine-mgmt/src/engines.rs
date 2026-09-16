@@ -39,7 +39,6 @@ use egret_core::http::ErrorBody;
 use crate::dependents::{
     DeleteEngineOutcome, EngineConflictBody, EngineDependentDto, EngineDependentKind,
 };
-use crate::store::ENGINE_STATUS_DELETING;
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
 use crate::{Engine, EngineCatalog};
@@ -1903,11 +1902,10 @@ async fn list_engines(
     Auth(p): Auth,
 ) -> Result<Json<Vec<EngineDto>>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
-    // The stored `status` column is only ever the create-time value
-    // ("provisioning") — nothing writes it back, so it would show every engine
-    // as forever-provisioning on the list. Recompute the LIVE phase per engine
-    // from the provisioner (same source `get_engine` uses), falling back to the
-    // stored value if the live read fails or no provisioner is configured.
+    // The stored `status` only advances when `get_engine` observes all pods
+    // ready, so recompute the LIVE phase per engine from the provisioner (same
+    // source `get_engine` uses), falling back to the stored value if the live
+    // read fails or no provisioner is configured.
     let engines = st.engine_mgmt.list_engines().await?;
     let prov = st.engine_provisioner.as_ref();
     let mut out = Vec::with_capacity(engines.len());
@@ -3593,14 +3591,14 @@ async fn get_engine(
     Path(id): Path<Uuid>,
 ) -> Result<Json<EngineDetailDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
-    let engine = st
+    let mut engine = st
         .engine_mgmt
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
     // A `deleting` row is the retry state of an unfinished delete; the live
     // status of a half-deleted cluster would hide it, so it wins.
-    let status = if engine.status == ENGINE_STATUS_DELETING {
+    let status = if engine.status == crate::engine_status::DELETING {
         EngineStatusDto {
             phase: engine.status.clone(),
             message: Some("a previous delete did not finish; retry the delete".into()),
@@ -3612,19 +3610,41 @@ async fn get_engine(
                 .status(&engine.r#type, &engine.namespace, &engine.name)
                 .await
             {
-                Ok(s) => EngineStatusDto {
-                    phase: s.phase,
-                    message: s.message,
-                    pods: s
-                        .pods
-                        .into_iter()
-                        .map(|p| EnginePodDto {
-                            name: p.name,
-                            phase: p.phase,
-                            ready: p.ready,
-                        })
-                        .collect(),
-                },
+                Ok(s) => {
+                    // Record the first all-pods-ready observation. Conditional on the
+                    // row still being `provisioning`, so `deleting`/`failed` stay put.
+                    if s.phase == crate::engine_status::RUNNING
+                        && engine.status == crate::engine_status::PROVISIONING
+                    {
+                        match st
+                            .engine_mgmt
+                            .transition_engine_status(
+                                engine.id,
+                                crate::engine_status::PROVISIONING,
+                                crate::engine_status::RUNNING,
+                            )
+                            .await
+                        {
+                            Ok(true) => engine.status = crate::engine_status::RUNNING.to_string(),
+                            Ok(false) => {}
+                            Err(e) => tracing::warn!(engine = %engine.name, error = %e,
+                                "could not record running status"),
+                        }
+                    }
+                    EngineStatusDto {
+                        phase: s.phase,
+                        message: s.message,
+                        pods: s
+                            .pods
+                            .into_iter()
+                            .map(|p| EnginePodDto {
+                                name: p.name,
+                                phase: p.phase,
+                                ready: p.ready,
+                            })
+                            .collect(),
+                    }
+                }
                 // A live-status read failure shouldn't hide the engine; fall back to
                 // the recorded row status with the error as a message.
                 Err(msg) => EngineStatusDto {
@@ -3973,7 +3993,7 @@ async fn delete_engine(
 
     // 3. Visible, retryable state for everything below that can fail.
     st.engine_mgmt
-        .set_engine_status(id, ENGINE_STATUS_DELETING)
+        .set_engine_status(id, crate::engine_status::DELETING)
         .await?;
 
     // 4. The cluster. A 404 is already success inside the provisioners.

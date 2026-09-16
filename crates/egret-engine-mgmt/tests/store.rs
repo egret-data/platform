@@ -336,3 +336,58 @@ fn coordinator_host_and_jwt_check() {
     };
     assert!(!e3.supports_jwt_delegation());
 }
+
+#[tokio::test]
+async fn engine_status_is_constrained_and_transitions_only_from_the_expected_value() {
+    let Some((catalog, engine_mgmt)) = stores().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let (wh_id, _) = seed_warehouse(&catalog, "status").await;
+    let e = engine_mgmt
+        .create_engine(
+            &format!("status-{}", Uuid::new_v4().simple()),
+            "trino",
+            "egret-engines",
+            wh_id,
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(e.status, egret_engine_mgmt::engine_status::PROVISIONING);
+
+    let err = sqlx::query("UPDATE engine_mgmt.engines SET status = 'ready' WHERE id = $1")
+        .bind(e.id)
+        .execute(catalog.pool())
+        .await
+        .expect_err("'ready' is not a lifecycle status");
+    assert_eq!(
+        err.as_database_error().and_then(|d| d.constraint()),
+        Some("engines_status_check")
+    );
+
+    assert!(engine_mgmt
+        .transition_engine_status(e.id, "provisioning", "running")
+        .await
+        .unwrap());
+    assert!(
+        !engine_mgmt
+            .transition_engine_status(e.id, "provisioning", "running")
+            .await
+            .unwrap(),
+        "the row is no longer provisioning"
+    );
+    engine_mgmt
+        .set_engine_status(e.id, "deleting")
+        .await
+        .unwrap();
+    assert!(!engine_mgmt
+        .transition_engine_status(e.id, "running", "running")
+        .await
+        .unwrap());
+    assert_eq!(
+        engine_mgmt.get_engine(e.id).await.unwrap().unwrap().status,
+        "deleting"
+    );
+}

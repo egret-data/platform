@@ -3662,3 +3662,65 @@ async fn catalog_detail_masks_inline_secrets_and_a_resave_keeps_them() {
         .expect("pg catalog rendered");
     assert_eq!(rendered.properties["connection-password"], "hunter2");
 }
+
+async fn stored_status(f: &Fixture, engine_id: &str) -> String {
+    sqlx::query_scalar("SELECT status FROM engine_mgmt.engines WHERE id = $1")
+        .bind(Uuid::parse_str(engine_id).unwrap())
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("engine status")
+}
+
+/// P6: `GET /engines/{id}` records `running` once live status reports every pod
+/// ready, and never overwrites `deleting`.
+#[tokio::test]
+async fn get_engine_records_running_and_leaves_deleting_alone() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p6_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = j["id"].as_str().unwrap().to_string();
+    assert_eq!(stored_status(&f, &id).await, "provisioning");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{id}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        stored_status(&f, &id).await,
+        "running",
+        "all pods ready ⇒ running recorded"
+    );
+
+    let name2 = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name2, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create 2; body={j}");
+    let id2 = j["id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE engine_mgmt.engines SET status = 'deleting' WHERE id = $1")
+        .bind(Uuid::parse_str(&id2).unwrap())
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{id2}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(stored_status(&f, &id2).await, "deleting");
+}

@@ -7,10 +7,17 @@ use uuid::Uuid;
 
 use crate::error::EngineMgmtError;
 
-/// Stored lifecycle status written when an engine delete starts. A row still in
-/// this state means the cluster delete or the row delete did not finish, and the
-/// delete can be retried.
-pub const ENGINE_STATUS_DELETING: &str = "deleting";
+/// The values `engine_mgmt.engines.status` may hold (`engines_status_check`).
+pub mod engine_status {
+    /// Created; the cluster has not yet reported every pod ready.
+    pub const PROVISIONING: &str = "provisioning";
+    /// Live status reported every pod ready at least once.
+    pub const RUNNING: &str = "running";
+    /// A create failed and its rollback could not remove the row.
+    pub const FAILED: &str = "failed";
+    /// A delete is in progress (written by the delete handler).
+    pub const DELETING: &str = "deleting";
+}
 
 /// A provisioned query engine (control-plane, platform-global) wired to a
 /// warehouse. `spec` holds the desired provisioning parameters; `status` tracks
@@ -249,6 +256,25 @@ impl EngineMgmtStore {
             .execute(self.pool())
             .await?;
         Ok(())
+    }
+
+    /// Move `status` from `from` to `to` only if it is still `from`; returns
+    /// whether a row moved. Conditional so a reader recording `running` can
+    /// never overwrite a concurrent `deleting`.
+    pub async fn transition_engine_status(
+        &self,
+        id: Uuid,
+        from: &str,
+        to: &str,
+    ) -> Result<bool, EngineMgmtError> {
+        let res =
+            sqlx::query("UPDATE engine_mgmt.engines SET status = $3 WHERE id = $1 AND status = $2")
+                .bind(id)
+                .bind(from)
+                .bind(to)
+                .execute(self.pool())
+                .await?;
+        Ok(res.rows_affected() == 1)
     }
 
     /// Bind (or detach with `None`) an engine to a Ranger policy profile.
