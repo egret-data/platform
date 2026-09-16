@@ -939,62 +939,23 @@ impl EngineProvisioner for StarRocksProvisioner {
         })
     }
     async fn delete(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
-        self.kube
-            .delete("starrocks.com/v1", "StarRocksCluster", namespace, name)
-            .await?;
-        let _ = self
-            .kube
-            .delete("v1", "ConfigMap", namespace, &format!("{name}-fe-cm"))
-            .await;
-        let _ = self
-            .kube
-            .delete("v1", "ConfigMap", namespace, &format!("{name}-cn-cm"))
-            .await;
-        let _ = self
-            .kube
-            .delete("v1", "ConfigMap", namespace, &format!("{name}-ranger-cm"))
-            .await;
-        let _ = self
-            .kube
-            .delete("v1", "ConfigMap", namespace, &format!("{name}-ssl-cm"))
-            .await;
-        let _ = self
-            .kube
-            .delete("v1", "Secret", namespace, &format!("{name}-ssl-secret"))
-            .await;
-        // Root-password initpwd resources (present only when a root password was
-        // configured; delete is best-effort / ignore-not-found otherwise).
-        let _ = self
-            .kube
-            .delete("batch/v1", "Job", namespace, &format!("{name}-initpwd"))
-            .await;
-        let _ = self
-            .kube
-            .delete(
-                "v1",
-                "ConfigMap",
-                namespace,
-                &format!("{name}-initpwd-shell"),
-            )
-            .await;
-        let _ = self
-            .kube
-            .delete("v1", "Secret", namespace, &format!("{name}-initpwd-secret"))
-            .await;
-        let _ = self
-            .kube
-            .delete(
-                "networking.k8s.io/v1",
-                "Ingress",
-                namespace,
-                &format!("{name}-fe"),
-            )
-            .await;
-        let _ = self
-            .kube
-            .delete("v1", "Secret", namespace, &format!("{name}-ingress-tls"))
-            .await;
-        Ok(())
+        // The CR first (the operator tears down FE/CN), then the objects egret
+        // applies beside it. A 404 is success; any other failure is returned,
+        // after the remaining objects have still been attempted.
+        let objects = [
+            ("starrocks.com/v1", "StarRocksCluster", name.to_string()),
+            ("v1", "ConfigMap", format!("{name}-fe-cm")),
+            ("v1", "ConfigMap", format!("{name}-cn-cm")),
+            ("v1", "ConfigMap", format!("{name}-ranger-cm")),
+            ("v1", "ConfigMap", format!("{name}-ssl-cm")),
+            ("v1", "Secret", format!("{name}-ssl-secret")),
+            ("batch/v1", "Job", format!("{name}-initpwd")),
+            ("v1", "ConfigMap", format!("{name}-initpwd-shell")),
+            ("v1", "Secret", format!("{name}-initpwd-secret")),
+            ("networking.k8s.io/v1", "Ingress", format!("{name}-fe")),
+            ("v1", "Secret", format!("{name}-ingress-tls")),
+        ];
+        crate::kube_client::delete_objects(&*self.kube, namespace, &objects).await
     }
 }
 
@@ -1637,6 +1598,27 @@ mod tests {
         assert!(deleted.contains(&"Job/sr1-initpwd".to_string()));
         assert!(deleted.contains(&"ConfigMap/sr1-initpwd-shell".to_string()));
         assert!(deleted.contains(&"Secret/sr1-initpwd-secret".to_string()));
+    }
+
+    /// D5/D6: a failed CR delete surfaces, and no longer aborts the cleanup of the
+    /// ConfigMaps/Secrets/Job/Ingress egret owns.
+    #[tokio::test]
+    async fn provisioner_delete_surfaces_a_failed_cluster_delete() {
+        use crate::kube_client::FakeKube;
+
+        let kube = Arc::new(FakeKube::default());
+        kube.fail_delete("StarRocksCluster", "sr1", "forbidden");
+        let err = StarRocksProvisioner::new(kube.clone())
+            .delete("egret-engines", "sr1")
+            .await
+            .expect_err("the CR delete failure must surface");
+        assert!(format!("{err:#}").contains("StarRocksCluster/sr1: forbidden"));
+        let deleted = kube.deleted.lock().unwrap();
+        assert_eq!(deleted.len(), 10, "{deleted:?}");
+        assert!(
+            deleted.contains(&"ConfigMap/sr1-fe-cm".to_string()),
+            "{deleted:?}"
+        );
     }
 
     /// T4 TDD: the restart merge-patch body stamps the restart annotation on

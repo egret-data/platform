@@ -9,6 +9,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import * as api from "@/api/controlPlane";
 import * as engineApi from "@/api/generated/control-plane-engines/control-plane-engines";
 import * as wsApi from "@/api/generated/admin-workspaces/admin-workspaces";
+import { ApiError } from "@/api/client";
+import type { EngineDependentDto } from "@/api/generated/model/engineDependentDto";
 import type { EngineWorkspaceDto } from "@/api/generated/model/engineWorkspaceDto";
 import type { WorkspaceDto } from "@/api/generated/model/workspaceDto";
 
@@ -166,6 +168,37 @@ describe("EngineDetail — Workspaces tab", () => {
     await user.click(screen.getByRole("tab", { name: "Workspaces" }));
     await screen.findByText("Engineering");
     expect(screen.getByRole("button", { name: /add workspace/i })).toBeDisabled();
+  });
+
+  test("a blocked Remove shows what still uses the engine instead of a toast", async () => {
+    setMutate.mockImplementationOnce(
+      (_vars: unknown, opts?: { onError?: (e: unknown) => void }) =>
+        opts?.onError?.(
+          new ApiError(409, "engine is still in use", "engine_has_dependents", {
+            error: "engine is still in use",
+            code: "engine_has_dependents",
+            dependents: [
+              {
+                workspaceId: WS_A.id,
+                workspaceName: WS_A.name,
+                workspaceSlug: WS_A.slug,
+                kind: "dataset",
+                count: 3,
+                sample: ["orders", "refunds", "revenue"],
+              },
+            ],
+          }),
+        ),
+    );
+    const user = await openWorkspacesTab();
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+
+    expect(await screen.findByText(/not removed/i)).toBeInTheDocument();
+    const table = screen.getByRole("table");
+    expect(within(table).getByText("Datasets")).toBeInTheDocument();
+    expect(within(table).getByText("orders, refunds, revenue")).toBeInTheDocument();
+    // Still assigned: the list row is untouched.
+    expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
   });
 });
 
@@ -781,5 +814,120 @@ describe("EngineDetail — Overview KPI strip", () => {
     // The replicas KPI degrades to em-dashes, never the literal "undefined".
     expect(screen.getByText("Coord — · Worker —")).toBeInTheDocument();
     expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
+  });
+});
+
+describe("EngineDetail — delete", () => {
+  const BLOCKERS: EngineDependentDto[] = [
+    {
+      workspaceId: WS_A.id,
+      workspaceName: WS_A.name,
+      workspaceSlug: WS_A.slug,
+      kind: "dataapi_endpoint",
+      count: 25,
+      sample: ["orders-by-day"],
+    },
+    {
+      workspaceId: WS_A.id,
+      workspaceName: WS_A.name,
+      workspaceSlug: WS_A.slug,
+      kind: "dataapi_endpoint_trashed",
+      count: 1,
+      sample: ["old-orders"],
+    },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetEngine(ENGINE.spec);
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+  });
+
+  async function openDeleteDialog() {
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    await user.click(screen.getByRole("button", { name: /more engine actions/i }));
+    await user.click(await screen.findByRole("menuitem", { name: /delete engine/i }));
+    return { user, dialog: await screen.findByRole("alertdialog") };
+  }
+
+  test("states what is destroyed and requires the engine name", async () => {
+    const { user, dialog } = await openDeleteDialog();
+    expect(within(dialog).getByText(/kubernetes cluster/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/query history and notebook engine access/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/saved queries that use it lose their connection/i)).toBeInTheDocument();
+
+    const confirm = within(dialog).getByRole("button", { name: "Delete" });
+    const input = within(dialog).getByPlaceholderText("analytics-trino");
+    await user.type(input, "delete");
+    expect(confirm).toBeDisabled();
+    await user.clear(input);
+    await user.type(input, "analytics-trino");
+    expect(confirm).toBeEnabled();
+  });
+
+  test("a 409 lists the dependents and offers no delete", async () => {
+    vi.mocked(api.deleteEngine).mockRejectedValue(
+      new ApiError(409, "engine is still in use", "engine_has_dependents", {
+        error: "engine is still in use",
+        code: "engine_has_dependents",
+        dependents: BLOCKERS,
+      }),
+    );
+    const { user, dialog } = await openDeleteDialog();
+    await user.type(within(dialog).getByPlaceholderText("analytics-trino"), "analytics-trino");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    const blocked = await screen.findByRole("alertdialog", { name: /still in use/i });
+    expect(within(blocked).getByText("Data API endpoints")).toBeInTheDocument();
+    expect(within(blocked).getByText("Data API endpoints in trash")).toBeInTheDocument();
+    expect(within(blocked).getByText("25")).toBeInTheDocument();
+    expect(within(blocked).queryByRole("button", { name: /delete/i })).not.toBeInTheDocument();
+    expect(vi.mocked(api.deleteEngine).mock.calls[0][0]).toBe("e1");
+  });
+
+  test("a 409 also refetches the engine, so a row left `deleting` by the race shows the retry state", async () => {
+    vi.mocked(api.deleteEngine).mockRejectedValue(
+      new ApiError(409, "engine is still in use", "engine_has_dependents", {
+        error: "engine is still in use",
+        code: "engine_has_dependents",
+        dependents: BLOCKERS,
+      }),
+    );
+    const { user, dialog } = await openDeleteDialog();
+    const callsBeforeDelete = vi.mocked(api.getEngine).mock.calls.length;
+    await user.type(within(dialog).getByPlaceholderText("analytics-trino"), "analytics-trino");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await screen.findByRole("alertdialog", { name: /still in use/i });
+
+    // The 409 leaves the engine `deleting` when it arrives after the cluster
+    // was already torn down (route step 5) — the header must refetch on ANY
+    // delete failure, dependents included, not just a non-dependents one.
+    await waitFor(() =>
+      expect(vi.mocked(api.getEngine).mock.calls.length).toBeGreaterThan(callsBeforeDelete),
+    );
+  });
+
+  test("a deleting engine shows the retry state and Retry delete deletes again", async () => {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      status: {
+        phase: "deleting",
+        message: "a previous delete did not finish; retry the delete",
+        pods: [],
+      },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+    vi.mocked(api.deleteEngine).mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderDetail();
+    expect(await screen.findByText("Deleting — retry")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /retry delete/i }));
+    await waitFor(() => expect(vi.mocked(api.deleteEngine).mock.calls[0]?.[0]).toBe("e1"));
   });
 });

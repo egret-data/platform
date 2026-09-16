@@ -33,6 +33,9 @@ pub trait KubeClient: Send + Sync {
         name: &str,
         patch: &Value,
     ) -> anyhow::Result<()>;
+    /// Delete one object. An object that is already gone (HTTP 404) is `Ok`:
+    /// deletes are retried after partial failures, and "already deleted" is the
+    /// outcome the caller asked for. Every other failure is an `Err`.
     async fn delete(
         &self,
         api_version: &str,
@@ -129,6 +132,9 @@ pub struct FakeKube {
     pub restarted: Mutex<Vec<(String, String)>>,
     /// `("kind/name", patch)` per `merge_patch` call.
     pub patched: Mutex<Vec<(String, Value)>>,
+    /// `"kind/name"` → error message. A `delete` of a listed object fails with
+    /// that message and is NOT recorded in `deleted`. Set with [`FakeKube::fail_delete`].
+    pub delete_failures: Mutex<BTreeMap<String, String>>,
 }
 
 impl Default for FakeKube {
@@ -140,6 +146,7 @@ impl Default for FakeKube {
             coordinator_response: Mutex::new((200, Vec::new())),
             restarted: Mutex::new(Vec::new()),
             patched: Mutex::new(Vec::new()),
+            delete_failures: Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -148,6 +155,14 @@ impl FakeKube {
     /// Set the canned response returned by `coordinator_request`.
     pub fn set_coordinator_response(&self, status: u16, body: Vec<u8>) {
         *self.coordinator_response.lock().unwrap() = (status, body);
+    }
+
+    /// Make every later `delete` of `kind/name` fail with `message`.
+    pub fn fail_delete(&self, kind: &str, name: &str, message: &str) {
+        self.delete_failures
+            .lock()
+            .unwrap()
+            .insert(format!("{kind}/{name}"), message.to_string());
     }
 }
 
@@ -177,7 +192,11 @@ impl KubeClient for FakeKube {
         Ok(())
     }
     async fn delete(&self, _av: &str, kind: &str, _ns: &str, name: &str) -> anyhow::Result<()> {
-        self.deleted.lock().unwrap().push(format!("{kind}/{name}"));
+        let key = format!("{kind}/{name}");
+        if let Some(message) = self.delete_failures.lock().unwrap().get(&key) {
+            anyhow::bail!("{message}");
+        }
+        self.deleted.lock().unwrap().push(key);
         Ok(())
     }
     async fn list_pods(
@@ -248,6 +267,47 @@ impl KubeClient for FakeKube {
         _command: &[String],
     ) -> anyhow::Result<kube::api::AttachedProcess> {
         anyhow::bail!("exec not supported in fake kube")
+    }
+}
+
+/// True for the API server's "not found" answer. A missing object and a resource
+/// type the cluster does not serve (e.g. KEDA's `ScaledObject` with no KEDA
+/// installed) both come back as 404, and both mean there is nothing to delete.
+pub fn is_not_found(err: &kube::Error) -> bool {
+    matches!(err, kube::Error::Api(resp) if resp.code == 404)
+}
+
+/// Map a kube delete result the way `LiveKube::delete` treats it: success or
+/// "already gone" (`is_not_found`) both count as deleted; anything else
+/// propagates. Pulled out as a pure function so this tolerance is pinned
+/// directly — `LiveKube::delete` itself needs a real cluster and isn't
+/// unit-tested (see its doc comment).
+fn tolerate_not_found(result: Result<(), kube::Error>) -> anyhow::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if is_not_found(&e) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Delete every `(apiVersion, kind, name)` in `namespace`. All of them are
+/// attempted even after a failure, so a retry has as little left as possible;
+/// the error names every object that failed and why.
+pub async fn delete_objects(
+    kube: &dyn KubeClient,
+    namespace: &str,
+    objects: &[(&str, &str, String)],
+) -> anyhow::Result<()> {
+    let mut failures = Vec::new();
+    for (api_version, kind, name) in objects {
+        if let Err(e) = kube.delete(api_version, kind, namespace, name).await {
+            failures.push(format!("{kind}/{name}: {e:#}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("failed to delete {}", failures.join("; "))
     }
 }
 
@@ -354,8 +414,7 @@ impl KubeClient for LiveKube {
 
         let ar = Self::api_resource(api_version, kind);
         let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
-        api.delete(name, &DeleteParams::default()).await?;
-        Ok(())
+        tolerate_not_found(api.delete(name, &DeleteParams::default()).await.map(|_| ()))
     }
 
     async fn list_pods(
@@ -593,6 +652,70 @@ mod tests {
                 ("egret-engines".to_string(), "demo-coordinator".to_string()),
                 ("egret-engines".to_string(), "demo-worker".to_string()),
             ]
+        );
+    }
+
+    fn api_error(code: u16, reason: &str) -> kube::Error {
+        kube::Error::Api(kube::core::ErrorResponse {
+            status: "Failure".into(),
+            message: format!("{reason} (test)"),
+            reason: reason.into(),
+            code,
+        })
+    }
+
+    /// A missing object and a resource type the cluster does not serve both come
+    /// back as 404; nothing else may be read as "already deleted".
+    #[test]
+    fn only_a_404_api_error_is_not_found() {
+        assert!(is_not_found(&api_error(404, "NotFound")));
+        assert!(!is_not_found(&api_error(403, "Forbidden")));
+        assert!(!is_not_found(&api_error(500, "InternalError")));
+    }
+
+    /// Pins `LiveKube::delete`'s actual tolerance policy (via the pure helper
+    /// it now calls): a 404 is swallowed as already-deleted, everything else
+    /// propagates. Before this helper existed, deleting the whole
+    /// `Err(e) if is_not_found(&e) => Ok(())` arm in `LiveKube::delete` kept
+    /// the suite green because nothing called that code path directly.
+    #[test]
+    fn tolerate_not_found_swallows_404_and_propagates_other_errors() {
+        assert!(tolerate_not_found(Ok(())).is_ok());
+        assert!(tolerate_not_found(Err(api_error(404, "NotFound"))).is_ok());
+        assert!(tolerate_not_found(Err(api_error(403, "Forbidden"))).is_err());
+        assert!(tolerate_not_found(Err(api_error(500, "InternalError"))).is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_objects_attempts_every_object_and_names_each_failure() {
+        let k = FakeKube::default();
+        k.fail_delete("Deployment", "demo-coordinator", "forbidden by RBAC");
+        k.fail_delete("Service", "demo-trino", "connection refused");
+        let objects = [
+            ("apps/v1", "Deployment", "demo-coordinator".to_string()),
+            ("apps/v1", "Deployment", "demo-worker".to_string()),
+            ("v1", "Service", "demo-trino".to_string()),
+            ("v1", "ConfigMap", "demo-config".to_string()),
+        ];
+        let err = delete_objects(&k, "egret-engines", &objects)
+            .await
+            .expect_err("two deletes failed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Deployment/demo-coordinator: forbidden by RBAC"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("Service/demo-trino: connection refused"),
+            "{msg}"
+        );
+        assert_eq!(
+            *k.deleted.lock().unwrap(),
+            vec![
+                "Deployment/demo-worker".to_string(),
+                "ConfigMap/demo-config".to_string()
+            ],
+            "the objects after a failure are still attempted"
         );
     }
 }

@@ -7,6 +7,11 @@ use uuid::Uuid;
 
 use crate::error::EngineMgmtError;
 
+/// Stored lifecycle status written when an engine delete starts. A row still in
+/// this state means the cluster delete or the row delete did not finish, and the
+/// delete can be retried.
+pub const ENGINE_STATUS_DELETING: &str = "deleting";
+
 /// A provisioned query engine (control-plane, platform-global) wired to a
 /// warehouse. `spec` holds the desired provisioning parameters; `status` tracks
 /// the last-known lifecycle phase.
@@ -168,7 +173,7 @@ impl EngineMgmtStore {
     pub fn new(db: Db) -> Self {
         Self { db }
     }
-    fn pool(&self) -> &sqlx::PgPool {
+    pub(crate) fn pool(&self) -> &sqlx::PgPool {
         &self.db.pool
     }
 
@@ -464,6 +469,20 @@ impl EngineMgmtStore {
             "SELECT workspace_id FROM engine_mgmt.engine_workspaces WHERE engine_id = $1",
         )
         .bind(engine_id)
+        .fetch_all(self.pool())
+        .await?)
+    }
+
+    /// The ids in `ids` that name no workspace.
+    pub async fn missing_workspace_ids(&self, ids: &[Uuid]) -> Result<Vec<Uuid>, EngineMgmtError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(sqlx::query_scalar(
+            "SELECT x FROM unnest($1::uuid[]) AS x \
+             WHERE NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.id = x)",
+        )
+        .bind(ids.to_vec())
         .fetch_all(self.pool())
         .await?)
     }

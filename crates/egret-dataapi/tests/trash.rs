@@ -897,6 +897,114 @@ async fn restore_cannot_collide_because_the_slot_was_never_released() {
     assert_eq!(body["path"], serde_json::json!(PATH), "body: {body}");
 }
 
+/// Emptying the trash is `DELETE …/endpoints/{id}` — it is what an engine delete's
+/// "trashed Data API endpoint" dependent tells the author to do. It must take the
+/// endpoint's children with it and leave its access log.
+///
+/// `compared_against` (0131) references `endpoint_versions` with NO `ON DELETE`
+/// action, and its comment says nothing deletes versions. A cascade deletes the
+/// referencing and referenced versions in one statement, which NO ACTION allows
+/// — this pins that, because RESTRICT would not.
+#[tokio::test]
+async fn emptying_the_trash_takes_versions_and_alerts_and_keeps_the_access_log() {
+    let f = skip_without_db!();
+    let id = f
+        .create_trashed_endpoint("purge-me", "/purge/me", "disabled")
+        .await;
+    let v1: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoint_versions (endpoint_id, version, snapshot) \
+         VALUES ($1, 1, '{}'::jsonb) RETURNING id",
+    )
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("v1");
+    let v2: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoint_versions (endpoint_id, version, snapshot, breaking_changes, compared_against) \
+         VALUES ($1, 2, '{}'::jsonb, '[]'::jsonb, $2) RETURNING id",
+    )
+    .bind(id)
+    .bind(v1)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("v2 compared against v1");
+    sqlx::query("UPDATE dataapi.endpoints SET live_version_id = $2 WHERE id = $1")
+        .bind(id)
+        .bind(v2)
+        .execute(&f.db.pool)
+        .await
+        .expect("point at v2");
+    let alert: Uuid = sqlx::query_scalar(
+        "INSERT INTO automation.schedules \
+           (workspace_id, type, name, crontab, validator_type, dataapi_metric, dataapi_window_s, dataapi_endpoint_id) \
+         VALUES ($1, 'dataapi_alert', 'purge-watch', '0 9 * * *', 'operator', 'call_count', 3600, $2) \
+         RETURNING id",
+    )
+    .bind(f.ws_id)
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("dataapi alert");
+    let request_id = format!("purge-{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO dataapi.access_log (workspace_id, endpoint_id, status_code, duration_ms, request_id) \
+         VALUES ($1, $2, 200, 5, $3)",
+    )
+    .bind(f.ws_id)
+    .bind(id)
+    .bind(&request_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("access log row");
+
+    let (status, body) = f
+        .send("DELETE", &format!("{}/{id}", f.collection()), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let count = |sql: &'static str, bind: Uuid| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(sql)
+                .bind(bind)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        count("SELECT count(*) FROM dataapi.endpoints WHERE id = $1", id).await,
+        0
+    );
+    assert_eq!(
+        count(
+            "SELECT count(*) FROM dataapi.endpoint_versions WHERE endpoint_id = $1",
+            id
+        )
+        .await,
+        0,
+        "both versions, compared_against chain included"
+    );
+    assert_eq!(
+        count(
+            "SELECT count(*) FROM automation.schedules WHERE id = $1",
+            alert
+        )
+        .await,
+        0
+    );
+    let log_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM dataapi.access_log WHERE request_id = $1")
+            .bind(&request_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        log_rows, 1,
+        "the access log outlives the endpoint by design (0123)"
+    );
+}
+
 // ---------- The trash boundary against the state machine (task 3) ----------
 //
 // `crates/egret-dataapi/src/lifecycle.rs` contained ZERO occurrences of

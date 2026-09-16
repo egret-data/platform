@@ -3,6 +3,7 @@
 pub mod assignment;
 pub mod delegation_default;
 pub mod delegator_policy;
+pub mod dependents;
 pub mod engines;
 pub mod error;
 pub mod http_error;

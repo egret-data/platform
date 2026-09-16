@@ -1035,7 +1035,7 @@
             }
           },
           "404": {
-            "description": "No such engine",
+            "description": "No such engine or workspace",
             "content": {
               "application/json": {
                 "schema": {
@@ -1105,6 +1105,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The workspace still has Data API endpoints, schedules or datasets on the engine's connection; nothing changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineConflictBody"
                 }
               }
             }
@@ -2955,10 +2975,10 @@
         ],
         "responses": {
           "204": {
-            "description": "Engine deprovisioned; catalogs and minted Catalog Clients cleaned up"
+            "description": "Cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"
           },
           "400": {
-            "description": "Engine delete failed on Kubernetes",
+            "description": "Kubernetes not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -2997,12 +3017,32 @@
               }
             }
           },
+          "409": {
+            "description": "Nothing deleted: Data API endpoints (including trashed), schedules or datasets still use the engine's workspace connections (`code` = `engine_has_dependents`, with `dependents`), or a database constraint refused the delete (`code` = `constraint_violation`, with `constraint`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineConflictBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The Kubernetes delete failed (`code` = `engine_cluster_delete_failed`); the engine stays `deleting` and the request can be retried",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineConflictBody"
                 }
               }
             }
@@ -4395,11 +4435,21 @@
             }
           },
           "404": {
-            "description": "No such engine",
+            "description": "No such engine, or an added workspace does not exist; nothing applied",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A removed workspace still has Data API endpoints, schedules or datasets on the engine's connection; nothing applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineConflictBody"
                 }
               }
             }
@@ -31655,6 +31705,83 @@
             "format": "uuid"
           }
         }
+      },
+      "EngineConflictBody": {
+        "type": "object",
+        "description": "The 409 body for an engine delete/unassign that was refused. `code` is\n`engine_has_dependents` (with `dependents`) or `constraint_violation` (with\n`constraint`).",
+        "required": [
+          "error",
+          "code"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "dependents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EngineDependentDto"
+            }
+          },
+          "constraint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "EngineDependentDto": {
+        "type": "object",
+        "description": "One (workspace, kind) group of blocking assets, with up to five names.",
+        "required": [
+          "workspaceId",
+          "workspaceName",
+          "workspaceSlug",
+          "kind",
+          "count",
+          "sample"
+        ],
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspaceName": {
+            "type": "string"
+          },
+          "workspaceSlug": {
+            "type": "string",
+            "description": "For links: the UI routes a workspace as `/explore/{slug}/…`."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EngineDependentKind"
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sample": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Up to five names, alphabetical."
+          }
+        }
+      },
+      "EngineDependentKind": {
+        "type": "string",
+        "description": "A kind of asset that blocks deleting or unassigning an engine.",
+        "enum": [
+          "dataapi_endpoint",
+          "dataapi_endpoint_trashed",
+          "schedule",
+          "dataset"
+        ]
       },
       "EngineDetailDto": {
         "allOf": [

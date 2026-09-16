@@ -36,6 +36,10 @@ use uuid::Uuid;
 
 use egret_core::http::ErrorBody;
 
+use crate::dependents::{
+    DeleteEngineOutcome, EngineConflictBody, EngineDependentDto, EngineDependentKind,
+};
+use crate::store::ENGINE_STATUS_DELETING;
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
 use crate::{Engine, EngineCatalog};
@@ -3531,37 +3535,47 @@ async fn get_engine(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-    let status = match st.engine_provisioner.as_ref() {
-        Some(prov) => match prov
-            .status(&engine.r#type, &engine.namespace, &engine.name)
-            .await
-        {
-            Ok(s) => EngineStatusDto {
-                phase: s.phase,
-                message: s.message,
-                pods: s
-                    .pods
-                    .into_iter()
-                    .map(|p| EnginePodDto {
-                        name: p.name,
-                        phase: p.phase,
-                        ready: p.ready,
-                    })
-                    .collect(),
+    // A `deleting` row is the retry state of an unfinished delete; the live
+    // status of a half-deleted cluster would hide it, so it wins.
+    let status = if engine.status == ENGINE_STATUS_DELETING {
+        EngineStatusDto {
+            phase: engine.status.clone(),
+            message: Some("a previous delete did not finish; retry the delete".into()),
+            pods: vec![],
+        }
+    } else {
+        match st.engine_provisioner.as_ref() {
+            Some(prov) => match prov
+                .status(&engine.r#type, &engine.namespace, &engine.name)
+                .await
+            {
+                Ok(s) => EngineStatusDto {
+                    phase: s.phase,
+                    message: s.message,
+                    pods: s
+                        .pods
+                        .into_iter()
+                        .map(|p| EnginePodDto {
+                            name: p.name,
+                            phase: p.phase,
+                            ready: p.ready,
+                        })
+                        .collect(),
+                },
+                // A live-status read failure shouldn't hide the engine; fall back to
+                // the recorded row status with the error as a message.
+                Err(msg) => EngineStatusDto {
+                    phase: engine.status.clone(),
+                    message: Some(msg),
+                    pods: vec![],
+                },
             },
-            // A live-status read failure shouldn't hide the engine; fall back to
-            // the recorded row status with the error as a message.
-            Err(msg) => EngineStatusDto {
+            None => EngineStatusDto {
                 phase: engine.status.clone(),
-                message: Some(msg),
+                message: None,
                 pods: vec![],
             },
-        },
-        None => EngineStatusDto {
-            phase: engine.status.clone(),
-            message: None,
-            pods: vec![],
-        },
+        }
     };
     Ok(Json(EngineDetailDto {
         engine: engine.into(),
@@ -3855,12 +3869,14 @@ async fn sr_primary_catalog_credential(st: &CpState, engine_id: Uuid) -> Option<
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 204, description = "Engine deprovisioned; catalogs and minted Catalog Clients cleaned up"),
-        (status = 400, description = "Engine delete failed on Kubernetes", body = ErrorBody),
+        (status = 204, description = "Cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"),
+        (status = 400, description = "Kubernetes not configured", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:delete permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "Nothing deleted: Data API endpoints (including trashed), schedules or datasets still use the engine's workspace connections (`code` = `engine_has_dependents`, with `dependents`), or a database constraint refused the delete (`code` = `constraint_violation`, with `constraint`)", body = EngineConflictBody),
         (status = 500, description = "Internal error", body = ErrorBody),
+        (status = 502, description = "The Kubernetes delete failed (`code` = `engine_cluster_delete_failed`); the engine stays `deleting` and the request can be retried", body = EngineConflictBody),
     ),
 )]
 async fn delete_engine(
@@ -3874,25 +3890,89 @@ async fn delete_engine(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-    // Collect any minted Catalog Clients referenced by the catalog rows before the
-    // engine (and its cascading catalogs) are removed.
-    let cats = st
-        .engine_mgmt
-        .list_engine_catalogs(engine.id)
-        .await
-        .unwrap_or_default();
-    if let Some(prov) = st.engine_provisioner.as_ref() {
-        prov.delete(&engine.r#type, &engine.namespace, &engine.name)
-            .await
-            .map_err(|e| CpError::BadRequest(format!("engine delete failed: {e}")))?;
+
+    // 1. Preflight. Nothing is touched while a user-authored asset still sits on
+    //    one of this engine's workspace connections: the row delete would fail on
+    //    it (endpoints RESTRICT, alerts CHECK) or silently destroy it (datasets).
+    let dependents = st.engine_mgmt.engine_dependents(id, None).await?;
+    if !dependents.is_empty() {
+        return Err(CpError::HasDependents(dependents));
     }
-    st.engine_mgmt.delete_engine(id).await?; // CASCADE removes engine_catalogs
-    for c in cats {
-        if let Some(cid) = client_row_id(&c.config) {
-            let _ = st.catalog.revoke_client(cid).await;
+
+    // 2. Same rule as create: without Kubernetes the cluster cannot be removed,
+    //    and deleting only the row would orphan it.
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+
+    // Catalog client ids, read before the catalogs cascade away with the row.
+    let cats = st.engine_mgmt.list_engine_catalogs(engine.id).await?;
+
+    // 3. Visible, retryable state for everything below that can fail.
+    st.engine_mgmt
+        .set_engine_status(id, ENGINE_STATUS_DELETING)
+        .await?;
+
+    // 4. The cluster. A 404 is already success inside the provisioners.
+    if let Err(msg) = prov
+        .delete(&engine.r#type, &engine.namespace, &engine.name)
+        .await
+    {
+        tracing::error!(engine = %engine.name, error = %msg, "engine cluster delete failed; row left deleting");
+        return Err(CpError::ClusterDeleteFailed(msg));
+    }
+
+    // 5. The row, re-checking dependents under locks (a dependent created since
+    //    step 1 answers 409; the row stays `deleting` and a retry finishes).
+    match st.engine_mgmt.delete_engine_unless_blocked(id).await? {
+        DeleteEngineOutcome::Deleted | DeleteEngineOutcome::NotFound => {}
+        DeleteEngineOutcome::Blocked(dependents) => {
+            tracing::warn!(
+                engine = %engine.name,
+                "dependents appeared after the cluster delete; row left deleting"
+            );
+            return Err(CpError::HasDependents(dependents));
         }
     }
+
+    // 6. Cross-seam cleanup after commit: logged, never returned.
+    cleanup_deleted_engine(&st, &engine, &cats).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// What an engine leaves outside its own tables. Each seam owns its own pool, so
+/// none of this can share the row delete's transaction; a failure here is logged
+/// and leaves an orphan, never a half-deleted engine.
+async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, cats: &[EngineCatalog]) {
+    // Only clients we minted; `mintedClient: false` belongs to someone else.
+    for c in cats {
+        let Some(cid) = client_row_id(&c.config) else {
+            continue;
+        };
+        if !is_minted_client(&c.config) {
+            continue;
+        }
+        if let Err(e) = st.catalog.revoke_client(cid).await {
+            tracing::warn!(engine = %engine.name, client = %cid, error = %e, "revoke engine catalog client failed");
+        }
+    }
+    // Secrets egret generated for this engine. `tls_cert_secret_ref` is an
+    // admin-provided secret and is deliberately not here.
+    for sid in [
+        engine.delegator_secret_id,
+        engine.root_secret_id,
+        engine.tls_secret_id,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        match st.secrets.delete(None, sid).await {
+            Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
+            Err(e) => {
+                tracing::warn!(engine = %engine.name, secret = %sid, error = %e, "delete engine secret failed")
+            }
+        }
+    }
 }
 
 /// `POST /engines/{id}/restart` — roll the engine's pods without changing config
@@ -4042,7 +4122,8 @@ async fn list_engine_workspaces(
         (status = 400, description = "An engine that is not assignable (e.g. no JWT auth)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
-        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 404, description = "No such engine, or an added workspace does not exist; nothing applied", body = ErrorBody),
+        (status = 409, description = "A removed workspace still has Data API endpoints, schedules or datasets on the engine's connection; nothing applied", body = EngineConflictBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -4053,7 +4134,8 @@ async fn set_engine_workspaces(
     Json(b): Json<SetWorkspacesBody>,
 ) -> Result<Json<Vec<EngineWorkspaceDto>>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
-    st.engine_mgmt
+    let engine = st
+        .engine_mgmt
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
@@ -4068,11 +4150,40 @@ async fn set_engine_workspaces(
         .map(|w| w.workspace_id)
         .collect();
     let desired: std::collections::HashSet<Uuid> = b.workspace_ids.into_iter().collect();
+    let to_assign: Vec<Uuid> = desired.difference(&current).copied().collect();
+    let to_unassign: Vec<Uuid> = current.difference(&desired).copied().collect();
+
+    // Validate the WHOLE change before writing any of it. The assignment service
+    // writes through two seams' pools, so it cannot be one transaction; every
+    // refusal it could hit is therefore checked here first.
+    if !st
+        .engine_mgmt
+        .missing_workspace_ids(&to_assign)
+        .await?
+        .is_empty()
+    {
+        return Err(CpError::NotFound);
+    }
+    if !to_assign.is_empty() && !engine.supports_delegation() {
+        return Err(CpError::BadRequest(
+            crate::assignment::NOT_DELEGATION_CAPABLE_MSG.into(),
+        ));
+    }
+    if !to_unassign.is_empty() {
+        let dependents = st
+            .engine_mgmt
+            .engine_dependents(id, Some(&to_unassign))
+            .await?;
+        if !dependents.is_empty() {
+            return Err(CpError::HasDependents(dependents));
+        }
+    }
+
     let actor = p.user_id.0;
-    for ws in desired.difference(&current) {
+    for ws in &to_assign {
         st.assignment.assign(id, *ws, actor).await?;
     }
-    for ws in current.difference(&desired) {
+    for ws in &to_unassign {
         st.assignment.unassign(id, *ws).await?;
     }
 
@@ -4113,7 +4224,7 @@ async fn list_workspace_engines(
         (status = 400, description = "Engine is not assignable (e.g. no JWT auth)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
-        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 404, description = "No such engine or workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -4124,6 +4235,14 @@ async fn assign_workspace_engine(
     Json(b): Json<AssignEngineBody>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    if !st
+        .engine_mgmt
+        .missing_workspace_ids(&[id])
+        .await?
+        .is_empty()
+    {
+        return Err(CpError::NotFound);
+    }
     st.assignment.assign(b.engine_id, id, p.user_id.0).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -4140,6 +4259,8 @@ async fn assign_workspace_engine(
         (status = 204, description = "Engine unassigned from the workspace"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 404, description = "No such workspace", body = ErrorBody),
+        (status = 409, description = "The workspace still has Data API endpoints, schedules or datasets on the engine's connection; nothing changed", body = EngineConflictBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -4149,6 +4270,23 @@ async fn unassign_workspace_engine(
     Path((id, engine_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    if !st
+        .engine_mgmt
+        .missing_workspace_ids(&[id])
+        .await?
+        .is_empty()
+    {
+        return Err(CpError::NotFound);
+    }
+    // Unassigning deletes the workspace's materialized connection, which fails on
+    // (endpoints, alerts) or destroys (datasets) whatever sits on it.
+    let dependents = st
+        .engine_mgmt
+        .engine_dependents(engine_id, Some(std::slice::from_ref(&id)))
+        .await?;
+    if !dependents.is_empty() {
+        return Err(CpError::HasDependents(dependents));
+    }
     st.assignment.unassign(engine_id, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -5142,6 +5280,9 @@ async fn bridge_exec(
         SetWorkspacesBody,
         WorkspaceEngineDto,
         AssignEngineBody,
+        EngineConflictBody,
+        EngineDependentDto,
+        EngineDependentKind,
         ErrorBody,
     )),
     tags((name = "control-plane-engines", description = "Engine provisioning: Trino-on-Kubernetes clusters, their catalogs, native query monitor, and pod logs/exec")),

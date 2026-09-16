@@ -1,14 +1,16 @@
 //! Engine-mgmt seam HTTP error.
 //!
-//! Mirrors `egret-controlplane`'s `CpError` mapping exactly (status codes +
-//! bodies unchanged) so the moved `engines.rs`/`monitor.rs` handlers keep
-//! behaving identically after the relocation.
+//! The variants that predate the engine-delete preflight mirror
+//! `egret-controlplane`'s mapping exactly (status + `{"error": msg}` body). The
+//! three added for engine delete/unassign also carry a machine-readable `code`.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use egret_catalog_api::CatalogApiError;
 use egret_secrets::SecretsError;
+
+use crate::dependents::{EngineConflictBody, EngineDependentDto};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineHttpError {
@@ -33,8 +35,43 @@ pub enum EngineHttpError {
     /// response) — surfaced to the UI as a 502 the monitor page can show.
     #[error("engine not reachable")]
     BadGateway,
+    /// Data API endpoints, schedules or datasets still use the engine's workspace
+    /// connections; nothing was changed. 409 with the list.
+    #[error("engine is still in use")]
+    HasDependents(Vec<EngineDependentDto>),
+    /// A write hit a foreign-key (23503) or CHECK (23514) constraint the
+    /// preflight did not anticipate. 409 naming the constraint.
+    #[error("blocked by database constraint {0}")]
+    ConstraintViolation(String),
+    /// The Kubernetes delete failed with something other than 404. The engine row
+    /// stays `deleting` and the delete can be retried. 502 with the cause.
+    #[error("engine cluster delete failed: {0}")]
+    ClusterDeleteFailed(String),
     #[error("internal error")]
     Internal,
+}
+
+/// The one place a `sqlx::Error` becomes an HTTP error. It is logged here because
+/// this is the last point the error still exists: `Internal` has no payload, and
+/// "internal error with nothing in the logs" was the reported defect.
+fn db_error(e: sqlx::Error) -> EngineHttpError {
+    let (sqlstate, constraint) = match e.as_database_error() {
+        Some(d) => (
+            d.code().map(|c| c.into_owned()),
+            d.constraint().map(str::to_owned),
+        ),
+        None => (None, None),
+    };
+    tracing::error!(
+        error = %e,
+        sqlstate = sqlstate.as_deref().unwrap_or("-"),
+        constraint = constraint.as_deref().unwrap_or("-"),
+        "engine-mgmt database error"
+    );
+    match (sqlstate.as_deref(), constraint) {
+        (Some("23503") | Some("23514"), Some(name)) => EngineHttpError::ConstraintViolation(name),
+        _ => EngineHttpError::Internal,
+    }
 }
 
 impl From<CatalogApiError> for EngineHttpError {
@@ -58,7 +95,7 @@ impl From<egret_storage::StorageRegistryError> for EngineHttpError {
         match e {
             E::NotFound(_) => EngineHttpError::NotFound,
             E::AlreadyExists(s) => EngineHttpError::AlreadyExists(s),
-            E::Db(_) => EngineHttpError::Internal,
+            E::Db(e) => db_error(e),
         }
     }
 }
@@ -69,7 +106,7 @@ impl From<crate::EngineMgmtError> for EngineHttpError {
             crate::EngineMgmtError::AlreadyExists(s) => EngineHttpError::AlreadyExists(s),
             crate::EngineMgmtError::NotFound(_) => EngineHttpError::NotFound,
             crate::EngineMgmtError::NotAssignable(s) => EngineHttpError::BadRequest(s),
-            crate::EngineMgmtError::Db(_) => EngineHttpError::Internal,
+            crate::EngineMgmtError::Db(e) => db_error(e),
         }
     }
 }
@@ -86,7 +123,8 @@ impl From<SecretsError> for EngineHttpError {
             SecretsError::InvalidType(_) | SecretsError::MissingKey(_) => {
                 EngineHttpError::BadRequest(e.to_string())
             }
-            SecretsError::Crypto(_) | SecretsError::Db(_) => EngineHttpError::Internal,
+            SecretsError::Crypto(_) => EngineHttpError::Internal,
+            SecretsError::Db(e) => db_error(e),
         }
     }
 }
@@ -114,21 +152,125 @@ impl From<egret_core::Error> for EngineHttpError {
     }
 }
 
+fn error_json(status: StatusCode, msg: String) -> Response {
+    (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
 impl IntoResponse for EngineHttpError {
     fn into_response(self) -> Response {
-        let (status, msg) = match &self {
-            EngineHttpError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
-            EngineHttpError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
-            EngineHttpError::AlreadyExists(_) => (StatusCode::CONFLICT, self.to_string()),
-            EngineHttpError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            EngineHttpError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
-            EngineHttpError::InUse(_) => (StatusCode::CONFLICT, self.to_string()),
-            EngineHttpError::BadGateway => (StatusCode::BAD_GATEWAY, self.to_string()),
-            EngineHttpError::Internal => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error".to_string(),
-            ),
-        };
-        (status, Json(serde_json::json!({ "error": msg }))).into_response()
+        let msg = self.to_string();
+        match self {
+            EngineHttpError::HasDependents(dependents) => {
+                let workspaces = dependents
+                    .iter()
+                    .map(|d| d.workspace_id)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len();
+                let body = EngineConflictBody {
+                    error: format!(
+                        "{msg}: {workspaces} workspace(s) have Data API endpoints, alerts or \
+                         datasets on it; remove or move them first"
+                    ),
+                    code: "engine_has_dependents".into(),
+                    dependents,
+                    constraint: None,
+                };
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            EngineHttpError::ConstraintViolation(constraint) => {
+                let body = EngineConflictBody {
+                    error: msg,
+                    code: "constraint_violation".into(),
+                    dependents: Vec::new(),
+                    constraint: Some(constraint),
+                };
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            EngineHttpError::ClusterDeleteFailed(_) => (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": msg, "code": "engine_cluster_delete_failed" })),
+            )
+                .into_response(),
+            EngineHttpError::Forbidden => error_json(StatusCode::FORBIDDEN, msg),
+            EngineHttpError::NotFound => error_json(StatusCode::NOT_FOUND, msg),
+            EngineHttpError::AlreadyExists(_)
+            | EngineHttpError::Conflict(_)
+            | EngineHttpError::InUse(_) => error_json(StatusCode::CONFLICT, msg),
+            EngineHttpError::BadRequest(_) => error_json(StatusCode::BAD_REQUEST, msg),
+            EngineHttpError::BadGateway => error_json(StatusCode::BAD_GATEWAY, msg),
+            EngineHttpError::Internal => error_json(StatusCode::INTERNAL_SERVER_ERROR, msg),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dependents::EngineDependentKind;
+
+    async fn body(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn dependents_are_a_409_carrying_the_list() {
+        let resp = EngineHttpError::HasDependents(vec![EngineDependentDto {
+            workspace_id: uuid::Uuid::from_u128(1),
+            workspace_name: "Sales".into(),
+            workspace_slug: "sales".into(),
+            kind: EngineDependentKind::DataapiEndpointTrashed,
+            count: 1,
+            sample: vec!["old-orders".into()],
+        }])
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let j = body(resp).await;
+        assert_eq!(j["code"], "engine_has_dependents");
+        assert_eq!(j["dependents"][0]["workspaceSlug"], "sales");
+        assert_eq!(j["dependents"][0]["kind"], "dataapi_endpoint_trashed");
+        assert!(
+            j["error"].as_str().unwrap().contains("1 workspace(s)"),
+            "{j}"
+        );
+        assert!(j.get("constraint").is_none(), "{j}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_cluster_delete_is_a_502_with_its_cause() {
+        let resp =
+            EngineHttpError::ClusterDeleteFailed("Deployment/x: forbidden".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            body(resp).await,
+            serde_json::json!({
+                "error": "engine cluster delete failed: Deployment/x: forbidden",
+                "code": "engine_cluster_delete_failed"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_variants_keep_their_bodies() {
+        let resp = EngineHttpError::BadRequest("kubernetes not configured".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body(resp).await,
+            serde_json::json!({ "error": "bad request: kubernetes not configured" })
+        );
+        let resp = EngineHttpError::NotFound.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            body(resp).await,
+            serde_json::json!({ "error": "not found" })
+        );
+        let resp = EngineHttpError::InUse(2).into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body(resp).await,
+            serde_json::json!({ "error": "secret is in use by 2 connection(s)" })
+        );
     }
 }

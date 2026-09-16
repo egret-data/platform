@@ -32,6 +32,7 @@ import {
   useControlPlaneEnginesSetEngineWorkspaces,
 } from "@/api/generated/control-plane-engines/control-plane-engines";
 import { useAdminWorkspacesListWs } from "@/api/generated/admin-workspaces/admin-workspaces";
+import type { EngineDependentDto } from "@/api/generated/model/engineDependentDto";
 import { ApiError } from "@/api/client";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -75,6 +76,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { CatalogForm } from "./CatalogForm";
+import { EngineDependentsTable, dependentsFromError } from "./EngineDependentsTable";
 import {
   useEngineConfigForm,
   type EngineConfigForm,
@@ -112,6 +114,7 @@ function phaseVariant(phase: string): BadgeVariant {
     case "pending":
     case "creating":
     case "updating":
+    case "deleting":
       return "warning";
     default:
       return "secondary";
@@ -224,6 +227,8 @@ function EngineActions({
   const queryClient = useQueryClient();
   const [restartOpen, setRestartOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [blockedBy, setBlockedBy] = useState<EngineDependentDto[] | null>(null);
+  const deleting = engine.status.phase === "deleting";
 
   const restartMutation = useMutation<void, ApiError, string>({
     mutationFn: restartEngine,
@@ -237,11 +242,39 @@ function EngineActions({
   const deleteMutation = useMutation<void, ApiError, string>({
     mutationFn: deleteEngine,
     onSuccess: () => navigate("/control-plane/engines"),
-    onError: (e) => toast.error(e.message ?? "Failed to delete the engine."),
+    onError: (e) => {
+      // Either branch can leave the engine `deleting` (a 409 here means the
+      // cluster was already torn down and a dependent appeared after the
+      // preflight check — see the route's step 5): refetch so the header
+      // shows the retry state rather than the last live phase.
+      queryClient.invalidateQueries({ queryKey: ["cp", "engine", engineId] });
+      const dependents = dependentsFromError(e);
+      if (dependents) {
+        setBlockedBy(dependents);
+        return;
+      }
+      toast.error(e.message ?? "Failed to delete the engine.");
+    },
   });
 
   return (
     <>
+      {deleting && (
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={() => deleteMutation.mutate(engine.id)}
+          disabled={deleteMutation.isPending}
+        >
+          {deleteMutation.isPending ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Trash2 className="h-4 w-4" />
+          )}
+          Retry delete
+        </Button>
+      )}
+
       <Button
         variant="outline"
         size="sm"
@@ -310,10 +343,39 @@ function EngineActions({
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
         title={`Delete «${engine.name}»?`}
-        description="This engine and its Kubernetes resources (cluster, catalog, secret) will be removed. This cannot be undone."
-        confirmText="delete"
+        description="This destroys the engine's Kubernetes cluster. It cannot be undone."
+        confirmText={engine.name}
         onConfirm={() => deleteMutation.mutate(engine.id)}
-      />
+      >
+        <ul className="list-disc space-y-1 pl-5">
+          <li>Query history and notebook engine access on its workspace connections are removed.</li>
+          <li>Saved queries that use it lose their connection.</li>
+          <li>
+            Data API endpoints (including trashed ones), alerts and datasets that use it block
+            the delete — you will be shown where they are.
+          </li>
+        </ul>
+      </ConfirmDeleteDialog>
+
+      <AlertDialog
+        open={blockedBy !== null}
+        onOpenChange={(open) => {
+          if (!open) setBlockedBy(null);
+        }}
+      >
+        <AlertDialogContent className="sm:max-w-2xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>«{engine.name}» is still in use</AlertDialogTitle>
+            <AlertDialogDescription>
+              Nothing was deleted. Remove or move these first, then delete the engine again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {blockedBy && <EngineDependentsTable dependents={blockedBy} />}
+          <AlertDialogFooter>
+            <AlertDialogCancel>Close</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }
@@ -363,7 +425,9 @@ export default function EngineDetail() {
         {data && (
           <div className="flex shrink-0 items-center gap-2">
             <Badge variant="secondary">{data.type}</Badge>
-            <Badge variant={phaseVariant(data.status.phase)}>{data.status.phase}</Badge>
+            <Badge variant={phaseVariant(data.status.phase)}>
+              {data.status.phase === "deleting" ? "Deleting — retry" : data.status.phase}
+            </Badge>
             <EngineActions engine={data} engineId={id} />
           </div>
         )}
@@ -1413,29 +1477,39 @@ function WorkspacesCard({ engine }: { engine: EngineWithStatus }) {
   const assignedIds = new Set(assigned.map((w) => w.workspaceId));
   const [addOpen, setAddOpen] = useState(false);
 
+  const [blockedBy, setBlockedBy] = useState<EngineDependentDto[] | null>(null);
+
   const setMut = useControlPlaneEnginesSetEngineWorkspaces({
     mutation: {
       onSuccess: () => {
+        setBlockedBy(null);
         queryClient.invalidateQueries({
           queryKey: getControlPlaneEnginesListEngineWorkspacesQueryKey(engineId),
         });
       },
-      onError: (e) =>
-        toast.error(
-          (e as { message?: string })?.message ?? "Failed to update workspaces.",
-        ),
     },
   });
+
+  // Per call rather than on the hook, so a 409 renders the dependents table and
+  // is not ALSO toasted by a hook-level handler.
+  const onSetError = (e: unknown) => {
+    const dependents = dependentsFromError(e);
+    if (dependents) {
+      setBlockedBy(dependents);
+      return;
+    }
+    toast.error((e as { message?: string })?.message ?? "Failed to update workspaces.");
+  };
 
   const addWorkspace = (wsId: string) =>
     setMut.mutate(
       { id: engineId, data: { workspaceIds: [...assignedIds, wsId] } },
-      { onSuccess: () => toast.success("Workspace assigned") },
+      { onSuccess: () => toast.success("Workspace assigned"), onError: onSetError },
     );
   const removeWorkspace = (wsId: string) =>
     setMut.mutate(
       { id: engineId, data: { workspaceIds: [...assignedIds].filter((x) => x !== wsId) } },
-      { onSuccess: () => toast.success("Workspace removed") },
+      { onSuccess: () => toast.success("Workspace removed"), onError: onSetError },
     );
 
   return (
@@ -1460,6 +1534,17 @@ function WorkspacesCard({ engine }: { engine: EngineWithStatus }) {
           <Plus className="mr-1 h-4 w-4" /> Add workspace
         </Button>
       </div>
+      {blockedBy && (
+        <div className="space-y-2 rounded-md border border-destructive/50 p-3">
+          <p className="text-sm font-medium text-destructive">
+            Not removed — the workspace still uses this engine
+          </p>
+          <p className="text-sm text-muted-foreground">
+            Remove or move these first, then try again.
+          </p>
+          <EngineDependentsTable dependents={blockedBy} />
+        </div>
+      )}
       <div>
         {assignedQ.isError ? (
           <Alert variant="destructive">
