@@ -800,10 +800,24 @@ enum ApplyOp {
 }
 
 /// Apply an assembled request and settle the internal secrets it rendered:
-/// recorded on success, deleted on failure. `engine` must be the row the
-/// request was built from. A failure to RECORD after a successful apply is
-/// logged, not returned — the cluster already runs the new values, and the next
-/// apply mints and records a fresh pair.
+/// recorded on the row on BOTH the success and the failure path. `engine` must
+/// be the row the request was built from.
+///
+/// This does NOT discard on a failed apply. `TrinoProvisioner::apply_all`
+/// writes the env Secret and the `password.db` ConfigMap BEFORE the
+/// Deployments and does not roll those back on a later failure (e.g. a bad
+/// Deployment spec, or the API server timing out on the last object) — so a
+/// failed `provision`/`update` call may still have left the CLUSTER holding
+/// the fresh pair. Discarding it in that case would delete a secret the
+/// running pods already carry, and the next pod roll would then 401 the
+/// monitor with no successful apply left to recover it. Committing
+/// unconditionally means the row always names the pair the apply ATTEMPTED to
+/// hand the cluster; the failure mode this trades for is the opposite one — an
+/// apply that failed before touching the Secret at all leaves the row naming a
+/// value no pod has yet, so the monitor may 401 until the NEXT successful
+/// apply, which resolves the already-committed pair (`resolve_internal_secrets`
+/// reuses it) and converges. A failure to record is logged, not returned — the
+/// cluster attempt already happened either way.
 async fn apply_built(
     st: &CpState,
     prov: &dyn egret_engine_mgmt_api::EngineProvisioningPort,
@@ -816,15 +830,10 @@ async fn apply_built(
         ApplyOp::Update => prov.update(&built.req).await,
     };
     if let Some(secrets) = &built.internal {
-        match &res {
-            Ok(()) => {
-                if let Err(e) = commit_internal_secrets(st, engine, secrets).await {
-                    tracing::error!(engine = %engine.name, error = ?e,
-                        "applied new internal secrets but could not record them; \
-                         the monitor fails until the next successful apply");
-                }
-            }
-            Err(_) => discard_internal_secrets(st, secrets).await,
+        if let Err(e) = commit_internal_secrets(st, engine, secrets).await {
+            tracing::error!(engine = %engine.name, error = ?e,
+                "minted internal secrets but could not record them; \
+                 the monitor fails until the next successful apply");
         }
     }
     res
@@ -1787,7 +1796,6 @@ async fn ensure_root_password_secret(
 
 /// A Trino engine's coordinator↔worker shared secret (`TRINO_INTERNAL_SECRET`)
 /// and `egret-monitor` password, as resolved for ONE apply.
-#[derive(Debug)]
 struct EngineInternalSecrets {
     internal_id: Uuid,
     internal: String,
@@ -1797,6 +1805,20 @@ struct EngineInternalSecrets {
     /// records it after Kubernetes accepted the spec and deletes it otherwise,
     /// so the row only ever names what the running pods were given.
     fresh: bool,
+}
+
+/// Redacts the plaintext fields — this struct carries live credentials and
+/// must never show up verbatim in a log line via a stray `{:?}`.
+impl std::fmt::Debug for EngineInternalSecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineInternalSecrets")
+            .field("internal_id", &self.internal_id)
+            .field("internal", &"<redacted>")
+            .field("monitor_id", &self.monitor_id)
+            .field("monitor", &"<redacted>")
+            .field("fresh", &self.fresh)
+            .finish()
+    }
 }
 
 /// 32 random bytes, URL-safe base64 without padding — no `:`, so it is also
@@ -1809,8 +1831,37 @@ fn random_internal_secret() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
+/// Resolve both secrets of an already-recorded pair. `Ok(None)` when either
+/// has been deleted out-of-band (e.g. an admin deleting the secret row
+/// directly) rather than failing every future apply on this engine forever —
+/// the caller mints a fresh pair instead.
+async fn resolve_stored_pair(
+    st: &CpState,
+    internal_id: Uuid,
+    monitor_id: Uuid,
+) -> Result<Option<EngineInternalSecrets>, CpError> {
+    let internal = match st.secrets.resolve_plaintext(None, internal_id).await {
+        Ok(v) => v,
+        Err(egret_secrets::SecretsError::NotFound) => return Ok(None),
+        Err(e) => return Err(CpError::BadRequest(format!("resolve internal secret: {e}"))),
+    };
+    let monitor = match st.secrets.resolve_plaintext(None, monitor_id).await {
+        Ok(v) => v,
+        Err(egret_secrets::SecretsError::NotFound) => return Ok(None),
+        Err(e) => return Err(CpError::BadRequest(format!("resolve monitor secret: {e}"))),
+    };
+    Ok(Some(EngineInternalSecrets {
+        internal_id,
+        internal,
+        monitor_id,
+        monitor,
+        fresh: false,
+    }))
+}
+
 /// Reuse the engine's recorded internal secrets, or mint a new pending pair when
-/// the row has none or `rotate` is set. Minting never writes the row.
+/// the row has none, `rotate` is set, or a recorded secret has vanished
+/// out-of-band. Minting never writes the row.
 async fn resolve_internal_secrets(
     st: &CpState,
     engine: &Engine,
@@ -1820,23 +1871,11 @@ async fn resolve_internal_secrets(
         if let (Some(internal_id), Some(monitor_id)) =
             (engine.internal_secret_id, engine.monitor_secret_id)
         {
-            let internal = st
-                .secrets
-                .resolve_plaintext(None, internal_id)
-                .await
-                .map_err(|e| CpError::BadRequest(format!("resolve internal secret: {e}")))?;
-            let monitor = st
-                .secrets
-                .resolve_plaintext(None, monitor_id)
-                .await
-                .map_err(|e| CpError::BadRequest(format!("resolve monitor secret: {e}")))?;
-            return Ok(EngineInternalSecrets {
-                internal_id,
-                internal,
-                monitor_id,
-                monitor,
-                fresh: false,
-            });
+            if let Some(existing) = resolve_stored_pair(st, internal_id, monitor_id).await? {
+                return Ok(existing);
+            }
+            // One or both rows are gone (deleted out-of-band). Fall through and
+            // mint a fresh pair rather than bricking every future apply.
         }
     }
     // A per-generation suffix keeps a rotation from colliding with the names of
@@ -1882,9 +1921,20 @@ async fn resolve_internal_secrets(
     })
 }
 
-/// After a successful apply: record a fresh pair on the row and delete the pair
-/// it superseded. `engine` is the row as loaded BEFORE the build (its ids are
-/// the superseded ones). No-op for a reused pair.
+/// Record a fresh pair on the row — called on BOTH the success and the
+/// failure path of an apply that rendered one (see [`apply_built`]) — and
+/// delete the pair it superseded. `engine` is the row as loaded BEFORE the
+/// build (its ids are the ones the caller's build read, and thus the ones
+/// this write is conditioned on via [`EngineMgmtStore::set_internal_secret_ids`]'s
+/// compare-and-set). No-op for a reused pair.
+///
+/// When the compare-and-set loses (a concurrent apply on the same engine
+/// already committed a different pair since `engine` was read), this writes
+/// nothing and does NOT delete `s` either: `s` may have just been applied to
+/// the cluster by THIS call's own `provision`/`update`, so deleting it would
+/// risk the same "delete a secret the cluster may hold" failure `apply_built`
+/// avoids. It is left as an orphaned secret-store row; the next apply on this
+/// engine reads whichever pair the row currently names and converges.
 async fn commit_internal_secrets(
     st: &CpState,
     engine: &Engine,
@@ -1893,9 +1943,22 @@ async fn commit_internal_secrets(
     if !s.fresh {
         return Ok(());
     }
-    st.engine_mgmt
-        .set_internal_secret_ids(engine.id, s.internal_id, s.monitor_id)
+    let committed = st
+        .engine_mgmt
+        .set_internal_secret_ids(
+            engine.id,
+            engine.internal_secret_id,
+            engine.monitor_secret_id,
+            s.internal_id,
+            s.monitor_id,
+        )
         .await?;
+    if !committed {
+        tracing::warn!(engine = %engine.name, internal_id = %s.internal_id, monitor_id = %s.monitor_id,
+            "lost the race to record internal secrets; a concurrent apply on this engine \
+             already committed a different pair — this pair is left unreferenced");
+        return Ok(());
+    }
     for old in [engine.internal_secret_id, engine.monitor_secret_id]
         .into_iter()
         .flatten()
@@ -1910,8 +1973,14 @@ async fn commit_internal_secrets(
     Ok(())
 }
 
-/// After a failed apply: delete a fresh pair (the pods never received it). No-op
-/// for a reused pair.
+/// Delete a freshly-minted pair that was never handed to the provisioner at
+/// all — the ONLY safe place to discard, because nothing has been applied to
+/// the cluster yet. Used solely when minting succeeds but a later step in the
+/// SAME build fails before any `provision`/`update` call is made (e.g.
+/// [`inject_monitor_user`] erroring on a malformed password). Once a build's
+/// request has been handed to the provisioner, [`apply_built`]/
+/// [`commit_internal_secrets`] takes over and never discards — see their doc
+/// comments for why. No-op for a reused pair.
 async fn discard_internal_secrets(st: &CpState, s: &EngineInternalSecrets) {
     if !s.fresh {
         return;
@@ -7601,6 +7670,128 @@ mod tests {
         assert!(not_found(
             st.secrets.resolve_plaintext(None, first.monitor_id).await
         ));
+    }
+
+    /// F2 fix: two concurrent applies on the same NULL-secret-ids engine each
+    /// mint their own pair; only the FIRST commit may write the row — the
+    /// second, still holding the stale (both-`None`) snapshot it minted
+    /// against, must not clobber the winner. The loser's pair is left
+    /// unreferenced (never deleted — see `commit_internal_secrets`'s doc
+    /// comment for why), and the next apply on the now-current row reuses the
+    /// winner.
+    #[tokio::test]
+    async fn concurrent_applies_do_not_clobber_each_others_commit() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping concurrent_applies_do_not_clobber_each_others_commit: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                "egret-engines",
+                wh.id,
+                &serde_json::json!({ "trinoConfig": {} }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+
+        // Two concurrent builds both read the same NULL row.
+        let a = resolve_internal_secrets(&st, &engine, false)
+            .await
+            .expect("mint a");
+        let b = resolve_internal_secrets(&st, &engine, false)
+            .await
+            .expect("mint b");
+        assert_ne!(a.internal_id, b.internal_id);
+
+        // The first apply's commit wins.
+        commit_internal_secrets(&st, &engine, &a)
+            .await
+            .expect("commit a");
+        let after_a = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(after_a.internal_secret_id, Some(a.internal_id));
+        assert_eq!(after_a.monitor_secret_id, Some(a.monitor_id));
+
+        // The second apply's commit, still holding the STALE (both-`None`)
+        // `engine` snapshot, must not overwrite it.
+        commit_internal_secrets(&st, &engine, &b)
+            .await
+            .expect("commit b (loses the race, but does not error)");
+        let after_b = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(
+            after_b.internal_secret_id,
+            Some(a.internal_id),
+            "the winner's pair must survive"
+        );
+        assert_eq!(after_b.monitor_secret_id, Some(a.monitor_id));
+
+        // The next apply on the now-current row reuses the committed winner.
+        let reused = resolve_internal_secrets(&st, &after_b, false)
+            .await
+            .expect("reuse");
+        assert!(!reused.fresh);
+        assert_eq!(reused.internal_id, a.internal_id);
+        assert_eq!(reused.monitor_id, a.monitor_id);
+    }
+
+    /// Minor fix: an admin (or anything else) deleting a recorded secret
+    /// out-of-band must not brick every future apply on the engine — the next
+    /// `resolve_internal_secrets` mints a fresh pair instead of propagating
+    /// `SecretsError::NotFound` forever.
+    #[tokio::test]
+    async fn resolve_internal_secrets_remints_when_a_stored_secret_is_gone() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping resolve_internal_secrets_remints_when_a_stored_secret_is_gone: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                "egret-engines",
+                wh.id,
+                &serde_json::json!({ "trinoConfig": {} }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        let first = resolve_internal_secrets(&st, &engine, false)
+            .await
+            .expect("mint");
+        commit_internal_secrets(&st, &engine, &first)
+            .await
+            .expect("commit");
+        let row = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+
+        // Delete the internal secret out-of-band (not through this module).
+        st.secrets
+            .delete(None, first.internal_id)
+            .await
+            .expect("delete internal secret directly");
+
+        let reminted = resolve_internal_secrets(&st, &row, false)
+            .await
+            .expect("must remint instead of erroring");
+        assert!(reminted.fresh);
+        assert_ne!(reminted.internal_id, first.internal_id);
     }
 
     /// WITHOUT a `secret_ref` the generic arm must render exactly as before:

@@ -415,14 +415,48 @@ async fn internal_secret_ids_round_trip_on_the_engine_row() {
     assert!(e.internal_secret_id.is_none() && e.monitor_secret_id.is_none());
 
     let (internal, monitor) = (Uuid::new_v4(), Uuid::new_v4());
-    engine_mgmt
-        .set_internal_secret_ids(e.id, internal, monitor)
+    let committed = engine_mgmt
+        .set_internal_secret_ids(e.id, None, None, internal, monitor)
         .await
         .unwrap();
+    assert!(
+        committed,
+        "the row was still NULL, matching the expected previous pair"
+    );
     let got = engine_mgmt.get_engine(e.id).await.unwrap().unwrap();
     assert_eq!(got.internal_secret_id, Some(internal));
     assert_eq!(got.monitor_secret_id, Some(monitor));
     let listed = engine_mgmt.list_engines().await.unwrap();
     let row = listed.iter().find(|x| x.id == e.id).expect("listed");
     assert_eq!(row.monitor_secret_id, Some(monitor));
+
+    // A stale caller — still expecting the row to be NULL — loses the race and
+    // writes nothing.
+    let (internal2, monitor2) = (Uuid::new_v4(), Uuid::new_v4());
+    let committed2 = engine_mgmt
+        .set_internal_secret_ids(e.id, None, None, internal2, monitor2)
+        .await
+        .unwrap();
+    assert!(
+        !committed2,
+        "the row no longer matches the stale expected pair"
+    );
+    let got = engine_mgmt.get_engine(e.id).await.unwrap().unwrap();
+    assert_eq!(
+        got.internal_secret_id,
+        Some(internal),
+        "the winner's pair must survive"
+    );
+    assert_eq!(got.monitor_secret_id, Some(monitor));
+
+    // The caller that reads the CURRENT pair as its expectation succeeds.
+    let (internal3, monitor3) = (Uuid::new_v4(), Uuid::new_v4());
+    let committed3 = engine_mgmt
+        .set_internal_secret_ids(e.id, Some(internal), Some(monitor), internal3, monitor3)
+        .await
+        .unwrap();
+    assert!(committed3);
+    let got = engine_mgmt.get_engine(e.id).await.unwrap().unwrap();
+    assert_eq!(got.internal_secret_id, Some(internal3));
+    assert_eq!(got.monitor_secret_id, Some(monitor3));
 }

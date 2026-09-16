@@ -1639,11 +1639,17 @@ async fn create_renders_stored_random_internal_secrets() {
     assert!(!bcrypt::verify(format!("egret-monitor-{id}"), &hash).unwrap());
 }
 
-/// P1 transition: an engine rendered before this change (no secret ids) keeps
-/// its legacy values through a FAILED apply and adopts stored secrets only on a
-/// successful one — so the monitor never presents a password no pod has.
+/// P1 transition + F1 fix: an engine rendered before this change (no secret
+/// ids) adopts stored secrets on its FIRST apply attempt EVEN WHEN that
+/// attempt fails. `TrinoProvisioner::apply_all` writes the env Secret and the
+/// `password.db` ConfigMap before the Deployments and does not roll those
+/// back on a later failure, so a failed apply may already have handed the
+/// cluster the new pair — discarding it would risk deleting a value the
+/// running pods carry. The row therefore COMMITS the pending pair on both the
+/// success and the failure path, and the NEXT apply (successful or not)
+/// REUSES that same committed pair rather than minting a third generation.
 #[tokio::test]
-async fn legacy_engine_adopts_internal_secrets_only_after_a_successful_apply() {
+async fn legacy_engine_adopts_internal_secrets_even_from_a_failed_apply() {
     let port = FakeEnginePort::default();
     let Some(f) = setup_full(
         Some(Arc::new(port.clone())),
@@ -1693,10 +1699,15 @@ async fn legacy_engine_adopts_internal_secrets_only_after_a_successful_apply() {
         .await
         .unwrap();
     assert!(!resp.status().is_success(), "injected failure must surface");
-    assert_eq!(engine_secret_ids(&f, engine.id).await, (None, None));
+    let (internal_id, monitor_id) = engine_secret_ids(&f, engine.id).await;
     assert!(
-        internal_secret_names(&f, engine.id).await.is_empty(),
-        "the failed attempt's secrets must be discarded"
+        internal_id.is_some() && monitor_id.is_some(),
+        "a failed apply still COMMITS the pending pair — the cluster may already carry it"
+    );
+    assert_eq!(
+        internal_secret_names(&f, engine.id).await.len(),
+        2,
+        "exactly one generation exists after the failed attempt"
     );
 
     port.set_fail_update(false);
@@ -1712,20 +1723,149 @@ async fn legacy_engine_adopts_internal_secrets_only_after_a_successful_apply() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let (internal_id, monitor_id) = engine_secret_ids(&f, engine.id).await;
+    let (internal_id2, monitor_id2) = engine_secret_ids(&f, engine.id).await;
+    assert_eq!(
+        internal_id2, internal_id,
+        "the next apply REUSES the already-committed pair"
+    );
+    assert_eq!(monitor_id2, monitor_id);
     let secrets = secret_store(&f);
     let internal = secrets
-        .resolve_plaintext(None, internal_id.unwrap())
+        .resolve_plaintext(None, internal_id2.unwrap())
         .await
         .unwrap();
     let monitor = secrets
-        .resolve_plaintext(None, monitor_id.unwrap())
+        .resolve_plaintext(None, monitor_id2.unwrap())
         .await
         .unwrap();
     let spec = port.last_updated();
     assert_eq!(rendered_internal_secret(&spec), internal);
     assert!(bcrypt::verify(&monitor, &monitor_hash(&spec)).unwrap());
-    assert_eq!(internal_secret_names(&f, engine.id).await.len(), 2);
+    assert_eq!(
+        internal_secret_names(&f, engine.id).await.len(),
+        2,
+        "no third generation minted — the pair was reused, not rotated"
+    );
+}
+
+/// Reviewer coverage: a SECOND successful apply on the same (new, this-side-of-
+/// the-change) engine reuses the already-committed pair — no third generation
+/// minted, ids unchanged.
+#[tokio::test]
+async fn second_successful_apply_reuses_the_same_internal_secret_pair() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p1_reuse_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (internal_id, monitor_id) = engine_secret_ids(&f, id).await;
+    assert!(internal_id.is_some() && monitor_id.is_some());
+    assert_eq!(internal_secret_names(&f, id).await.len(), 2);
+
+    let put_body = serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 2,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "trinoConfig": { "delegationMode": "impersonate", "auth": {} },
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{id}"),
+            &token,
+            Some(put_body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (internal_id2, monitor_id2) = engine_secret_ids(&f, id).await;
+    assert_eq!(
+        internal_id2, internal_id,
+        "ids unchanged across the second apply"
+    );
+    assert_eq!(monitor_id2, monitor_id);
+    assert_eq!(
+        internal_secret_names(&f, id).await.len(),
+        2,
+        "no third generation minted"
+    );
+    let secrets = secret_store(&f);
+    let internal = secrets
+        .resolve_plaintext(None, internal_id2.unwrap())
+        .await
+        .unwrap();
+    let spec = port.last_updated();
+    assert_eq!(rendered_internal_secret(&spec), internal);
+}
+
+/// A jwt-delegation engine has no PASSWORD authenticator (`is_jwt_delegation`
+/// skips `inject_monitor_user`, so `password.db` carries no `egret-monitor`
+/// entry), but it still needs a `TRINO_INTERNAL_SECRET` for coordinator↔worker
+/// traffic — and `resolve_internal_secrets` always mints/commits the pair
+/// together, so a monitor secret is still recorded even though nothing
+/// references it in the rendered spec.
+#[tokio::test]
+async fn jwt_delegation_engine_mints_and_commits_internal_secret_without_a_monitor_user() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p1_jwt_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name,
+        wh_id,
+        serde_json::json!({ "delegationMode": "jwt" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let (internal_id, monitor_id) = engine_secret_ids(&f, id).await;
+    let secrets = secret_store(&f);
+    let internal = secrets
+        .resolve_plaintext(None, internal_id.expect("internal secret recorded"))
+        .await
+        .unwrap();
+    monitor_id.expect("monitor secret is still minted+committed alongside the internal one");
+
+    let spec = port.last_provisioned();
+    assert_eq!(rendered_internal_secret(&spec), internal);
+    let cm = egret_provisioner::trino::trino_config_map(&spec);
+    assert!(
+        cm["data"].get("password.db").is_none(),
+        "jwt-only engines render no password.db at all (no PASSWORD authenticator users)"
+    );
 }
 
 #[tokio::test]

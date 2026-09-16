@@ -344,22 +344,35 @@ impl EngineMgmtStore {
         Ok(())
     }
 
-    /// Record the internal/monitor secrets the last successful apply rendered.
+    /// Record the internal/monitor secrets an apply attempted to render,
+    /// compare-and-set against the pair the caller's build read
+    /// (`prev_internal_secret_id`/`prev_monitor_secret_id`, i.e. `Engine::{internal_secret_id,monitor_secret_id}`
+    /// as loaded BEFORE that build). Writes only when the row still names that
+    /// exact pair (`IS NOT DISTINCT FROM` so two `NULL`s also match); returns
+    /// `false` and writes nothing otherwise. This closes the race between two
+    /// concurrent applies on the same engine: whichever commits first wins,
+    /// and the loser does not clobber it with its own (possibly stale) pair.
     pub async fn set_internal_secret_ids(
         &self,
         engine_id: Uuid,
+        prev_internal_secret_id: Option<Uuid>,
+        prev_monitor_secret_id: Option<Uuid>,
         internal_secret_id: Uuid,
         monitor_secret_id: Uuid,
-    ) -> Result<(), EngineMgmtError> {
-        sqlx::query(
-            "UPDATE engine_mgmt.engines SET internal_secret_id = $2, monitor_secret_id = $3 WHERE id = $1",
+    ) -> Result<bool, EngineMgmtError> {
+        let res = sqlx::query(
+            "UPDATE engine_mgmt.engines SET internal_secret_id = $4, monitor_secret_id = $5 \
+             WHERE id = $1 AND internal_secret_id IS NOT DISTINCT FROM $2 \
+             AND monitor_secret_id IS NOT DISTINCT FROM $3",
         )
         .bind(engine_id)
+        .bind(prev_internal_secret_id)
+        .bind(prev_monitor_secret_id)
         .bind(internal_secret_id)
         .bind(monitor_secret_id)
         .execute(self.pool())
         .await?;
-        Ok(())
+        Ok(res.rows_affected() == 1)
     }
 
     pub async fn delete_engine(&self, id: Uuid) -> Result<(), EngineMgmtError> {
