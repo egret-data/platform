@@ -51,6 +51,15 @@ describe("dependentsFromError", () => {
     expect(dependentsFromError(new ApiError(502, "boom", "engine_cluster_delete_failed"))).toBeNull();
     expect(dependentsFromError(new Error("network"))).toBeNull();
   });
+
+  test("is null for an empty dependents array (an empty list must not open a blocked dialog)", () => {
+    const e = new ApiError(409, "still in use", "engine_has_dependents", {
+      error: "still in use",
+      code: "engine_has_dependents",
+      dependents: [],
+    });
+    expect(dependentsFromError(e)).toBeNull();
+  });
 });
 
 describe("EngineDependentsTable", () => {

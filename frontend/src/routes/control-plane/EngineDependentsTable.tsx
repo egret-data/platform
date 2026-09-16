@@ -32,7 +32,7 @@ const KIND_PATH: Record<string, string> = {
 export function dependentsFromError(e: unknown): EngineDependentDto[] | null {
   if (!(e instanceof ApiError) || e.code !== "engine_has_dependents") return null;
   const dependents = (e.body as Partial<EngineConflictBody> | undefined)?.dependents;
-  return Array.isArray(dependents) ? dependents : null;
+  return Array.isArray(dependents) && dependents.length > 0 ? dependents : null;
 }
 
 /** What still uses an engine's workspace connections, one row per workspace and kind. */
