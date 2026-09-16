@@ -3972,32 +3972,78 @@ struct StarRocksDelegationBootstrap {
 /// (`<name>-fe-service.<namespace>.svc`) is the kube-starrocks operator's
 /// documented convention; UNVERIFIED against a live operator install as of
 /// this change (flagged for the Task 8 / S3-T4 live smoke — see plan doc).
-/// Whether a background StarRocks bootstrap may still write to the engine it was
-/// spawned for: the row must still exist under the same id and name and not be
-/// on its way out. A delete, or a delete plus same-name re-create (new id), stops
-/// it instead of running DDL against a cluster it no longer owns.
+/// Returns the spawned task's `JoinHandle` purely so a test can `.await` it
+/// for a deterministic "the bootstrap has finished" signal instead of a
+/// guessed sleep (P7's `bootstrap_stops_before_any_provisioner_call_when_*`
+/// test does this); both production call sites ignore it.
+/// Whether a background StarRocks bootstrap may still write to the engine it
+/// was spawned for: the row must still exist under the same id and name and
+/// not be on its way out (`DELETING`) or already given up on (`FAILED` —
+/// Task 12's compensation may not have been able to remove it, and its
+/// cluster objects may already be gone). A delete, a delete plus same-name
+/// re-create (new id), or a status flip to `DELETING`/`FAILED` all stop the
+/// bootstrap instead of running DDL against a cluster it no longer owns.
 fn bootstrap_target_is_current(found: Option<&Engine>, engine_name: &str) -> bool {
-    matches!(found, Some(e) if e.name == engine_name && e.status != crate::engine_status::DELETING)
+    matches!(found, Some(e) if e.name == engine_name
+        && e.status != crate::engine_status::DELETING
+        && e.status != crate::engine_status::FAILED)
 }
 
-/// Re-read the engine and apply [`bootstrap_target_is_current`]; a read error
-/// also stops the bootstrap.
+/// How many consecutive `get_engine` read failures [`engine_still_current`]
+/// tolerates before it gives up on the bootstrap. A single blip must not
+/// permanently abandon a healthy bootstrap that checks in up to ~60 times
+/// over its ~10-minute budget (30 FE-ready polls + 30 root-login polls, each
+/// a checkpoint) — but a store that is genuinely unreachable must not spin
+/// the task forever either. 5 is chosen so a handful of back-to-back
+/// failures (more than one bad connection acquisition in a row, fewer than a
+/// whole poll cycle) is what it takes to conclude the store, not the
+/// network, is the problem.
+const MAX_CONSECUTIVE_ENGINE_READ_ERRORS: u32 = 5;
+
+/// Re-read the engine and apply [`bootstrap_target_is_current`]. A DEFINITE
+/// answer — the row is gone, renamed, deleting or failed — stops the
+/// bootstrap immediately. A `get_engine` READ ERROR does NOT: it is
+/// tolerated (logged at `warn`, this checkpoint treated as "still current")
+/// like the existing tolerant cluster-poll arms elsewhere in
+/// `spawn_starrocks_catalog_wire`, unless it has now failed
+/// [`MAX_CONSECUTIVE_ENGINE_READ_ERRORS`] times in a row, at which point it
+/// also stops — an endless loop against a truly dead store must still end.
+/// `consecutive_read_errors` is owned by the caller: one counter per spawned
+/// bootstrap, threaded through every checkpoint, so only BACK-TO-BACK
+/// failures count — any successful read (whatever verdict it carries)
+/// resets it to 0.
 async fn engine_still_current(
     store: &crate::EngineMgmtStore,
     engine_id: Uuid,
     engine_name: &str,
+    consecutive_read_errors: &mut u32,
 ) -> bool {
     let current = match store.get_engine(engine_id).await {
-        Ok(found) => bootstrap_target_is_current(found.as_ref(), engine_name),
+        Ok(found) => {
+            *consecutive_read_errors = 0;
+            bootstrap_target_is_current(found.as_ref(), engine_name)
+        }
         Err(e) => {
-            tracing::warn!(engine = %engine_name, error = %e,
-                "starrocks bootstrap: could not re-read the engine; stopping");
-            false
+            *consecutive_read_errors += 1;
+            if *consecutive_read_errors >= MAX_CONSECUTIVE_ENGINE_READ_ERRORS {
+                tracing::warn!(engine = %engine_name, error = %e,
+                    consecutive_errors = *consecutive_read_errors,
+                    "starrocks bootstrap: could not re-read the engine after \
+                     several consecutive attempts; stopping");
+                false
+            } else {
+                tracing::warn!(engine = %engine_name, error = %e,
+                    consecutive_errors = *consecutive_read_errors,
+                    "starrocks bootstrap: could not re-read the engine; \
+                     tolerating and retrying at the next checkpoint");
+                true
+            }
         }
     };
     if !current {
         tracing::info!(engine = %engine_name, %engine_id,
-            "starrocks bootstrap: engine deleted, re-created or deleting; stopping");
+            "starrocks bootstrap: engine deleted, re-created, failed, deleting, \
+             or unreachable too many times in a row; stopping");
     }
     current
 }
@@ -4015,13 +4061,24 @@ fn spawn_starrocks_catalog_wire(
     client_secret: String,
     root_password: Option<String>,
     delegation: Option<StarRocksDelegationBootstrap>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         const MAX_POLLS: u32 = 30;
         const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+        // One counter for the whole bootstrap, threaded through every
+        // `engine_still_current` checkpoint: see
+        // `MAX_CONSECUTIVE_ENGINE_READ_ERRORS`.
+        let mut consecutive_read_errors: u32 = 0;
         let mut fe_ready = false;
         for _ in 0..MAX_POLLS {
-            if !engine_still_current(&store, engine_id, &engine_name).await {
+            if !engine_still_current(
+                &store,
+                engine_id,
+                &engine_name,
+                &mut consecutive_read_errors,
+            )
+            .await
+            {
                 return;
             }
             match prov.status("starrocks", &namespace, &engine_name).await {
@@ -4056,7 +4113,14 @@ fn spawn_starrocks_catalog_wire(
         // DDL below runs only once initpwd has won. Bounded like the pod poll.
         let mut auth_ready = false;
         for _ in 0..MAX_POLLS {
-            if !engine_still_current(&store, engine_id, &engine_name).await {
+            if !engine_still_current(
+                &store,
+                engine_id,
+                &engine_name,
+                &mut consecutive_read_errors,
+            )
+            .await
+            {
                 return;
             }
             match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, "SELECT 1", root_pw, None)
@@ -4080,7 +4144,14 @@ fn spawn_starrocks_catalog_wire(
             return;
         }
 
-        if !engine_still_current(&store, engine_id, &engine_name).await {
+        if !engine_still_current(
+            &store,
+            engine_id,
+            &engine_name,
+            &mut consecutive_read_errors,
+        )
+        .await
+        {
             return;
         }
         // The OAuth2 credential is the SAME `client_id:client_secret` the Trino
@@ -4120,7 +4191,14 @@ fn spawn_starrocks_catalog_wire(
             // StarRocks has no `CREATE … IF NOT EXISTS` for this object (measured:
             // it is a syntax error, as is `DROP … IF EXISTS`), so converging from
             // either starting state takes two statements, not one.
-            if !engine_still_current(&store, engine_id, &engine_name).await {
+            if !engine_still_current(
+                &store,
+                engine_id,
+                &engine_name,
+                &mut consecutive_read_errors,
+            )
+            .await
+            {
                 return;
             }
             let create_integration = stmts.remove(0);
@@ -4135,6 +4213,16 @@ fn spawn_starrocks_catalog_wire(
             {
                 Ok(()) => {}
                 Err(e) if sr_already_exists(&e) => {
+                    if !engine_still_current(
+                        &store,
+                        engine_id,
+                        &engine_name,
+                        &mut consecutive_read_errors,
+                    )
+                    .await
+                    {
+                        return;
+                    }
                     let repair =
                         starrocks_jwt_integration_repair_sql(&d.jwks_url, &d.issuer, &d.audience);
                     match run_starrocks_ddl(
@@ -4165,7 +4253,14 @@ fn spawn_starrocks_catalog_wire(
             }
 
             for stmt in &stmts {
-                if !engine_still_current(&store, engine_id, &engine_name).await {
+                if !engine_still_current(
+                    &store,
+                    engine_id,
+                    &engine_name,
+                    &mut consecutive_read_errors,
+                )
+                .await
+                {
                     return;
                 }
                 if let Err(e) = run_starrocks_ddl(
@@ -4187,7 +4282,7 @@ fn spawn_starrocks_catalog_wire(
                     "starrocks delegation bootstrap: JWT integration + impersonation user wired");
             }
         }
-    });
+    })
 }
 
 #[utoipa::path(
@@ -8274,7 +8369,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_stops_when_the_engine_is_gone_renamed_or_deleting() {
+    fn bootstrap_stops_when_the_engine_is_gone_renamed_deleting_or_failed() {
         let mut e = dummy_engine();
         e.name = "sr1".into();
         e.status = crate::engine_status::RUNNING.into();
@@ -8292,6 +8387,11 @@ mod tests {
             !bootstrap_target_is_current(Some(&e), "sr1"),
             "delete in progress"
         );
+        e.status = crate::engine_status::FAILED.into();
+        assert!(
+            !bootstrap_target_is_current(Some(&e), "sr1"),
+            "Task 12's compensation may not have removed it; cluster objects may already be gone"
+        );
     }
 
     #[tokio::test]
@@ -8306,9 +8406,198 @@ mod tests {
             .expect("connect");
         let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = seed_sr_engine(&st, wh.id).await;
-        assert!(engine_still_current(&st.engine_mgmt, engine.id, &engine.name).await);
+        let mut errors = 0u32;
+        assert!(engine_still_current(&st.engine_mgmt, engine.id, &engine.name, &mut errors).await);
+        assert_eq!(
+            errors, 0,
+            "a successful read must not touch the error counter"
+        );
         st.engine_mgmt.delete_engine(engine.id).await.unwrap();
-        assert!(!engine_still_current(&st.engine_mgmt, engine.id, &engine.name).await);
+        assert!(!engine_still_current(&st.engine_mgmt, engine.id, &engine.name, &mut errors).await);
+    }
+
+    /// A transient DB read failure must not permanently abandon a healthy
+    /// bootstrap (F3): fewer than [`MAX_CONSECUTIVE_ENGINE_READ_ERRORS`]
+    /// consecutive `get_engine` errors are tolerated (treated as "still
+    /// current"), the threshold-th consecutive one stops it, and a
+    /// subsequent successful read resets the counter — proven against a real
+    /// `EngineMgmtStore` whose pool has been closed, so every read
+    /// deterministically errors.
+    #[tokio::test]
+    async fn engine_still_current_tolerates_a_few_consecutive_read_errors_then_stops() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping engine_still_current_tolerates_a_few_consecutive_read_errors_then_stops: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+
+        // A store whose pool is already closed: every `get_engine` call
+        // errors deterministically, standing in for a transient DB blip
+        // without any real network flakiness in the test.
+        let broken_db = egret_metastore::Db::connect(&dsn, 1)
+            .await
+            .expect("connect (before closing)");
+        broken_db.pool.close().await;
+        let broken_store = crate::EngineMgmtStore::new(broken_db);
+
+        let mut consecutive = 0u32;
+        for i in 0..MAX_CONSECUTIVE_ENGINE_READ_ERRORS - 1 {
+            assert!(
+                engine_still_current(&broken_store, engine.id, &engine.name, &mut consecutive)
+                    .await,
+                "read error #{i} (below the threshold) must be tolerated"
+            );
+        }
+        assert_eq!(consecutive, MAX_CONSECUTIVE_ENGINE_READ_ERRORS - 1);
+
+        // The threshold-th CONSECUTIVE failure gives up.
+        assert!(
+            !engine_still_current(&broken_store, engine.id, &engine.name, &mut consecutive).await,
+            "the {MAX_CONSECUTIVE_ENGINE_READ_ERRORS}th consecutive read error must stop the bootstrap"
+        );
+
+        // A later successful read against the real store resets the
+        // counter — failures only count when back-to-back.
+        let mut consecutive2 = MAX_CONSECUTIVE_ENGINE_READ_ERRORS - 1;
+        assert!(
+            engine_still_current(&st.engine_mgmt, engine.id, &engine.name, &mut consecutive2).await,
+            "the still-current engine must read back true"
+        );
+        assert_eq!(
+            consecutive2, 0,
+            "a successful read must reset the consecutive-error counter"
+        );
+    }
+
+    /// Counts `.status()` calls — proves a checkpoint trips BEFORE the
+    /// provisioner is ever touched, rather than merely reasoning about it.
+    #[derive(Default)]
+    struct CountingStatusProvisioner {
+        status_calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl egret_engine_mgmt_api::EngineProvisioningPort for CountingStatusProvisioner {
+        async fn provision(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn status(
+            &self,
+            _kind: &str,
+            _namespace: &str,
+            _name: &str,
+        ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+            self.status_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(egret_engine_mgmt_api::EngineStatus::default())
+        }
+        async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn restart(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// F4 (Task 14 round-1 review): prove — by actually running
+    /// `spawn_starrocks_catalog_wire`, not just its helpers — that the FIRST
+    /// checkpoint stops the bootstrap before it ever calls the provisioner.
+    /// Deleting that checkpoint would make `.status()` get called at least
+    /// once; that regression would NOT be caught by the two helper-level
+    /// unit tests above it, only by driving the real spawned task.
+    ///
+    /// The remaining five checkpoints are not exercised behaviorally here:
+    /// they only run after a real FE reports ready over
+    /// `EngineProvisioningPort::status`, at which point the function starts
+    /// making real MySQL-protocol connections via `run_starrocks_ddl` to a
+    /// `<name>-fe-service.<namespace>.svc` host that doesn't exist in a unit
+    /// test sandbox — DNS resolution failing (or hanging, environment
+    /// dependent) would be what stops the test, not the guard being proven.
+    /// Making that deterministic and fast would mean threading an injectable
+    /// DDL-runner through five call sites that each have different
+    /// retry/error-handling (the plain catalog DDL, the
+    /// create-then-repair-on-`already exists` JWT integration branch, and
+    /// the loop over the remaining delegation statements) — a materially
+    /// larger refactor of an already-large function that wasn't attempted
+    /// here. `spawn_starrocks_catalog_wire_keeps_all_six_guard_checkpoints`
+    /// below is the fallback the brief allows instead: a structural
+    /// regression guard so dropping any of the six calls fails the build.
+    #[tokio::test]
+    async fn bootstrap_stops_before_any_provisioner_call_when_engine_already_gone() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping bootstrap_stops_before_any_provisioner_call_when_engine_already_gone: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        st.engine_mgmt.delete_engine(engine.id).await.unwrap();
+
+        let counting = std::sync::Arc::new(CountingStatusProvisioner::default());
+        let prov: Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort> = counting.clone();
+
+        let handle = spawn_starrocks_catalog_wire(
+            prov,
+            st.engine_mgmt.clone(),
+            engine.id,
+            "egret-engines".into(),
+            engine.name.clone(),
+            "https://egret.example".into(),
+            wh.name.clone(),
+            "client".into(),
+            "secret".into(),
+            None,
+            None,
+        );
+        handle.await.expect("bootstrap task did not panic");
+
+        assert_eq!(
+            counting
+                .status_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the engine was already deleted before spawn; the first checkpoint must stop the \
+             task before it ever calls the provisioner"
+        );
+    }
+
+    /// Regression guard for the five checkpoints
+    /// `bootstrap_stops_before_any_provisioner_call_when_engine_already_gone`
+    /// above doesn't drive (it exercises only the first) — see that test's
+    /// doc comment for why a full behavioral seam wasn't added. Fails the
+    /// build if a checkpoint call is ever added to, or removed from,
+    /// `spawn_starrocks_catalog_wire`'s body.
+    #[test]
+    fn spawn_starrocks_catalog_wire_keeps_all_six_guard_checkpoints() {
+        let src = include_str!("engines.rs");
+        let start = src
+            .find("fn spawn_starrocks_catalog_wire(")
+            .expect("function present");
+        let end = src[start..]
+            .find("\nasync fn get_engine(")
+            .map(|i| start + i)
+            .expect("next handler present, bounding the search");
+        let body = &src[start..end];
+        let count = body.matches("engine_still_current(").count();
+        assert_eq!(
+            count, 6,
+            "expected 6 `engine_still_current(...)` checkpoints inside \
+             spawn_starrocks_catalog_wire; found {count} instead — a guard was added or removed"
+        );
     }
 
     #[test]
