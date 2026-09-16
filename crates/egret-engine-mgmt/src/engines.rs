@@ -4064,8 +4064,18 @@ fn preserve_trino_delegation_mode(spec: &mut serde_json::Value, stored: &serde_j
     }
 }
 
-/// Put back the spec/status an update persisted before its build or apply
-/// failed. Logged, not returned: the caller is already returning that failure.
+/// Put back the spec an update persisted before its build or apply failed.
+/// `update_engine` never writes `status` (see its doc comment), so there is no
+/// status to restore — only the spec. Logged, not returned: the caller is
+/// already returning that failure.
+///
+/// The restore is gated the same way the original write was:
+/// `expect_status` is the status observed right before that write (and so
+/// still the row's status if nothing else has touched it since). If the row
+/// has since moved to a different status — typically a concurrent delete —
+/// the restore matches zero rows and is a no-op; that is logged as an error
+/// (not a warning), since the caller's 502 and its OpenAPI description both
+/// promise the previous spec was restored, and here it was not.
 ///
 /// This restores the STORED SPEC only. A pair of internal secrets `apply_built`
 /// may have committed on the failed apply attempt (Task 7's
@@ -4075,12 +4085,44 @@ fn preserve_trino_delegation_mode(spec: &mut serde_json::Value, stored: &serde_j
 /// whole failed on a later object, and deleting the committed pair in that case
 /// would strand the running pods on a value no longer on record. See
 /// `apply_built`'s doc comment for the full argument.
-async fn restore_engine_spec(st: &CpState, id: Uuid, spec: &serde_json::Value, status: &str) {
-    if let Err(e) = st.engine_mgmt.update_engine(id, spec, status).await {
-        tracing::error!(engine_id = %id, error = %e,
-            "could not restore the engine spec after a failed update; \
-             the stored spec is ahead of the cluster");
+async fn restore_engine_spec(
+    st: &CpState,
+    id: Uuid,
+    spec: &serde_json::Value,
+    expect_status: &str,
+) {
+    match st.engine_mgmt.update_engine(id, spec, expect_status).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::error!(
+                engine_id = %id,
+                expect_status,
+                "could not restore the engine spec after a failed update: the row's status \
+                 changed before the restore could run (likely a concurrent delete); \
+                 the stored spec is ahead of the cluster"
+            );
+        }
+        Err(e) => {
+            tracing::error!(engine_id = %id, expect_status, error = %e,
+                "could not restore the engine spec after a failed update; \
+                 the stored spec is ahead of the cluster");
+        }
     }
+}
+
+/// Re-materialize every workspace assigned to `engine_id`, shared by both
+/// update paths so they can't drift on the mapping. The CR was already
+/// applied by the time this runs, so a failure here must surface loudly
+/// (400) rather than silently leave stale connection options behind.
+async fn rematerialize_or_400(st: &CpState, engine_id: Uuid) -> Result<(), CpError> {
+    st.assignment
+        .rematerialize_for_engine(engine_id)
+        .await
+        .map_err(|e| {
+            CpError::BadRequest(format!(
+                "engine updated but re-materializing workspace connections failed: {e}"
+            ))
+        })
 }
 
 #[utoipa::path(
@@ -4095,6 +4137,7 @@ async fn restore_engine_spec(st: &CpState, id: Uuid, spec: &serde_json::Value, s
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
         (status = 502, description = "Kubernetes rejected the update; the previous spec was restored", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -4171,27 +4214,38 @@ async fn update_engine(
     // Snapshot what is stored so a failed build or apply can put it back — the
     // same contract `update_catalog` keeps for a catalog row.
     let snapshot_spec = engine.spec.clone();
-    let snapshot_status = engine.status.clone();
-    st.engine_mgmt
-        .update_engine(id, &spec, &engine.status)
-        .await?;
+    let expected_status = engine.status.clone();
+    // Compare-and-set on the status just read. A miss means the row changed
+    // since (typically a concurrent delete) — stop here, BEFORE the
+    // provisioner is touched at all, so a lost race can never re-create the
+    // CR of an engine whose row is already gone (the orphaned-cluster class
+    // this programme closes).
+    if !st
+        .engine_mgmt
+        .update_engine(id, &spec, &expected_status)
+        .await?
+    {
+        return Err(CpError::Conflict(
+            "engine changed while the update was being applied; retry".into(),
+        ));
+    }
     let engine = match st.engine_mgmt.get_engine(id).await {
         Ok(Some(e)) => e,
         Ok(None) => return Err(CpError::NotFound),
         Err(e) => {
-            restore_engine_spec(&st, id, &snapshot_spec, &snapshot_status).await;
+            restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
             return Err(e.into());
         }
     };
     let built = match build_provision_req(&st, &engine).await {
         Ok(built) => built,
         Err(e) => {
-            restore_engine_spec(&st, id, &snapshot_spec, &snapshot_status).await;
+            restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
             return Err(e);
         }
     };
     if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
-        restore_engine_spec(&st, id, &snapshot_spec, &snapshot_status).await;
+        restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
         return Err(CpError::ClusterApplyFailed(msg));
     }
 
@@ -4200,14 +4254,7 @@ async fn update_engine(
     // and unconditionally for the same reason: a retried PUT must heal a
     // previous partial re-materialization, which a diff against the
     // already-persisted spec cannot see. Idempotent and cheap when unchanged.
-    st.assignment
-        .rematerialize_for_engine(id)
-        .await
-        .map_err(|e| {
-            CpError::BadRequest(format!(
-                "engine updated but re-materializing workspace connections failed: {e}"
-            ))
-        })?;
+    rematerialize_or_400(&st, id).await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -4295,28 +4342,37 @@ async fn update_starrocks_engine(
 
     // Snapshot for restore on a failed build or apply (see `update_engine`).
     let snapshot_spec = engine.spec.clone();
-    let snapshot_status = engine.status.clone();
-    st.engine_mgmt
-        .update_engine(engine.id, &spec, &engine.status)
-        .await?;
+    let expected_status = engine.status.clone();
     let engine_id = engine.id;
+    // Compare-and-set on the status just read. A miss means the row changed
+    // since (typically a concurrent delete) — stop here, BEFORE the
+    // provisioner is touched at all (see `update_engine`'s matching guard).
+    if !st
+        .engine_mgmt
+        .update_engine(engine_id, &spec, &expected_status)
+        .await?
+    {
+        return Err(CpError::Conflict(
+            "engine changed while the update was being applied; retry".into(),
+        ));
+    }
     let engine = match st.engine_mgmt.get_engine(engine_id).await {
         Ok(Some(e)) => e,
         Ok(None) => return Err(CpError::NotFound),
         Err(e) => {
-            restore_engine_spec(&st, engine_id, &snapshot_spec, &snapshot_status).await;
+            restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
             return Err(e.into());
         }
     };
     let (req, bootstrap) = match build_starrocks_provision_req(&st, &engine, &wh).await {
         Ok(v) => v,
         Err(e) => {
-            restore_engine_spec(&st, engine_id, &snapshot_spec, &snapshot_status).await;
+            restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
             return Err(e);
         }
     };
     if let Err(msg) = prov.update(&req).await {
-        restore_engine_spec(&st, engine_id, &snapshot_spec, &snapshot_status).await;
+        restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
         return Err(CpError::ClusterApplyFailed(msg));
     }
 
@@ -4374,17 +4430,8 @@ async fn update_starrocks_engine(
             }
         }
     }
-    // (b) Re-materialize the per-workspace connections unconditionally. The CR
-    // was already updated, so a failure here must surface loudly (400) rather
-    // than silently leave stale connection options behind.
-    st.assignment
-        .rematerialize_for_engine(engine.id)
-        .await
-        .map_err(|e| {
-            CpError::BadRequest(format!(
-                "engine updated but re-materializing workspace connections failed: {e}"
-            ))
-        })?;
+    // (b) Re-materialize the per-workspace connections unconditionally.
+    rematerialize_or_400(&st, engine.id).await?;
     Ok(Json(engine.into()))
 }
 
@@ -6808,6 +6855,38 @@ mod tests {
         }
     }
 
+    /// Counts `update` calls, so a test can assert the provisioner was never
+    /// touched (e.g. a CAS miss must bail before it).
+    #[derive(Default)]
+    struct CountingProvisioner {
+        updates: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl egret_engine_mgmt_api::EngineProvisioningPort for CountingProvisioner {
+        async fn provision(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn status(
+            &self,
+            _kind: &str,
+            _namespace: &str,
+            _name: &str,
+        ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+            Ok(egret_engine_mgmt_api::EngineStatus::default())
+        }
+        async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            self.updates
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn restart(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
     /// `ensure_root_password_secret` is idempotent: two calls (the second on a
     /// row that now carries the persisted `root_secret_id`) return the SAME
     /// secret id and the SAME plaintext, and the first call persists the id.
@@ -7804,10 +7883,12 @@ mod tests {
         // A stale PUT, still holding the pre-delete `provisioning` it read
         // earlier, tries to persist a new spec.
         let new_spec = serde_json::json!({ "starrocksConfig": { "feReplicas": 9 } });
-        st.engine_mgmt
+        let matched = st
+            .engine_mgmt
             .update_engine(engine.id, &new_spec, &engine.status)
             .await
             .unwrap();
+        assert!(!matched, "the stale-status write must match zero rows");
 
         let reloaded = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
         assert_eq!(
@@ -7818,6 +7899,60 @@ mod tests {
         assert_eq!(
             reloaded.spec, engine.spec,
             "spec must not be overwritten either"
+        );
+    }
+
+    /// Handler-level version of the above, through `update_starrocks_engine`
+    /// itself: a PUT whose `Engine` snapshot was read before a concurrent
+    /// status change (simulated with a direct `set_engine_status` between the
+    /// seed and the call, standing in for a delete that raced the handler's own
+    /// read) must 409 BEFORE touching the provisioner at all — never build a
+    /// request or call `update`, which on a real cluster would re-create the CR
+    /// of an engine whose row is already gone.
+    #[tokio::test]
+    async fn update_starrocks_engine_conflict_stops_before_the_provisioner() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping update_starrocks_engine_conflict_stops_before_the_provisioner: DATABASE_URL not set"
+            );
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        st.engine_provisioner = Some(counting.clone());
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+
+        // Simulate a concurrent change (e.g. a delete) that landed after this
+        // handler call's `Engine` was already read.
+        st.engine_mgmt
+            .set_engine_status(engine.id, crate::engine_status::DELETING)
+            .await
+            .unwrap();
+
+        let body = sr_update_body(Some(StarRocksConfigBody {
+            fe_replicas: Some(9),
+            ..Default::default()
+        }));
+        let err = update_starrocks_engine(st.clone(), engine.clone(), body)
+            .await
+            .err()
+            .expect("a lost race must surface as an error, not a silent 200");
+        assert!(matches!(err, CpError::Conflict(_)), "got {err:?}");
+        assert!(
+            err.to_string().contains("retry"),
+            "message should tell the caller to retry; got {err}"
+        );
+
+        let reloaded = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.spec, engine.spec, "stored spec untouched");
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the provisioner must never be called on a lost race"
         );
     }
 

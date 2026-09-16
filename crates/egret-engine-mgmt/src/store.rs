@@ -241,9 +241,13 @@ impl EngineMgmtStore {
     }
 
     /// Persist a new spec, gated on the row still being at the caller's last
-    /// observed `status` — a compare-and-set that does NOT itself write
-    /// `status`. Only [`Self::set_engine_status`] and
-    /// [`Self::transition_engine_status`] own that column.
+    /// observed `status` — a compare-and-set (mirrors
+    /// [`Self::transition_engine_status`]'s `Ok(bool)`) that does NOT itself
+    /// write `status`. Only [`Self::set_engine_status`] and
+    /// [`Self::transition_engine_status`] own that column. Returns whether the
+    /// row was still at `status` (and so was updated); the caller MUST check
+    /// this — a `false` means something else changed the row (typically a
+    /// concurrent delete) since it was read, and the new spec was NOT written.
     ///
     /// Every caller reads an [`Engine`], derives a new spec from it, then calls
     /// this passing the status it just read. Without the `AND status = $3`
@@ -257,14 +261,15 @@ impl EngineMgmtStore {
         id: Uuid,
         spec: &serde_json::Value,
         status: &str,
-    ) -> Result<(), EngineMgmtError> {
-        sqlx::query("UPDATE engine_mgmt.engines SET spec = $2 WHERE id = $1 AND status = $3")
-            .bind(id)
-            .bind(spec)
-            .bind(status)
-            .execute(self.pool())
-            .await?;
-        Ok(())
+    ) -> Result<bool, EngineMgmtError> {
+        let res =
+            sqlx::query("UPDATE engine_mgmt.engines SET spec = $2 WHERE id = $1 AND status = $3")
+                .bind(id)
+                .bind(spec)
+                .bind(status)
+                .execute(self.pool())
+                .await?;
+        Ok(res.rows_affected() == 1)
     }
 
     pub async fn set_engine_status(&self, id: Uuid, status: &str) -> Result<(), EngineMgmtError> {

@@ -2944,6 +2944,16 @@
               }
             }
           },
+          "409": {
+            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
