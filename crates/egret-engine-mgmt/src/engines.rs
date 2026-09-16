@@ -832,9 +832,14 @@ enum ApplyOp {
 /// still carry. The row still names the new pair either way (see above) — a
 /// failed apply therefore leaves EVERY pair still on record resolvable
 /// (including ones left behind by an earlier failed apply on this same
-/// engine), and only the next successful apply (which reuses the
-/// now-committed pair, see `resolve_internal_secrets`) sweeps up every
-/// superseded generation at once.
+/// engine), and only the next successful apply deletes anything — and even
+/// then ONLY the pair its own compare-and-set displaced
+/// (`commit_internal_secrets`'s doc comment explains why a wider,
+/// prefix-based sweep is unsafe: a concurrent apply's already-minted, not-yet-
+/// committed pair could be caught in it). A run of failed rotations can
+/// therefore leave orphaned generations behind indefinitely; only engine
+/// delete (Task 15) is a safe place to sweep them, since by then no apply can
+/// still be in flight for this engine.
 async fn apply_built(
     st: &CpState,
     prov: &dyn egret_engine_mgmt_api::EngineProvisioningPort,
@@ -1955,28 +1960,44 @@ enum Supersede {
 
 /// Record a fresh pair on the row — called on BOTH the success and the
 /// failure path of an apply that rendered one (see [`apply_built`]) — and,
-/// when `superseded` is [`Supersede::Delete`], sweep away every OTHER
-/// internal/monitor secret generation on record for this engine. `engine` is
-/// the row as loaded BEFORE the build (its ids are the ones the caller's
-/// build read, and thus the ones this write is conditioned on via
-/// [`EngineMgmtStore::set_internal_secret_ids`]'s compare-and-set). No-op for
+/// when `superseded` is [`Supersede::Delete`], delete the pair it superseded:
+/// `engine.internal_secret_id`/`engine.monitor_secret_id`, i.e. the exact ids
+/// the compare-and-set used as `expected`. `engine` is the row as loaded
+/// BEFORE the build (its ids are the ones the caller's build read). No-op for
 /// a reused pair.
 ///
 /// `Supersede::Keep` (a failed apply) still commits the new pair onto the row
 /// — that part is unconditional, see `apply_built` — but deletes nothing: the
-/// cluster may be trusting ANY generation still on record (this one, the
-/// immediate predecessor, or — after a run of failed rotations — one further
-/// back), so nothing is destroyed until a LATER successful apply confirms
-/// convergence.
+/// cluster may be trusting the pair this call is about to supersede, so
+/// nothing is destroyed until a LATER successful apply confirms convergence.
 ///
-/// `Supersede::Delete` sweeps ALL of this engine's OTHER internal/monitor
-/// secret rows, not just the immediate predecessor: a successful apply proves
-/// the cluster is now actually running `s` (the provisioner call that just
-/// returned `Ok` wrote it and rolled the pods — see [`apply_built`]), so every
-/// other generation — including any left behind by earlier `Keep`s — is
-/// provably stale at this point and safe to delete. Without this sweep,
-/// repeated fail-then-succeed rotations would leak one orphaned pair per
-/// failure forever.
+/// `Supersede::Delete` (a successful apply) deletes ONLY
+/// `engine.internal_secret_id`/`engine.monitor_secret_id` — the pair this
+/// exact commit displaces — never anything wider. Round 1 of this fix swept
+/// EVERY other secret row matching this engine's name prefix on a successful
+/// commit, reasoning that a success proves convergence on the new pair; that
+/// was wrong; a re-review reproduced the failure: `A` and `B` both build
+/// concurrently, `A` commits successfully and swept `B`'s already-minted (but
+/// not yet committed) pair — deleting a secret the cluster's next reconcile
+/// with `B`'s in-flight request could still be about to receive, in direct
+/// violation of the standing "never delete a secret the cluster may still
+/// hold" rule (see `apply_built`'s doc comment). Only the CAS's own
+/// `expected` pair is provably superseded by THIS commit; any other row
+/// (e.g. one a run of `Keep`s left behind, or one a losing concurrent commit
+/// left orphaned below) may belong to an apply still in flight and must be
+/// left alone here.
+///
+/// **Consequence — those orphans are a known, intentional gap, not a bug**:
+/// a pair left behind by a `Keep` (or by a lost CAS below) is referenced by
+/// nothing once a LATER apply supersedes the row again, and nothing in this
+/// module ever sweeps it — no concurrent apply on the same engine can be
+/// ruled out at any point `commit_internal_secrets` runs, so no prefix-wide
+/// delete is ever safe here. The one place that IS safe is engine delete
+/// (Task 15): by then the row and every apply path to it are gone, so
+/// nothing can still be "in flight" for this engine. Task 15 must (a) delete
+/// the row's current `internal_secret_id`/`monitor_secret_id`, and (b)
+/// prefix-sweep any remaining `engine-internal-{id}-*` / `engine-monitor-
+/// {id}-*` rows this function's `Keep` path left behind.
 ///
 /// When the compare-and-set loses (a concurrent apply on the same engine
 /// already committed a different pair since `engine` was read), this writes
@@ -1984,8 +2005,8 @@ enum Supersede {
 /// have just been applied to the cluster by THIS call's own
 /// `provision`/`update`, so deleting it would risk the same "delete a secret
 /// the cluster may hold" failure `apply_built` avoids. It is left as an
-/// orphaned secret-store row; the next successful commit on this engine
-/// sweeps it up.
+/// orphaned secret-store row — see the "Consequence" note above; only Task
+/// 15's engine-delete sweep reclaims it.
 async fn commit_internal_secrets(
     st: &CpState,
     engine: &Engine,
@@ -2014,50 +2035,18 @@ async fn commit_internal_secrets(
     if superseded == Supersede::Keep {
         return Ok(());
     }
-    sweep_stale_internal_secret_generations(st, engine.id, s.internal_id, s.monitor_id).await;
-    Ok(())
-}
-
-/// Delete every internal/monitor secret row recorded for `engine_id` OTHER
-/// than `keep_internal_id`/`keep_monitor_id` — the generations a run of failed
-/// (`Supersede::Keep`) rotations left behind. Only called once THIS
-/// generation's apply has actually succeeded (see [`commit_internal_secrets`]),
-/// so every other generation is provably no longer what the cluster runs.
-/// Scans all global named secrets (mirrors the vault's own naming convention:
-/// `resolve_internal_secrets` names every row `engine-{internal,monitor}-
-/// {engine_id}-{generation}`) rather than adding a dedicated prefix-query to
-/// `egret-secrets` — engine applies are an infrequent, admin-triggered path,
-/// not a hot one. A failure to list or delete is logged, not propagated: the
-/// row already names the right pair either way, and the next successful apply
-/// retries the sweep.
-async fn sweep_stale_internal_secret_generations(
-    st: &CpState,
-    engine_id: Uuid,
-    keep_internal_id: Uuid,
-    keep_monitor_id: Uuid,
-) {
-    let prefix_internal = format!("engine-internal-{engine_id}-");
-    let prefix_monitor = format!("engine-monitor-{engine_id}-");
-    let all = match st.secrets.list(None).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(engine_id = %engine_id, error = %e,
-                "could not list secrets to sweep stale internal-secret generations");
-            return;
-        }
-    };
-    for meta in all {
-        if meta.id == keep_internal_id || meta.id == keep_monitor_id {
-            continue;
-        }
-        if !meta.name.starts_with(&prefix_internal) && !meta.name.starts_with(&prefix_monitor) {
-            continue;
-        }
-        if let Err(e) = st.secrets.delete(None, meta.id).await {
-            tracing::warn!(engine_id = %engine_id, secret_id = %meta.id, error = %e,
-                "could not delete a stale internal secret generation");
+    for old in [engine.internal_secret_id, engine.monitor_secret_id]
+        .into_iter()
+        .flatten()
+    {
+        if old != s.internal_id && old != s.monitor_id {
+            if let Err(e) = st.secrets.delete(None, old).await {
+                tracing::warn!(engine = %engine.name, secret_id = %old, error = %e,
+                    "could not delete a superseded internal secret");
+            }
         }
     }
+    Ok(())
 }
 
 /// Delete a freshly-minted pair that was never handed to the provisioner at
@@ -4504,10 +4493,14 @@ async fn restart_engine(
 /// `POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication
 /// secret and `egret-monitor` password and re-apply the engine (pods roll). The
 /// new pair is recorded on the row even if the apply fails — the cluster may
-/// already have received it — so every pair still on record (this one, and
-/// any left behind by an earlier failed rotation) is kept resolvable, never
-/// deleted, until a later successful apply confirms it is safe to sweep them
-/// all away at once.
+/// already have received it — so a failed rotation's pair is kept resolvable,
+/// never deleted, alongside whatever it superseded. A later successful
+/// rotation deletes only the ONE pair its own apply superseded; anything
+/// further back (left by an earlier failed rotation, or by a losing
+/// concurrent apply) stays orphaned but resolvable until the engine itself is
+/// deleted — a wider sweep here could destroy a pair a DIFFERENT, still
+/// in-flight apply on this engine just minted, which is the one thing this
+/// route must never do.
 #[utoipa::path(
     post,
     path = "/api/control-plane/engines/{id}/rotate-secrets",
@@ -7869,6 +7862,30 @@ mod tests {
         assert_eq!(after_a.internal_secret_id, Some(a.internal_id));
         assert_eq!(after_a.monitor_secret_id, Some(a.monitor_id));
 
+        // F2 round 2 regression guard: A's `Supersede::Delete` commit deletes
+        // ONLY the pair its own compare-and-set displaced (here: nothing —
+        // `engine`'s pre-build ids were both `None`) and must NEVER reach for
+        // B's already-minted, not-yet-committed pair just because it happens
+        // to share this engine's secret-name prefix. Round 1 of this fix used
+        // a prefix-wide sweep on a successful commit and a re-review
+        // reproduced exactly this: A's sweep deleted B's pair before B ever
+        // got to commit it, even though B's apply might be the one that lands
+        // on the cluster last. Assert B's pair is untouched.
+        assert!(
+            st.secrets
+                .resolve_plaintext(None, b.internal_id)
+                .await
+                .is_ok(),
+            "A's commit must not delete B's still-in-flight pair"
+        );
+        assert!(
+            st.secrets
+                .resolve_plaintext(None, b.monitor_id)
+                .await
+                .is_ok(),
+            "A's commit must not delete B's still-in-flight pair"
+        );
+
         // The second apply's commit, still holding the STALE (both-`None`)
         // `engine` snapshot, must not overwrite it.
         commit_internal_secrets(&st, &engine, &b, Supersede::Delete)
@@ -7881,6 +7898,24 @@ mod tests {
             "the winner's pair must survive"
         );
         assert_eq!(after_b.monitor_secret_id, Some(a.monitor_id));
+
+        // Losing the race must not delete B's own pair either — it is left
+        // orphaned (unreferenced by the row) but resolvable, exactly like a
+        // `Supersede::Keep`'d pair; only engine delete (Task 15) reclaims it.
+        assert!(
+            st.secrets
+                .resolve_plaintext(None, b.internal_id)
+                .await
+                .is_ok(),
+            "a losing commit must not delete its own pair"
+        );
+        assert!(
+            st.secrets
+                .resolve_plaintext(None, b.monitor_id)
+                .await
+                .is_ok(),
+            "a losing commit must not delete its own pair"
+        );
 
         // The next apply on the now-current row reuses the committed winner.
         let reused = resolve_internal_secrets(&st, &after_b, false)

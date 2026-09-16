@@ -4048,11 +4048,13 @@ async fn get_engine_records_running_and_leaves_deleting_alone() {
 /// row's ids — but F2 (standing rule: never delete a value the cluster may
 /// still hold) means it must NOT delete the pair it superseded, because a
 /// failure can happen either before or after the cluster actually received
-/// it. The superseded pair therefore stays resolvable until a LATER
-/// successful apply confirms convergence and sweeps every stale generation —
-/// this one included — away at once (`internal_secret_names` count asserted
-/// at each step so an accumulation, or an unsafe early delete, fails the
-/// test). Non-Trino → 400, unknown → 404.
+/// it. A LATER successful apply deletes ONLY the one pair its own
+/// compare-and-set displaced (never a wider sweep — that could catch a
+/// DIFFERENT, concurrently in-flight apply's freshly-minted pair, see
+/// `commit_internal_secrets`'s doc comment), so a generation left behind by a
+/// failed rotation survives as a permanent orphan until engine delete (Task
+/// 15) — `internal_secret_names` count asserted at each step to pin exactly
+/// which pairs are deleted and which survive. Non-Trino → 400, unknown → 404.
 #[tokio::test]
 async fn rotate_secrets_replaces_both_values_only_on_a_successful_apply() {
     let port = FakeEnginePort::default();
@@ -4169,31 +4171,45 @@ async fn rotate_secrets_replaces_both_values_only_on_a_successful_apply() {
     // bcrypt salts every hash, so "the hash changed" proves nothing; verify.
     assert!(bcrypt::verify(&new_monitor, &hash).unwrap());
     assert!(!bcrypt::verify(&old_monitor, &hash).unwrap());
-    // The successful apply proves the cluster now runs the new pair, so BOTH
-    // superseded generations (the original pair AND the one left behind by
-    // the failed rotation) are swept away in this one commit — exactly the
-    // superseded rows, no more (a leftover would mean an accumulation bug)
-    // and no fewer (an early sweep would mean an unsafe delete).
-    assert!(matches!(
-        secrets.resolve_plaintext(None, old_internal_id).await,
-        Err(egret_secrets::SecretsError::NotFound)
-    ));
-    assert!(matches!(
-        secrets.resolve_plaintext(None, old_monitor_id).await,
-        Err(egret_secrets::SecretsError::NotFound)
-    ));
-    assert!(matches!(
-        secrets.resolve_plaintext(None, failed_internal_id).await,
-        Err(egret_secrets::SecretsError::NotFound)
-    ));
+    // F2 round 2 (re-review): the successful apply's own compare-and-set only
+    // displaces the ONE pair it read as `expected` — the failed rotation's
+    // pair, since that is what the row named when THIS build started. It must
+    // NOT reach further back and delete the original pair too: a wider,
+    // prefix-based sweep was tried in round 1 and reverted because it could
+    // just as easily catch a DIFFERENT, concurrently in-flight apply's
+    // freshly-minted (not-yet-committed) pair — see `commit_internal_secrets`'s
+    // doc comment. So the original pair survives as a permanent orphan here;
+    // only engine delete (Task 15) is a safe place to sweep it.
+    assert_eq!(
+        secrets
+            .resolve_plaintext(None, old_internal_id)
+            .await
+            .expect("the original pair is NOT this commit's `expected` — it must survive"),
+        old_internal
+    );
+    assert_eq!(
+        secrets
+            .resolve_plaintext(None, old_monitor_id)
+            .await
+            .expect("the original pair is NOT this commit's `expected` — it must survive"),
+        old_monitor
+    );
+    assert!(
+        matches!(
+            secrets.resolve_plaintext(None, failed_internal_id).await,
+            Err(egret_secrets::SecretsError::NotFound)
+        ),
+        "the failed rotation's pair WAS this commit's `expected` — it is deleted"
+    );
     assert!(matches!(
         secrets.resolve_plaintext(None, failed_monitor_id).await,
         Err(egret_secrets::SecretsError::NotFound)
     ));
     assert_eq!(
         internal_secret_names(&f, id).await.len(),
-        2,
-        "back to exactly one generation — no accumulation"
+        4,
+        "the original pair is an orphan (2 rows) alongside the current pair (2 rows) — \
+         narrowing the delete to only what this apply superseded means it is NOT swept here"
     );
 
     let sr = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())

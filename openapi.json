@@ -4294,7 +4294,7 @@
         "tags": [
           "control-plane-engines"
         ],
-        "summary": "`POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication\nsecret and `egret-monitor` password and re-apply the engine (pods roll). The\nnew pair is recorded on the row even if the apply fails — the cluster may\nalready have received it — so every pair still on record (this one, and\nany left behind by an earlier failed rotation) is kept resolvable, never\ndeleted, until a later successful apply confirms it is safe to sweep them\nall away at once.",
+        "summary": "`POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication\nsecret and `egret-monitor` password and re-apply the engine (pods roll). The\nnew pair is recorded on the row even if the apply fails — the cluster may\nalready have received it — so a failed rotation's pair is kept resolvable,\nnever deleted, alongside whatever it superseded. A later successful\nrotation deletes only the ONE pair its own apply superseded; anything\nfurther back (left by an earlier failed rotation, or by a losing\nconcurrent apply) stays orphaned but resolvable until the engine itself is\ndeleted — a wider sweep here could destroy a pair a DIFFERENT, still\nin-flight apply on this engine just minted, which is the one thing this\nroute must never do.",
         "operationId": "rotate_engine_secrets",
         "parameters": [
           {

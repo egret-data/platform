@@ -2866,10 +2866,14 @@ export const getControlPlaneEnginesRotateEngineSecretsUrl = (id: string,) => {
  * @summary `POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication
 secret and `egret-monitor` password and re-apply the engine (pods roll). The
 new pair is recorded on the row even if the apply fails — the cluster may
-already have received it — so every pair still on record (this one, and
-any left behind by an earlier failed rotation) is kept resolvable, never
-deleted, until a later successful apply confirms it is safe to sweep them
-all away at once.
+already have received it — so a failed rotation's pair is kept resolvable,
+never deleted, alongside whatever it superseded. A later successful
+rotation deletes only the ONE pair its own apply superseded; anything
+further back (left by an earlier failed rotation, or by a losing
+concurrent apply) stays orphaned but resolvable until the engine itself is
+deleted — a wider sweep here could destroy a pair a DIFFERENT, still
+in-flight apply on this engine just minted, which is the one thing this
+route must never do.
  */
 export const controlPlaneEnginesRotateEngineSecrets = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRotateEngineSecretsResponse> => {
 
@@ -2921,10 +2925,14 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
  * @summary `POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication
 secret and `egret-monitor` password and re-apply the engine (pods roll). The
 new pair is recorded on the row even if the apply fails — the cluster may
-already have received it — so every pair still on record (this one, and
-any left behind by an earlier failed rotation) is kept resolvable, never
-deleted, until a later successful apply confirms it is safe to sweep them
-all away at once.
+already have received it — so a failed rotation's pair is kept resolvable,
+never deleted, alongside whatever it superseded. A later successful
+rotation deletes only the ONE pair its own apply superseded; anything
+further back (left by an earlier failed rotation, or by a losing
+concurrent apply) stays orphaned but resolvable until the engine itself is
+deleted — a wider sweep here could destroy a pair a DIFFERENT, still
+in-flight apply on this engine just minted, which is the one thing this
+route must never do.
  */
 export const useControlPlaneEnginesRotateEngineSecrets = <TError = ErrorBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
