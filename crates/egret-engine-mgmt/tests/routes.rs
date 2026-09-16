@@ -4044,10 +4044,15 @@ async fn get_engine_records_running_and_leaves_deleting_alone() {
 }
 
 /// Rotate: `apply_built` commits the pending pair on BOTH the success and the
-/// failure path (Task 7's reviewed decision — never delete a value the cluster
-/// may already hold), so even a failed apply replaces the row's ids and drops
-/// the pair it superseded; a successful apply then renders the newest values.
-/// Non-Trino → 400, unknown → 404.
+/// failure path (Task 7's reviewed decision), so a failed apply replaces the
+/// row's ids — but F2 (standing rule: never delete a value the cluster may
+/// still hold) means it must NOT delete the pair it superseded, because a
+/// failure can happen either before or after the cluster actually received
+/// it. The superseded pair therefore stays resolvable until a LATER
+/// successful apply confirms convergence and sweeps every stale generation —
+/// this one included — away at once (`internal_secret_names` count asserted
+/// at each step so an accumulation, or an unsafe early delete, fails the
+/// test). Non-Trino → 400, unknown → 404.
 #[tokio::test]
 async fn rotate_secrets_replaces_both_values_only_on_a_successful_apply() {
     let port = FakeEnginePort::default();
@@ -4084,6 +4089,11 @@ async fn rotate_secrets_replaces_both_values_only_on_a_successful_apply() {
         .resolve_plaintext(None, old_monitor_id)
         .await
         .unwrap();
+    assert_eq!(
+        internal_secret_names(&f, id).await.len(),
+        2,
+        "baseline: one generation exists"
+    );
     let rotate = || {
         req(
             "POST",
@@ -4103,9 +4113,12 @@ async fn rotate_secrets_replaces_both_values_only_on_a_successful_apply() {
             .contains("injected update failure"),
         "body={j}"
     );
-    // The failed apply still committed the pair it attempted to hand the
-    // cluster and deleted the one it superseded — apply_built never discards
-    // on a failure, only on a pre-apply build error.
+    // F2 (standing rule: never delete a value the cluster may still hold): the
+    // failed apply still commits the pair it attempted to hand the cluster
+    // (the row moves on), but it must NOT delete the pair it superseded — the
+    // failure could have happened before OR after the cluster received the
+    // new pair, so both must stay resolvable until a later success proves
+    // which one the cluster actually converged on.
     let (failed_internal_id, failed_monitor_id) = engine_secret_ids(&f, id).await;
     let (failed_internal_id, failed_monitor_id) =
         (failed_internal_id.unwrap(), failed_monitor_id.unwrap());
@@ -4113,17 +4126,23 @@ async fn rotate_secrets_replaces_both_values_only_on_a_successful_apply() {
     assert_ne!(failed_monitor_id, old_monitor_id);
     assert_eq!(
         internal_secret_names(&f, id).await.len(),
-        2,
-        "old pair superseded, not left behind"
+        4,
+        "both generations on record: the failed apply deleted nothing"
     );
-    assert!(matches!(
-        secrets.resolve_plaintext(None, old_internal_id).await,
-        Err(egret_secrets::SecretsError::NotFound)
-    ));
-    assert!(matches!(
-        secrets.resolve_plaintext(None, old_monitor_id).await,
-        Err(egret_secrets::SecretsError::NotFound)
-    ));
+    assert_eq!(
+        secrets
+            .resolve_plaintext(None, old_internal_id)
+            .await
+            .expect("the superseded pair must still resolve after a failed apply"),
+        old_internal
+    );
+    assert_eq!(
+        secrets
+            .resolve_plaintext(None, old_monitor_id)
+            .await
+            .expect("the superseded pair must still resolve after a failed apply"),
+        old_monitor
+    );
 
     port.set_fail_update(false);
     let resp = f.app.clone().oneshot(rotate()).await.unwrap();
@@ -4150,6 +4169,11 @@ async fn rotate_secrets_replaces_both_values_only_on_a_successful_apply() {
     // bcrypt salts every hash, so "the hash changed" proves nothing; verify.
     assert!(bcrypt::verify(&new_monitor, &hash).unwrap());
     assert!(!bcrypt::verify(&old_monitor, &hash).unwrap());
+    // The successful apply proves the cluster now runs the new pair, so BOTH
+    // superseded generations (the original pair AND the one left behind by
+    // the failed rotation) are swept away in this one commit — exactly the
+    // superseded rows, no more (a leftover would mean an accumulation bug)
+    // and no fewer (an early sweep would mean an unsafe delete).
     assert!(matches!(
         secrets.resolve_plaintext(None, old_internal_id).await,
         Err(egret_secrets::SecretsError::NotFound)
@@ -4166,7 +4190,11 @@ async fn rotate_secrets_replaces_both_values_only_on_a_successful_apply() {
         secrets.resolve_plaintext(None, failed_monitor_id).await,
         Err(egret_secrets::SecretsError::NotFound)
     ));
-    assert_eq!(internal_secret_names(&f, id).await.len(), 2);
+    assert_eq!(
+        internal_secret_names(&f, id).await.len(),
+        2,
+        "back to exactly one generation — no accumulation"
+    );
 
     let sr = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
         .create_engine(

@@ -2865,7 +2865,11 @@ export const getControlPlaneEnginesRotateEngineSecretsUrl = (id: string,) => {
 /**
  * @summary `POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication
 secret and `egret-monitor` password and re-apply the engine (pods roll). The
-old values stay in force, and on the row, unless the apply succeeds.
+new pair is recorded on the row even if the apply fails — the cluster may
+already have received it — so every pair still on record (this one, and
+any left behind by an earlier failed rotation) is kept resolvable, never
+deleted, until a later successful apply confirms it is safe to sweep them
+all away at once.
  */
 export const controlPlaneEnginesRotateEngineSecrets = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRotateEngineSecretsResponse> => {
 
@@ -2916,7 +2920,11 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     /**
  * @summary `POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication
 secret and `egret-monitor` password and re-apply the engine (pods roll). The
-old values stay in force, and on the row, unless the apply succeeds.
+new pair is recorded on the row even if the apply fails — the cluster may
+already have received it — so every pair still on record (this one, and
+any left behind by an earlier failed rotation) is kept resolvable, never
+deleted, until a later successful apply confirms it is safe to sweep them
+all away at once.
  */
 export const useControlPlaneEnginesRotateEngineSecrets = <TError = ErrorBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
