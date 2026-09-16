@@ -364,6 +364,27 @@ describe("EngineDetail — Trino Settings tab (merged Configuration + Security)"
     expect(await screen.findByText("Password users")).toBeInTheDocument();
   });
 
+  test("Security & Exposure rotates secrets only after a pods-will-restart confirmation", async () => {
+    vi.mocked(api.rotateEngineSecrets).mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderDetail(
+      `/control-plane/engines/${ENGINE.id}?tab=settings&section=security`,
+    );
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    await user.click(
+      await screen.findByRole("button", { name: "Rotate secrets" }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/all pods will restart/i)).toBeInTheDocument();
+    expect(api.rotateEngineSecrets).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Rotate" }));
+    await waitFor(() =>
+      expect(api.rotateEngineSecrets).toHaveBeenCalledWith("e1"),
+    );
+  });
+
   test("legacy ?tab=security bookmark resolves to the merged Settings tab", async () => {
     renderDetail(`/control-plane/engines/${ENGINE.id}?tab=security`);
     await screen.findByRole("heading", { name: "analytics-trino" });
