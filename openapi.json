@@ -2975,7 +2975,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets, minted Catalog Clients and the engine's own Ranger profile cleaned up"
+            "description": "Cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"
           },
           "400": {
             "description": "Kubernetes not configured",
@@ -3042,7 +3042,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/EngineConflictBody"
                 }
               }
             }

@@ -895,7 +895,7 @@ export type controlPlaneEnginesDeleteEngineResponse500 = {
 }
 
 export type controlPlaneEnginesDeleteEngineResponse502 = {
-  data: ErrorBody
+  data: EngineConflictBody
   status: 502
 }
 

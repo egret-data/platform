@@ -3869,14 +3869,14 @@ async fn sr_primary_catalog_credential(st: &CpState, engine_id: Uuid) -> Option<
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 204, description = "Cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets, minted Catalog Clients and the engine's own Ranger profile cleaned up"),
+        (status = 204, description = "Cluster deleted, engine row removed (its catalogs, workspace connections, query history and notebook access cascade), engine-generated secrets and minted Catalog Clients cleaned up; the engine's own Ranger profile is unbound, not deleted"),
         (status = 400, description = "Kubernetes not configured", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:delete permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
         (status = 409, description = "Nothing deleted: Data API endpoints (including trashed), schedules or datasets still use the engine's workspace connections (`code` = `engine_has_dependents`, with `dependents`), or a database constraint refused the delete (`code` = `constraint_violation`, with `constraint`)", body = EngineConflictBody),
         (status = 500, description = "Internal error", body = ErrorBody),
-        (status = 502, description = "The Kubernetes delete failed (`code` = `engine_cluster_delete_failed`); the engine stays `deleting` and the request can be retried", body = ErrorBody),
+        (status = 502, description = "The Kubernetes delete failed (`code` = `engine_cluster_delete_failed`); the engine stays `deleting` and the request can be retried", body = EngineConflictBody),
     ),
 )]
 async fn delete_engine(
