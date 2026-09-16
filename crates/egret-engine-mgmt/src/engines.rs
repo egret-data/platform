@@ -606,8 +606,34 @@ fn catalog_props_and_secrets(cat: &EngineCatalog) -> CatalogPropsAndSecrets {
     (connector, plain, secrets)
 }
 
+/// Knobs for one spec assembly.
+#[derive(Clone, Copy, Debug, Default)]
+struct BuildOpts {
+    /// Render the catalogs WITHOUT this row (`remove_catalog` applies first and
+    /// deletes the row only after Kubernetes dropped the catalog).
+    exclude_catalog: Option<Uuid>,
+    /// Mint new internal secrets even when the engine already has some.
+    rotate_internal_secrets: bool,
+}
+
+/// An assembled provisioning request plus the internal secrets it rendered
+/// (Trino only). Hand it to [`apply_built`], which settles those secrets.
+struct BuiltReq {
+    req: EngineProvisionReq,
+    internal: Option<EngineInternalSecrets>,
+}
+
 /// Build the full provisioning request from the engine + its stored catalogs + config.
-async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProvisionReq, CpError> {
+async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<BuiltReq, CpError> {
+    build_provision_req_with(st, engine, BuildOpts::default()).await
+}
+
+/// [`build_provision_req`] with explicit [`BuildOpts`].
+async fn build_provision_req_with(
+    st: &CpState,
+    engine: &Engine,
+    opts: BuildOpts,
+) -> Result<BuiltReq, CpError> {
     // StarRocks engines assemble an entirely different `EngineSpec` (FE/CN roles
     // + builtin storage volume, no Trino catalogs/auth). Dispatch to the shared
     // StarRocks assembler so ANY generic caller of `build_provision_req` is
@@ -621,9 +647,18 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
             .await?
             .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
         let (req, _bootstrap) = build_starrocks_provision_req(st, engine, &wh).await?;
-        return Ok(req);
+        return Ok(BuiltReq {
+            req,
+            internal: None,
+        });
     }
-    let cats = st.engine_mgmt.list_engine_catalogs(engine.id).await?;
+    let cats: Vec<EngineCatalog> = st
+        .engine_mgmt
+        .list_engine_catalogs(engine.id)
+        .await?
+        .into_iter()
+        .filter(|c| Some(c.id) != opts.exclude_catalog)
+        .collect();
     let mut catalogs = Vec::new();
     for (i, c) in cats.iter().enumerate() {
         catalogs.push(build_catalog_req(st, engine, c, &format!("C{i}")).await?);
@@ -636,15 +671,6 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
     // Resolve the RAW auth block (password secrets → bcrypt hashes, JWKS default),
     // mirroring the fault-tolerant storage resolution. Ingress is parsed inline.
     config.auth = resolve_auth(st, &engine.spec["trinoConfig"]).await?;
-    // When the engine ALREADY has auth on, inject the derived `egret-monitor`
-    // system user so the native Trino monitor can authenticate. Guarded on
-    // `auth.is_some()` (inside the helper) so a no-auth engine stays auth-free.
-    // Skipped for jwt-delegation engines: their coordinator is JWT-only (no
-    // PASSWORD authenticator), so a basic-auth monitor user can't authenticate —
-    // the monitor degrades on jwt engines (acceptable).
-    if !engine.is_jwt_delegation() {
-        inject_monitor_user(&mut config.auth, engine.id)?;
-    }
     // TLS for ANY delegation-capable engine (both modes): generate/reuse a
     // self-signed coordinator cert + mount the keystore so the coordinator serves
     // https and the connector can pin the cert. impersonate: encrypts the wire so
@@ -717,13 +743,25 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
             }
         }
     }
-    // Trino requires a coordinator<->worker shared secret whenever auth is enabled.
-    // Derive a stable per-engine value (both roles read it from the env Secret).
+    // Internal secrets come LAST: minting writes new secret rows, so every
+    // fallible step above has already passed, and a failure below cleans up
+    // after itself. `apply_built` records or discards them.
+    let internal = resolve_internal_secrets(st, engine, opts.rotate_internal_secrets).await?;
+    // The native monitor signs in as `egret-monitor`. Skipped for jwt-delegation
+    // engines: their coordinator is JWT-only (no PASSWORD authenticator), so a
+    // basic-auth monitor user can't authenticate — the monitor degrades there.
+    if !engine.is_jwt_delegation() {
+        if let Err(e) = inject_monitor_user(&mut config.auth, &internal.monitor) {
+            discard_internal_secrets(st, &internal).await;
+            return Err(e);
+        }
+    }
+    // Trino requires a coordinator<->worker shared secret whenever auth is
+    // enabled; both roles read it from the env Secret.
     if config.auth.is_some() {
-        config.env.insert(
-            "TRINO_INTERNAL_SECRET".into(),
-            format!("egret-internal-{}", engine.id),
-        );
+        config
+            .env
+            .insert("TRINO_INTERNAL_SECRET".into(), internal.internal.clone());
     }
     // When the engine is bound to a Ranger profile (its trino profile is named
     // after the engine), template the apache-ranger access-control config so the
@@ -736,19 +774,60 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
                 egret_url: st.engine_egret_url.clone(),
                 poll_interval_ms: 30_000,
             });
-    Ok(EngineProvisionReq {
-        name: engine.name.clone(),
-        namespace: engine.namespace.clone(),
-        image_version: engine.spec["imageVersion"]
-            .as_str()
-            .unwrap_or(DEFAULT_IMAGE_VERSION)
-            .into(),
-        catalogs,
-        config,
-        ranger,
-        kind: egret_engine_mgmt_api::EngineKind::Trino,
-        starrocks: None,
+    Ok(BuiltReq {
+        req: EngineProvisionReq {
+            name: engine.name.clone(),
+            namespace: engine.namespace.clone(),
+            image_version: engine.spec["imageVersion"]
+                .as_str()
+                .unwrap_or(DEFAULT_IMAGE_VERSION)
+                .into(),
+            catalogs,
+            config,
+            ranger,
+            kind: egret_engine_mgmt_api::EngineKind::Trino,
+            starrocks: None,
+        },
+        internal: Some(internal),
     })
+}
+
+/// Which provisioning call an [`apply_built`] makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApplyOp {
+    Provision,
+    Update,
+}
+
+/// Apply an assembled request and settle the internal secrets it rendered:
+/// recorded on success, deleted on failure. `engine` must be the row the
+/// request was built from. A failure to RECORD after a successful apply is
+/// logged, not returned — the cluster already runs the new values, and the next
+/// apply mints and records a fresh pair.
+async fn apply_built(
+    st: &CpState,
+    prov: &dyn egret_engine_mgmt_api::EngineProvisioningPort,
+    engine: &Engine,
+    built: &BuiltReq,
+    op: ApplyOp,
+) -> Result<(), String> {
+    let res = match op {
+        ApplyOp::Provision => prov.provision(&built.req).await,
+        ApplyOp::Update => prov.update(&built.req).await,
+    };
+    if let Some(secrets) = &built.internal {
+        match &res {
+            Ok(()) => {
+                if let Err(e) = commit_internal_secrets(st, engine, secrets).await {
+                    tracing::error!(engine = %engine.name, error = ?e,
+                        "applied new internal secrets but could not record them; \
+                         the monitor fails until the next successful apply");
+                }
+            }
+            Err(_) => discard_internal_secrets(st, secrets).await,
+        }
+    }
+    res
 }
 
 /// Resolve the stored `trinoConfig.faultTolerant`
@@ -1516,23 +1595,39 @@ async fn resolve_auth(st: &CpState, tc: &serde_json::Value) -> Result<Option<Aut
 }
 
 /// System user the native Trino monitor (Phase 1.6b) authenticates as against a
-/// coordinator that has auth enabled. The password is DERIVED from the engine id
-/// (no storage): both provisioning (bcrypt into `password.db`, [`inject_monitor_user`])
-/// and the monitor's Basic auth header re-derive the same value.
-pub fn monitor_password(id: Uuid) -> String {
+/// coordinator that has auth enabled.
+///
+/// The legacy password, derived from the engine id. Valid ONLY for an engine
+/// whose row has no `monitor_secret_id`: its pods were rendered before internal
+/// secrets were stored and still carry this value in `password.db`. Everything
+/// else must go through [`monitor_password_for`].
+pub(crate) fn legacy_monitor_password(id: Uuid) -> String {
     format!("egret-monitor-{id}")
 }
 
-/// Inject the derived `egret-monitor` password entry into an engine's auth block
-/// so the native monitor can authenticate. No-op when `auth` is `None`: this must
-/// NOT turn auth on for engines that have none — it only rides along when auth is
+/// The `egret-monitor` password to present to this engine's coordinator: the
+/// stored secret once an apply has recorded one, else the legacy value.
+pub(crate) async fn monitor_password_for(st: &CpState, engine: &Engine) -> Result<String, CpError> {
+    match engine.monitor_secret_id {
+        Some(id) => st
+            .secrets
+            .resolve_plaintext(None, id)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("resolve monitor secret: {e}"))),
+        None => Ok(legacy_monitor_password(engine.id)),
+    }
+}
+
+/// Inject the `egret-monitor` password entry into an engine's auth block so the
+/// native monitor can authenticate. No-op when `auth` is `None`: this must NOT
+/// turn auth on for engines that have none — it only rides along when auth is
 /// already enabled. Uses the same `$2b$`→`$2y$` relabel as the human users so
 /// Trino's jBCrypt file authenticator accepts the hash.
-fn inject_monitor_user(auth: &mut Option<AuthReq>, engine_id: Uuid) -> Result<(), CpError> {
+fn inject_monitor_user(auth: &mut Option<AuthReq>, password: &str) -> Result<(), CpError> {
     let Some(auth) = auth.as_mut() else {
         return Ok(());
     };
-    let bcrypt_hash = bcrypt::hash(monitor_password(engine_id), bcrypt::DEFAULT_COST)
+    let bcrypt_hash = bcrypt::hash(password, bcrypt::DEFAULT_COST)
         .map_err(|e| CpError::BadRequest(format!("bcrypt monitor password: {e}")))?
         .replacen("$2b$", "$2y$", 1);
     auth.password_users.push(PasswordEntryReq {
@@ -1688,6 +1783,145 @@ async fn ensure_root_password_secret(
     };
     st.engine_mgmt.set_root_secret(engine.id, id).await?;
     Ok((id, pw))
+}
+
+/// A Trino engine's coordinator↔worker shared secret (`TRINO_INTERNAL_SECRET`)
+/// and `egret-monitor` password, as resolved for ONE apply.
+#[derive(Debug)]
+struct EngineInternalSecrets {
+    internal_id: Uuid,
+    internal: String,
+    monitor_id: Uuid,
+    monitor: String,
+    /// Minted for this apply and not yet on the engine row. [`apply_built`]
+    /// records it after Kubernetes accepted the spec and deletes it otherwise,
+    /// so the row only ever names what the running pods were given.
+    fresh: bool,
+}
+
+/// 32 random bytes, URL-safe base64 without padding — no `:`, so it is also
+/// safe as a Basic-auth password.
+fn random_internal_secret() -> String {
+    use base64::Engine as _;
+    use rand::RngCore;
+    let mut b = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut b);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+}
+
+/// Reuse the engine's recorded internal secrets, or mint a new pending pair when
+/// the row has none or `rotate` is set. Minting never writes the row.
+async fn resolve_internal_secrets(
+    st: &CpState,
+    engine: &Engine,
+    rotate: bool,
+) -> Result<EngineInternalSecrets, CpError> {
+    if !rotate {
+        if let (Some(internal_id), Some(monitor_id)) =
+            (engine.internal_secret_id, engine.monitor_secret_id)
+        {
+            let internal = st
+                .secrets
+                .resolve_plaintext(None, internal_id)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("resolve internal secret: {e}")))?;
+            let monitor = st
+                .secrets
+                .resolve_plaintext(None, monitor_id)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("resolve monitor secret: {e}")))?;
+            return Ok(EngineInternalSecrets {
+                internal_id,
+                internal,
+                monitor_id,
+                monitor,
+                fresh: false,
+            });
+        }
+    }
+    // A per-generation suffix keeps a rotation from colliding with the names of
+    // the secrets it replaces (those stay until the new apply commits).
+    let generation = Uuid::new_v4().simple();
+    let internal = random_internal_secret();
+    let internal_id = st
+        .secrets
+        .create(
+            None,
+            &format!("engine-internal-{}-{generation}", engine.id),
+            Some("Trino internal-communication shared secret"),
+            &internal,
+        )
+        .await
+        .map_err(|e| CpError::BadRequest(format!("store internal secret: {e}")))?;
+    let monitor = random_internal_secret();
+    let monitor_id = match st
+        .secrets
+        .create(
+            None,
+            &format!("engine-monitor-{}-{generation}", engine.id),
+            Some("egret-monitor password for the native Trino monitor"),
+            &monitor,
+        )
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            if let Err(del) = st.secrets.delete(None, internal_id).await {
+                tracing::warn!(engine = %engine.name, secret_id = %internal_id, error = %del,
+                    "could not delete a half-minted internal secret");
+            }
+            return Err(CpError::BadRequest(format!("store monitor secret: {e}")));
+        }
+    };
+    Ok(EngineInternalSecrets {
+        internal_id,
+        internal,
+        monitor_id,
+        monitor,
+        fresh: true,
+    })
+}
+
+/// After a successful apply: record a fresh pair on the row and delete the pair
+/// it superseded. `engine` is the row as loaded BEFORE the build (its ids are
+/// the superseded ones). No-op for a reused pair.
+async fn commit_internal_secrets(
+    st: &CpState,
+    engine: &Engine,
+    s: &EngineInternalSecrets,
+) -> Result<(), CpError> {
+    if !s.fresh {
+        return Ok(());
+    }
+    st.engine_mgmt
+        .set_internal_secret_ids(engine.id, s.internal_id, s.monitor_id)
+        .await?;
+    for old in [engine.internal_secret_id, engine.monitor_secret_id]
+        .into_iter()
+        .flatten()
+    {
+        if old != s.internal_id && old != s.monitor_id {
+            if let Err(e) = st.secrets.delete(None, old).await {
+                tracing::warn!(engine = %engine.name, secret_id = %old, error = %e,
+                    "could not delete a superseded internal secret");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// After a failed apply: delete a fresh pair (the pods never received it). No-op
+/// for a reused pair.
+async fn discard_internal_secrets(st: &CpState, s: &EngineInternalSecrets) {
+    if !s.fresh {
+        return;
+    }
+    for id in [s.internal_id, s.monitor_id] {
+        if let Err(e) = st.secrets.delete(None, id).await {
+            tracing::warn!(secret_id = %id, error = %e,
+                "could not delete an unapplied internal secret");
+        }
+    }
 }
 
 /// Extract the leading `-----BEGIN CERTIFICATE-----`…`-----END CERTIFICATE-----`
@@ -2205,8 +2439,16 @@ async fn create_engine(
         return Err(e.into());
     }
 
-    // 6. Build the provisioning request from the stored engine + catalogs.
-    let req = match build_provision_req(&st, &engine).await {
+    // 6. Kubernetes must be configured before anything is rendered (a build
+    //    mints internal secrets that only an apply settles).
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        let _ = st.engine_mgmt.delete_engine(engine.id).await;
+        let _ = st.catalog.revoke_client(client.id).await;
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    // 7. Build from the stored engine + catalogs, then provision; roll back the
+    //    engine row (+ cascade catalog) + client on any failure.
+    let built = match build_provision_req(&st, &engine).await {
         Ok(r) => r,
         Err(e) => {
             let _ = st.engine_mgmt.delete_engine(engine.id).await; // CASCADE removes the catalog
@@ -2214,15 +2456,7 @@ async fn create_engine(
             return Err(e);
         }
     };
-
-    // 7. Provision on Kubernetes; roll back the engine row (+ cascade catalog) +
-    //    client on any failure.
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.catalog.revoke_client(client.id).await;
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
-    };
-    if let Err(msg) = prov.provision(&req).await {
+    if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Provision).await {
         let _ = st.engine_mgmt.delete_engine(engine.id).await;
         let _ = st.catalog.revoke_client(client.id).await;
         return Err(CpError::BadRequest(format!(
@@ -2331,8 +2565,10 @@ async fn create_engine(
             // can re-provision. Refetch to pick up the freshly-set binding.
             match st.engine_mgmt.get_engine(engine.id).await {
                 Ok(Some(bound)) => match build_provision_req(&st, &bound).await {
-                    Ok(req2) => {
-                        if let Err(msg) = prov.update(&req2).await {
+                    Ok(built2) => {
+                        if let Err(msg) =
+                            apply_built(&st, prov.as_ref(), &bound, &built2, ApplyOp::Update).await
+                        {
                             tracing::warn!(engine = %bound.name, %msg,
                                 "re-provision after auto-bind failed; engine unenforced until next update");
                         }
@@ -3752,11 +3988,11 @@ async fn update_engine(
         .await?
         .ok_or(CpError::NotFound)?;
 
-    let req = build_provision_req(&st, &engine).await?;
     let Some(prov) = st.engine_provisioner.as_ref() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
-    if let Err(msg) = prov.update(&req).await {
+    let built = build_provision_req(&st, &engine).await?;
+    if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
         return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
     }
     Ok(Json(engine.into()))
@@ -4559,18 +4795,18 @@ async fn add_catalog(
             let _ = st.catalog.revoke_client(cid).await;
         }
     };
-    let req = match build_provision_req(&st, &engine).await {
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        rollback(st.clone(), cat.id, minted_client).await;
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    let built = match build_provision_req(&st, &engine).await {
         Ok(r) => r,
         Err(e) => {
             rollback(st.clone(), cat.id, minted_client).await;
             return Err(e);
         }
     };
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        rollback(st.clone(), cat.id, minted_client).await;
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
-    };
-    if let Err(msg) = prov.update(&req).await {
+    if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
         rollback(st.clone(), cat.id, minted_client).await;
         return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
     }
@@ -4837,10 +5073,10 @@ async fn remove_catalog(
             let _ = st.catalog.revoke_client(clientid).await;
         }
     }
-    // Re-render + roll.
-    let req = build_provision_req(&st, &engine).await?;
+    // Re-render + roll. (Task 11 reorders this to apply before deleting.)
     if let Some(prov) = st.engine_provisioner.as_ref() {
-        if let Err(msg) = prov.update(&req).await {
+        let built = build_provision_req(&st, &engine).await?;
+        if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
             return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
         }
     }
@@ -4915,18 +5151,18 @@ async fn update_catalog(
             .await;
     };
 
-    let req = match build_provision_req(&st, &engine).await {
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        restore(st.clone(), prev).await;
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    let built = match build_provision_req(&st, &engine).await {
         Ok(r) => r,
         Err(e) => {
             restore(st.clone(), prev).await;
             return Err(e);
         }
     };
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        restore(st.clone(), prev).await;
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
-    };
-    if let Err(msg) = prov.update(&req).await {
+    if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
         restore(st.clone(), prev).await;
         return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
     }
@@ -5456,16 +5692,15 @@ mod tests {
     }
 
     #[test]
-    fn monitor_password_is_derived_from_id() {
+    fn legacy_monitor_password_is_derived_from_id() {
         assert_eq!(
-            monitor_password(Uuid::nil()),
+            legacy_monitor_password(Uuid::nil()),
             "egret-monitor-00000000-0000-0000-0000-000000000000"
         );
     }
 
     #[test]
     fn inject_monitor_user_adds_egret_monitor_when_auth_on() {
-        let id = Uuid::new_v4();
         // An engine WITH auth (one human password user).
         let mut auth = Some(AuthReq {
             password_users: vec![PasswordEntryReq {
@@ -5474,7 +5709,7 @@ mod tests {
             }],
             jwt: None,
         });
-        inject_monitor_user(&mut auth, id).unwrap();
+        inject_monitor_user(&mut auth, "pw-123").unwrap();
 
         let users = &auth.unwrap().password_users;
         // Both the human user AND egret-monitor are present.
@@ -5487,14 +5722,14 @@ mod tests {
         assert!(mon.bcrypt_hash.starts_with("$2y$"));
         // `bcrypt::verify` wants the `$2b$` prefix; relabel back for the check.
         let hash = mon.bcrypt_hash.replacen("$2y$", "$2b$", 1);
-        assert!(bcrypt::verify(monitor_password(id), &hash).unwrap());
+        assert!(bcrypt::verify("pw-123", &hash).unwrap());
     }
 
     #[test]
     fn inject_monitor_user_noop_when_no_auth() {
         // A no-auth engine must NOT gain an auth block (egret-monitor not forced on).
         let mut auth: Option<AuthReq> = None;
-        inject_monitor_user(&mut auth, Uuid::new_v4()).unwrap();
+        inject_monitor_user(&mut auth, "pw").unwrap();
         assert!(auth.is_none());
     }
 
@@ -7253,10 +7488,119 @@ mod tests {
 
         let req = build_provision_req(&st, &engine)
             .await
-            .expect("build_provision_req");
+            .expect("build_provision_req")
+            .req;
         assert_eq!(req.kind, egret_engine_mgmt_api::EngineKind::StarRocks);
         assert!(req.starrocks.is_some());
         assert!(req.catalogs.is_empty());
+    }
+
+    /// P1: internal secrets are random, stay OFF the row until committed, are
+    /// reused when present, and a discarded or superseded generation is deleted.
+    /// The monitor presents the legacy value exactly until a commit.
+    #[tokio::test]
+    async fn internal_secrets_are_pending_until_committed() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping internal_secrets_are_pending_until_committed: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                "egret-engines",
+                wh.id,
+                &serde_json::json!({ "trinoConfig": {} }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        let not_found = |r: Result<String, egret_secrets::SecretsError>| {
+            matches!(r, Err(egret_secrets::SecretsError::NotFound))
+        };
+
+        let first = resolve_internal_secrets(&st, &engine, false)
+            .await
+            .expect("mint");
+        assert!(first.fresh);
+        assert_ne!(first.internal, first.monitor);
+        {
+            use base64::Engine as _;
+            let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(&first.internal)
+                .expect("url-safe base64");
+            assert_eq!(raw.len(), 32);
+        }
+        let row = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert!(row.internal_secret_id.is_none() && row.monitor_secret_id.is_none());
+        assert_eq!(
+            monitor_password_for(&st, &row).await.unwrap(),
+            legacy_monitor_password(engine.id),
+            "uncommitted ⇒ the pods still have the legacy password"
+        );
+
+        commit_internal_secrets(&st, &row, &first)
+            .await
+            .expect("commit");
+        let row = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(row.internal_secret_id, Some(first.internal_id));
+        assert_eq!(row.monitor_secret_id, Some(first.monitor_id));
+        assert_eq!(
+            monitor_password_for(&st, &row).await.unwrap(),
+            first.monitor
+        );
+
+        let reused = resolve_internal_secrets(&st, &row, false)
+            .await
+            .expect("reuse");
+        assert!(!reused.fresh);
+        assert_eq!(reused.internal, first.internal);
+
+        let rotated = resolve_internal_secrets(&st, &row, true)
+            .await
+            .expect("rotate");
+        assert!(rotated.fresh);
+        assert_ne!(rotated.internal, first.internal);
+        discard_internal_secrets(&st, &rotated).await;
+        assert!(not_found(
+            st.secrets
+                .resolve_plaintext(None, rotated.internal_id)
+                .await
+        ));
+        assert!(not_found(
+            st.secrets.resolve_plaintext(None, rotated.monitor_id).await
+        ));
+        assert_eq!(
+            st.engine_mgmt
+                .get_engine(engine.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .monitor_secret_id,
+            Some(first.monitor_id),
+            "a discard never touches the row"
+        );
+
+        let rotated = resolve_internal_secrets(&st, &row, true)
+            .await
+            .expect("rotate again");
+        commit_internal_secrets(&st, &row, &rotated)
+            .await
+            .expect("commit rotation");
+        assert!(not_found(
+            st.secrets.resolve_plaintext(None, first.internal_id).await
+        ));
+        assert!(not_found(
+            st.secrets.resolve_plaintext(None, first.monitor_id).await
+        ));
     }
 
     /// WITHOUT a `secret_ref` the generic arm must render exactly as before:

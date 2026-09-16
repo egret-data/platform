@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use egret_core::http::ErrorBody;
 
-use crate::engines::monitor_password;
+use crate::engines::monitor_password_for;
 use crate::Engine;
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
@@ -140,20 +140,22 @@ pub fn routes() -> Router<CpState> {
 }
 
 /// Monitor auth headers for a coordinator request. When the engine's stored spec
-/// has an auth block (`trinoConfig.auth`), authenticate as the derived
-/// `egret-monitor` file-password user over HTTP Basic (plus `X-Forwarded-Proto:
-/// https` so Trino accepts Basic on the proxied hop); otherwise pass the trino
-/// user header directly (no-auth engines).
-fn monitor_headers(engine: &Engine) -> Vec<(String, String)> {
+/// has an auth block (`trinoConfig.auth`), authenticate as the `egret-monitor`
+/// file-password user over HTTP Basic (plus `X-Forwarded-Proto: https` so Trino
+/// accepts Basic on the proxied hop), with the password the engine's pods were
+/// last given ([`monitor_password_for`]); otherwise pass the trino user header
+/// directly (no-auth engines).
+async fn monitor_headers(st: &CpState, engine: &Engine) -> Result<Vec<(String, String)>, CpError> {
     if engine.spec["trinoConfig"]["auth"].is_object() {
-        let creds = format!("egret-monitor:{}", monitor_password(engine.id));
+        let password = monitor_password_for(st, engine).await?;
+        let creds = format!("egret-monitor:{password}");
         let b64 = base64::engine::general_purpose::STANDARD.encode(creds);
-        vec![
+        Ok(vec![
             ("Authorization".into(), format!("Basic {b64}")),
             ("X-Forwarded-Proto".into(), "https".into()),
-        ]
+        ])
     } else {
-        vec![("X-Trino-User".into(), "egret-monitor".into())]
+        Ok(vec![("X-Trino-User".into(), "egret-monitor".into())])
     }
 }
 
@@ -229,7 +231,7 @@ pub(crate) async fn coordinator_call(
     path: &str,
     body: Option<Vec<u8>>,
 ) -> Result<(u16, Vec<u8>), CpError> {
-    let headers = monitor_headers(engine);
+    let headers = monitor_headers(st, engine).await?;
     if let Some(resp) = try_ingress(engine, method, path, &headers, body.clone()).await {
         return Ok(resp);
     }

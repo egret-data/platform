@@ -413,9 +413,6 @@ struct FakeEnginePort {
 }
 
 impl FakeEnginePort {
-    // No caller yet within this task — later Part B tasks (create route tests)
-    // call this to inspect what the fake recorded.
-    #[allow(dead_code)]
     fn last_provisioned(&self) -> egret_engine_mgmt_api::EngineSpec {
         self.provisioned
             .lock()
@@ -432,9 +429,6 @@ impl FakeEnginePort {
             .cloned()
             .expect("update was called")
     }
-    // No caller yet within this task — later Part B tasks (update-failure
-    // route tests) call these to inject a provisioner failure.
-    #[allow(dead_code)]
     fn set_fail_update(&self, fail: bool) {
         self.fail_update
             .store(fail, std::sync::atomic::Ordering::SeqCst);
@@ -1509,9 +1503,6 @@ async fn seed_secret(f: &Fixture, value: &str) -> Uuid {
 
 /// The app's named-secret store, built with the SAME test crypto key as
 /// `build_app`, so a test can read back what the handlers sealed.
-// No caller yet within this task — later Part B tasks read back secrets the
-// handlers sealed.
-#[allow(dead_code)]
 fn secret_store(f: &Fixture) -> egret_secrets::WorkspaceSecretStore {
     egret_secrets::WorkspaceSecretStore::new(
         f.db.clone(),
@@ -1523,8 +1514,6 @@ fn secret_store(f: &Fixture) -> egret_secrets::WorkspaceSecretStore {
 }
 
 /// `(internal_secret_id, monitor_secret_id)` straight off the engine row.
-// Unused until Task 7 wires the setter up; remove this attribute then.
-#[allow(dead_code)]
 async fn engine_secret_ids(f: &Fixture, engine_id: Uuid) -> (Option<Uuid>, Option<Uuid>) {
     sqlx::query_as(
         "SELECT internal_secret_id, monitor_secret_id FROM engine_mgmt.engines WHERE id = $1",
@@ -1561,6 +1550,182 @@ async fn create_engine_via_api(
         .await
         .unwrap();
     into_json(resp).await
+}
+
+/// `TRINO_INTERNAL_SECRET` exactly as the env Secret renders it.
+fn rendered_internal_secret(spec: &egret_engine_mgmt_api::EngineSpec) -> String {
+    egret_provisioner::trino::trino_env_secret(spec)["stringData"]["TRINO_INTERNAL_SECRET"]
+        .as_str()
+        .expect("TRINO_INTERNAL_SECRET rendered")
+        .to_string()
+}
+
+/// The `egret-monitor` bcrypt hash exactly as `password.db` renders it,
+/// relabelled `$2y$`→`$2b$` for `bcrypt::verify`.
+fn monitor_hash(spec: &egret_engine_mgmt_api::EngineSpec) -> String {
+    let cm = egret_provisioner::trino::trino_config_map(spec);
+    let db = cm["data"]["password.db"]
+        .as_str()
+        .expect("password.db rendered");
+    let line = db
+        .lines()
+        .find(|l| l.starts_with("egret-monitor:"))
+        .expect("egret-monitor entry");
+    line["egret-monitor:".len()..].replacen("$2y$", "$2b$", 1)
+}
+
+/// Names of every internal/monitor secret minted for this engine.
+async fn internal_secret_names(f: &Fixture, engine_id: Uuid) -> Vec<String> {
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM workspace_secrets WHERE workspace_id IS NULL")
+            .fetch_all(&f.db.pool)
+            .await
+            .expect("list global secret names");
+    let (a, b) = (
+        format!("engine-internal-{engine_id}-"),
+        format!("engine-monitor-{engine_id}-"),
+    );
+    names
+        .into_iter()
+        .filter(|n| n.starts_with(&a) || n.starts_with(&b))
+        .collect()
+}
+
+/// P1: a new Trino engine gets random stored secrets; the rendered env Secret
+/// and password.db carry them, not the id-derived values.
+#[tokio::test]
+async fn create_renders_stored_random_internal_secrets() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p1_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let (internal_id, monitor_id) = engine_secret_ids(&f, id).await;
+    let secrets = secret_store(&f);
+    let internal = secrets
+        .resolve_plaintext(None, internal_id.expect("internal secret recorded"))
+        .await
+        .unwrap();
+    let monitor = secrets
+        .resolve_plaintext(None, monitor_id.expect("monitor secret recorded"))
+        .await
+        .unwrap();
+
+    let spec = port.last_provisioned();
+    let rendered = rendered_internal_secret(&spec);
+    assert_eq!(rendered, internal);
+    assert_ne!(rendered, format!("egret-internal-{id}"));
+    let hash = monitor_hash(&spec);
+    assert!(bcrypt::verify(&monitor, &hash).unwrap());
+    assert!(!bcrypt::verify(format!("egret-monitor-{id}"), &hash).unwrap());
+}
+
+/// P1 transition: an engine rendered before this change (no secret ids) keeps
+/// its legacy values through a FAILED apply and adopts stored secrets only on a
+/// successful one — so the monitor never presents a password no pod has.
+#[tokio::test]
+async fn legacy_engine_adopts_internal_secrets_only_after_a_successful_apply() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p1_legacy_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let trino_config = serde_json::json!({ "delegationMode": "impersonate", "auth": {} });
+    let engine = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .create_engine(
+            &name,
+            "trino",
+            "egret-engines",
+            wh_id,
+            &serde_json::json!({
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "imageVersion": "470", "trinoConfig": trino_config.clone(),
+            }),
+            None,
+        )
+        .await
+        .expect("seed legacy engine row");
+    let put_body = serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "trinoConfig": trino_config,
+    });
+
+    port.set_fail_update(true);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{}", engine.id),
+            &token,
+            Some(put_body.clone()),
+        ))
+        .await
+        .unwrap();
+    assert!(!resp.status().is_success(), "injected failure must surface");
+    assert_eq!(engine_secret_ids(&f, engine.id).await, (None, None));
+    assert!(
+        internal_secret_names(&f, engine.id).await.is_empty(),
+        "the failed attempt's secrets must be discarded"
+    );
+
+    port.set_fail_update(false);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{}", engine.id),
+            &token,
+            Some(put_body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let (internal_id, monitor_id) = engine_secret_ids(&f, engine.id).await;
+    let secrets = secret_store(&f);
+    let internal = secrets
+        .resolve_plaintext(None, internal_id.unwrap())
+        .await
+        .unwrap();
+    let monitor = secrets
+        .resolve_plaintext(None, monitor_id.unwrap())
+        .await
+        .unwrap();
+    let spec = port.last_updated();
+    assert_eq!(rendered_internal_secret(&spec), internal);
+    assert!(bcrypt::verify(&monitor, &monitor_hash(&spec)).unwrap());
+    assert_eq!(internal_secret_names(&f, engine.id).await.len(), 2);
 }
 
 #[tokio::test]
