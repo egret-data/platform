@@ -5035,6 +5035,21 @@ async fn delete_engine_sweeps_orphaned_internal_secret_generations() {
         .await
         .expect("mint orphan monitor secret");
 
+    // M5: the sweep predicate is `starts_with(prefix)`, not `contains(prefix)` —
+    // a secret whose name merely CONTAINS engine A's prefix as a substring,
+    // without starting with it, must survive. Catches a `starts_with` →
+    // `contains` regression the fixtures above (which only ever start with the
+    // prefix or belong to an unrelated id) cannot.
+    let lookalike_id = secrets
+        .create(
+            None,
+            &format!("other-engine-internal-{id_a}-x"),
+            None,
+            "lookalike-value",
+        )
+        .await
+        .expect("mint lookalike secret");
+
     let resp = f
         .app
         .clone()
@@ -5058,4 +5073,9 @@ async fn delete_engine_sweeps_orphaned_internal_secret_generations() {
             "a different engine's secret {sid} must survive engine A's sweep"
         );
     }
+    assert!(
+        secrets.resolve_plaintext(None, lookalike_id).await.is_ok(),
+        "a secret whose name only CONTAINS the prefix, without starting with it, \
+         must survive the sweep"
+    );
 }
