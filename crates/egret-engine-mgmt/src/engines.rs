@@ -3674,6 +3674,8 @@ async fn create_starrocks_engine(
     let root_password = req.starrocks.as_ref().and_then(|s| s.root_password.clone());
     spawn_starrocks_catalog_wire(
         prov.clone(),
+        st.engine_mgmt.clone(),
+        engine.id,
         engine.namespace.clone(),
         engine.name.clone(),
         st.engine_egret_url.clone(),
@@ -3970,9 +3972,41 @@ struct StarRocksDelegationBootstrap {
 /// (`<name>-fe-service.<namespace>.svc`) is the kube-starrocks operator's
 /// documented convention; UNVERIFIED against a live operator install as of
 /// this change (flagged for the Task 8 / S3-T4 live smoke — see plan doc).
+/// Whether a background StarRocks bootstrap may still write to the engine it was
+/// spawned for: the row must still exist under the same id and name and not be
+/// on its way out. A delete, or a delete plus same-name re-create (new id), stops
+/// it instead of running DDL against a cluster it no longer owns.
+fn bootstrap_target_is_current(found: Option<&Engine>, engine_name: &str) -> bool {
+    matches!(found, Some(e) if e.name == engine_name && e.status != crate::engine_status::DELETING)
+}
+
+/// Re-read the engine and apply [`bootstrap_target_is_current`]; a read error
+/// also stops the bootstrap.
+async fn engine_still_current(
+    store: &crate::EngineMgmtStore,
+    engine_id: Uuid,
+    engine_name: &str,
+) -> bool {
+    let current = match store.get_engine(engine_id).await {
+        Ok(found) => bootstrap_target_is_current(found.as_ref(), engine_name),
+        Err(e) => {
+            tracing::warn!(engine = %engine_name, error = %e,
+                "starrocks bootstrap: could not re-read the engine; stopping");
+            false
+        }
+    };
+    if !current {
+        tracing::info!(engine = %engine_name, %engine_id,
+            "starrocks bootstrap: engine deleted, re-created or deleting; stopping");
+    }
+    current
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_starrocks_catalog_wire(
     prov: Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
+    store: crate::EngineMgmtStore,
+    engine_id: Uuid,
     namespace: String,
     engine_name: String,
     egret_url: String,
@@ -3987,6 +4021,9 @@ fn spawn_starrocks_catalog_wire(
         const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
         let mut fe_ready = false;
         for _ in 0..MAX_POLLS {
+            if !engine_still_current(&store, engine_id, &engine_name).await {
+                return;
+            }
             match prov.status("starrocks", &namespace, &engine_name).await {
                 Ok(s) => {
                     if s.pods.iter().any(|p| p.name.contains("-fe-") && p.ready) {
@@ -4019,6 +4056,9 @@ fn spawn_starrocks_catalog_wire(
         // DDL below runs only once initpwd has won. Bounded like the pod poll.
         let mut auth_ready = false;
         for _ in 0..MAX_POLLS {
+            if !engine_still_current(&store, engine_id, &engine_name).await {
+                return;
+            }
             match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, "SELECT 1", root_pw, None)
                 .await
             {
@@ -4040,6 +4080,9 @@ fn spawn_starrocks_catalog_wire(
             return;
         }
 
+        if !engine_still_current(&store, engine_id, &engine_name).await {
+            return;
+        }
         // The OAuth2 credential is the SAME `client_id:client_secret` the Trino
         // path stores (see `build_catalog_req`'s egret-warehouse arm); StarRocks
         // exchanges it for an access token itself and refreshes on expiry.
@@ -4077,6 +4120,9 @@ fn spawn_starrocks_catalog_wire(
             // StarRocks has no `CREATE … IF NOT EXISTS` for this object (measured:
             // it is a syntax error, as is `DROP … IF EXISTS`), so converging from
             // either starting state takes two statements, not one.
+            if !engine_still_current(&store, engine_id, &engine_name).await {
+                return;
+            }
             let create_integration = stmts.remove(0);
             match run_starrocks_ddl(
                 &fe_host,
@@ -4119,6 +4165,9 @@ fn spawn_starrocks_catalog_wire(
             }
 
             for stmt in &stmts {
+                if !engine_still_current(&store, engine_id, &engine_name).await {
+                    return;
+                }
                 if let Err(e) = run_starrocks_ddl(
                     &fe_host,
                     STARROCKS_FE_MYSQL_PORT,
@@ -4612,6 +4661,8 @@ async fn update_starrocks_engine(
                         req.starrocks.as_ref().and_then(|s| s.root_password.clone());
                     spawn_starrocks_catalog_wire(
                         prov.clone(),
+                        st.engine_mgmt.clone(),
+                        engine.id,
                         engine.namespace.clone(),
                         engine.name.clone(),
                         st.engine_egret_url.clone(),
@@ -8220,6 +8271,44 @@ mod tests {
             )
             .await
             .expect("create engine row")
+    }
+
+    #[test]
+    fn bootstrap_stops_when_the_engine_is_gone_renamed_or_deleting() {
+        let mut e = dummy_engine();
+        e.name = "sr1".into();
+        e.status = crate::engine_status::RUNNING.into();
+        assert!(bootstrap_target_is_current(Some(&e), "sr1"));
+        assert!(
+            !bootstrap_target_is_current(None, "sr1"),
+            "deleted (or re-created under a new id)"
+        );
+        assert!(
+            !bootstrap_target_is_current(Some(&e), "sr2"),
+            "not the engine it was spawned for"
+        );
+        e.status = crate::engine_status::DELETING.into();
+        assert!(
+            !bootstrap_target_is_current(Some(&e), "sr1"),
+            "delete in progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_still_current_reads_the_row() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping engine_still_current_reads_the_row: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        assert!(engine_still_current(&st.engine_mgmt, engine.id, &engine.name).await);
+        st.engine_mgmt.delete_engine(engine.id).await.unwrap();
+        assert!(!engine_still_current(&st.engine_mgmt, engine.id, &engine.name).await);
     }
 
     #[test]
