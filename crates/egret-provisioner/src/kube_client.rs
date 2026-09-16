@@ -277,6 +277,19 @@ pub fn is_not_found(err: &kube::Error) -> bool {
     matches!(err, kube::Error::Api(resp) if resp.code == 404)
 }
 
+/// Map a kube delete result the way `LiveKube::delete` treats it: success or
+/// "already gone" (`is_not_found`) both count as deleted; anything else
+/// propagates. Pulled out as a pure function so this tolerance is pinned
+/// directly — `LiveKube::delete` itself needs a real cluster and isn't
+/// unit-tested (see its doc comment).
+fn tolerate_not_found(result: Result<(), kube::Error>) -> anyhow::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if is_not_found(&e) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Delete every `(apiVersion, kind, name)` in `namespace`. All of them are
 /// attempted even after a failure, so a retry has as little left as possible;
 /// the error names every object that failed and why.
@@ -401,11 +414,7 @@ impl KubeClient for LiveKube {
 
         let ar = Self::api_resource(api_version, kind);
         let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
-        match api.delete(name, &DeleteParams::default()).await {
-            Ok(_) => Ok(()),
-            Err(e) if is_not_found(&e) => Ok(()),
-            Err(e) => Err(e.into()),
-        }
+        tolerate_not_found(api.delete(name, &DeleteParams::default()).await.map(|_| ()))
     }
 
     async fn list_pods(
@@ -662,6 +671,19 @@ mod tests {
         assert!(is_not_found(&api_error(404, "NotFound")));
         assert!(!is_not_found(&api_error(403, "Forbidden")));
         assert!(!is_not_found(&api_error(500, "InternalError")));
+    }
+
+    /// Pins `LiveKube::delete`'s actual tolerance policy (via the pure helper
+    /// it now calls): a 404 is swallowed as already-deleted, everything else
+    /// propagates. Before this helper existed, deleting the whole
+    /// `Err(e) if is_not_found(&e) => Ok(())` arm in `LiveKube::delete` kept
+    /// the suite green because nothing called that code path directly.
+    #[test]
+    fn tolerate_not_found_swallows_404_and_propagates_other_errors() {
+        assert!(tolerate_not_found(Ok(())).is_ok());
+        assert!(tolerate_not_found(Err(api_error(404, "NotFound"))).is_ok());
+        assert!(tolerate_not_found(Err(api_error(403, "Forbidden"))).is_err());
+        assert!(tolerate_not_found(Err(api_error(500, "InternalError"))).is_err());
     }
 
     #[tokio::test]
