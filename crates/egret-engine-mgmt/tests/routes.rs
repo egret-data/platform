@@ -412,10 +412,10 @@ struct FakeEnginePort {
     fail_update: Arc<std::sync::atomic::AtomicBool>,
 }
 
-// These accessors have no caller yet within this task — later Part B tasks
-// (create/update route tests) call them to inspect what the fake recorded.
-#[allow(dead_code)]
 impl FakeEnginePort {
+    // No caller yet within this task — later Part B tasks (create route tests)
+    // call this to inspect what the fake recorded.
+    #[allow(dead_code)]
     fn last_provisioned(&self) -> egret_engine_mgmt_api::EngineSpec {
         self.provisioned
             .lock()
@@ -432,10 +432,14 @@ impl FakeEnginePort {
             .cloned()
             .expect("update was called")
     }
+    // No caller yet within this task — later Part B tasks (update-failure
+    // route tests) call these to inject a provisioner failure.
+    #[allow(dead_code)]
     fn set_fail_update(&self, fail: bool) {
         self.fail_update
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
+    #[allow(dead_code)]
     fn set_fail_provision(&self, fail: bool) {
         self.fail_provision
             .store(fail, std::sync::atomic::Ordering::SeqCst);
@@ -3557,4 +3561,104 @@ async fn add_catalog_accepts_a_connector_kind_outside_the_legacy_enum() {
     let (status, j) = into_json(resp).await;
     assert_eq!(status, StatusCode::CREATED, "add mysql catalog; body={j}");
     assert_eq!(j["kind"], "mysql", "stored kind; body={j}");
+}
+
+/// P8: an inline password on a non-warehouse catalog is masked on read, and
+/// re-saving the form (which PUTs the masked config back) keeps the real value
+/// in the row AND in what reaches the cluster.
+#[tokio::test]
+async fn catalog_detail_masks_inline_secrets_and_a_resave_keeps_them() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p8_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            Some(serde_json::json!({
+                "name": "pg", "kind": "postgresql",
+                "config": { "properties": {
+                    "connection-url": "jdbc:postgresql://db:5432/x",
+                    "connection-user": "u",
+                    "connection-password": "hunter2"
+                } }
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "add pg catalog; body={j}");
+    let cat_id = j["id"].as_str().expect("catalog id").to_string();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/catalogs/{cat_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, detail) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "catalog detail; body={detail}");
+    assert_eq!(
+        detail["config"]["properties"]["connection-password"],
+        "********"
+    );
+    assert_eq!(detail["config"]["properties"]["connection-user"], "u");
+    assert!(
+        !detail.to_string().contains("hunter2"),
+        "no plaintext in GET; body={detail}"
+    );
+
+    // Re-save exactly what the form received.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}/catalogs/{cat_id}"),
+            &token,
+            Some(serde_json::json!({ "config": detail["config"].clone() })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "re-save catalog; body={j}");
+
+    let stored = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .get_engine_catalog(Uuid::parse_str(&cat_id).unwrap())
+        .await
+        .expect("get catalog")
+        .expect("catalog row");
+    assert_eq!(
+        stored.config["properties"]["connection-password"],
+        "hunter2"
+    );
+    let rendered = port
+        .last_updated()
+        .catalogs
+        .into_iter()
+        .find(|c| c.name == "pg")
+        .expect("pg catalog rendered");
+    assert_eq!(rendered.properties["connection-password"], "hunter2");
 }

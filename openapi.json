@@ -31641,7 +31641,7 @@
       },
       "EngineCatalogDetailDto": {
         "type": "object",
-        "description": "`GET /engines/{id}/catalogs/{cid}` payload: full stored config + secretRef,\nwith system-minted secret material redacted (see [`redact_catalog_config`]).",
+        "description": "`GET /engines/{id}/catalogs/{cid}` payload: full stored config + secretRef,\nwith secret material removed or masked (see [`redact_catalog_config`]).",
         "required": [
           "id",
           "name",

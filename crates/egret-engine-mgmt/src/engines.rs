@@ -297,7 +297,7 @@ impl From<EngineCatalog> for EngineCatalogDto {
 }
 
 /// `GET /engines/{id}/catalogs/{cid}` payload: full stored config + secretRef,
-/// with system-minted secret material redacted (see [`redact_catalog_config`]).
+/// with secret material removed or masked (see [`redact_catalog_config`]).
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct EngineCatalogDetailDto {
@@ -310,17 +310,80 @@ struct EngineCatalogDetailDto {
     config: serde_json::Value,
 }
 
-/// Strip system-minted secret material from a catalog config before returning it
-/// to clients. egret-warehouse configs carry a client credential; nothing else
-/// should ever be exposed.
-fn redact_catalog_config(kind: &str, mut config: serde_json::Value) -> serde_json::Value {
-    if kind == "egret-warehouse" {
-        if let Some(obj) = config.as_object_mut() {
-            obj.remove("credential");
-            obj.remove("clientRowId");
+/// What `GET /engines/{id}/catalogs/{cid}` returns in place of a sensitive
+/// value. The edit form PUTs the config back verbatim, so `update_catalog`
+/// treats this exact string as "unchanged" (see [`restore_redacted_properties`]).
+const REDACTED_VALUE: &str = "********";
+
+/// Whether a catalog config key names secret material (spec SP1 §4.9).
+fn is_sensitive_config_key(key: &str) -> bool {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            regex::Regex::new(
+                r"(?i)(password|secret|token|credential|private[-_.]?key|access[-_.]?key)",
+            )
+            .expect("static sensitive-key pattern compiles")
+        })
+        .is_match(key)
+}
+
+/// Strip or mask secret material before a catalog config leaves the server.
+/// For every kind: the minted client's `credential` and `clientRowId` are
+/// removed, and every top-level or `properties` value whose key matches
+/// [`is_sensitive_config_key`] becomes [`REDACTED_VALUE`]. `secretProperties`
+/// is left intact: its values are secret IDs, and its own key contains
+/// "secret".
+fn redact_catalog_config(mut config: serde_json::Value) -> serde_json::Value {
+    let Some(obj) = config.as_object_mut() else {
+        return config;
+    };
+    obj.remove("credential");
+    obj.remove("clientRowId");
+    for (k, v) in obj.iter_mut() {
+        if k != "properties" && k != "secretProperties" && is_sensitive_config_key(k) {
+            *v = serde_json::Value::String(REDACTED_VALUE.into());
+        }
+    }
+    if let Some(props) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
+        for (k, v) in props.iter_mut() {
+            if is_sensitive_config_key(k) {
+                *v = serde_json::Value::String(REDACTED_VALUE.into());
+            }
         }
     }
     config
+}
+
+/// Undo [`redact_catalog_config`] on a PUT body: a sensitive key whose value is
+/// still exactly [`REDACTED_VALUE`] gets the stored value back, so re-saving
+/// the edit form never overwrites a password with the mask.
+fn restore_redacted_properties(config: &mut serde_json::Value, stored: &serde_json::Value) {
+    fn restore_level(
+        new: &mut serde_json::Map<String, serde_json::Value>,
+        old: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) {
+        for (k, v) in new.iter_mut() {
+            if v.as_str() == Some(REDACTED_VALUE) && is_sensitive_config_key(k) {
+                if let Some(prev) = old.and_then(|o| o.get(k)) {
+                    *v = prev.clone();
+                }
+            }
+        }
+    }
+    let Some(new_obj) = config.as_object_mut() else {
+        return;
+    };
+    restore_level(new_obj, stored.as_object());
+    if let Some(new_props) = new_obj
+        .get_mut("properties")
+        .and_then(|p| p.as_object_mut())
+    {
+        restore_level(
+            new_props,
+            stored.get("properties").and_then(|p| p.as_object()),
+        );
+    }
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -4536,7 +4599,7 @@ async fn get_catalog(
         kind: cat.kind.clone(),
         is_primary: cat.is_primary,
         secret_ref: cat.secret_ref,
-        config: redact_catalog_config(&cat.kind, cat.config.clone()),
+        config: redact_catalog_config(cat.config.clone()),
     }))
 }
 
@@ -4816,9 +4879,12 @@ async fn update_catalog(
 
     // Persist the new config, then re-provision. If re-provisioning fails, restore
     // the previous config/secret so the stored row never leads the running cluster.
+    // The form echoes what GET returned; keep stored values the admin left masked.
+    let mut config = b.config.clone();
+    restore_redacted_properties(&mut config, &prev.config);
     let updated = st
         .engine_mgmt
-        .update_engine_catalog(cid, &b.config, b.secret_ref)
+        .update_engine_catalog(cid, &config, b.secret_ref)
         .await?
         .ok_or(CpError::NotFound)?;
 
@@ -5546,13 +5612,109 @@ mod tests {
             "warehouse": "wh1", "s3_endpoint": "http://minio:9000",
             "credential": "id:secret", "clientRowId": "abc"
         });
-        let out = redact_catalog_config("egret-warehouse", cfg);
+        let out = redact_catalog_config(cfg);
         assert!(out.get("credential").is_none());
         assert!(out.get("clientRowId").is_none());
         assert_eq!(out["warehouse"], "wh1");
-        // Non-warehouse kinds pass through untouched.
-        let pg = serde_json::json!({"host": "db", "user": "u"});
-        assert_eq!(redact_catalog_config("postgresql", pg.clone()), pg);
+    }
+
+    #[test]
+    fn redact_masks_inline_secrets_for_every_kind() {
+        let cfg = serde_json::json!({
+            "host": "db", "user": "u", "password": "legacy-top-level",
+            "properties": {
+                "connection-url": "jdbc:postgresql://db:5432/x",
+                "connection-user": "u",
+                "connection-password": "hunter2",
+                "iceberg.rest-catalog.oauth2.token": "t0k",
+                "s3.aws-access-key": "AKIA",
+                "s3.aws-secret-key": "shh",
+                "bigquery.credentials-key": "json",
+                "gcs.json-private.key": "pem",
+                "hive.s3.accesskey": "AKIA2",
+                "tokenless-setting": "kept? no — contains token"
+            },
+            "secretProperties": { "connection-password": "0b3f5c0e-1111-4222-8333-944455556666" }
+        });
+        let out = redact_catalog_config(cfg);
+        assert_eq!(out["password"], REDACTED_VALUE);
+        assert_eq!(out["host"], "db");
+        assert_eq!(out["user"], "u");
+        let p = &out["properties"];
+        assert_eq!(p["connection-url"], "jdbc:postgresql://db:5432/x");
+        assert_eq!(p["connection-user"], "u");
+        for k in [
+            "connection-password",
+            "iceberg.rest-catalog.oauth2.token",
+            "s3.aws-access-key",
+            "s3.aws-secret-key",
+            "bigquery.credentials-key",
+            "gcs.json-private.key",
+            "hive.s3.accesskey",
+            "tokenless-setting",
+        ] {
+            assert_eq!(p[k], REDACTED_VALUE, "{k} must be masked");
+        }
+        // secretProperties maps a property to a secret ID, not to secret
+        // material; masking it would unbind the secret on the next save.
+        assert_eq!(
+            out["secretProperties"]["connection-password"],
+            "0b3f5c0e-1111-4222-8333-944455556666"
+        );
+    }
+
+    #[test]
+    fn sensitive_key_matcher_follows_the_spec_pattern() {
+        for k in [
+            "PASSWORD",
+            "x.Secret",
+            "oauth-token",
+            "credentials",
+            "private_key",
+            "privatekey",
+            "private.key",
+            "private-key",
+            "access_key",
+            "accesskey",
+        ] {
+            assert!(is_sensitive_config_key(k), "{k} should match");
+        }
+        for k in [
+            "connection-url",
+            "user",
+            "host",
+            "private--key",
+            "keyaccess",
+            "properties",
+        ] {
+            assert!(!is_sensitive_config_key(k), "{k} should not match");
+        }
+    }
+
+    #[test]
+    fn restore_redacted_properties_puts_back_only_masked_sensitive_values() {
+        let stored = serde_json::json!({
+            "password": "old-top",
+            "properties": { "connection-password": "hunter2", "connection-user": "u" }
+        });
+        let mut incoming = serde_json::json!({
+            "password": REDACTED_VALUE,
+            "properties": {
+                "connection-password": REDACTED_VALUE,
+                "connection-user": "u2",
+                "api-token": REDACTED_VALUE
+            }
+        });
+        restore_redacted_properties(&mut incoming, &stored);
+        assert_eq!(incoming["password"], "old-top");
+        assert_eq!(incoming["properties"]["connection-password"], "hunter2");
+        assert_eq!(incoming["properties"]["connection-user"], "u2");
+        // Nothing stored to restore from: the mask stays as typed.
+        assert_eq!(incoming["properties"]["api-token"], REDACTED_VALUE);
+        // A NEW value replaces the stored one.
+        let mut changed = serde_json::json!({ "properties": { "connection-password": "new" } });
+        restore_redacted_properties(&mut changed, &stored);
+        assert_eq!(changed["properties"]["connection-password"], "new");
     }
 
     // ── build_starrocks_spec: omitted-field-preserves + delegation rule ─────
