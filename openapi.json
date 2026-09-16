@@ -2773,7 +2773,7 @@
             }
           },
           "409": {
-            "description": "An engine with this name already exists",
+            "description": "An engine with this name already exists, or its same-name policy profile is bound to another engine",
             "content": {
               "application/json": {
                 "schema": {

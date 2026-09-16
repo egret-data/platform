@@ -2502,6 +2502,132 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
     }
 }
 
+/// How a new Trino engine gets its Ranger profile — decided before anything is
+/// minted, so a conflict is a clean 409.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProfilePlan {
+    /// No binding: Ranger is disabled and no valid profile was chosen. Trino
+    /// defaults to allow-all, which is what delegated impersonation needs there.
+    Unbound,
+    /// Bind to a profile that already exists (chosen, or an orphan left by a
+    /// deleted same-name engine). Compensation never deletes it.
+    Existing(i64),
+    /// Create `<name>` (trino) and `<name>_tag` (tag) during the create.
+    Create,
+}
+
+/// Decide the profile for a Trino create named `name`.
+async fn plan_trino_profile(
+    st: &CpState,
+    name: &str,
+    requested: Option<i64>,
+) -> Result<ProfilePlan, CpError> {
+    if let Some(sid) = requested {
+        let services = st
+            .authz
+            .list_services()
+            .await
+            .map_err(|e| CpError::BadRequest(format!("list policy profiles: {e}")))?;
+        if services.iter().any(|s| s.id == sid) {
+            return Ok(ProfilePlan::Existing(sid));
+        }
+        tracing::warn!(sid, "authz_service_id not found");
+    }
+    if !st.ranger_enabled {
+        tracing::info!(
+            engine = %name,
+            "ranger disabled; Trino engine provisioned without Ranger access-control (allow-all)"
+        );
+        return Ok(ProfilePlan::Unbound);
+    }
+    match st
+        .authz
+        .get_service_opt(name)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("resolve policy profile: {e}")))?
+    {
+        None => Ok(ProfilePlan::Create),
+        Some(svc) if svc.r#type != "trino" => Err(CpError::Conflict(format!(
+            "a policy profile named {name} already exists with type {}",
+            svc.r#type
+        ))),
+        Some(svc) => match st
+            .engine_mgmt
+            .count_engines_bound_to_authz_service(svc.id)
+            .await?
+        {
+            0 => Ok(ProfilePlan::Existing(svc.id)),
+            bound => Err(CpError::Conflict(format!(
+                "policy profile {name} is already bound to {bound} other engine(s)"
+            ))),
+        },
+    }
+}
+
+/// Carry out a [`ProfilePlan`] for the new engine row, recording anything it
+/// creates in `undo`.
+async fn bind_trino_profile(
+    st: &CpState,
+    engine_id: Uuid,
+    name: &str,
+    plan: &ProfilePlan,
+    undo: &mut CreateUndo,
+) -> Result<(), CpError> {
+    let profile_id = match plan {
+        ProfilePlan::Unbound => return Ok(()),
+        ProfilePlan::Existing(id) => *id,
+        ProfilePlan::Create => {
+            st.authz
+                .ensure_trino_def()
+                .await
+                .map_err(|e| CpError::BadRequest(format!("seed trino service-def: {e}")))?;
+            // A TAG service alongside the trino profile (Access P3.2), linked by
+            // the profile's `tagService` config, so tag-based masking/row-filter
+            // policies have a service. Best-effort: the profile works untagged.
+            let tag_service_name = format!("{name}_tag");
+            if let Err(e) = st.authz.ensure_tag_def().await {
+                tracing::warn!(error = %e, "ensure_tag_def failed during auto-bind");
+            }
+            let tag_wired = match st
+                .authz
+                .create_service(&tag_service_name, "tag", &serde_json::json!({}))
+                .await
+            {
+                Ok(svc) => {
+                    undo.created_tag_service_id = Some(svc.id);
+                    true
+                }
+                // Left by a deleted same-name engine: reuse, never delete.
+                Err(egret_policy_api::PolicyError::AlreadyExists(_)) => true,
+                Err(e) => {
+                    tracing::warn!(error = %e, "create tag service failed during auto-bind");
+                    false
+                }
+            };
+            let config = if tag_wired {
+                serde_json::json!({ "tagService": tag_service_name })
+            } else {
+                serde_json::json!({})
+            };
+            let svc = match st.authz.create_service(name, "trino", &config).await {
+                Ok(svc) => svc,
+                Err(egret_policy_api::PolicyError::AlreadyExists(_)) => {
+                    return Err(CpError::Conflict(format!(
+                        "policy profile {name} was created concurrently; retry the create"
+                    )))
+                }
+                Err(e) => return Err(CpError::BadRequest(format!("create policy profile: {e}"))),
+            };
+            undo.created_profile_id = Some(svc.id);
+            svc.id
+        }
+    };
+    st.engine_mgmt
+        .set_engine_authz_service(engine_id, Some(profile_id))
+        .await?;
+    Ok(())
+}
+
 #[utoipa::path(
     post,
     path = "/api/control-plane/engines",
@@ -2512,7 +2638,7 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
         (status = 400, description = "Unknown/unprovisioned warehouse, invalid input, or provisioning failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:create permission", body = ErrorBody),
-        (status = 409, description = "An engine with this name already exists", body = ErrorBody),
+        (status = 409, description = "An engine with this name already exists, or its same-name policy profile is bound to another engine", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -2677,6 +2803,10 @@ async fn create_engine(
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
 
+    // Decide the Ranger profile BEFORE minting anything: a same-name profile
+    // bound to another engine is a 409 with nothing to roll back.
+    let profile_plan = plan_trino_profile(&st, &b.name, b.authz_service_id).await?;
+
     // 5. Auto-wire: mint a fresh Catalog Client for the warehouse. Minted only
     //    AFTER delegation resolves (step 3) and the spec validates (step 4), so
     //    neither a resolver 400 nor a resource-group 400 leaks a client. From
@@ -2742,7 +2872,25 @@ async fn create_engine(
         return Err(e.into());
     }
 
-    // 8. Build from the stored engine + catalogs and provision.
+    // 8. Bind the Ranger profile BEFORE the first provision, so a governed
+    //    engine never runs unbound (allow-all) — not even between two applies.
+    if let Err(e) = bind_trino_profile(&st, engine.id, &b.name, &profile_plan, &mut undo).await {
+        compensate_failed_create(&st, undo).await;
+        return Err(e);
+    }
+    let engine = match st.engine_mgmt.get_engine(engine.id).await {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            compensate_failed_create(&st, undo).await;
+            return Err(CpError::NotFound);
+        }
+        Err(e) => {
+            compensate_failed_create(&st, undo).await;
+            return Err(e.into());
+        }
+    };
+
+    // 9. Build from the stored (bound) engine + catalogs and provision once.
     let built = match build_provision_req(&st, &engine).await {
         Ok(built) => built,
         Err(e) => {
@@ -2760,124 +2908,6 @@ async fn create_engine(
         return Err(CpError::BadRequest(format!(
             "engine provisioning failed: {msg}"
         )));
-    }
-
-    // 9. Auto-bind the engine to a Ranger policy profile: link the admin-chosen
-    // existing service, or create a fresh one named after the engine. Runs ONLY
-    // here on the success path — after provisioning succeeded and every rollback
-    // path above is passed — so a failed provision never creates an orphan
-    // profile and a same-name retry stays clean. Best-effort: a binding failure
-    // must not fail provisioning (the engine still works; the admin can relink
-    // later), so we log and continue.
-    let profile_id: Option<i64> = match b.authz_service_id {
-        Some(sid) => match st.authz.list_services().await {
-            Ok(svcs) if svcs.iter().any(|s| s.id == sid) => Some(sid),
-            Ok(_) => {
-                tracing::warn!(sid, "authz_service_id not found; leaving engine unlinked");
-                None
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "list_services failed during auto-bind");
-                None
-            }
-        },
-        // No admin-chosen service. Auto-create a fresh Ranger profile ONLY when
-        // the platform Ranger integration is enabled. When it is off (the
-        // default), leave the engine UNBOUND: the provisioner then writes no
-        // `access-control.properties`, Trino defaults to allow-all, and per-user
-        // delegated impersonation queries work (a Ranger-bound-but-unpolicied
-        // Trino denies `egret_delegator` becoming the target user).
-        None if !st.ranger_enabled => {
-            tracing::info!(
-                engine = %b.name,
-                "ranger disabled; Trino engine provisioned without Ranger access-control (allow-all)"
-            );
-            None
-        }
-        None => {
-            if let Err(e) = st.authz.ensure_trino_def().await {
-                tracing::warn!(error = %e, "ensure_trino_def failed during auto-bind");
-            }
-            // Provision a TAG service alongside the trino profile (Access P3.2),
-            // one tag service per trino profile, so tag-based masking/row-filter
-            // policies can exist and `download_tags` has a service to serve. The
-            // trino profile's config carries `tagService = <name>_tag`, the
-            // standard Ranger field linking a resource service to its tag service.
-            //
-            // LIVE-ONLY: the `tagService` config key + any `ranger.plugin.tag.*`
-            // download wiring are validated against the real Ranger tag plugin at
-            // runtime, NOT in CI. If the plugin doesn't pick up tags, THIS is the
-            // tuning spot. Best-effort like the rest of auto-bind: a failure here
-            // never fails provisioning (the profile still works untagged).
-            let tag_service_name = format!("{}_tag", b.name);
-            let tag_wired = {
-                if let Err(e) = st.authz.ensure_tag_def().await {
-                    tracing::warn!(error = %e, "ensure_tag_def failed during auto-bind");
-                }
-                match st
-                    .authz
-                    .create_service(&tag_service_name, "tag", &serde_json::json!({}))
-                    .await
-                {
-                    Ok(_) => true,
-                    // A same-name tag service already exists (retry) — still wire it.
-                    Err(egret_policy_api::PolicyError::AlreadyExists(_)) => true,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "create tag service failed during auto-bind");
-                        false
-                    }
-                }
-            };
-            let trino_config = if tag_wired {
-                serde_json::json!({ "tagService": tag_service_name })
-            } else {
-                serde_json::json!({})
-            };
-            match st
-                .authz
-                .create_service(&b.name, "trino", &trino_config)
-                .await
-            {
-                Ok(svc) => Some(svc.id),
-                Err(e) => {
-                    tracing::warn!(error = %e, "create_service failed during auto-bind");
-                    None
-                }
-            }
-        }
-    };
-    if let Some(pid) = profile_id {
-        if let Err(e) = st
-            .engine_mgmt
-            .set_engine_authz_service(engine.id, Some(pid))
-            .await
-        {
-            tracing::warn!(error = %e, "set_engine_authz_service failed during auto-bind");
-        } else {
-            // Re-provision now that the engine is bound. The first `provision`
-            // above ran BEFORE auto-bind set `authz_service_id`, so its spec had
-            // no `RangerBinding` → the pod got no `access-control.properties`.
-            // `build_provision_req` reads `authz_service_id`, so re-building here
-            // and `update`-ing lands the Ranger plugin config (Access P3.2). Best
-            // effort: a failure leaves a working-but-unenforced engine an admin
-            // can re-provision. Refetch to pick up the freshly-set binding.
-            match st.engine_mgmt.get_engine(engine.id).await {
-                Ok(Some(bound)) => match build_provision_req(&st, &bound).await {
-                    Ok(built2) => {
-                        if let Err(msg) =
-                            apply_built(&st, prov.as_ref(), &bound, &built2, ApplyOp::Update).await
-                        {
-                            tracing::warn!(engine = %bound.name, %msg,
-                                "re-provision after auto-bind failed; engine unenforced until next update");
-                        }
-                    }
-                    Err(e) => tracing::warn!(error = ?e,
-                        "rebuild provision req after auto-bind failed"),
-                },
-                Ok(None) => {}
-                Err(e) => tracing::warn!(error = %e, "refetch engine after auto-bind failed"),
-            }
-        }
     }
 
     Ok((StatusCode::CREATED, Json(engine.into())))

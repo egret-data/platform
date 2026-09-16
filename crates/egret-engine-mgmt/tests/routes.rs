@@ -4703,3 +4703,163 @@ async fn invalid_resource_groups_and_unconfigured_kubernetes_leak_nothing() {
         "no StarRocks client minted without kubernetes configured"
     );
 }
+
+async fn authz_service_of(f: &Fixture, name: &str) -> Option<i64> {
+    sqlx::query_scalar("SELECT authz_service_id FROM engine_mgmt.engines WHERE name = $1")
+        .bind(name)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("engine row")
+}
+
+/// D9 regression: re-creating an engine whose same-name profile survived (no
+/// engine bound) reuses that profile, and the FIRST provision is already bound —
+/// never an allow-all window.
+#[tokio::test]
+async fn recreate_with_same_name_binds_the_orphan_profile_before_provisioning() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_d9_orphan_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    egret_policy_api::PolicyPort::ensure_trino_def(&policy)
+        .await
+        .unwrap();
+    let orphan = egret_policy_api::PolicyPort::create_service(
+        &policy,
+        &name,
+        "trino",
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "body={j}");
+    assert_eq!(authz_service_of(&f, &name).await, Some(orphan.id));
+    let provisioned = port.provisioned.lock().unwrap().clone();
+    assert_eq!(provisioned.len(), 1, "one provision, no unbound first pass");
+    assert_eq!(
+        provisioned[0]
+            .ranger
+            .as_ref()
+            .map(|r| r.service_name.clone()),
+        Some(name.clone())
+    );
+}
+
+/// D9: a same-name profile already bound to another engine is a 409 before
+/// anything is minted.
+#[tokio::test]
+async fn create_whose_profile_is_bound_elsewhere_is_409_and_mints_nothing() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_d9_bound_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    egret_policy_api::PolicyPort::ensure_trino_def(&policy)
+        .await
+        .unwrap();
+    let profile = egret_policy_api::PolicyPort::create_service(
+        &policy,
+        &name,
+        "trino",
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let other = format!("trino-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": other, "warehouseId": wh_id, "authzServiceId": profile.id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(authz_service_of(&f, &other).await, Some(profile.id));
+    let provisions_before = port.provisioned.lock().unwrap().len();
+
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM engine_mgmt.engines WHERE name = $1)")
+            .bind(&name)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert!(!exists);
+    let clients = egret_catalog_engine::CatalogStore::new(f.db.clone())
+        .list_clients(wh_id)
+        .await
+        .unwrap();
+    assert!(!clients.iter().any(|c| c.name == format!("engine-{name}")));
+    assert_eq!(port.provisioned.lock().unwrap().len(), provisions_before);
+}
+
+/// D9 + P2: a create that auto-created its profile removes it again on failure.
+#[tokio::test]
+async fn failed_create_removes_the_profile_it_created() {
+    let port = FakeEnginePort::default();
+    port.set_fail_provision(true);
+    let Some(f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_d9_undo_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert!(
+        port.last_provisioned().ranger.is_some(),
+        "the attempted provision was already bound"
+    );
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    assert!(
+        egret_policy_api::PolicyPort::get_service_opt(&policy, &name)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        egret_policy_api::PolicyPort::get_service_opt(&policy, &format!("{name}_tag"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

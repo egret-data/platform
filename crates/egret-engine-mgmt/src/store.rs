@@ -314,6 +314,19 @@ impl EngineMgmtStore {
         Ok(())
     }
 
+    /// How many engines are bound to a Ranger profile.
+    pub async fn count_engines_bound_to_authz_service(
+        &self,
+        service_id: i64,
+    ) -> Result<i64, EngineMgmtError> {
+        Ok(sqlx::query_scalar(
+            "SELECT count(*) FROM engine_mgmt.engines WHERE authz_service_id = $1",
+        )
+        .bind(service_id)
+        .fetch_one(self.pool())
+        .await?)
+    }
+
     /// Persist the generated delegator secret id for an engine (idempotent bookkeeping).
     pub async fn set_delegator_secret(
         &self,
