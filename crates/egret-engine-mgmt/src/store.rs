@@ -37,6 +37,12 @@ pub struct Engine {
     pub tls_secret_id: Option<Uuid>,
     pub coordinator_cert: Option<String>,
     pub tls_cert_secret_ref: Option<Uuid>,
+    /// Named secret holding `TRINO_INTERNAL_SECRET`, as last applied. `None`:
+    /// the pods still carry the legacy id-derived value.
+    pub internal_secret_id: Option<Uuid>,
+    /// Named secret holding the `egret-monitor` password, as last applied.
+    /// `None`: the pods still carry the legacy id-derived value.
+    pub monitor_secret_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -197,7 +203,7 @@ impl EngineMgmtStore {
     ) -> Result<Engine, EngineMgmtError> {
         sqlx::query_as::<_, Engine>(
             "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, tls_cert_secret_ref) VALUES ($1,$2,$3,$4,$5,$6) \
-             RETURNING id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, created_at",
+             RETURNING id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at",
         )
         .bind(name)
         .bind(r#type)
@@ -217,7 +223,7 @@ impl EngineMgmtStore {
 
     pub async fn list_engines(&self) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, created_at \
+            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at \
              FROM engine_mgmt.engines ORDER BY created_at",
         )
         .fetch_all(self.pool())
@@ -226,7 +232,7 @@ impl EngineMgmtStore {
 
     pub async fn get_engine(&self, id: Uuid) -> Result<Option<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, created_at \
+            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at \
              FROM engine_mgmt.engines WHERE id = $1",
         )
         .bind(id)
@@ -333,6 +339,24 @@ impl EngineMgmtStore {
         .bind(engine_id)
         .bind(secret_id)
         .bind(cert_pem)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Record the internal/monitor secrets the last successful apply rendered.
+    pub async fn set_internal_secret_ids(
+        &self,
+        engine_id: Uuid,
+        internal_secret_id: Uuid,
+        monitor_secret_id: Uuid,
+    ) -> Result<(), EngineMgmtError> {
+        sqlx::query(
+            "UPDATE engine_mgmt.engines SET internal_secret_id = $2, monitor_secret_id = $3 WHERE id = $1",
+        )
+        .bind(engine_id)
+        .bind(internal_secret_id)
+        .bind(monitor_secret_id)
         .execute(self.pool())
         .await?;
         Ok(())
@@ -519,7 +543,7 @@ impl EngineMgmtStore {
         workspace_id: Uuid,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT e.id, e.name, e.type, e.namespace, e.warehouse_id, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.created_at \
+            "SELECT e.id, e.name, e.type, e.namespace, e.warehouse_id, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at \
              FROM engine_mgmt.engines e JOIN engine_mgmt.engine_workspaces ew ON ew.engine_id = e.id \
              WHERE ew.workspace_id = $1 ORDER BY e.name",
         )
@@ -549,6 +573,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         };
         assert_eq!(e.delegation_mode(), "impersonate");
@@ -572,6 +598,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         };
         assert_eq!(e.delegation_mode(), "jwt");
@@ -595,6 +623,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         };
         assert!(e.is_jwt_delegation());
@@ -620,6 +650,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -654,6 +686,8 @@ mod tests {
             tls_secret_id: None,
             coordinator_cert: None,
             tls_cert_secret_ref: None,
+            internal_secret_id: None,
+            monitor_secret_id: None,
             created_at: chrono::Utc::now(),
         };
         assert_eq!(e.coordinator_host(), "trino1-trino.engines.svc");

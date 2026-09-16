@@ -316,6 +316,8 @@ fn coordinator_host_and_jwt_check() {
         tls_secret_id: None,
         coordinator_cert: None,
         tls_cert_secret_ref: None,
+        internal_secret_id: None,
+        monitor_secret_id: None,
         created_at: chrono::Utc::now(),
     };
     assert_eq!(e.coordinator_host(), "trino-prod-trino.engines.svc");
@@ -390,4 +392,37 @@ async fn engine_status_is_constrained_and_transitions_only_from_the_expected_val
         engine_mgmt.get_engine(e.id).await.unwrap().unwrap().status,
         "deleting"
     );
+}
+
+#[tokio::test]
+async fn internal_secret_ids_round_trip_on_the_engine_row() {
+    let Some((catalog, engine_mgmt)) = stores().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let (wh_id, _) = seed_warehouse(&catalog, "isec").await;
+    let e = engine_mgmt
+        .create_engine(
+            &format!("isec-{}", Uuid::new_v4().simple()),
+            "trino",
+            "egret-engines",
+            wh_id,
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(e.internal_secret_id.is_none() && e.monitor_secret_id.is_none());
+
+    let (internal, monitor) = (Uuid::new_v4(), Uuid::new_v4());
+    engine_mgmt
+        .set_internal_secret_ids(e.id, internal, monitor)
+        .await
+        .unwrap();
+    let got = engine_mgmt.get_engine(e.id).await.unwrap().unwrap();
+    assert_eq!(got.internal_secret_id, Some(internal));
+    assert_eq!(got.monitor_secret_id, Some(monitor));
+    let listed = engine_mgmt.list_engines().await.unwrap();
+    let row = listed.iter().find(|x| x.id == e.id).expect("listed");
+    assert_eq!(row.monitor_secret_id, Some(monitor));
 }

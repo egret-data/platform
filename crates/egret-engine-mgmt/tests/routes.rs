@@ -1522,6 +1522,19 @@ fn secret_store(f: &Fixture) -> egret_secrets::WorkspaceSecretStore {
     )
 }
 
+/// `(internal_secret_id, monitor_secret_id)` straight off the engine row.
+// Unused until Task 7 wires the setter up; remove this attribute then.
+#[allow(dead_code)]
+async fn engine_secret_ids(f: &Fixture, engine_id: Uuid) -> (Option<Uuid>, Option<Uuid>) {
+    sqlx::query_as(
+        "SELECT internal_secret_id, monitor_secret_id FROM engine_mgmt.engines WHERE id = $1",
+    )
+    .bind(engine_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("engine secret ids")
+}
+
 /// `POST /engines` for a Trino engine with the wizard defaults and the given
 /// `trinoConfig`; returns the status and body.
 async fn create_engine_via_api(
