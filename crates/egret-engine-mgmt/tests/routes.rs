@@ -4889,9 +4889,13 @@ async fn failed_create_removes_the_profile_it_created() {
     let name = format!("trino-{}", Uuid::new_v4().simple());
     let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
-    assert!(
-        port.last_provisioned().ranger.is_some(),
-        "the attempted provision was already bound"
+    assert_eq!(
+        port.last_provisioned()
+            .ranger
+            .as_ref()
+            .map(|r| r.service_name.clone()),
+        Some(name.clone()),
+        "the attempted provision was already bound to THIS engine's own profile"
     );
     let policy = egret_policy::PolicyStore::new(f.db.clone());
     assert!(
