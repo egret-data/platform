@@ -4165,6 +4165,20 @@ async fn update_engine(
             "update not supported for this engine kind".into(),
         ));
     }
+    update_trino_engine(st, engine, b).await
+}
+
+/// Trino update path, split out from [`update_engine`] (which only does the
+/// auth check, the fetch, and the type dispatch) so it takes the `Engine` it
+/// was dispatched with directly — the same shape [`update_starrocks_engine`]
+/// already has — and can be driven in a test with a snapshot read before a
+/// simulated concurrent change, without needing true task interleaving.
+async fn update_trino_engine(
+    st: CpState,
+    engine: Engine,
+    b: CreateEngineBody,
+) -> Result<Json<EngineDto>, CpError> {
+    let id = engine.id;
     // An update is only meaningful if it can be applied: refuse BEFORE
     // persisting, so the stored spec never runs ahead of the cluster.
     let Some(prov) = st.engine_provisioner.clone() else {
@@ -7938,6 +7952,81 @@ mod tests {
             ..Default::default()
         }));
         let err = update_starrocks_engine(st.clone(), engine.clone(), body)
+            .await
+            .err()
+            .expect("a lost race must surface as an error, not a silent 200");
+        assert!(matches!(err, CpError::Conflict(_)), "got {err:?}");
+        assert!(
+            err.to_string().contains("retry"),
+            "message should tell the caller to retry; got {err}"
+        );
+
+        let reloaded = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.spec, engine.spec, "stored spec untouched");
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the provisioner must never be called on a lost race"
+        );
+    }
+
+    /// Trino counterpart of `update_starrocks_engine_conflict_stops_before_the_provisioner`
+    /// above, through `update_trino_engine` (the ordering is separately written
+    /// code for the two engine kinds, so it needs its own regression guard): a
+    /// PUT whose `Engine` snapshot was read before a concurrent status change
+    /// (simulated with a direct `set_engine_status` between the seed and the
+    /// call) must 409 BEFORE touching the provisioner at all.
+    #[tokio::test]
+    async fn update_trino_engine_conflict_stops_before_the_provisioner() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping update_trino_engine_conflict_stops_before_the_provisioner: DATABASE_URL not set"
+            );
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        st.engine_provisioner = Some(counting.clone());
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                DEFAULT_NAMESPACE,
+                wh.id,
+                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+
+        // Simulate a concurrent change (e.g. a delete) that landed after this
+        // handler call's `Engine` was already read.
+        st.engine_mgmt
+            .set_engine_status(engine.id, crate::engine_status::DELETING)
+            .await
+            .unwrap();
+
+        let body = CreateEngineBody {
+            name: engine.name.clone(),
+            warehouse_id: wh.id,
+            image_version: None,
+            coordinator_replicas: 2,
+            worker_replicas: 5,
+            cpu_min: "1".into(),
+            cpu_max: "2".into(),
+            memory: "4Gi".into(),
+            trino_config: None,
+            authz_service_id: None,
+            kind: "trino".into(),
+            starrocks: None,
+            tls_cert_secret_ref: None,
+        };
+        let err = update_trino_engine(st.clone(), engine.clone(), body)
             .await
             .err()
             .expect("a lost race must surface as an error, not a silent 200");
