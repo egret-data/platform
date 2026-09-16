@@ -4289,6 +4289,92 @@
         }
       }
     },
+    "/api/control-plane/engines/{id}/rotate-secrets": {
+      "post": {
+        "tags": [
+          "control-plane-engines"
+        ],
+        "summary": "`POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication\nsecret and `egret-monitor` password and re-apply the engine (pods roll). The\nold values stay in force, and on the row, unless the apply succeeds.",
+        "operationId": "rotate_engine_secrets",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "New internal secrets applied; the engine's pods restart"
+          },
+          "400": {
+            "description": "Not a Trino engine, or Kubernetes not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing engine:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Kubernetes rejected the apply; the previous secrets stay in force",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/engines/{id}/workspaces": {
       "get": {
         "tags": [

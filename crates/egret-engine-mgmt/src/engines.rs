@@ -106,6 +106,7 @@ pub fn router() -> Router<CpState> {
         .route("/engines/{id}/pods/{pod}/logs/follow", get(pod_logs_follow))
         .route("/engines/{id}/pods/{pod}/exec", get(pod_exec))
         .route("/engines/{id}/restart", post(restart_engine))
+        .route("/engines/{id}/rotate-secrets", post(rotate_engine_secrets))
         // Engine↔workspace assignment (P1): list + set-full-assignment-set.
         .route(
             "/engines/{id}/workspaces",
@@ -4414,6 +4415,61 @@ async fn restart_engine(
     Ok(StatusCode::OK)
 }
 
+/// `POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication
+/// secret and `egret-monitor` password and re-apply the engine (pods roll). The
+/// old values stay in force, and on the row, unless the apply succeeds.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/engines/{id}/rotate-secrets",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 204, description = "New internal secrets applied; the engine's pods restart"),
+        (status = 400, description = "Not a Trino engine, or Kubernetes not configured", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 502, description = "Kubernetes rejected the apply; the previous secrets stay in force", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn rotate_engine_secrets(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    // Only Trino has these two secrets; StarRocks' analogues (root and
+    // delegator passwords) are separate and not rotated here.
+    if engine.r#type != "trino" {
+        return Err(CpError::BadRequest(format!(
+            "rotating internal secrets is not supported for {} engines",
+            engine.r#type
+        )));
+    }
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    let built = build_provision_req_with(
+        &st,
+        &engine,
+        BuildOpts {
+            rotate_internal_secrets: true,
+            ..BuildOpts::default()
+        },
+    )
+    .await?;
+    apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update)
+        .await
+        .map_err(CpError::ClusterApplyFailed)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── engine ↔ workspace assignment ────────────────────────────────────────────────
 
 /// A workspace an engine is assigned to (CP `…/workspaces` list payload).
@@ -5639,6 +5695,7 @@ async fn bridge_exec(
         update_engine,
         delete_engine,
         restart_engine,
+        rotate_engine_secrets,
         list_engine_workspaces,
         set_engine_workspaces,
         list_workspace_engines,

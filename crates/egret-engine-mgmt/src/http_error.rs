@@ -47,6 +47,10 @@ pub enum EngineHttpError {
     /// stays `deleting` and the delete can be retried. 502 with the cause.
     #[error("engine cluster delete failed: {0}")]
     ClusterDeleteFailed(String),
+    /// Kubernetes rejected (or never answered) an apply of an engine's rendered
+    /// spec. The stored state was restored; the cause is surfaced verbatim.
+    #[error("engine cluster apply failed: {0}")]
+    ClusterApplyFailed(String),
     #[error("internal error")]
     Internal,
 }
@@ -189,6 +193,11 @@ impl IntoResponse for EngineHttpError {
             EngineHttpError::ClusterDeleteFailed(_) => (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({ "error": msg, "code": "engine_cluster_delete_failed" })),
+            )
+                .into_response(),
+            EngineHttpError::ClusterApplyFailed(_) => (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": msg, "code": "engine_cluster_apply_failed" })),
             )
                 .into_response(),
             EngineHttpError::Forbidden => error_json(StatusCode::FORBIDDEN, msg),

@@ -4042,3 +4042,165 @@ async fn get_engine_records_running_and_leaves_deleting_alone() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(stored_status(&f, &id2).await, "deleting");
 }
+
+/// Rotate: `apply_built` commits the pending pair on BOTH the success and the
+/// failure path (Task 7's reviewed decision — never delete a value the cluster
+/// may already hold), so even a failed apply replaces the row's ids and drops
+/// the pair it superseded; a successful apply then renders the newest values.
+/// Non-Trino → 400, unknown → 404.
+#[tokio::test]
+async fn rotate_secrets_replaces_both_values_only_on_a_successful_apply() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_rotate_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let secrets = secret_store(&f);
+    let (old_internal_id, old_monitor_id) = engine_secret_ids(&f, id).await;
+    let (old_internal_id, old_monitor_id) = (old_internal_id.unwrap(), old_monitor_id.unwrap());
+    let old_internal = secrets
+        .resolve_plaintext(None, old_internal_id)
+        .await
+        .unwrap();
+    let old_monitor = secrets
+        .resolve_plaintext(None, old_monitor_id)
+        .await
+        .unwrap();
+    let rotate = || {
+        req(
+            "POST",
+            &format!("/engines/{id}/rotate-secrets"),
+            &token,
+            None,
+        )
+    };
+
+    port.set_fail_update(true);
+    let (status, j) = into_json(f.app.clone().oneshot(rotate()).await.unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "body={j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap()
+            .contains("injected update failure"),
+        "body={j}"
+    );
+    // The failed apply still committed the pair it attempted to hand the
+    // cluster and deleted the one it superseded — apply_built never discards
+    // on a failure, only on a pre-apply build error.
+    let (failed_internal_id, failed_monitor_id) = engine_secret_ids(&f, id).await;
+    let (failed_internal_id, failed_monitor_id) =
+        (failed_internal_id.unwrap(), failed_monitor_id.unwrap());
+    assert_ne!(failed_internal_id, old_internal_id);
+    assert_ne!(failed_monitor_id, old_monitor_id);
+    assert_eq!(
+        internal_secret_names(&f, id).await.len(),
+        2,
+        "old pair superseded, not left behind"
+    );
+    assert!(matches!(
+        secrets.resolve_plaintext(None, old_internal_id).await,
+        Err(egret_secrets::SecretsError::NotFound)
+    ));
+    assert!(matches!(
+        secrets.resolve_plaintext(None, old_monitor_id).await,
+        Err(egret_secrets::SecretsError::NotFound)
+    ));
+
+    port.set_fail_update(false);
+    let resp = f.app.clone().oneshot(rotate()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let (new_internal_id, new_monitor_id) = engine_secret_ids(&f, id).await;
+    let (new_internal_id, new_monitor_id) = (new_internal_id.unwrap(), new_monitor_id.unwrap());
+    assert_ne!(new_internal_id, old_internal_id);
+    assert_ne!(new_monitor_id, old_monitor_id);
+    assert_ne!(new_internal_id, failed_internal_id);
+    assert_ne!(new_monitor_id, failed_monitor_id);
+    let new_internal = secrets
+        .resolve_plaintext(None, new_internal_id)
+        .await
+        .unwrap();
+    let new_monitor = secrets
+        .resolve_plaintext(None, new_monitor_id)
+        .await
+        .unwrap();
+    assert_ne!(new_internal, old_internal);
+
+    let spec = port.last_updated();
+    assert_eq!(rendered_internal_secret(&spec), new_internal);
+    let hash = monitor_hash(&spec);
+    // bcrypt salts every hash, so "the hash changed" proves nothing; verify.
+    assert!(bcrypt::verify(&new_monitor, &hash).unwrap());
+    assert!(!bcrypt::verify(&old_monitor, &hash).unwrap());
+    assert!(matches!(
+        secrets.resolve_plaintext(None, old_internal_id).await,
+        Err(egret_secrets::SecretsError::NotFound)
+    ));
+    assert!(matches!(
+        secrets.resolve_plaintext(None, old_monitor_id).await,
+        Err(egret_secrets::SecretsError::NotFound)
+    ));
+    assert!(matches!(
+        secrets.resolve_plaintext(None, failed_internal_id).await,
+        Err(egret_secrets::SecretsError::NotFound)
+    ));
+    assert!(matches!(
+        secrets.resolve_plaintext(None, failed_monitor_id).await,
+        Err(egret_secrets::SecretsError::NotFound)
+    ));
+    assert_eq!(internal_secret_names(&f, id).await.len(), 2);
+
+    let sr = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .create_engine(
+            &format!("sr-{}", Uuid::new_v4().simple()),
+            "starrocks",
+            "egret-engines",
+            wh_id,
+            &serde_json::json!({ "starrocksConfig": {} }),
+            None,
+        )
+        .await
+        .unwrap();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{}/rotate-secrets", sr.id),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{}/rotate-secrets", Uuid::new_v4()),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

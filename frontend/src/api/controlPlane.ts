@@ -69,6 +69,7 @@ import {
   controlPlaneEnginesPodLogs,
   controlPlaneEnginesRemoveCatalog,
   controlPlaneEnginesRestartEngine,
+  controlPlaneEnginesRotateEngineSecrets,
   controlPlaneEnginesTestCatalog,
   controlPlaneEnginesUpdateCatalog,
   controlPlaneEnginesUpdateEngine,
@@ -914,6 +915,14 @@ export async function deleteEngine(id: string): Promise<void> {
 
 export async function restartEngine(id: string): Promise<void> {
   await controlPlaneEnginesRestartEngine(id);
+}
+
+/**
+ * Mint a new Trino internal-communication secret and monitor password and
+ * re-apply the engine. Every pod restarts.
+ */
+export async function rotateEngineSecrets(id: string): Promise<void> {
+  await controlPlaneEnginesRotateEngineSecrets(id);
 }
 
 // ── Engine monitor (native Trino monitor / control-plane) ────────────────────

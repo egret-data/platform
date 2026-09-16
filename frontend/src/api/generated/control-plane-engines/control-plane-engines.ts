@@ -2810,6 +2810,124 @@ export const useControlPlaneEnginesRestartEngine = <TError = ErrorBody,
       > => {
       return useMutation(getControlPlaneEnginesRestartEngineMutationOptions(options), queryClient);
     }
+    export type controlPlaneEnginesRotateEngineSecretsResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type controlPlaneEnginesRotateEngineSecretsResponseSuccess = (controlPlaneEnginesRotateEngineSecretsResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesRotateEngineSecretsResponseError = (controlPlaneEnginesRotateEngineSecretsResponse400 | controlPlaneEnginesRotateEngineSecretsResponse401 | controlPlaneEnginesRotateEngineSecretsResponse403 | controlPlaneEnginesRotateEngineSecretsResponse404 | controlPlaneEnginesRotateEngineSecretsResponse500 | controlPlaneEnginesRotateEngineSecretsResponse502) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesRotateEngineSecretsResponse = (controlPlaneEnginesRotateEngineSecretsResponseSuccess | controlPlaneEnginesRotateEngineSecretsResponseError)
+
+export const getControlPlaneEnginesRotateEngineSecretsUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/rotate-secrets`
+}
+
+/**
+ * @summary `POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication
+secret and `egret-monitor` password and re-apply the engine (pods roll). The
+old values stay in force, and on the row, unless the apply succeeds.
+ */
+export const controlPlaneEnginesRotateEngineSecrets = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneEnginesRotateEngineSecretsResponse> => {
+
+  return customInstance<controlPlaneEnginesRotateEngineSecretsResponse>(getControlPlaneEnginesRotateEngineSecretsUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesRotateEngineSecretsMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>, TError,{id: string}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesRotateEngineSecrets'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>, {id: string}> = (props) => {
+          const {id} = props ?? {};
+
+          return  controlPlaneEnginesRotateEngineSecrets(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesRotateEngineSecretsMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>>
+
+    export type ControlPlaneEnginesRotateEngineSecretsMutationError = ErrorBody
+
+    /**
+ * @summary `POST /engines/{id}/rotate-secrets` — mint a new Trino internal-communication
+secret and `egret-monitor` password and re-apply the engine (pods roll). The
+old values stay in force, and on the row, unless the apply succeeds.
+ */
+export const useControlPlaneEnginesRotateEngineSecrets = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesRotateEngineSecrets>>,
+        TError,
+        {id: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesRotateEngineSecretsMutationOptions(options), queryClient);
+    }
     export type controlPlaneEnginesListEngineWorkspacesResponse200 = {
   data: EngineWorkspaceDto[]
   status: 200
