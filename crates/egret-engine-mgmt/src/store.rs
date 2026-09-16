@@ -240,13 +240,25 @@ impl EngineMgmtStore {
         .await?)
     }
 
+    /// Persist a new spec, gated on the row still being at the caller's last
+    /// observed `status` — a compare-and-set that does NOT itself write
+    /// `status`. Only [`Self::set_engine_status`] and
+    /// [`Self::transition_engine_status`] own that column.
+    ///
+    /// Every caller reads an [`Engine`], derives a new spec from it, then calls
+    /// this passing the status it just read. Without the `AND status = $3`
+    /// guard, a PUT racing a concurrent DELETE could read `running`, and DELETE
+    /// could flip the row to `deleting` before the PUT's write lands — silently
+    /// erasing the `deleting` retry marker `delete_engine` depends on. With the
+    /// guard, that write matches zero rows and is a no-op: the row stays
+    /// exactly as DELETE left it.
     pub async fn update_engine(
         &self,
         id: Uuid,
         spec: &serde_json::Value,
         status: &str,
     ) -> Result<(), EngineMgmtError> {
-        sqlx::query("UPDATE engine_mgmt.engines SET spec = $2, status = $3 WHERE id = $1")
+        sqlx::query("UPDATE engine_mgmt.engines SET spec = $2 WHERE id = $1 AND status = $3")
             .bind(id)
             .bind(spec)
             .bind(status)

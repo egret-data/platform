@@ -2905,7 +2905,7 @@
             }
           },
           "400": {
-            "description": "Invalid config or engine update failed",
+            "description": "Invalid config, Kubernetes not configured, or re-materializing workspace connections failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -2946,6 +2946,16 @@
           },
           "500": {
             "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Kubernetes rejected the update; the previous spec was restored",
             "content": {
               "application/json": {
                 "schema": {

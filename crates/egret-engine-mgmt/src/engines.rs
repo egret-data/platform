@@ -4047,6 +4047,42 @@ async fn get_engine(
     }))
 }
 
+/// Carry the stored Trino `delegationMode` into a new spec whose `trinoConfig`
+/// omits it. An absent key reads back as `impersonate`
+/// (`store::Engine::delegation_mode`), so dropping it would silently change the
+/// engine's delegation mode.
+fn preserve_trino_delegation_mode(spec: &mut serde_json::Value, stored: &serde_json::Value) {
+    let Some(mode) = stored
+        .get("trinoConfig")
+        .and_then(|t| t.get("delegationMode"))
+        .cloned()
+    else {
+        return;
+    };
+    if let Some(tc) = spec.get_mut("trinoConfig").and_then(|t| t.as_object_mut()) {
+        tc.entry("delegationMode").or_insert(mode);
+    }
+}
+
+/// Put back the spec/status an update persisted before its build or apply
+/// failed. Logged, not returned: the caller is already returning that failure.
+///
+/// This restores the STORED SPEC only. A pair of internal secrets `apply_built`
+/// may have committed on the failed apply attempt (Task 7's
+/// `commit_internal_secrets`, called unconditionally on both the success and
+/// failure path) is NOT rolled back here, by design: the cluster's live
+/// Secret/ConfigMap may already carry the fresh pair even though the apply as a
+/// whole failed on a later object, and deleting the committed pair in that case
+/// would strand the running pods on a value no longer on record. See
+/// `apply_built`'s doc comment for the full argument.
+async fn restore_engine_spec(st: &CpState, id: Uuid, spec: &serde_json::Value, status: &str) {
+    if let Err(e) = st.engine_mgmt.update_engine(id, spec, status).await {
+        tracing::error!(engine_id = %id, error = %e,
+            "could not restore the engine spec after a failed update; \
+             the stored spec is ahead of the cluster");
+    }
+}
+
 #[utoipa::path(
     put,
     path = "/api/control-plane/engines/{id}",
@@ -4055,10 +4091,11 @@ async fn get_engine(
     request_body = CreateEngineBody,
     responses(
         (status = 200, description = "Engine spec updated and pods rolled", body = EngineDto),
-        (status = 400, description = "Invalid config or engine update failed", body = ErrorBody),
+        (status = 400, description = "Invalid config, Kubernetes not configured, or re-materializing workspace connections failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 502, description = "Kubernetes rejected the update; the previous spec was restored", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -4085,6 +4122,11 @@ async fn update_engine(
             "update not supported for this engine kind".into(),
         ));
     }
+    // An update is only meaningful if it can be applied: refuse BEFORE
+    // persisting, so the stored spec never runs ahead of the cluster.
+    let Some(prov) = st.engine_provisioner.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
 
     // Rebuild the spec from the body + config. The primary Catalog Client is NOT
     // re-minted (its credential lives on the primary catalog row), so nothing is
@@ -4107,6 +4149,7 @@ async fn update_engine(
     } else if let Some(tc) = engine.spec.get("trinoConfig") {
         spec["trinoConfig"] = tc.clone();
     }
+    preserve_trino_delegation_mode(&mut spec, &engine.spec);
     validate_spec_resource_groups(&spec)?;
     // Validate an optional ingress-TLS secret reference (400 on a missing /
     // non-TLS / incomplete secret) before persisting, mirroring create.
@@ -4124,22 +4167,52 @@ async fn update_engine(
     {
         resolve_dockerconfigjson_secret(&st, ref_id).await?;
     }
+
+    // Snapshot what is stored so a failed build or apply can put it back — the
+    // same contract `update_catalog` keeps for a catalog row.
+    let snapshot_spec = engine.spec.clone();
+    let snapshot_status = engine.status.clone();
     st.engine_mgmt
         .update_engine(id, &spec, &engine.status)
         .await?;
+    let engine = match st.engine_mgmt.get_engine(id).await {
+        Ok(Some(e)) => e,
+        Ok(None) => return Err(CpError::NotFound),
+        Err(e) => {
+            restore_engine_spec(&st, id, &snapshot_spec, &snapshot_status).await;
+            return Err(e.into());
+        }
+    };
+    let built = match build_provision_req(&st, &engine).await {
+        Ok(built) => built,
+        Err(e) => {
+            restore_engine_spec(&st, id, &snapshot_spec, &snapshot_status).await;
+            return Err(e);
+        }
+    };
+    if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
+        restore_engine_spec(&st, id, &snapshot_spec, &snapshot_status).await;
+        return Err(CpError::ClusterApplyFailed(msg));
+    }
+
+    // Re-materialize every assigned workspace's connection so a delegation-mode
+    // or TLS change reaches the query path — as `update_starrocks_engine` does,
+    // and unconditionally for the same reason: a retried PUT must heal a
+    // previous partial re-materialization, which a diff against the
+    // already-persisted spec cannot see. Idempotent and cheap when unchanged.
+    st.assignment
+        .rematerialize_for_engine(id)
+        .await
+        .map_err(|e| {
+            CpError::BadRequest(format!(
+                "engine updated but re-materializing workspace connections failed: {e}"
+            ))
+        })?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
-    };
-    let built = build_provision_req(&st, &engine).await?;
-    if let Err(msg) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
-        return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
-    }
     Ok(Json(engine.into()))
 }
 
@@ -4207,30 +4280,44 @@ async fn update_starrocks_engine(
     // match-miss only costs an idempotent no-op re-bootstrap. This gates ONLY the
     // FE re-bootstrap — re-materialization runs unconditionally below.
     let deleg_changed = old_delegation != sr_delegation_block(&spec);
-    st.engine_mgmt
-        .update_engine(engine.id, &spec, &engine.status)
-        .await?;
-    let engine = st
-        .engine_mgmt
-        .get_engine(engine.id)
-        .await?
-        .ok_or(CpError::NotFound)?;
-
+    // Refuse BEFORE persisting when nothing can apply the update.
+    let Some(prov) = st.engine_provisioner.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
     // Re-resolve the warehouse (same resolver create uses) so the FE/CN builtin
-    // storage volume is fed the SAME S3 coords, and grab the delegation bootstrap
-    // (unused today, consumed by the later delegation-change task).
+    // storage volume is fed the SAME S3 coords. It does not depend on the new
+    // spec, so resolve it before persisting too.
     let wh = st
         .catalog
         .get_warehouse(engine.warehouse_id)
         .await?
         .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
-    let (req, bootstrap) = build_starrocks_provision_req(&st, &engine, &wh).await?;
 
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    // Snapshot for restore on a failed build or apply (see `update_engine`).
+    let snapshot_spec = engine.spec.clone();
+    let snapshot_status = engine.status.clone();
+    st.engine_mgmt
+        .update_engine(engine.id, &spec, &engine.status)
+        .await?;
+    let engine_id = engine.id;
+    let engine = match st.engine_mgmt.get_engine(engine_id).await {
+        Ok(Some(e)) => e,
+        Ok(None) => return Err(CpError::NotFound),
+        Err(e) => {
+            restore_engine_spec(&st, engine_id, &snapshot_spec, &snapshot_status).await;
+            return Err(e.into());
+        }
+    };
+    let (req, bootstrap) = match build_starrocks_provision_req(&st, &engine, &wh).await {
+        Ok(v) => v,
+        Err(e) => {
+            restore_engine_spec(&st, engine_id, &snapshot_spec, &snapshot_status).await;
+            return Err(e);
+        }
     };
     if let Err(msg) = prov.update(&req).await {
-        return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
+        restore_engine_spec(&st, engine_id, &snapshot_spec, &snapshot_status).await;
+        return Err(CpError::ClusterApplyFailed(msg));
     }
 
     // Two follow-up steps, deliberately DECOUPLED so a partial failure converges
@@ -6695,6 +6782,32 @@ mod tests {
         }
     }
 
+    /// Like `NoopProvisioner`, but `update` fails — a Kubernetes rejection.
+    struct FailingUpdateProvisioner;
+    #[async_trait::async_trait]
+    impl egret_engine_mgmt_api::EngineProvisioningPort for FailingUpdateProvisioner {
+        async fn provision(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn status(
+            &self,
+            _kind: &str,
+            _namespace: &str,
+            _name: &str,
+        ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+            Ok(egret_engine_mgmt_api::EngineStatus::default())
+        }
+        async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Err("injected update failure".into())
+        }
+        async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn restart(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
     /// `ensure_root_password_secret` is idempotent: two calls (the second on a
     /// row that now carries the persisted `root_secret_id`) return the SAME
     /// secret id and the SAME plaintext, and the first call persists the id.
@@ -7586,16 +7699,138 @@ mod tests {
             .expect("create engine row")
     }
 
+    #[test]
+    fn preserve_trino_delegation_mode_keeps_the_stored_mode_only_when_omitted() {
+        let stored = serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } });
+        let mut omitted = serde_json::json!({ "trinoConfig": { "worker": {} } });
+        preserve_trino_delegation_mode(&mut omitted, &stored);
+        assert_eq!(omitted["trinoConfig"]["delegationMode"], "jwt");
+        let mut explicit = serde_json::json!({ "trinoConfig": { "delegationMode": "none" } });
+        preserve_trino_delegation_mode(&mut explicit, &stored);
+        assert_eq!(explicit["trinoConfig"]["delegationMode"], "none");
+        let mut from_legacy = serde_json::json!({ "trinoConfig": {} });
+        preserve_trino_delegation_mode(&mut from_legacy, &serde_json::json!({}));
+        assert!(from_legacy["trinoConfig"].get("delegationMode").is_none());
+    }
+
+    /// P3 (StarRocks): a rejected apply restores the stored spec and is a 502.
+    #[tokio::test]
+    async fn update_starrocks_engine_failure_restores_spec() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping update_starrocks_engine_failure_restores_spec: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(FailingUpdateProvisioner));
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        let body = sr_update_body(Some(StarRocksConfigBody {
+            fe_replicas: Some(3),
+            ..Default::default()
+        }));
+        let err = update_starrocks_engine(st.clone(), engine.clone(), body)
+            .await
+            .err()
+            .expect("the apply failure must surface");
+        assert!(matches!(err, CpError::ClusterApplyFailed(_)), "got {err:?}");
+        let reloaded = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.spec, engine.spec, "stored spec restored");
+    }
+
+    /// Without Kubernetes an update is refused before anything is persisted.
+    #[tokio::test]
+    async fn update_starrocks_engine_without_kubernetes_changes_nothing() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping update_starrocks_engine_without_kubernetes_changes_nothing: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        let body = sr_update_body(Some(StarRocksConfigBody {
+            fe_replicas: Some(3),
+            ..Default::default()
+        }));
+        let err = update_starrocks_engine(st.clone(), engine.clone(), body)
+            .await
+            .err()
+            .map(|e| e.to_string());
+        assert!(
+            matches!(&err, Some(m) if m.contains("kubernetes not configured")),
+            "got {err:?}"
+        );
+        let reloaded = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.spec["starrocksConfig"]["feReplicas"], 1);
+    }
+
+    /// Carried finding: `EngineMgmtStore::update_engine` must not clobber a
+    /// concurrent DELETE's `deleting` marker. Simulates a PUT that read the
+    /// engine as `provisioning` (the status seeded on it) racing a DELETE that
+    /// has since moved it to `deleting`: the stale-status write must match zero
+    /// rows, leaving BOTH the status and the spec exactly as the DELETE left
+    /// them.
+    #[tokio::test]
+    async fn update_engine_cannot_move_a_row_out_of_deleting() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping update_engine_cannot_move_a_row_out_of_deleting: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        assert_eq!(engine.status, crate::engine_status::PROVISIONING);
+
+        // Concurrent DELETE flips the row to `deleting`.
+        st.engine_mgmt
+            .set_engine_status(engine.id, crate::engine_status::DELETING)
+            .await
+            .unwrap();
+
+        // A stale PUT, still holding the pre-delete `provisioning` it read
+        // earlier, tries to persist a new spec.
+        let new_spec = serde_json::json!({ "starrocksConfig": { "feReplicas": 9 } });
+        st.engine_mgmt
+            .update_engine(engine.id, &new_spec, &engine.status)
+            .await
+            .unwrap();
+
+        let reloaded = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.status,
+            crate::engine_status::DELETING,
+            "status must not be clobbered back"
+        );
+        assert_eq!(
+            reloaded.spec, engine.spec,
+            "spec must not be overwritten either"
+        );
+    }
+
     /// A PUT that bumps `feReplicas` + sets `feResources` re-persists those into
     /// the stored spec while preserving the untouched `cnReplicas`/`feImage`.
-    /// `test_state` has no k8s provisioner, so the update persists the spec then
-    /// fails at the provision step — the DB-visible spec change is what matters.
+    /// The fake provisioner accepts the apply, so the spec stays persisted.
     #[tokio::test]
     async fn update_starrocks_engine_rescales() {
-        let Some(st) = test_state().await else {
+        let Some(mut st) = test_state().await else {
             eprintln!("skipping update_starrocks_engine_rescales: DATABASE_URL not set");
             return;
         };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
         let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
@@ -7608,15 +7843,9 @@ mod tests {
             fe_resources: Some(serde_json::json!({ "memRequest": "2Gi", "memLimit": "4Gi" })),
             ..Default::default()
         }));
-        // Ok(Json<EngineDto>) isn't Debug, so map to the error message first.
-        let err = update_starrocks_engine(st.clone(), engine.clone(), body)
-            .await
-            .err()
-            .map(|e| e.to_string());
-        assert!(
-            matches!(&err, Some(m) if m.contains("kubernetes not configured")),
-            "expected k8s-not-configured after persist, got {err:?}"
-        );
+        if let Err(e) = update_starrocks_engine(st.clone(), engine.clone(), body).await {
+            panic!("update failed: {e}");
+        }
 
         let reloaded = st
             .engine_mgmt
@@ -7637,10 +7866,11 @@ mod tests {
     /// warehouse (`<bucket>/starrocks/<engine>`), unchanged by the config edit.
     #[tokio::test]
     async fn update_starrocks_engine_preserves_storage() {
-        let Some(st) = test_state().await else {
+        let Some(mut st) = test_state().await else {
             eprintln!("skipping update_starrocks_engine_preserves_storage: DATABASE_URL not set");
             return;
         };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
         let dsn = egret_test_db::url().await.unwrap();
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
@@ -7652,7 +7882,9 @@ mod tests {
             cn_replicas: Some(4),
             ..Default::default()
         }));
-        let _ = update_starrocks_engine(st.clone(), engine.clone(), body).await; // fails at prov; spec persisted
+        if let Err(e) = update_starrocks_engine(st.clone(), engine.clone(), body).await {
+            panic!("update failed: {e}");
+        }
 
         let reloaded = st
             .engine_mgmt

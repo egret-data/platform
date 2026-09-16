@@ -4248,3 +4248,164 @@ async fn rotate_secrets_replaces_both_values_only_on_a_successful_apply() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+async fn stored_spec(f: &Fixture, id: &str) -> serde_json::Value {
+    sqlx::query_scalar("SELECT spec FROM engine_mgmt.engines WHERE id = $1")
+        .bind(Uuid::parse_str(id).unwrap())
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("engine spec")
+}
+
+/// P3: a rejected apply restores the stored spec and is a 502 carrying the cause;
+/// a body whose trinoConfig omits delegationMode keeps the stored mode.
+#[tokio::test]
+async fn trino_update_failure_restores_the_spec_and_keeps_delegation_mode() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p3_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = j["id"].as_str().unwrap().to_string();
+    let before = stored_spec(&f, &id).await;
+    assert_eq!(before["trinoConfig"]["delegationMode"], "jwt");
+
+    port.set_fail_update(true);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 5,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "body={j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap()
+            .contains("injected update failure"),
+        "body={j}"
+    );
+    assert_eq!(stored_spec(&f, &id).await, before, "spec restored");
+
+    port.set_fail_update(false);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "trinoConfig": {
+                    "coordinator": { "replicas": 1 },
+                    "worker": { "replicas": 1 },
+                    "auth": { "jwt": {} }
+                }
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "update; body={j}");
+    assert_eq!(
+        stored_spec(&f, &id).await["trinoConfig"]["delegationMode"],
+        "jwt",
+        "omitted delegationMode must keep the stored mode"
+    );
+}
+
+/// P4: a Trino update re-materializes the connections of assigned workspaces.
+#[tokio::test]
+async fn trino_update_rematerializes_assigned_workspace_connections() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_p4_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let ws = seed_workspace(&f).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{id}/workspaces"),
+            &token,
+            Some(serde_json::json!({ "workspaceIds": [ws] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Make the materialized connection stale.
+    sqlx::query(
+        "UPDATE query.databases SET options = '{}'::jsonb WHERE workspace_id = $1 AND engine_id = $2",
+    )
+    .bind(ws)
+    .bind(id)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let scheme: Option<String> = sqlx::query_scalar(
+        "SELECT options->>'http_scheme' FROM query.databases WHERE workspace_id = $1 AND engine_id = $2",
+    )
+    .bind(ws)
+    .bind(id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        scheme.as_deref(),
+        Some("https"),
+        "connection re-materialized"
+    );
+}
