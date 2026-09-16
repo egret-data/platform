@@ -4863,3 +4863,151 @@ async fn failed_create_removes_the_profile_it_created() {
             .is_none()
     );
 }
+
+/// Deleting an engine removes every secret egret minted for it, including the
+/// internal/monitor secrets.
+#[tokio::test]
+async fn delete_engine_removes_internal_and_monitor_secrets() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_delete_secrets_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (internal_id, monitor_id) = engine_secret_ids(&f, id).await;
+    let (internal_id, monitor_id) = (internal_id.unwrap(), monitor_id.unwrap());
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("/engines/{id}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let secrets = secret_store(&f);
+    for sid in [internal_id, monitor_id] {
+        assert!(
+            matches!(
+                secrets.resolve_plaintext(None, sid).await,
+                Err(egret_secrets::SecretsError::NotFound)
+            ),
+            "secret {sid} must be deleted with the engine"
+        );
+    }
+}
+
+/// A failed rotation (`commit_internal_secrets`'s `Supersede::Keep` path, or a
+/// lost compare-and-set) leaves an `engine-internal-{id}-*` /
+/// `engine-monitor-{id}-*` pair that is no longer referenced by the row —
+/// nothing sweeps it while the engine might still have an apply in flight
+/// (see that function's doc comment). Engine delete is the one place that
+/// orphan sweep is safe, since by then no apply can still be racing this
+/// engine id. The sweep must be scoped to THIS engine's id: a look-alike pair
+/// minted for a different engine (same naming scheme, different id) must
+/// survive.
+#[tokio::test]
+async fn delete_engine_sweeps_orphaned_internal_secret_generations() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_delete_orphan_sweep_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    let name_a = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name_a,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create a; body={j}");
+    let id_a = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    // A different engine, minted through the same naming scheme, must never
+    // be touched by engine A's sweep.
+    let name_b = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &name_b,
+        wh_id,
+        serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create b; body={j}");
+    let id_b = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (b_internal_id, b_monitor_id) = engine_secret_ids(&f, id_b).await;
+    let (b_internal_id, b_monitor_id) = (b_internal_id.unwrap(), b_monitor_id.unwrap());
+
+    // Simulate the orphan a failed rotation on engine A leaves: a fresh
+    // generation minted under A's id, never recorded on the row (a `Keep` or
+    // a lost CAS never gets here).
+    let secrets = secret_store(&f);
+    let generation = Uuid::new_v4().simple();
+    let orphan_internal_id = secrets
+        .create(
+            None,
+            &format!("engine-internal-{id_a}-{generation}"),
+            None,
+            "orphan-internal-value",
+        )
+        .await
+        .expect("mint orphan internal secret");
+    let orphan_monitor_id = secrets
+        .create(
+            None,
+            &format!("engine-monitor-{id_a}-{generation}"),
+            None,
+            "orphan-monitor-value",
+        )
+        .await
+        .expect("mint orphan monitor secret");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("/engines/{id_a}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    for sid in [orphan_internal_id, orphan_monitor_id] {
+        assert!(
+            matches!(
+                secrets.resolve_plaintext(None, sid).await,
+                Err(egret_secrets::SecretsError::NotFound)
+            ),
+            "orphaned generation {sid} must be swept with the engine"
+        );
+    }
+    for sid in [b_internal_id, b_monitor_id] {
+        assert!(
+            secrets.resolve_plaintext(None, sid).await.is_ok(),
+            "a different engine's secret {sid} must survive engine A's sweep"
+        );
+    }
+}

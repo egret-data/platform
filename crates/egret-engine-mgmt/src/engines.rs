@@ -4902,21 +4902,51 @@ async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, cats: &[EngineCat
             tracing::warn!(engine = %engine.name, client = %cid, error = %e, "revoke engine catalog client failed");
         }
     }
-    // Secrets egret generated for this engine. `tls_cert_secret_ref` is an
-    // admin-provided secret and is deliberately not here.
-    for sid in [
-        engine.delegator_secret_id,
-        engine.root_secret_id,
-        engine.tls_secret_id,
-    ]
-    .into_iter()
-    .flatten()
-    {
+    // Secrets egret generated for this engine — the same ownership list create
+    // compensation uses (Task 12's `engine_owned_secret_ids`). This already
+    // covers `internal_secret_id`/`monitor_secret_id` (Task 6). Never
+    // `tls_cert_secret_ref`: admin-provided and possibly shared with other
+    // engines.
+    for sid in engine_owned_secret_ids(engine) {
         match st.secrets.delete(None, sid).await {
             Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
             Err(e) => {
                 tracing::warn!(engine = %engine.name, secret = %sid, error = %e, "delete engine secret failed")
             }
+        }
+    }
+    // Orphan generations a failed rotation leaves behind. `commit_internal_secrets`
+    // mints a fresh `engine-internal-{id}-{generation}` / `engine-monitor-{id}-
+    // {generation}` pair on every rotation; when the apply that carried it never
+    // reaches the cluster (`Supersede::Keep`), or the compare-and-set that would
+    // record it on the row loses a race, that pair's rows are never referenced by
+    // anything and nothing sweeps them — see that function's doc comment for why
+    // no earlier point is safe to do so (a concurrent apply on this engine could
+    // still be relying on them). Sweeping by a prefix of the engine's id is safe
+    // HERE and ONLY here: the engine row is already gone and its delete already
+    // went through `deleting`, so no apply for this engine id can still be in
+    // flight to race this sweep.
+    let internal_prefix = format!("engine-internal-{}-", engine.id);
+    let monitor_prefix = format!("engine-monitor-{}-", engine.id);
+    match st.secrets.list(None).await {
+        Ok(all) => {
+            for meta in all {
+                if !meta.name.starts_with(&internal_prefix)
+                    && !meta.name.starts_with(&monitor_prefix)
+                {
+                    continue;
+                }
+                match st.secrets.delete(None, meta.id).await {
+                    Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
+                    Err(e) => {
+                        tracing::warn!(engine = %engine.name, secret = %meta.id, error = %e,
+                            "delete orphaned engine secret generation failed")
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(engine = %engine.name, error = %e, "list secrets for orphan generation sweep failed")
         }
     }
 }
