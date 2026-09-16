@@ -869,41 +869,68 @@ enum ApplyOp {
 /// therefore leave orphaned generations behind indefinitely; only engine
 /// delete (Task 15) is a safe place to sweep them, since by then no apply can
 /// still be in flight for this engine.
-/// Failure from [`apply_built`]: either the row moved out from under the
-/// caller before the provisioner was touched, or the provisioner itself
+/// Failure from [`apply_built`]: either the row was gone or `deleting` when
+/// re-checked, before the provisioner was touched, or the provisioner itself
 /// rejected the apply. Kept distinct so every caller can turn the former into
 /// `CpError::Conflict` (409, retry) instead of the apply-failure shape it uses
 /// for the latter.
+#[derive(Debug)]
 enum ApplyBuiltError {
-    /// The row is no longer at the status the caller observed when it read
-    /// `engine` (typically a concurrent delete), or re-reading it to check
-    /// failed outright. Either way `apply_built` cannot confirm it is still
-    /// safe to call the provisioner, so it never does.
+    /// The row is gone, or is `deleting` (a concurrent DELETE), or re-reading
+    /// it to check failed outright. Either way `apply_built` cannot confirm
+    /// it is still safe to call the provisioner, so it never does.
     Conflict,
     Failed(String),
 }
 
-/// `expected_status`: the status the caller observed on `engine` when it read
-/// the row (before building `built`, minting anything, etc.). Re-checked here,
-/// immediately before the provisioner call, because every caller does real
-/// work between that read and this point — long enough for a concurrent
-/// DELETE to mark the row `deleting` and tear the cluster down. `prov.provision`
-/// / `prov.update` is server-side apply: called on a deleted engine it would
-/// RE-CREATE every object DELETE just removed, including minting a fresh
-/// internal-secret pair the row can never reference again (SP1 Part B final
-/// review, C1). Refusing here is the one place all six apply routes share, so
-/// it is the one place this guard needs to live.
+/// Re-checked immediately before the provisioner call, because every caller
+/// does real work between reading `engine` and this point — long enough for
+/// a concurrent DELETE to mark the row `deleting` and tear the cluster down.
+/// `prov.provision`/`prov.update` is server-side apply: called on a deleted
+/// engine it would RE-CREATE every object DELETE just removed, including
+/// minting a fresh internal-secret pair the row can never reference again
+/// (SP1 Part B final review, C1). Refusing here is the one place all six
+/// apply routes share, so it is the one place this guard needs to live.
+///
+/// The guard refuses ONLY on `deleting` or a missing row — NOT on any other
+/// status change. An earlier version demanded the row still be at the exact
+/// status the caller had observed, which 409'd a legitimate apply landing
+/// between `GET /engines/{id}` recording `provisioning → running` (the
+/// detail page polls that every 5 seconds) and the apply's own re-check —
+/// reachable in the first minute of an engine's life, exactly when an admin
+/// adds catalogs (round-2 review finding N1). `deleting` is the one
+/// transition that actually means "the cluster this apply is about to touch
+/// may already be gone"; every other transition (`provisioning → running`,
+/// `running → provisioning` on a later apply, etc.) is a live engine that
+/// this apply is still allowed to reach.
 async fn apply_built(
     st: &CpState,
     prov: &dyn egret_engine_mgmt_api::EngineProvisioningPort,
     engine: &Engine,
     built: &BuiltReq,
     op: ApplyOp,
-    expected_status: &str,
 ) -> Result<(), ApplyBuiltError> {
     match st.engine_mgmt.get_engine(engine.id).await {
-        Ok(Some(current)) if current.status == expected_status => {}
-        _ => return Err(ApplyBuiltError::Conflict),
+        Ok(Some(current)) if current.status != crate::engine_status::DELETING => {}
+        _ => {
+            // N2 (round-2 review): nothing has been applied at this point —
+            // this guard runs BEFORE the provisioner is ever touched — so a
+            // pair `build_provision_req_with` minted for this attempt
+            // (`built.internal`, present only when it minted a fresh one; a
+            // reused recorded pair is `fresh: false` and this is a no-op) is
+            // safe to discard HERE and ONLY here: once a request reaches the
+            // provisioner, `commit_internal_secrets` takes over and must
+            // record it instead, because a failed-but-possibly-delivered
+            // apply may have already handed it to the cluster (see that
+            // function's doc comment). Discarding on this path prevents an
+            // orphaned secret-store row nothing will ever reference — the row
+            // this apply was building against is gone or already `deleting`,
+            // so no other apply for this engine id can pick it up either.
+            if let Some(secrets) = &built.internal {
+                discard_internal_secrets(st, secrets).await;
+            }
+            return Err(ApplyBuiltError::Conflict);
+        }
     }
     let res = match op {
         ApplyOp::Provision => prov.provision(&built.req).await,
@@ -2115,12 +2142,13 @@ async fn commit_internal_secrets(
 
 /// Delete a freshly-minted pair that was never handed to the provisioner at
 /// all — the ONLY safe place to discard, because nothing has been applied to
-/// the cluster yet. Used solely when minting succeeds but a later step in the
-/// SAME build fails before any `provision`/`update` call is made (e.g.
-/// [`inject_monitor_user`] erroring on a malformed password). Once a build's
-/// request has been handed to the provisioner, [`apply_built`]/
-/// [`commit_internal_secrets`] takes over and never discards — see their doc
-/// comments for why. No-op for a reused pair.
+/// the cluster yet. Used when minting succeeds but a later step BEFORE any
+/// `provision`/`update` call fails: either a later step in the SAME build
+/// (e.g. [`inject_monitor_user`] erroring on a malformed password), or
+/// [`apply_built`]'s own pre-provisioner status re-check losing a race (round-2
+/// review, N2). Once a request has actually been handed to the provisioner,
+/// [`apply_built`]/[`commit_internal_secrets`] takes over and never discards —
+/// see their doc comments for why. No-op for a reused pair.
 async fn discard_internal_secrets(st: &CpState, s: &EngineInternalSecrets) {
     if !s.fresh {
         return;
@@ -2967,16 +2995,7 @@ async fn create_engine(
         engine.namespace.clone(),
         engine.name.clone(),
     ));
-    if let Err(e) = apply_built(
-        &st,
-        prov.as_ref(),
-        &engine,
-        &built,
-        ApplyOp::Provision,
-        &engine.status,
-    )
-    .await
-    {
+    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Provision).await {
         compensate_failed_create(&st, undo).await;
         return Err(match e {
             ApplyBuiltError::Conflict => apply_conflict(),
@@ -4666,16 +4685,7 @@ async fn update_trino_engine(
             return Err(e);
         }
     };
-    if let Err(e) = apply_built(
-        &st,
-        prov.as_ref(),
-        &engine,
-        &built,
-        ApplyOp::Update,
-        &expected_status,
-    )
-    .await
-    {
+    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
         restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
         return Err(match e {
             ApplyBuiltError::Conflict => apply_conflict(),
@@ -5153,19 +5163,12 @@ async fn rotate_engine_secrets(
         },
     )
     .await?;
-    apply_built(
-        &st,
-        prov.as_ref(),
-        &engine,
-        &built,
-        ApplyOp::Update,
-        &engine.status,
-    )
-    .await
-    .map_err(|e| match e {
-        ApplyBuiltError::Conflict => apply_conflict(),
-        ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
-    })?;
+    apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update)
+        .await
+        .map_err(|e| match e {
+            ApplyBuiltError::Conflict => apply_conflict(),
+            ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
+        })?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -5636,16 +5639,7 @@ async fn add_catalog(
             return Err(e);
         }
     };
-    if let Err(e) = apply_built(
-        &st,
-        prov.as_ref(),
-        &engine,
-        &built,
-        ApplyOp::Update,
-        &engine.status,
-    )
-    .await
-    {
+    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
         rollback(st.clone(), cat.id, minted_client).await;
         return Err(match e {
             ApplyBuiltError::Conflict => apply_conflict(),
@@ -5926,16 +5920,7 @@ async fn remove_catalog(
         },
     )
     .await?;
-    if let Err(e) = apply_built(
-        &st,
-        prov.as_ref(),
-        &engine,
-        &built,
-        ApplyOp::Update,
-        &engine.status,
-    )
-    .await
-    {
+    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
         return Err(match e {
             ApplyBuiltError::Conflict => apply_conflict(),
             ApplyBuiltError::Failed(msg) => {
@@ -6044,16 +6029,7 @@ async fn update_catalog(
             return Err(e);
         }
     };
-    if let Err(e) = apply_built(
-        &st,
-        prov.as_ref(),
-        &engine,
-        &built,
-        ApplyOp::Update,
-        &engine.status,
-    )
-    .await
-    {
+    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
         restore(st.clone(), prev).await;
         return Err(match e {
             ApplyBuiltError::Conflict => apply_conflict(),
@@ -9079,16 +9055,15 @@ mod tests {
     /// torn down, it would RE-CREATE every object DELETE just removed. This
     /// proves the re-read `apply_built` does immediately before the provisioner
     /// call — independent of any earlier per-route check — refuses once the row
-    /// has left the status the caller observed, never calling the provisioner.
-    /// Simulated the same way the CAS tests above simulate a race: build the
-    /// request from an engine snapshot taken while `provisioning`, then flip the
-    /// row to `deleting` (as a concurrent DELETE would) before calling
-    /// `apply_built` with that stale snapshot's status.
+    /// is `deleting`, never calling the provisioner. Simulated the same way the
+    /// CAS tests above simulate a race: build the request from a `provisioning`
+    /// engine snapshot, then flip the row to `deleting` (as a concurrent DELETE
+    /// would) before calling `apply_built`.
     #[tokio::test]
-    async fn apply_built_refuses_when_the_row_left_expected_status() {
+    async fn apply_built_refuses_when_the_row_is_deleting() {
         let Some(st) = test_state().await else {
             eprintln!(
-                "skipping apply_built_refuses_when_the_row_left_expected_status: DATABASE_URL not set"
+                "skipping apply_built_refuses_when_the_row_is_deleting: DATABASE_URL not set"
             );
             return;
         };
@@ -9116,24 +9091,19 @@ mod tests {
             .await
             .expect("build request");
 
-        // Concurrent DELETE lands after this snapshot's status was read (the
-        // same interleaving the four routes are exposed to between their own
+        // Concurrent DELETE lands after this snapshot was read (the same
+        // interleaving the four routes are exposed to between their own
         // `get_engine` and their `apply_built` call).
         st.engine_mgmt
             .set_engine_status(engine.id, crate::engine_status::DELETING)
             .await
             .unwrap();
 
-        let err = apply_built(
-            &st,
-            counting.as_ref(),
-            &engine,
-            &built,
-            ApplyOp::Update,
-            &engine.status,
-        )
-        .await
-        .expect_err("a lost race must surface as an error, not a silent apply");
+        let err = apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+            .await
+            .expect_err(
+                "a lost race against a delete must surface as an error, not a silent apply",
+            );
         assert!(
             matches!(err, ApplyBuiltError::Conflict),
             "expected Conflict"
@@ -9141,8 +9111,145 @@ mod tests {
         assert_eq!(
             counting.updates.load(std::sync::atomic::Ordering::SeqCst),
             0,
-            "the provisioner must never be called once the row left the expected status"
+            "the provisioner must never be called once the row is deleting"
         );
+    }
+
+    /// N1 (round-2 review, from the C1 fix): the opposite direction of the
+    /// test above. `apply_built`'s guard must NOT demand the row still be at
+    /// the exact status the caller observed — only that it isn't gone or
+    /// `deleting`. A concurrent `GET /engines/{id}` recording
+    /// `provisioning → running` (the detail page polls it every 5 seconds) is
+    /// NOT a reason to refuse a legitimate apply landing in the same window —
+    /// reachable in the first minute of an engine's life, exactly when an
+    /// admin is likely to add a catalog. Same simulated-race shape as the test
+    /// above, but the concurrent change is `provisioning → running` instead of
+    /// a delete, and the apply must SUCCEED (provisioner called once).
+    #[tokio::test]
+    async fn apply_built_succeeds_when_the_row_merely_advanced_to_running() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping apply_built_succeeds_when_the_row_merely_advanced_to_running: DATABASE_URL not set"
+            );
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                DEFAULT_NAMESPACE,
+                wh.id,
+                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        assert_eq!(engine.status, crate::engine_status::PROVISIONING);
+
+        let built = build_provision_req(&st, &engine)
+            .await
+            .expect("build request");
+
+        // A concurrent GET /engines/{id} records the live `running` status
+        // (the same transition `get_engine`'s guard writes) in the window
+        // between this snapshot's read and the apply below.
+        st.engine_mgmt
+            .transition_engine_status(
+                engine.id,
+                crate::engine_status::PROVISIONING,
+                crate::engine_status::RUNNING,
+            )
+            .await
+            .unwrap();
+
+        apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+            .await
+            .expect("an apply must succeed when the row merely advanced to running");
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the provisioner must be called exactly once"
+        );
+    }
+
+    /// N2 (round-2 review, from the C1 fix): on the `Conflict` path
+    /// `apply_built` must discard a freshly-minted internal/monitor pair
+    /// rather than leak two unreferenced secret-store rows — nothing was
+    /// applied at that point, so nothing else can be relying on it.
+    #[tokio::test]
+    async fn apply_built_discards_a_fresh_pair_on_conflict() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping apply_built_discards_a_fresh_pair_on_conflict: DATABASE_URL not set"
+            );
+            return;
+        };
+        let counting = std::sync::Arc::new(CountingProvisioner::default());
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                DEFAULT_NAMESPACE,
+                wh.id,
+                &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+
+        // Force a fresh pair to be minted (mirrors what `rotate_engine_secrets`
+        // asks `build_provision_req_with` for).
+        let built = build_provision_req_with(
+            &st,
+            &engine,
+            BuildOpts {
+                rotate_internal_secrets: true,
+                ..BuildOpts::default()
+            },
+        )
+        .await
+        .expect("build request");
+        let (internal_id, monitor_id) = {
+            let secrets = built.internal.as_ref().expect("a fresh pair was minted");
+            (secrets.internal_id, secrets.monitor_id)
+        };
+
+        // Concurrent DELETE lands before the apply's own re-check.
+        st.engine_mgmt
+            .set_engine_status(engine.id, crate::engine_status::DELETING)
+            .await
+            .unwrap();
+
+        apply_built(&st, counting.as_ref(), &engine, &built, ApplyOp::Update)
+            .await
+            .expect_err("must refuse once the row is deleting");
+        assert_eq!(
+            counting.updates.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the provisioner must never be called"
+        );
+        for (label, id) in [("internal", internal_id), ("monitor", monitor_id)] {
+            assert!(
+                matches!(
+                    st.secrets.resolve_plaintext(None, id).await,
+                    Err(egret_secrets::SecretsError::NotFound)
+                ),
+                "the unapplied {label} secret must be discarded, not leaked"
+            );
+        }
     }
 
     /// Critical (SP1 Part B final review, C1) — handler level, the review's
