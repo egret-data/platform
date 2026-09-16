@@ -708,13 +708,42 @@ async fn build_provision_req_with(
             config.image_pull_secrets.push(pull);
         }
     }
+    // Late-bind (R1): an engine created while Ranger was disabled keeps
+    // `authz_service_id = NULL` forever — `set_engine_authz_service` has one
+    // caller, reachable only from create — so once an operator turns Ranger
+    // back on, every later apply would otherwise keep re-rendering explicit
+    // allow-all with no operator-accessible remedy. Reuses the SAME
+    // plan/bind a create uses (create / adopt-orphan / 409-if-bound-
+    // elsewhere); best-effort — any failure here just leaves the engine
+    // unbound, exactly as it was, and never fails the apply itself.
+    let mut authz_service_id = engine.authz_service_id;
+    if st.ranger_enabled && authz_service_id.is_none() {
+        match plan_trino_profile(st, &engine.name, None).await {
+            Ok(plan) => {
+                let mut undo = CreateUndo::default();
+                match bind_trino_profile(st, engine.id, &engine.name, &plan, &mut undo).await {
+                    Ok(()) => {
+                        authz_service_id = match plan {
+                            ProfilePlan::Existing(id) => Some(id),
+                            ProfilePlan::Create => undo.created_profile_id,
+                            ProfilePlan::Unbound => None,
+                        }
+                    }
+                    Err(e) => tracing::warn!(engine = %engine.name, error = %e,
+                        "late Ranger bind failed; engine stays unbound"),
+                }
+            }
+            Err(e) => tracing::warn!(engine = %engine.name, error = %e,
+                "late Ranger bind plan failed; engine stays unbound"),
+        }
+    }
     // Impersonate-mode delegation: when auth is on, provision the `egret_delegator`
     // service user (generate + store its password once, inject its bcrypt into the
     // auth block so it lands in `password.db`) and seed the impersonate + query-
     // timeout Ranger policies onto the bound Trino service. Guarded on auth being
     // enabled — without a `password.db` the delegator can't basic-auth, so
     // impersonate delegation is meaningless (and `inject_delegator_user` no-ops).
-    let ranger_service_name = engine.authz_service_id.map(|_| engine.name.clone());
+    let ranger_service_name = authz_service_id.map(|_| engine.name.clone());
     if config.auth.is_some() && engine.is_impersonate_delegation() {
         let (_secret_id, pw) = ensure_delegator_secret(st, engine).await?;
         inject_delegator_user(&mut config.auth, &pw)?;

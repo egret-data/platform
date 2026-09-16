@@ -4908,6 +4908,80 @@ async fn create_whose_profile_is_bound_elsewhere_is_409_and_mints_nothing() {
     assert_eq!(port.provisioned.lock().unwrap().len(), provisions_before);
 }
 
+/// R1 (SP1 Part B final review, security gap): an engine created while
+/// Ranger was DISABLED keeps `authz_service_id = NULL` forever —
+/// `set_engine_authz_service` has one caller, reachable only from create — so
+/// once an operator turns Ranger back on, every later apply used to keep
+/// re-rendering explicit allow-all with no operator-accessible remedy.
+/// `build_provision_req_with` now late-binds a profile (create / adopt-orphan
+/// / 409-if-bound-elsewhere, same as create) on any apply once Ranger is on.
+#[tokio::test]
+async fn apply_late_binds_ranger_once_it_is_enabled_after_an_unbound_create() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_with_ranger(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        false, // created while Ranger is OFF
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_r1_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    assert_eq!(
+        authz_service_of(&f, &name).await,
+        None,
+        "created unbound while Ranger was off"
+    );
+    assert!(
+        port.last_provisioned().ranger.is_none(),
+        "the initial provision rendered allow-all"
+    );
+    let id = j["id"].as_str().unwrap().to_string();
+
+    // Operator turns Ranger back on.
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        true,
+    );
+    f.ranger_enabled = true;
+
+    // The smallest apply route (rotate) must now late-bind a profile.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{id}/rotate-secrets"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "rotate must succeed");
+    assert_eq!(
+        port.last_updated()
+            .ranger
+            .as_ref()
+            .map(|r| r.service_name.clone()),
+        Some(name.clone()),
+        "the apply must now be bound to a profile named after the engine"
+    );
+    assert!(
+        authz_service_of(&f, &name).await.is_some(),
+        "the row itself must record the newly-bound profile"
+    );
+}
+
 /// D9 + P2: a create that auto-created its profile removes it again on failure.
 #[tokio::test]
 async fn failed_create_removes_the_profile_it_created() {
