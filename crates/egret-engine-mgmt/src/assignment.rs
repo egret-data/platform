@@ -18,6 +18,12 @@ use uuid::Uuid;
 use crate::error::EngineMgmtError;
 use crate::store::{Engine, EngineMgmtStore};
 
+/// Shared refusal text for both places that gate an assignment on
+/// [`Engine::supports_delegation`] — `EngineAssignmentService::assign` and
+/// `PUT /engines/{id}/workspaces` (`engines.rs`) — so the two 400s cannot drift.
+pub const NOT_DELEGATION_CAPABLE_MSG: &str =
+    "engine must support delegation before it can be assigned";
+
 /// Orchestrates engine↔workspace assignment across the engine-provisioning and
 /// query seams. Cheap to clone (both stores are `Clone` handles over a pool).
 #[derive(Clone)]
@@ -50,7 +56,7 @@ impl EngineAssignmentService {
             .ok_or_else(|| EngineMgmtError::NotFound(engine_id.to_string()))?;
         if !engine.supports_delegation() {
             return Err(EngineMgmtError::NotAssignable(
-                "engine must support delegation before it can be assigned".into(),
+                NOT_DELEGATION_CAPABLE_MSG.into(),
             ));
         }
         // Idempotent: `assign_workspace` is `ON CONFLICT DO NOTHING`.

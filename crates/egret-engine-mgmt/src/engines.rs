@@ -4166,7 +4166,7 @@ async fn set_engine_workspaces(
     }
     if !to_assign.is_empty() && !engine.supports_delegation() {
         return Err(CpError::BadRequest(
-            "engine must support delegation before it can be assigned".into(),
+            crate::assignment::NOT_DELEGATION_CAPABLE_MSG.into(),
         ));
     }
     if !to_unassign.is_empty() {
