@@ -5,6 +5,7 @@
 //! in `egret-engine-mgmt`, which depends on this crate.
 
 pub mod config;
+pub mod legacy;
 pub mod name;
 pub mod render;
 pub mod sensitive;
@@ -13,6 +14,10 @@ pub use config::{
     Advanced, CatalogConfig, CatalogDef, CatalogKind, ElasticsearchConfig, EngineType,
     GenericConfig, HiveFamilyConfig, HiveMetastore, IcebergConfig, IcebergMetastore, JdbcConfig,
     JdbcDialect, JdbcSsl, RestAuth, SampleConfig, SecretProperties, ValidationError,
+};
+pub use legacy::{
+    classify, classify_generic, legacy_props_and_secrets, plaintext_secrets, Classified,
+    ClassifyOutcome, LegacyCatalog,
 };
 pub use name::{
     first_free_name, is_valid_catalog_name, join_truncated, normalize_catalog_name, with_suffix,
