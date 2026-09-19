@@ -51,6 +51,13 @@ pub enum EngineHttpError {
     /// spec. The stored state was restored; the cause is surfaced verbatim.
     #[error("engine cluster apply failed: {0}")]
     ClusterApplyFailed(String),
+    /// A registry catalog is still attached to engines or assigned to
+    /// workspaces; nothing was changed. 409 listing both.
+    #[error("catalog is still in use")]
+    CatalogInUse {
+        engines: Vec<crate::catalogs::CatalogConflictEngine>,
+        workspaces: Vec<crate::catalogs::CatalogConflictWorkspace>,
+    },
     #[error("internal error")]
     Internal,
 }
@@ -214,6 +221,23 @@ impl IntoResponse for EngineHttpError {
                 Json(serde_json::json!({ "error": msg, "code": "engine_cluster_apply_failed" })),
             )
                 .into_response(),
+            EngineHttpError::CatalogInUse {
+                engines,
+                workspaces,
+            } => {
+                let body = crate::catalogs::CatalogConflictBody {
+                    error: format!(
+                        "{msg}: attached to {} engine(s) and assigned to {} workspace(s); \
+                         detach and unassign it first",
+                        engines.len(),
+                        workspaces.len()
+                    ),
+                    code: "catalog_in_use".into(),
+                    engines,
+                    workspaces,
+                };
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
             EngineHttpError::Forbidden => error_json(StatusCode::FORBIDDEN, msg),
             EngineHttpError::NotFound => error_json(StatusCode::NOT_FOUND, msg),
             EngineHttpError::AlreadyExists(_)

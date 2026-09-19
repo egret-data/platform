@@ -410,6 +410,8 @@ struct FakeEnginePort {
     delete_error: Arc<std::sync::Mutex<Option<String>>>,
     fail_provision: Arc<std::sync::atomic::AtomicBool>,
     fail_update: Arc<std::sync::atomic::AtomicBool>,
+    /// Engine names whose `update` fails (the others succeed) — for propagation.
+    fail_update_for: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// When `Some`, `status` returns this instead of the hard-coded
     /// all-pods-ready `running` default — so a test can drive a not-ready /
     /// crash-looping cluster through `GET /engines/{id}` (I1).
@@ -439,6 +441,14 @@ impl FakeEnginePort {
     fn set_fail_update(&self, fail: bool) {
         self.fail_update
             .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn set_fail_update_for(&self, engine_name: &str, fail: bool) {
+        let mut names = self.fail_update_for.lock().unwrap();
+        if fail {
+            names.insert(engine_name.to_string());
+        } else {
+            names.remove(engine_name);
+        }
     }
     fn set_fail_provision(&self, fail: bool) {
         self.fail_provision
@@ -479,7 +489,9 @@ impl EngineProvisioningPort for FakeEnginePort {
     }
     async fn update(&self, req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
         self.updated.lock().unwrap().push(req.clone());
-        if self.fail_update.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.fail_update.load(std::sync::atomic::Ordering::SeqCst)
+            || self.fail_update_for.lock().unwrap().contains(&req.name)
+        {
             return Err("injected update failure".into());
         }
         Ok(())
@@ -5717,4 +5729,362 @@ async fn attaching_to_a_starrocks_engine_is_refused() {
         .await
         .unwrap()
         .is_none());
+}
+
+// ── Catalog registry (SP3a) ─────────────────────────────────────────────────────
+
+fn unique_catalog_name(prefix: &str) -> String {
+    format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..10])
+}
+
+async fn call(
+    f: &Fixture,
+    method: &str,
+    uri: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    into_json(
+        f.app
+            .clone()
+            .oneshot(req(method, uri, token, body))
+            .await
+            .unwrap(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn registry_catalog_crud_validation_and_delete_refusal() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_crud_admin", true).await;
+    let pw = seed_secret(&f, "hunter2").await;
+    let name = unique_catalog_name("pg");
+    let jdbc = serde_json::json!({
+        "dialect": "postgresql", "host": "db.internal", "port": 5432, "database": "sales",
+        "user": "reader", "password_secret_id": pw, "ssl": { "mode": "require" }
+    });
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "kind": "jdbc", "config": jdbc, "description": "sales db"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(
+        (j["name"].as_str(), j["kind"].as_str()),
+        (Some(name.as_str()), Some("jdbc"))
+    );
+    assert_eq!(j["engines"], serde_json::json!([]));
+    let id = j["id"].as_str().unwrap().to_string();
+
+    let (status, j) = call(&f, "GET", &format!("/catalogs?secretId={pw}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        j.as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == serde_json::json!(id)),
+        "{j}"
+    );
+
+    let (status, _) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": name, "kind": "jdbc", "config": jdbc })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "duplicate name");
+    for (why, body) in [
+        (
+            "bad name",
+            serde_json::json!({ "name": "Bad-Name", "kind": "tpch", "config": {} }),
+        ),
+        (
+            "unknown kind",
+            serde_json::json!({ "name": unique_catalog_name("x"), "kind": "mongo", "config": {} }),
+        ),
+        (
+            "unknown secret",
+            serde_json::json!({ "name": unique_catalog_name("x"), "kind": "jdbc", "config": {
+            "dialect": "postgresql", "host": "h", "port": 5432, "database": "d", "user": "u",
+            "password_secret_id": Uuid::new_v4(), "ssl": { "mode": "require" } } }),
+        ),
+        (
+            "plaintext advanced",
+            serde_json::json!({ "name": unique_catalog_name("x"), "kind": "tpch", "config": {},
+            "advanced": { "trino": { "a.password": "hunter2" } } }),
+        ),
+        (
+            "egret warehouse",
+            serde_json::json!({ "name": unique_catalog_name("x"), "kind": "iceberg",
+            "config": { "metastore": { "type": "egret", "warehouse_id": Uuid::new_v4() } } }),
+        ),
+    ] {
+        let (status, j) = call(&f, "POST", "/catalogs", &token, Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {j}");
+    }
+
+    // Refused while attached; the 409 names the engine.
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let catalog_id = Uuid::parse_str(&id).unwrap();
+    let reg = registry(&f);
+    reg.insert_attachment(&egret_catalog_registry::NewAttachment {
+        engine_id,
+        catalog_id,
+        catalog_client_id: None,
+        credential_secret_id: None,
+        minted_client: false,
+        applied_now: true,
+        created_at: None,
+    })
+    .await
+    .unwrap();
+    let (status, j) = call(&f, "DELETE", &format!("/catalogs/{id}"), &token, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(j["code"], "catalog_in_use");
+    assert_eq!(j["engines"][0]["name"], serde_json::json!(engine_name));
+    reg.delete_attachment(engine_id, catalog_id).await.unwrap();
+    let (status, _) = call(&f, "DELETE", &format!("/catalogs/{id}"), &token, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // A warehouse catalog goes with its warehouse, never through this route.
+    let lone_wh = seed_provisioned_warehouse(&f).await;
+    let wh = egret_catalog_engine::CatalogStore::new(f.db.clone())
+        .get_warehouse(lone_wh)
+        .await
+        .unwrap()
+        .unwrap();
+    let (lone, _) = reg
+        .ensure_warehouse_catalog(
+            &egret_catalog_registry::WarehouseIdentity {
+                id: lone_wh,
+                name: &wh.name,
+                workspace_id: wh.workspace_id,
+            },
+            None,
+            |_| Vec::new(),
+        )
+        .await
+        .unwrap();
+    reg.set_catalog_workspaces(lone.id, &[]).await.unwrap();
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{}", lone.id),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert!(j["error"].as_str().unwrap().contains("warehouse"), "{j}");
+}
+
+#[tokio::test]
+async fn registry_update_propagates_and_flags_the_failed_engine() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_prop_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name_a = format!("trino-a-{}", Uuid::new_v4().simple());
+    let name_b = format!("trino-b-{}", Uuid::new_v4().simple());
+    let mut engines = Vec::new();
+    for n in [&name_a, &name_b] {
+        let (status, j) = create_engine_via_api(&f, &token, n, wh_id, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::CREATED, "{j}");
+        engines.push(Uuid::parse_str(j["id"].as_str().unwrap()).unwrap());
+    }
+    let cat_name = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let catalog_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let reg = registry(&f);
+    for engine_id in &engines {
+        reg.insert_attachment(&egret_catalog_registry::NewAttachment {
+            engine_id: *engine_id,
+            catalog_id,
+            catalog_client_id: None,
+            credential_secret_id: None,
+            minted_client: false,
+            applied_now: true,
+            created_at: None,
+        })
+        .await
+        .unwrap();
+    }
+
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/catalogs/{catalog_id}/impact"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["engines"].as_array().unwrap().len(), 2);
+    assert!(
+        j["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["action"] == "restart"),
+        "{j}"
+    );
+
+    port.set_fail_update_for(&name_b, true);
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{catalog_id}"),
+        &token,
+        Some(serde_json::json!({
+            "config": {}, "advanced": { "trino": { "tpch.column-naming": "STANDARD" } }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    let outcome = |n: &str| {
+        j["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["engineName"] == n)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(outcome(&name_a)["status"], "applied");
+    assert_eq!(outcome(&name_b)["status"], "failed");
+    assert!(outcome(&name_b)["error"]
+        .as_str()
+        .unwrap()
+        .contains("injected update failure"));
+
+    // Engine A holds the new configuration; nothing was reverted.
+    let spec_a = port
+        .updated
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|s| s.name == name_a)
+        .cloned()
+        .unwrap();
+    let rendered = spec_a
+        .catalogs
+        .iter()
+        .find(|c| c.name == cat_name)
+        .expect("catalog rendered on A");
+    assert_eq!(rendered.properties["tpch.column-naming"], "STANDARD");
+    let stored = reg.get_catalog(catalog_id).await.unwrap().unwrap();
+    assert_eq!(stored.advanced["trino"]["tpch.column-naming"], "STANDARD");
+    let a = reg
+        .get_attachment(engines[0], catalog_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let b = reg
+        .get_attachment(engines[1], catalog_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.apply_status, "applied");
+    assert_eq!(b.apply_status, "failed");
+    assert!(b.apply_error.unwrap().contains("injected update failure"));
+
+    // Re-apply once the engine is healthy again.
+    port.set_fail_update_for(&name_b, false);
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{catalog_id}/reapply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert!(
+        j.as_array()
+            .unwrap()
+            .iter()
+            .all(|o| o["status"] == "applied"),
+        "{j}"
+    );
+    assert_eq!(
+        reg.get_attachment(engines[1], catalog_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .apply_status,
+        "applied"
+    );
+}
+
+#[tokio::test]
+async fn catalog_permissions_with_the_real_pdp() {
+    let Some(mut f) = setup_full(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let reader = session_for_with_permission(&f, "cat_reader", "catalog_registry:read").await;
+    let engine_reader = session_for_with_permission(&f, "cat_engine_reader", "engine:read").await;
+    attach_real_pdp(&mut f).await;
+    let body =
+        serde_json::json!({ "name": unique_catalog_name("x"), "kind": "tpch", "config": {} });
+    assert_eq!(
+        call(&f, "GET", "/catalogs", &reader, None).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&f, "POST", "/catalogs", &reader, Some(body)).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(&f, "GET", "/catalogs", &engine_reader, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    // 0148: every platform role holding warehouse:read now holds catalog_registry:read.
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM role_permissions rp JOIN roles r ON r.id = rp.role_id \
+          WHERE r.scope = 'platform' AND r.name = 'data_steward' AND rp.permission = 'catalog_registry:read'",
+    )
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1);
 }

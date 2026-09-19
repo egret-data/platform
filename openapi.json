@@ -2609,6 +2609,541 @@
         }
       }
     },
+    "/api/control-plane/catalogs": {
+      "get": {
+        "tags": [
+          "control-plane-catalog-registry"
+        ],
+        "operationId": "list_registry_catalogs",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "query",
+            "description": "Only catalogs assigned to this workspace.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "secretId",
+            "in": "query",
+            "description": "Only catalogs referencing this secret (config or engine credential).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registry catalogs with their engines and workspaces",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RegistryCatalogDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing catalog_registry:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "control-plane-catalog-registry"
+        ],
+        "operationId": "create_registry_catalog",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRegistryCatalogBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Catalog created (not attached to any engine)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryCatalogDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid name, kind or configuration, an unknown secret or storage connection, or an egret warehouse catalog (those are created with their warehouse)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing catalog_registry:create permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A catalog with this name already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/catalogs/{id}": {
+      "get": {
+        "tags": [
+          "control-plane-catalog-registry"
+        ],
+        "operationId": "get_registry_catalog",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegistryCatalogDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing catalog_registry:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "control-plane-catalog-registry"
+        ],
+        "operationId": "update_registry_catalog",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRegistryCatalogBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored, then applied to every attached engine; `outcomes` lists each engine (a failed engine is flagged, nothing is reverted)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogUpdateResultDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, an unknown secret or storage connection, or a changed warehouse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing catalog_registry:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "control-plane-catalog-registry"
+        ],
+        "operationId": "delete_registry_catalog",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Catalog deleted"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing catalog_registry:delete permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Still attached or assigned (`code` = `catalog_in_use`, with `engines` and `workspaces`), or an egret warehouse catalog (delete the warehouse instead)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogConflictBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/catalogs/{id}/impact": {
+      "get": {
+        "tags": [
+          "control-plane-catalog-registry"
+        ],
+        "operationId": "catalog_impact",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What saving this catalog does to each attached engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogImpactDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing catalog_registry:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/catalogs/{id}/reapply": {
+      "post": {
+        "tags": [
+          "control-plane-catalog-registry"
+        ],
+        "operationId": "reapply_registry_catalog",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The unchanged configuration re-applied to every attached engine (e.g. after rotating a secret)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApplyOutcomeDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing catalog_registry:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/clients/{id}": {
       "delete": {
         "tags": [
@@ -28558,6 +29093,34 @@
           }
         }
       },
+      "ApplyOutcomeDto": {
+        "type": "object",
+        "description": "One engine's result of applying a catalog.",
+        "required": [
+          "engineId",
+          "engineName",
+          "status"
+        ],
+        "properties": {
+          "engineId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "engineName": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`applied` | `failed`."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "ApproveAccessRequest": {
         "type": "object",
         "properties": {
@@ -28877,6 +29440,150 @@
           }
         }
       },
+      "CatalogAttachmentDto": {
+        "type": "object",
+        "description": "One engine a catalog is attached to.",
+        "required": [
+          "engineId",
+          "engineName",
+          "engineType",
+          "applyStatus"
+        ],
+        "properties": {
+          "engineId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "engineName": {
+            "type": "string"
+          },
+          "engineType": {
+            "type": "string"
+          },
+          "applyStatus": {
+            "type": "string",
+            "description": "`applied` | `failed`."
+          },
+          "applyError": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "appliedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "CatalogConflictBody": {
+        "type": "object",
+        "description": "409 body of a refused catalog delete (`code` = `catalog_in_use`).",
+        "required": [
+          "error",
+          "code",
+          "engines",
+          "workspaces"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogConflictEngine"
+            }
+          },
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogConflictWorkspace"
+            }
+          }
+        }
+      },
+      "CatalogConflictEngine": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "CatalogConflictWorkspace": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "slug"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        }
+      },
+      "CatalogImpactDto": {
+        "type": "object",
+        "required": [
+          "engines"
+        ],
+        "properties": {
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogImpactEngineDto"
+            }
+          }
+        }
+      },
+      "CatalogImpactEngineDto": {
+        "type": "object",
+        "required": [
+          "engineId",
+          "engineName",
+          "engineType",
+          "action"
+        ],
+        "properties": {
+          "engineId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "engineName": {
+            "type": "string"
+          },
+          "engineType": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "description": "`restart` (Trino rolls its pods) | `in_place` (StarRocks rebuilds the connector)."
+          }
+        }
+      },
       "CatalogRoleDto": {
         "type": "object",
         "required": [
@@ -28916,6 +29623,24 @@
           },
           "message": {
             "type": "string"
+          }
+        }
+      },
+      "CatalogUpdateResultDto": {
+        "type": "object",
+        "required": [
+          "catalog",
+          "outcomes"
+        ],
+        "properties": {
+          "catalog": {
+            "$ref": "#/components/schemas/RegistryCatalogDto"
+          },
+          "outcomes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApplyOutcomeDto"
+            }
           }
         }
       },
@@ -29802,6 +30527,35 @@
           },
           "config": {
             "description": "Optional service config (e.g. StarRocks JDBC coordinates). Stored verbatim."
+          }
+        }
+      },
+      "CreateRegistryCatalogBody": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "SQL name on every engine: `^[a-z][a-z0-9_]{0,62}$`, immutable."
+          },
+          "kind": {
+            "type": "string",
+            "description": "iceberg | hive | delta_lake | hudi | jdbc | elasticsearch | tpch | tpcds | generic"
+          },
+          "config": {
+            "type": "object"
+          },
+          "advanced": {
+            "type": "object"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -34721,6 +35475,74 @@
           "slack"
         ]
       },
+      "RegistryCatalogDto": {
+        "type": "object",
+        "description": "A registry catalog. `config` is the typed per-kind configuration (snake_case\nfields, spec §4.2); it never holds a plaintext secret.",
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "config",
+          "advanced",
+          "engines",
+          "workspaceIds",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "config": {
+            "type": "object"
+          },
+          "advanced": {
+            "type": "object"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "warehouseId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The warehouse an egret catalog is."
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogAttachmentDto"
+            }
+          },
+          "workspaceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "RenameFolder": {
         "type": "object",
         "required": [
@@ -37713,6 +38535,27 @@
           }
         }
       },
+      "UpdateRegistryCatalogBody": {
+        "type": "object",
+        "description": "Replaces config/advanced/description; name and kind never change.",
+        "required": [
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "type": "object"
+          },
+          "advanced": {
+            "type": "object"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "UpdateRoleInput": {
         "type": "object",
         "required": [
@@ -38544,6 +39387,10 @@
     {
       "name": "control-plane-engines",
       "description": "Engine provisioning: Trino-on-Kubernetes clusters, their catalogs, native query monitor, and pod logs/exec"
+    },
+    {
+      "name": "control-plane-catalog-registry",
+      "description": "Catalog registry: platform catalogs, their engine attachments and workspace assignment"
     },
     {
       "name": "idp",

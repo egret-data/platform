@@ -2,6 +2,7 @@
 
 pub mod assignment;
 pub(crate) mod catalog_apply;
+pub mod catalogs;
 pub mod delegation_default;
 pub mod delegator_policy;
 pub mod dependents;
@@ -34,5 +35,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     use utoipa::OpenApi as _;
     let mut doc = engines::EngineMgmtApi::openapi();
     doc.merge(monitor::MonitorApi::openapi());
+    doc.merge(catalogs::CatalogRegistryApi::openapi());
     doc
 }

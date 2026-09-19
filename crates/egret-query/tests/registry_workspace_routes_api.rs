@@ -850,3 +850,90 @@ async fn test_unsaved_unreachable_host_is_200_not_ok() {
         "an unreachable host must report ok=false; body={json}"
     );
 }
+
+/// SP3 permission split: the platform key `catalog_registry:read` must NOT
+/// satisfy the workspace-scope `catalog:read` check (Cedar `Workspace in
+/// Platform` would make a same-named platform grant pass it in EVERY
+/// workspace). The HTTP 403 below is also produced by WsContext's membership
+/// gate, so the direct PDP assertions are what actually discriminate: they fail
+/// if the platform permission is ever renamed back to `catalog:read`.
+#[tokio::test]
+async fn platform_catalog_registry_read_does_not_grant_workspace_catalog_read() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let email = format!("regreader_{}@egret.local", Uuid::new_v4().simple());
+    let uid = f
+        .users
+        .insert_local(&email, "Test", "x")
+        .await
+        .expect("insert user");
+    let role_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (scope, name, description) VALUES ('platform', $1, 'test-only role') RETURNING id",
+    )
+    .bind(format!("test_role_{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert role");
+    sqlx::query(
+        "INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'catalog_registry:read')",
+    )
+    .bind(role_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("grant permission");
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL)",
+    )
+    .bind(uid.0)
+    .bind(role_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign role");
+    let token = f
+        .sessions
+        .create(uid, "test", "127.0.0.1")
+        .await
+        .expect("session")
+        .token;
+
+    // Not a member of ws_a: the workspace engine view is 403.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/engines", f.slug_a),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // The PDP itself: the role was seeded after `setup()` built its PDP, so build
+    // a fresh one that sees it.
+    let pdp = egret_auth::pdp::CedarPdp::build(f.db.clone(), &egret_events::EventBus::new())
+        .await
+        .expect("build CedarPdp");
+    use egret_core::authz::{Pdp, Resource, Subject};
+    let subject = Subject {
+        user_id: uid,
+        group_ids: vec![],
+    };
+    let platform = pdp
+        .authorize(&subject, "catalog_registry:read", &Resource::Platform)
+        .await
+        .expect("authorize");
+    assert!(platform.allow, "positive control: the platform grant works");
+    let workspace = pdp
+        .authorize(&subject, "catalog:read", &Resource::Workspace(f.ws_a))
+        .await
+        .expect("authorize");
+    assert!(
+        !workspace.allow,
+        "catalog_registry:read must not satisfy the workspace-scope catalog:read"
+    );
+}

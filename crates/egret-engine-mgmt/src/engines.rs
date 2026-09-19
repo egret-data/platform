@@ -115,6 +115,8 @@ pub fn router() -> Router<CpState> {
         )
         // Native Trino monitor (query list / detail / kill / cluster).
         .merge(crate::monitor::routes())
+        // Registry catalogs (SP3): platform CRUD + impact + re-apply.
+        .merge(crate::catalogs::routes())
 }
 
 /// Workspace-admin engine-assignment router (P1). Mounted under `/api/admin` by

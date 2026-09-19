@@ -103,6 +103,34 @@ pub static PERMISSIONS: &[Permission] = &[
         "Delete warehouses",
         Scope::Platform
     ),
+    // Registry catalogs (SP3). Deliberately NOT `catalog:*`: `catalog:read` is
+    // the workspace-scope key every workspace role holds (0024) for
+    // egret-query's workspace engine view, and a platform grant of the same key
+    // would satisfy that check in every workspace.
+    perm!(
+        "catalog_registry:read",
+        "Catalogs",
+        "View registry catalogs and their engine attachments",
+        Scope::Platform
+    ),
+    perm!(
+        "catalog_registry:create",
+        "Catalogs",
+        "Create registry catalogs",
+        Scope::Platform
+    ),
+    perm!(
+        "catalog_registry:update",
+        "Catalogs",
+        "Edit registry catalogs, re-apply them to engines, and assign them to workspaces",
+        Scope::Platform
+    ),
+    perm!(
+        "catalog_registry:delete",
+        "Catalogs",
+        "Delete registry catalogs",
+        Scope::Platform
+    ),
     perm!(
         "storage:read",
         "Storage",
@@ -536,6 +564,27 @@ mod tests {
         assert!(PERMISSIONS
             .iter()
             .any(|p| p.key == "tag:manage" && p.scope == Scope::Platform));
+    }
+    #[test]
+    fn catalog_registry_perms_are_platform_scoped_and_distinct() {
+        for k in [
+            "catalog_registry:read",
+            "catalog_registry:create",
+            "catalog_registry:update",
+            "catalog_registry:delete",
+        ] {
+            assert!(
+                PERMISSIONS
+                    .iter()
+                    .any(|p| p.key == k && p.scope == Scope::Platform),
+                "{k}"
+            );
+        }
+        assert!(groups().contains(&"Catalogs"));
+        // The workspace-scope `catalog:read` (0024) is NOT a platform key and
+        // must never become one: a platform grant of it would pass the
+        // workspace check in every workspace.
+        assert!(!is_known("catalog:read"));
     }
     #[test]
     fn workspace_actions_present_and_scoped() {

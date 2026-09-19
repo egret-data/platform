@@ -47,6 +47,8 @@ const EXTRA_FILES: &[&str] = &[
     "../egret-workspace/src/routes.rs",
     "../egret-engine-mgmt/src/engines.rs",
     "../egret-engine-mgmt/src/monitor.rs",
+    // `catalog_registry:*` (SP3) are gated in the engine seam's registry routes.
+    "../egret-engine-mgmt/src/catalogs.rs",
     "../egret-policy/src/admin/mod.rs",
     // `warehouse:*` keys moved into the Catalog seam's admin router (E3d-3).
     "../egret-catalog-engine/src/warehouse_admin/mod.rs",
