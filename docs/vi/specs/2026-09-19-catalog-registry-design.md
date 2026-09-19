@@ -161,10 +161,16 @@ enforcement, thuộc SP4 (Ranger profile) và SP5 (các engine do egret thực t
 
 ### 4.7 Permissions
 
-Các platform permission mới `catalog:read`, `catalog:create`, `catalog:update`, `catalog:delete`
-(assign-to-workspace và re-apply dùng `catalog:update`). Migration cấp cho mỗi role permission
-`catalog:*` tương ứng với mỗi `warehouse:*` mà role đó đang có (nên `data_steward` có thêm
-`catalog:read`). `warehouse:*` vẫn còn cho tới khi SP3c bỏ các trang Warehouses, sau đó mới bị xoá.
+Các platform permission mới `catalog_registry:read`, `catalog_registry:create`,
+`catalog_registry:update`, `catalog_registry:delete` (assign-to-workspace, re-apply và Retry dùng
+`catalog_registry:update`). Migration cấp cho mỗi platform role permission `catalog_registry:*`
+tương ứng với mỗi `warehouse:*` mà role đó đang có (nên `data_steward` có thêm
+`catalog_registry:read`).
+
+Các key này cố ý không phải `catalog:*`: `catalog:read` đã tồn tại như một permission ở phạm vi
+workspace (migration 0024, mọi workspace role đều có, được workspace engine view kiểm tra), và một
+platform grant cùng key sẽ thoả check đó ở mọi workspace (Cedar `Workspace in Platform`).
+`catalog:read` của workspace giữ nguyên. `warehouse:*` vẫn còn cho tới khi SP3c bỏ các trang Warehouses, sau đó mới bị xoá.
 
 ### 4.8 Migration dữ liệu hiện có
 

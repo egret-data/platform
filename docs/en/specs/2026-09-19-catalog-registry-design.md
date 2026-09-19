@@ -156,9 +156,15 @@ profiles) and SP5 (egret-enforced engines).
 
 ### 4.7 Permissions
 
-New platform permissions `catalog:read`, `catalog:create`, `catalog:update`, `catalog:delete`
-(assign-to-workspace and re-apply use `catalog:update`). Migration grants each role the
-`catalog:*` counterpart of every `warehouse:*` it holds (so `data_steward` gains `catalog:read`).
+New platform permissions `catalog_registry:read`, `catalog_registry:create`,
+`catalog_registry:update`, `catalog_registry:delete` (assign-to-workspace, re-apply and Retry use
+`catalog_registry:update`). Migration grants each platform role the `catalog_registry:*`
+counterpart of every `warehouse:*` it holds (so `data_steward` gains `catalog_registry:read`).
+
+The keys are deliberately not `catalog:*`: `catalog:read` already exists as a workspace-scope
+permission (migration 0024, held by every workspace role, checked by the workspace engine view),
+and a platform grant of the same key would satisfy that check in every workspace (Cedar
+`Workspace in Platform`). The workspace `catalog:read` is left untouched.
 `warehouse:*` stays until SP3c removes the Warehouses pages, then is dropped.
 
 ### 4.8 Migration of existing data
