@@ -1,0 +1,16 @@
+[package]
+name = "egret-catalog-registry"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# The platform catalog registry (SP3): the `registry` schema, the typed
+# per-kind catalog configuration, rendering, and the boot-time backfill.
+# No axum and no engine-mgmt dependency: engine-mgmt (routes, apply) and
+# catalog-engine (warehouse routes) both depend on this crate.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+regex.workspace = true
