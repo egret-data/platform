@@ -138,16 +138,16 @@ pub fn classify(
     let (want_plain, want_secret) = legacy_target(legacy, extracted);
 
     let reason = match typed_candidate(&want_plain, &want_secret) {
-        Ok(def)
-            if def.validate().is_ok()
-                && round_trips(legacy.name, &def, &want_plain, &want_secret) =>
-        {
-            return Ok(Classified {
-                def,
-                outcome: ClassifyOutcome::Typed,
-            });
-        }
-        Ok(_) => "the typed form would not render the same Trino properties".to_string(),
+        Ok(def) => match def.validate() {
+            Ok(()) if round_trips(legacy.name, &def, &want_plain, &want_secret) => {
+                return Ok(Classified {
+                    def,
+                    outcome: ClassifyOutcome::Typed,
+                });
+            }
+            Ok(()) => "the typed form would not render the same Trino properties".to_string(),
+            Err(e) => format!("typed form rejected: {e}"),
+        },
         Err(reason) => reason,
     };
 
@@ -539,6 +539,117 @@ mod tests {
             panic!()
         };
         assert_eq!(g.secret_properties.trino.len(), 2);
+    }
+
+    /// `round_trips` is the real gate behind [`ClassifyOutcome::Typed`]; for
+    /// today's typed forms `typed_candidate`'s own preconditions already
+    /// guarantee equality with a well-formed input, so `classify`'s six tests
+    /// above cannot tell a real equality check from `true`. Exercise the
+    /// private function directly with a def that mismatches the wanted maps
+    /// in each of the four ways rendering can differ.
+    #[test]
+    fn round_trips_rejects_every_kind_of_mismatch() {
+        let def = CatalogDef {
+            config: CatalogConfig::Generic(GenericConfig {
+                engines: [EngineType::Trino].into_iter().collect(),
+                secret_properties: SecretProperties {
+                    trino: [("a.secret".to_string(), id(1))].into_iter().collect(),
+                    starrocks: BTreeMap::new(),
+                },
+            }),
+            advanced: Advanced {
+                trino: [
+                    ("connector.name".to_string(), "x".to_string()),
+                    ("a.prop".to_string(), "v".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                starrocks: BTreeMap::new(),
+            },
+        };
+        def.validate().unwrap();
+
+        let exact_plain: BTreeMap<String, String> = [
+            ("connector.name".to_string(), "x".to_string()),
+            ("a.prop".to_string(), "v".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let exact_secret: BTreeMap<String, Uuid> =
+            [("a.secret".to_string(), id(1))].into_iter().collect();
+
+        assert!(
+            round_trips("cat", &def, &exact_plain, &exact_secret),
+            "exact match must round-trip"
+        );
+
+        // (1) the render has a property the wanted map does not.
+        let mut missing_from_want = exact_plain.clone();
+        missing_from_want.remove("a.prop");
+        assert!(!round_trips("cat", &def, &missing_from_want, &exact_secret));
+
+        // (2) the wanted map has a property the render does not.
+        let mut extra_in_want = exact_plain.clone();
+        extra_in_want.insert("b.prop".to_string(), "w".to_string());
+        assert!(!round_trips("cat", &def, &extra_in_want, &exact_secret));
+
+        // (3) same key, a different value.
+        let mut different_value = exact_plain.clone();
+        different_value.insert("a.prop".to_string(), "different".to_string());
+        assert!(!round_trips("cat", &def, &different_value, &exact_secret));
+
+        // (4) the secret is mapped to a different id.
+        let different_secret: BTreeMap<String, Uuid> =
+            [("a.secret".to_string(), id(2))].into_iter().collect();
+        assert!(!round_trips("cat", &def, &exact_plain, &different_secret));
+    }
+
+    /// `classify`'s reason must name the real cause: a typed candidate that
+    /// parses but fails `CatalogDef::validate()` (here, a host with an
+    /// underscore) is a different failure from one that round-trips wrong.
+    #[test]
+    fn generic_reason_names_a_validation_rejection_not_a_round_trip_mismatch() {
+        let cfg = json!({
+            "properties": { "connection-url": "jdbc:postgresql://db_1:5432/sales?sslmode=require", "connection-user": "reader" },
+            "secretProperties": { "connection-password": id(13).to_string() }
+        });
+        let c = classify(&legacy("postgresql", &cfg, None), &BTreeMap::new()).unwrap();
+        let ClassifyOutcome::Generic { reason } = &c.outcome else {
+            panic!("{:?}", c.outcome)
+        };
+        assert!(
+            reason.starts_with("typed form rejected:"),
+            "reason was {reason:?}"
+        );
+        assert!(
+            reason.contains("host must be a host name or address"),
+            "reason was {reason:?}"
+        );
+    }
+
+    /// A legacy row whose `connection-url` combines a plaintext `//` (disable)
+    /// scheme with the `?oracle.net.ssl_server_dn_match=true` suffix parses
+    /// (the regex allows the two independently) and validates (`ssl:
+    /// disable` is legal on its own), but `jdbc_url` never reproduces that
+    /// suffix for `disable` — a genuine round-trip mismatch, distinct from a
+    /// validation rejection.
+    #[test]
+    fn generic_reason_names_a_real_round_trip_mismatch() {
+        let cfg = json!({
+            "properties": {
+                "connection-url": "jdbc:oracle:thin:@//db:1521/ORCL?oracle.net.ssl_server_dn_match=true",
+                "connection-user": "reader"
+            },
+            "secretProperties": { "connection-password": id(11).to_string() }
+        });
+        let c = classify(&legacy("oracle", &cfg, None), &BTreeMap::new()).unwrap();
+        let ClassifyOutcome::Generic { reason } = &c.outcome else {
+            panic!("{:?}", c.outcome)
+        };
+        assert_eq!(
+            reason,
+            "the typed form would not render the same Trino properties"
+        );
     }
 
     fn probe_free() -> crate::TrinoRenderInput<'static> {
