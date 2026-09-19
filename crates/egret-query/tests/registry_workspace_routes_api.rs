@@ -610,18 +610,19 @@ async fn ws_database_list_and_detail_expose_engine_id() {
     );
 }
 
-/// Seed an engine assigned to `workspace_id`, with one catalog whose
-/// `secret_ref` points at a named workspace secret. The engine name is
-/// `{prefix}-{uuid}` (engines.name is globally UNIQUE across the shared test
-/// DB). Returns `(engine_id, engine_name, storage_name, secret_name)` for the
-/// ws-member view assertions.
+/// Seed an engine assigned to `workspace_id`, with one registry catalog
+/// (attached to the engine) whose secret ref points at a named workspace
+/// secret. The engine name is `{prefix}-{uuid}` (engines.name is globally
+/// UNIQUE across the shared test DB). Returns `(engine_id, engine_name,
+/// storage_name, secret_name, catalog_name)` for the ws-member view
+/// assertions.
 async fn seed_assigned_engine_with_catalog(
     db: &Db,
     workspace_secrets: &egret_secrets::WorkspaceSecretStore,
     workspace_id: Uuid,
     owner: UserId,
     prefix: &str,
-) -> (Uuid, String, String, String) {
+) -> (Uuid, String, String, String, String) {
     let engine_name = format!("{prefix}-{}", Uuid::new_v4().simple());
     // A storage connection + warehouse + engine (known storage name).
     let store_name = format!("store_{}", Uuid::new_v4().simple());
@@ -662,16 +663,33 @@ async fn seed_assigned_engine_with_catalog(
         .await
         .expect("seed named catalog secret");
 
-    // A catalog bound to the secret.
+    // A registry catalog (the engine's warehouse) referencing the secret,
+    // attached to the engine.
+    let catalog_name = format!("lakehouse_{}", Uuid::new_v4().simple());
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) RETURNING id",
+    )
+    .bind(&catalog_name)
+    .bind(wh_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed registry catalog");
+    sqlx::query("INSERT INTO registry.catalog_secret_refs (catalog_id, secret_id) VALUES ($1, $2)")
+        .bind(catalog_id)
+        .bind(secret_ref)
+        .execute(&db.pool)
+        .await
+        .expect("seed secret ref");
     sqlx::query(
-        "INSERT INTO engine_mgmt.engine_catalogs (engine_id, name, kind, config, secret_ref, is_primary) \
-         VALUES ($1, 'lakehouse', 'egret-warehouse', '{}'::jsonb, $2, true)",
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
     )
     .bind(engine_id)
-    .bind(secret_ref)
+    .bind(catalog_id)
     .execute(&db.pool)
     .await
-    .expect("seed engine catalog");
+    .expect("seed attachment");
 
     // The assignment row.
     sqlx::query(
@@ -685,7 +703,13 @@ async fn seed_assigned_engine_with_catalog(
     .await
     .expect("seed engine_workspaces assignment");
 
-    (engine_id, engine_name, store_name, secret_name)
+    (
+        engine_id,
+        engine_name,
+        store_name,
+        secret_name,
+        catalog_name,
+    )
 }
 
 /// B2: a workspace member sees its assigned engines read-only, with each
@@ -699,14 +723,15 @@ async fn ws_engine_view_lists_assigned_engines_with_catalogs() {
     };
     let token = add_member(&f, f.ws_a, "admin", "ws_admin").await;
 
-    let (engine_id, engine_name, storage_name, secret_name) = seed_assigned_engine_with_catalog(
-        &f.db,
-        &f.workspace_secrets,
-        f.ws_a.0,
-        f.owner,
-        "trino-prod",
-    )
-    .await;
+    let (engine_id, engine_name, storage_name, secret_name, catalog_name) =
+        seed_assigned_engine_with_catalog(
+            &f.db,
+            &f.workspace_secrets,
+            f.ws_a.0,
+            f.owner,
+            "trino-prod",
+        )
+        .await;
 
     // LIST → exactly the one assigned engine.
     let resp = f
@@ -747,7 +772,7 @@ async fn ws_engine_view_lists_assigned_engines_with_catalogs() {
     assert_eq!(d["type"], serde_json::json!("trino"));
     let cats = d["catalogs"].as_array().expect("catalogs array");
     assert_eq!(cats.len(), 1, "one catalog; body={d}");
-    assert_eq!(cats[0]["name"], serde_json::json!("lakehouse"));
+    assert_eq!(cats[0]["name"], serde_json::json!(catalog_name));
     assert_eq!(cats[0]["kind"], serde_json::json!("egret-warehouse"));
     assert_eq!(
         cats[0]["storage_name"].as_str(),
@@ -789,7 +814,7 @@ async fn ws_engine_view_allows_non_admin_member() {
         return;
     };
     let token = add_member(&f, f.ws_a, "viewer", "ws_viewer").await;
-    let (_engine_id, _name, _s, _sec) = seed_assigned_engine_with_catalog(
+    let (_engine_id, _name, _s, _sec, _cat) = seed_assigned_engine_with_catalog(
         &f.db,
         &f.workspace_secrets,
         f.ws_a.0,

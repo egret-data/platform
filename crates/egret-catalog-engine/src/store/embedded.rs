@@ -164,6 +164,23 @@ impl CatalogStore {
         Ok(())
     }
 
+    /// Whether a workspace may use a warehouse (SP3 §4.6): its registry catalog
+    /// is assigned there, or — for a warehouse the boot backfill has not reached
+    /// — the warehouse is the workspace's own.
+    pub async fn warehouse_visible_to_workspace(
+        &self,
+        warehouse_id: Uuid,
+        workspace_id: Uuid,
+    ) -> Result<bool, CatalogError> {
+        self.registry()
+            .warehouse_visible_to_workspace(warehouse_id, workspace_id)
+            .await
+            .map_err(|e| match e {
+                egret_catalog_registry::RegistryError::Db(e) => CatalogError::Db(e),
+                other => CatalogError::BadRequest(other.to_string()),
+            })
+    }
+
     // roles + grants -----------------------------------------------------------
 
     pub async fn create_role(

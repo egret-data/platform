@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use egret_core::http::ErrorBody;
 
-use crate::{CatalogStore, GrantInput, NewClient};
+use crate::{CatalogError, CatalogStore, GrantInput, NewClient};
 pub use error::CatalogHttpError;
 
 /// State for the admin catalog router. The `CatalogStore` + storage-connection
@@ -371,7 +371,7 @@ async fn list_warehouses(
     tag = "control-plane-catalog",
     request_body = CreateWarehouseBody,
     responses(
-        (status = 201, description = "Warehouse created (egret row + lakekeeper warehouse when a provisioner is wired)", body = WarehouseDto),
+        (status = 201, description = "Warehouse created (egret row + lakekeeper warehouse when a provisioner is wired) with its registry catalog, assigned to the workspace", body = WarehouseDto),
         (status = 400, description = "Unknown storage connection or invalid input", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing warehouse:create permission", body = ErrorBody),
@@ -408,6 +408,26 @@ async fn create_warehouse(
         .get_warehouse(w.id)
         .await?
         .ok_or(CatalogHttpError::NotFound)?;
+
+    // SP3: the warehouse is a registry catalog, assigned to this workspace. A
+    // failure is not fatal — engine create and the boot backfill ensure it too.
+    if let Err(e) = st
+        .store
+        .registry()
+        .ensure_warehouse_catalog(
+            &egret_catalog_registry::WarehouseIdentity {
+                id: w.id,
+                name: &w.name,
+                workspace_id: w.workspace_id,
+            },
+            None,
+            |_| Vec::new(),
+        )
+        .await
+    {
+        tracing::warn!(warehouse = %w.name, error = %e, "warehouse created but its registry catalog was not");
+    }
+
     Ok((StatusCode::CREATED, Json(w.into())))
 }
 
@@ -482,6 +502,7 @@ async fn get_warehouse(
         (status = 204, description = "Warehouse deleted"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing warehouse:delete permission", body = ErrorBody),
+        (status = 409, description = "The warehouse's catalog is attached to an engine", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -491,7 +512,41 @@ async fn delete_warehouse(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CatalogHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "warehouse:delete").await?;
-    st.store.delete_warehouse(id).await?;
+    // SP3: the warehouse's registry catalog goes with it (FK cascade) unless an
+    // engine attaches it. `registry.catalog_workspaces.catalog_id` is NO ACTION,
+    // not cascaded from `registry.catalogs` (migration 0147 §decision 5), so a
+    // plain `DELETE FROM catalog.warehouses` while the catalog is still assigned
+    // to a workspace fails with a raw FK 500 — the assignments must be released
+    // first. Releasing and deleting as two separate statements would let a
+    // failure land between them: the catalog released (invisible to every
+    // workspace) with the warehouse still standing, and no automatic retry.
+    // Both run in ONE transaction instead, so that half-done state cannot occur.
+    let registry = st.store.registry();
+    if let Some(cat) = registry.get_catalog_for_warehouse(id).await? {
+        let engines = registry.list_catalog_attachments(cat.id).await?;
+        if !engines.is_empty() {
+            let names: Vec<String> = engines.into_iter().map(|e| e.engine_name).collect();
+            return Err(CatalogHttpError::Conflict(format!(
+                "the warehouse's catalog {} is attached to engine(s) {}; detach it first",
+                cat.name,
+                names.join(", ")
+            )));
+        }
+        let mut tx = st.store.pool().begin().await.map_err(CatalogError::Db)?;
+        sqlx::query("DELETE FROM registry.catalog_workspaces WHERE catalog_id = $1")
+            .bind(cat.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(CatalogError::Db)?;
+        sqlx::query("DELETE FROM catalog.warehouses WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(CatalogError::Db)?;
+        tx.commit().await.map_err(CatalogError::Db)?;
+    } else {
+        st.store.delete_warehouse(id).await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

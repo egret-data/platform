@@ -292,12 +292,11 @@ impl egret_policy::EngineBindingReader for EngineBindingReaderImpl {
         &self,
         engine_id: uuid::Uuid,
     ) -> Result<Vec<String>, egret_policy::EngineReadError> {
-        let cats = self
-            .store
-            .list_engine_catalogs(engine_id)
+        self.store
+            .registry()
+            .attached_catalog_names(engine_id)
             .await
-            .map_err(|e| egret_policy::EngineReadError(e.to_string()))?;
-        Ok(cats.into_iter().map(|c| c.name).collect())
+            .map_err(|e| egret_policy::EngineReadError(e.to_string()))
     }
 
     async fn warehouse_schemas(

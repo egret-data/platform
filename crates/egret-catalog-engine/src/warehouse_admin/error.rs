@@ -51,6 +51,22 @@ impl From<CatalogError> for CatalogHttpError {
     }
 }
 
+/// The registry store error (SP3): a warehouse's registry catalog (creation,
+/// visibility, attachment checks on delete).
+impl From<egret_catalog_registry::RegistryError> for CatalogHttpError {
+    fn from(e: egret_catalog_registry::RegistryError) -> Self {
+        use egret_catalog_registry::RegistryError as E;
+        match e {
+            E::NotFound(_) => CatalogHttpError::NotFound,
+            E::AlreadyExists(s) => CatalogHttpError::AlreadyExists(s),
+            E::Conflict(s) => CatalogHttpError::Conflict(s),
+            E::Invalid(v) => CatalogHttpError::BadRequest(v.to_string()),
+            E::Secrets(s) => s.into(),
+            E::Db(_) => CatalogHttpError::Internal,
+        }
+    }
+}
+
 /// The engine-level domain error from the per-request warehouse/browse
 /// operations (E3d-2). Carries lakekeeper's own status classification through to
 /// the right HTTP code.

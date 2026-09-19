@@ -224,12 +224,10 @@ impl PolicyStore {
     ) -> Result<Vec<TagAssignmentRow>, PolicyStoreError> {
         // The `catalog` dimension MUST be the catalog name Trino sees, not the
         // egret warehouse name — the Ranger tag plugin matches downloaded tags
-        // against the query's `catalog.schema.table.column` resource. egret names
-        // every engine's primary warehouse catalog `egret` (a fixed name at
-        // provision time, see engines.rs), which usually differs from the
-        // warehouse name (e.g. `demo-catalog`). Emitting `w.name` here made tag
-        // masking silently no-op (resource paths never matched). Join the engine's
-        // primary `engine_catalogs` row and emit ITS name instead.
+        // against the query's `catalog.schema.table.column` resource. Every
+        // warehouse an engine attaches is served under its registry catalog's
+        // name — the SQL name on every engine (SP3 D5) — not only the engine's
+        // primary, and not an assumed `egret`.
         // `$1` is the service the plugin polled. The Trino tag plugin polls the
         // TAG service (`<profile>_tag`), but engines bind to the TRINO profile —
         // so resolve the trino profile that owns this tag service (via its
@@ -251,11 +249,13 @@ impl PolicyStore {
                JOIN policy.authz_services s ON s.id = $1
                LEFT JOIN policy.authz_services tp
                     ON tp.type = 'trino' AND tp.config_jsonb->>'tagService' = s.name
+               JOIN registry.catalogs c
+                    ON c.warehouse_id = a.warehouse_id
+               JOIN registry.engine_catalog_attachments ea
+                    ON ea.catalog_id = c.id
                JOIN engine_mgmt.engines e
-                    ON e.warehouse_id = a.warehouse_id
+                    ON e.id = ea.engine_id
                    AND e.authz_service_id = COALESCE(tp.id, s.id)
-               JOIN engine_mgmt.engine_catalogs c
-                    ON c.engine_id = e.id AND c.is_primary AND c.kind = 'egret-warehouse'
                ORDER BY c.name, a.schema_name, a.table_name, a.column_name, t.name"#,
         )
         .bind(service_id)

@@ -9572,7 +9572,7 @@
         },
         "responses": {
           "201": {
-            "description": "Warehouse created (egret row + lakekeeper warehouse when a provisioner is wired)",
+            "description": "Warehouse created (egret row + lakekeeper warehouse when a provisioner is wired) with its registry catalog, assigned to the workspace",
             "content": {
               "application/json": {
                 "schema": {
@@ -9748,6 +9748,16 @@
           },
           "403": {
             "description": "Missing warehouse:delete permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The warehouse's catalog is attached to an engine",
             "content": {
               "application/json": {
                 "schema": {
@@ -22232,7 +22242,7 @@
             }
           },
           "400": {
-            "description": "Warehouse not found or not owned by this workspace",
+            "description": "Warehouse not found or not assigned to this workspace",
             "content": {
               "application/json": {
                 "schema": {

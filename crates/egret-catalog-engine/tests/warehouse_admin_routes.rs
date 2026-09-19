@@ -670,3 +670,123 @@ async fn scoped_permission_warehouses_read_and_create() {
         "a scoped warehouse:create principal must create; body={body}"
     );
 }
+
+/// SP3: creating a warehouse creates its registry catalog assigned to the
+/// warehouse's workspace; deleting it is refused while an engine attaches the
+/// catalog, and otherwise removes the catalog with the warehouse.
+#[tokio::test]
+async fn warehouse_create_and_delete_keep_the_registry_in_step() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "wh_registry_admin", true).await;
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name) VALUES ($1, 'Reg WS') RETURNING id",
+    )
+    .bind(format!("reg-ws-{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    let other_ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name) VALUES ($1, 'Other WS') RETURNING id",
+    )
+    .bind(format!("reg-ws-{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    let sc: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) VALUES ($1, 'us-east-1', 'b', 'k') RETURNING id")
+        .bind(format!("reg-sc-{}", Uuid::new_v4().simple()))
+        .fetch_one(&f.db.pool).await.unwrap();
+    let wh_name = format!("Reg-WH-{}", Uuid::new_v4().simple());
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/warehouses",
+            &token,
+            Some(serde_json::json!({
+                "name": wh_name, "workspaceId": ws, "storageConnectionId": sc
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let wh_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let reg = store.registry();
+    let cat = reg
+        .get_catalog_for_warehouse(wh_id)
+        .await
+        .unwrap()
+        .expect("catalog created with the warehouse");
+    assert_eq!(
+        cat.name,
+        egret_catalog_registry::normalize_catalog_name(&wh_name)
+    );
+    assert!(store
+        .warehouse_visible_to_workspace(wh_id, ws)
+        .await
+        .unwrap());
+    assert!(!store
+        .warehouse_visible_to_workspace(wh_id, other_ws)
+        .await
+        .unwrap());
+    reg.set_catalog_workspaces(cat.id, &[other_ws])
+        .await
+        .unwrap();
+    assert!(store
+        .warehouse_visible_to_workspace(wh_id, other_ws)
+        .await
+        .unwrap());
+
+    // An engine on ANOTHER warehouse attaches this warehouse's catalog.
+    let engine_wh = store
+        .create_warehouse(&format!("eng-wh-{}", Uuid::new_v4().simple()), ws, sc)
+        .await
+        .unwrap();
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb) RETURNING id")
+        .bind(format!("reg-eng-{}", Uuid::new_v4().simple())).bind(engine_wh.id)
+        .fetch_one(&f.db.pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
+    )
+    .bind(engine_id)
+    .bind(cat.id)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("/warehouses/{wh_id}"), &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert!(reg
+        .get_catalog_for_warehouse(wh_id)
+        .await
+        .unwrap()
+        .is_some());
+
+    reg.delete_attachment(engine_id, cat.id).await.unwrap();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("/warehouses/{wh_id}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        reg.get_catalog(cat.id).await.unwrap().is_none(),
+        "catalog went with its warehouse"
+    );
+}

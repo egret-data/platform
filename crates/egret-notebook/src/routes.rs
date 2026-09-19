@@ -690,7 +690,7 @@ fn cat_err(e: egret_catalog_engine::CatalogError) -> NotebookApiError {
     request_body = SetNotebookWarehouse,
     responses(
         (status = 200, description = "Notebook warehouse set; catalog role + write grant provisioned", body = NotebookSettings),
-        (status = 400, description = "Warehouse not found or not owned by this workspace", body = ErrorBody),
+        (status = 400, description = "Warehouse not found or not assigned to this workspace", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing workspace:manage_members permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -705,15 +705,20 @@ async fn set_notebook_warehouse(
         .await
         .map_err(NotebookApiError::from)?;
 
-    // The warehouse must exist AND belong to this workspace (cross-tenant → 400,
-    // no partial mutation).
+    // The warehouse must exist AND its catalog be assigned to this workspace
+    // (SP3 §4.6; cross-tenant → 400, no partial mutation).
     let wh = st
         .catalog
         .get_warehouse(b.warehouse_id)
         .await
         .map_err(cat_err)?
         .ok_or_else(|| NotebookApiError::from(Error::InvalidInput("warehouse not found".into())))?;
-    if wh.workspace_id != ctx.workspace_id.0 {
+    if !st
+        .catalog
+        .warehouse_visible_to_workspace(wh.id, ctx.workspace_id.0)
+        .await
+        .map_err(cat_err)?
+    {
         return Err(NotebookApiError::from(Error::InvalidInput(
             "warehouse not in this workspace".into(),
         )));

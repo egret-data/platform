@@ -484,18 +484,26 @@ impl DatabaseRepo {
         .await?)
     }
 
-    /// Catalogs of an engine, each with its secret NAME resolved from
-    /// `secret_ref` → `workspace_secrets.name` (LEFT JOIN → `None` when absent;
-    /// the secret VALUE is never read here). Ordered by name.
+    /// Catalogs attached to an engine (SP3 registry), with the legacy `kind`
+    /// label the workspace view shows (`egret-warehouse` or the Trino connector
+    /// name) and the NAME of one secret the catalog references (`None` when
+    /// none; the value is never read). Ordered by name.
     pub async fn list_engine_catalogs(
         &self,
         engine_id: Uuid,
     ) -> Result<Vec<EngineCatalogRow>, DatabaseError> {
         Ok(sqlx::query_as::<_, EngineCatalogRow>(
-            "SELECT c.name, c.kind, ws.name AS secret_name \
-               FROM engine_mgmt.engine_catalogs c \
-               LEFT JOIN workspace_secrets ws ON ws.id = c.secret_ref \
-              WHERE c.engine_id = $1 \
+            "SELECT c.name, \
+                    CASE WHEN c.warehouse_id IS NOT NULL THEN 'egret-warehouse' \
+                         WHEN c.kind = 'jdbc' THEN c.config->>'dialect' \
+                         WHEN c.kind = 'generic' THEN COALESCE(c.advanced->'trino'->>'connector.name', 'generic') \
+                         ELSE c.kind END AS kind, \
+                    (SELECT min(ws.name) FROM registry.catalog_secret_refs r \
+                       JOIN workspace_secrets ws ON ws.id = r.secret_id \
+                      WHERE r.catalog_id = c.id) AS secret_name \
+               FROM registry.engine_catalog_attachments a \
+               JOIN registry.catalogs c ON c.id = a.catalog_id \
+              WHERE a.engine_id = $1 \
               ORDER BY c.name",
         )
         .bind(engine_id)

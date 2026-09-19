@@ -40,7 +40,8 @@ fn get(uri: &str) -> Request<Body> {
 }
 
 /// Seed a workspace + storage connection + warehouse + a Trino engine bound to
-/// `service_id`. Returns (warehouse_id, warehouse_name).
+/// `service_id`. Returns (warehouse_id, the registry catalog name the engine
+/// reaches it by).
 async fn seed_bound_warehouse(pool: &sqlx::PgPool, service_id: i64) -> (Uuid, String) {
     let (ws_id,): (Uuid,) =
         sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
@@ -80,18 +81,28 @@ async fn seed_bound_warehouse(pool: &sqlx::PgPool, service_id: i64) -> (Uuid, St
     .fetch_one(pool)
     .await
     .expect("insert engine");
-    // The engine's primary Trino catalog is named `egret` (a fixed name at
-    // provision time), NOT the warehouse name — `tag_assignments_for_service`
-    // emits THIS as the `catalog` so downloaded tags match the query's resource.
+    // The engine reaches the warehouse through its registry catalog; the tag
+    // export must emit THAT catalog's name (the SQL name Trino sees).
+    let catalog_name = format!("tagcat_{}", Uuid::new_v4().simple());
+    let (catalog_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) RETURNING id",
+    )
+    .bind(&catalog_name)
+    .bind(wh_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert registry catalog");
     sqlx::query(
-        "INSERT INTO engine_mgmt.engine_catalogs (engine_id, name, kind, config, is_primary) \
-         VALUES ($1,'egret','egret-warehouse','{}'::jsonb,true)",
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
     )
     .bind(eng_id)
+    .bind(catalog_id)
     .execute(pool)
     .await
-    .expect("insert engine catalog");
-    (wh_id, wh_name)
+    .expect("attach catalog");
+    (wh_id, catalog_name)
 }
 
 #[tokio::test]
@@ -149,7 +160,7 @@ async fn download_tags_serves_seeded_assignment() {
         .await
         .expect("create service");
 
-    let (wh_id, _wh_name) = seed_bound_warehouse(&pool, svc_row.id).await;
+    let (wh_id, catalog_name) = seed_bound_warehouse(&pool, svc_row.id).await;
 
     // One classification tag, assigned to a column of a table in this warehouse.
     let (tag_id,): (Uuid,) =
@@ -186,12 +197,12 @@ async fn download_tags_serves_seeded_assignment() {
     assert_eq!(st["tags"]["1"]["type"], "PII");
     // One resource. `resourceElements` sits directly on the entry (Ranger
     // `RangerServiceResource` shape), and `catalog` resolves to the engine's
-    // Trino catalog name (`egret`), NOT the warehouse name.
+    // registry catalog name, NOT the warehouse name.
     let srs = st["serviceResources"].as_array().unwrap();
     assert_eq!(srs.len(), 1, "one resource, got {srs:?}");
     assert_eq!(srs[0]["isEnabled"], true);
     let els = &srs[0]["resourceElements"];
-    assert_eq!(els["catalog"]["values"][0], "egret");
+    assert_eq!(els["catalog"]["values"][0], json!(catalog_name));
     assert_eq!(els["schema"]["values"][0], "sales");
     assert_eq!(els["table"]["values"][0], "orders");
     assert_eq!(els["column"]["values"][0], "email");
@@ -226,7 +237,7 @@ async fn download_tags_via_tag_service_resolves_owning_trino_profile() {
         .create_service(&tag_svc, "tag", &json!({}))
         .await
         .expect("create tag service");
-    let (wh_id, _wh) = seed_bound_warehouse(&pool, trino_row.id).await;
+    let (wh_id, catalog_name) = seed_bound_warehouse(&pool, trino_row.id).await;
     let (tag_id,): (Uuid,) =
         sqlx::query_as("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
             .bind(format!("pii-{base}"))
@@ -258,6 +269,9 @@ async fn download_tags_via_tag_service_resolves_owning_trino_profile() {
         1,
         "polling the tag service must resolve the owning trino profile's assignments, got {srs:?}"
     );
-    assert_eq!(srs[0]["resourceElements"]["catalog"]["values"][0], "egret");
+    assert_eq!(
+        srs[0]["resourceElements"]["catalog"]["values"][0],
+        json!(catalog_name)
+    );
     assert_eq!(srs[0]["resourceElements"]["column"]["values"][0], "email");
 }
