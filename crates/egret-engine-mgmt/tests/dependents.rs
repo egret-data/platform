@@ -227,7 +227,7 @@ async fn set_null_children_have_no_check_that_needs_the_column() {
     }
 }
 
-/// Deleting the engine row cascades these three; nothing else may reference it.
+/// Deleting the engine row cascades these four; nothing else may reference it.
 #[tokio::test]
 async fn every_fk_child_of_engines_cascades() {
     let (db, _store) = harness_or_skip!();
@@ -235,6 +235,12 @@ async fn every_fk_child_of_engines_cascades() {
         ("engine_mgmt.engine_catalogs", "engine_id", "c", true),
         ("engine_mgmt.engine_workspaces", "engine_id", "c", true),
         ("query.databases", "engine_id", "c", false),
+        (
+            "registry.engine_catalog_attachments",
+            "engine_id",
+            "c",
+            true,
+        ),
     ]
     .into_iter()
     .map(|(t, c, a, n)| (t.to_string(), c.to_string(), a.to_string(), n))
