@@ -2975,7 +2975,7 @@
             }
           },
           "409": {
-            "description": "Still attached or assigned (`code` = `catalog_in_use`, with `engines` and `workspaces`), or an egret warehouse catalog (delete the warehouse instead)",
+            "description": "Nothing deleted: an egret warehouse catalog (`code` = `warehouse_catalog`; it goes with its warehouse — this route refuses it unconditionally, delete the warehouse instead), or still attached or assigned (`code` = `catalog_in_use`, with `engines` and `workspaces`)",
             "content": {
               "application/json": {
                 "schema": {
@@ -29481,12 +29481,10 @@
       },
       "CatalogConflictBody": {
         "type": "object",
-        "description": "409 body of a refused catalog delete (`code` = `catalog_in_use`).",
+        "description": "409 body of a refused catalog delete. Two shapes share this struct (same\npattern as `EngineConflictBody`): `code = \"catalog_in_use\"` carries the\nnon-empty `engines`/`workspaces` that still use the catalog; `code =\n\"warehouse_catalog\"` (an egret warehouse catalog, refused unconditionally —\ndelete the warehouse instead) carries neither, so they're omitted.",
         "required": [
           "error",
-          "code",
-          "engines",
-          "workspaces"
+          "code"
         ],
         "properties": {
           "error": {

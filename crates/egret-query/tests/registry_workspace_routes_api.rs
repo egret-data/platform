@@ -851,14 +851,25 @@ async fn test_unsaved_unreachable_host_is_200_not_ok() {
     );
 }
 
-/// SP3 permission split: the platform key `catalog_registry:read` must NOT
-/// satisfy the workspace-scope `catalog:read` check (Cedar `Workspace in
-/// Platform` would make a same-named platform grant pass it in EVERY
-/// workspace). The HTTP 403 below is also produced by WsContext's membership
-/// gate, so the direct PDP assertions are what actually discriminate: they fail
-/// if the platform permission is ever renamed back to `catalog:read`.
+/// Pins the B1b-2 `==` anti-leak for the SAME-NAME case: even if a platform
+/// role held `catalog:read` ITSELF — the literal workspace-scope key from
+/// 0024 — Cedar still cannot let that platform grant satisfy the workspace
+/// check, because `template_for_role` (`crates/egret-auth/src/pdp/templates.rs`)
+/// gives a non-`platform_admin` platform-scoped role `resource == ?resource`,
+/// and `scope_uid("platform", ..)` (`entities.rs`) binds that slot to
+/// `Egret::Platform::"root"` — which can never `==` an `Egret::Workspace::<id>`
+/// entity, same action name or not. (SP3 still keeps `catalog_registry:*`
+/// DISTINCT from `catalog:read` — not because Cedar would confuse them, but
+/// because permission keys are scope-blind strings everywhere else they're
+/// read: `rbac::is_known`, the effective-permission lists the admin
+/// permission UI renders, and the single Cedar action namespace a policy
+/// names by string.) The HTTP 403 below is also produced by WsContext's
+/// membership gate, so the direct PDP assertions are what actually
+/// discriminate: they fail if `template_for_role`'s platform-scope operator
+/// ever regresses from `==` to `in` (verified by hand — see the task-8 fix
+/// report for the RED/GREEN transcript of temporarily making that change).
 #[tokio::test]
-async fn platform_catalog_registry_read_does_not_grant_workspace_catalog_read() {
+async fn platform_grant_never_satisfies_workspace_scope_check() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
@@ -876,13 +887,13 @@ async fn platform_catalog_registry_read_does_not_grant_workspace_catalog_read() 
     .fetch_one(&f.db.pool)
     .await
     .expect("insert role");
-    sqlx::query(
-        "INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'catalog_registry:read')",
-    )
-    .bind(role_id)
-    .execute(&f.db.pool)
-    .await
-    .expect("grant permission");
+    // The COLLIDING key itself: this role holds `catalog:read` — the literal
+    // workspace-scope permission — but only ever granted at PLATFORM scope.
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'catalog:read')")
+        .bind(role_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("grant permission");
     sqlx::query(
         "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
          VALUES ('user', $1, $2, 'platform', NULL)",
@@ -924,7 +935,7 @@ async fn platform_catalog_registry_read_does_not_grant_workspace_catalog_read() 
         group_ids: vec![],
     };
     let platform = pdp
-        .authorize(&subject, "catalog_registry:read", &Resource::Platform)
+        .authorize(&subject, "catalog:read", &Resource::Platform)
         .await
         .expect("authorize");
     assert!(platform.allow, "positive control: the platform grant works");
@@ -934,6 +945,7 @@ async fn platform_catalog_registry_read_does_not_grant_workspace_catalog_read() 
         .expect("authorize");
     assert!(
         !workspace.allow,
-        "catalog_registry:read must not satisfy the workspace-scope catalog:read"
+        "a platform-scope grant of catalog:read must not satisfy the workspace-scope \
+         catalog:read check on a specific workspace (B1b-2 anti-leak)"
     );
 }

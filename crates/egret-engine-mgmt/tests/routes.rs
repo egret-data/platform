@@ -5887,7 +5887,9 @@ async fn registry_catalog_crud_validation_and_delete_refusal() {
         )
         .await
         .unwrap();
-    reg.set_catalog_workspaces(lone.id, &[]).await.unwrap();
+    // Still assigned to its warehouse's workspace (never unassigned): the
+    // warehouse refusal fires unconditionally, before the in-use check would
+    // otherwise see that assignment and report `catalog_in_use` instead.
     let (status, j) = call(
         &f,
         "DELETE",
@@ -5897,6 +5899,7 @@ async fn registry_catalog_crud_validation_and_delete_refusal() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(j["code"], "warehouse_catalog", "{j}");
     assert!(j["error"].as_str().unwrap().contains("warehouse"), "{j}");
 }
 
@@ -6087,4 +6090,131 @@ async fn catalog_permissions_with_the_real_pdp() {
     .await
     .unwrap();
     assert_eq!(n, 1);
+}
+
+#[tokio::test]
+async fn registry_catalog_not_found_warehouse_change_and_permission_checks() {
+    let Some(mut f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "cat_404_admin", true).await;
+    let reader = session_for_with_permission(&f, "cat_404_reader", "catalog_registry:read").await;
+    attach_real_pdp(&mut f).await;
+
+    // Unknown id: 404 on every route (the admin holds platform_admin's
+    // unrestricted PDP bypass, so these reach `load`).
+    let missing = Uuid::new_v4();
+    assert_eq!(
+        call(&f, "GET", &format!("/catalogs/{missing}"), &admin, None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(
+            &f,
+            "PUT",
+            &format!("/catalogs/{missing}"),
+            &admin,
+            Some(serde_json::json!({ "config": {} })),
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&f, "DELETE", &format!("/catalogs/{missing}"), &admin, None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+
+    // A read-only session (holds catalog_registry:read only) is forbidden from
+    // updating or deleting, even a catalog that doesn't exist — authz runs
+    // before the lookup.
+    assert_eq!(
+        call(
+            &f,
+            "PUT",
+            &format!("/catalogs/{missing}"),
+            &reader,
+            Some(serde_json::json!({ "config": {} })),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(&f, "DELETE", &format!("/catalogs/{missing}"), &reader, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    // PUT that newly ADDS a warehouse_id to a plain (non-egret) iceberg catalog
+    // is refused: the warehouse of an egret catalog is immutable, and that
+    // includes going from none to one.
+    let sc_id = seed_exchange_storage_conn(&f).await;
+    let name = unique_catalog_name("ice");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &admin,
+        Some(serde_json::json!({
+            "name": name, "kind": "iceberg",
+            "config": { "metastore": { "type": "hive", "uri": "thrift://hms:9083" }, "storage_connection_id": sc_id }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let catalog_id = j["id"].as_str().unwrap().to_string();
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{catalog_id}"),
+        &admin,
+        Some(
+            serde_json::json!({ "config": { "metastore": { "type": "egret", "warehouse_id": Uuid::new_v4() } } }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    assert!(j["error"].as_str().unwrap().contains("warehouse"), "{j}");
+
+    // A 409 body that lists `workspaces`: assign a (non-warehouse) catalog to a
+    // workspace, then try to delete it.
+    let name2 = unique_catalog_name("bench2");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &admin,
+        Some(serde_json::json!({ "name": name2, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cat2_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let ws_id = seed_workspace(&f).await;
+    registry(&f)
+        .set_catalog_workspaces(cat2_id, &[ws_id])
+        .await
+        .unwrap();
+    let (status, j) = call(&f, "DELETE", &format!("/catalogs/{cat2_id}"), &admin, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(j["code"], "catalog_in_use");
+    assert_eq!(j["workspaces"].as_array().unwrap().len(), 1, "{j}");
+    assert_eq!(j["workspaces"][0]["id"], serde_json::json!(ws_id), "{j}");
+    assert!(
+        j.get("engines")
+            .map(|v| v.as_array().unwrap().is_empty())
+            .unwrap_or(true),
+        "{j}"
+    );
 }

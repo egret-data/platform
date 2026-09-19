@@ -169,12 +169,18 @@ pub struct CatalogConflictWorkspace {
     pub slug: String,
 }
 
-/// 409 body of a refused catalog delete (`code` = `catalog_in_use`).
+/// 409 body of a refused catalog delete. Two shapes share this struct (same
+/// pattern as `EngineConflictBody`): `code = "catalog_in_use"` carries the
+/// non-empty `engines`/`workspaces` that still use the catalog; `code =
+/// "warehouse_catalog"` (an egret warehouse catalog, refused unconditionally —
+/// delete the warehouse instead) carries neither, so they're omitted.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CatalogConflictBody {
     pub error: String,
     pub code: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub engines: Vec<CatalogConflictEngine>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub workspaces: Vec<CatalogConflictWorkspace>,
 }
 
@@ -371,7 +377,7 @@ async fn update_registry_catalog(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:delete permission", body = ErrorBody),
         (status = 404, description = "No such catalog", body = ErrorBody),
-        (status = 409, description = "Still attached or assigned (`code` = `catalog_in_use`, with `engines` and `workspaces`), or an egret warehouse catalog (delete the warehouse instead)", body = CatalogConflictBody),
+        (status = 409, description = "Nothing deleted: an egret warehouse catalog (`code` = `warehouse_catalog`; it goes with its warehouse — this route refuses it unconditionally, delete the warehouse instead), or still attached or assigned (`code` = `catalog_in_use`, with `engines` and `workspaces`)", body = CatalogConflictBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -382,6 +388,16 @@ async fn delete_registry_catalog(
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "catalog_registry:delete").await?;
     let row = load(&st, id).await?;
+    // An egret warehouse catalog is refused unconditionally, before even
+    // looking at attachments/assignments: it goes with its warehouse (FK
+    // cascade) and is never deletable through this route, so telling the
+    // caller to detach/unassign it first (the catalog_in_use message) would be
+    // actionable-sounding advice that leads nowhere.
+    if row.warehouse_id.is_some() {
+        return Err(CpError::WarehouseCatalog(
+            "this catalog is an egret warehouse; delete the warehouse instead".into(),
+        ));
+    }
     let registry = st.engine_mgmt.registry();
     let engines = registry.list_catalog_attachments(id).await?;
     let workspaces = registry.list_catalog_workspaces(id).await?;
@@ -403,11 +419,6 @@ async fn delete_registry_catalog(
                 })
                 .collect(),
         });
-    }
-    if row.warehouse_id.is_some() {
-        return Err(CpError::Conflict(
-            "this catalog is an egret warehouse; delete the warehouse instead".into(),
-        ));
     }
     registry.delete_catalog(id).await?;
     Ok(StatusCode::NO_CONTENT)

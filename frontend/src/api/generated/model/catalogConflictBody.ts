@@ -9,11 +9,15 @@ import type { CatalogConflictEngine } from './catalogConflictEngine';
 import type { CatalogConflictWorkspace } from './catalogConflictWorkspace';
 
 /**
- * 409 body of a refused catalog delete (`code` = `catalog_in_use`).
+ * 409 body of a refused catalog delete. Two shapes share this struct (same
+ * pattern as `EngineConflictBody`): `code = "catalog_in_use"` carries the
+ * non-empty `engines`/`workspaces` that still use the catalog; `code =
+ * "warehouse_catalog"` (an egret warehouse catalog, refused unconditionally —
+ * delete the warehouse instead) carries neither, so they're omitted.
  */
 export interface CatalogConflictBody {
   error: string;
   code: string;
-  engines: CatalogConflictEngine[];
-  workspaces: CatalogConflictWorkspace[];
+  engines?: CatalogConflictEngine[];
+  workspaces?: CatalogConflictWorkspace[];
 }

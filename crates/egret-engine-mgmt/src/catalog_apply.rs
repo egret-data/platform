@@ -94,7 +94,16 @@ impl CatalogOpError {
     }
 
     /// Registry routes: a rejected apply is a 502 (spec §4.4).
-    #[allow(dead_code)] // consumed by the registry routes (Task 8)
+    ///
+    /// Currently unused: `catalogs.rs`'s handlers reach a rejected apply only
+    /// through `propagate` (returns `Vec<ApplyOutcome>`, folding a failed
+    /// engine into an outcome entry rather than an error) and
+    /// `validate_references` (returns `Result<(), CpError>` directly) — neither
+    /// ever constructs a `CatalogOpError` for the registry routes to convert.
+    /// Kept for the seam it documents (attach/detach's 502 mapping once the
+    /// registry routes grow an attach/detach endpoint of their own); remove if
+    /// that never lands.
+    #[allow(dead_code)]
     pub(crate) fn into_registry(self) -> CpError {
         match self {
             CatalogOpError::Apply(ApplyError::Rejected(m)) => CpError::ClusterApplyFailed(m),
@@ -107,7 +116,6 @@ impl CatalogOpError {
 #[derive(Clone, Debug)]
 pub(crate) struct ApplyOutcome {
     pub(crate) engine_id: Uuid,
-    #[allow(dead_code)] // read by the registry routes' outcome DTO (Task 8)
     pub(crate) engine_name: String,
     pub(crate) applied: bool,
     pub(crate) error: Option<String>,

@@ -58,6 +58,12 @@ pub enum EngineHttpError {
         engines: Vec<crate::catalogs::CatalogConflictEngine>,
         workspaces: Vec<crate::catalogs::CatalogConflictWorkspace>,
     },
+    /// A registry catalog is an egret warehouse catalog: it goes with its
+    /// warehouse and can never be deleted through `/catalogs`. 409, unconditional
+    /// (checked before attachments/assignments, since telling the caller to
+    /// detach/unassign it would be pointless — it stays refused either way).
+    #[error("catalog is an egret warehouse")]
+    WarehouseCatalog(String),
     #[error("internal error")]
     Internal,
 }
@@ -235,6 +241,15 @@ impl IntoResponse for EngineHttpError {
                     code: "catalog_in_use".into(),
                     engines,
                     workspaces,
+                };
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            EngineHttpError::WarehouseCatalog(error) => {
+                let body = crate::catalogs::CatalogConflictBody {
+                    error,
+                    code: "warehouse_catalog".into(),
+                    engines: Vec::new(),
+                    workspaces: Vec::new(),
                 };
                 (StatusCode::CONFLICT, Json(body)).into_response()
             }
