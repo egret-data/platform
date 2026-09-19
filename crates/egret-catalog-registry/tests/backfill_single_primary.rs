@@ -225,7 +225,11 @@ async fn single_primary_platform_migrates_like_the_kind_cluster() {
     assert_eq!(pg.kind, "generic");
     assert!(
         !pg.advanced.to_string().contains("hunter2"),
-        "plaintext left the catalog"
+        "plaintext left the catalog's advanced properties"
+    );
+    assert!(
+        !pg.config.to_string().contains("hunter2"),
+        "plaintext left the catalog's config"
     );
     // T2: the secret is not just absent from the catalog — it resolves to the
     // exact original plaintext, so the credential was moved, never lost.

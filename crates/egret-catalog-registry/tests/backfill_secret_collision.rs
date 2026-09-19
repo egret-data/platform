@@ -147,17 +147,15 @@ async fn a_secret_name_collision_with_a_different_value_never_binds_the_wrong_cr
     );
 
     // The collision was reported, not silently resolved.
-    let codes: Vec<String> = sqlx::query_scalar(
-        "SELECT code FROM registry.migration_report WHERE run_id = $1 ORDER BY id",
+    let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT code, message, detail FROM registry.migration_report WHERE run_id = $1 ORDER BY id",
     )
     .bind(run.run_id)
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert!(
-        codes.iter().any(|c| c == "secret_name_collision"),
-        "{codes:?}"
-    );
+    let codes: Vec<&str> = rows.iter().map(|(c, _, _)| c.as_str()).collect();
+    assert!(codes.contains(&"secret_name_collision"), "{codes:?}");
 
     // Exactly two named secrets exist for this shared client id: the original
     // and its suffixed sibling — no third is created on a second boot.
@@ -168,6 +166,29 @@ async fn a_secret_name_collision_with_a_different_value_never_binds_the_wrong_cr
             .await
             .unwrap();
     assert_eq!(names.len(), 2, "{names:?}");
+    let suffixed_name = names
+        .iter()
+        .find(|n| n.as_str() != format!("catalog-client-{shared_client}"))
+        .expect("one of the two names must be the suffixed sibling");
+
+    // M1: the `secret_extracted` message names the secret ACTUALLY used (the
+    // suffixed one), not the base name the wanted-but-taken name — otherwise an
+    // operator reading the report would go looking under the wrong name.
+    assert!(
+        rows.iter()
+            .any(|(c, msg, _)| c == "secret_extracted" && msg.contains(suffixed_name.as_str())),
+        "no secret_extracted message names the suffixed secret {suffixed_name}: {rows:?}"
+    );
+    // The collision entry's own detail names both the wanted and used names.
+    let collision_detail = rows
+        .iter()
+        .find(|(c, _, _)| c == "secret_name_collision")
+        .map(|(_, _, d)| d.clone())
+        .unwrap();
+    assert_eq!(
+        collision_detail["usedName"].as_str(),
+        Some(suffixed_name.as_str())
+    );
 
     let second = run_backfill(&store, &vault).await.expect("second boot");
     assert_eq!((second.report_rows, second.failed_rows), (0, 0));

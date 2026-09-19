@@ -202,7 +202,7 @@ async fn run_locked(
     let mut shared: HashMap<String, (String, Uuid)> = HashMap::new();
     for row in &rows {
         let result = if row.kind == "egret-warehouse" {
-            migrate_warehouse_row(store, secrets, run_id, row).await
+            migrate_warehouse_row(store, secrets, run_id, row, egret_warehouse).await
         } else {
             migrate_connector_row(store, secrets, run_id, row, &mut shared).await
         };
@@ -387,34 +387,43 @@ fn renamed_entry(
 /// to bundle into its own atomic write (never written here, so it stays
 /// consistent with review fix I1: it must land in the same transaction as the
 /// row it belongs to).
+///
+/// Returns `(secret id, name actually used, collision report entry)`. The
+/// collision entry is `Some` whenever `used name != base_name`, whether THIS
+/// call created the suffixed secret or found it already there (review fix M2):
+/// a crash between a prior boot creating `-2` and that row's own transaction
+/// committing would otherwise make a retry silently reuse `-2` (same value) and
+/// never explain why. Since a row is migrated at most once, ever, the entry
+/// this returns is bundled into that one row's one-time atomic write, so it is
+/// written exactly once regardless of how many boots it took to get there.
 async fn create_or_reuse_secret(
     secrets: &WorkspaceSecretStore,
     run_id: Uuid,
     base_name: &str,
     value: &str,
-) -> Result<(Uuid, Option<ReportEntry>), RegistryError> {
+) -> Result<(Uuid, String, Option<ReportEntry>), RegistryError> {
     for attempt in 0..MAX_SUFFIX_ATTEMPTS {
         let name = if attempt == 0 {
             base_name.to_string()
         } else {
             format!("{base_name}-{}", attempt + 1)
         };
+        let collision_note = |used_name: &str| {
+            (used_name != base_name).then(|| {
+                ReportEntry::warning(
+                    run_id,
+                    "secret_name_collision",
+                    format!("secret {base_name}"),
+                    format!(
+                        "a secret named {base_name} already exists with a different value; \
+                         this credential was stored as {used_name} instead so it is never bound to the wrong secret"
+                    ),
+                )
+                .detail(json!({ "wantedName": base_name, "usedName": used_name }))
+            })
+        };
         match secrets.create(None, &name, Some(EXTRACTED), value).await {
-            Ok(id) => {
-                let note = (attempt > 0).then(|| {
-                    ReportEntry::warning(
-                        run_id,
-                        "secret_name_collision",
-                        format!("secret {base_name}"),
-                        format!(
-                            "a secret named {base_name} already exists with a different value; \
-                             this credential was stored as {name} instead so it is never bound to the wrong secret"
-                        ),
-                    )
-                    .detail(json!({ "wantedName": base_name, "usedName": name }))
-                });
-                return Ok((id, note));
-            }
+            Ok(id) => return Ok((id, name.clone(), collision_note(&name))),
             Err(SecretsError::AlreadyExists(_)) => {
                 let existing = secrets
                     .list(None)
@@ -427,7 +436,7 @@ async fn create_or_reuse_secret(
                         ))
                     })?;
                 if secrets.resolve_plaintext(None, existing.id).await? == value {
-                    return Ok((existing.id, None));
+                    return Ok((existing.id, name.clone(), collision_note(&name)));
                 }
                 // A DIFFERENT value already lives under this name: never reuse it.
                 continue;
@@ -486,6 +495,7 @@ async fn migrate_warehouse_row(
     secrets: &WorkspaceSecretStore,
     run_id: Uuid,
     row: &LegacyRow,
+    egret_warehouse: Option<Uuid>,
 ) -> Result<(), RegistryError> {
     let warehouse_id = row_warehouse(store, row).await?;
     let wh: WarehouseRow =
@@ -494,11 +504,20 @@ async fn migrate_warehouse_row(
             .fetch_optional(store.pool())
             .await?
             .ok_or_else(|| RegistryError::NotFound(format!("warehouse {warehouse_id}")))?;
-    // Step 1 already created every warehouse's catalog (or reported why it could
-    // not); this only creates one itself in the rare case step 1 failed for this
-    // warehouse and THIS row's own attempt at it succeeds — no report is owed
-    // here for that (step 1's failure entry already explains it), so the closure
-    // is empty.
+    // Step 1 already created every warehouse's catalog in the common case; this
+    // only creates one itself when step 1 failed for it (review fix M5) — so it
+    // must make the SAME preferred-name decision step 1 would have (the
+    // single-primary `egret` exception), and owes the SAME `warehouse_catalog_
+    // created`/`primary_named_egret` report step 1 would have written, since
+    // step 1's own `backfill_failed` entry says nothing about how this warehouse
+    // actually ended up migrated.
+    let preferred =
+        if Some(wh.id) == egret_warehouse && store.get_catalog_by_name(EGRET).await?.is_none() {
+            Some(EGRET)
+        } else {
+            None
+        };
+    let had_preferred = preferred.is_some();
     let (cat, _) = store
         .ensure_warehouse_catalog(
             &WarehouseIdentity {
@@ -506,8 +525,15 @@ async fn migrate_warehouse_row(
                 name: &wh.name,
                 workspace_id: wh.workspace_id,
             },
-            None,
-            |_| Vec::new(),
+            preferred,
+            |cat: &CatalogRow| {
+                let mut entries = vec![warehouse_created_entry(run_id, &wh, cat)];
+                if had_preferred {
+                    entries.push(primary_named_egret_entry(run_id, &wh, cat));
+                }
+                log_entries(&entries);
+                entries
+            },
         )
         .await?;
     let client = client_row_id(&row.config);
@@ -549,14 +575,14 @@ async fn migrate_warehouse_row(
         Some(id) => format!("catalog-client-{id}"),
         None => format!("catalog-client-legacy-{}", row.id),
     };
-    let (secret_id, collision_note) =
+    let (secret_id, used_secret_name, collision_note) =
         create_or_reuse_secret(secrets, run_id, &secret_name, credential).await?;
 
     let mut entries = vec![ReportEntry::info(
         run_id,
         "secret_extracted",
         format!("engine {} catalog {}", row.engine_name, row.name),
-        format!("the catalog client credential moved into secret {secret_name}"),
+        format!("the catalog client credential moved into secret {used_secret_name}"),
     )
     .engine(row.engine_id)
     .catalog(cat.id)];
@@ -674,7 +700,7 @@ async fn migrate_connector_row(
     let mut extracted = BTreeMap::new();
     for (property, value) in plaintext_secrets(&legacy) {
         let secret_name = format!("catalog-{name}-{property}");
-        let (id, collision_note) =
+        let (id, used_secret_name, collision_note) =
             create_or_reuse_secret(secrets, run_id, &secret_name, &value).await?;
         extracted.insert(property.clone(), id);
         entries.push(
@@ -682,7 +708,7 @@ async fn migrate_connector_row(
                 run_id,
                 "secret_extracted",
                 subject.clone(),
-                format!("plaintext {property} moved into secret {secret_name}"),
+                format!("plaintext {property} moved into secret {used_secret_name}"),
             )
             .engine(row.engine_id),
         );
