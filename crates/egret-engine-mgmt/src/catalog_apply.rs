@@ -93,17 +93,8 @@ impl CatalogOpError {
         }
     }
 
-    /// Registry routes: a rejected apply is a 502 (spec §4.4).
-    ///
-    /// Currently unused: `catalogs.rs`'s handlers reach a rejected apply only
-    /// through `propagate` (returns `Vec<ApplyOutcome>`, folding a failed
-    /// engine into an outcome entry rather than an error) and
-    /// `validate_references` (returns `Result<(), CpError>` directly) — neither
-    /// ever constructs a `CatalogOpError` for the registry routes to convert.
-    /// Kept for the seam it documents (attach/detach's 502 mapping once the
-    /// registry routes grow an attach/detach endpoint of their own); remove if
-    /// that never lands.
-    #[allow(dead_code)]
+    /// Registry routes: a rejected apply is a 502 (spec §4.4). Used by
+    /// `catalogs.rs`'s `attach_catalog` and `retry_catalog_apply`.
     pub(crate) fn into_registry(self) -> CpError {
         match self {
             CatalogOpError::Apply(ApplyError::Rejected(m)) => CpError::ClusterApplyFailed(m),
@@ -504,16 +495,24 @@ pub(crate) async fn attach_to_engine(
     };
 
     if let Err(e) = apply_catalog_change(st, engine, CatalogChange::Attach(pending)).await {
-        // Revoking makes the credential worthless even if the failed apply got as
-        // far as the engine's env Secret, so its egret copy can go too.
+        // Only delete egret's copy of the credential once the client that
+        // holds it is actually revoked. If the failed apply got as far as the
+        // engine's env Secret, a live, unrevoked client whose egret copy is
+        // gone is a credential nobody can clean up; keep it and log loudly
+        // instead so an operator can find and revoke it.
         if let Some((client_id, secret_id)) = minted {
-            if let Err(err) = st.catalog.revoke_client(client_id).await {
-                tracing::warn!(engine = %engine.name, %client_id, error = ?err,
-                    "attach rollback: revoke failed");
-            }
-            if let Err(err) = st.secrets.delete(None, secret_id).await {
-                tracing::warn!(engine = %engine.name, %secret_id, error = %err,
-                    "attach rollback: secret delete failed");
+            match st.catalog.revoke_client(client_id).await {
+                Ok(()) => {
+                    if let Err(err) = st.secrets.delete(None, secret_id).await {
+                        tracing::warn!(engine = %engine.name, %secret_id, error = %err,
+                            "attach rollback: secret delete failed");
+                    }
+                }
+                Err(err) => {
+                    tracing::error!(engine = %engine.name, %client_id, %secret_id, error = ?err,
+                        "attach rollback: revoke failed; leaving the credential secret in place \
+                         so it is not lost while the client may still be live — clean up manually");
+                }
             }
         }
         return Err(CatalogOpError::Apply(e));
@@ -568,18 +567,20 @@ pub(crate) async fn detach_from_engine(
     Ok(())
 }
 
-/// Re-apply one engine after a catalog changed; flags the attachment on failure.
+/// Re-apply one engine after a catalog changed; flags the attachment on a
+/// rejected apply. A `deleting` engine (concurrent delete) is a 409 that
+/// writes nothing — a refused apply must leave the DB unchanged, and the
+/// attachment's `apply_status` says nothing true about a cluster the apply
+/// never reached.
 pub(crate) async fn retry_apply(
     st: &CpState,
     engine: &Engine,
     catalog_id: Uuid,
 ) -> Result<(), CatalogOpError> {
-    let result = if engine.status == crate::engine_status::DELETING {
-        Err(ApplyError::Conflict)
-    } else {
-        apply_catalog_change(st, engine, CatalogChange::Reapply).await
-    };
-    if let Err(e) = result {
+    if engine.status == crate::engine_status::DELETING {
+        return Err(CatalogOpError::Apply(ApplyError::Conflict));
+    }
+    if let Err(e) = apply_catalog_change(st, engine, CatalogChange::Reapply).await {
         st.engine_mgmt
             .registry()
             .set_apply_failed(engine.id, catalog_id, &e.message())

@@ -6295,12 +6295,13 @@ async fn attach_detach_and_retry_on_a_trino_engine() {
     assert_eq!(status, StatusCode::CONFLICT, "already attached");
 
     // A StarRocks-only generic catalog cannot be attached to Trino.
+    let sr_only_name = unique_catalog_name("paimon");
     let (_, j) = call(&f, "POST", "/catalogs", &token, Some(serde_json::json!({
-        "name": unique_catalog_name("paimon"), "kind": "generic",
+        "name": sr_only_name, "kind": "generic",
         "config": { "engines": ["starrocks"] }, "advanced": { "starrocks": { "type": "paimon" } }
     }))).await;
     let sr_only = j["id"].as_str().unwrap().to_string();
-    let (status, _) = call(
+    let (status, j) = call(
         &f,
         "POST",
         &format!("/engines/{engine_id}/catalogs/{sr_only}"),
@@ -6308,12 +6309,32 @@ async fn attach_detach_and_retry_on_a_trino_engine() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    let msg = j["error"].as_str().unwrap();
+    assert!(msg.contains("trino"), "{msg} should name the engine type");
+    assert!(msg.contains(&sr_only_name), "{msg} should name the catalog");
+
+    // Retry's IDOR guard: `sr_only` exists but was never attached to this
+    // (or any) engine — the path's engine id does not make it eligible.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{sr_only}/apply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
+    assert!(reg
+        .get_attachment(e, Uuid::parse_str(&sr_only).unwrap())
+        .await
+        .unwrap()
+        .is_none());
 
     // Retry: a failed attachment is re-applied once the engine is healthy.
     reg.set_apply_failed(e, c, "earlier failure").await.unwrap();
     port.set_fail_update(true);
-    let (status, _) = call(
+    let (status, j) = call(
         &f,
         "POST",
         &format!("/engines/{engine_id}/catalogs/{cid}/apply"),
@@ -6322,6 +6343,7 @@ async fn attach_detach_and_retry_on_a_trino_engine() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(j["code"], "engine_cluster_apply_failed");
     assert!(reg
         .get_attachment(e, c)
         .await
@@ -6516,4 +6538,245 @@ async fn workspace_assignment_and_the_migration_report() {
         .unwrap()
         .iter()
         .any(|r| r["runId"] == serde_json::json!(run)));
+}
+
+#[tokio::test]
+async fn new_catalog_routes_enforce_their_permission_gates() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // Ad-hoc single-permission roles must exist before the real PDP snapshots
+    // roles/permissions at build time (see `attach_real_pdp`).
+    let engine_updater = session_for_with_permission(&f, "cat_gate_eng_upd", "engine:update").await;
+    let registry_updater =
+        session_for_with_permission(&f, "cat_gate_reg_upd", "catalog_registry:update").await;
+    let registry_reader =
+        session_for_with_permission(&f, "cat_gate_reg_read", "catalog_registry:read").await;
+    attach_real_pdp(&mut f).await;
+    let admin = session_for(&f, "cat_gate_admin", true).await;
+
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &admin, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("gate");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &admin,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = j["id"].as_str().unwrap().to_string();
+    let reg = registry(&f);
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+
+    // Attach requires `engine:update`; `catalog_registry:update` alone is not
+    // enough — the two gates are distinct even though both mutate.
+    let (status, _) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &registry_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        reg.get_attachment(e, c).await.unwrap().is_none(),
+        "forbidden attach wrote nothing"
+    );
+
+    // Positive: a session holding exactly `engine:update` (not platform_admin)
+    // gets through — proves the gate checks the real key, not just "is admin".
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &engine_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(j["applyStatus"], "applied");
+
+    // Retry requires `catalog_registry:update`; `engine:update` alone is not enough.
+    let before = reg.get_attachment(e, c).await.unwrap().unwrap();
+    let (status, _) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}/apply"),
+        &engine_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let after = reg.get_attachment(e, c).await.unwrap().unwrap();
+    assert_eq!(
+        (before.apply_status, before.apply_error),
+        (after.apply_status, after.apply_error),
+        "forbidden retry changed nothing"
+    );
+
+    // PUT workspaces requires `catalog_registry:update`; `catalog_registry:read`
+    // alone is not enough.
+    let ws_id = seed_workspace(&f).await;
+    let (status, _) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &registry_reader,
+        Some(serde_json::json!({ "workspaceIds": [ws_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        reg.list_catalog_workspaces(c).await.unwrap().is_empty(),
+        "forbidden assignment wrote nothing"
+    );
+
+    // The migration-report GETs require `catalog_registry:read`; `engine:update`
+    // is not enough.
+    let (status, _) = call(
+        &f,
+        "GET",
+        "/catalogs/migration-report",
+        &engine_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(
+        &f,
+        "GET",
+        &format!("/catalogs/{cid}/workspaces"),
+        &engine_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Acknowledge requires `catalog_registry:update`; `catalog_registry:read`
+    // alone is not enough.
+    let run = Uuid::new_v4();
+    reg.insert_report(&[egret_catalog_registry::ReportEntry::info(
+        run,
+        "warehouse_catalog_created",
+        "warehouse w",
+        "w is catalog w",
+    )])
+    .await
+    .unwrap();
+    let (status, _) = call(
+        &f,
+        "POST",
+        "/catalogs/migration-report/acknowledge",
+        &registry_reader,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, j) = call(&f, "GET", "/catalogs/migration-report", &admin, None).await;
+    assert!(
+        j.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["runId"] == serde_json::json!(run)),
+        "forbidden acknowledge left the row open; {j}"
+    );
+}
+
+#[tokio::test]
+async fn retry_on_a_deleting_engine_is_409_and_writes_nothing() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_retry_deleting_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("del");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let (status, _) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let reg = registry(&f);
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+    // Leave the attachment in a known `failed` state so a wrongful write by
+    // the 409 path is visible: `set_apply_failed` would flip it back to
+    // `failed` with a different message, which the equality check below
+    // catches either way, but starting from `failed` also confirms the
+    // conflict path does not "helpfully" flip it to `applied`.
+    reg.set_apply_failed(e, c, "earlier failure").await.unwrap();
+    let before = reg.get_attachment(e, c).await.unwrap().unwrap();
+
+    sqlx::query("UPDATE engine_mgmt.engines SET status = 'deleting' WHERE id = $1")
+        .bind(e)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let updates_before = port.updated.lock().unwrap().len();
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}/apply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "a refused apply on a deleting engine must not reach the provisioner"
+    );
+    let after = reg.get_attachment(e, c).await.unwrap().unwrap();
+    assert_eq!(
+        (before.apply_status, before.apply_error),
+        (after.apply_status, after.apply_error),
+        "a refused apply on a deleting engine must leave the attachment unchanged"
+    );
 }
