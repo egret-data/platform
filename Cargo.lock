@@ -3053,6 +3053,7 @@ dependencies = [
  "egret-automation",
  "egret-bi",
  "egret-catalog-engine",
+ "egret-catalog-registry",
  "egret-config",
  "egret-controlplane",
  "egret-core",

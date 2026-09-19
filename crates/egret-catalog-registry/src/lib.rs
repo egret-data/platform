@@ -4,15 +4,18 @@
 //! boot-time backfill. Engine-side effects (applying to Trino, StarRocks DDL) live
 //! in `egret-engine-mgmt`, which depends on this crate.
 
+pub mod backfill;
 pub mod config;
 pub mod error;
 pub mod legacy;
 pub mod name;
 pub mod render;
 pub mod report;
+pub mod scan;
 pub mod sensitive;
 pub mod store;
 
+pub use backfill::{run_backfill, BackfillSummary, BACKFILL_LOCK_KEY};
 pub use config::{
     Advanced, CatalogConfig, CatalogDef, CatalogKind, ElasticsearchConfig, EngineType,
     GenericConfig, HiveFamilyConfig, HiveMetastore, IcebergConfig, IcebergMetastore, JdbcConfig,

@@ -219,9 +219,8 @@ pub(crate) async fn insert_attachment_row(
     .await
 }
 
-// Unused within this task: the backfill (SP3a Task 6) is the only planned
-// caller, and it lands in a later task.
-#[allow(dead_code)]
+/// The backfill's only caller: marks an `engine_mgmt.engine_catalogs` row
+/// migrated, so it is never revisited on a later boot.
 pub(crate) async fn map_legacy_row_on(
     conn: &mut PgConnection,
     engine_catalog_id: Uuid,
@@ -711,6 +710,62 @@ impl RegistryStore {
         .bind(engine_id)
         .fetch_one(self.pool())
         .await?)
+    }
+
+    /// Backfill: attach + mark the legacy row migrated, atomically.
+    pub(crate) async fn insert_attachment_and_map(
+        &self,
+        a: &NewAttachment,
+        engine_catalog_id: Uuid,
+    ) -> Result<(), RegistryError> {
+        let mut tx = self.pool().begin().await?;
+        insert_attachment_row(&mut tx, a).await?;
+        map_legacy_row_on(&mut tx, engine_catalog_id, a.engine_id, Some(a.catalog_id)).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Backfill: mark a legacy row migrated without writing an attachment.
+    pub(crate) async fn map_legacy_row(
+        &self,
+        engine_catalog_id: Uuid,
+        engine_id: Uuid,
+        catalog_id: Option<Uuid>,
+    ) -> Result<(), RegistryError> {
+        let mut conn = self.pool().acquire().await?;
+        map_legacy_row_on(&mut conn, engine_catalog_id, engine_id, catalog_id).await?;
+        Ok(())
+    }
+
+    /// Backfill: catalog + attachment + map, atomically.
+    pub(crate) async fn create_catalog_for_legacy_row(
+        &self,
+        name: &str,
+        def: &CatalogDef,
+        engine_id: Uuid,
+        engine_catalog_id: Uuid,
+        created_at: DateTime<Utc>,
+    ) -> Result<CatalogRow, RegistryError> {
+        let mut tx = self.pool().begin().await?;
+        let row = insert_catalog(&mut tx, name, def, None)
+            .await
+            .map_err(|e| map_insert_error(e, name))?;
+        insert_attachment_row(
+            &mut tx,
+            &NewAttachment {
+                engine_id,
+                catalog_id: row.id,
+                catalog_client_id: None,
+                credential_secret_id: None,
+                minted_client: false,
+                applied_now: false,
+                created_at: Some(created_at),
+            },
+        )
+        .await?;
+        map_legacy_row_on(&mut tx, engine_catalog_id, engine_id, Some(row.id)).await?;
+        tx.commit().await?;
+        Ok(row)
     }
 
     pub async fn insert_report(&self, entries: &[ReportEntry]) -> Result<(), RegistryError> {

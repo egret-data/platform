@@ -22,6 +22,7 @@ egret-audit = { workspace = true }
 egret-events = { workspace = true }
 egret-workspace.workspace = true
 egret-catalog-engine.workspace = true
+egret-catalog-registry.workspace = true
 egret-engine-mgmt.workspace = true
 egret-engine-mgmt-api.workspace = true
 egret-controlplane.workspace = true
