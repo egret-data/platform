@@ -1,14 +1,13 @@
 //! Control-plane management for query engines (Trino on Kubernetes).
 //!
 //! Provisioning a Trino auto-wires it to egret's embedded Iceberg catalog: the
-//! route resolves the warehouse + storage endpoint, mints a fresh Catalog Client
-//! for the warehouse, and records that as the engine's PRIMARY catalog row. A
-//! cluster can then carry additional catalogs (Postgres, tpch/tpcds, generic).
+//! route attaches the warehouse's registry catalog with a freshly minted Catalog
+//! Client (its credential in a named secret) as the engine's PRIMARY catalog. A
+//! cluster can then attach further registry catalogs (SP3).
 //!
-//! This seam owns all connector-kind logic: [`build_catalog_req`]
-//! translates each stored [`EngineCatalog`] row into a flat `{name, properties,
-//! env}` [`CatalogReq`], and [`build_provision_req`] assembles the full
-//! [`EngineProvisionReq`]. The kube-free provisioning ops (provision/status/
+//! Catalogs render from registry attachments (`crate::catalog_apply` turns each
+//! into a flat `{name, properties, env}` [`CatalogReq`]), and
+//! [`build_provision_req`] assembles the full [`EngineProvisionReq`]. The kube-free provisioning ops (provision/status/
 //! update/delete/restart) go through the `EngineProvisioningPort`, implemented
 //! in egret-bin over `egret-provisioner`. The kube-shaped ops
 //! (exec/pod-logs/coordinator-request) go straight through
@@ -36,12 +35,14 @@ use uuid::Uuid;
 
 use egret_core::http::ErrorBody;
 
+use crate::catalog_apply::CatalogOpError;
 use crate::dependents::{
     DeleteEngineOutcome, EngineConflictBody, EngineDependentDto, EngineDependentKind,
 };
+use crate::Engine;
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
-use crate::{Engine, EngineCatalog};
+use egret_catalog_registry::{AttachedCatalog, CatalogDef, LegacyCatalog, WarehouseIdentity};
 
 /// Default Trino image (official `trinodb/trino` tag) when the body omits it.
 const DEFAULT_IMAGE_VERSION: &str = "470";
@@ -277,23 +278,51 @@ impl From<Engine> for EngineDto {
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct EngineCatalogDto {
-    id: Uuid,
-    name: String,
-    kind: String,
-    is_primary: bool,
-    secret_ref: Option<Uuid>,
+pub(crate) struct EngineCatalogDto {
+    pub(crate) id: Uuid,
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) is_primary: bool,
+    pub(crate) secret_ref: Option<Uuid>,
 }
-impl From<EngineCatalog> for EngineCatalogDto {
-    fn from(c: EngineCatalog) -> Self {
-        EngineCatalogDto {
-            id: c.id,
-            name: c.name,
-            kind: c.kind,
-            is_primary: c.is_primary,
-            secret_ref: c.secret_ref,
-        }
+
+/// The legacy `kind` of a registry catalog: `egret-warehouse` for a warehouse,
+/// otherwise the Trino connector name (what `engine_catalogs.kind` held).
+pub(crate) fn legacy_kind(def: &CatalogDef) -> String {
+    if def.warehouse_id().is_some() {
+        "egret-warehouse".into()
+    } else {
+        def.trino_connector_name()
     }
+}
+
+fn legacy_catalog_dto(engine: &Engine, a: &AttachedCatalog) -> Result<EngineCatalogDto, CpError> {
+    let def = a
+        .catalog
+        .def()
+        .map_err(|e| CpError::BadRequest(format!("catalog {}: {e}", a.catalog.name)))?;
+    Ok(EngineCatalogDto {
+        id: a.catalog.id,
+        name: a.catalog.name.clone(),
+        kind: legacy_kind(&def),
+        is_primary: a.catalog.warehouse_id == Some(engine.warehouse_id),
+        secret_ref: def.secret_ids().into_iter().next(),
+    })
+}
+
+/// The registry catalog `cid` as attached to `engine` (404 when not attached).
+async fn find_attached(
+    st: &CpState,
+    engine: &Engine,
+    cid: Uuid,
+) -> Result<AttachedCatalog, CpError> {
+    st.engine_mgmt
+        .registry()
+        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .await?
+        .into_iter()
+        .find(|a| a.catalog.id == cid)
+        .ok_or(CpError::NotFound)
 }
 
 /// `GET /engines/{id}/catalogs/{cid}` payload: full stored config + secretRef,
@@ -317,15 +346,7 @@ const REDACTED_VALUE: &str = "********";
 
 /// Whether a catalog config key names secret material (spec SP1 §4.9).
 fn is_sensitive_config_key(key: &str) -> bool {
-    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    PATTERN
-        .get_or_init(|| {
-            regex::Regex::new(
-                r"(?i)(password|secret|token|credential|private[-_.]?key|access[-_.]?key)",
-            )
-            .expect("static sensitive-key pattern compiles")
-        })
-        .is_match(key)
+    egret_catalog_registry::is_sensitive_key(key)
 }
 
 /// Strip or mask secret material before a catalog config leaves the server.
@@ -434,194 +455,36 @@ struct EngineDetailDto {
     status: EngineStatusDto,
 }
 
-// ── translation: stored catalog rows → provisioning request ─────────────────────
-
-/// Translate one stored catalog row into a flat Trino catalog (properties + env).
-/// `env_prefix` namespaces this catalog's secret env vars (e.g. "C0") so two
-/// catalogs never collide on an env key.
-async fn build_catalog_req(
-    st: &CpState,
-    _engine: &Engine,
-    cat: &EngineCatalog,
-    env_prefix: &str,
-) -> Result<CatalogReq, CpError> {
-    let mut props = BTreeMap::new();
-    let mut env = BTreeMap::new();
-    match cat.kind.as_str() {
-        "egret-warehouse" => {
-            // Warehouse name + a minted client live in cat.config; the OAuth
-            // credential is passed via env so it never lands in the ConfigMap.
-            let wh_name = cat.config["warehouse"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            let cred_var = format!("EGRET_{env_prefix}");
-            props.insert("connector.name".into(), "iceberg".into());
-            props.insert("iceberg.catalog.type".into(), "rest".into());
-            props.insert(
-                "iceberg.rest-catalog.uri".into(),
-                format!("{}/catalog", st.engine_egret_url),
-            );
-            props.insert("iceberg.rest-catalog.warehouse".into(), wh_name);
-            props.insert("iceberg.rest-catalog.security".into(), "OAUTH2".into());
-            props.insert(
-                "iceberg.rest-catalog.oauth2.server-uri".into(),
-                format!("{}/oauth/token", st.engine_egret_url),
-            );
-            props.insert(
-                "iceberg.rest-catalog.oauth2.credential".into(),
-                format!("${{ENV:{cred_var}}}"),
-            );
-            props.insert(
-                "iceberg.rest-catalog.vended-credentials-enabled".into(),
-                "true".into(),
-            );
-            props.insert("fs.native-s3.enabled".into(), "true".into());
-            props.insert(
-                "s3.endpoint".into(),
-                cat.config["s3_endpoint"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .into(),
-            );
-            props.insert("s3.region".into(), "us-east-1".into());
-            props.insert("s3.path-style-access".into(), "true".into());
-            let cred = cat.config["credential"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            env.insert(cred_var, cred);
-        }
-        _ => {
-            // Connector-first (v2): the stored `kind` IS the Trino connector
-            // name and `config = { properties, secretProperties }`. Plaintext
-            // properties render verbatim; each `secretProperties` entry gets
-            // its own `${ENV:CAT_<prefix>_<n>}` placeholder resolved below.
-            // `catalog_props_and_secrets` also carries the back-compat shim
-            // for v1 rows (old `postgresql` host/port, old `generic`
-            // connectorName/secretProperty).
-            let (connector, plain, secrets) = catalog_props_and_secrets(cat);
-            props.insert("connector.name".into(), connector);
-            for (k, v) in plain {
-                props.insert(k, v);
-            }
-            for (n, (k, secret_id)) in secrets.into_iter().enumerate() {
-                let var = format!("CAT_{env_prefix}_{n}");
-                props.insert(k, format!("${{ENV:{var}}}"));
-                let val = st
-                    .secrets
-                    .resolve_plaintext(None, secret_id)
-                    .await
-                    .map_err(|e| CpError::BadRequest(format!("resolve secret: {e}")))?;
-                env.insert(var, val);
-            }
-        }
-    }
-    Ok(CatalogReq {
-        name: cat.name.clone(),
-        properties: props,
-        env,
-    })
-}
-
-/// Connector name + (plaintext props, secret-backed props) resolved from a
-/// stored catalog's config; see [`catalog_props_and_secrets`].
-type CatalogPropsAndSecrets = (String, Vec<(String, String)>, Vec<(String, Uuid)>);
-
-/// Resolve a catalog's connector name + (plaintext props, secret-backed props)
-/// from its stored config. Supports the v2 shape
-/// `{ properties, secretProperties }` and back-compat for v1 rows
-/// (old `postgresql` host/port and old `generic` connectorName/secretProperty).
-fn catalog_props_and_secrets(cat: &EngineCatalog) -> CatalogPropsAndSecrets {
-    let cfg = &cat.config;
-    // ── legacy postgres (kind == "postgresql", config.host present, no v2 properties)
-    if cat.kind == "postgresql" && cfg.get("properties").is_none() && cfg.get("host").is_some() {
-        let mut plain = vec![
-            (
-                "connection-url".to_string(),
-                format!(
-                    "jdbc:postgresql://{}:{}/{}",
-                    cfg["host"].as_str().unwrap_or_default(),
-                    cfg["port"].as_i64().unwrap_or(5432),
-                    cfg["database"].as_str().unwrap_or_default()
-                ),
-            ),
-            (
-                "connection-user".to_string(),
-                cfg["user"].as_str().unwrap_or_default().to_string(),
-            ),
-        ];
-        let mut secrets = vec![];
-        if let Some(id) = cat.secret_ref {
-            secrets.push(("connection-password".to_string(), id));
-        } else {
-            plain.push(("connection-password".to_string(), String::new()));
-        }
-        return ("postgresql".to_string(), plain, secrets);
-    }
-    // ── connector name: v2 uses kind; legacy generic used config.connectorName
-    let connector = if cat.kind == "generic" {
-        cfg["connectorName"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string()
-    } else {
-        cat.kind.clone()
-    };
-    // ── secret-backed properties
-    let mut secrets: Vec<(String, Uuid)> = vec![];
-    // v2: config.secretProperties = { prop: "<uuid>" }
-    if let Some(obj) = cfg.get("secretProperties").and_then(|v| v.as_object()) {
-        for (k, v) in obj {
-            if let Some(id) = v.as_str().and_then(|s| Uuid::parse_str(s).ok()) {
-                secrets.push((k.clone(), id));
-            }
-        }
-    }
-    // legacy generic single-secret: config.secretProperty + cat.secret_ref,
-    // defaulting the property name to "connection-password" (matching the
-    // old generic arm's default) when the row predates `secretProperty`.
-    if secrets.is_empty() && cat.kind == "generic" {
-        if let Some(id) = cat.secret_ref {
-            let prop = cfg
-                .get("secretProperty")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or("connection-password")
-                .to_string();
-            secrets.push((prop, id));
-        }
-    }
-    let secret_keys: std::collections::HashSet<&str> =
-        secrets.iter().map(|(k, _)| k.as_str()).collect();
-    // ── plaintext properties (skip any key that is secret-backed)
-    let mut plain: Vec<(String, String)> = vec![];
-    if let Some(obj) = cfg.get("properties").and_then(|v| v.as_object()) {
-        for (k, v) in obj {
-            if secret_keys.contains(k.as_str()) {
-                continue;
-            }
-            plain.push((k.clone(), v.as_str().unwrap_or_default().to_string()));
-        }
-    }
-    (connector, plain, secrets)
-}
-
 /// Knobs for one spec assembly.
 #[derive(Clone, Copy, Debug, Default)]
-struct BuildOpts {
-    /// Render the catalogs WITHOUT this row (`remove_catalog` applies first and
-    /// deletes the row only after Kubernetes dropped the catalog).
-    exclude_catalog: Option<Uuid>,
+pub(crate) struct BuildOpts {
+    /// Render WITHOUT this registry catalog: detach applies first and deletes the
+    /// attachment only after Kubernetes dropped the catalog.
+    pub(crate) exclude_catalog: Option<Uuid>,
+    /// Render as if this attachment existed: attach applies first and writes the
+    /// attachment only after Kubernetes accepted the catalog.
+    pub(crate) pending_attachment: Option<PendingAttachment>,
     /// Mint new internal secrets even when the engine already has some.
-    rotate_internal_secrets: bool,
+    pub(crate) rotate_internal_secrets: bool,
+}
+
+/// An attachment rendered before it is written (see [`BuildOpts`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingAttachment {
+    pub(crate) catalog_id: Uuid,
+    pub(crate) catalog_client_id: Option<Uuid>,
+    pub(crate) credential_secret_id: Option<Uuid>,
 }
 
 /// An assembled provisioning request plus the internal secrets it rendered
 /// (Trino only). Hand it to [`apply_built`], which settles those secrets.
-struct BuiltReq {
+pub(crate) struct BuiltReq {
     req: EngineProvisionReq,
     internal: Option<EngineInternalSecrets>,
+    /// Database time just before the catalogs were read (Trino only). A
+    /// successful apply marks applied only attachments whose catalog has not
+    /// changed since.
+    catalogs_read_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Build the full provisioning request from the engine + its stored catalogs + config.
@@ -630,7 +493,7 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<BuiltReq, 
 }
 
 /// [`build_provision_req`] with explicit [`BuildOpts`].
-async fn build_provision_req_with(
+pub(crate) async fn build_provision_req_with(
     st: &CpState,
     engine: &Engine,
     opts: BuildOpts,
@@ -651,18 +514,47 @@ async fn build_provision_req_with(
         return Ok(BuiltReq {
             req,
             internal: None,
+            catalogs_read_at: None,
         });
     }
-    let cats: Vec<EngineCatalog> = st
-        .engine_mgmt
-        .list_engine_catalogs(engine.id)
-        .await?
-        .into_iter()
-        .filter(|c| Some(c.id) != opts.exclude_catalog)
-        .collect();
-    let mut catalogs = Vec::new();
-    for (i, c) in cats.iter().enumerate() {
-        catalogs.push(build_catalog_req(st, engine, c, &format!("C{i}")).await?);
+    // Catalogs come from the registry (SP3). An engine whose legacy
+    // `engine_catalogs` rows the boot backfill has not migrated must not be
+    // applied: rendering only the registry would drop catalogs it runs today
+    // (plan decision #31).
+    let registry = st.engine_mgmt.registry();
+    let unmigrated = registry.unmigrated_legacy_catalog_count(engine.id).await?;
+    if unmigrated > 0 {
+        return Err(CpError::Conflict(format!(
+            "engine {} has {unmigrated} catalog(s) the boot-time catalog registry migration \
+             could not move, and applying it now would drop them from the running engine; \
+             the catalog migration report (GET /api/control-plane/catalogs/migration-report, \
+             code backfill_failed) says why — fix the cause and restart egret to retry the migration",
+            engine.name
+        )));
+    }
+    let catalogs_read_at = registry.db_now().await?;
+    let mut attached = registry
+        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .await?;
+    attached.retain(|a| Some(a.catalog.id) != opts.exclude_catalog);
+    if let Some(p) = opts.pending_attachment {
+        let catalog = registry
+            .get_catalog(p.catalog_id)
+            .await?
+            .ok_or(CpError::NotFound)?;
+        attached.push(AttachedCatalog {
+            catalog,
+            attachment: egret_catalog_registry::AttachmentRow::pending(
+                engine.id,
+                p.catalog_id,
+                p.catalog_client_id,
+                p.credential_secret_id,
+            ),
+        });
+    }
+    let mut catalogs = Vec::with_capacity(attached.len());
+    for (i, a) in attached.iter().enumerate() {
+        catalogs.push(crate::catalog_apply::trino_catalog_req(st, a, &format!("C{i}")).await?);
     }
     let mut config = build_trino_config(&engine.spec);
     // Resolve the fault-tolerant exchange storage connection (if any) into S3
@@ -819,12 +711,13 @@ async fn build_provision_req_with(
             starrocks: None,
         },
         internal: Some(internal),
+        catalogs_read_at: Some(catalogs_read_at),
     })
 }
 
 /// Which provisioning call an [`apply_built`] makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ApplyOp {
+pub(crate) enum ApplyOp {
     Provision,
     Update,
 }
@@ -875,7 +768,7 @@ enum ApplyOp {
 /// `CpError::Conflict` (409, retry) instead of the apply-failure shape it uses
 /// for the latter.
 #[derive(Debug)]
-enum ApplyBuiltError {
+pub(crate) enum ApplyBuiltError {
     /// The row is gone, or is `deleting` (a concurrent DELETE), or re-reading
     /// it to check failed outright. Either way `apply_built` cannot confirm
     /// it is still safe to call the provisioner, so it never does.
@@ -903,7 +796,7 @@ enum ApplyBuiltError {
 /// may already be gone"; every other transition (`provisioning → running`,
 /// `running → provisioning` on a later apply, etc.) is a live engine that
 /// this apply is still allowed to reach.
-async fn apply_built(
+pub(crate) async fn apply_built(
     st: &CpState,
     prov: &dyn egret_engine_mgmt_api::EngineProvisioningPort,
     engine: &Engine,
@@ -936,6 +829,21 @@ async fn apply_built(
         ApplyOp::Provision => prov.provision(&built.req).await,
         ApplyOp::Update => prov.update(&built.req).await,
     };
+    // Every attachment this request rendered is now on the engine (Trino renders
+    // them all on every apply), so their failed flags — Retry's subject — clear.
+    if res.is_ok() && !engine.is_starrocks() {
+        if let Some(read_at) = built.catalogs_read_at {
+            if let Err(e) = st
+                .engine_mgmt
+                .registry()
+                .mark_engine_applied(engine.id, read_at)
+                .await
+            {
+                tracing::warn!(engine = %engine.name, error = %e,
+                    "applied, but the catalog apply status could not be recorded");
+            }
+        }
+    }
     if let Some(secrets) = &built.internal {
         let superseded = if res.is_ok() {
             Supersede::Delete
@@ -953,7 +861,7 @@ async fn apply_built(
 
 /// `CpError::Conflict` with the wording every apply route uses when
 /// [`apply_built`] reports a lost race against a concurrent status change.
-fn apply_conflict() -> CpError {
+pub(crate) fn apply_conflict() -> CpError {
     CpError::Conflict("engine changed while the update was being applied; retry".into())
 }
 
@@ -2400,7 +2308,7 @@ async fn list_engines(
 /// Find (or create) the shared per-warehouse engine role and return its id. A new
 /// role is granted catalog-wide `manage` so the engine can read + write the
 /// whole warehouse.
-async fn ensure_engine_role(st: &CpState, warehouse_id: Uuid) -> Result<Uuid, CpError> {
+pub(crate) async fn ensure_engine_role(st: &CpState, warehouse_id: Uuid) -> Result<Uuid, CpError> {
     if let Some(r) = st
         .catalog
         .list_roles(warehouse_id)
@@ -2433,28 +2341,14 @@ async fn ensure_engine_role(st: &CpState, warehouse_id: Uuid) -> Result<Uuid, Cp
     Ok(role.id)
 }
 
-/// Extract the internal Catalog Client row id stashed in a catalog's `config`.
-fn client_row_id(config: &serde_json::Value) -> Option<Uuid> {
-    config
-        .get("clientRowId")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-}
-
-/// Whether the client referenced by `clientRowId` was minted by us (and should
-/// be revoked when the catalog is removed). Defaults to `true` — missing or
-/// non-`false` means minted — so it's a no-op for existing rows and only an
-/// explicit `"mintedClient": false` opts a client out of revoke-on-remove.
-fn is_minted_client(config: &serde_json::Value) -> bool {
-    config.get("mintedClient").and_then(|v| v.as_bool()) != Some(false)
-}
-
 /// What an engine create has minted so far; [`compensate_failed_create`]
 /// undoes exactly this and nothing else.
 #[derive(Debug, Default)]
 struct CreateUndo {
     /// The auto-wired Catalog Client.
     client_id: Option<Uuid>,
+    /// The named secret holding that client's credential.
+    credential_secret_id: Option<Uuid>,
     /// The engine row (its owned secrets are read off it at undo time).
     engine_id: Option<Uuid>,
     /// `(kind, namespace, name)` once a provision has been attempted.
@@ -2543,6 +2437,7 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
             return;
         }
     }
+    let mut row_kept = false;
     if let Some(engine_id) = undo.engine_id {
         match st.engine_mgmt.get_engine(engine_id).await {
             Ok(Some(engine)) => {
@@ -2557,6 +2452,7 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
                         }
                     }
                     Err(e) => {
+                        row_kept = true;
                         tracing::error!(engine = %engine.name, error = %e,
                             "create compensation: engine row delete failed; marking it failed");
                         if let Err(e) = st
@@ -2573,6 +2469,16 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
             Ok(None) => {}
             Err(e) => tracing::error!(%engine_id, error = %e,
                 "create compensation: could not load the engine row"),
+        }
+    }
+    // The credential of the auto-wired client. Kept only while the row is kept
+    // (its attachment still names it); otherwise the cluster is confirmed gone or
+    // was never touched, exactly like the owned secrets above.
+    if !row_kept {
+        if let Some(secret_id) = undo.credential_secret_id {
+            if let Err(e) = st.secrets.delete(None, secret_id).await {
+                tracing::error!(%secret_id, error = %e, "create compensation: credential secret delete failed");
+            }
         }
     }
     for (what, id) in [
@@ -2798,13 +2704,12 @@ async fn create_engine(
         }
     }
 
-    // 2. Resolve the storage endpoint for the Trino S3 connector.
-    let sc = st
-        .storage_registry
+    // 2. The warehouse's storage connection must exist (the renderer resolves
+    //    its endpoint on every apply).
+    st.storage_registry
         .get_storage_conn(wh.storage_conn_id)
         .await?
         .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
-    let s3_endpoint = sc.endpoint.unwrap_or_default();
 
     // 3. Build + resolve the per-role trinoConfig — including default-on
     //    delegation — BEFORE minting the catalog client. Ordering matters: the
@@ -2899,10 +2804,24 @@ async fn create_engine(
     // bound to another engine is a 409 with nothing to roll back.
     let profile_plan = plan_trino_profile(&st, &b.name, b.authz_service_id).await?;
 
-    // 5. Auto-wire: mint a fresh Catalog Client for the warehouse. Minted only
-    //    AFTER delegation resolves (step 3) and the spec validates (step 4), so
-    //    neither a resolver 400 nor a resource-group 400 leaks a client. From
-    //    here on, every failure runs `compensate_failed_create`.
+    // 5. Auto-wire: the warehouse's registry catalog (created with the warehouse;
+    //    ensured here for one that predates the registry) and a fresh Catalog
+    //    Client for this engine, whose credential lives in a named secret. Minted
+    //    only AFTER delegation resolves (step 3) and the spec validates (step 4);
+    //    from here on every failure runs `compensate_failed_create`.
+    let (wh_catalog, _) = st
+        .engine_mgmt
+        .registry()
+        .ensure_warehouse_catalog(
+            &WarehouseIdentity {
+                id: wh.id,
+                name: &wh.name,
+                workspace_id: wh.workspace_id,
+            },
+            None,
+            |_| Vec::new(),
+        )
+        .await?;
     let role_id = ensure_engine_role(&st, wh.id).await?;
     let client = st
         .catalog
@@ -2918,9 +2837,15 @@ async fn create_engine(
         client_id: Some(client.id),
         ..CreateUndo::default()
     };
+    match crate::catalog_apply::store_client_credential(&st, &client).await {
+        Ok(id) => undo.credential_secret_id = Some(id),
+        Err(e) => {
+            compensate_failed_create(&st, undo).await;
+            return Err(e);
+        }
+    }
 
-    // 6. Record the intent row (status `provisioning`). The auto-wired client id
-    //    lives on the PRIMARY catalog row, not in the engine spec.
+    // 6. Record the intent row (status `provisioning`).
     let engine = match st
         .engine_mgmt
         .create_engine(
@@ -2941,23 +2866,20 @@ async fn create_engine(
     };
     undo.engine_id = Some(engine.id);
 
-    // 7. Record the PRIMARY catalog row (the auto-wired egret warehouse).
-    let cat_config = serde_json::json!({
-        "warehouse": wh.name,
-        "s3_endpoint": s3_endpoint,
-        "credential": format!("{}:{}", client.client_id, client.client_secret),
-        "clientRowId": client.id,
-    });
+    // 7. Attach the warehouse's catalog: the engine's PRIMARY catalog. Marked
+    //    applied by the provision below.
     if let Err(e) = st
         .engine_mgmt
-        .create_engine_catalog(
-            engine.id,
-            "egret",
-            "egret-warehouse",
-            &cat_config,
-            None,
-            true,
-        )
+        .registry()
+        .insert_attachment(&egret_catalog_registry::NewAttachment {
+            engine_id: engine.id,
+            catalog_id: wh_catalog.id,
+            catalog_client_id: Some(client.id),
+            credential_secret_id: undo.credential_secret_id,
+            minted_client: true,
+            applied_now: false,
+            created_at: None,
+        })
         .await
     {
         compensate_failed_create(&st, undo).await;
@@ -3598,6 +3520,19 @@ async fn create_starrocks_engine(
     // engine row exists, so a mint failure here needs no rollback (nothing to
     // roll back yet), matching the Trino path's ordering. From here on, every
     // failure runs `compensate_failed_create`.
+    let (wh_catalog, _) = st
+        .engine_mgmt
+        .registry()
+        .ensure_warehouse_catalog(
+            &WarehouseIdentity {
+                id: wh.id,
+                name: &wh.name,
+                workspace_id: wh.workspace_id,
+            },
+            None,
+            |_| Vec::new(),
+        )
+        .await?;
     let role_id = ensure_engine_role(&st, wh.id).await?;
     let client = st
         .catalog
@@ -3613,6 +3548,13 @@ async fn create_starrocks_engine(
         client_id: Some(client.id),
         ..CreateUndo::default()
     };
+    match crate::catalog_apply::store_client_credential(&st, &client).await {
+        Ok(id) => undo.credential_secret_id = Some(id),
+        Err(e) => {
+            compensate_failed_create(&st, undo).await;
+            return Err(e);
+        }
+    }
 
     let namespace = DEFAULT_NAMESPACE.to_string();
     // Stored spec (identical builder create and update share). The delegation
@@ -3653,28 +3595,20 @@ async fn create_starrocks_engine(
     };
     undo.engine_id = Some(engine.id);
 
-    // Step 2: record the PRIMARY catalog row — same shape/kind Trino's
-    // auto-wire uses (`egret-warehouse`), so `delete_engine`/list/detail/
-    // `redact_catalog_config` treat a StarRocks engine's auto-wired catalog
-    // identically to a Trino one. No `s3_endpoint` key: unlike Trino's
-    // Iceberg-REST *connector config*, the StarRocks side never reads this
-    // row back into a rendered config file (the CN/FE never see `cat_config`)
-    // — it only carries the credential the background wire step consumes.
-    let cat_config = serde_json::json!({
-        "warehouse": wh.name,
-        "credential": format!("{}:{}", client.client_id, client.client_secret),
-        "clientRowId": client.id,
-    });
+    // Step 2: attach the warehouse's catalog (the engine's PRIMARY catalog); its
+    // credential secret is what the background FE wire presents.
     if let Err(e) = st
         .engine_mgmt
-        .create_engine_catalog(
-            engine.id,
-            "egret",
-            "egret-warehouse",
-            &cat_config,
-            None,
-            true,
-        )
+        .registry()
+        .insert_attachment(&egret_catalog_registry::NewAttachment {
+            engine_id: engine.id,
+            catalog_id: wh_catalog.id,
+            catalog_client_id: Some(client.id),
+            credential_secret_id: undo.credential_secret_id,
+            minted_client: true,
+            applied_now: false,
+            created_at: None,
+        })
         .await
     {
         compensate_failed_create(&st, undo).await;
@@ -3775,6 +3709,7 @@ async fn create_starrocks_engine(
         engine.name.clone(),
         st.engine_egret_url.clone(),
         wh.name.clone(),
+        wh_catalog.name.clone(),
         client.client_id.clone(),
         client.client_secret.clone(),
         root_password,
@@ -3805,8 +3740,8 @@ fn sr_escape_ident(s: &str) -> String {
 /// Build the StarRocks `CREATE EXTERNAL CATALOG` DDL that points a provisioned
 /// StarRocks at egret's embedded Iceberg REST catalog, authenticating with
 /// OAuth2 client-credentials — the EXACT same egret token endpoint +
-/// `client_id:client_secret` credential the Trino path renders in
-/// [`build_catalog_req`] (`iceberg.rest-catalog.security=OAUTH2` /
+/// `client_id:client_secret` credential the Trino path renders
+/// for an egret warehouse catalog (`iceberg.rest-catalog.security=OAUTH2` /
 /// `…oauth2.server-uri` / `…oauth2.credential`). StarRocks' REST catalog client
 /// self-refreshes its access token from these props, so — unlike a static
 /// `iceberg.catalog.token` — the catalog does NOT die when a token expires.
@@ -4152,6 +4087,7 @@ fn spawn_starrocks_catalog_wire(
     engine_name: String,
     egret_url: String,
     warehouse_name: String,
+    catalog_name: String,
     client_id: String,
     client_secret: String,
     root_password: Option<String>,
@@ -4250,10 +4186,11 @@ fn spawn_starrocks_catalog_wire(
             return;
         }
         // The OAuth2 credential is the SAME `client_id:client_secret` the Trino
-        // path stores (see `build_catalog_req`'s egret-warehouse arm); StarRocks
+        // path renders (see `egret_catalog_registry::render_trino`); StarRocks
         // exchanges it for an access token itself and refreshes on expiry.
         let credential = format!("{client_id}:{client_secret}");
-        let sql = starrocks_external_catalog_sql("egret", &egret_url, &warehouse_name, &credential);
+        let sql =
+            starrocks_external_catalog_sql(&catalog_name, &egret_url, &warehouse_name, &credential);
         match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, &sql, root_pw, None).await {
             Ok(()) => {
                 tracing::info!(engine = %engine_name,
@@ -4843,12 +4780,12 @@ async fn update_starrocks_engine(
     // a mode the FE has not finished (re)bootstrapping.
     if deleg_changed {
         // (a) Re-bootstrap, mirroring create's non-blocking post-Ready wire.
-        // Needs the primary catalog's OAuth2 credential (create embedded it in
-        // the primary `engine_catalogs` row); best-effort like create, so a
-        // missing credential warns rather than failing the update.
+        // Needs the primary catalog's OAuth2 credential (its attachment's
+        // credential secret); best-effort like create, so a missing credential
+        // warns rather than failing the update.
         if let Some(boot) = bootstrap {
-            match sr_primary_catalog_credential(&st, engine.id).await {
-                Some((client_id, client_secret)) => {
+            match sr_primary_catalog_credential(&st, &engine).await {
+                Some((catalog_name, client_id, client_secret)) => {
                     // Same minted-root-password threading as create's wire.
                     let root_password =
                         req.starrocks.as_ref().and_then(|s| s.root_password.clone());
@@ -4860,6 +4797,7 @@ async fn update_starrocks_engine(
                         engine.name.clone(),
                         st.engine_egret_url.clone(),
                         wh.name.clone(),
+                        catalog_name,
                         client_id,
                         client_secret,
                         root_password,
@@ -4894,17 +4832,34 @@ fn sr_delegation_block(spec: &serde_json::Value) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
-/// Recover the OAuth2 `(client_id, client_secret)` create embedded in the
-/// engine's PRIMARY `engine_catalogs` row (`config.credential` =
-/// `"<client_id>:<client_secret>"`). Returns `None` when there is no primary
-/// catalog or the credential is absent/malformed — the re-bootstrap then skips
-/// the catalog-wire step (best-effort, like create).
-async fn sr_primary_catalog_credential(st: &CpState, engine_id: Uuid) -> Option<(String, String)> {
-    let cats = st.engine_mgmt.list_engine_catalogs(engine_id).await.ok()?;
-    let primary = cats.iter().find(|c| c.is_primary)?;
-    let credential = primary.config.get("credential")?.as_str()?;
+/// The StarRocks primary catalog's name and OAuth2 `(client_id, client_secret)`
+/// (the attachment's credential secret holds `"<client_id>:<client_secret>"`).
+/// `None` when there is no primary attachment or credential — the re-bootstrap
+/// then skips the catalog-wire step (best-effort, like create).
+async fn sr_primary_catalog_credential(
+    st: &CpState,
+    engine: &Engine,
+) -> Option<(String, String, String)> {
+    let attached = st
+        .engine_mgmt
+        .registry()
+        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .await
+        .ok()?;
+    let primary = attached
+        .into_iter()
+        .find(|a| a.catalog.warehouse_id == Some(engine.warehouse_id))?;
+    let credential = st
+        .secrets
+        .resolve_plaintext(None, primary.attachment.credential_secret_id?)
+        .await
+        .ok()?;
     let (client_id, client_secret) = credential.split_once(':')?;
-    Some((client_id.to_string(), client_secret.to_string()))
+    Some((
+        primary.catalog.name,
+        client_id.to_string(),
+        client_secret.to_string(),
+    ))
 }
 
 #[utoipa::path(
@@ -4949,8 +4904,13 @@ async fn delete_engine(
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
 
-    // Catalog client ids, read before the catalogs cascade away with the row.
-    let cats = st.engine_mgmt.list_engine_catalogs(engine.id).await?;
+    // Attachments (minted clients, credential secrets), read before they cascade
+    // away with the row.
+    let attachments = st
+        .engine_mgmt
+        .registry()
+        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .await?;
 
     // 3. Visible, retryable state for everything below that can fail.
     st.engine_mgmt
@@ -4980,25 +4940,20 @@ async fn delete_engine(
     }
 
     // 6. Cross-seam cleanup after commit: logged, never returned.
-    cleanup_deleted_engine(&st, &engine, &cats).await;
+    cleanup_deleted_engine(&st, &engine, &attachments).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// What an engine leaves outside its own tables. Each seam owns its own pool, so
 /// none of this can share the row delete's transaction; a failure here is logged
 /// and leaves an orphan, never a half-deleted engine.
-async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, cats: &[EngineCatalog]) {
-    // Only clients we minted; `mintedClient: false` belongs to someone else.
-    for c in cats {
-        let Some(cid) = client_row_id(&c.config) else {
-            continue;
-        };
-        if !is_minted_client(&c.config) {
-            continue;
-        }
-        if let Err(e) = st.catalog.revoke_client(cid).await {
-            tracing::warn!(engine = %engine.name, client = %cid, error = %e, "revoke engine catalog client failed");
-        }
+async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, attachments: &[AttachedCatalog]) {
+    // Only clients we minted, and the named secrets holding their credentials
+    // (egret's copies; the cluster that used them is gone). `minted_client =
+    // false` belongs to someone else — its client AND its credential secret,
+    // which may be shared with another engine's attachment, stay.
+    for a in attachments {
+        crate::catalog_apply::retire_minted_credential(st, engine, &a.attachment).await;
     }
     // Secrets egret generated for this engine — the same ownership list create
     // compensation uses (Task 12's `engine_owned_secret_ids`). This already
@@ -5459,18 +5414,21 @@ async fn list_catalogs(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<EngineCatalogDto>>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
-    let _engine = st
+    let engine = st
         .engine_mgmt
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    let attached = st
+        .engine_mgmt
+        .registry()
+        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .await?;
     Ok(Json(
-        st.engine_mgmt
-            .list_engine_catalogs(id)
-            .await?
-            .into_iter()
-            .map(Into::into)
-            .collect(),
+        attached
+            .iter()
+            .map(|a| legacy_catalog_dto(&engine, a))
+            .collect::<Result<_, _>>()?,
     ))
 }
 
@@ -5481,12 +5439,12 @@ async fn list_catalogs(
     params(("id" = Uuid, Path, description = "Engine id")),
     request_body = AddCatalogBody,
     responses(
-        (status = 201, description = "Catalog added and engine re-provisioned", body = EngineCatalogDto),
-        (status = 400, description = "Missing/invalid catalog kind, warehouse, or engine update failed", body = ErrorBody),
+        (status = 201, description = "Catalog added to the registry (or the warehouse's registry catalog reused), applied to the engine, then attached", body = EngineCatalogDto),
+        (status = 400, description = "Missing/invalid catalog kind, name, warehouse or properties, or engine update failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:create permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
+        (status = 409, description = "The catalog is already attached to this engine, a registry catalog with this name is in use, or the engine changed concurrently (e.g. a delete in progress; retry)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -5516,26 +5474,11 @@ async fn add_catalog(
         return Err(CpError::BadRequest("catalog kind is required".into()));
     }
 
-    // For an egret-warehouse catalog, resolve the warehouse + endpoint and mint a
-    // fresh client (same as the primary); other kinds store the body as-is.
-    //
-    // `config.clientId` (optional): run the catalog under the ROLE/grants of an
-    // EXISTING Catalog Client of this warehouse, instead of the shared
-    // `engine_default` role. `CatalogClient` never exposes a retrievable secret
-    // (`client_secret` is generated once in `create_client` and only its argon2
-    // hash is persisted — see `CatalogClient`/`CreatedClient` in
-    // `egret-catalog/src/service/embedded.rs`), so we can't just reuse the
-    // referenced client's credential directly. Instead we look up the chosen
-    // client to read its `catalog_role_id`, validate it belongs to `wh`, and
-    // mint a FRESH client under that same role. The new client is therefore
-    // still ours (auto-created, its credential lives only on this catalog row),
-    // so `mintedClient` stays `true` and revoke-on-remove in `remove_catalog`
-    // still applies — the feature only changes which ROLE the minted client
-    // inherits, not who "owns" the minted client.
-    let (config, secret_ref, minted_client): (serde_json::Value, Option<Uuid>, Option<Uuid>) = if b
-        .kind
-        == "egret-warehouse"
-    {
+    // Registry semantics (SP3): an egret warehouse attaches its warehouse's
+    // catalog (under that catalog's name — D5); any other kind becomes a registry
+    // catalog of its own, classified typed when that renders the same properties.
+    let registry = st.engine_mgmt.registry();
+    let catalog = if b.kind == "egret-warehouse" {
         let wh_id = b.config["warehouseId"]
             .as_str()
             .and_then(|s| Uuid::parse_str(s).ok())
@@ -5552,15 +5495,11 @@ async fn add_catalog(
                 "warehouse is not provisioned yet".into(),
             ));
         }
-        let sc = st
-            .storage_registry
-            .get_storage_conn(wh.storage_conn_id)
-            .await?
-            .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
-        let s3_endpoint = sc.endpoint.unwrap_or_default();
-
-        // Optional `config.clientId`: inherit that client's role instead of the
-        // default engine role. Validated to belong to `wh` via `list_clients`.
+        // `config.clientId` (optional): mint this engine's client under the role
+        // of an EXISTING client of this warehouse instead of the engine role.
+        // `CatalogClient` never exposes a retrievable secret, so the referenced
+        // client cannot be reused verbatim; the fresh client is still ours
+        // (`minted_client`), so detach and engine delete revoke it.
         let client_id_param = match b.config.get("clientId") {
             Some(serde_json::Value::Null) | None => None,
             Some(v) => Some(
@@ -5571,87 +5510,76 @@ async fn add_catalog(
                     })?,
             ),
         };
-        let role_id = match client_id_param {
-            Some(cid) => {
-                st.catalog
-                    .list_clients(wh.id)
-                    .await?
-                    .into_iter()
-                    .find(|c| c.id == cid)
-                    .ok_or_else(|| {
-                        CpError::BadRequest(
-                            "config.clientId does not reference a client of this warehouse".into(),
-                        )
-                    })?
-                    .catalog_role_id
-            }
-            None => ensure_engine_role(&st, wh.id).await?,
-        };
-        let client = st
-            .catalog
-            .create_client(NewClient {
-                name: format!("engine-{}-{}", engine.name, b.name),
-                consumer_type: "engine".into(),
-                workspace_id: wh.workspace_id,
-                warehouse_id: wh.id,
-                catalog_role_id: role_id,
-            })
+        let (catalog, _) = registry
+            .ensure_warehouse_catalog(
+                &WarehouseIdentity {
+                    id: wh.id,
+                    name: &wh.name,
+                    workspace_id: wh.workspace_id,
+                },
+                None,
+                |_| Vec::new(),
+            )
             .await?;
-        let cfg = serde_json::json!({
-            "warehouse": wh.name,
-            "s3_endpoint": s3_endpoint,
-            "credential": format!("{}:{}", client.client_id, client.client_secret),
-            "clientRowId": client.id,
-            "mintedClient": true,
-        });
-        (cfg, None, Some(client.id))
+        crate::catalog_apply::attach_to_engine(&st, &engine, &catalog, client_id_param)
+            .await
+            .map_err(CatalogOpError::into_legacy)?;
+        catalog
     } else {
-        (b.config.clone(), b.secret_ref, None)
-    };
-
-    let cat = match st
-        .engine_mgmt
-        .create_engine_catalog(engine.id, &b.name, &b.kind, &config, secret_ref, false)
-        .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            if let Some(cid) = minted_client {
-                let _ = st.catalog.revoke_client(cid).await;
+        if !egret_catalog_registry::is_valid_catalog_name(&b.name) {
+            return Err(CpError::BadRequest(format!(
+                "catalog name {:?} must match ^[a-z][a-z0-9_]{{0,62}}$",
+                b.name
+            )));
+        }
+        let legacy = LegacyCatalog {
+            name: &b.name,
+            kind: &b.kind,
+            config: &b.config,
+            secret_ref: b.secret_ref,
+        };
+        let extracted =
+            crate::catalog_apply::extract_plaintext_secrets(&st, &b.name, &legacy).await?;
+        // Unattached and unassigned — what an earlier remove through this form
+        // leaves behind — is replaced by the new body, atomically, as it was
+        // before the registry (plan decision #27); an in-use name is 409.
+        let created = match egret_catalog_registry::classify(&legacy, &extracted)
+            .map_err(|e| CpError::BadRequest(e.to_string()))
+        {
+            Ok(classified) => {
+                match crate::catalog_apply::validate_references(&st, &classified.def).await {
+                    Ok(()) => registry
+                        .create_catalog_replacing_orphan(&b.name, &classified.def, None)
+                        .await
+                        .map_err(CpError::from),
+                    Err(e) => Err(e),
+                }
             }
-            return Err(e.into());
-        }
-    };
-
-    // Re-render + roll. On failure, undo the row (+ client).
-    let rollback = |st: CpState, cat_id: Uuid, minted: Option<Uuid>| async move {
-        let _ = st.engine_mgmt.delete_engine_catalog(cat_id).await;
-        if let Some(cid) = minted {
-            let _ = st.catalog.revoke_client(cid).await;
-        }
-    };
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        rollback(st.clone(), cat.id, minted_client).await;
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
-    };
-    let built = match build_provision_req(&st, &engine).await {
-        Ok(r) => r,
-        Err(e) => {
-            rollback(st.clone(), cat.id, minted_client).await;
-            return Err(e);
-        }
-    };
-    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
-        rollback(st.clone(), cat.id, minted_client).await;
-        return Err(match e {
-            ApplyBuiltError::Conflict => apply_conflict(),
-            ApplyBuiltError::Failed(msg) => {
-                CpError::BadRequest(format!("engine update failed: {msg}"))
+            Err(e) => Err(e),
+        };
+        let catalog = match created {
+            Ok((catalog, _replaced)) => catalog,
+            Err(e) => {
+                // Nothing references the secrets this request just made.
+                crate::catalog_apply::discard_extracted_secrets(&st, &extracted).await;
+                return Err(e);
             }
-        });
-    }
-
-    Ok((StatusCode::CREATED, Json(cat.into())))
+        };
+        if let Err(e) = crate::catalog_apply::attach_to_engine(&st, &engine, &catalog, None).await {
+            // Nothing attached it; the extracted secrets stay (plan table #19):
+            // the failed apply may have handed their values to the engine.
+            if let Err(del) = registry.delete_catalog(catalog.id).await {
+                tracing::warn!(catalog = %catalog.name, error = %del, "add rollback: catalog delete failed");
+            }
+            return Err(e.into_legacy());
+        }
+        catalog
+    };
+    let attached = find_attached(&st, &engine, catalog.id).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(legacy_catalog_dto(&engine, &attached)?),
+    ))
 }
 
 #[utoipa::path(
@@ -5660,7 +5588,7 @@ async fn add_catalog(
     tag = "control-plane-engines",
     params(
         ("id" = Uuid, Path, description = "Engine id"),
-        ("cid" = Uuid, Path, description = "Catalog id"),
+        ("cid" = Uuid, Path, description = "Registry catalog id"),
     ),
     responses(
         (status = 200, description = "Full catalog config (system-minted secret material redacted)", body = EngineCatalogDetailDto),
@@ -5681,21 +5609,16 @@ async fn get_catalog(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-    let cat = st
-        .engine_mgmt
-        .get_engine_catalog(cid)
-        .await?
-        .ok_or(CpError::NotFound)?;
-    if cat.engine_id != engine.id {
-        return Err(CpError::NotFound);
-    }
+    let attached = find_attached(&st, &engine, cid).await?;
+    let dto = legacy_catalog_dto(&engine, &attached)?;
+    let config = crate::catalog_apply::legacy_config_view(&st, &attached).await?;
     Ok(Json(EngineCatalogDetailDto {
-        id: cat.id,
-        name: cat.name.clone(),
-        kind: cat.kind.clone(),
-        is_primary: cat.is_primary,
-        secret_ref: cat.secret_ref,
-        config: redact_catalog_config(cat.config.clone()),
+        id: dto.id,
+        name: dto.name,
+        kind: dto.kind,
+        is_primary: dto.is_primary,
+        secret_ref: dto.secret_ref,
+        config: redact_catalog_config(config),
     }))
 }
 
@@ -5756,7 +5679,7 @@ fn coordinator_error_message(code: u16, body: &[u8]) -> String {
     tag = "control-plane-engines",
     params(
         ("id" = Uuid, Path, description = "Engine id"),
-        ("cid" = Uuid, Path, description = "Catalog id"),
+        ("cid" = Uuid, Path, description = "Registry catalog id"),
     ),
     responses(
         (status = 200, description = "Test-connection result (ok=false with a message on a coordinator/query failure)", body = CatalogTestDto),
@@ -5778,14 +5701,7 @@ async fn test_catalog(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-    let cat = st
-        .engine_mgmt
-        .get_engine_catalog(cid)
-        .await?
-        .ok_or(CpError::NotFound)?;
-    if cat.engine_id != engine.id {
-        return Err(CpError::NotFound);
-    }
+    let cat = find_attached(&st, &engine, cid).await?.catalog;
 
     let sql = format!("SHOW SCHEMAS FROM {}", quote_ident(&cat.name));
     let (code, body) = crate::monitor::coordinator_call(
@@ -5864,10 +5780,10 @@ async fn test_catalog(
     tag = "control-plane-engines",
     params(
         ("id" = Uuid, Path, description = "Engine id"),
-        ("cid" = Uuid, Path, description = "Catalog id"),
+        ("cid" = Uuid, Path, description = "Registry catalog id"),
     ),
     responses(
-        (status = 200, description = "Catalog removed from the cluster, then its row deleted and its minted client revoked"),
+        (status = 200, description = "Catalog removed from the cluster, then detached (the registry catalog is kept) and its minted client revoked"),
         (status = 400, description = "Cannot delete the primary catalog, Kubernetes not configured, or the engine update failed (the catalog is kept)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:delete permission", body = ErrorBody),
@@ -5887,63 +5803,10 @@ async fn remove_catalog(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-    let cat = st
-        .engine_mgmt
-        .get_engine_catalog(cid)
-        .await?
-        .ok_or(CpError::NotFound)?;
-    // Guard against cross-engine deletes via a mismatched path.
-    if cat.engine_id != engine.id {
-        return Err(CpError::NotFound);
-    }
-    if cat.is_primary {
-        return Err(CpError::BadRequest(
-            "cannot delete the primary catalog".into(),
-        ));
-    }
-    // A concurrent DELETE already marked the row and may have torn the cluster
-    // down; 409 the common case here, rather than only catching it in
-    // `apply_built`'s re-read right before the provisioner call.
-    if engine.status == crate::engine_status::DELETING {
-        return Err(apply_conflict());
-    }
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
-    };
-    // Drop the catalog from the cluster FIRST. Only once Kubernetes accepted
-    // the spec without it are the row deleted and the credential revoked, so a
-    // failure leaves row, client and running catalog consistent — and a retry
-    // still has a row to act on.
-    let built = build_provision_req_with(
-        &st,
-        &engine,
-        BuildOpts {
-            exclude_catalog: Some(cat.id),
-            ..BuildOpts::default()
-        },
-    )
-    .await?;
-    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
-        return Err(match e {
-            ApplyBuiltError::Conflict => apply_conflict(),
-            ApplyBuiltError::Failed(msg) => {
-                CpError::BadRequest(format!("engine update failed: {msg}"))
-            }
-        });
-    }
-    st.engine_mgmt.delete_engine_catalog(cat.id).await?;
-    // Retire a minted Catalog Client (egret-warehouse catalogs). Gated on
-    // `mintedClient` so a client we did NOT mint is never revoked out from
-    // under its owner. The cluster no longer uses it, so a failed revoke is
-    // logged rather than failing a removal that already happened.
-    if let Some(client_id) = client_row_id(&cat.config) {
-        if is_minted_client(&cat.config) {
-            if let Err(e) = st.catalog.revoke_client(client_id).await {
-                tracing::warn!(engine = %engine.name, %client_id, error = ?e,
-                    "catalog removed but its minted client could not be revoked");
-            }
-        }
-    }
+    let attached = find_attached(&st, &engine, cid).await?;
+    crate::catalog_apply::detach_from_engine(&st, &engine, &attached.catalog)
+        .await
+        .map_err(CatalogOpError::into_legacy)?;
     Ok(StatusCode::OK)
 }
 
@@ -5953,12 +5816,12 @@ async fn remove_catalog(
     tag = "control-plane-engines",
     params(
         ("id" = Uuid, Path, description = "Engine id"),
-        ("cid" = Uuid, Path, description = "Catalog id"),
+        ("cid" = Uuid, Path, description = "Registry catalog id"),
     ),
     request_body = UpdateCatalogBody,
     responses(
-        (status = 200, description = "Catalog config replaced and engine re-provisioned", body = EngineCatalogDto),
-        (status = 400, description = "Primary or managed egret-warehouse catalogs are not editable, or engine update failed", body = ErrorBody),
+        (status = 200, description = "Catalog config replaced in the registry and applied to every engine that attaches it", body = EngineCatalogDto),
+        (status = 400, description = "Primary or managed egret-warehouse catalogs are not editable, the properties do not fit the catalog's kind, or this engine's update failed (the catalog is not reverted)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
@@ -5978,72 +5841,95 @@ async fn update_catalog(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-    let prev = st
-        .engine_mgmt
-        .get_engine_catalog(cid)
-        .await?
-        .ok_or(CpError::NotFound)?;
-    // Guard against cross-engine updates via a mismatched path.
-    if prev.engine_id != engine.id {
-        return Err(CpError::NotFound);
-    }
-    if prev.is_primary {
+    let attached = find_attached(&st, &engine, cid).await?;
+    let def = attached
+        .catalog
+        .def()
+        .map_err(|e| CpError::BadRequest(format!("catalog {}: {e}", attached.catalog.name)))?;
+    if attached.catalog.warehouse_id == Some(engine.warehouse_id) {
         return Err(CpError::BadRequest(
             "cannot edit the primary catalog".into(),
         ));
     }
-    if prev.kind == "egret-warehouse" {
+    if def.warehouse_id().is_some() {
         return Err(CpError::BadRequest(
             "egret-warehouse catalogs are managed and not editable".into(),
         ));
     }
     // A concurrent DELETE already marked the row and may have torn the cluster
-    // down; 409 the common case here, before writing the new config, rather
-    // than only catching it in `apply_built`'s re-read.
+    // down; 409 the common case here, before writing the new config.
     if engine.status == crate::engine_status::DELETING {
         return Err(apply_conflict());
     }
-
-    // Persist the new config, then re-provision. If re-provisioning fails, restore
-    // the previous config/secret so the stored row never leads the running cluster.
     // The form echoes what GET returned; keep stored values the admin left masked.
+    let stored = crate::catalog_apply::legacy_config_view(&st, &attached).await?;
     let mut config = b.config.clone();
-    restore_redacted_properties(&mut config, &prev.config);
-    let updated = st
-        .engine_mgmt
-        .update_engine_catalog(cid, &config, b.secret_ref)
-        .await?
-        .ok_or(CpError::NotFound)?;
-
-    let restore = |st: CpState, prev: EngineCatalog| async move {
-        let _ = st
-            .engine_mgmt
-            .update_engine_catalog(prev.id, &prev.config, prev.secret_ref)
-            .await;
+    restore_redacted_properties(&mut config, &stored);
+    let kind = legacy_kind(&def);
+    let legacy = LegacyCatalog {
+        name: &attached.catalog.name,
+        kind: &kind,
+        config: &config,
+        secret_ref: b.secret_ref,
     };
-
-    let Some(prov) = st.engine_provisioner.as_ref() else {
-        restore(st.clone(), prev).await;
-        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    let extracted =
+        crate::catalog_apply::extract_plaintext_secrets(&st, &attached.catalog.name, &legacy)
+            .await?;
+    // A generic catalog stays generic; a typed one must still be expressible as
+    // its kind (the kind of a catalog never changes).
+    let new_def = if def.kind() == egret_catalog_registry::CatalogKind::Generic {
+        egret_catalog_registry::classify_generic(&legacy, &extracted)
+            .map_err(|e| CpError::BadRequest(e.to_string()))
+    } else {
+        egret_catalog_registry::classify(&legacy, &extracted)
+            .map_err(|e| CpError::BadRequest(e.to_string()))
+            .and_then(|classified| {
+                if classified.def.kind() == def.kind() {
+                    Ok(classified.def)
+                } else {
+                    Err(CpError::BadRequest(format!(
+                        "these properties cannot be expressed as a {} catalog; \
+                         edit catalog {} through PUT /api/control-plane/catalogs/{{id}} instead",
+                        def.kind().as_str(),
+                        attached.catalog.name
+                    )))
+                }
+            })
     };
-    let built = match build_provision_req(&st, &engine).await {
-        Ok(r) => r,
+    let new_def = match new_def {
+        Ok(d) => match crate::catalog_apply::validate_references(&st, &d).await {
+            Ok(()) => d,
+            Err(e) => {
+                crate::catalog_apply::discard_extracted_secrets(&st, &extracted).await;
+                return Err(e);
+            }
+        },
         Err(e) => {
-            restore(st.clone(), prev).await;
+            crate::catalog_apply::discard_extracted_secrets(&st, &extracted).await;
             return Err(e);
         }
     };
-    if let Err(e) = apply_built(&st, prov.as_ref(), &engine, &built, ApplyOp::Update).await {
-        restore(st.clone(), prev).await;
-        return Err(match e {
-            ApplyBuiltError::Conflict => apply_conflict(),
-            ApplyBuiltError::Failed(msg) => {
-                CpError::BadRequest(format!("engine update failed: {msg}"))
-            }
-        });
+    // Registry semantics (spec §4.5): store, then apply to every engine that
+    // attaches it. Nothing reverts; a failed engine is flagged. This route
+    // answers for its own engine.
+    let updated = st
+        .engine_mgmt
+        .registry()
+        .update_catalog(cid, &new_def, attached.catalog.description.as_deref())
+        .await?
+        .ok_or(CpError::NotFound)?;
+    let outcomes = crate::catalog_apply::propagate(&st, &updated).await?;
+    if let Some(failed) = outcomes
+        .iter()
+        .find(|o| o.engine_id == engine.id && !o.applied)
+    {
+        return Err(CpError::BadRequest(format!(
+            "engine update failed: {}",
+            failed.error.clone().unwrap_or_default()
+        )));
     }
-
-    Ok(Json(updated.into()))
+    let attached = find_attached(&st, &engine, cid).await?;
+    Ok(Json(legacy_catalog_dto(&engine, &attached)?))
 }
 
 // ── pod logs ─────────────────────────────────────────────────────────────────
@@ -7106,21 +6992,6 @@ mod tests {
             sr_delegation_block(&none),
             sr_delegation_block(&impersonate)
         );
-    }
-
-    // ── build_catalog_req: generic connector + secret sourcing ──────────────
-
-    fn generic_catalog(config: serde_json::Value, secret_ref: Option<Uuid>) -> EngineCatalog {
-        EngineCatalog {
-            id: Uuid::new_v4(),
-            engine_id: Uuid::new_v4(),
-            name: "gen".into(),
-            kind: "generic".into(),
-            config,
-            secret_ref,
-            is_primary: false,
-            created_at: chrono::Utc::now(),
-        }
     }
 
     fn dummy_engine() -> Engine {
@@ -8756,6 +8627,7 @@ mod tests {
             engine.name.clone(),
             "https://egret.example".into(),
             wh.name.clone(),
+            "egret".into(),
             "client".into(),
             "secret".into(),
             None,
@@ -9721,293 +9593,6 @@ mod tests {
             .expect("must remint instead of erroring");
         assert!(reminted.fresh);
         assert_ne!(reminted.internal_id, first.internal_id);
-    }
-
-    /// WITHOUT a `secret_ref` the generic arm must render exactly as before:
-    /// verbatim properties, no env vars, no `${ENV:...}` placeholders.
-    #[tokio::test]
-    async fn generic_catalog_without_secret_ref_is_verbatim() {
-        let Some(st) = test_state().await else {
-            eprintln!(
-                "skipping generic_catalog_without_secret_ref_is_verbatim: DATABASE_URL not set"
-            );
-            return;
-        };
-        let cfg = serde_json::json!({
-            "connectorName": "mysql",
-            "properties": {
-                "connection-url": "jdbc:mysql://db:3306/x",
-                "connection-user": "root",
-            }
-        });
-        let cat = generic_catalog(cfg, None);
-        let req = build_catalog_req(&st, &dummy_engine(), &cat, "T0")
-            .await
-            .expect("build_catalog_req");
-
-        assert_eq!(req.properties["connector.name"], "mysql");
-        assert_eq!(req.properties["connection-url"], "jdbc:mysql://db:3306/x");
-        assert_eq!(req.properties["connection-user"], "root");
-        assert!(req.env.is_empty());
-        assert!(!req.properties.values().any(|v| v.contains("${ENV:")));
-    }
-
-    /// WITH a `secret_ref`, the designated property (default
-    /// `connection-password`) is replaced by an `${ENV:...}` placeholder and
-    /// the resolved plaintext lands in `env`, not in `properties`.
-    #[tokio::test]
-    async fn generic_catalog_with_secret_ref_injects_env_var() {
-        let Some(st) = test_state().await else {
-            eprintln!(
-                "skipping generic_catalog_with_secret_ref_injects_env_var: DATABASE_URL not set"
-            );
-            return;
-        };
-        let secret_name = format!("t_{}", Uuid::new_v4().simple());
-        let secret_id = st
-            .secrets
-            .create(None, &secret_name, None, "s3cr3t")
-            .await
-            .expect("create secret");
-        let cfg = serde_json::json!({
-            "connectorName": "mysql",
-            "properties": {
-                "connection-url": "jdbc:mysql://db:3306/x",
-                "connection-password": "PLACEHOLDER",
-            }
-        });
-        let cat = generic_catalog(cfg, Some(secret_id));
-        let req = build_catalog_req(&st, &dummy_engine(), &cat, "T1")
-            .await
-            .expect("build_catalog_req");
-
-        // Env var naming is now the uniform `CAT_<prefix>_<n>` scheme (was
-        // `GEN_<prefix>`), shared by the v2 arm and this legacy shim path.
-        assert_eq!(req.properties["connection-password"], "${ENV:CAT_T1_0}");
-        assert_eq!(req.env["CAT_T1_0"], "s3cr3t");
-        // The plaintext placeholder from `properties` must never leak through.
-        assert!(!req.properties.values().any(|v| v == "PLACEHOLDER"));
-    }
-
-    // ── build_catalog_req: v2 connector-first shape + v1 back-compat shim ───
-
-    /// Build a catalog row of an arbitrary `kind` (v2 rows use the connector
-    /// name itself as `kind`, e.g. "mysql").
-    fn catalog_of(
-        kind: &str,
-        config: serde_json::Value,
-        secret_ref: Option<Uuid>,
-    ) -> EngineCatalog {
-        EngineCatalog {
-            id: Uuid::new_v4(),
-            engine_id: Uuid::new_v4(),
-            name: "cat".into(),
-            kind: kind.into(),
-            config,
-            secret_ref,
-            is_primary: false,
-            created_at: chrono::Utc::now(),
-        }
-    }
-
-    /// (a) v2 connector row: `kind` IS the connector name, one secret-backed
-    /// property resolves to `${ENV:CAT_<prefix>_0}` + a matching `env` entry;
-    /// the plaintext password never appears in `properties`.
-    #[tokio::test]
-    async fn v2_connector_single_secret_property() {
-        let Some(st) = test_state().await else {
-            eprintln!("skipping v2_connector_single_secret_property: DATABASE_URL not set");
-            return;
-        };
-        let secret_id = st
-            .secrets
-            .create(
-                None,
-                &format!("t_{}", Uuid::new_v4().simple()),
-                None,
-                "sekret",
-            )
-            .await
-            .expect("create secret");
-        let cfg = serde_json::json!({
-            "properties": {"connection-url": "jdbc:mysql://h"},
-            "secretProperties": {"connection-password": secret_id.to_string()},
-        });
-        let cat = catalog_of("mysql", cfg, None);
-        let req = build_catalog_req(&st, &dummy_engine(), &cat, "P0")
-            .await
-            .expect("build_catalog_req");
-
-        assert_eq!(req.properties["connector.name"], "mysql");
-        assert_eq!(req.properties["connection-url"], "jdbc:mysql://h");
-        assert_eq!(req.properties["connection-password"], "${ENV:CAT_P0_0}");
-        assert_eq!(req.env["CAT_P0_0"], "sekret");
-        assert!(!req.properties.values().any(|v| v == "sekret"));
-    }
-
-    /// (b) v2 connector row with TWO `secretProperties`: two distinct
-    /// `${ENV:CAT_<prefix>_n}` placeholders and two matching `env` entries.
-    /// Assert set membership since insertion order (a JSON object) is not
-    /// guaranteed.
-    #[tokio::test]
-    async fn v2_connector_two_secret_properties() {
-        let Some(st) = test_state().await else {
-            eprintln!("skipping v2_connector_two_secret_properties: DATABASE_URL not set");
-            return;
-        };
-        let secret_a = st
-            .secrets
-            .create(
-                None,
-                &format!("a_{}", Uuid::new_v4().simple()),
-                None,
-                "val-a",
-            )
-            .await
-            .expect("create secret a");
-        let secret_b = st
-            .secrets
-            .create(
-                None,
-                &format!("b_{}", Uuid::new_v4().simple()),
-                None,
-                "val-b",
-            )
-            .await
-            .expect("create secret b");
-        let cfg = serde_json::json!({
-            "properties": {"connection-url": "jdbc:snowflake://h"},
-            "secretProperties": {
-                "connection-password": secret_a.to_string(),
-                "connection-token": secret_b.to_string(),
-            },
-        });
-        let cat = catalog_of("snowflake", cfg, None);
-        let req = build_catalog_req(&st, &dummy_engine(), &cat, "P1")
-            .await
-            .expect("build_catalog_req");
-
-        let vars: std::collections::HashSet<&str> = ["CAT_P1_0", "CAT_P1_1"].into_iter().collect();
-        assert!(vars.contains(
-            req.properties["connection-password"]
-                .trim_start_matches("${ENV:")
-                .trim_end_matches('}')
-        ));
-        assert!(vars.contains(
-            req.properties["connection-token"]
-                .trim_start_matches("${ENV:")
-                .trim_end_matches('}')
-        ));
-        assert_ne!(
-            req.properties["connection-password"],
-            req.properties["connection-token"]
-        );
-        let resolved: std::collections::HashSet<&str> =
-            req.env.values().map(|s| s.as_str()).collect();
-        assert!(resolved.contains("val-a"));
-        assert!(resolved.contains("val-b"));
-        assert_eq!(req.env.len(), 2);
-    }
-
-    /// (c) v2 connector row with only `properties`, no `secretProperties`:
-    /// verbatim passthrough, empty env (parity with the old no-secret path).
-    #[tokio::test]
-    async fn v2_connector_no_secrets_is_verbatim() {
-        let Some(st) = test_state().await else {
-            eprintln!("skipping v2_connector_no_secrets_is_verbatim: DATABASE_URL not set");
-            return;
-        };
-        let cfg = serde_json::json!({
-            "properties": {"connection-url": "jdbc:mysql://h", "connection-user": "root"},
-        });
-        let cat = catalog_of("mysql", cfg, None);
-        let req = build_catalog_req(&st, &dummy_engine(), &cat, "P2")
-            .await
-            .expect("build_catalog_req");
-
-        assert_eq!(req.properties["connector.name"], "mysql");
-        assert_eq!(req.properties["connection-url"], "jdbc:mysql://h");
-        assert_eq!(req.properties["connection-user"], "root");
-        assert!(req.env.is_empty());
-        assert!(!req.properties.values().any(|v| v.contains("${ENV:")));
-    }
-
-    /// (d) legacy `generic` row (kind="generic", config.connectorName +
-    /// config.secretProperty + top-level secret_ref) still routes through the
-    /// shim to the same connector.name + `${ENV:...}` shape.
-    #[tokio::test]
-    async fn legacy_generic_row_still_resolves() {
-        let Some(st) = test_state().await else {
-            eprintln!("skipping legacy_generic_row_still_resolves: DATABASE_URL not set");
-            return;
-        };
-        let secret_id = st
-            .secrets
-            .create(
-                None,
-                &format!("t_{}", Uuid::new_v4().simple()),
-                None,
-                "legacy-pw",
-            )
-            .await
-            .expect("create secret");
-        let cfg = serde_json::json!({
-            "connectorName": "mysql",
-            "properties": {
-                "connection-url": "jdbc:mysql://db:3306/x",
-                "connection-password": "PLACEHOLDER",
-            },
-            "secretProperty": "connection-password",
-        });
-        let cat = generic_catalog(cfg, Some(secret_id));
-        let req = build_catalog_req(&st, &dummy_engine(), &cat, "P3")
-            .await
-            .expect("build_catalog_req");
-
-        assert_eq!(req.properties["connector.name"], "mysql");
-        assert_eq!(req.properties["connection-password"], "${ENV:CAT_P3_0}");
-        assert_eq!(req.env["CAT_P3_0"], "legacy-pw");
-        assert!(!req.properties.values().any(|v| v == "PLACEHOLDER"));
-    }
-
-    /// (e) legacy `postgresql` row (kind="postgresql", config.host/port/user,
-    /// top-level secret_ref) still builds a `connection-url` and a
-    /// secret-backed `connection-password`.
-    #[tokio::test]
-    async fn legacy_postgres_row_still_resolves() {
-        let Some(st) = test_state().await else {
-            eprintln!("skipping legacy_postgres_row_still_resolves: DATABASE_URL not set");
-            return;
-        };
-        let secret_id = st
-            .secrets
-            .create(
-                None,
-                &format!("t_{}", Uuid::new_v4().simple()),
-                None,
-                "pgpw",
-            )
-            .await
-            .expect("create secret");
-        let cfg = serde_json::json!({
-            "host": "db.internal",
-            "port": 5432,
-            "database": "mydb",
-            "user": "svc",
-        });
-        let cat = catalog_of("postgresql", cfg, Some(secret_id));
-        let req = build_catalog_req(&st, &dummy_engine(), &cat, "P4")
-            .await
-            .expect("build_catalog_req");
-
-        assert_eq!(req.properties["connector.name"], "postgresql");
-        assert_eq!(
-            req.properties["connection-url"],
-            "jdbc:postgresql://db.internal:5432/mydb"
-        );
-        assert_eq!(req.properties["connection-user"], "svc");
-        assert_eq!(req.properties["connection-password"], "${ENV:CAT_P4_0}");
-        assert_eq!(req.env["CAT_P4_0"], "pgpw");
     }
 
     /// [`starrocks_external_catalog_sql`] (T6) renders a `CREATE EXTERNAL

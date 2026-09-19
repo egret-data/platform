@@ -1,6 +1,7 @@
 //! Engine-provisioning seam storage: owns the `engine_mgmt` schema.
 
 pub mod assignment;
+pub(crate) mod catalog_apply;
 pub mod delegation_default;
 pub mod delegator_policy;
 pub mod dependents;

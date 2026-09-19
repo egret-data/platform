@@ -410,6 +410,74 @@ impl RegistryStore {
         }
     }
 
+    /// Create `name`; an existing catalog of that name is replaced when it is an
+    /// orphan — attached to no engine, assigned to no workspace, not a warehouse
+    /// catalog (plan decision #27: what a legacy engine-catalog remove leaves
+    /// behind). Anything else under that name is `AlreadyExists`.
+    ///
+    /// Atomic: the old row is locked `FOR UPDATE` before it is checked, and the
+    /// check, the delete and the insert share one transaction. An attachment or
+    /// assignment insert takes `FOR KEY SHARE` on the catalog row, which
+    /// conflicts with that lock, so one racing this call either committed first
+    /// (and the check sees it: `AlreadyExists`, nothing changed) or waits until
+    /// this commits (and then fails its foreign key: the row it named is gone).
+    /// Returns the new row and whether an orphan was replaced.
+    pub async fn create_catalog_replacing_orphan(
+        &self,
+        name: &str,
+        def: &CatalogDef,
+        description: Option<&str>,
+    ) -> Result<(CatalogRow, bool), RegistryError> {
+        if !is_valid_catalog_name(name) {
+            return Err(ValidationError::Name(name.to_string()).into());
+        }
+        let in_use = || {
+            RegistryError::AlreadyExists(format!(
+                "a registry catalog named {name} already exists and is in use"
+            ))
+        };
+        let mut tx = self.pool().begin().await?;
+        let existing: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(
+            "SELECT id, warehouse_id FROM registry.catalogs WHERE name = $1 FOR UPDATE",
+        )
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let replaced = match existing {
+            None => false,
+            Some((_, Some(_))) => return Err(in_use()),
+            Some((id, None)) => {
+                let referenced: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM registry.engine_catalog_attachments WHERE catalog_id = $1) \
+                         OR EXISTS (SELECT 1 FROM registry.catalog_workspaces WHERE catalog_id = $1)",
+                )
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if referenced {
+                    return Err(in_use());
+                }
+                sqlx::query("DELETE FROM registry.catalogs WHERE id = $1")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        if is_fk_violation(&e) {
+                            in_use()
+                        } else {
+                            e.into()
+                        }
+                    })?;
+                true
+            }
+        };
+        let row = insert_catalog(&mut tx, name, def, description)
+            .await
+            .map_err(|e| map_insert_error(e, name))?;
+        tx.commit().await?;
+        Ok((row, replaced))
+    }
+
     pub(crate) async fn names_starting_with(
         &self,
         prefix: &str,

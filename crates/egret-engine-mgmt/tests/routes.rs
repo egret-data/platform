@@ -699,6 +699,7 @@ async fn test_catalog_reports_ok_error_and_non_2xx() {
 
     // A catalog id that belongs to a DIFFERENT engine must 404 (ownership guard).
     let other_name = format!("trino-{}", Uuid::new_v4().simple());
+    let other_wh = seed_provisioned_warehouse(&f).await;
     let resp = f
         .app
         .clone()
@@ -707,7 +708,7 @@ async fn test_catalog_reports_ok_error_and_non_2xx() {
             "/engines",
             &token,
             Some(serde_json::json!({
-                "name": other_name, "warehouseId": wh_id,
+                "name": other_name, "warehouseId": other_wh,
                 "coordinatorReplicas": 1, "workerReplicas": 1,
                 "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
             })),
@@ -998,10 +999,21 @@ async fn create_engine_starrocks_persists_starrocks_type() {
     );
     assert_eq!(cats[0]["kind"], "egret-warehouse", "catalog kind; body={j}");
     assert_eq!(cats[0]["isPrimary"], true, "catalog is primary; body={j}");
-    assert_eq!(cats[0]["name"], "egret", "catalog name; body={j}");
+    // D5: an engine reaches its warehouse under the warehouse catalog's name.
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+    assert_eq!(
+        cats[0]["name"],
+        serde_json::json!(wh_cat.name),
+        "catalog name; body={j}"
+    );
+    assert_eq!(
+        cats[0]["id"],
+        serde_json::json!(wh_cat.id),
+        "legacy id is the registry id; body={j}"
+    );
 
-    // The client's credential lives on the primary catalog row and is revoked
-    // when the engine is deleted, same as Trino's; confirm it was minted.
+    // The client's credential lives in a named secret on the attachment and is
+    // revoked when the engine is deleted, same as Trino's; confirm it was minted.
     let (client_count,): (i64,) = sqlx::query_as(
         "SELECT count(*) FROM catalog.catalog_clients WHERE warehouse_id = $1 AND name = $2",
     )
@@ -1559,6 +1571,19 @@ fn secret_store(f: &Fixture) -> egret_secrets::WorkspaceSecretStore {
             Some(egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("crypto")),
         ),
     )
+}
+
+fn registry(f: &Fixture) -> egret_catalog_registry::RegistryStore {
+    egret_catalog_registry::RegistryStore::new(f.db.clone())
+}
+
+/// The registry catalog of a warehouse (created with the engine that uses it).
+async fn warehouse_catalog(f: &Fixture, wh_id: Uuid) -> egret_catalog_registry::CatalogRow {
+    registry(f)
+        .get_catalog_for_warehouse(wh_id)
+        .await
+        .expect("read catalog")
+        .expect("warehouse has a catalog")
 }
 
 /// `(internal_secret_id, monitor_secret_id)` straight off the engine row.
@@ -2401,19 +2426,21 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
     };
     let token = session_for(&f, "engine_cat_clientid_admin", true).await;
     let wh_id = seed_provisioned_warehouse(&f).await;
+    // D5: a warehouse is one catalog per engine, so the governed catalog comes
+    // from a SECOND warehouse.
+    let governed_wh = seed_provisioned_warehouse(&f).await;
     let name = format!("trino-{}", Uuid::new_v4().simple());
 
     // Seed a pre-existing, user-owned client on a custom (non-default) role.
     let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
-    let engine_mgmt = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
     let wh = catalog_store
-        .get_warehouse(wh_id)
+        .get_warehouse(governed_wh)
         .await
         .expect("get warehouse")
         .expect("warehouse exists");
     let role = catalog_store
         .create_role(
-            wh_id,
+            governed_wh,
             "readonly_analyst",
             "external",
             Some("read-only role"),
@@ -2425,7 +2452,7 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
             name: "pre-existing-client".into(),
             consumer_type: "external".into(),
             workspace_id: wh.workspace_id,
-            warehouse_id: wh_id,
+            warehouse_id: governed_wh,
             catalog_role_id: role.id,
         })
         .await
@@ -2466,7 +2493,7 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
             Some(serde_json::json!({
                 "name": "governed",
                 "kind": "egret-warehouse",
-                "config": { "warehouseId": wh_id, "clientId": existing_client.id },
+                "config": { "warehouseId": governed_wh, "clientId": existing_client.id },
             })),
         ))
         .await
@@ -2497,24 +2524,22 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
     assert_eq!(j["config"]["mintedClient"], true, "mintedClient; body={j}");
     // credential/clientRowId are redacted from the HTTP response; inspect the
     // stored row directly via the storage layer instead.
-    let stored = engine_mgmt
-        .list_engine_catalogs(Uuid::parse_str(&engine_id).unwrap())
+    let stored = registry(&f)
+        .get_attachment(
+            Uuid::parse_str(&engine_id).unwrap(),
+            Uuid::parse_str(&cat_id).unwrap(),
+        )
         .await
-        .expect("list engine catalogs")
-        .into_iter()
-        .find(|c| c.id.to_string() == cat_id)
-        .expect("stored catalog row");
-    let minted_client_row_id = stored.config["clientRowId"]
-        .as_str()
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .expect("clientRowId present");
+        .expect("read attachment")
+        .expect("attachment row");
+    let minted_client_row_id = stored.catalog_client_id.expect("minted client id");
     assert_ne!(
         minted_client_row_id, existing_client.id,
         "a fresh client must be minted, not the referenced one reused"
     );
     // The minted client inherited the referenced client's role.
     let minted_row = catalog_store
-        .list_clients(wh_id)
+        .list_clients(governed_wh)
         .await
         .expect("list clients")
         .into_iter()
@@ -2541,7 +2566,7 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
     assert_eq!(resp.status(), StatusCode::OK, "delete catalog");
 
     let remaining = catalog_store
-        .list_clients(wh_id)
+        .list_clients(governed_wh)
         .await
         .expect("list clients after delete");
     assert!(
@@ -2570,6 +2595,10 @@ async fn add_catalog_with_foreign_client_id_400() {
     let token = session_for(&f, "engine_cat_bad_clientid_admin", true).await;
     let wh_id = seed_provisioned_warehouse(&f).await;
     let other_wh_id = seed_provisioned_warehouse(&f).await;
+    // The catalog to attach comes from a third warehouse (not the engine's
+    // primary), so the check under test — a client that is not the target
+    // warehouse's — is reached instead of "already attached".
+    let target_wh = seed_provisioned_warehouse(&f).await;
     let name = format!("trino-{}", Uuid::new_v4().simple());
 
     // A client that belongs to a DIFFERENT warehouse.
@@ -2628,7 +2657,7 @@ async fn add_catalog_with_foreign_client_id_400() {
             Some(serde_json::json!({
                 "name": "governed",
                 "kind": "egret-warehouse",
-                "config": { "warehouseId": wh_id, "clientId": foreign_client.id },
+                "config": { "warehouseId": target_wh, "clientId": foreign_client.id },
             })),
         ))
         .await
@@ -2650,7 +2679,7 @@ async fn add_catalog_with_foreign_client_id_400() {
             Some(serde_json::json!({
                 "name": "governed2",
                 "kind": "egret-warehouse",
-                "config": { "warehouseId": wh_id, "clientId": "not-a-uuid" },
+                "config": { "warehouseId": target_wh, "clientId": "not-a-uuid" },
             })),
         ))
         .await
@@ -3508,24 +3537,26 @@ async fn delete_engine_removes_cluster_row_secrets_and_minted_clients_only() {
     let mut engine_secrets = vec![delegator, root];
     engine_secrets.extend(engine.tls_secret_id);
 
-    let primary = store
-        .list_engine_catalogs(engine_id)
+    let reg = registry(&f);
+    let primary = reg
+        .get_attachment(engine_id, warehouse_catalog(&f, wh_id).await.id)
         .await
         .unwrap()
-        .into_iter()
-        .find(|c| c.is_primary)
-        .expect("primary catalog");
-    let minted: Uuid = primary.config["clientRowId"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
+        .expect("primary attachment");
+    let minted = primary.catalog_client_id.expect("minted client");
+    engine_secrets.push(primary.credential_secret_id.expect("credential secret"));
 
+    // A second warehouse's catalog, attached with a client the engine did NOT mint.
+    let foreign_wh = seed_provisioned_warehouse(&f).await;
     let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
-    let wh = catalog_store.get_warehouse(wh_id).await.unwrap().unwrap();
+    let wh = catalog_store
+        .get_warehouse(foreign_wh)
+        .await
+        .unwrap()
+        .unwrap();
     let role = catalog_store
         .create_role(
-            wh_id,
+            foreign_wh,
             "readonly_analyst",
             "external",
             Some("read-only role"),
@@ -3537,22 +3568,45 @@ async fn delete_engine_removes_cluster_row_secrets_and_minted_clients_only() {
             name: "not-minted-by-the-engine".into(),
             consumer_type: "external".into(),
             workspace_id: wh.workspace_id,
-            warehouse_id: wh_id,
+            warehouse_id: foreign_wh,
             catalog_role_id: role.id,
         })
         .await
         .unwrap();
-    store
-        .create_engine_catalog(
-            engine_id,
-            "external",
-            "egret-warehouse",
-            &serde_json::json!({ "clientRowId": foreign.id, "mintedClient": false }),
+    // Its credential is the admin's (not minted by this engine): it must
+    // survive the engine delete, like the client it belongs to.
+    let foreign_cred = secrets
+        .create(
             None,
-            false,
+            &format!("foreign-cred-{}", Uuid::new_v4().simple()),
+            None,
+            "x:y",
         )
         .await
         .unwrap();
+    let (foreign_cat, _) = reg
+        .ensure_warehouse_catalog(
+            &egret_catalog_registry::WarehouseIdentity {
+                id: foreign_wh,
+                name: &wh.name,
+                workspace_id: wh.workspace_id,
+            },
+            None,
+            |_| Vec::new(),
+        )
+        .await
+        .unwrap();
+    reg.insert_attachment(&egret_catalog_registry::NewAttachment {
+        engine_id,
+        catalog_id: foreign_cat.id,
+        catalog_client_id: Some(foreign.id),
+        credential_secret_id: Some(foreign_cred),
+        minted_client: false,
+        applied_now: true,
+        created_at: None,
+    })
+    .await
+    .unwrap();
 
     let resp = f
         .app
@@ -3608,6 +3662,10 @@ async fn delete_engine_removes_cluster_row_secrets_and_minted_clients_only() {
         client_count(foreign.id).await,
         1,
         "a client the engine did not mint survives"
+    );
+    assert!(
+        secrets.get_meta(None, foreign_cred).await.is_ok(),
+        "the credential of a client the engine did not mint survives"
     );
 }
 
@@ -3986,14 +4044,24 @@ async fn catalog_detail_masks_inline_secrets_and_a_resave_keeps_them() {
         .unwrap();
     let (status, detail) = into_json(resp).await;
     assert_eq!(status, StatusCode::OK, "catalog detail; body={detail}");
-    assert_eq!(
-        detail["config"]["properties"]["connection-password"],
-        "********"
-    );
+    let secret_id = detail["config"]["secretProperties"]["connection-password"]
+        .as_str()
+        .expect("password is a secret reference now")
+        .to_string();
+    assert!(detail["config"]["properties"]
+        .get("connection-password")
+        .is_none());
     assert_eq!(detail["config"]["properties"]["connection-user"], "u");
     assert!(
         !detail.to_string().contains("hunter2"),
         "no plaintext in GET; body={detail}"
+    );
+    assert_eq!(
+        secret_store(&f)
+            .resolve_plaintext(None, Uuid::parse_str(&secret_id).unwrap())
+            .await
+            .unwrap(),
+        "hunter2"
     );
 
     // Re-save exactly what the form received.
@@ -4011,14 +4079,14 @@ async fn catalog_detail_masks_inline_secrets_and_a_resave_keeps_them() {
     let (status, j) = into_json(resp).await;
     assert_eq!(status, StatusCode::OK, "re-save catalog; body={j}");
 
-    let stored = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
-        .get_engine_catalog(Uuid::parse_str(&cat_id).unwrap())
+    let stored = registry(&f)
+        .get_catalog(Uuid::parse_str(&cat_id).unwrap())
         .await
-        .expect("get catalog")
-        .expect("catalog row");
-    assert_eq!(
-        stored.config["properties"]["connection-password"],
-        "hunter2"
+        .unwrap()
+        .unwrap();
+    assert!(
+        !stored.advanced.to_string().contains("hunter2"),
+        "plaintext never stored"
     );
     let rendered = port
         .last_updated()
@@ -4026,7 +4094,12 @@ async fn catalog_detail_masks_inline_secrets_and_a_resave_keeps_them() {
         .into_iter()
         .find(|c| c.name == "pg")
         .expect("pg catalog rendered");
-    assert_eq!(rendered.properties["connection-password"], "hunter2");
+    let placeholder = &rendered.properties["connection-password"];
+    let var = placeholder
+        .strip_prefix("${ENV:")
+        .and_then(|v| v.strip_suffix('}'))
+        .expect("env placeholder");
+    assert_eq!(rendered.env[var], "hunter2");
 }
 
 async fn stored_status(f: &Fixture, engine_id: &str) -> String {
@@ -4508,6 +4581,7 @@ async fn remove_catalog_applies_before_deleting_and_revoking() {
     };
     let token = session_for(&f, "engine_p5_admin", true).await;
     let wh_id = seed_provisioned_warehouse(&f).await;
+    let extra_wh = seed_provisioned_warehouse(&f).await;
     let name = format!("trino-{}", Uuid::new_v4().simple());
     let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
     assert_eq!(status, StatusCode::CREATED, "create; body={j}");
@@ -4522,7 +4596,7 @@ async fn remove_catalog_applies_before_deleting_and_revoking() {
             &token,
             Some(serde_json::json!({
                 "name": "extra", "kind": "egret-warehouse",
-                "config": { "warehouseId": wh_id }
+                "config": { "warehouseId": extra_wh }
             })),
         ))
         .await
@@ -4534,16 +4608,16 @@ async fn remove_catalog_applies_before_deleting_and_revoking() {
         "add warehouse catalog; body={j}"
     );
     let cat_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
-    let store = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
-    let client_id = store
-        .get_engine_catalog(cat_id)
+    let cat_name = j["name"].as_str().unwrap().to_string();
+    let engine_uuid = Uuid::parse_str(&engine_id).unwrap();
+    let reg = registry(&f);
+    let attachment = reg
+        .get_attachment(engine_uuid, cat_id)
         .await
         .unwrap()
-        .unwrap()
-        .config["clientRowId"]
-        .as_str()
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .expect("minted client id");
+        .unwrap();
+    let client_id = attachment.catalog_client_id.expect("minted client id");
+    let credential = attachment.credential_secret_id.expect("credential secret");
     let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
     let remove = || {
         req(
@@ -4561,16 +4635,19 @@ async fn remove_catalog_applies_before_deleting_and_revoking() {
         port.last_updated()
             .catalogs
             .iter()
-            .all(|c| c.name != "extra"),
+            .all(|c| c.name != cat_name),
         "the apply rendered the engine without the catalog"
     );
     assert!(
-        store.get_engine_catalog(cat_id).await.unwrap().is_some(),
+        reg.get_attachment(engine_uuid, cat_id)
+            .await
+            .unwrap()
+            .is_some(),
         "row kept"
     );
     assert!(
         catalog_store
-            .list_clients(wh_id)
+            .list_clients(extra_wh)
             .await
             .unwrap()
             .iter()
@@ -4582,17 +4659,31 @@ async fn remove_catalog_applies_before_deleting_and_revoking() {
     let resp = f.app.clone().oneshot(remove()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
-        store.get_engine_catalog(cat_id).await.unwrap().is_none(),
+        reg.get_attachment(engine_uuid, cat_id)
+            .await
+            .unwrap()
+            .is_none(),
         "row deleted"
     );
     assert!(
         !catalog_store
-            .list_clients(wh_id)
+            .list_clients(extra_wh)
             .await
             .unwrap()
             .iter()
             .any(|c| c.id == client_id),
         "minted client revoked"
+    );
+    assert!(
+        matches!(
+            secret_store(&f).get_meta(None, credential).await,
+            Err(egret_secrets::SecretsError::NotFound)
+        ),
+        "the minted client's credential secret is deleted with the attachment"
+    );
+    assert!(
+        reg.get_catalog(cat_id).await.unwrap().is_some(),
+        "detach keeps the registry catalog"
     );
 }
 
@@ -4625,6 +4716,24 @@ async fn failed_provision_rolls_back_row_client_and_cluster() {
             .unwrap()
         }
     };
+
+    // A minted client's credential secret is `catalog-client-<client id>`; one
+    // whose client no longer exists was leaked by a rollback.
+    let orphaned_credentials = || {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT s.name FROM workspace_secrets s \
+                  WHERE s.workspace_id IS NULL AND left(s.name, 15) = 'catalog-client-' \
+                    AND NOT EXISTS (SELECT 1 FROM catalog.catalog_clients c \
+                                     WHERE 'catalog-client-' || c.id::text = s.name)",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let orphans_before = orphaned_credentials().await;
 
     let wh_id = seed_provisioned_warehouse(&f).await;
     let name = format!("trino-{}", Uuid::new_v4().simple());
@@ -4680,6 +4789,11 @@ async fn failed_provision_rolls_back_row_client_and_cluster() {
         "egret-engines".to_string(),
         sr_name
     )));
+    assert_eq!(
+        orphaned_credentials().await,
+        orphans_before,
+        "both rollbacks deleted the credential secret of the client they revoked"
+    );
 }
 
 /// P2 regression: the resource-group validation move (now ahead of the
@@ -5191,4 +5305,416 @@ async fn delete_engine_sweeps_orphaned_internal_secret_generations() {
         "a secret whose name only CONTAINS the prefix, without starting with it, \
          must survive the sweep"
     );
+}
+
+// ── SP3a: engine catalogs over the registry ──────────────────────────────────
+
+/// `POST /engines/{id}/catalogs` with `body`; returns status + JSON.
+async fn add_catalog_via_api(
+    f: &Fixture,
+    token: &str,
+    engine_id: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            token,
+            Some(body),
+        ))
+        .await
+        .unwrap();
+    into_json(resp).await
+}
+
+fn tpch_body(name: &str) -> serde_json::Value {
+    serde_json::json!({ "name": name, "kind": "tpch", "config": { "properties": {} } })
+}
+
+/// Plan decisions #19/#27: a legacy DELETE detaches and keeps the registry
+/// catalog; re-adding the same name replaces that orphan (new id, new body),
+/// while a name another engine still attaches is 409 and leaves it alone.
+#[tokio::test]
+async fn legacy_readd_replaces_an_orphan_but_never_an_attached_catalog() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_orphan_admin", true).await;
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_a = j["id"].as_str().unwrap().to_string();
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_b = j["id"].as_str().unwrap().to_string();
+
+    let name = format!("bench_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let (status, j) = add_catalog_via_api(&f, &token, &engine_a, tpch_body(&name)).await;
+    assert_eq!(status, StatusCode::CREATED, "add; body={j}");
+    let first_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    // Engine B cannot take a name engine A still attaches.
+    let (status, j) = add_catalog_via_api(&f, &token, &engine_b, tpch_body(&name)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "in-use name; body={j}");
+    assert!(
+        registry(&f).get_catalog(first_id).await.unwrap().is_some(),
+        "the attached catalog is untouched"
+    );
+
+    // Remove = detach: the registry catalog stays, attached nowhere.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{engine_a}/catalogs/{first_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(registry(&f).get_catalog(first_id).await.unwrap().is_some());
+
+    // Re-adding the name adopts the orphan: replaced, attached to engine B.
+    let (status, j) = add_catalog_via_api(&f, &token, &engine_b, tpch_body(&name)).await;
+    assert_eq!(status, StatusCode::CREATED, "re-add; body={j}");
+    let second_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    assert_ne!(second_id, first_id, "the orphan was replaced");
+    assert!(registry(&f).get_catalog(first_id).await.unwrap().is_none());
+    assert_eq!(j["name"], serde_json::json!(name));
+}
+
+/// D5 (#12): a warehouse is one catalog per engine — adding the engine's own
+/// warehouse again is 409, and the body name of an `egret-warehouse` add is
+/// ignored in favour of the warehouse catalog's name.
+#[tokio::test]
+async fn legacy_warehouse_add_is_once_per_engine_under_the_catalog_name() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_d5_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        wh_id,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let (status, j) = add_catalog_via_api(
+        &f,
+        &token,
+        &engine_id,
+        serde_json::json!({ "name": "again", "kind": "egret-warehouse", "config": { "warehouseId": wh_id } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "already attached; body={j}");
+
+    let other = seed_provisioned_warehouse(&f).await;
+    let (status, j) = add_catalog_via_api(
+        &f,
+        &token,
+        &engine_id,
+        serde_json::json!({ "name": "ignored", "kind": "egret-warehouse", "config": { "warehouseId": other } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "add; body={j}");
+    assert_eq!(
+        j["name"],
+        serde_json::json!(warehouse_catalog(&f, other).await.name)
+    );
+    assert_eq!(j["isPrimary"], false);
+}
+
+/// Plan decisions #21/#31: an engine whose legacy `engine_catalogs` rows the
+/// backfill could not migrate refuses every apply, and says why and where to
+/// look; nothing is sent to Kubernetes.
+#[tokio::test]
+async fn an_engine_with_unmigrated_legacy_catalogs_refuses_applies() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_unmigrated_admin", true).await;
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    // A legacy row the backfill left unmapped (it reported backfill_failed).
+    egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .create_engine_catalog(
+            Uuid::parse_str(&engine_id).unwrap(),
+            "stuck",
+            "postgresql",
+            &serde_json::json!({ "properties": { "connection-url": "jdbc:postgresql://db:5432/x" } }),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    let updates_before = port.updated.lock().unwrap().len();
+
+    let bench = format!("bench_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let (status, j) = add_catalog_via_api(&f, &token, &engine_id, tpch_body(&bench)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "apply refused; body={j}");
+    let msg = j["error"].as_str().unwrap();
+    assert!(msg.contains("1 catalog(s)"), "{msg}");
+    assert!(msg.contains("migration report"), "{msg}");
+    assert!(msg.contains("backfill_failed"), "{msg}");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "nothing applied"
+    );
+    assert!(
+        registry(&f)
+            .get_catalog_by_name(&bench)
+            .await
+            .unwrap()
+            .is_none(),
+        "the refused add left no catalog behind"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/rotate-secrets"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert!(
+        j.to_string().contains("migration report"),
+        "rotate is an apply too: {status} {j}"
+    );
+}
+
+/// Spec §4.5: a legacy PUT stores the new definition and applies it; a
+/// rejected apply answers 400 WITHOUT reverting and flags the attachment, and
+/// the next successful apply clears the flag.
+#[tokio::test]
+async fn legacy_put_flags_a_failed_apply_without_reverting_and_a_later_apply_clears_it() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_put_admin", true).await;
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let engine_uuid = Uuid::parse_str(&engine_id).unwrap();
+    let name = format!("pg_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let (status, j) = add_catalog_via_api(
+        &f,
+        &token,
+        &engine_id,
+        serde_json::json!({ "name": name, "kind": "postgresql", "config": { "properties": {
+            "connection-url": "jdbc:postgresql://db:5432/x", "connection-user": "u"
+        } } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "add; body={j}");
+    let cat_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    port.set_fail_update(true);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}/catalogs/{cat_id}"),
+            &token,
+            Some(serde_json::json!({ "config": { "properties": {
+                "connection-url": "jdbc:postgresql://db:5432/y", "connection-user": "u"
+            } } })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "rejected apply; body={j}");
+    let stored = registry(&f).get_catalog(cat_id).await.unwrap().unwrap();
+    assert!(
+        stored.config.to_string().contains("\"y\"") || stored.advanced.to_string().contains("/y"),
+        "not reverted: {} {}",
+        stored.config,
+        stored.advanced
+    );
+    let a = registry(&f)
+        .get_attachment(engine_uuid, cat_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.apply_status, "failed");
+    assert!(a.apply_error.is_some());
+
+    port.set_fail_update(false);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/rotate-secrets"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "rotate applies: {}",
+        resp.status()
+    );
+    let a = registry(&f)
+        .get_attachment(engine_uuid, cat_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        a.apply_status, "applied",
+        "a successful apply clears the flag"
+    );
+    assert!(a.apply_error.is_none());
+    let rendered = port
+        .last_updated()
+        .catalogs
+        .into_iter()
+        .find(|c| c.name == name)
+        .expect("catalog rendered");
+    assert_eq!(
+        rendered.properties["connection-url"],
+        "jdbc:postgresql://db:5432/y"
+    );
+}
+
+/// Plan decision #21: SP3a ships the StarRocks seam, not a renderer — attaching
+/// a registry catalog to a StarRocks engine is refused and leaves nothing behind.
+#[tokio::test]
+async fn attaching_to_a_starrocks_engine_is_refused() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_sr_attach_admin", true).await;
+    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": format!("sr-{}", Uuid::new_v4().simple()), "warehouseId": wh_id, "kind": "starrocks",
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create sr; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let other = seed_provisioned_warehouse(&f).await;
+    let clients_before = egret_catalog_engine::CatalogStore::new(f.db.clone())
+        .list_clients(other)
+        .await
+        .unwrap()
+        .len();
+    let (status, j) = add_catalog_via_api(
+        &f,
+        &token,
+        &engine_id,
+        serde_json::json!({ "name": "x", "kind": "egret-warehouse", "config": { "warehouseId": other } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert!(
+        j["error"].as_str().unwrap().contains("not supported yet"),
+        "{j}"
+    );
+    assert_eq!(
+        egret_catalog_engine::CatalogStore::new(f.db.clone())
+            .list_clients(other)
+            .await
+            .unwrap()
+            .len(),
+        clients_before,
+        "no client minted"
+    );
+    let cat = warehouse_catalog(&f, other).await;
+    assert!(registry(&f)
+        .get_attachment(Uuid::parse_str(&engine_id).unwrap(), cat.id)
+        .await
+        .unwrap()
+        .is_none());
 }

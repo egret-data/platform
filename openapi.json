@@ -3173,7 +3173,7 @@
         },
         "responses": {
           "201": {
-            "description": "Catalog added and engine re-provisioned",
+            "description": "Catalog added to the registry (or the warehouse's registry catalog reused), applied to the engine, then attached",
             "content": {
               "application/json": {
                 "schema": {
@@ -3183,7 +3183,7 @@
             }
           },
           "400": {
-            "description": "Missing/invalid catalog kind, warehouse, or engine update failed",
+            "description": "Missing/invalid catalog kind, name, warehouse or properties, or engine update failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -3223,7 +3223,7 @@
             }
           },
           "409": {
-            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
+            "description": "The catalog is already attached to this engine, a registry catalog with this name is in use, or the engine changed concurrently (e.g. a delete in progress; retry)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3265,7 +3265,7 @@
           {
             "name": "cid",
             "in": "path",
-            "description": "Catalog id",
+            "description": "Registry catalog id",
             "required": true,
             "schema": {
               "type": "string",
@@ -3345,7 +3345,7 @@
           {
             "name": "cid",
             "in": "path",
-            "description": "Catalog id",
+            "description": "Registry catalog id",
             "required": true,
             "schema": {
               "type": "string",
@@ -3365,7 +3365,7 @@
         },
         "responses": {
           "200": {
-            "description": "Catalog config replaced and engine re-provisioned",
+            "description": "Catalog config replaced in the registry and applied to every engine that attaches it",
             "content": {
               "application/json": {
                 "schema": {
@@ -3375,7 +3375,7 @@
             }
           },
           "400": {
-            "description": "Primary or managed egret-warehouse catalogs are not editable, or engine update failed",
+            "description": "Primary or managed egret-warehouse catalogs are not editable, the properties do not fit the catalog's kind, or this engine's update failed (the catalog is not reverted)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3455,7 +3455,7 @@
           {
             "name": "cid",
             "in": "path",
-            "description": "Catalog id",
+            "description": "Registry catalog id",
             "required": true,
             "schema": {
               "type": "string",
@@ -3465,7 +3465,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Catalog removed from the cluster, then its row deleted and its minted client revoked"
+            "description": "Catalog removed from the cluster, then detached (the registry catalog is kept) and its minted client revoked"
           },
           "400": {
             "description": "Cannot delete the primary catalog, Kubernetes not configured, or the engine update failed (the catalog is kept)",
@@ -3551,7 +3551,7 @@
           {
             "name": "cid",
             "in": "path",
-            "description": "Catalog id",
+            "description": "Registry catalog id",
             "required": true,
             "schema": {
               "type": "string",

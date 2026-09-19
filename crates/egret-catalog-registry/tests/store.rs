@@ -410,3 +410,143 @@ async fn report_rows_are_listed_until_acknowledged() {
         2
     );
 }
+
+fn sample_def() -> CatalogDef {
+    CatalogDef::parse("tpch", &json!({}), &json!(null)).unwrap()
+}
+
+/// Plan decision #27 ("adopt the orphan"): an unattached, unassigned catalog is
+/// replaced; one in use, or a warehouse's, is not.
+#[tokio::test]
+async fn create_replacing_orphan_replaces_only_an_unused_catalog() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let ws = workspace(&db).await;
+
+    let fresh = unique("fresh");
+    let (row, replaced) = store
+        .create_catalog_replacing_orphan(&fresh, &sample_def(), None)
+        .await
+        .unwrap();
+    assert!(!replaced, "nothing to replace");
+    assert_eq!(row.name, fresh);
+
+    let (again, replaced) = store
+        .create_catalog_replacing_orphan(&fresh, &sample_def(), Some("new"))
+        .await
+        .unwrap();
+    assert!(replaced, "the orphan is replaced");
+    assert_ne!(again.id, row.id);
+    assert!(store.get_catalog(row.id).await.unwrap().is_none());
+
+    store.set_catalog_workspaces(again.id, &[ws]).await.unwrap();
+    assert!(matches!(
+        store
+            .create_catalog_replacing_orphan(&fresh, &sample_def(), None)
+            .await,
+        Err(RegistryError::AlreadyExists(_))
+    ));
+    assert!(
+        store.get_catalog(again.id).await.unwrap().is_some(),
+        "in-use catalog kept"
+    );
+
+    let wh = warehouse(&db, &unique("wh"), ws).await;
+    let (wh_cat, _) = store
+        .ensure_warehouse_catalog(
+            &WarehouseIdentity {
+                id: wh,
+                name: &unique("wh"),
+                workspace_id: ws,
+            },
+            None,
+            |_| Vec::new(),
+        )
+        .await
+        .unwrap();
+    store.set_catalog_workspaces(wh_cat.id, &[]).await.unwrap();
+    assert!(
+        matches!(
+            store
+                .create_catalog_replacing_orphan(&wh_cat.name, &sample_def(), None)
+                .await,
+            Err(RegistryError::AlreadyExists(_))
+        ),
+        "a warehouse catalog is never an orphan"
+    );
+}
+
+/// The adopt-the-orphan replace is atomic against a racing assignment: an
+/// assignment insert that holds its foreign-key lock blocks the replace, which
+/// then sees the committed assignment (409, catalog kept) — or, if that insert
+/// rolled back, replaces the orphan.
+#[tokio::test]
+async fn create_replacing_orphan_serialises_with_a_racing_assignment() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let ws = workspace(&db).await;
+
+    for commit in [true, false] {
+        let name = unique("race");
+        let orphan = store
+            .create_catalog(&name, &sample_def(), None)
+            .await
+            .unwrap();
+
+        // An assignment in flight: its FK check holds FOR KEY SHARE on the row.
+        let mut racer = db.pool.begin().await.unwrap();
+        sqlx::query(
+            "INSERT INTO registry.catalog_workspaces (catalog_id, workspace_id) VALUES ($1, $2)",
+        )
+        .bind(orphan.id)
+        .bind(ws)
+        .execute(&mut *racer)
+        .await
+        .unwrap();
+
+        let replacing = {
+            let store = store.clone();
+            let name = name.clone();
+            tokio::spawn(async move {
+                store
+                    .create_catalog_replacing_orphan(&name, &sample_def(), None)
+                    .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            !replacing.is_finished(),
+            "the replace waits for the racing assignment"
+        );
+
+        if commit {
+            racer.commit().await.unwrap();
+            let res = replacing.await.unwrap();
+            assert!(
+                matches!(res, Err(RegistryError::AlreadyExists(_))),
+                "the committed assignment wins: {res:?}"
+            );
+            assert!(
+                store.get_catalog(orphan.id).await.unwrap().is_some(),
+                "catalog kept"
+            );
+            assert_eq!(
+                store
+                    .list_catalog_workspaces(orphan.id)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        } else {
+            racer.rollback().await.unwrap();
+            let (row, replaced) = replacing.await.unwrap().unwrap();
+            assert!(replaced);
+            assert_ne!(row.id, orphan.id);
+            assert!(
+                store.get_catalog(orphan.id).await.unwrap().is_none(),
+                "orphan replaced"
+            );
+        }
+    }
+}
