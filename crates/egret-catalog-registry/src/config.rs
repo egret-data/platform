@@ -633,7 +633,22 @@ impl CatalogDef {
     pub fn validate(&self) -> Result<(), ValidationError> {
         validate_config(&self.config)?;
         validate_advanced(self)?;
-        Ok(())
+        // What the typed form sets is exactly what rendering produces; probing
+        // with inputs that satisfy every kind finds any advanced key that would
+        // silently override the form (§4.3). SP3b adds the StarRocks probe.
+        use crate::render::trino::{render_trino, RenderError, TrinoRenderInput};
+        match render_trino("probe", self, &TrinoRenderInput::probe()) {
+            Err(RenderError::Collision(key)) => Err(ValidationError::Collision {
+                engine: "trino".into(),
+                key,
+                kind: self.kind().as_str().into(),
+            }),
+            Err(RenderError::LineBreak(key)) => Err(ValidationError::Config {
+                kind: self.kind().as_str().into(),
+                msg: format!("{key} contains a line break"),
+            }),
+            _ => Ok(()),
+        }
     }
 
     pub fn kind(&self) -> CatalogKind {

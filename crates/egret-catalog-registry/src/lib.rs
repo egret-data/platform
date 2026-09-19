@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod name;
+pub mod render;
 pub mod sensitive;
 
 pub use config::{
@@ -16,5 +17,9 @@ pub use config::{
 pub use name::{
     first_free_name, is_valid_catalog_name, join_truncated, normalize_catalog_name, with_suffix,
     MAX_NAME_LEN,
+};
+pub use render::trino::{
+    jdbc_url, render_trino, RenderError, StorageRender, TrinoCatalogFile, TrinoRenderInput,
+    WarehouseRender,
 };
 pub use sensitive::{is_plaintext_secret, is_sensitive_key};
