@@ -488,6 +488,13 @@ impl DatabaseRepo {
     /// label the workspace view shows (`egret-warehouse` or the Trino connector
     /// name) and the NAME of one secret the catalog references (`None` when
     /// none; the value is never read). Ordered by name.
+    ///
+    /// The `kind` CASE re-implements, in SQL, the same connector-name mapping
+    /// `egret_catalog_registry::CatalogDef::trino_connector_name` computes in
+    /// Rust for rendering (`crates/egret-catalog-registry/src/config.rs`) — this
+    /// is a DISPLAY-ONLY read path with no `CatalogDef` at hand, not a second
+    /// source of truth. If `trino_connector_name`'s mapping changes, this CASE
+    /// must change with it (SP3 catalog-registry review M6).
     pub async fn list_engine_catalogs(
         &self,
         engine_id: Uuid,

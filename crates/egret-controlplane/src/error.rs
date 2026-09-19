@@ -42,6 +42,7 @@ impl From<CatalogError> for CpError {
                     .to_string(),
             ),
             CatalogError::BadRequest(s) => CpError::BadRequest(s),
+            CatalogError::Conflict(s) => CpError::Conflict(s),
             CatalogError::Db(_) => CpError::Internal,
         }
     }

@@ -744,15 +744,26 @@ async fn warehouse_create_and_delete_keep_the_registry_in_step() {
         .warehouse_visible_to_workspace(wh_id, other_ws)
         .await
         .unwrap());
+    // M4 (SP3 catalog-registry review): the fail-closed side — reassigning the
+    // catalog away from its OWNER workspace must revoke that owner's own
+    // notebook/data-browsing visibility too, not just grant the new one's.
+    assert!(
+        !store
+            .warehouse_visible_to_workspace(wh_id, ws)
+            .await
+            .unwrap(),
+        "the original owner must lose visibility once the catalog is reassigned elsewhere"
+    );
 
     // An engine on ANOTHER warehouse attaches this warehouse's catalog.
     let engine_wh = store
         .create_warehouse(&format!("eng-wh-{}", Uuid::new_v4().simple()), ws, sc)
         .await
         .unwrap();
+    let engine_name = format!("reg-eng-{}", Uuid::new_v4().simple());
     let engine_id: Uuid = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb) RETURNING id")
-        .bind(format!("reg-eng-{}", Uuid::new_v4().simple())).bind(engine_wh.id)
+        .bind(&engine_name).bind(engine_wh.id)
         .fetch_one(&f.db.pool).await.unwrap();
     sqlx::query(
         "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
@@ -771,6 +782,13 @@ async fn warehouse_create_and_delete_keep_the_registry_in_step() {
         .unwrap();
     let (status, j) = into_json(resp).await;
     assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    // M4 (SP3 catalog-registry review): the 409 must NAME the attached engine,
+    // not just carry the status.
+    let msg = j["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains(&engine_name),
+        "409 body must name the attached engine {engine_name}; got {j}"
+    );
     assert!(reg
         .get_catalog_for_warehouse(wh_id)
         .await
@@ -789,4 +807,63 @@ async fn warehouse_create_and_delete_keep_the_registry_in_step() {
         reg.get_catalog(cat.id).await.unwrap().is_none(),
         "catalog went with its warehouse"
     );
+}
+
+/// SP3 catalog-registry review M3: a warehouse still un-migrated (no registry
+/// catalog at all yet — the state before the boot backfill reaches it) but
+/// still an engine's `engines.warehouse_id` PRIMARY must 409, naming the
+/// engine, instead of the pre-existing raw FK 500 (`engines_warehouse_id_fkey`,
+/// migration 0056).
+#[tokio::test]
+async fn warehouse_delete_maps_legacy_primary_fk_to_409() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "wh_legacy_fk_admin", true).await;
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name) VALUES ($1, 'Legacy WS') RETURNING id",
+    )
+    .bind(format!("legacy-ws-{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    let sc: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) VALUES ($1, 'us-east-1', 'b', 'k') RETURNING id")
+        .bind(format!("legacy-sc-{}", Uuid::new_v4().simple()))
+        .fetch_one(&f.db.pool).await.unwrap();
+
+    let store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    // A warehouse the backfill has NOT reached: no registry catalog at all.
+    let wh = store
+        .create_warehouse(&format!("legacy-wh-{}", Uuid::new_v4().simple()), ws, sc)
+        .await
+        .unwrap();
+    let engine_name = format!("legacy-eng-{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb)")
+        .bind(&engine_name).bind(wh.id)
+        .execute(&f.db.pool).await.unwrap();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/warehouses/{}", wh.id),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    let msg = j["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains(&engine_name),
+        "409 body must name the engine still primary on this warehouse {engine_name}; got {j}"
+    );
+
+    // Nothing was mutated: the warehouse still exists.
+    assert!(store.get_warehouse(wh.id).await.unwrap().is_some());
 }

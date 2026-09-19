@@ -561,19 +561,6 @@ impl RegistryStore {
         )))
     }
 
-    /// Clear a warehouse catalog's workspace assignments so the warehouse (and,
-    /// by cascade, its catalog) can be deleted from the legacy Warehouses page.
-    pub async fn release_warehouse_catalog(&self, warehouse_id: Uuid) -> Result<(), RegistryError> {
-        sqlx::query(
-            "DELETE FROM registry.catalog_workspaces \
-              WHERE catalog_id IN (SELECT id FROM registry.catalogs WHERE warehouse_id = $1)",
-        )
-        .bind(warehouse_id)
-        .execute(self.pool())
-        .await?;
-        Ok(())
-    }
-
     // attachments --------------------------------------------------------------
 
     pub async fn insert_attachment(

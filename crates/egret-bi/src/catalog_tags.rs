@@ -129,13 +129,27 @@ impl CatalogTagRepo {
     }
 
     /// Bump `policy.authz_services.tag_version` for every policy service bound to
-    /// `warehouse_id`. The binding is the engine seam:
-    /// `engine_mgmt.engines.authz_service_id` -> the warehouse's engine(s) (the
-    /// same join `PolicyStore::tag_assignments_for_service` uses on the serving
-    /// side). A monotonic `tag_version` is how the Ranger tag-download plugin
-    /// (which polls `download_tags?lastKnownVersion=`) learns a warehouse's
-    /// catalog-tag assignments changed; without the bump it 304s forever. Runs on
-    /// the caller's transaction. Parameterized, cross-seam-but-same-DB write.
+    /// `warehouse_id`. A monotonic `tag_version` is how the Ranger tag-download
+    /// plugin (which polls `download_tags?lastKnownVersion=`) learns a
+    /// warehouse's catalog-tag assignments changed; without the bump it 304s
+    /// forever. Runs on the caller's transaction. Parameterized,
+    /// cross-seam-but-same-DB write.
+    ///
+    /// The binding is the SAME union `PolicyStore::tag_assignments_for_service`
+    /// serves under (SP3 catalog-registry review C1/I1) — an engine bumps for
+    /// this warehouse if EITHER:
+    ///   (a) the legacy branch — `engine_mgmt.engines.authz_service_id`, this
+    ///       warehouse is the engine's own primary (`engines.warehouse_id`); or
+    ///   (b) the registry branch — the engine attaches this warehouse's registry
+    ///       catalog through `registry.engine_catalog_attachments` (SP3 D5), NOT
+    ///       only as its primary.
+    /// Missing (b) was fail-open for UPDATES specifically: a tag change on a
+    /// warehouse an engine attaches only as a SECONDARY catalog never bumped
+    /// that engine's service, so `download_tags` kept answering 304 and the new
+    /// mask/tag never reached the plugin until an unrelated restart. The legacy
+    /// branch stays until `engine_catalogs` is retired (SP3c), for the same
+    /// un-migrated / rename-window reasons documented on
+    /// `tag_assignments_for_service`.
     async fn bump_bound_tag_versions(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         warehouse_id: Uuid,
@@ -147,6 +161,12 @@ impl CatalogTagRepo {
                  SELECT DISTINCT e.authz_service_id \
                  FROM engine_mgmt.engines e \
                  WHERE e.warehouse_id = $1 AND e.authz_service_id IS NOT NULL \
+                 UNION \
+                 SELECT DISTINCT e.authz_service_id \
+                 FROM registry.catalogs c \
+                 JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
+                 JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
+                 WHERE c.warehouse_id = $1 AND e.authz_service_id IS NOT NULL \
              )",
         )
         .bind(warehouse_id)

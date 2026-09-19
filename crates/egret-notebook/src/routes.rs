@@ -678,6 +678,7 @@ fn cat_err(e: egret_catalog_engine::CatalogError) -> NotebookApiError {
         C::AlreadyExists(m) => Error::Conflict(m),
         C::InUse => Error::Conflict("in use".into()),
         C::BadRequest(m) => Error::InvalidInput(m),
+        C::Conflict(m) => Error::Conflict(m),
         C::Db(db) => Error::Internal(anyhow::anyhow!(db)),
     })
 }

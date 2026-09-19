@@ -46,6 +46,7 @@ impl From<CatalogError> for CatalogHttpError {
                     .to_string(),
             ),
             CatalogError::BadRequest(s) => CatalogHttpError::BadRequest(s),
+            CatalogError::Conflict(s) => CatalogHttpError::Conflict(s),
             CatalogError::Db(_) => CatalogHttpError::Internal,
         }
     }
