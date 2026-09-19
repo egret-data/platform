@@ -171,6 +171,7 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
                 workspace_id: ws,
             },
             None,
+            |_| vec![],
         )
         .await
         .unwrap();
@@ -199,6 +200,7 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
                 workspace_id: ws,
             },
             None,
+            |_| vec![],
         )
         .await
         .unwrap();
@@ -213,6 +215,7 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
                 workspace_id: ws,
             },
             None,
+            |_| vec![],
         )
         .await
         .unwrap();
@@ -232,6 +235,7 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
                 workspace_id: ws,
             },
             None,
+            |_| vec![],
         )
         .await
         .unwrap();
@@ -260,6 +264,7 @@ async fn attachments_order_status_and_block_deletes() {
                 workspace_id: ws,
             },
             None,
+            |_| vec![],
         )
         .await
         .unwrap();

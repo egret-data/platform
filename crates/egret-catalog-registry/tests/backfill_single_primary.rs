@@ -1,6 +1,8 @@
 //! Backfill: one engine primary (the kind-cluster shape), name normalisation and
 //! suffixing, typed vs generic, shared vs suffixed same-name rows, secret
-//! extraction, idempotency. DB-gated; FAILS without DATABASE_URL.
+//! extraction end-to-end (T2), the primary-processed-first name guard, and
+//! idempotency down to attachment/secret/legacy-map counts. DB-gated; FAILS
+//! without DATABASE_URL.
 
 use egret_catalog_registry::{run_backfill, CatalogConfig, RegistryStore};
 use egret_metastore::Db;
@@ -53,6 +55,33 @@ async fn codes(db: &Db, run: Uuid) -> Vec<String> {
         .unwrap()
 }
 
+/// `(engine_id, catalog_id)` for every attachment, for a before/after idempotency
+/// comparison that is not fooled by a count staying the same while the SET changes.
+async fn attachment_pairs(db: &Db) -> BTreeSet<(Uuid, Uuid)> {
+    sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT engine_id, catalog_id FROM registry.engine_catalog_attachments",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .collect()
+}
+
+async fn secret_count(db: &Db) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM workspace_secrets")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+async fn legacy_map_count(db: &Db) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM registry.legacy_engine_catalogs")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn single_primary_platform_migrates_like_the_kind_cluster() {
     let Some(dsn) = egret_test_db::url().await else {
@@ -79,6 +108,9 @@ async fn single_primary_platform_migrates_like_the_kind_cluster() {
     s.warehouse("Sales Data").await;
     s.warehouse("sales_data").await;
     s.warehouse("1st").await;
+    // A warehouse literally NAMED "egret" but NOT the primary: proves the
+    // primary-processed-first fix (I2 minor) — it must never steal the name.
+    let impostor_wh = s.warehouse("egret").await;
     let demo = s.engine("demo-trino", primary_wh).await;
     let other = s.engine("trino-b", primary_wh).await;
     let client = Uuid::new_v4();
@@ -113,15 +145,21 @@ async fn single_primary_platform_migrates_like_the_kind_cluster() {
     s.legacy(demo, "Bad-Name", "postgresql", json!({
         "properties": { "connection-url": "jdbc:postgresql://db:5432/z?sslmode=require", "connection-user": "u" },
         "secretProperties": { "connection-password": pw.to_string() } }), false).await;
+    // T2: an all-digit password under a sensitive key is still a secret, never a
+    // plaintext value left in config/advanced, and its own secret round-trips.
+    s.legacy(demo, "pg_num", "postgresql", json!({ "properties": {
+        "connection-url": "jdbc:postgresql://numdb:5432/n", "connection-user": "u", "connection-password": "123456" } }), false).await;
 
     let first = run_backfill(&store, &vault).await.expect("backfill");
     assert_eq!(first.failed_rows, 0);
 
-    // Warehouses: the single primary is `egret`; the rest normalise, collisions suffix.
+    // Warehouses: the single primary is `egret`; the impostor is suffixed; the
+    // rest normalise, collisions suffix.
     assert_eq!(
         catalog_names(&db).await,
         [
             "egret",
+            "egret_2",
             "e2e_wh_1784519491585",
             "sales_data",
             "sales_data_2",
@@ -130,6 +168,7 @@ async fn single_primary_platform_migrates_like_the_kind_cluster() {
             "pg_main",
             "pg_main_trino_b",
             "bad_name",
+            "pg_num",
         ]
         .into_iter()
         .map(String::from)
@@ -140,6 +179,12 @@ async fn single_primary_platform_migrates_like_the_kind_cluster() {
     assert_eq!(
         store.list_catalog_workspaces(egret.id).await.unwrap()[0].workspace_id,
         ws
+    );
+    let impostor = store.get_catalog_by_name("egret_2").await.unwrap().unwrap();
+    assert_eq!(
+        impostor.warehouse_id,
+        Some(impostor_wh),
+        "the literally-named warehouse never steals the primary's name"
     );
 
     // The primary attachment carries its client; the credential is a secret now.
@@ -182,12 +227,38 @@ async fn single_primary_platform_migrates_like_the_kind_cluster() {
         !pg.advanced.to_string().contains("hunter2"),
         "plaintext left the catalog"
     );
+    // T2: the secret is not just absent from the catalog — it resolves to the
+    // exact original plaintext, so the credential was moved, never lost.
+    let CatalogConfig::Generic(pg_cfg) = &pg.def().unwrap().config else {
+        panic!("{:?}", pg.def())
+    };
+    let pg_pw_id = pg_cfg.secret_properties.trino["connection-password"];
+    assert_eq!(
+        vault.resolve_plaintext(None, pg_pw_id).await.unwrap(),
+        "hunter2"
+    );
+
     let typed = store
         .get_catalog_by_name("bad_name")
         .await
         .unwrap()
         .unwrap();
     assert_eq!(typed.kind, "jdbc");
+
+    // T2: an all-digit password is still a secret — never in config/advanced,
+    // and it resolves to exactly the original digits.
+    let pg_num = store.get_catalog_by_name("pg_num").await.unwrap().unwrap();
+    assert_eq!(pg_num.kind, "generic");
+    assert!(!pg_num.advanced.to_string().contains("123456"));
+    assert!(!pg_num.config.to_string().contains("123456"));
+    let CatalogConfig::Generic(pg_num_cfg) = &pg_num.def().unwrap().config else {
+        panic!("{:?}", pg_num.def())
+    };
+    let pg_num_pw_id = pg_num_cfg.secret_properties.trino["connection-password"];
+    assert_eq!(
+        vault.resolve_plaintext(None, pg_num_pw_id).await.unwrap(),
+        "123456"
+    );
 
     let got = codes(&db, first.run_id).await;
     for code in [
@@ -217,9 +288,14 @@ async fn single_primary_platform_migrates_like_the_kind_cluster() {
         0
     );
 
-    // Idempotent, and an admin's removal is not undone.
+    // Idempotent down to the exact attachment set, secret count and legacy-map
+    // count — not just "still 11 catalogs" — and an admin's removal is not undone.
+    let attachments_before = attachment_pairs(&db).await;
+    let secrets_before = secret_count(&db).await;
+    let legacy_map_before = legacy_map_count(&db).await;
     store.set_catalog_workspaces(egret.id, &[]).await.unwrap();
     store.delete_attachment(other, bench.id).await.unwrap();
+
     let second = run_backfill(&store, &vault).await.expect("second backfill");
     assert_eq!((second.report_rows, second.failed_rows), (0, 0));
     assert!(store
@@ -232,5 +308,23 @@ async fn single_primary_platform_migrates_like_the_kind_cluster() {
         .await
         .unwrap()
         .is_none());
-    assert_eq!(catalog_names(&db).await.len(), 9);
+    assert_eq!(catalog_names(&db).await.len(), 11);
+
+    let mut expected_attachments = attachments_before.clone();
+    expected_attachments.remove(&(other, bench.id));
+    assert_eq!(
+        attachment_pairs(&db).await,
+        expected_attachments,
+        "the second run neither re-adds the removed attachment nor touches any other"
+    );
+    assert_eq!(
+        secret_count(&db).await,
+        secrets_before,
+        "no secret is re-created or duplicated on a no-op boot"
+    );
+    assert_eq!(
+        legacy_map_count(&db).await,
+        legacy_map_before,
+        "no legacy row is re-mapped on a no-op boot"
+    );
 }
