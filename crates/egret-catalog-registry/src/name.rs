@@ -41,8 +41,14 @@ pub fn with_suffix(base: &str, n: u32) -> String {
 }
 
 /// `base` + `_` + `tail`, truncated to [`MAX_NAME_LEN`] (the `_<engine>` suffix
-/// §4.8.3 gives a same-name catalog with a different configuration).
+/// §4.8.3 gives a same-name catalog with a different configuration). `tail`
+/// itself is bounded too, keeping at least one character of `base`, so the
+/// result always fits regardless of how long `tail` is.
 pub fn join_truncated(base: &str, tail: &str) -> String {
+    // Reserve at least 1 byte for `base` plus the `_` separator.
+    let max_tail_len = MAX_NAME_LEN.saturating_sub(2);
+    let mut tail = tail.to_string();
+    tail.truncate(max_tail_len);
     let keep = MAX_NAME_LEN.saturating_sub(tail.len() + 1);
     let mut head = base.to_string();
     head.truncate(keep);
@@ -112,5 +118,18 @@ mod tests {
             join_truncated(&"c".repeat(60), "engine").len(),
             MAX_NAME_LEN
         );
+    }
+
+    #[test]
+    fn join_truncated_bounds_a_long_tail_too() {
+        let long_tail = "t".repeat(90);
+        let joined = join_truncated("base", &long_tail);
+        assert!(joined.len() <= MAX_NAME_LEN);
+        assert!(is_valid_catalog_name(&joined));
+
+        let long_base = "b".repeat(90);
+        let joined = join_truncated(&long_base, &long_tail);
+        assert!(joined.len() <= MAX_NAME_LEN);
+        assert!(is_valid_catalog_name(&joined));
     }
 }
