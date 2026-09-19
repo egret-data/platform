@@ -163,8 +163,12 @@ counterpart of every `warehouse:*` it holds (so `data_steward` gains `catalog_re
 
 The keys are deliberately not `catalog:*`: `catalog:read` already exists as a workspace-scope
 permission (migration 0024, held by every workspace role, checked by the workspace engine view),
-and a platform grant of the same key would satisfy that check in every workspace (Cedar
-`Workspace in Platform`). The workspace `catalog:read` is left untouched.
+and permission keys are scope-blind strings in `rbac::is_known`, in the effective-permission lists
+the frontend reads, in the admin permission UI and as Cedar actions — one key with two meanings
+would be ambiguous in all of them. (It would **not** widen access: a non-admin platform grant is
+bound to `resource == Platform::"root"` and can never satisfy a workspace-scope check — an earlier
+draft of this section claimed otherwise, and that was wrong.) The workspace `catalog:read` is left
+untouched.
 `warehouse:*` stays until SP3c removes the Warehouses pages, then is dropped.
 
 ### 4.8 Migration of existing data

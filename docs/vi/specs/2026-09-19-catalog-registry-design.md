@@ -168,9 +168,12 @@ tương ứng với mỗi `warehouse:*` mà role đó đang có (nên `data_stew
 `catalog_registry:read`).
 
 Các key này cố ý không phải `catalog:*`: `catalog:read` đã tồn tại như một permission ở phạm vi
-workspace (migration 0024, mọi workspace role đều có, được workspace engine view kiểm tra), và một
-platform grant cùng key sẽ thoả check đó ở mọi workspace (Cedar `Workspace in Platform`).
-`catalog:read` của workspace giữ nguyên. `warehouse:*` vẫn còn cho tới khi SP3c bỏ các trang Warehouses, sau đó mới bị xoá.
+workspace (migration 0024, mọi workspace role đều có, được workspace engine view kiểm tra), và key
+quyền là chuỗi không phân biệt phạm vi trong `rbac::is_known`, trong danh sách quyền hiệu lực mà
+frontend đọc, trong UI quản trị quyền và trong action Cedar — một key mang hai nghĩa sẽ gây nhập
+nhằng ở tất cả những chỗ đó. (Nó **không** mở rộng quyền: grant platform của role không phải admin
+bị ràng buộc `resource == Platform::"root"` nên không bao giờ thoả một check phạm vi workspace — bản
+nháp trước của mục này khẳng định ngược lại, và điều đó sai.) `catalog:read` của workspace giữ nguyên. `warehouse:*` vẫn còn cho tới khi SP3c bỏ các trang Warehouses, sau đó mới bị xoá.
 
 ### 4.8 Migration dữ liệu hiện có
 
