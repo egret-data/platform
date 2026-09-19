@@ -5,16 +5,20 @@
 //! in `egret-engine-mgmt`, which depends on this crate.
 
 pub mod config;
+pub mod error;
 pub mod legacy;
 pub mod name;
 pub mod render;
+pub mod report;
 pub mod sensitive;
+pub mod store;
 
 pub use config::{
     Advanced, CatalogConfig, CatalogDef, CatalogKind, ElasticsearchConfig, EngineType,
     GenericConfig, HiveFamilyConfig, HiveMetastore, IcebergConfig, IcebergMetastore, JdbcConfig,
     JdbcDialect, JdbcSsl, RestAuth, SampleConfig, SecretProperties, ValidationError,
 };
+pub use error::RegistryError;
 pub use legacy::{
     classify, classify_generic, legacy_props_and_secrets, plaintext_secrets, Classified,
     ClassifyOutcome, LegacyCatalog,
@@ -27,4 +31,9 @@ pub use render::trino::{
     jdbc_url, render_trino, RenderError, StorageRender, TrinoCatalogFile, TrinoRenderInput,
     WarehouseRender,
 };
+pub use report::{ReportEntry, ReportRow, Severity};
 pub use sensitive::{is_plaintext_secret, is_sensitive_key};
+pub use store::{
+    AttachedCatalog, AttachmentRow, CatalogEngineRow, CatalogFilter, CatalogRow,
+    CatalogWorkspaceRow, NewAttachment, RegistryStore, WarehouseIdentity,
+};

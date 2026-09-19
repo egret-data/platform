@@ -17,6 +17,7 @@ egret-auth.workspace = true
 # `CatalogPort`; the concrete `egret-catalog-engine` store impl is wired in egret-bin and only
 # needed here as a dev-dep for test state construction.
 egret-catalog-api.workspace = true
+egret-catalog-registry.workspace = true
 egret-storage.workspace = true
 egret-secrets.workspace = true
 # Policy/Ranger seam contract (E2a). Engine-create auto-binds an engine to a

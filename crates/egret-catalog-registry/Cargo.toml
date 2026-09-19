@@ -14,3 +14,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 regex.workspace = true
+egret-metastore.workspace = true
+egret-secrets.workspace = true
+sqlx.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+egret-test-db.workspace = true
+tokio.workspace = true

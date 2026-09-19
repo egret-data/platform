@@ -115,6 +115,20 @@ impl From<crate::EngineMgmtError> for EngineHttpError {
     }
 }
 
+impl From<egret_catalog_registry::RegistryError> for EngineHttpError {
+    fn from(e: egret_catalog_registry::RegistryError) -> Self {
+        use egret_catalog_registry::RegistryError as E;
+        match e {
+            E::NotFound(_) => EngineHttpError::NotFound,
+            E::AlreadyExists(s) => EngineHttpError::AlreadyExists(s),
+            E::Conflict(s) => EngineHttpError::Conflict(s),
+            E::Invalid(v) => EngineHttpError::BadRequest(v.to_string()),
+            E::Secrets(s) => s.into(),
+            E::Db(e) => db_error(e),
+        }
+    }
+}
+
 impl From<SecretsError> for EngineHttpError {
     fn from(e: SecretsError) -> Self {
         match e {

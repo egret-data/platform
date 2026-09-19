@@ -3115,6 +3115,7 @@ dependencies = [
  "egret-auth",
  "egret-catalog-api",
  "egret-catalog-engine",
+ "egret-catalog-registry",
  "egret-config",
  "egret-core",
  "egret-events",
@@ -3147,10 +3148,17 @@ dependencies = [
 name = "egret-catalog-registry"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "egret-metastore",
+ "egret-secrets",
+ "egret-test-db",
  "regex",
  "serde",
  "serde_json",
+ "sqlx",
  "thiserror 2.0.20",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -3289,6 +3297,7 @@ dependencies = [
  "egret-auth",
  "egret-catalog-api",
  "egret-catalog-engine",
+ "egret-catalog-registry",
  "egret-core",
  "egret-engine-mgmt-api",
  "egret-events",

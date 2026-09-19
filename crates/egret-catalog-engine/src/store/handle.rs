@@ -18,4 +18,9 @@ impl CatalogStore {
     pub fn pool(&self) -> &sqlx::PgPool {
         &self.db.pool
     }
+
+    /// The catalog registry on the same database (SP3).
+    pub fn registry(&self) -> egret_catalog_registry::RegistryStore {
+        egret_catalog_registry::RegistryStore::new(self.db.clone())
+    }
 }
