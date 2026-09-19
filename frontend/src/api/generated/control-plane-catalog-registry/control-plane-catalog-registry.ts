@@ -26,13 +26,18 @@ import type {
 
 import type {
   ApplyOutcomeDto,
+  CatalogAttachmentDto,
   CatalogConflictBody,
   CatalogImpactDto,
   CatalogUpdateResultDto,
+  CatalogWorkspaceDto,
+  ControlPlaneCatalogRegistryGetMigrationReportParams,
   ControlPlaneCatalogRegistryListRegistryCatalogsParams,
   CreateRegistryCatalogBody,
   ErrorBody,
+  MigrationReportRowDto,
   RegistryCatalogDto,
+  SetCatalogWorkspacesBody,
   UpdateRegistryCatalogBody
 } from '../model';
 
@@ -290,6 +295,229 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getControlPlaneCatalogRegistryCreateRegistryCatalogMutationOptions(options), queryClient);
+    }
+    export type controlPlaneCatalogRegistryGetMigrationReportResponse200 = {
+  data: MigrationReportRowDto[]
+  status: 200
+}
+
+export type controlPlaneCatalogRegistryGetMigrationReportResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogRegistryGetMigrationReportResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogRegistryGetMigrationReportResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogRegistryGetMigrationReportResponseSuccess = (controlPlaneCatalogRegistryGetMigrationReportResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogRegistryGetMigrationReportResponseError = (controlPlaneCatalogRegistryGetMigrationReportResponse401 | controlPlaneCatalogRegistryGetMigrationReportResponse403 | controlPlaneCatalogRegistryGetMigrationReportResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogRegistryGetMigrationReportResponse = (controlPlaneCatalogRegistryGetMigrationReportResponseSuccess | controlPlaneCatalogRegistryGetMigrationReportResponseError)
+
+export const getControlPlaneCatalogRegistryGetMigrationReportUrl = (params?: ControlPlaneCatalogRegistryGetMigrationReportParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/control-plane/catalogs/migration-report?${stringifiedParams}` : `/api/control-plane/catalogs/migration-report`
+}
+
+export const controlPlaneCatalogRegistryGetMigrationReport = async (params?: ControlPlaneCatalogRegistryGetMigrationReportParams, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogRegistryGetMigrationReportResponse> => {
+
+  return customInstance<controlPlaneCatalogRegistryGetMigrationReportResponse>(getControlPlaneCatalogRegistryGetMigrationReportUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogRegistryGetMigrationReportQueryKey = (params?: ControlPlaneCatalogRegistryGetMigrationReportParams,) => {
+    return [
+    `/api/control-plane/catalogs/migration-report`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getControlPlaneCatalogRegistryGetMigrationReportQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>, TError = ErrorBody>(params?: ControlPlaneCatalogRegistryGetMigrationReportParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneCatalogRegistryGetMigrationReportQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>> = ({ signal }) => controlPlaneCatalogRegistryGetMigrationReport(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneCatalogRegistryGetMigrationReportQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>>
+export type ControlPlaneCatalogRegistryGetMigrationReportQueryError = ErrorBody
+
+
+export function useControlPlaneCatalogRegistryGetMigrationReport<TData = Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>, TError = ErrorBody>(
+ params: undefined |  ControlPlaneCatalogRegistryGetMigrationReportParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneCatalogRegistryGetMigrationReport<TData = Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>, TError = ErrorBody>(
+ params?: ControlPlaneCatalogRegistryGetMigrationReportParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneCatalogRegistryGetMigrationReport<TData = Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>, TError = ErrorBody>(
+ params?: ControlPlaneCatalogRegistryGetMigrationReportParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneCatalogRegistryGetMigrationReport<TData = Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>, TError = ErrorBody>(
+ params?: ControlPlaneCatalogRegistryGetMigrationReportParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryGetMigrationReport>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneCatalogRegistryGetMigrationReportQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneCatalogRegistryAcknowledgeMigrationReportResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneCatalogRegistryAcknowledgeMigrationReportResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogRegistryAcknowledgeMigrationReportResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogRegistryAcknowledgeMigrationReportResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogRegistryAcknowledgeMigrationReportResponseSuccess = (controlPlaneCatalogRegistryAcknowledgeMigrationReportResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogRegistryAcknowledgeMigrationReportResponseError = (controlPlaneCatalogRegistryAcknowledgeMigrationReportResponse401 | controlPlaneCatalogRegistryAcknowledgeMigrationReportResponse403 | controlPlaneCatalogRegistryAcknowledgeMigrationReportResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogRegistryAcknowledgeMigrationReportResponse = (controlPlaneCatalogRegistryAcknowledgeMigrationReportResponseSuccess | controlPlaneCatalogRegistryAcknowledgeMigrationReportResponseError)
+
+export const getControlPlaneCatalogRegistryAcknowledgeMigrationReportUrl = () => {
+
+
+
+
+  return `/api/control-plane/catalogs/migration-report/acknowledge`
+}
+
+export const controlPlaneCatalogRegistryAcknowledgeMigrationReport = async ( options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogRegistryAcknowledgeMigrationReportResponse> => {
+
+  return customInstance<controlPlaneCatalogRegistryAcknowledgeMigrationReportResponse>(getControlPlaneCatalogRegistryAcknowledgeMigrationReportUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogRegistryAcknowledgeMigrationReportMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryAcknowledgeMigrationReport>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryAcknowledgeMigrationReport>>, TError,void, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogRegistryAcknowledgeMigrationReport'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogRegistryAcknowledgeMigrationReport>>, void> = () => {
+
+
+          return  controlPlaneCatalogRegistryAcknowledgeMigrationReport(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogRegistryAcknowledgeMigrationReportMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogRegistryAcknowledgeMigrationReport>>>
+
+    export type ControlPlaneCatalogRegistryAcknowledgeMigrationReportMutationError = ErrorBody
+
+    export const useControlPlaneCatalogRegistryAcknowledgeMigrationReport = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryAcknowledgeMigrationReport>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogRegistryAcknowledgeMigrationReport>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogRegistryAcknowledgeMigrationReportMutationOptions(options), queryClient);
     }
     export type controlPlaneCatalogRegistryGetRegistryCatalogResponse200 = {
   data: RegistryCatalogDto
@@ -851,4 +1079,461 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getControlPlaneCatalogRegistryReapplyRegistryCatalogMutationOptions(options), queryClient);
+    }
+    export type controlPlaneCatalogRegistryListCatalogWorkspacesResponse200 = {
+  data: CatalogWorkspaceDto[]
+  status: 200
+}
+
+export type controlPlaneCatalogRegistryListCatalogWorkspacesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogRegistryListCatalogWorkspacesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogRegistryListCatalogWorkspacesResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneCatalogRegistryListCatalogWorkspacesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogRegistryListCatalogWorkspacesResponseSuccess = (controlPlaneCatalogRegistryListCatalogWorkspacesResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogRegistryListCatalogWorkspacesResponseError = (controlPlaneCatalogRegistryListCatalogWorkspacesResponse401 | controlPlaneCatalogRegistryListCatalogWorkspacesResponse403 | controlPlaneCatalogRegistryListCatalogWorkspacesResponse404 | controlPlaneCatalogRegistryListCatalogWorkspacesResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogRegistryListCatalogWorkspacesResponse = (controlPlaneCatalogRegistryListCatalogWorkspacesResponseSuccess | controlPlaneCatalogRegistryListCatalogWorkspacesResponseError)
+
+export const getControlPlaneCatalogRegistryListCatalogWorkspacesUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/catalogs/${encodeURIComponent(id)}/workspaces`
+}
+
+export const controlPlaneCatalogRegistryListCatalogWorkspaces = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogRegistryListCatalogWorkspacesResponse> => {
+
+  return customInstance<controlPlaneCatalogRegistryListCatalogWorkspacesResponse>(getControlPlaneCatalogRegistryListCatalogWorkspacesUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogRegistryListCatalogWorkspacesQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/catalogs/${encodeURIComponent(id)}/workspaces`
+    ] as const;
+    }
+
+
+export const getControlPlaneCatalogRegistryListCatalogWorkspacesQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneCatalogRegistryListCatalogWorkspacesQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>> = ({ signal }) => controlPlaneCatalogRegistryListCatalogWorkspaces(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneCatalogRegistryListCatalogWorkspacesQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>>
+export type ControlPlaneCatalogRegistryListCatalogWorkspacesQueryError = ErrorBody
+
+
+export function useControlPlaneCatalogRegistryListCatalogWorkspaces<TData = Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneCatalogRegistryListCatalogWorkspaces<TData = Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneCatalogRegistryListCatalogWorkspaces<TData = Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneCatalogRegistryListCatalogWorkspaces<TData = Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryListCatalogWorkspaces>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneCatalogRegistryListCatalogWorkspacesQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneCatalogRegistrySetCatalogWorkspacesResponse200 = {
+  data: CatalogWorkspaceDto[]
+  status: 200
+}
+
+export type controlPlaneCatalogRegistrySetCatalogWorkspacesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogRegistrySetCatalogWorkspacesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogRegistrySetCatalogWorkspacesResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneCatalogRegistrySetCatalogWorkspacesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogRegistrySetCatalogWorkspacesResponseSuccess = (controlPlaneCatalogRegistrySetCatalogWorkspacesResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogRegistrySetCatalogWorkspacesResponseError = (controlPlaneCatalogRegistrySetCatalogWorkspacesResponse401 | controlPlaneCatalogRegistrySetCatalogWorkspacesResponse403 | controlPlaneCatalogRegistrySetCatalogWorkspacesResponse404 | controlPlaneCatalogRegistrySetCatalogWorkspacesResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogRegistrySetCatalogWorkspacesResponse = (controlPlaneCatalogRegistrySetCatalogWorkspacesResponseSuccess | controlPlaneCatalogRegistrySetCatalogWorkspacesResponseError)
+
+export const getControlPlaneCatalogRegistrySetCatalogWorkspacesUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/catalogs/${encodeURIComponent(id)}/workspaces`
+}
+
+export const controlPlaneCatalogRegistrySetCatalogWorkspaces = async (id: string,
+    setCatalogWorkspacesBody: SetCatalogWorkspacesBody, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogRegistrySetCatalogWorkspacesResponse> => {
+
+  return customInstance<controlPlaneCatalogRegistrySetCatalogWorkspacesResponse>(getControlPlaneCatalogRegistrySetCatalogWorkspacesUrl(id),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setCatalogWorkspacesBody)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogRegistrySetCatalogWorkspacesMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistrySetCatalogWorkspaces>>, TError,{id: string;data: SetCatalogWorkspacesBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistrySetCatalogWorkspaces>>, TError,{id: string;data: SetCatalogWorkspacesBody}, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogRegistrySetCatalogWorkspaces'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogRegistrySetCatalogWorkspaces>>, {id: string;data: SetCatalogWorkspacesBody}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  controlPlaneCatalogRegistrySetCatalogWorkspaces(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogRegistrySetCatalogWorkspacesMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogRegistrySetCatalogWorkspaces>>>
+    export type ControlPlaneCatalogRegistrySetCatalogWorkspacesMutationBody = SetCatalogWorkspacesBody
+    export type ControlPlaneCatalogRegistrySetCatalogWorkspacesMutationError = ErrorBody
+
+    export const useControlPlaneCatalogRegistrySetCatalogWorkspaces = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistrySetCatalogWorkspaces>>, TError,{id: string;data: SetCatalogWorkspacesBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogRegistrySetCatalogWorkspaces>>,
+        TError,
+        {id: string;data: SetCatalogWorkspacesBody},
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogRegistrySetCatalogWorkspacesMutationOptions(options), queryClient);
+    }
+    export type controlPlaneCatalogRegistryAttachCatalogResponse201 = {
+  data: CatalogAttachmentDto
+  status: 201
+}
+
+export type controlPlaneCatalogRegistryAttachCatalogResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneCatalogRegistryAttachCatalogResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogRegistryAttachCatalogResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogRegistryAttachCatalogResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneCatalogRegistryAttachCatalogResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneCatalogRegistryAttachCatalogResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogRegistryAttachCatalogResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type controlPlaneCatalogRegistryAttachCatalogResponseSuccess = (controlPlaneCatalogRegistryAttachCatalogResponse201) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogRegistryAttachCatalogResponseError = (controlPlaneCatalogRegistryAttachCatalogResponse400 | controlPlaneCatalogRegistryAttachCatalogResponse401 | controlPlaneCatalogRegistryAttachCatalogResponse403 | controlPlaneCatalogRegistryAttachCatalogResponse404 | controlPlaneCatalogRegistryAttachCatalogResponse409 | controlPlaneCatalogRegistryAttachCatalogResponse500 | controlPlaneCatalogRegistryAttachCatalogResponse502) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogRegistryAttachCatalogResponse = (controlPlaneCatalogRegistryAttachCatalogResponseSuccess | controlPlaneCatalogRegistryAttachCatalogResponseError)
+
+export const getControlPlaneCatalogRegistryAttachCatalogUrl = (id: string,
+    cid: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/catalogs/${encodeURIComponent(cid)}`
+}
+
+export const controlPlaneCatalogRegistryAttachCatalog = async (id: string,
+    cid: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogRegistryAttachCatalogResponse> => {
+
+  return customInstance<controlPlaneCatalogRegistryAttachCatalogResponse>(getControlPlaneCatalogRegistryAttachCatalogUrl(id,cid),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogRegistryAttachCatalogMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryAttachCatalog>>, TError,{id: string;cid: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryAttachCatalog>>, TError,{id: string;cid: string}, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogRegistryAttachCatalog'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogRegistryAttachCatalog>>, {id: string;cid: string}> = (props) => {
+          const {id,cid} = props ?? {};
+
+          return  controlPlaneCatalogRegistryAttachCatalog(id,cid,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogRegistryAttachCatalogMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogRegistryAttachCatalog>>>
+
+    export type ControlPlaneCatalogRegistryAttachCatalogMutationError = ErrorBody
+
+    export const useControlPlaneCatalogRegistryAttachCatalog = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryAttachCatalog>>, TError,{id: string;cid: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogRegistryAttachCatalog>>,
+        TError,
+        {id: string;cid: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogRegistryAttachCatalogMutationOptions(options), queryClient);
+    }
+    export type controlPlaneCatalogRegistryRetryCatalogApplyResponse200 = {
+  data: ApplyOutcomeDto
+  status: 200
+}
+
+export type controlPlaneCatalogRegistryRetryCatalogApplyResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneCatalogRegistryRetryCatalogApplyResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogRegistryRetryCatalogApplyResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogRegistryRetryCatalogApplyResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneCatalogRegistryRetryCatalogApplyResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneCatalogRegistryRetryCatalogApplyResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogRegistryRetryCatalogApplyResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type controlPlaneCatalogRegistryRetryCatalogApplyResponseSuccess = (controlPlaneCatalogRegistryRetryCatalogApplyResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogRegistryRetryCatalogApplyResponseError = (controlPlaneCatalogRegistryRetryCatalogApplyResponse400 | controlPlaneCatalogRegistryRetryCatalogApplyResponse401 | controlPlaneCatalogRegistryRetryCatalogApplyResponse403 | controlPlaneCatalogRegistryRetryCatalogApplyResponse404 | controlPlaneCatalogRegistryRetryCatalogApplyResponse409 | controlPlaneCatalogRegistryRetryCatalogApplyResponse500 | controlPlaneCatalogRegistryRetryCatalogApplyResponse502) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogRegistryRetryCatalogApplyResponse = (controlPlaneCatalogRegistryRetryCatalogApplyResponseSuccess | controlPlaneCatalogRegistryRetryCatalogApplyResponseError)
+
+export const getControlPlaneCatalogRegistryRetryCatalogApplyUrl = (id: string,
+    cid: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/catalogs/${encodeURIComponent(cid)}/apply`
+}
+
+export const controlPlaneCatalogRegistryRetryCatalogApply = async (id: string,
+    cid: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogRegistryRetryCatalogApplyResponse> => {
+
+  return customInstance<controlPlaneCatalogRegistryRetryCatalogApplyResponse>(getControlPlaneCatalogRegistryRetryCatalogApplyUrl(id,cid),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogRegistryRetryCatalogApplyMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryRetryCatalogApply>>, TError,{id: string;cid: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryRetryCatalogApply>>, TError,{id: string;cid: string}, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogRegistryRetryCatalogApply'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogRegistryRetryCatalogApply>>, {id: string;cid: string}> = (props) => {
+          const {id,cid} = props ?? {};
+
+          return  controlPlaneCatalogRegistryRetryCatalogApply(id,cid,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogRegistryRetryCatalogApplyMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogRegistryRetryCatalogApply>>>
+
+    export type ControlPlaneCatalogRegistryRetryCatalogApplyMutationError = ErrorBody
+
+    export const useControlPlaneCatalogRegistryRetryCatalogApply = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryRetryCatalogApply>>, TError,{id: string;cid: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogRegistryRetryCatalogApply>>,
+        TError,
+        {id: string;cid: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogRegistryRetryCatalogApplyMutationOptions(options), queryClient);
     }

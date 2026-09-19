@@ -100,7 +100,10 @@ pub fn router() -> Router<CpState> {
         )
         .route(
             "/engines/{id}/catalogs/{cid}",
-            get(get_catalog).put(update_catalog).delete(remove_catalog),
+            get(get_catalog)
+                .put(update_catalog)
+                .post(crate::catalogs::attach_catalog)
+                .delete(remove_catalog),
         )
         .route("/engines/{id}/catalogs/{cid}/test", post(test_catalog))
         .route("/engines/{id}/pods/{pod}/logs", get(pod_logs))

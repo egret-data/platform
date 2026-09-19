@@ -6218,3 +6218,302 @@ async fn registry_catalog_not_found_warehouse_change_and_permission_checks() {
         "{j}"
     );
 }
+
+#[tokio::test]
+async fn attach_detach_and_retry_on_a_trino_engine() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_attach_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("bench");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let reg = registry(&f);
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+
+    // A rejected apply is a 502 and writes nothing.
+    port.set_fail_update(true);
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{j}");
+    assert_eq!(j["code"], "engine_cluster_apply_failed");
+    assert!(reg.get_attachment(e, c).await.unwrap().is_none());
+    port.set_fail_update(false);
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(j["applyStatus"], "applied");
+    assert!(port
+        .last_updated()
+        .catalogs
+        .iter()
+        .any(|c| c.name == cat_name));
+    let (status, _) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "already attached");
+
+    // A StarRocks-only generic catalog cannot be attached to Trino.
+    let (_, j) = call(&f, "POST", "/catalogs", &token, Some(serde_json::json!({
+        "name": unique_catalog_name("paimon"), "kind": "generic",
+        "config": { "engines": ["starrocks"] }, "advanced": { "starrocks": { "type": "paimon" } }
+    }))).await;
+    let sr_only = j["id"].as_str().unwrap().to_string();
+    let (status, _) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{sr_only}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Retry: a failed attachment is re-applied once the engine is healthy.
+    reg.set_apply_failed(e, c, "earlier failure").await.unwrap();
+    port.set_fail_update(true);
+    let (status, _) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}/apply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(reg
+        .get_attachment(e, c)
+        .await
+        .unwrap()
+        .unwrap()
+        .apply_error
+        .unwrap()
+        .contains("injected update failure"));
+    port.set_fail_update(false);
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}/apply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["status"], "applied");
+    let a = reg.get_attachment(e, c).await.unwrap().unwrap();
+    assert_eq!((a.apply_status.as_str(), a.apply_error), ("applied", None));
+
+    // Detach (the shared DELETE) applies first, then removes the attachment.
+    let (status, _) = call(
+        &f,
+        "DELETE",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(reg.get_attachment(e, c).await.unwrap().is_none());
+    assert!(port
+        .last_updated()
+        .catalogs
+        .iter()
+        .all(|c| c.name != cat_name));
+}
+
+#[tokio::test]
+async fn nothing_is_attached_to_a_starrocks_engine_yet() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_sr_admin", true).await;
+    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
+    let (status, j) = call(&f, "POST", "/engines", &token, Some(serde_json::json!({
+        "name": format!("sr-{}", Uuid::new_v4().simple()), "kind": "starrocks", "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1, "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+    }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": unique_catalog_name("b"), "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!(
+            "/engines/{engine_id}/catalogs/{}",
+            j["id"].as_str().unwrap()
+        ),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    assert!(j["error"].as_str().unwrap().contains("StarRocks"), "{j}");
+}
+
+#[tokio::test]
+async fn workspace_assignment_and_the_migration_report() {
+    let Some(f) = setup_full(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_ws_admin", true).await;
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": unique_catalog_name("b"), "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let ws1 = seed_workspace(&f).await;
+    let ws2 = seed_workspace(&f).await;
+
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &token,
+        Some(serde_json::json!({ "workspaceIds": [ws1, ws2] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j.as_array().unwrap().len(), 2);
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &token,
+        Some(serde_json::json!({ "workspaceIds": [ws2] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(j[0]["workspaceId"], serde_json::json!(ws2));
+    let (_, j) = call(
+        &f,
+        "GET",
+        &format!("/catalogs?workspaceId={ws2}"),
+        &token,
+        None,
+    )
+    .await;
+    assert!(j
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["id"] == serde_json::json!(cid)));
+    let (status, _) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &token,
+        Some(serde_json::json!({ "workspaceIds": [Uuid::new_v4()] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "unknown workspace");
+    let (status, j) = call(&f, "DELETE", &format!("/catalogs/{cid}"), &token, None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(j["workspaces"][0]["id"], serde_json::json!(ws2));
+
+    let run = Uuid::new_v4();
+    registry(&f)
+        .insert_report(&[egret_catalog_registry::ReportEntry::info(
+            run,
+            "warehouse_catalog_created",
+            "warehouse w",
+            "w is catalog w",
+        )])
+        .await
+        .unwrap();
+    let (status, j) = call(&f, "GET", "/catalogs/migration-report", &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        j.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["runId"] == serde_json::json!(run)),
+        "{j}"
+    );
+    let (status, _) = call(
+        &f,
+        "POST",
+        "/catalogs/migration-report/acknowledge",
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, j) = call(&f, "GET", "/catalogs/migration-report", &token, None).await;
+    assert!(j
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["runId"] != serde_json::json!(run)));
+    let (_, j) = call(
+        &f,
+        "GET",
+        "/catalogs/migration-report?all=true",
+        &token,
+        None,
+    )
+    .await;
+    assert!(j
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["runId"] == serde_json::json!(run)));
+}

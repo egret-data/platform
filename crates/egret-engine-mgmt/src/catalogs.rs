@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::catalog_apply::{propagate, validate_references, ApplyOutcome};
+use crate::catalog_apply::{
+    attach_to_engine, propagate, retry_apply, validate_references, ApplyOutcome, CatalogOpError,
+};
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
 
@@ -32,6 +34,19 @@ pub(crate) fn routes() -> Router<CpState> {
         )
         .route("/catalogs/{id}/impact", get(catalog_impact))
         .route("/catalogs/{id}/reapply", post(reapply_registry_catalog))
+        .route("/catalogs/migration-report", get(get_migration_report))
+        .route(
+            "/catalogs/migration-report/acknowledge",
+            post(acknowledge_migration_report),
+        )
+        .route(
+            "/catalogs/{id}/workspaces",
+            get(list_catalog_workspaces).put(set_catalog_workspaces),
+        )
+        .route(
+            "/engines/{id}/catalogs/{cid}/apply",
+            post(retry_catalog_apply),
+        )
 }
 
 /// One engine a catalog is attached to.
@@ -494,6 +509,281 @@ async fn reapply_registry_catalog(
     ))
 }
 
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetCatalogWorkspacesBody {
+    workspace_ids: Vec<Uuid>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogWorkspaceDto {
+    workspace_id: Uuid,
+    name: String,
+    slug: String,
+    assigned_at: DateTime<Utc>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MigrationReportRowDto {
+    id: i64,
+    run_id: Uuid,
+    created_at: DateTime<Utc>,
+    /// `info` | `warning`.
+    severity: String,
+    code: String,
+    catalog_id: Option<Uuid>,
+    engine_id: Option<Uuid>,
+    warehouse_id: Option<Uuid>,
+    subject: String,
+    message: String,
+    #[schema(value_type = Object)]
+    detail: serde_json::Value,
+    acknowledged_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(crate) struct MigrationReportQuery {
+    /// Include rows already acknowledged.
+    #[serde(default)]
+    all: bool,
+}
+
+async fn engine_or_404(st: &CpState, id: Uuid) -> Result<crate::Engine, CpError> {
+    st.engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)
+}
+
+async fn attachment_dto(
+    st: &CpState,
+    engine_id: Uuid,
+    catalog_id: Uuid,
+) -> Result<CatalogAttachmentDto, CpError> {
+    st.engine_mgmt
+        .registry()
+        .list_catalog_attachments(catalog_id)
+        .await?
+        .into_iter()
+        .find(|r| r.engine_id == engine_id)
+        .map(Into::into)
+        .ok_or(CpError::NotFound)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/engines/{id}/catalogs/{cid}",
+    tag = "control-plane-catalog-registry",
+    params(
+        ("id" = Uuid, Path, description = "Engine id"),
+        ("cid" = Uuid, Path, description = "Registry catalog id"),
+    ),
+    responses(
+        (status = 201, description = "Applied to the engine, then attached (an egret warehouse catalog mints a Catalog Client for the engine)", body = CatalogAttachmentDto),
+        (status = 400, description = "The engine cannot read this catalog, StarRocks attachment is not supported yet, or Kubernetes is not configured", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 404, description = "No such engine or catalog", body = ErrorBody),
+        (status = 409, description = "Already attached, or the engine is being deleted", body = ErrorBody),
+        (status = 502, description = "Kubernetes rejected the apply (`code` = `engine_cluster_apply_failed`); nothing was attached", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+pub(crate) async fn attach_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, cid)): Path<(Uuid, Uuid)>,
+) -> Result<(StatusCode, Json<CatalogAttachmentDto>), CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    let engine = engine_or_404(&st, id).await?;
+    let catalog = load(&st, cid).await?;
+    attach_to_engine(&st, &engine, &catalog, None)
+        .await
+        .map_err(CatalogOpError::into_registry)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(attachment_dto(&st, engine.id, cid).await?),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/engines/{id}/catalogs/{cid}/apply",
+    tag = "control-plane-catalog-registry",
+    params(
+        ("id" = Uuid, Path, description = "Engine id"),
+        ("cid" = Uuid, Path, description = "Registry catalog id"),
+    ),
+    responses(
+        (status = 200, description = "Re-applied; the attachment is `applied`", body = ApplyOutcomeDto),
+        (status = 400, description = "StarRocks re-apply is not supported yet, or Kubernetes is not configured", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
+        (status = 404, description = "No such engine, or the catalog is not attached to it", body = ErrorBody),
+        (status = 409, description = "The engine is being deleted", body = ErrorBody),
+        (status = 502, description = "Kubernetes rejected the apply; the attachment stays `failed` with the new error", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn retry_catalog_apply(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, cid)): Path<(Uuid, Uuid)>,
+) -> Result<Json<ApplyOutcomeDto>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
+    let engine = engine_or_404(&st, id).await?;
+    st.engine_mgmt
+        .registry()
+        .get_attachment(engine.id, cid)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    retry_apply(&st, &engine, cid)
+        .await
+        .map_err(CatalogOpError::into_registry)?;
+    Ok(Json(ApplyOutcomeDto {
+        engine_id: engine.id,
+        engine_name: engine.name,
+        status: "applied".into(),
+        error: None,
+    }))
+}
+
+async fn workspace_dtos(st: &CpState, id: Uuid) -> Result<Vec<CatalogWorkspaceDto>, CpError> {
+    Ok(st
+        .engine_mgmt
+        .registry()
+        .list_catalog_workspaces(id)
+        .await?
+        .into_iter()
+        .map(|w| CatalogWorkspaceDto {
+            workspace_id: w.workspace_id,
+            name: w.name,
+            slug: w.slug,
+            assigned_at: w.assigned_at,
+        })
+        .collect())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/catalogs/{id}/workspaces",
+    tag = "control-plane-catalog-registry",
+    params(("id" = Uuid, Path, description = "Registry catalog id")),
+    responses(
+        (status = 200, description = "Workspaces the catalog is assigned to", body = Vec<CatalogWorkspaceDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
+        (status = 404, description = "No such catalog", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_catalog_workspaces(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<CatalogWorkspaceDto>>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
+    load(&st, id).await?;
+    Ok(Json(workspace_dtos(&st, id).await?))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/control-plane/catalogs/{id}/workspaces",
+    tag = "control-plane-catalog-registry",
+    params(("id" = Uuid, Path, description = "Registry catalog id")),
+    request_body = SetCatalogWorkspacesBody,
+    responses(
+        (status = 200, description = "The full assignment set was replaced. In SP3 it decides which egret warehouse catalogs a workspace can pick for notebooks; engines are not restricted by it yet", body = Vec<CatalogWorkspaceDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
+        (status = 404, description = "No such catalog or workspace (nothing changed)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn set_catalog_workspaces(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(b): Json<SetCatalogWorkspacesBody>,
+) -> Result<Json<Vec<CatalogWorkspaceDto>>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
+    load(&st, id).await?;
+    let mut ids = b.workspace_ids;
+    ids.sort();
+    ids.dedup();
+    if !st.engine_mgmt.missing_workspace_ids(&ids).await?.is_empty() {
+        return Err(CpError::NotFound);
+    }
+    st.engine_mgmt
+        .registry()
+        .set_catalog_workspaces(id, &ids)
+        .await?;
+    Ok(Json(workspace_dtos(&st, id).await?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/catalogs/migration-report",
+    tag = "control-plane-catalog-registry",
+    params(MigrationReportQuery),
+    responses(
+        (status = 200, description = "What the registry migration did, oldest first (unacknowledged rows unless `all`)", body = Vec<MigrationReportRowDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn get_migration_report(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Query(q): Query<MigrationReportQuery>,
+) -> Result<Json<Vec<MigrationReportRowDto>>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
+    let rows = st.engine_mgmt.registry().list_report(q.all).await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| MigrationReportRowDto {
+                id: r.id,
+                run_id: r.run_id,
+                created_at: r.created_at,
+                severity: r.severity,
+                code: r.code,
+                catalog_id: r.catalog_id,
+                engine_id: r.engine_id,
+                warehouse_id: r.warehouse_id,
+                subject: r.subject,
+                message: r.message,
+                detail: r.detail,
+                acknowledged_at: r.acknowledged_at,
+            })
+            .collect(),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/catalogs/migration-report/acknowledge",
+    tag = "control-plane-catalog-registry",
+    responses(
+        (status = 204, description = "Every open report row acknowledged"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn acknowledge_migration_report(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
+    st.engine_mgmt.registry().acknowledge_report().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(utoipa::OpenApi)]
 #[openapi(
     paths(
@@ -504,6 +794,12 @@ async fn reapply_registry_catalog(
         delete_registry_catalog,
         catalog_impact,
         reapply_registry_catalog,
+        attach_catalog,
+        retry_catalog_apply,
+        list_catalog_workspaces,
+        set_catalog_workspaces,
+        get_migration_report,
+        acknowledge_migration_report,
     ),
     components(schemas(
         RegistryCatalogDto,
@@ -517,6 +813,9 @@ async fn reapply_registry_catalog(
         CatalogConflictBody,
         CatalogConflictEngine,
         CatalogConflictWorkspace,
+        SetCatalogWorkspacesBody,
+        CatalogWorkspaceDto,
+        MigrationReportRowDto,
         ErrorBody,
     )),
     tags((name = "control-plane-catalog-registry", description = "Catalog registry: platform catalogs, their engine attachments and workspace assignment")),
