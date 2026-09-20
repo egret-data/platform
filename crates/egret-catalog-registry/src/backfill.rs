@@ -200,17 +200,9 @@ async fn run_locked(
     .fetch_all(store.pool())
     .await?;
     let mut shared: HashMap<String, (String, Uuid)> = HashMap::new();
-    // Warehouses whose Ranger tag export this run changed — see step 2b.
-    let mut exported: BTreeSet<Uuid> = BTreeSet::new();
     for row in &rows {
         let result = if row.kind == "egret-warehouse" {
-            migrate_warehouse_row(store, secrets, run_id, row, egret_warehouse)
-                .await
-                .map(|attached| {
-                    if let Some(wh_id) = attached {
-                        exported.insert(wh_id);
-                    }
-                })
+            migrate_warehouse_row(store, secrets, run_id, row, egret_warehouse).await
         } else {
             migrate_connector_row(store, secrets, run_id, row, &mut shared).await
         };
@@ -230,42 +222,6 @@ async fn run_locked(
                 .detail(json!({ "engineCatalogId": row.id })),
             )
             .await?;
-        }
-    }
-
-    // 2b. Make the new attachments REACHABLE by a plugin that is already
-    // running (review F-1). Writing an attachment changes what
-    // `PolicyStore::tag_assignments_for_service` returns — a warehouse an
-    // engine held only as a SECONDARY `egret-warehouse` row now exports its
-    // tags under the registry catalog name, where the legacy branch (which
-    // filters `is_primary`) never emitted it. But nothing outside a tag
-    // assign/unassign moves `tag_version`, and `download_tags` gates its 304 on
-    // exactly that, so the plugin would keep 304ing until some unrelated tag
-    // edit — in precisely the deployments the union was written for.
-    //
-    // This is not a transitional nicety: no production path writes
-    // `engine_mgmt.engine_catalogs` any more, so the export's legacy branch is
-    // frozen at whatever this backfill inherited and can only ever shrink. The
-    // registry branch becoming reachable by an already-running plugin is the
-    // mechanism now.
-    //
-    // Once, at the end of the migration, per warehouse — over-bumping is free
-    // (the plugin re-downloads an identical payload), under-bumping is the
-    // fail-open bug. A failed bump is logged, not fatal: the attachment it
-    // describes is committed and correct, and the next tag edit or restart
-    // still delivers it. Attach through the API needs no equivalent: its apply
-    // rewrites `trino_catalogs_config_map`, which `config_checksum`
-    // (`egret-provisioner/src/trino.rs`) hashes into the pod annotation, so the
-    // coordinator rolls and the plugin re-downloads from scratch. The backfill
-    // writes attachments with no apply and no pod roll, which is why it has to
-    // say so itself.
-    for wh_id in &exported {
-        if let Err(e) = crate::tag_version::bump_bound_tag_versions(store.pool(), *wh_id).await {
-            tracing::warn!(
-                error = %e, warehouse_id = %wh_id,
-                "catalog registry backfill: could not bump the bound tag versions; \
-                 Ranger tag downloads for this warehouse keep 304ing until the next tag edit"
-            );
         }
     }
 
@@ -533,16 +489,15 @@ async fn row_warehouse(store: &RegistryStore, row: &LegacyRow) -> Result<Uuid, R
     }
 }
 
-/// Migrates one `egret-warehouse` legacy row: attach + map + report, atomically.
-/// Returns the warehouse whose tag export this changed (`None` when the engine
-/// already reached it and nothing was attached) — see step 2b.
+/// Migrates one `egret-warehouse` legacy row: attach + map + report + the tag
+/// versions the new attachment changes, all in one transaction.
 async fn migrate_warehouse_row(
     store: &RegistryStore,
     secrets: &WorkspaceSecretStore,
     run_id: Uuid,
     row: &LegacyRow,
     egret_warehouse: Option<Uuid>,
-) -> Result<Option<Uuid>, RegistryError> {
+) -> Result<(), RegistryError> {
     let warehouse_id = row_warehouse(store, row).await?;
     let wh: WarehouseRow =
         sqlx::query_as("SELECT id, name, workspace_id FROM catalog.warehouses WHERE id = $1")
@@ -606,7 +561,8 @@ async fn migrate_warehouse_row(
         store
             .map_legacy_row(row.id, row.engine_id, Some(cat.id), &entries)
             .await?;
-        return Ok(None);
+        // Nothing was attached, so the tag export is unchanged: no bump.
+        return Ok(());
     }
 
     let credential = row
@@ -654,9 +610,32 @@ async fn migrate_warehouse_row(
             },
             row.id,
             &entries,
+            // Bump this warehouse's bound tag services, in the SAME
+            // transaction (review F-1, F-14). Writing this attachment changes
+            // what `PolicyStore::tag_assignments_for_service` returns — a
+            // warehouse an engine held only as a SECONDARY `egret-warehouse`
+            // row now exports its tags under the registry catalog name, where
+            // the legacy branch (which filters `is_primary`) never emitted it.
+            // Nothing outside a tag assign/unassign moves `tag_version`, and
+            // `download_tags` gates its 304 on exactly that, so without this
+            // the plugin keeps 304ing until some unrelated tag edit — in
+            // precisely the deployments the union was written for. And this is
+            // not transitional: no production path writes
+            // `engine_mgmt.engine_catalogs` any more, so the export's legacy
+            // branch is frozen at whatever this backfill inherited and can only
+            // shrink. The registry branch becoming reachable by an
+            // already-running plugin is the mechanism now.
+            //
+            // Attach through the API needs no equivalent: its apply rewrites
+            // `trino_catalogs_config_map`, which `config_checksum`
+            // (`egret-provisioner/src/trino.rs`) hashes into the pod-template
+            // annotation, so the coordinator rolls and the plugin re-downloads
+            // from scratch. The backfill writes attachments with no apply and
+            // no pod roll, which is why it has to say so itself.
+            Some(wh.id),
         )
         .await?;
-    Ok(Some(wh.id))
+    Ok(())
 }
 
 /// Migrates one non-`egret-warehouse` legacy row: share / suffix / classify,
@@ -713,6 +692,12 @@ async fn migrate_connector_row(
                         },
                         row.id,
                         &entries,
+                        // A connector catalog carries no warehouse, and the tag
+                        // export only ever emits warehouse catalogs' tags
+                        // (`registry.catalogs ON c.warehouse_id =
+                        // a.warehouse_id`), so this attachment changes nothing
+                        // a plugin could download.
+                        None,
                     )
                     .await?;
             } else {

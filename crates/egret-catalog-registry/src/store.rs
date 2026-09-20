@@ -849,21 +849,37 @@ impl RegistryStore {
         .await?)
     }
 
-    /// Backfill: attach + mark the legacy row migrated + write its report rows,
-    /// atomically — a crash before commit loses the mutation AND the report
-    /// together (the row stays unmapped and is retried whole next boot); a crash
-    /// after commit loses neither (review fix I1).
+    /// Backfill: attach, mark the legacy row migrated, write its report rows,
+    /// and bump the tag versions this attachment changes — atomically. A crash
+    /// before commit loses all of them together (the row stays unmapped and is
+    /// retried whole next boot); a crash after commit loses none (review fix
+    /// I1, extended by review F-14).
+    ///
+    /// `bump_tags_for_warehouse` is the warehouse whose Ranger tag export this
+    /// attachment changes (`None` for a catalog with no warehouse, whose tags
+    /// the export does not carry). It MUST be part of this transaction, not a
+    /// pass afterwards: step 2 only ever selects legacy rows that are not yet
+    /// in `registry.legacy_engine_catalogs`, so once this commits the row is
+    /// never revisited. A bump left for later and lost to a kill — OOM, a
+    /// liveness probe, a failed deploy — is lost PERMANENTLY, and the plugin
+    /// 304s forever on a catalog the export has started emitting. Inside the
+    /// transaction, a bump that fails takes the attachment down with it and the
+    /// whole row is retried on the next boot.
     pub(crate) async fn insert_attachment_and_map(
         &self,
         a: &NewAttachment,
         engine_catalog_id: Uuid,
         report: &[ReportEntry],
+        bump_tags_for_warehouse: Option<Uuid>,
     ) -> Result<(), RegistryError> {
         let mut tx = self.pool().begin().await?;
         insert_attachment_row(&mut tx, a).await?;
         map_legacy_row_on(&mut tx, engine_catalog_id, a.engine_id, Some(a.catalog_id)).await?;
         for e in report {
             insert_report_row(&mut tx, e).await?;
+        }
+        if let Some(warehouse_id) = bump_tags_for_warehouse {
+            crate::tag_version::bump_bound_tag_versions(&mut *tx, warehouse_id).await?;
         }
         tx.commit().await?;
         Ok(())

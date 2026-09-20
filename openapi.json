@@ -3354,7 +3354,7 @@
         },
         "responses": {
           "200": {
-            "description": "The full assignment set was replaced. Assignment decides which catalogs a workspace sees in its engine view (GET /api/ws/{workspace}/engines/{id}); it does not restrict what an engine serves. Notebook warehouse selection is deliberately owner-only and ignores assignment — an assigned workspace gets its own notebook role and namespace in SP4",
+            "description": "The full assignment set was replaced. Assignment decides which catalogs a workspace sees in its engine view (GET /api/ws/{workspace}/engines/{engine_id}), alongside the fallback that shows an unassigned warehouse catalog to the workspace that owns its warehouse; it does not restrict what an engine serves. Notebook warehouse selection is deliberately owner-only and ignores assignment — an assigned workspace gets its own notebook role and namespace in SP4",
             "content": {
               "application/json": {
                 "schema": {
