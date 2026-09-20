@@ -432,9 +432,9 @@ async fn engine_detail(
         .get_assigned_engine(ctx.workspace_id.0, engine_id)
         .await?
         .ok_or_else(|| DatabaseError::NotFound(engine_id.to_string()))?;
-    // storage_name is a property of the engine's warehouse; shared by every
-    // catalog. Best-effort — `None` when the warehouse/storage is unresolvable.
-    let storage_name = st.repo.resolve_storage_name(engine.warehouse_id).await?;
+    // storage_name belongs to the CATALOG's own warehouse and is resolved per
+    // row by the query (review F-8): the list holds other warehouses' catalogs
+    // and jdbc/generic ones, which have no warehouse and no storage at all.
     let catalogs = st
         .repo
         .list_engine_catalogs(engine_id, ctx.workspace_id.0)
@@ -448,7 +448,7 @@ async fn engine_detail(
             .map(|c| WsEngineCatalogDto {
                 name: c.name,
                 kind: c.kind,
-                storage_name: storage_name.clone(),
+                storage_name: c.storage_name,
                 secret_name: c.secret_name,
             })
             .collect(),

@@ -39,17 +39,17 @@ pub struct AssignedEngineRow {
     /// (a reserved word) in the query.
     pub engine_type: String,
     pub status: String,
-    /// The engine's warehouse (catalog seam); used to resolve `storage_name`.
-    pub warehouse_id: Uuid,
 }
 
 /// One catalog of an assigned engine, with its storage/secret NAMES resolved
 /// (never the secret value). `storage_name`/`secret_name` are best-effort:
-/// `None` when the reference is absent or unresolvable (LEFT JOINs).
+/// `None` when the reference is absent or unresolvable (LEFT JOINs) — a jdbc
+/// or generic catalog has no warehouse and therefore no storage at all.
 #[derive(sqlx::FromRow)]
 pub struct EngineCatalogRow {
     pub name: String,
     pub kind: String,
+    pub storage_name: Option<String>,
     pub secret_name: Option<String>,
 }
 
@@ -436,7 +436,7 @@ impl DatabaseRepo {
         workspace_id: Uuid,
     ) -> Result<Vec<AssignedEngineRow>, DatabaseError> {
         Ok(sqlx::query_as::<_, AssignedEngineRow>(
-            "SELECT e.id, e.name, e.type AS engine_type, e.status, e.warehouse_id \
+            "SELECT e.id, e.name, e.type AS engine_type, e.status \
                FROM engine_mgmt.engines e \
                JOIN engine_mgmt.engine_workspaces ew ON ew.engine_id = e.id \
               WHERE ew.workspace_id = $1 \
@@ -455,7 +455,7 @@ impl DatabaseRepo {
         engine_id: Uuid,
     ) -> Result<Option<AssignedEngineRow>, DatabaseError> {
         Ok(sqlx::query_as::<_, AssignedEngineRow>(
-            "SELECT e.id, e.name, e.type AS engine_type, e.status, e.warehouse_id \
+            "SELECT e.id, e.name, e.type AS engine_type, e.status \
                FROM engine_mgmt.engines e \
                JOIN engine_mgmt.engine_workspaces ew ON ew.engine_id = e.id \
               WHERE ew.workspace_id = $1 AND e.id = $2",
@@ -466,29 +466,20 @@ impl DatabaseRepo {
         .await?)
     }
 
-    /// Resolve an engine's warehouse to its storage-connection NAME
-    /// (`catalog.warehouses` → `storage.storage_connections`). Best-effort:
-    /// `Ok(None)` when the warehouse or its storage connection is absent.
-    pub async fn resolve_storage_name(
-        &self,
-        warehouse_id: Uuid,
-    ) -> Result<Option<String>, DatabaseError> {
-        Ok(sqlx::query_scalar::<_, String>(
-            "SELECT sc.name \
-               FROM catalog.warehouses wh \
-               JOIN storage.storage_connections sc ON sc.id = wh.storage_conn_id \
-              WHERE wh.id = $1",
-        )
-        .bind(warehouse_id)
-        .fetch_optional(&self.db.pool)
-        .await?)
-    }
-
     /// Catalogs attached to an engine (SP3 registry) that are VISIBLE to
     /// `workspace_id` (SP3 §4.6, catalog-registry review N2), with the legacy
     /// `kind` label the workspace view shows (`egret-warehouse` or the Trino
-    /// connector name) and the NAME of one secret the catalog references
+    /// connector name), the NAME of the storage connection THIS catalog's own
+    /// warehouse writes to, and the NAME of one secret the catalog references
     /// (`None` when none; the value is never read). Ordered by name.
+    ///
+    /// `storage_name` is resolved per catalog, through that catalog's mirrored
+    /// `warehouse_id` — not from the engine's primary warehouse. Copying the
+    /// engine's storage onto every row was true when an engine had exactly one
+    /// warehouse catalog, and became wrong the moment this list started
+    /// returning other warehouses and jdbc/generic catalogs (review F-8): a
+    /// non-primary row showed a confidently wrong storage, and a jdbc catalog
+    /// — which has no warehouse and no storage — showed one anyway.
     ///
     /// Visibility mirrors the two-branch shape
     /// `RegistryStore::warehouse_visible_to_workspace` encodes (assigned OR
@@ -526,11 +517,14 @@ impl DatabaseRepo {
                          WHEN c.kind = 'jdbc' THEN c.config->>'dialect' \
                          WHEN c.kind = 'generic' THEN COALESCE(c.advanced->'trino'->>'connector.name', 'generic') \
                          ELSE c.kind END AS kind, \
+                    sc.name AS storage_name, \
                     (SELECT min(ws.name) FROM registry.catalog_secret_refs r \
                        JOIN workspace_secrets ws ON ws.id = r.secret_id \
                       WHERE r.catalog_id = c.id) AS secret_name \
                FROM registry.engine_catalog_attachments a \
                JOIN registry.catalogs c ON c.id = a.catalog_id \
+               LEFT JOIN catalog.warehouses wh ON wh.id = c.warehouse_id \
+               LEFT JOIN storage.storage_connections sc ON sc.id = wh.storage_conn_id \
               WHERE a.engine_id = $1 \
                 AND ( \
                      EXISTS (SELECT 1 FROM registry.catalog_workspaces cw \
