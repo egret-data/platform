@@ -5829,6 +5829,119 @@ async fn legacy_add_refused_by_engine_type_leaves_the_orphan_byte_identical() {
     );
 }
 
+/// Whole-branch review F-5: two attachments can share one Catalog Client —
+/// the backfill takes it verbatim from the legacy row and derives the
+/// credential secret's name from it, so two engines end up on one client and
+/// one secret. Detaching one of them must revoke neither: the other engine's
+/// rendered Trino properties still present that credential.
+#[tokio::test]
+async fn detach_keeps_a_catalog_client_another_attachment_still_uses() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_shared_client_admin", true).await;
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create A; body={j}");
+    let engine_a = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create B; body={j}");
+    let engine_b = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    // Engine A attaches a SECOND warehouse: a minted client + its credential
+    // secret, both retired on detach.
+    let shared_wh = seed_provisioned_warehouse(&f).await;
+    let (status, j) = add_catalog_via_api(
+        &f,
+        &token,
+        &engine_a.to_string(),
+        serde_json::json!({ "name": "shared", "kind": "egret-warehouse",
+                            "config": { "warehouseId": shared_wh } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "attach to A; body={j}");
+    let catalog = warehouse_catalog(&f, shared_wh).await;
+    let attachment = registry(&f)
+        .get_attachment(engine_a, catalog.id)
+        .await
+        .unwrap()
+        .expect("attachment");
+    let client_id = attachment.catalog_client_id.expect("minted client");
+    let secret_id = attachment.credential_secret_id.expect("credential secret");
+
+    // What the backfill produces: engine B reaches the same catalog through
+    // the SAME client and the SAME secret.
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments \
+           (engine_id, catalog_id, catalog_client_id, credential_secret_id, minted_client) \
+         VALUES ($1, $2, $3, $4, true)",
+    )
+    .bind(engine_b)
+    .bind(catalog.id)
+    .bind(client_id)
+    .bind(secret_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("seed the shared attachment");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{engine_a}/catalogs/{}", catalog.id),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "detach from A");
+    assert!(
+        registry(&f)
+            .get_attachment(engine_a, catalog.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "A is detached"
+    );
+
+    assert!(
+        egret_catalog_engine::CatalogStore::new(f.db.clone())
+            .list_clients(shared_wh)
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.id == client_id),
+        "the Catalog Client engine B still uses must not be revoked"
+    );
+    assert!(
+        secret_store(&f)
+            .resolve_plaintext(None, secret_id)
+            .await
+            .is_ok(),
+        "the credential secret engine B still holds must survive"
+    );
+}
+
 // ── Catalog registry (SP3a) ─────────────────────────────────────────────────────
 
 fn unique_catalog_name(prefix: &str) -> String {

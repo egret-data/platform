@@ -375,7 +375,22 @@ fn is_primary(engine: &Engine, catalog: &CatalogRow) -> bool {
 /// Retire what egret minted for an attachment the engine no longer uses: the
 /// minted Catalog Client and the named secret holding its credential. Both only
 /// when `minted_client` — a client (and credential) the engine did not mint
-/// belongs to someone else, and its secret may be shared. Failures are logged.
+/// belongs to someone else, and its secret may be shared. Failures are logged;
+/// the operation that called this has already happened.
+///
+/// Two guards, both the same standing rule (never destroy a credential an
+/// engine may still hold), stated once here for the detach and engine-delete
+/// paths:
+///   - another attachment still naming this client keeps BOTH (review F-5):
+///     the backfill can point two engines at one legacy client and one shared
+///     secret, and revoking on behalf of one would break the other's live
+///     Trino properties;
+///   - the secret goes only once the client that holds it is actually revoked
+///     — the same order, and the same reason, as the attach rollback
+///     (review F-6). A live, unrevoked client whose egret copy is gone is a
+///     credential nobody can clean up, so it is kept and logged loudly
+///     instead. `catalog_client_id IS NULL` (a backfilled row that named no
+///     client) has nothing to revoke, so its secret can go.
 pub(crate) async fn retire_minted_credential(
     st: &CpState,
     engine: &Engine,
@@ -385,9 +400,36 @@ pub(crate) async fn retire_minted_credential(
         return;
     }
     if let Some(client_id) = attachment.catalog_client_id {
+        match st
+            .engine_mgmt
+            .registry()
+            .client_used_by_another_attachment(
+                client_id,
+                attachment.engine_id,
+                attachment.catalog_id,
+            )
+            .await
+        {
+            Ok(true) => {
+                tracing::info!(engine = %engine.name, %client_id,
+                    "catalog client kept: another attachment still uses it");
+                return;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                // Unknown sharing is treated as shared: keeping a credential
+                // costs clutter, destroying a live one costs an outage.
+                tracing::warn!(engine = %engine.name, %client_id, error = %e,
+                    "could not check whether another attachment uses this catalog client; \
+                     keeping it and its credential secret");
+                return;
+            }
+        }
         if let Err(e) = st.catalog.revoke_client(client_id).await {
-            tracing::warn!(engine = %engine.name, %client_id, error = ?e,
-                "minted catalog client could not be revoked");
+            tracing::error!(engine = %engine.name, %client_id, error = ?e,
+                "minted catalog client could not be revoked; keeping its credential secret \
+                 so it is not lost while the client may still be live — clean up manually");
+            return;
         }
     }
     if let Some(secret_id) = attachment.credential_secret_id {
@@ -522,7 +564,9 @@ pub(crate) async fn attach_to_engine(
         // holds it is actually revoked. If the failed apply got as far as the
         // engine's env Secret, a live, unrevoked client whose egret copy is
         // gone is a credential nobody can clean up; keep it and log loudly
-        // instead so an operator can find and revoke it.
+        // instead so an operator can find and revoke it. `retire_minted_
+        // credential` (detach, engine delete) applies the same order for the
+        // same reason — the rule holds on every path, not just this one.
         if let Some((client_id, secret_id)) = minted {
             match st.catalog.revoke_client(client_id).await {
                 Ok(()) => {

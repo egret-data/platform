@@ -607,6 +607,36 @@ impl RegistryStore {
         Ok(r.rows_affected() == 1)
     }
 
+    /// Whether an attachment OTHER than (`engine_id`, `catalog_id`) still names
+    /// `client_id` as its Catalog Client.
+    ///
+    /// Two attachments can share one client: the backfill takes it verbatim
+    /// from the legacy row and derives the credential secret's name from it
+    /// (`catalog-client-{id}`), so `create_or_reuse_secret` deliberately
+    /// collapses them onto one secret. Revoking on behalf of one of them would
+    /// destroy a credential the OTHER engine's rendered Trino properties still
+    /// present — the standing "never destroy a credential an engine may still
+    /// hold" rule, broken through the revoke door instead of the delete door
+    /// (review F-5). The pair is excluded rather than assumed gone so the
+    /// answer is the same whether the caller deleted its row first or not.
+    pub async fn client_used_by_another_attachment(
+        &self,
+        client_id: Uuid,
+        engine_id: Uuid,
+        catalog_id: Uuid,
+    ) -> Result<bool, RegistryError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM registry.engine_catalog_attachments \
+                             WHERE catalog_client_id = $1 \
+                               AND NOT (engine_id = $2 AND catalog_id = $3))",
+        )
+        .bind(client_id)
+        .bind(engine_id)
+        .bind(catalog_id)
+        .fetch_one(self.pool())
+        .await?)
+    }
+
     /// An engine's catalogs in render order: its primary (the catalog of
     /// `primary_warehouse`) first, then by attachment time, then name — the
     /// order `engine_catalogs` rendered in, so env-var names stay put.
