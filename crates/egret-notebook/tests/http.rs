@@ -1520,12 +1520,17 @@ async fn set_notebook_warehouse_rejects_foreign_warehouse(pool: sqlx::PgPool) {
 /// changed (the old check compared `wh.workspace_id` directly and could never
 /// allow this).
 #[sqlx::test(migrations = "../../migrations")]
-async fn set_notebook_warehouse_allows_registry_assigned_warehouse(pool: sqlx::PgPool) {
+async fn set_notebook_warehouse_registry_assignment_alone_is_refused(pool: sqlx::PgPool) {
     let f = setup(pool).await;
     let (_uid, token) = add_member(&f, f.ws_a, "admin", "ws_admin").await;
     // Warehouse OWNED by ws_B...
     let wh_b = seed_warehouse(&f, f.ws_b.0).await;
-    // ...whose registry catalog is ASSIGNED to ws_A.
+    // ...whose registry catalog is ASSIGNED to ws_A (data-browsing visibility
+    // only — SP3 §4.6). Notebook selection is deliberately OWNER-ONLY: the
+    // shared `notebook` catalog role + namespace grant provisioned below would
+    // otherwise hand ws_A read/write on ws_B's private notebook namespace,
+    // with no way to revoke it. Assignment-based notebook selection needs its
+    // own per-workspace role + namespace and is deferred to SP4.
     let catalog_id: Uuid = sqlx::query_scalar(
         "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
          VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
@@ -1559,17 +1564,17 @@ async fn set_notebook_warehouse_allows_registry_assigned_warehouse(pool: sqlx::P
     let (status, json) = into_json(resp).await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "registry-assigned warehouse accepted even though ws_A does not own it; body={json}"
+        StatusCode::BAD_REQUEST,
+        "a registry assignment alone must NOT grant notebook selection — only ownership does; body={json}"
     );
 
+    // Nothing was persisted for ws_A.
     let store = NotebookStore::new(f.db.clone());
-    let (persisted_wh, _ns) = store
+    assert!(store
         .get_notebook_warehouse(f.ws_a.0)
         .await
         .unwrap()
-        .expect("warehouse persisted for ws_a");
-    assert_eq!(persisted_wh, wh_b);
+        .is_none());
 }
 
 /// `#[sqlx::test]` resolves `DATABASE_URL` through dotenvy, so an unexported

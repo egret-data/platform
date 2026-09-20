@@ -22242,7 +22242,7 @@
             }
           },
           "400": {
-            "description": "Warehouse not found or not assigned to this workspace",
+            "description": "Warehouse not found or not owned by this workspace",
             "content": {
               "application/json": {
                 "schema": {
