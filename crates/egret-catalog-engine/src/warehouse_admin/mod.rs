@@ -502,7 +502,7 @@ async fn get_warehouse(
         (status = 204, description = "Warehouse deleted"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing warehouse:delete permission", body = ErrorBody),
-        (status = 409, description = "The warehouse's catalog is attached to an engine", body = ErrorBody),
+        (status = 409, description = "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or the warehouse is still an engine's primary warehouse, or the boot backfill has just created and assigned its catalog (retry)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

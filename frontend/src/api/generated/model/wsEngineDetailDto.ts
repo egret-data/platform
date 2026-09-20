@@ -9,7 +9,8 @@ import type { WsEngineCatalogDto } from './wsEngineCatalogDto';
 
 /**
  * Read-only detail of an assigned engine: its catalogs, each resolved to the
- * storage connection (via the engine's warehouse) and secret name it uses.
+ * storage connection of its own warehouse (none for a jdbc/generic catalog)
+ * and the secret name it uses.
  */
 export interface WsEngineDetailDto {
   name: string;

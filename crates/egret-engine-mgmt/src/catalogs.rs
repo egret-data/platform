@@ -697,7 +697,7 @@ async fn list_catalog_workspaces(
     params(("id" = Uuid, Path, description = "Registry catalog id")),
     request_body = SetCatalogWorkspacesBody,
     responses(
-        (status = 200, description = "The full assignment set was replaced. In SP3 it decides which egret warehouse catalogs a workspace can pick for notebooks; engines are not restricted by it yet", body = Vec<CatalogWorkspaceDto>),
+        (status = 200, description = "The full assignment set was replaced. Assignment decides which catalogs a workspace sees in its engine view (GET /api/ws/{workspace}/engines/{id}); it does not restrict what an engine serves. Notebook warehouse selection is deliberately owner-only and ignores assignment — an assigned workspace gets its own notebook role and namespace in SP4", body = Vec<CatalogWorkspaceDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
         (status = 404, description = "No such catalog or workspace (nothing changed)", body = ErrorBody),

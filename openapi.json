@@ -3354,7 +3354,7 @@
         },
         "responses": {
           "200": {
-            "description": "The full assignment set was replaced. In SP3 it decides which egret warehouse catalogs a workspace can pick for notebooks; engines are not restricted by it yet",
+            "description": "The full assignment set was replaced. Assignment decides which catalogs a workspace sees in its engine view (GET /api/ws/{workspace}/engines/{id}); it does not restrict what an engine serves. Notebook warehouse selection is deliberately owner-only and ignores assignment — an assigned workspace gets its own notebook role and namespace in SP4",
             "content": {
               "application/json": {
                 "schema": {
@@ -9757,7 +9757,7 @@
             }
           },
           "409": {
-            "description": "The warehouse's catalog is attached to an engine",
+            "description": "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or the warehouse is still an engine's primary warehouse, or the boot backfill has just created and assigned its catalog (retry)",
             "content": {
               "application/json": {
                 "schema": {
@@ -39745,7 +39745,7 @@
       },
       "WsEngineCatalogDto": {
         "type": "object",
-        "description": "One catalog of an assigned engine, with the storage/secret NAME it maps to.\n`storage_name`/`secret_name` are best-effort (`null` when unresolvable); the\nsecret VALUE is never exposed.",
+        "description": "One catalog of an assigned engine, with the storage/secret NAME it maps to.\n`storage_name` is the storage connection THIS catalog's own warehouse writes\nto — `null` for a jdbc or generic catalog, which has no warehouse and no\nstorage. `storage_name`/`secret_name` are best-effort (`null` when\nunresolvable); the secret VALUE is never exposed.",
         "required": [
           "name",
           "kind"
@@ -39773,7 +39773,7 @@
       },
       "WsEngineDetailDto": {
         "type": "object",
-        "description": "Read-only detail of an assigned engine: its catalogs, each resolved to the\nstorage connection (via the engine's warehouse) and secret name it uses.",
+        "description": "Read-only detail of an assigned engine: its catalogs, each resolved to the\nstorage connection of its own warehouse (none for a jdbc/generic catalog)\nand the secret name it uses.",
         "required": [
           "name",
           "type",
