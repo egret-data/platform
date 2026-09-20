@@ -790,9 +790,29 @@ impl RegistryStore {
         Ok(())
     }
 
-    /// Whether a workspace may use a warehouse (notebook warehouse selection,
-    /// §4.6): its catalog is assigned there — or, for a warehouse the backfill
-    /// has not reached yet, the warehouse's own workspace.
+    /// The §4.6 "assigned OR owned-and-not-yet-assigned" visibility rule, as
+    /// one executable predicate: a workspace sees a warehouse when its registry
+    /// catalog is assigned there — or, for a warehouse the backfill has not
+    /// reached yet (no registry catalog at all), when the warehouse is that
+    /// workspace's own.
+    ///
+    /// NO PRODUCTION CALLER TODAY, deliberately (review F-10). It is kept for
+    /// two reasons, and a third that is NOT one of them:
+    ///   - `egret-query`'s `list_engine_catalogs` re-states the same two
+    ///     branches in SQL, per-row, because it iterates catalogs that are
+    ///     already known to exist; this function is the statement that SQL
+    ///     mirrors, and the DB tests here and in `egret-catalog-engine` are
+    ///     what keep the two honest (including the fail-closed direction:
+    ///     reassigning a catalog away from its owner revokes the owner).
+    ///   - SP4 — the per-workspace notebook role + namespace — is the consumer
+    ///     that will call it, and is the reason it was written.
+    ///   - it is NOT an authorization gate, and notebook warehouse selection
+    ///     does NOT use it: that check is deliberately owner-only (user
+    ///     decision, 2026-09-20), because notebook selection provisions ONE
+    ///     shared role per warehouse. Calling this there before SP4 gives an
+    ///     assigned workspace read/write on the OWNER's private namespace.
+    ///
+    /// Delete it with SP4 if SP4 ends up needing a different predicate.
     pub async fn warehouse_visible_to_workspace(
         &self,
         warehouse_id: Uuid,

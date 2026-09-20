@@ -372,6 +372,79 @@ async fn attachments_order_status_and_block_deletes() {
     assert_eq!(store.unmigrated_legacy_catalog_count(eng).await.unwrap(), 0);
 }
 
+/// `WorkspaceSecretStore::used_by` counts
+/// `engine_catalog_attachments.credential_secret_id` (T5, promoted by the
+/// whole-branch review §2): that subquery is the single mechanism keeping a
+/// minted Catalog Client credential — a secret the engine's env Secret holds
+/// right now — from being deleted out from under a live attachment. Drop the
+/// term and this delete succeeds.
+///
+/// It also pins the OTHER half of the rule: the refusal is the attachment's
+/// alone, so it lifts the moment the attachment is gone, without needing a
+/// catalog `secret_refs` row to stand in for it.
+#[tokio::test]
+async fn an_attachments_credential_secret_cannot_be_deleted() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let vault = secrets(&db);
+    let ws = workspace(&db).await;
+    let wh = warehouse(&db, &unique("wh"), ws).await;
+    let eng = engine(&db, wh).await;
+    let (catalog, _) = store
+        .ensure_warehouse_catalog(
+            &WarehouseIdentity {
+                id: wh,
+                name: &unique("wh"),
+                workspace_id: ws,
+            },
+            None,
+            |_| vec![],
+        )
+        .await
+        .unwrap();
+    // A warehouse catalog references no secret of its own, so the count below
+    // can only ever come from the attachment's own term.
+    let refs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM registry.catalog_secret_refs WHERE catalog_id = $1",
+    )
+    .bind(catalog.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(refs, 0, "no catalog-config secret to confuse used_by with");
+    let credential = vault
+        .create(None, &unique("cred"), None, "client:secret")
+        .await
+        .unwrap();
+
+    store
+        .insert_attachment(&NewAttachment {
+            engine_id: eng,
+            catalog_id: catalog.id,
+            catalog_client_id: Some(Uuid::new_v4()),
+            credential_secret_id: Some(credential),
+            minted_client: true,
+            applied_now: true,
+            created_at: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(
+            vault.delete(None, credential).await,
+            Err(egret_secrets::SecretsError::InUse(1))
+        ),
+        "a live attachment must block the delete of the credential it names"
+    );
+
+    assert!(store.delete_attachment(eng, catalog.id).await.unwrap());
+    vault
+        .delete(None, credential)
+        .await
+        .expect("once nothing attaches it, the credential can go");
+}
+
 #[tokio::test]
 async fn report_rows_are_listed_until_acknowledged() {
     let Some(db) = db().await else { return };

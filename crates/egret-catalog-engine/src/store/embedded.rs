@@ -267,9 +267,13 @@ impl CatalogStore {
         }
     }
 
-    /// Whether a workspace may use a warehouse (SP3 §4.6): its registry catalog
-    /// is assigned there, or — for a warehouse the boot backfill has not reached
-    /// — the warehouse is the workspace's own.
+    /// `RegistryStore::warehouse_visible_to_workspace` through the catalog
+    /// seam's store. Like it, this has NO production caller today (review
+    /// F-10): it is the executable form of the §4.6 assigned-or-owned rule
+    /// that `egret-query` mirrors in SQL, held for SP4's per-workspace
+    /// notebook role. It is not an authorization gate, and notebook warehouse
+    /// selection deliberately does not use it — read that function's doc
+    /// before calling this one.
     pub async fn warehouse_visible_to_workspace(
         &self,
         warehouse_id: Uuid,
