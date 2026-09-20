@@ -150,8 +150,12 @@ Also:
 ### 4.6 Workspace assignment
 
 `GET/PUT /api/control-plane/catalogs/{id}/workspaces`. In SP3 an assignment decides which
-catalogs a workspace sees in data browsing and notebook warehouse selection (iceberg-egret only).
-It does **not** yet restrict what an engine returns — that is enforcement, which is SP4 (Ranger
+catalogs a workspace sees in data browsing (iceberg-egret only). **Notebook warehouse selection
+stays owner-only** (user decision, 2026-09-20): a notebook writes through one shared `notebook`
+role per warehouse, so selecting an assigned warehouse would give the assigned workspace
+read/write on the owner's private notebook namespace, and removing the assignment would not
+revoke it. Notebooks on an assigned warehouse wait for a per-workspace notebook role and
+namespace in SP4. An assignment does **not** yet restrict what an engine returns — that is enforcement, which is SP4 (Ranger
 profiles) and SP5 (egret-enforced engines).
 
 ### 4.7 Permissions

@@ -155,8 +155,12 @@ Ngoài ra:
 ### 4.6 Gán (assignment) workspace
 
 `GET/PUT /api/control-plane/catalogs/{id}/workspaces`. Trong SP3, một assignment quyết định
-workspace nào thấy được catalog nào khi duyệt dữ liệu (data browsing) và khi chọn warehouse cho
-notebook (chỉ iceberg-egret). Nó **chưa** giới hạn những gì một engine trả về — đó là phần
+workspace nào thấy được catalog nào khi duyệt dữ liệu (data browsing) (chỉ iceberg-egret).
+**Chọn warehouse cho notebook vẫn chỉ dành cho workspace sở hữu** (quyết định của người dùng,
+2026-09-20): notebook ghi qua MỘT role `notebook` dùng chung cho cả warehouse, nên chọn một
+warehouse được gán sẽ cho workspace đó đọc/ghi namespace notebook riêng của workspace chủ, và gỡ
+assignment cũng không thu hồi được. Notebook trên warehouse được gán chờ role + namespace notebook
+riêng cho từng workspace ở SP4. Một assignment **chưa** giới hạn những gì một engine trả về — đó là phần
 enforcement, thuộc SP4 (Ranger profile) và SP5 (các engine do egret thực thi).
 
 ### 4.7 Permissions
