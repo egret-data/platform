@@ -5548,20 +5548,24 @@ async fn add_catalog(
         // Unattached and unassigned — what an earlier remove through this form
         // leaves behind — is replaced by the new body, atomically, as it was
         // before the registry (plan decision #27); an in-use name is 409.
-        let created = match egret_catalog_registry::classify(&legacy, &extracted)
-            .map_err(|e| CpError::BadRequest(e.to_string()))
-        {
-            Ok(classified) => {
-                match crate::catalog_apply::validate_references(&st, &classified.def).await {
-                    Ok(()) => registry
-                        .create_catalog_replacing_orphan(&b.name, &classified.def, None)
-                        .await
-                        .map_err(CpError::from),
-                    Err(e) => Err(e),
-                }
-            }
-            Err(e) => Err(e),
-        };
+        let created = async {
+            let classified = egret_catalog_registry::classify(&legacy, &extracted)
+                .map_err(|e| CpError::BadRequest(e.to_string()))?;
+            crate::catalog_apply::validate_references(&st, &classified.def).await?;
+            // BEFORE the replace, never after: `create_catalog_replacing_orphan`
+            // DESTROYS a same-named orphan, and this request's rollback can only
+            // delete what it created — so a refusal decided later (StarRocks, a
+            // kind this engine cannot read) would 400 having silently destroyed
+            // the operator's existing catalog definition (review F-2). The same
+            // function decides it for the registry attach route.
+            crate::catalog_apply::check_engine_supports(&engine, &b.name, &classified.def)
+                .map_err(CatalogOpError::into_legacy)?;
+            registry
+                .create_catalog_replacing_orphan(&b.name, &classified.def, None)
+                .await
+                .map_err(CpError::from)
+        }
+        .await;
         let catalog = match created {
             Ok((catalog, _replaced)) => catalog,
             Err(e) => {

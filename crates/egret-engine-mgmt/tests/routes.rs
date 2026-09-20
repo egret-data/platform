@@ -5731,6 +5731,104 @@ async fn attaching_to_a_starrocks_engine_is_refused() {
         .is_none());
 }
 
+/// Whole-branch review F-2: the engine-type refusals are decided BEFORE the
+/// registry is touched. A legacy add of a connector catalog to a StarRocks
+/// engine 400s, and the same-named orphan that
+/// `create_catalog_replacing_orphan` would have destroyed is still there,
+/// byte-identical — a refusal must never cost the operator a catalog
+/// definition the response says nothing about.
+#[tokio::test]
+async fn legacy_add_refused_by_engine_type_leaves_the_orphan_byte_identical() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_f2_admin", true).await;
+
+    // An orphan: added through a Trino engine, then detached. Exactly what
+    // "remove then add again with the same name" leaves behind.
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create trino; body={j}");
+    let trino_id = j["id"].as_str().unwrap().to_string();
+    let name = unique_catalog_name("orph");
+    let (status, j) = add_catalog_via_api(&f, &token, &trino_id, tpch_body(&name)).await;
+    assert_eq!(status, StatusCode::CREATED, "add; body={j}");
+    let orphan_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{trino_id}/catalogs/{orphan_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "detach");
+
+    // The whole row as the database holds it, before the refused add.
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(c.*) FROM registry.catalogs c WHERE c.id = $1")
+            .bind(orphan_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("orphan row");
+
+    let sr_wh = seed_provisioned_warehouse_with_secret(&f).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": format!("sr-{}", Uuid::new_v4().simple()), "warehouseId": sr_wh,
+                "kind": "starrocks",
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create starrocks; body={j}");
+    let sr_id = j["id"].as_str().unwrap().to_string();
+
+    let (status, j) = add_catalog_via_api(&f, &token, &sr_id, tpch_body(&name)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "starrocks add; body={j}");
+    assert!(
+        j["error"].as_str().unwrap().contains("not supported yet"),
+        "{j}"
+    );
+
+    let after: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT to_jsonb(c.*) FROM registry.catalogs c WHERE c.id = $1")
+            .bind(orphan_id)
+            .fetch_optional(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after.as_ref(),
+        Some(&before),
+        "the refused add must leave the orphan untouched"
+    );
+}
+
 // ── Catalog registry (SP3a) ─────────────────────────────────────────────────────
 
 fn unique_catalog_name(prefix: &str) -> String {

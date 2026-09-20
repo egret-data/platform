@@ -399,6 +399,40 @@ pub(crate) async fn retire_minted_credential(
     }
 }
 
+/// The refusals that depend only on the engine type and the catalog's own
+/// definition: a kind this engine type cannot read, and StarRocks (SP3b owns
+/// the renderer; plan decision #21). They mint nothing, write nothing and
+/// destroy nothing, so they can — and must — be decided before anything else.
+///
+/// Both paths into an attach go through this one function so the two cannot
+/// drift: `attach_to_engine` runs it as its first step, and the legacy add
+/// route (`engines.rs::add_catalog`) runs it BEFORE
+/// `create_catalog_replacing_orphan`, which DESTROYS a same-named unattached,
+/// unassigned catalog. Deciding a refusal after that destroy loses the orphan
+/// for good — the route's rollback only deletes the catalog the request itself
+/// created — while the 400 says nothing happened (whole-branch review F-2).
+pub(crate) fn check_engine_supports(
+    engine: &Engine,
+    catalog_name: &str,
+    def: &CatalogDef,
+) -> Result<(), CatalogOpError> {
+    let engine_type = EngineType::parse(&engine.r#type)
+        .ok_or_else(|| CpError::BadRequest(format!("unknown engine type {}", engine.r#type)))?;
+    if !def.can_read(engine_type) {
+        return Err(CatalogOpError::Http(CpError::BadRequest(format!(
+            "a {} engine cannot read catalog {}",
+            engine_type.as_str(),
+            catalog_name
+        ))));
+    }
+    if engine_type == EngineType::StarRocks {
+        return Err(CatalogOpError::Apply(ApplyError::NotSupported(
+            STARROCKS_NOT_YET,
+        )));
+    }
+    Ok(())
+}
+
 /// Attach a registry catalog to an engine: apply first, then write the
 /// attachment (SP1 Part B ordering). An egret warehouse catalog mints a Catalog
 /// Client for this engine — under `role_from_client`'s role when given (today's
@@ -424,20 +458,9 @@ pub(crate) async fn attach_to_engine(
         ))));
     }
     let def = catalog_def(catalog)?;
-    let engine_type = EngineType::parse(&engine.r#type)
-        .ok_or_else(|| CpError::BadRequest(format!("unknown engine type {}", engine.r#type)))?;
-    if !def.can_read(engine_type) {
-        return Err(CatalogOpError::Http(CpError::BadRequest(format!(
-            "a {} engine cannot read catalog {}",
-            engine_type.as_str(),
-            catalog.name
-        ))));
-    }
-    if engine_type == EngineType::StarRocks {
-        return Err(CatalogOpError::Apply(ApplyError::NotSupported(
-            STARROCKS_NOT_YET,
-        )));
-    }
+    // Idempotent: the legacy add route already decided these, before it touched
+    // the registry (F-2). The registry attach route reaches them only here.
+    check_engine_supports(engine, &catalog.name, &def)?;
 
     let mut minted: Option<(Uuid, Uuid)> = None;
     if let Some(wh_id) = def.warehouse_id() {

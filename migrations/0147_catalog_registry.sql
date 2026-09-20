@@ -95,7 +95,8 @@ CREATE TABLE registry.legacy_engine_catalogs (
 -- acknowledged). Codes: warehouse_catalog_created, primary_named_egret,
 -- engine_catalog_typed, engine_catalog_generic, engine_catalog_shared,
 -- engine_catalog_suffixed, engine_catalog_renamed, duplicate_attachment_skipped,
--- secret_extracted, saved_sql_references_catalog, backfill_failed.
+-- secret_extracted, secret_name_collision, saved_sql_references_catalog,
+-- saved_sql_scan_failed, backfill_failed.
 CREATE TABLE registry.migration_report (
     id              bigserial PRIMARY KEY,
     run_id          uuid NOT NULL,
