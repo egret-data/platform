@@ -14,6 +14,7 @@ pub mod report;
 pub mod scan;
 pub mod sensitive;
 pub mod store;
+pub mod tag_version;
 
 pub use backfill::{run_backfill, BackfillSummary, BACKFILL_LOCK_KEY};
 pub use config::{
@@ -40,3 +41,4 @@ pub use store::{
     AttachedCatalog, AttachmentRow, CatalogEngineRow, CatalogFilter, CatalogRow,
     CatalogWorkspaceRow, NewAttachment, RegistryStore, WarehouseIdentity,
 };
+pub use tag_version::bump_bound_tag_versions;

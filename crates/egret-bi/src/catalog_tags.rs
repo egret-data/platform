@@ -128,76 +128,23 @@ impl CatalogTagRepo {
         Ok(())
     }
 
-    /// Bump `policy.authz_services.tag_version` for every policy service bound to
-    /// `warehouse_id`, AND for the tag service each such service is actually
-    /// POLLED through. A monotonic `tag_version` is how the Ranger tag-download
-    /// plugin (which polls `download_tags?lastKnownVersion=`) learns a
-    /// warehouse's catalog-tag assignments changed; without the bump it 304s
-    /// forever. Runs on the caller's transaction. Parameterized,
-    /// cross-seam-but-same-DB write.
+    /// Bump the `tag_version` of every policy service that serves
+    /// `warehouse_id`'s catalog tags, so the Ranger tag plugin stops 304ing and
+    /// re-downloads. Runs on the caller's transaction (cross-seam, same DB).
     ///
-    /// `profiles` is the SAME union `PolicyStore::tag_assignments_for_service`
-    /// serves under (SP3 catalog-registry review C1/I1) — an engine's service
-    /// binds to this warehouse if EITHER:
-    ///   (a) the legacy branch — `engine_mgmt.engines.authz_service_id`, this
-    ///       warehouse is the engine's own primary (`engines.warehouse_id`); or
-    ///   (b) the registry branch — the engine attaches this warehouse's registry
-    ///       catalog through `registry.engine_catalog_attachments` (SP3 D5), NOT
-    ///       only as its primary.
-    /// Missing (b) was fail-open for UPDATES specifically: a tag change on a
-    /// warehouse an engine attaches only as a SECONDARY catalog never bumped
-    /// that engine's service, so `download_tags` kept answering 304 and the new
-    /// mask/tag never reached the plugin until an unrelated restart. The legacy
-    /// branch stays until `engine_catalogs` is retired (SP3c), for the same
-    /// un-migrated / rename-window reasons documented on
-    /// `tag_assignments_for_service`.
-    ///
-    /// SP3 catalog-registry review N1: bumping only `profiles` is NOT enough.
-    /// The Trino Ranger tag plugin polls the TAG service, not the trino
-    /// profile — `download_tags` (`ranger/api/download.rs`) gates its 304 on
-    /// **the polled service's own** `tag_version`, and a trino profile's tag
-    /// service is `profiles.config_jsonb->>'tagService'` (the SAME field
-    /// `tag_assignments_for_service`'s `LEFT JOIN ... tp.config_jsonb->>
-    /// 'tagService' = s.name` already reads on the serving side, and the field
-    /// `crates/egret-engine-mgmt/src/engines.rs`'s trino-profile auto-bind
-    /// writes — `config: { "tagService": format!("{name}_tag") }` — when it
-    /// creates the paired tag service; established by reading that call site,
-    /// not guessed from the `<profile>_tag` naming convention it happens to
-    /// use). So the tag service named by each resolved profile's `tagService`
-    /// config is bumped too. Bumping the profile itself is kept: a service
-    /// with no trino/tag split (bound to directly, as in
-    /// `assign_and_unassign_bump_bound_service_tag_version`) has no separate
-    /// tag service, and the direct bump is the only one that reaches it.
+    /// The resolution itself — the registry∪legacy `profiles` union and the
+    /// `tagService` fan-out the plugin actually polls — lives in
+    /// `egret_catalog_registry::bump_bound_tag_versions`, because the boot
+    /// backfill has to bump the same services for the same reason (SP3
+    /// catalog-registry review C1/I1/N1/F-1). One implementation, three
+    /// callers, no drift: read that function for why each branch is there.
     async fn bump_bound_tag_versions(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         warehouse_id: Uuid,
     ) -> Result<(), BiApiError> {
-        sqlx::query(
-            "WITH profiles AS ( \
-                 SELECT DISTINCT e.authz_service_id AS id \
-                 FROM engine_mgmt.engines e \
-                 WHERE e.warehouse_id = $1 AND e.authz_service_id IS NOT NULL \
-                 UNION \
-                 SELECT DISTINCT e.authz_service_id AS id \
-                 FROM registry.catalogs c \
-                 JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
-                 JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
-                 WHERE c.warehouse_id = $1 AND e.authz_service_id IS NOT NULL \
-             ) \
-             UPDATE policy.authz_services s \
-                SET tag_version = tag_version + 1, updated_at = now() \
-              WHERE s.id IN (SELECT id FROM profiles) \
-                 OR s.name IN ( \
-                     SELECT tp.config_jsonb ->> 'tagService' \
-                     FROM policy.authz_services tp \
-                     WHERE tp.id IN (SELECT id FROM profiles) \
-                       AND tp.config_jsonb ->> 'tagService' IS NOT NULL \
-                 )",
-        )
-        .bind(warehouse_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(crate::error::BiError::from)?;
+        egret_catalog_registry::bump_bound_tag_versions(&mut **tx, warehouse_id)
+            .await
+            .map_err(crate::error::BiError::from)?;
         Ok(())
     }
 
