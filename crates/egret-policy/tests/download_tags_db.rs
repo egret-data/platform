@@ -550,3 +550,77 @@ async fn download_tags_unrelated_service_exports_nothing() {
         "a service with no bound engine must export nothing, got {srs:?}"
     );
 }
+
+/// I3 leftover (SP3 catalog-registry review re-review): an engine whose own
+/// PRIMARY warehouse (`engines.warehouse_id`) IS the tagged one, but which
+/// has neither an attachment (registry branch) nor a legacy primary row
+/// (legacy branch) — the fail-closed direction, e.g. right after a detach
+/// with nothing re-attached — exports nothing for it. This needs the
+/// exporting-nothing engine and the engine that DOES export it on TWO
+/// DIFFERENT services: sharing one service (as the secondary-attachment test
+/// above does) cannot isolate "this specific engine's own export" from "the
+/// service's export via some other bound engine".
+#[tokio::test]
+async fn download_tags_owning_engine_with_neither_attachment_nor_legacy_row_exports_nothing() {
+    let Some(db) = db().await else {
+        eprintln!("skip");
+        return;
+    };
+    let pool = db.pool.clone();
+    let store = PolicyStore::new(db);
+    seed_trino(&store).await.expect("seed");
+
+    // Engine C: its OWN primary warehouse is W (tagged below), bound to
+    // service S1. No attachment, no legacy primary row for C at all — the
+    // state right after a detach with nothing re-attached.
+    let svc_c = format!("trino_{}", Uuid::new_v4().simple());
+    let svc_c_row = store
+        .create_service(&svc_c, "trino", &json!({}))
+        .await
+        .expect("create service C");
+    let wh_w = seed_warehouse(&pool).await;
+    let _eng_c = seed_engine(&pool, svc_c_row.id, wh_w).await;
+    seed_tag_assignment(&pool, wh_w).await;
+
+    // Engine D: a DIFFERENT service S2, its OWN primary is a different,
+    // untagged warehouse; it attaches W's registry catalog as a secondary.
+    let svc_d = format!("trino_{}", Uuid::new_v4().simple());
+    let svc_d_row = store
+        .create_service(&svc_d, "trino", &json!({}))
+        .await
+        .expect("create service D");
+    let wh_d = seed_warehouse(&pool).await;
+    let eng_d = seed_engine(&pool, svc_d_row.id, wh_d).await;
+    let (catalog_w, catalog_name_w) = seed_registry_catalog(&pool, wh_w, "detached_owner").await;
+    attach_catalog(&pool, eng_d, catalog_w).await;
+
+    // S1 (engine C, the owning-but-detached engine) exports NOTHING for W.
+    let r = app(store.clone())
+        .oneshot(get(&format!("/tags/download/{svc_c}")))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let bytes = r.into_body().collect().await.unwrap().to_bytes();
+    let st: Value = serde_json::from_slice(&bytes).unwrap();
+    let srs = st["serviceResources"].as_array().unwrap();
+    assert!(
+        srs.is_empty(),
+        "an engine whose primary IS the tagged warehouse, with no attachment \
+         and no legacy row, must export nothing for it, got {srs:?}"
+    );
+
+    // S2 (engine D, the actual attaching engine) exports it correctly.
+    let r = app(store)
+        .oneshot(get(&format!("/tags/download/{svc_d}")))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let bytes = r.into_body().collect().await.unwrap().to_bytes();
+    let st: Value = serde_json::from_slice(&bytes).unwrap();
+    let srs = st["serviceResources"].as_array().unwrap();
+    assert_eq!(srs.len(), 1, "one resource, got {srs:?}");
+    assert_eq!(
+        srs[0]["resourceElements"]["catalog"]["values"][0],
+        json!(catalog_name_w)
+    );
+}

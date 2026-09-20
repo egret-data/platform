@@ -805,6 +805,178 @@ async fn ws_engine_view_lists_assigned_engines_with_catalogs() {
     );
 }
 
+/// SP3 catalog-registry review N2 (user ruling: filter by registry
+/// assignment now, in SP3a). The workspace engine view's per-engine catalog
+/// list is visibility-filtered by `registry.catalog_workspaces`, mirroring
+/// `RegistryStore::warehouse_visible_to_workspace`'s two-branch shape:
+///   1. a catalog explicitly assigned to this workspace is listed, even when
+///      a DIFFERENT workspace owns the underlying warehouse;
+///   2. a catalog attached to the SAME engine but assigned only to another
+///      workspace is absent;
+///   3. an un-backfilled warehouse catalog (no `catalog_workspaces` row at
+///      all yet) still appears for the workspace that OWNS the warehouse
+///      directly — the fallback.
+/// This is READ VISIBILITY only, not enforcement: a hidden catalog's engine
+/// would still answer a direct query for it (unchanged, untested here).
+#[tokio::test]
+async fn ws_engine_view_catalogs_filtered_by_registry_assignment() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+
+    // Scenario 3: the engine's PRIMARY warehouse catalog, seeded directly (no
+    // `catalog_workspaces` row at all), owned by ws_a via
+    // `catalog.warehouses.workspace_id` — the un-backfilled fallback.
+    let (engine_id, _engine_name, _storage_name, _secret_name, primary_catalog_name) =
+        seed_assigned_engine_with_catalog(
+            &f.db,
+            &f.workspace_secrets,
+            f.ws_a.0,
+            f.owner,
+            "n2-primary",
+        )
+        .await;
+
+    // Scenario 1: a SECOND warehouse, owned by ws_B, whose registry catalog is
+    // attached to the SAME engine as a secondary catalog and explicitly
+    // ASSIGNED to ws_A — proves assignment, not warehouse ownership, drives
+    // visibility.
+    let sc2: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections \
+           (name, provider, region, bucket, access_key, path_style) \
+         VALUES ($1, 's3', 'us-east-1', 'warehouse', 'egret', true) RETURNING id",
+    )
+    .bind(format!("n2-sc-{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed second storage connection");
+    let wh2: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(format!("n2-wh-{}", Uuid::new_v4().simple()))
+    .bind(f.ws_b.0)
+    .bind(sc2)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed second warehouse");
+    let assigned_catalog_name = format!("n2_assigned_{}", Uuid::new_v4().simple());
+    let assigned_catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) RETURNING id",
+    )
+    .bind(&assigned_catalog_name)
+    .bind(wh2)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed second registry catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
+    )
+    .bind(engine_id)
+    .bind(assigned_catalog_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("attach second catalog");
+    sqlx::query(
+        "INSERT INTO registry.catalog_workspaces (catalog_id, workspace_id) VALUES ($1, $2)",
+    )
+    .bind(assigned_catalog_id)
+    .bind(f.ws_a.0)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign second catalog to ws_a");
+
+    // Scenario 2: a THIRD catalog, attached to the SAME engine, assigned ONLY
+    // to ws_B — must be absent from ws_A's view.
+    let sc3: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections \
+           (name, provider, region, bucket, access_key, path_style) \
+         VALUES ($1, 's3', 'us-east-1', 'warehouse', 'egret', true) RETURNING id",
+    )
+    .bind(format!("n2-sc3-{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed third storage connection");
+    let wh3: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(format!("n2-wh3-{}", Uuid::new_v4().simple()))
+    .bind(f.ws_b.0)
+    .bind(sc3)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed third warehouse");
+    let hidden_catalog_name = format!("n2_hidden_{}", Uuid::new_v4().simple());
+    let hidden_catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) RETURNING id",
+    )
+    .bind(&hidden_catalog_name)
+    .bind(wh3)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed third registry catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
+    )
+    .bind(engine_id)
+    .bind(hidden_catalog_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("attach third catalog");
+    sqlx::query(
+        "INSERT INTO registry.catalog_workspaces (catalog_id, workspace_id) VALUES ($1, $2)",
+    )
+    .bind(hidden_catalog_id)
+    .bind(f.ws_b.0)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign third catalog to ws_b only");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/engines/{engine_id}", f.slug_a),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, d) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "engine detail; body={d}");
+    let names: Vec<String> = d["catalogs"]
+        .as_array()
+        .expect("catalogs array")
+        .iter()
+        .map(|c| c["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        names.contains(&primary_catalog_name),
+        "the un-backfilled owned warehouse catalog must still appear; got {names:?}"
+    );
+    assert!(
+        names.contains(&assigned_catalog_name),
+        "a catalog explicitly assigned to ws_a must appear even though ws_b owns its warehouse; got {names:?}"
+    );
+    assert!(
+        !names.contains(&hidden_catalog_name),
+        "a catalog attached to the engine but assigned only to ws_b must NOT appear; got {names:?}"
+    );
+    assert_eq!(
+        names.len(),
+        2,
+        "exactly the two visible catalogs, got {names:?}"
+    );
+}
+
 /// B2: a non-admin member (ws_viewer holds `catalog:read`) may read the engine
 /// view — it is a member read, not a manage-only action.
 #[tokio::test]

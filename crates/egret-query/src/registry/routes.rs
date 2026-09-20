@@ -435,7 +435,10 @@ async fn engine_detail(
     // storage_name is a property of the engine's warehouse; shared by every
     // catalog. Best-effort — `None` when the warehouse/storage is unresolvable.
     let storage_name = st.repo.resolve_storage_name(engine.warehouse_id).await?;
-    let catalogs = st.repo.list_engine_catalogs(engine_id).await?;
+    let catalogs = st
+        .repo
+        .list_engine_catalogs(engine_id, ctx.workspace_id.0)
+        .await?;
     Ok(Json(WsEngineDetailDto {
         name: engine.name,
         engine_type: engine.engine_type,
