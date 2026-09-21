@@ -50,8 +50,12 @@ catalog left by a pre-SP3a engine. Re-applying an edited catalog uses `ALTER CAT
 a second `CREATE`, because `IF NOT EXISTS` makes a credential rotation a silent no-op.
 
 **D4 — StarRocks 4.x is the floor.** Egret provisions `starrocks/fe-ubuntu:4.1-latest`. `can_read`
-gates on that: iceberg, hive, deltalake, hudi, elasticsearch, tpch/tpcds (rendered `benchmark`),
-and jdbc for postgresql, mysql, mariadb, oracle, sqlserver and clickhouse. The image is
+gates on that: iceberg, hive, deltalake, hudi, elasticsearch, and jdbc for postgresql, mysql,
+mariadb, oracle, sqlserver and clickhouse. **`tpch` and `tpcds` are refused on StarRocks.** The
+`benchmark` connector that would serve them exists only on StarRocks' `main` (added 2026-01-22,
+commit `c019a148`); it is in no release branch — not 4.0, not 4.1 — and in no tag, so a `benchmark`
+catalog fails on every FE egret can actually provision. The SP3 design's engine-support table said
+otherwise and was wrong. When the connector ships, this is a one-line change plus a test. The image is
 overridable, so an engine pinned to an older FE can still refuse a kind egret allows; that refusal
 surfaces as the DDL error on the attachment, not as a validation error. Today `can_read` answers
 `true` for every typed kind on both engines through a `_ => true` arm. At a 4.x floor the matrix
@@ -78,7 +82,11 @@ each engine.
 **D6 — Secrets are resolved at DDL-build time and never logged.** There is no `${ENV:…}` for
 StarRocks; the plaintext goes into the statement. Therefore: the DDL text is never logged, not even
 at debug, and errors returned from the FE are scrubbed before they reach an `apply_error` column or
-an API response. The catalog DDL also starts using the engine's pinned FE certificate, which the
+an API response. **Scrubbing alone is not enough.** It removes whole occurrences of a secret, in
+both its raw and its escaped form, but an FE error that quotes a *truncated* statement leaks a
+prefix that no substring match can catch. So the consumer caps and summarises the FE error rather
+than storing it whole: `apply_error` keeps the FE's error code and a bounded, scrubbed excerpt, and
+never the statement. The catalog DDL also starts using the engine's pinned FE certificate, which the
 delegation path already passes and the catalog path does not — today an OAuth2 credential crosses
 the wire in cleartext on a TLS-capable engine, and so does the FE **root password** on the
 login probe that precedes it. Every statement goes through one target so neither can be forgotten
@@ -125,4 +133,4 @@ service and never will until upstream starrocks#67458 lands, so nothing here cha
   `ALTER`, detach with an unknown catalog, and a compensating drop.
 - The bootstrap's checkpoints become behavioural tests instead of a source-text grep.
 - Live on kind: provision a StarRocks engine, attach an iceberg and a postgres catalog, query both,
-  rotate the password, re-apply, detach. Reported as manual.
+  rotate the password, re-apply, detach. Reported as manual. (Not a `tpch` catalog: see D4.)
