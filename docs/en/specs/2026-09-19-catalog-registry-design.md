@@ -38,7 +38,7 @@ StarRocks `fe/fe-core/.../connector/ConnectorType.java`, `docs/en/data_source/ca
 | | Oracle, SQL Server | `oracle`, `sqlserver` | `jdbc` (since 3.2.9 / 3.3.1) |
 | | ClickHouse | `clickhouse` | `jdbc` (experimental since 3.3.0) |
 | Search | Elasticsearch | `elasticsearch` | `es` |
-| Sample | TPC-H, TPC-DS | `tpch`, `tpcds` | `benchmark` (also SSB) |
+| Sample | TPC-H, TPC-DS | `tpch`, `tpcds` | **not supported** — the `benchmark` connector is on StarRocks `main` only (commit `c019a148`, 2026-01-22), in no release branch or tag, so egret refuses these on StarRocks (SP3b D4) |
 
 Trino only: BigQuery, Snowflake, Redshift, SingleStore, Cassandra, MongoDB, Redis, Kafka, Druid,
 Pinot, Prometheus, Loki, Google Sheets, Exasol, DuckDB, Ignite, OpenSearch, Lakehouse, JMX,
