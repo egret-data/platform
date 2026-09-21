@@ -176,11 +176,16 @@ impl Default for JdbcDrivers {
 }
 
 impl JdbcDrivers {
-    /// The pinned (or overridden) driver for a dialect, or `None` when the
-    /// entry's `driver_url` is empty — an operator's way of saying "not
-    /// available here" (a `[starrocks.jdbc_drivers]` override can blank one
-    /// deliberately; `render_starrocks` then refuses with `NoJdbcDriver`
-    /// unless the catalog's own `advanced.starrocks` supplies both keys).
+    /// The pinned (or overridden) driver for a dialect, or `None` when
+    /// either `driver_url` or `driver_class` is empty — an operator's way of
+    /// saying "not available here" (a `[starrocks.jdbc_drivers]` override
+    /// can blank either field deliberately; `render_starrocks` then refuses
+    /// with `NoJdbcDriver` unless the catalog's own `advanced.starrocks`
+    /// supplies both keys). Checking only `driver_url` would let a
+    /// deployment blank `driver_class` alone reach the FE as
+    /// `driver_class = ""`, which comes back as an FE error instead of
+    /// egret's own clean refusal — exactly what D5's refusal exists to
+    /// avoid.
     pub fn get(&self, dialect: JdbcDialect) -> Option<&JdbcDriver> {
         let driver = match dialect {
             JdbcDialect::Postgresql => &self.postgresql,
@@ -190,7 +195,7 @@ impl JdbcDrivers {
             JdbcDialect::Sqlserver => &self.sqlserver,
             JdbcDialect::Clickhouse => &self.clickhouse,
         };
-        if driver.driver_url.is_empty() {
+        if driver.driver_url.is_empty() || driver.driver_class.is_empty() {
             None
         } else {
             Some(driver)
@@ -1113,6 +1118,35 @@ mod tests {
         assert_eq!(
             p["driver_url"],
             PropValue::Plain("file:///opt/pg.jar".into())
+        );
+    }
+
+    /// Same as the `driver_url` case above, but for `driver_class` alone.
+    /// `get` must treat EITHER field being blanked as "not available here" —
+    /// checking only `driver_url` would let a deployment override that blanks
+    /// `driver_class` alone reach the FE as `driver_class = ""`, which comes
+    /// back as an FE error instead of egret's own clean `NoJdbcDriver` refusal.
+    #[test]
+    fn a_blanked_driver_class_override_also_disables_the_dialect() {
+        let mut settings = egret_config::StarRocksSettings::default();
+        settings.jdbc_drivers.postgresql = Some(egret_config::JdbcDriverOverride {
+            driver_url: None,
+            driver_class: Some(String::new()),
+        });
+        let drivers = DEFAULT_SR_JDBC_DRIVERS.with_overrides(&settings);
+        assert!(drivers.get(JdbcDialect::Postgresql).is_none());
+
+        let d = def(
+            "jdbc",
+            json!({ "dialect": "postgresql", "host": "db", "port": 5432, "database": "s",
+                    "user": "u", "password_secret_id": PW, "ssl": { "mode": "require" } }),
+            json!(null),
+        );
+        let mut in_: StarRocksRenderInput<'_> = input();
+        in_.drivers = &drivers;
+        assert_eq!(
+            render_starrocks("j", &d, &in_).unwrap_err(),
+            RenderError::NoJdbcDriver(JdbcDialect::Postgresql)
         );
     }
 
