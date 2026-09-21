@@ -469,7 +469,10 @@ impl std::fmt::Debug for FeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FeError")
             .field("code", &self.code)
-            .field("excerpt", &"<withheld: use FeError::scrubbed(&secrets)>")
+            .field(
+                "excerpt",
+                &"<withheld: use FeError::scrubbed(fe, &secrets)>",
+            )
             .field("already_exists", &self.already_exists)
             .field("unknown_catalog", &self.unknown_catalog)
             .finish()
