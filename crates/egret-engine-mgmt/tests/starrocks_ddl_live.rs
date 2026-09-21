@@ -88,8 +88,11 @@ async fn run(fe: &FeTarget, name: &str) -> Result<(), String> {
     secrets.insert(pw_id, "egret".to_string());
     // Task 4 made this structural: `excerpt` is private and `Display` is the
     // FE code alone, so `scrubbed` is the only way to read the diagnosis — the
-    // pattern every production caller now follows by construction.
-    let scrub = |e: &egret_engine_mgmt::FeError| e.scrubbed(&secrets);
+    // pattern every production caller now follows by construction. The final
+    // review went one step further: `scrubbed` takes the `&FeTarget` too, so
+    // the credential this connection logs in with cannot be left out of the
+    // map even here, where the map is hand-written.
+    let scrub = |e: &egret_engine_mgmt::FeError| e.scrubbed(fe, &secrets);
 
     runner
         .execute(fe, &ddl.create_sql(&secrets).map_err(|e| e.to_string())?)

@@ -4126,13 +4126,12 @@ fn spawn_starrocks_catalog_wire(
             }
         };
 
-        // Everything on this connection logs in as `root`, so the root
+        // (Everything on this connection logs in as `root`, so the root
         // password is a secret EVERY error below could quote — a failed login
-        // echoes the credential it was given (fix round 1, F3: this used to
-        // scrub against an empty map under a comment that said exactly this).
-        // `FeTarget::secrets` is the one place this is derived, so a future
-        // caller can't forget the root password the way that fix was needed.
-        let fe_secrets: std::collections::BTreeMap<Uuid, String> = fe.secrets();
+        // echoes the credential it was given. This used to be a `fe_secrets`
+        // map assembled here and threaded through each `scrubbed` call by
+        // hand, which is the thing that was forgotten twice; `scrubbed` now
+        // takes `&fe` and derives it. Final whole-branch review, F2.)
 
         // FE-pod-Ready is NOT root-login-ready: the `{name}-initpwd` Job (#268)
         // sets root's password via a SEPARATE Job that races the FE coming up, so
@@ -4158,11 +4157,13 @@ fn spawn_starrocks_catalog_wire(
                     break;
                 }
                 Err(e) => {
-                    // The probe carries the root password, so what comes back
-                    // can quote it: `scrubbed` is the only way to read it, and
-                    // `fe_secrets` is what closes the module's documented
-                    // short-unquoted residual for that value.
-                    tracing::debug!(engine = %engine_name, error = %e.scrubbed(&fe_secrets),
+                    // The probe carries the root password and nothing else, so
+                    // what comes back can quote it: `scrubbed` is the only way
+                    // to read the diagnosis, and the `&fe` it is given is what
+                    // closes the module's documented short-unquoted residual
+                    // for that value.
+                    tracing::debug!(engine = %engine_name,
+                        error = %e.scrubbed(&fe, &std::collections::BTreeMap::new()),
                         "starrocks bootstrap: root login not ready yet (initpwd race); retrying");
                 }
             }
@@ -4199,11 +4200,12 @@ fn spawn_starrocks_catalog_wire(
             let mut all_ok = true;
             // The service user's password is inline in `CREATE USER … IDENTIFIED
             // BY` (D6), so every FE error below is scrubbed against it before it
-            // reaches a log — AND against the root password this connection
-            // logged in with, which is on the wire for these statements exactly
-            // as it was for the probe (fix round 1, F3). The statements
-            // themselves are never logged.
-            let mut secrets = fe_secrets.clone();
+            // reaches a log. That is the STATEMENT's half and the only half a
+            // caller supplies; the root password this connection logged in
+            // with — on the wire for these statements exactly as it was for
+            // the probe — comes from the `&fe` each `scrubbed` call is handed.
+            // The statements themselves are never logged.
+            let mut secrets = std::collections::BTreeMap::new();
             secrets.insert(Uuid::from_u128(1), d.service_password.clone());
 
             // The integration's `CREATE` is the one statement that is NOT
@@ -4253,7 +4255,7 @@ fn spawn_starrocks_catalog_wire(
                              properties re-applied so a changed issuer takes effect"),
                         Err(e) => {
                             all_ok = false;
-                            tracing::warn!(engine = %engine_name, error = %e.scrubbed(&secrets),
+                            tracing::warn!(engine = %engine_name, error = %e.scrubbed(&fe, &secrets),
                                 "starrocks delegation bootstrap: egret_oidc exists but could not \
                                  be updated; JWT logins will fail if the issuer has changed");
                         }
@@ -4261,7 +4263,7 @@ fn spawn_starrocks_catalog_wire(
                 }
                 Err(e) => {
                     all_ok = false;
-                    tracing::warn!(engine = %engine_name, error = %e.scrubbed(&secrets),
+                    tracing::warn!(engine = %engine_name, error = %e.scrubbed(&fe, &secrets),
                         "starrocks delegation bootstrap: statement failed; admin can retry");
                 }
             }
@@ -4279,7 +4281,7 @@ fn spawn_starrocks_catalog_wire(
                 }
                 if let Err(e) = st.starrocks_ddl.execute(&fe, stmt).await {
                     all_ok = false;
-                    tracing::warn!(engine = %engine_name, error = %e.scrubbed(&secrets),
+                    tracing::warn!(engine = %engine_name, error = %e.scrubbed(&fe, &secrets),
                         "starrocks delegation bootstrap: statement failed; admin can retry");
                 }
             }
@@ -8925,6 +8927,81 @@ mod tests {
         }
     }
 
+    /// Collects what a `tracing` subscriber writes, so a test can assert on a
+    /// log line that is the only sink a code path has. Same shape as
+    /// `tests/error_mapping.rs`'s, which is the other place in this crate that
+    /// needs one.
+    #[derive(Clone, Default)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Capture {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).expect("utf-8 log")
+        }
+    }
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Capture;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// A root password no shape-based redaction pass can see: eight
+    /// characters, no whitespace, no quoting, no `scheme://`. Too short for
+    /// `redact_opaque_runs` (>= 20), invisible to `redact_quoted` and
+    /// `redact_urls`, and it leaves a well-formed message's quoting intact so
+    /// the fail-closed check does not withhold the excerpt either.
+    ///
+    /// This is the residual `starrocks_ddl`'s module doc names as the one
+    /// shape its redaction cannot close, and it is what the F2 tests are for:
+    /// a REAL minted root password is 32 unbroken base64url characters, which
+    /// `redact_opaque_runs` masks whatever the scrub map holds, so a test
+    /// using one would pass on luck rather than on the code under test.
+    const SHORT_ROOT_PW: &str = "sh0rt-pw";
+
+    /// Replace `engine`'s FE root password with [`SHORT_ROOT_PW`] and return
+    /// the reloaded row. Shared by the three F2 tests (apply, detach and the
+    /// compensating drop), which differ only in which statement they make the
+    /// FE refuse.
+    async fn give_a_short_root_password(st: &CpState, engine: &Engine) -> Engine {
+        let sid = st
+            .secrets
+            .create(
+                None,
+                &format!("egret-root-{}", engine.id),
+                Some("StarRocks FE root password (short, for this test)"),
+                SHORT_ROOT_PW,
+            )
+            .await
+            .expect("store the short root password");
+        st.engine_mgmt
+            .set_root_secret(engine.id, sid)
+            .await
+            .expect("set root secret");
+        st.engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .expect("reload")
+            .expect("engine present")
+    }
+
+    /// An `Access denied` the way a real FE words one, echoing the credential
+    /// it was given — unquoted and short, so only the scrub map can remove it.
+    fn access_denied_echoing_the_root_password() -> String {
+        format!("ERROR 1045 (28000): Access denied for user root using password {SHORT_ROOT_PW}")
+    }
+
     /// F2 (final whole-branch review). Every statement the apply path sends
     /// travels on a connection that logs in as `root` with the FE root
     /// password, so that password is a secret each of those FE errors could
@@ -8957,31 +9034,7 @@ mod tests {
         let (wh, _s) = seed_sr_warehouse(&st, &db).await;
         let engine = seed_sr_engine(&st, wh.id).await;
 
-        // Eight characters, no whitespace, no quoting, no `scheme://`: too
-        // short for `redact_opaque_runs` (>= 20), invisible to
-        // `redact_quoted` and `redact_urls`, and it leaves the message's own
-        // quoting well-formed so the fail-closed check does not withhold.
-        const SHORT_ROOT_PW: &str = "sh0rt-pw";
-        let sid = st
-            .secrets
-            .create(
-                None,
-                &format!("egret-root-{}", engine.id),
-                Some("StarRocks FE root password (short, for this test)"),
-                SHORT_ROOT_PW,
-            )
-            .await
-            .expect("store the short root password");
-        st.engine_mgmt
-            .set_root_secret(engine.id, sid)
-            .await
-            .expect("set root secret");
-        let engine = st
-            .engine_mgmt
-            .get_engine(engine.id)
-            .await
-            .expect("reload")
-            .expect("engine present");
+        let engine = give_a_short_root_password(&st, &engine).await;
         prov.set_status(ready_fe_status(&engine.name));
 
         let name = format!("a_{}", Uuid::new_v4().simple());
@@ -8991,12 +9044,7 @@ mod tests {
         // credential it was given, the way a real `Access denied` does. Not
         // `SELECT 1`: the root-login probe has to pass, or the bootstrap gives
         // up before it reaches an attachment at all.
-        fake.fail_matching(
-            "SHOW CATALOGS",
-            &format!(
-                "ERROR 1045 (28000): Access denied for user root using password {SHORT_ROOT_PW}"
-            ),
-        );
+        fake.fail_matching("SHOW CATALOGS", &access_denied_echoing_the_root_password());
 
         spawn_starrocks_catalog_wire(
             st.clone(),
@@ -9021,6 +9069,148 @@ mod tests {
             err.contains("Access denied"),
             "premise: this message survives redaction intact apart from the \
              credential, so the scrub map is what removed it; apply_error={err}"
+        );
+    }
+
+    /// The second of the three scrub sites F2 named, and the first of the two
+    /// that used to pass `BTreeMap::new()` under a comment reasoning only
+    /// about the statement. A `DROP CATALOG IF EXISTS` carries no secret of
+    /// its own — but it still logs in as `root`, so a refused login echoes the
+    /// credential, and this error goes straight into the 4xx/502 body a
+    /// detach's caller reads.
+    ///
+    /// Driven through `apply_catalog_change` rather than the bootstrap,
+    /// because that is the only way into the detach arm.
+    #[tokio::test]
+    async fn a_failed_detach_scrubs_the_fe_root_password_too() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping a_failed_detach_scrubs_the_fe_root_password_too: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = give_a_short_root_password(&st, &engine).await;
+
+        let name = format!("a_{}", Uuid::new_v4().simple());
+        let ids = seed_pending_attachments(&st, &engine, &[name.as_str()]).await;
+
+        fake.fail_matching("DROP CATALOG", &access_denied_echoing_the_root_password());
+
+        let err = crate::catalog_apply::apply_catalog_change(
+            &st,
+            &engine,
+            crate::catalog_apply::CatalogChange::Detach(ids[&name]),
+        )
+        .await
+        .err()
+        .expect("premise: the FE refused the DROP");
+        let msg = err.message();
+        assert!(
+            !msg.contains(SHORT_ROOT_PW),
+            "the FE root password reached a detach's error body: {msg}"
+        );
+        assert!(
+            msg.contains("Access denied"),
+            "premise: the message survives redaction apart from the credential, \
+             so the scrub map is what removed it; message={msg}"
+        );
+    }
+
+    /// The third scrub site, and the other former `BTreeMap::new()`:
+    /// `compensate_created_catalog`. Its only sink is a `tracing::error!`, so
+    /// this captures the log rather than a return value.
+    ///
+    /// Reaching it takes a double fault, which is what D7 is about: the
+    /// convergence CREATES the catalog, the attachment row vanishes before it
+    /// can be settled (a concurrent detach — simulated here by deleting the
+    /// row from the fake's create hook, so `set_apply_applied` answers
+    /// `NotFound`), and then the compensating DROP fails too. That last
+    /// failure is the FE error under test.
+    #[tokio::test]
+    async fn a_failed_compensating_drop_scrubs_the_fe_root_password_out_of_its_log() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_failed_compensating_drop_scrubs_the_fe_root_password_out_of_its_log: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = give_a_short_root_password(&st, &engine).await;
+        prov.set_status(ready_fe_status(&engine.name));
+
+        let name = format!("a_{}", Uuid::new_v4().simple());
+        let ids = seed_pending_attachments(&st, &engine, &[name.as_str()]).await;
+        let catalog_id = ids[&name];
+
+        // Fault one: the row is gone by the time the CREATE is recorded.
+        let registry = st.engine_mgmt.registry();
+        let engine_id = engine.id;
+        fake.on_create(move |_name| {
+            let registry = registry.clone();
+            Box::pin(async move {
+                registry
+                    .delete_attachment(engine_id, catalog_id)
+                    .await
+                    .expect("simulate a concurrent detach");
+            })
+        });
+        // Fault two: the compensating DROP is refused, echoing the credential.
+        fake.fail_matching("DROP CATALOG", &access_denied_echoing_the_root_password());
+
+        let logs = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        // `set_default`, not `with_default`: the work below is async, and
+        // `#[tokio::test]`'s current-thread runtime keeps it on this thread,
+        // where the guard applies.
+        let guard = tracing::subscriber::set_default(subscriber);
+        // `tracing` caches per-callsite interest for the whole PROCESS, so a
+        // sibling test in this binary that reached the line below first — with
+        // no subscriber installed — can have cached it as "never" and make
+        // this capture silently empty. That has bitten this repo before
+        // (`tests/error_mapping.rs`'s module doc names the case). Recomputing
+        // the cache under this subscriber is the documented remedy; the
+        // "premise" assertion afterwards is what would catch it if it were
+        // not enough, so this test can only go flaky-RED, never false-green.
+        tracing::callsite::rebuild_interest_cache();
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            None,
+        )
+        .await
+        .expect("bootstrap task did not panic");
+        drop(guard);
+
+        let text = logs.text();
+        assert!(
+            text.contains("the compensating DROP failed too"),
+            "premise: the double fault was reached, so the line under test was \
+             written at all; log={text}"
+        );
+        assert!(
+            !text.contains(SHORT_ROOT_PW),
+            "the FE root password reached the compensation log: {text}"
+        );
+        assert!(
+            text.contains("Access denied"),
+            "premise: the message survives redaction apart from the credential, \
+             so the scrub map is what removed it; log={text}"
         );
     }
 

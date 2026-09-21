@@ -106,12 +106,17 @@ impl FeTarget {
     /// The secrets this target's own fields carry, keyed the way
     /// [`FeError::scrubbed`] wants them: synthetically, since `scrub_secrets`
     /// reads only the values. Today that is just the root password every
-    /// statement on this connection logs in with (fix round 1, F3: a caller
-    /// that scrubs against a hand-rolled map instead of this one can forget
-    /// it, which is exactly what happened once already). A third caller
-    /// resolving an FE target should build its secrets map from here rather
-    /// than re-deriving it.
-    pub fn secrets(&self) -> BTreeMap<uuid::Uuid, String> {
+    /// statement on this connection logs in with.
+    ///
+    /// **PRIVATE, and that is the fix.** It was `pub`, with a doc telling
+    /// callers to build their scrub map from here — and the root password was
+    /// then left out of a scrub map TWICE: once by the delegation bootstrap
+    /// (fix round 1, F3) and once by the apply path Task 4 wrote *after* that
+    /// fix (final whole-branch review, F2). A rule forgotten twice will be
+    /// forgotten again, so it stopped being a rule: [`FeError::scrubbed`] now
+    /// takes the `&FeTarget` itself and reads this, there is no other way to
+    /// obtain the map, and a caller that could omit it no longer type-checks.
+    fn secrets(&self) -> BTreeMap<uuid::Uuid, String> {
         self.root_password
             .iter()
             .map(|pw| (uuid::Uuid::nil(), pw.clone()))
@@ -310,13 +315,60 @@ pub struct FeError {
 
 impl FeError {
     /// The only form that may be logged, stored in `apply_error`, or returned
-    /// to an API caller (D6): this module's shape-based redaction, PLUS the
-    /// caller's own resolved secret values, which close the short-unquoted
-    /// residual the module doc describes. Pass every secret the failed
-    /// statement carried — `StarRocksCatalogDdl::secret_ids` resolved — or an
-    /// empty map for a statement that carries none (a `DROP`, a `SHOW`).
-    pub fn scrubbed(&self, secrets: &BTreeMap<uuid::Uuid, String>) -> String {
-        let text = egret_catalog_registry::scrub_secrets(&self.excerpt, secrets);
+    /// to an API caller (D6): this module's shape-based redaction, PLUS every
+    /// resolved secret value on the wire, which closes the short-unquoted
+    /// residual the module doc describes.
+    ///
+    /// **Two halves, and only one of them is the caller's.** `secrets` is
+    /// what the failed STATEMENT carried — `StarRocksCatalogDdl::secret_ids`
+    /// resolved, or an empty map for a `DROP` or a `SHOW`. `fe` is what the
+    /// CONNECTION carried: every statement in this module logs in as `root`,
+    /// and a refused login echoes the credential it was given. Taking the
+    /// `&FeTarget` rather than trusting the caller to have folded
+    /// `FeTarget::secrets` into its own map is the whole point of the
+    /// signature — see that method for the two times it was forgotten.
+    ///
+    /// The old, forgettable shape no longer type-checks:
+    ///
+    /// ```compile_fail,E0061
+    /// # use std::collections::BTreeMap;
+    /// # use egret_engine_mgmt::FeError;
+    /// fn diagnose(e: &FeError, statement_secrets: &BTreeMap<uuid::Uuid, String>) -> String {
+    ///     // The FE root password is nowhere in sight, and that is now an error.
+    ///     e.scrubbed(statement_secrets)
+    /// }
+    /// ```
+    ///
+    /// and the shape that does compile cannot leave the connection's own
+    /// secrets out, because it is handed the connection:
+    ///
+    /// ```
+    /// # use std::collections::BTreeMap;
+    /// # use egret_engine_mgmt::{FeError, FeTarget};
+    /// fn diagnose(
+    ///     e: &FeError,
+    ///     fe: &FeTarget,
+    ///     statement_secrets: &BTreeMap<uuid::Uuid, String>,
+    /// ) -> String {
+    ///     e.scrubbed(fe, statement_secrets)
+    /// }
+    /// ```
+    ///
+    /// Nor can a caller re-derive the connection half by hand and get it
+    /// wrong, because [`FeTarget::secrets`] is private:
+    ///
+    /// ```compile_fail,E0624
+    /// # use egret_engine_mgmt::FeTarget;
+    /// fn connection_secrets(fe: &FeTarget) -> usize {
+    ///     fe.secrets().len()
+    /// }
+    /// ```
+    pub fn scrubbed(&self, fe: &FeTarget, secrets: &BTreeMap<uuid::Uuid, String>) -> String {
+        // The FE's own go in LAST, so nothing a caller passes can displace
+        // them — not even a map that happens to key on the nil UUID.
+        let mut all = secrets.clone();
+        all.extend(fe.secrets());
+        let text = egret_catalog_registry::scrub_secrets(&self.excerpt, &all);
         match self.code {
             Some(c) => format!("FE error {c}: {text}"),
             None => text,
@@ -1367,7 +1419,7 @@ mod tests {
         let e = fe_error(
             r#"Getting analyzing error. Detail message: security integration 'egret's oidc' already exists."#,
         );
-        let printable = e.scrubbed(&BTreeMap::new());
+        let printable = e.scrubbed(&fe(), &BTreeMap::new());
         assert!(
             printable.contains(WITHHELD),
             "premise: this message's quoting cannot be paired, so the excerpt is \
@@ -1397,7 +1449,7 @@ mod tests {
             "detail word ".repeat(FE_ERROR_EXCERPT_MAX / 4)
         );
         let e = fe_error(&long);
-        let printable = e.scrubbed(&BTreeMap::new());
+        let printable = e.scrubbed(&fe(), &BTreeMap::new());
         assert!(
             !printable.to_ascii_lowercase().contains("already exists"),
             "premise: the phrase falls outside the cap; scrubbed={printable}"
@@ -1451,7 +1503,7 @@ mod tests {
             // Premise first: the printable form really has lost the phrase,
             // so this test cannot pass for the wrong reason.
             let e = fe_error(&raw);
-            let printable = e.scrubbed(&BTreeMap::new());
+            let printable = e.scrubbed(&fe(), &BTreeMap::new());
             assert!(
                 !printable.to_ascii_lowercase().contains("unknown catalog"),
                 "premise ({label}): the phrase must be gone from the excerpt; \
@@ -1509,7 +1561,7 @@ mod tests {
 
         let mut secrets = BTreeMap::new();
         secrets.insert(uuid::Uuid::nil(), "pw-abc".to_string());
-        let out = e.scrubbed(&secrets);
+        let out = e.scrubbed(&fe(), &secrets);
         assert!(!out.contains("pw-abc"), "scrubbed={out}");
         assert!(out.contains("Access denied"), "diagnosis survives: {out}");
         assert!(out.starts_with("FE error 1064: "), "scrubbed={out}");

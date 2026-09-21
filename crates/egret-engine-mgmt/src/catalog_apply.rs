@@ -253,13 +253,14 @@ async fn apply_starrocks(
             st.starrocks_ddl
                 .execute(&fe, &sql)
                 .await
-                // The DROP carries no secret of its own — but the CONNECTION
-                // does: it logs in as `root` with `fe.root_password`, which a
-                // failed login echoes. `fe.secrets()`, not `BTreeMap::new()`
-                // (final whole-branch review, F2): the old comment reasoned
-                // only about the statement and missed the channel it travels
-                // on.
-                .map_err(|e| ApplyError::Rejected(e.scrubbed(&fe.secrets())))
+                // The DROP carries no secret of its own, which is all the
+                // empty map here says. The CONNECTION's secrets — the root
+                // password a refused login echoes — are not this call site's
+                // to remember: `scrubbed` takes the `&FeTarget` and reads them
+                // itself (final whole-branch review, F2; before that fix this
+                // line passed `BTreeMap::new()` alone and the comment reasoned
+                // only about the statement).
+                .map_err(|e| ApplyError::Rejected(e.scrubbed(&fe, &BTreeMap::new())))
         }
     }
 }
@@ -418,22 +419,21 @@ pub(crate) async fn converge_attachment(
     let ddl = render_starrocks_attached(st, a)
         .await
         .map_err(ApplyError::Build)?;
-    // The statement's own secrets PLUS the FE root password this connection
-    // logs in with. Both halves are on the wire for every statement below, so
-    // both belong in every scrub below (final whole-branch review, F2: this
-    // used to be the catalog's secrets alone, and was closed only by the fact
-    // that a minted root password is 32 unbroken characters, which
-    // `redact_opaque_runs` catches by shape — a SHORT one would have fallen
-    // straight into the documented residual). `FeTarget::secrets` is the one
-    // place that half is derived.
-    let mut secrets = resolve_ddl_secrets(st, &ddl)
+    // The STATEMENT's secrets. The connection's — the FE root password every
+    // statement below logs in with — are added by `FeError::scrubbed` from the
+    // `&FeTarget` it is handed, not here: this function is the second place
+    // that half was forgotten (final whole-branch review, F2), and the fix was
+    // to stop asking call sites to remember it. It mattered: the leak was
+    // closed only by a minted root password being 32 unbroken characters,
+    // which `redact_opaque_runs` catches by SHAPE, and a short one would have
+    // fallen straight into the documented residual.
+    let secrets = resolve_ddl_secrets(st, &ddl)
         .await
         .map_err(ApplyError::Build)?;
-    secrets.extend(fe.secrets());
     let runner = st.starrocks_ddl.as_ref();
     let present = show_catalogs(runner, fe)
         .await
-        .map_err(|e| ApplyError::Rejected(e.scrubbed(&secrets)))?
+        .map_err(|e| ApplyError::Rejected(e.scrubbed(fe, &secrets)))?
         .contains(&name);
 
     // `None` from the second read means the FE said "Unknown catalog" — the
@@ -447,7 +447,7 @@ pub(crate) async fn converge_attachment(
     let fe_props = if present {
         show_create_catalog(runner, fe, &name)
             .await
-            .map_err(|e| ApplyError::Rejected(e.scrubbed(&secrets)))?
+            .map_err(|e| ApplyError::Rejected(e.scrubbed(fe, &secrets)))?
     } else {
         None
     };
@@ -531,7 +531,7 @@ pub(crate) async fn converge_attachment(
             };
             tracing::warn!(engine = %engine.name, catalog = %name,
                 statement = %ddl.redacted(form), "starrocks catalog DDL failed");
-            Err(ApplyError::Rejected(e.scrubbed(&secrets)))
+            Err(ApplyError::Rejected(e.scrubbed(fe, &secrets)))
         }
     }
 }
@@ -546,9 +546,9 @@ async fn compensate_created_catalog(st: &CpState, engine: &Engine, fe: &FeTarget
     let sql = drop_ddl(name).drop_sql();
     if let Err(e) = st.starrocks_ddl.execute(fe, &sql).await {
         tracing::error!(engine = %engine.name, catalog = %name,
-            // Same as the detach above: the DROP carries no secret, the
-            // connection carries the root password (final review, F2).
-            error = %e.scrubbed(&fe.secrets()),
+            // Same as the detach above: the DROP carries no secret of its
+            // own, and the connection's come from the `&FeTarget`.
+            error = %e.scrubbed(fe, &BTreeMap::new()),
             "created a catalog egret could not record, and the compensating DROP failed too — \
              drop it on the engine by hand");
     }
