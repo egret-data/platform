@@ -5562,10 +5562,11 @@ async fn add_catalog(
             crate::catalog_apply::validate_references(&st, &classified.def).await?;
             // BEFORE the replace, never after: `create_catalog_replacing_orphan`
             // DESTROYS a same-named orphan, and this request's rollback can only
-            // delete what it created — so a refusal decided later (StarRocks, a
-            // kind this engine cannot read) would 400 having silently destroyed
-            // the operator's existing catalog definition (review F-2). The same
-            // function decides it for the registry attach route.
+            // delete what it created — so a refusal decided later (a kind this
+            // engine cannot read, a name the engine reserves) would 400 having
+            // silently destroyed the operator's existing catalog definition
+            // (review F-2). The same function decides it for the registry
+            // attach route.
             crate::catalog_apply::check_engine_supports(&engine, &b.name, &classified.def)
                 .map_err(CatalogOpError::into_legacy)?;
             registry

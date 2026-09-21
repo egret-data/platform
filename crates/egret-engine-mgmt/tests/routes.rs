@@ -374,6 +374,40 @@ async fn seed_provisioned_warehouse_with_secret(f: &Fixture) -> Uuid {
     wh.id
 }
 
+/// [`seed_provisioned_warehouse`] under a CHOSEN warehouse name — the registry
+/// names a warehouse's catalog after its warehouse, so this is how a test
+/// decides what that catalog will be called.
+async fn seed_warehouse_named(f: &Fixture, name: &str) -> Uuid {
+    let (ws_id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("engine-ws-named-{}", Uuid::new_v4().simple()))
+            .bind("Engine Test Workspace (named)")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("insert workspace");
+    let (storage_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(format!("engine-sc-named-{}", Uuid::new_v4().simple()))
+    .bind("us-east-1")
+    .bind("egret-engine-test")
+    .bind("AKIATEST")
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert storage connection");
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let wh = catalog_store
+        .create_warehouse(name, ws_id, storage_id)
+        .await
+        .expect("create warehouse");
+    catalog_store
+        .set_lakekeeper_warehouse_id(wh.id, "wh-123")
+        .await
+        .expect("set lakekeeper id");
+    wh.id
+}
+
 /// Seed a workspace + storage_connection + warehouse WITHOUT lakekeeper_warehouse_id.
 async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
     let (ws_id,): (Uuid,) =
@@ -5374,9 +5408,10 @@ fn tpch_body(name: &str) -> serde_json::Value {
 /// `tpch`/`tpcds` no longer are — StarRocks has no `BENCHMARK` connector on
 /// any shipped release, `c019a148`). Used where a test targets a StarRocks
 /// engine and needs the request to get PAST the can_read gate, to exercise
-/// something else (the "StarRocks apply not supported yet" gate, an
-/// orphan-preservation check, …) instead of re-testing can_read itself,
-/// which has its own dedicated coverage in egret-catalog-registry.
+/// something else (an apply, a detach, an orphan-preservation check, …)
+/// instead of re-testing can_read itself, which has its own dedicated
+/// coverage in egret-catalog-registry. It also renders entirely from plain
+/// properties, which is what lets a drift test differ in exactly one key.
 fn elasticsearch_body(name: &str) -> serde_json::Value {
     serde_json::json!({ "name": name, "kind": "elasticsearch",
         "config": { "hosts": ["es1"], "port": 9200, "tls": false } })
@@ -5697,10 +5732,41 @@ async fn legacy_put_flags_a_failed_apply_without_reverting_and_a_later_apply_cle
     );
 }
 
-/// Plan decision #21: SP3a ships the StarRocks seam, not a renderer — attaching
-/// a registry catalog to a StarRocks engine is refused and leaves nothing behind.
+/// `POST /engines` for a StarRocks engine with the wizard defaults; returns
+/// `(engine id, its warehouse id)`. The engine's own post-provision FE wire is
+/// spawned in the background and still dials `mysql_async` directly (Task 5
+/// moves it), so it records nothing on `f.starrocks_ddl` — every statement the
+/// fake sees below was sent by the apply path under test.
+async fn create_starrocks_via_api(f: &Fixture, token: &str) -> (String, Uuid) {
+    let wh_id = seed_provisioned_warehouse_with_secret(f).await;
+    let (status, j) = call(f, "POST", "/engines", token, Some(serde_json::json!({
+        "name": format!("sr-{}", Uuid::new_v4().simple()), "warehouseId": wh_id, "kind": "starrocks",
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+    }))).await;
+    assert_eq!(status, StatusCode::CREATED, "create starrocks; body={j}");
+    (j["id"].as_str().unwrap().to_string(), wh_id)
+}
+
+/// A `jdbc` catalog body whose password lives in `secret_id` — the kind whose
+/// StarRocks statement really carries a credential inline (D6), and the one
+/// `SHOW CREATE CATALOG` deletes `password` from.
+fn jdbc_body(name: &str, secret_id: Uuid) -> serde_json::Value {
+    serde_json::json!({ "name": name, "kind": "jdbc", "config": {
+        "dialect": "postgresql", "host": "db.internal", "port": 5432,
+        "database": "sales", "user": "reader", "password_secret_id": secret_id,
+        "ssl": { "mode": "require" }
+    }})
+}
+
+/// SP3b D1/D3: the seam is gone — an egret warehouse attached to a StarRocks
+/// engine mints its Catalog Client and the catalog is CREATEd on the FE, with
+/// the minted credential inline (there is no `${ENV:…}` on StarRocks).
+/// Was `attaching_to_a_starrocks_engine_is_refused`.
 #[tokio::test]
-async fn attaching_to_a_starrocks_engine_is_refused() {
+async fn attaching_an_egret_warehouse_to_a_starrocks_engine_mints_a_client_and_creates_the_catalog()
+{
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
@@ -5711,26 +5777,7 @@ async fn attaching_to_a_starrocks_engine_is_refused() {
         return;
     };
     let token = session_for(&f, "engine_sr_attach_admin", true).await;
-    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
-    let resp = f
-        .app
-        .clone()
-        .oneshot(req(
-            "POST",
-            "/engines",
-            &token,
-            Some(serde_json::json!({
-                "name": format!("sr-{}", Uuid::new_v4().simple()), "warehouseId": wh_id, "kind": "starrocks",
-                "coordinatorReplicas": 1, "workerReplicas": 1,
-                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
-                "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
-            })),
-        ))
-        .await
-        .unwrap();
-    let (status, j) = into_json(resp).await;
-    assert_eq!(status, StatusCode::CREATED, "create sr; body={j}");
-    let engine_id = j["id"].as_str().unwrap().to_string();
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
 
     let other = seed_provisioned_warehouse(&f).await;
     let clients_before = egret_catalog_engine::CatalogStore::new(f.db.clone())
@@ -5745,26 +5792,106 @@ async fn attaching_to_a_starrocks_engine_is_refused() {
         serde_json::json!({ "name": "x", "kind": "egret-warehouse", "config": { "warehouseId": other } }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
-    assert!(
-        j["error"].as_str().unwrap().contains("not supported yet"),
-        "{j}"
-    );
+    assert_eq!(status, StatusCode::CREATED, "body={j}");
     assert_eq!(
         egret_catalog_engine::CatalogStore::new(f.db.clone())
             .list_clients(other)
             .await
             .unwrap()
             .len(),
-        clients_before,
-        "no client minted"
+        clients_before + 1,
+        "exactly one client minted"
     );
     let cat = warehouse_catalog(&f, other).await;
-    assert!(registry(&f)
+    let row = registry(&f)
         .get_attachment(Uuid::parse_str(&engine_id).unwrap(), cat.id)
         .await
         .unwrap()
-        .is_none());
+        .expect("attachment written");
+    assert_eq!(row.apply_status, "applied");
+    assert!(row.minted_client);
+
+    let sent = f.starrocks_ddl.executed();
+    let create = sent
+        .iter()
+        .find(|s| s.starts_with("CREATE EXTERNAL CATALOG"))
+        .unwrap_or_else(|| panic!("no CREATE was sent; sent={sent:?}"));
+    assert!(
+        create.contains("\"iceberg.catalog.credential\""),
+        "the minted credential is inline in the statement; create={create}"
+    );
+    // D3: never `IF NOT EXISTS` — that is what silently adopts a hand-made
+    // catalog and makes a credential rotation a no-op.
+    assert!(!create.contains("IF NOT EXISTS"), "create={create}");
+    assert_eq!(
+        f.starrocks_ddl.catalog(&cat.name).unwrap()["type"],
+        "iceberg"
+    );
+}
+
+/// D3 + `is_reserved_starrocks_name`: the refusal that replaced the
+/// not-supported-yet gate holds the SAME pre-mint position — a catalog whose
+/// name StarRocks reserves is 400, and no Catalog Client is minted for it.
+#[tokio::test]
+async fn a_reserved_starrocks_catalog_name_is_refused_before_a_client_is_minted() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_sr_reserved_admin", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+
+    // A warehouse whose name lands on StarRocks' resource-mapping prefix, so
+    // its registry catalog (named after the warehouse) is reserved. The
+    // prefix, not the bare `default_catalog`, so repeated runs against the
+    // same database cannot collide on `registry.catalogs.name`.
+    let reserved = seed_warehouse_named(
+        &f,
+        &format!(
+            "resource_mapping_inside_catalog_{}",
+            &Uuid::new_v4().simple().to_string()[..8]
+        ),
+    )
+    .await;
+    let clients_before = egret_catalog_engine::CatalogStore::new(f.db.clone())
+        .list_clients(reserved)
+        .await
+        .unwrap()
+        .len();
+    let (status, j) = add_catalog_via_api(
+        &f,
+        &token,
+        &engine_id,
+        serde_json::json!({ "name": "x", "kind": "egret-warehouse", "config": { "warehouseId": reserved } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap()
+            .contains("reserves the catalog"),
+        "{j}"
+    );
+    assert_eq!(
+        egret_catalog_engine::CatalogStore::new(f.db.clone())
+            .list_clients(reserved)
+            .await
+            .unwrap()
+            .len(),
+        clients_before,
+        "no client minted"
+    );
+    assert!(
+        f.starrocks_ddl.executed().is_empty(),
+        "nothing reached the FE: {:?}",
+        f.starrocks_ddl.executed()
+    );
 }
 
 /// Whole-branch review F-2: the engine-type refusals are decided BEFORE the
@@ -5845,12 +5972,14 @@ async fn legacy_add_refused_by_engine_type_leaves_the_orphan_byte_identical() {
     assert_eq!(status, StatusCode::CREATED, "create starrocks; body={j}");
     let sr_id = j["id"].as_str().unwrap().to_string();
 
-    // D4 correction: `tpch` is now refused by `can_read` itself — checked
-    // BEFORE the "StarRocks apply not supported yet" gate
-    // (`check_engine_supports`) — so the refusal reason changed from
-    // not-implemented to not-readable. Still exactly the refusal this test
-    // is about: decided before the registry is touched, so the orphan
-    // survives byte-identical either way.
+    // SP3b deleted the "StarRocks apply not supported yet" refusal this test
+    // originally rode on; the invariant it pins does NOT depend on which
+    // refusal fires, only that a refusal decided by `check_engine_supports`
+    // happens BEFORE `create_catalog_replacing_orphan`. `can_read` is that
+    // refusal now: D4's correction makes `tpch` unreadable on StarRocks
+    // (no shipped `BENCHMARK` connector), and `can_read` is the FIRST check
+    // in `check_engine_supports` — so the orphan survives byte-identical
+    // exactly as before.
     let (status, j) = add_catalog_via_api(&f, &token, &sr_id, tpch_body(&name)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "starrocks add; body={j}");
     assert!(
@@ -6639,8 +6768,13 @@ async fn attach_detach_and_retry_on_a_trino_engine() {
         .all(|c| c.name != cat_name));
 }
 
+/// D1: an attach to a StarRocks engine whose FE is reachable creates the
+/// catalog there and the attachment reads `applied`.
+/// Was `nothing_is_attached_to_a_starrocks_engine_yet`. (Not the plan's
+/// `tpch`/`benchmark` catalog: D4's correction refuses those on StarRocks
+/// outright — the connector is on no shipped release.)
 #[tokio::test]
-async fn nothing_is_attached_to_a_starrocks_engine_yet() {
+async fn a_catalog_attaches_to_a_starrocks_engine_and_reaches_the_fe() {
     let Some(f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
@@ -6651,37 +6785,556 @@ async fn nothing_is_attached_to_a_starrocks_engine_yet() {
         return;
     };
     let token = session_for(&f, "cat_sr_admin", true).await;
-    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
-    let (status, j) = call(&f, "POST", "/engines", &token, Some(serde_json::json!({
-        "name": format!("sr-{}", Uuid::new_v4().simple()), "kind": "starrocks", "warehouseId": wh_id,
-        "coordinatorReplicas": 1, "workerReplicas": 1, "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
-    }))).await;
-    assert_eq!(status, StatusCode::CREATED, "{j}");
-    let engine_id = j["id"].as_str().unwrap().to_string();
-    // A readable-by-starrocks kind: this test is about the "StarRocks apply
-    // not supported yet" gate, not can_read (D4: `tpch` is refused by
-    // can_read now, for an unrelated, dedicated-elsewhere reason).
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    let name = unique_catalog_name("es");
     let (_, j) = call(
         &f,
         "POST",
         "/catalogs",
         &token,
-        Some(elasticsearch_body(&unique_catalog_name("b"))),
+        Some(elasticsearch_body(&name)),
     )
     .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+
     let (status, j) = call(
         &f,
         "POST",
-        &format!(
-            "/engines/{engine_id}/catalogs/{}",
-            j["id"].as_str().unwrap()
-        ),
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(j["applyStatus"], "applied", "{j}");
+    assert_eq!(f.starrocks_ddl.created(), vec![name.clone()]);
+    assert_eq!(f.starrocks_ddl.catalog(&name).unwrap()["type"], "es");
+    let row = registry(&f)
+        .get_attachment(
+            Uuid::parse_str(&engine_id).unwrap(),
+            Uuid::parse_str(&cid).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.apply_status, "applied");
+    assert!(row.applied_at.is_some(), "applied_at is set");
+    // D6: every statement carries the engine's FE coordinates through the one
+    // target `fe_target` builds — there is no second, cert-less path any more.
+    assert_eq!(f.starrocks_ddl.last_target().port, 9030);
+}
+
+/// D1: an attach against an UNREACHABLE FE still answers 201, records the row
+/// `failed` with the error, creates nothing — and the Retry route converges it.
+#[tokio::test]
+async fn an_attach_against_an_unreachable_fe_is_recorded_and_converged_by_retry() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_sr_unreachable", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    let name = unique_catalog_name("es");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(elasticsearch_body(&name)),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+
+    f.starrocks_ddl
+        .set_fail(Some("fe unreachable: connect timed out after 10s"));
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "D1: the row is the point; {j}");
+    assert_eq!(j["applyStatus"], "failed", "{j}");
+    assert!(
+        j["applyError"].as_str().unwrap().contains("fe unreachable"),
+        "{j}"
+    );
+    assert!(
+        f.starrocks_ddl
+            .executed()
+            .iter()
+            .all(|s| !s.starts_with("CREATE EXTERNAL CATALOG")),
+        "nothing was created: {:?}",
+        f.starrocks_ddl.executed()
+    );
+    assert_eq!(
+        registry(&f)
+            .get_attachment(e, c)
+            .await
+            .unwrap()
+            .unwrap()
+            .apply_status,
+        "failed"
+    );
+
+    // Retry converges it, with no second attach and no second client.
+    f.starrocks_ddl.set_fail(None);
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}/apply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    let row = registry(&f).get_attachment(e, c).await.unwrap().unwrap();
+    assert_eq!(
+        (row.apply_status.as_str(), row.apply_error),
+        ("applied", None)
+    );
+    assert!(f.starrocks_ddl.catalog(&name).is_some(), "created on retry");
+}
+
+/// D3: a catalog of the same name the FE already holds with DIFFERENT
+/// properties is refused, the FE is untouched, and the error names the keys.
+/// This is the `egret` catalog today's Warehouse UI tells operators to create
+/// by hand, and the one a pre-SP3a engine leaves behind.
+#[tokio::test]
+async fn a_drifted_catalog_is_refused_and_the_fe_is_left_alone() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_sr_drift", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    let name = unique_catalog_name("es");
+    // Somebody else's catalog, under the name egret is about to use.
+    f.starrocks_ddl.seed(
+        &name,
+        &[
+            ("type", "es"),
+            ("hosts", "http://somebody-elses-cluster:9200"),
+            ("es.net.ssl", "false"),
+        ],
+    );
+    let before = f.starrocks_ddl.catalog(&name).unwrap();
+
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(elasticsearch_body(&name)),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "D1: the row is still written; {j}"
+    );
+    assert_eq!(j["applyStatus"], "failed", "{j}");
+    let err = j["applyError"].as_str().unwrap();
+    assert!(err.contains("hosts"), "the differing key is named: {err}");
+    assert!(
+        !err.contains("somebody-elses-cluster"),
+        "key NAMES only — a value could be anything the FE holds: {err}"
+    );
+    assert_eq!(
+        f.starrocks_ddl.catalog(&name).unwrap(),
+        before,
+        "the FE was left exactly as it was"
+    );
+    assert!(
+        f.starrocks_ddl.executed().iter().all(|s| {
+            !s.starts_with("CREATE EXTERNAL CATALOG") && !s.starts_with("ALTER CATALOG")
+        }),
+        "reads only: {:?}",
+        f.starrocks_ddl.executed()
+    );
+}
+
+/// D3: re-applying an edited catalog ALTERs — it never issues a second CREATE,
+/// which `IF NOT EXISTS` would have turned into a silent no-op. The rotated
+/// password has to actually reach the FE, which is the whole point: the drift
+/// comparison cannot see it (`SHOW CREATE CATALOG` deletes `password`).
+#[tokio::test]
+async fn a_credential_rotation_reaches_the_fe_through_alter() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_sr_rotate", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    let first = seed_secret(&f, "hunter2-the-first").await;
+    let second = seed_secret(&f, "hunter2-the-second").await;
+    let name = unique_catalog_name("pg");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(jdbc_body(&name, first)),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(
+        f.starrocks_ddl.catalog(&name).unwrap()["password"],
+        "hunter2-the-first"
+    );
+
+    // Rotate: the same body with a different password secret. `PUT /catalogs`
+    // propagates to every attached engine with no StarRocks-specific code.
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}"),
+        &token,
+        Some(serde_json::json!({ "config": jdbc_body(&name, second)["config"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["outcomes"][0]["status"], "applied", "{j}");
+
+    let sent = f.starrocks_ddl.executed();
+    assert!(
+        sent.iter().any(|s| s.starts_with("ALTER CATALOG")),
+        "sent={sent:?}"
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|s| s.starts_with("CREATE EXTERNAL CATALOG"))
+            .count(),
+        1,
+        "exactly the original create; sent={sent:?}"
+    );
+    assert_eq!(
+        f.starrocks_ddl.catalog(&name).unwrap()["password"],
+        "hunter2-the-second",
+        "the rotation actually reached the FE"
+    );
+}
+
+/// D7: detach drops first; a catalog the FE never had is still a success, and
+/// the primary catalog is still refused without a statement being sent for it.
+#[tokio::test]
+async fn detach_drops_first_tolerates_an_unknown_catalog_and_still_refuses_the_primary() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_sr_detach", true).await;
+    let (engine_id, wh_id) = create_starrocks_via_api(&f, &token).await;
+    let name = unique_catalog_name("es");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(elasticsearch_body(&name)),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert!(
+        f.starrocks_ddl.catalog(&name).is_none(),
+        "dropped on the FE"
+    );
+    assert!(
+        f.starrocks_ddl
+            .executed()
+            .iter()
+            .any(|s| s.starts_with("DROP CATALOG IF EXISTS")),
+        "a DROP was sent: {:?}",
+        f.starrocks_ddl.executed()
+    );
+    assert!(
+        registry(&f).get_attachment(e, c).await.unwrap().is_none(),
+        "row gone AFTER the drop"
+    );
+
+    // A second attach, then a DROP the FE no longer knows about: still a
+    // success, so a row can always be cleaned up.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    f.starrocks_ddl.forget(&name);
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unknown catalog is not an error; {j}"
+    );
+    assert!(registry(&f).get_attachment(e, c).await.unwrap().is_none());
+
+    // The primary is still refused, and nothing was sent to the FE for it.
+    let primary = warehouse_catalog(&f, wh_id).await;
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/engines/{engine_id}/catalogs/{}", primary.id),
         &token,
         None,
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
-    assert!(j["error"].as_str().unwrap().contains("StarRocks"), "{j}");
+    assert!(
+        f.starrocks_ddl
+            .executed()
+            .iter()
+            .all(|s| !s.contains(&primary.name)),
+        "no statement about the primary: {:?}",
+        f.starrocks_ddl.executed()
+    );
+    assert!(registry(&f)
+        .get_attachment(e, primary.id)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+/// D7: the DDL succeeded and the attachment row could not be settled — egret
+/// drops the catalog again rather than leaving one nothing will ever prune.
+/// SP3a's comment said "the next apply of this engine removes it again"; that
+/// is true of a Trino ConfigMap and false of a StarRocks FE, where nothing
+/// prunes anything. The attachment row is deleted out from under the apply by
+/// the fake's `on_create` hook, which runs between the CREATE reaching the FE
+/// and egret recording it.
+#[tokio::test]
+async fn a_catalog_egret_cannot_remember_is_dropped_again() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_sr_compensate", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    let name = unique_catalog_name("es");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(elasticsearch_body(&name)),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+
+    let pool = f.db.pool.clone();
+    f.starrocks_ddl.on_create(move |_name| {
+        let pool = pool.clone();
+        Box::pin(async move {
+            sqlx::query(
+                "DELETE FROM registry.engine_catalog_attachments \
+                  WHERE engine_id = $1 AND catalog_id = $2",
+            )
+            .bind(e)
+            .bind(c)
+            .execute(&pool)
+            .await
+            .expect("delete the attachment mid-apply");
+        })
+    });
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::CREATED,
+        "an attach egret could not record is not a success; {j}"
+    );
+    let sent = f.starrocks_ddl.executed();
+    assert!(
+        sent.iter()
+            .any(|s| s.starts_with("CREATE EXTERNAL CATALOG")),
+        "sent={sent:?}"
+    );
+    assert!(
+        sent.iter().any(|s| s.starts_with("DROP CATALOG IF EXISTS")),
+        "the compensating drop ran: {sent:?}"
+    );
+    assert!(
+        f.starrocks_ddl.catalog(&name).is_none(),
+        "nothing left on the FE"
+    );
+    assert!(registry(&f).get_attachment(e, c).await.unwrap().is_none());
+}
+
+/// D6: no secret an FE error carries reaches `apply_error` or the response —
+/// including the residual `starrocks_ddl`'s own redaction documents and cannot
+/// close: a SHORT, unquoted secret in an otherwise well-formed message. Only
+/// the caller's `FeError::scrubbed(&secrets)` closes that, which is why this
+/// test fails the moment an apply path formats an `FeError` any other way.
+#[tokio::test]
+async fn an_fe_error_stored_on_the_attachment_carries_no_ddl_and_no_secret() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_sr_secret", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    // Short and unquoted where the FE repeats it: under `MIN_OPAQUE_RUN`, so
+    // no shape-based pass in `starrocks_ddl` can see it.
+    let secret_plaintext = "pw-a1b2";
+    let secret_id = seed_secret(&f, secret_plaintext).await;
+    let name = unique_catalog_name("pg");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(jdbc_body(&name, secret_id)),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+
+    // What StarRocks really does: quote the statement back, secrets and all.
+    f.starrocks_ddl.fail_matching(
+        "CREATE EXTERNAL CATALOG",
+        &format!(
+            "ERROR 1064 (HY000): Getting analyzing error. Detail message: \
+             CREATE EXTERNAL CATALOG `x` PROPERTIES (\"password\" = \"{secret_plaintext}\") \
+             rejected, password {secret_plaintext} is not accepted"
+        ),
+    );
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let err = registry(&f)
+        .get_attachment(
+            Uuid::parse_str(&engine_id).unwrap(),
+            Uuid::parse_str(&cid).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .apply_error
+        .expect("the failure was recorded");
+    assert!(
+        !err.contains(secret_plaintext),
+        "the secret leaked into apply_error: {err}"
+    );
+    assert!(
+        !j["applyError"].as_str().unwrap().contains(secret_plaintext),
+        "…and into the response: {j}"
+    );
+    assert!(
+        err.contains("Getting analyzing error"),
+        "the diagnosis survived: {err}"
+    );
+    assert!(
+        err.contains("FE error 1064"),
+        "the FE's own code survived: {err}"
+    );
+    assert!(
+        err.contains("<redacted>"),
+        "the quoted echo of the statement was removed: {err}"
+    );
 }
 
 #[tokio::test]

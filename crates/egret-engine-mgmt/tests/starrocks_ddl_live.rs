@@ -35,9 +35,7 @@
 
 use std::collections::BTreeMap;
 
-use egret_catalog_registry::{
-    escape_ident, render_starrocks, CatalogDef, StarRocksRenderInput,
-};
+use egret_catalog_registry::{escape_ident, render_starrocks, CatalogDef, StarRocksRenderInput};
 use egret_engine_mgmt::{compare_to_fe, show_catalogs, show_create_catalog};
 use egret_engine_mgmt::{Drift, FeTarget, MysqlDdlRunner, StarRocksDdl};
 use serde_json::json;

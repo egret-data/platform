@@ -4265,7 +4265,7 @@
         ],
         "responses": {
           "201": {
-            "description": "Applied to the engine, then attached (an egret warehouse catalog mints a Catalog Client for the engine)",
+            "description": "Attached (an egret warehouse catalog mints a Catalog Client for the engine). For Trino the apply happened first; for StarRocks the attachment is recorded first and converged after, so a 201 may carry `applyStatus: failed` with the engine's error — the Retry route converges it (SP3b D1)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4275,7 +4275,7 @@
             }
           },
           "400": {
-            "description": "The engine cannot read this catalog, StarRocks attachment is not supported yet, or Kubernetes is not configured",
+            "description": "The engine cannot read this catalog, the engine reserves this catalog name, or Kubernetes is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -4480,7 +4480,7 @@
             }
           },
           "400": {
-            "description": "StarRocks re-apply is not supported yet, or Kubernetes is not configured",
+            "description": "The change could not be assembled, or Kubernetes is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -29959,7 +29959,7 @@
           },
           "applyStatus": {
             "type": "string",
-            "description": "`applied` | `failed`."
+            "description": "`applied` | `failed` | `pending` (recorded by egret, not yet accepted\nby the engine — SP3b D1; only a StarRocks attachment is ever written\nthat way, and only for as long as its convergence takes)."
           },
           "applyError": {
             "type": [

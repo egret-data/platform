@@ -56,7 +56,9 @@ pub(crate) struct CatalogAttachmentDto {
     engine_id: Uuid,
     engine_name: String,
     engine_type: String,
-    /// `applied` | `failed`.
+    /// `applied` | `failed` | `pending` (recorded by egret, not yet accepted
+    /// by the engine — SP3b D1; only a StarRocks attachment is ever written
+    /// that way, and only for as long as its convergence takes).
     apply_status: String,
     apply_error: Option<String>,
     applied_at: Option<DateTime<Utc>>,
@@ -582,8 +584,8 @@ async fn attachment_dto(
         ("cid" = Uuid, Path, description = "Registry catalog id"),
     ),
     responses(
-        (status = 201, description = "Applied to the engine, then attached (an egret warehouse catalog mints a Catalog Client for the engine)", body = CatalogAttachmentDto),
-        (status = 400, description = "The engine cannot read this catalog, StarRocks attachment is not supported yet, or Kubernetes is not configured", body = ErrorBody),
+        (status = 201, description = "Attached (an egret warehouse catalog mints a Catalog Client for the engine). For Trino the apply happened first; for StarRocks the attachment is recorded first and converged after, so a 201 may carry `applyStatus: failed` with the engine's error — the Retry route converges it (SP3b D1)", body = CatalogAttachmentDto),
+        (status = 400, description = "The engine cannot read this catalog, the engine reserves this catalog name, or Kubernetes is not configured", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine or catalog", body = ErrorBody),
@@ -619,7 +621,7 @@ pub(crate) async fn attach_catalog(
     ),
     responses(
         (status = 200, description = "Re-applied; the attachment is `applied`", body = ApplyOutcomeDto),
-        (status = 400, description = "StarRocks re-apply is not supported yet, or Kubernetes is not configured", body = ErrorBody),
+        (status = 400, description = "The change could not be assembled, or Kubernetes is not configured", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
         (status = 404, description = "No such engine, or the catalog is not attached to it", body = ErrorBody),
