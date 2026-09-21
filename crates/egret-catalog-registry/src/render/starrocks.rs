@@ -65,7 +65,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 use crate::config::{
-    CatalogConfig, CatalogDef, EngineType, IcebergMetastore, JdbcConfig, JdbcDialect, RestAuth,
+    CatalogConfig, CatalogDef, EngineType, HiveMetastore, IcebergMetastore, JdbcConfig,
+    JdbcDialect, RestAuth,
 };
 use crate::sensitive::is_sensitive_key;
 
@@ -358,11 +359,11 @@ pub fn render_starrocks(
                     .expect("hive-family kinds always have a StarRocks type"),
             );
             match &c.metastore {
-                crate::config::HiveMetastore::Hive { uri } => {
+                HiveMetastore::Hive { uri } => {
                     out.set("hive.metastore.type", "hive");
                     out.set("hive.metastore.uris", uri.as_str());
                 }
-                crate::config::HiveMetastore::Glue {
+                HiveMetastore::Glue {
                     region,
                     access_key,
                     secret_key_secret_id,
