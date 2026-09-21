@@ -94,8 +94,9 @@ pub struct FeTarget {
     /// TLS with this cert as its only trust root and domain validation off
     /// (the cert's CN cannot match the in-cluster Service DNS egret dials) —
     /// the same posture `StarRocksConnector::new` and the delegation bootstrap
-    /// already use, and [`fe_target`] will apply to every statement once
-    /// Task 4/5 wire a production caller (D6).
+    /// already use, and which [`fe_target`] now applies to every statement the
+    /// APPLY path sends (D6). The bootstrap in `engines.rs` still dials
+    /// `mysql_async` directly and is not covered by that yet; Task 5 moves it.
     pub tls_cert_pem: Option<String>,
 }
 
@@ -230,7 +231,9 @@ fn has_residual_quote(text: &str) -> bool {
 /// of it, never a bare URL or long opaque token, and — when [`fe_error`]'s
 /// fail-closed check can't confirm all of that held — no text at all. See
 /// the module doc's "guarantee" paragraph for exactly what this promises.
-#[derive(Clone, Debug, PartialEq, Eq)]
+// NOT `Debug`: see the hand-written impl below. A derived one would print the
+// private `excerpt`, which is the whole hole `Display` was narrowed to close.
+#[derive(Clone, PartialEq, Eq)]
 pub struct FeError {
     /// The FE's own numeric error code (StarRocks' `ERROR <code>
     /// (<sqlstate>): …` convention, e.g. `1064`, `5078`), when the message
@@ -272,14 +275,37 @@ impl FeError {
 /// is what `format!("{e}")` and `e.to_string()` produce, and those are exactly
 /// the expressions a caller reaches for when assembling an `apply_error`. A
 /// `Display` that carried the excerpt made the leak in the module doc's
-/// boundary paragraph a one-line mistake; this makes it unrepresentable. Use
-/// [`FeError::scrubbed`] for the diagnosis.
+/// boundary paragraph a one-line mistake. Use [`FeError::scrubbed`] for the
+/// diagnosis.
 impl std::fmt::Display for FeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.code {
             Some(c) => write!(f, "FE error {c}"),
             None => write!(f, "FE error (no code)"),
         }
+    }
+}
+
+/// Hand-written, and it must stay that way (fix round 1 review, F2): a DERIVED
+/// `Debug` prints private fields, so it would print `excerpt` — and `Debug` is
+/// not an exotic path here. `tracing::error!(error = ?e, …)` is one character
+/// away from the `%e` this crate uses everywhere and is the idiom already in
+/// use a few call sites over, `FeError` is publicly re-exported from `lib.rs`,
+/// and `{e:?}` inside a `panic!`/`expect`/`unwrap` would do it too. Making
+/// `Display` safe while leaving `Debug` leaky would have left the documented
+/// short-unquoted residual reachable by the most ordinary typo in the
+/// codebase, with a comment next to it claiming it was not.
+///
+/// So this prints the code and says the excerpt was withheld. Both formatters
+/// out of this type are now safe by construction, and [`FeError::scrubbed`] —
+/// which takes the caller's secrets — remains the only way to read the
+/// diagnosis.
+impl std::fmt::Debug for FeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FeError")
+            .field("code", &self.code)
+            .field("excerpt", &"<withheld: use FeError::scrubbed(&secrets)>")
+            .finish()
     }
 }
 
@@ -338,9 +364,11 @@ pub trait StarRocksDdl: Send + Sync {
 /// fork) offers no built-in connect-timeout option to lean on, so both are
 /// enforced with `tokio::time::timeout` around the call. This matters
 /// precisely because D1's premise is that a freshly-provisioned FE is
-/// unreachable for five to ten minutes, and Task 4 will call `execute` from
-/// an HTTP handler, not only from a background bootstrap with its own poll
-/// loop.
+/// unreachable for five to ten minutes, and since Task 4 `execute` IS called
+/// from an HTTP handler (`catalog_apply::converge_attachment`, reached by
+/// `POST /engines/{id}/catalogs/{cid}`), not only from a background bootstrap
+/// with its own poll loop. An attach against an unreachable FE now blocks a
+/// request for `FE_CONNECT_TIMEOUT` and then records `failed` (D1).
 const FE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const FE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -425,14 +453,17 @@ impl StarRocksDdl for MysqlDdlRunner {
 /// under which the FE actually serves TLS. Before SP3b the catalog DDL and the
 /// root-login probe both passed `None` while the delegation DDL passed the
 /// cert, so an OAuth2 credential AND the FE root password crossed the wire in
-/// cleartext on a TLS-capable engine (D6). This function is the fix; nothing
-/// in production calls it yet (module doc, F-5) — that is Task 4/5's job.
+/// cleartext on a TLS-capable engine (D6). This function is the fix, and since
+/// SP3b Task 4 it is applied: `catalog_apply::apply_starrocks` builds its
+/// `FeTarget` here, so every attach, re-apply and detach statement carries the
+/// pinned cert and the root password. The BOOTSTRAP
+/// (`spawn_starrocks_catalog_wire`) still dials `mysql_async` directly and is
+/// Task 5's to move; until it does, the cleartext path survives for exactly
+/// the primary catalog of a freshly created engine.
 // `pub(crate)`, not the public API: only this crate's apply/bootstrap code
-// (Tasks 4/5) calls it. Until they land it has no production caller — only
-// `engines::tests::fe_target_resolves_root_password_and_gates_the_cert_on_delegation_tls`
-// exercises it — so the plain (non-test) compilation of this crate would
-// otherwise warn `dead_code` under `-D warnings`.
-#[allow(dead_code)]
+// calls it. (The `#[allow(dead_code)]` that used to sit here for the window
+// where it had no production caller is gone with that window — fix round 1
+// review, F6.)
 pub(crate) async fn fe_target(st: &CpState, engine: &Engine) -> Result<FeTarget, CpError> {
     let root_password = match engine.root_secret_id {
         Some(sid) => Some(
@@ -1175,6 +1206,20 @@ mod tests {
             .to_string(),
             "FE error (no code)"
         );
+
+        // Fix round 1, F2: `Debug` is the other formatter, and a DERIVED one
+        // would print the private excerpt. `?e` is one character from `%e`.
+        let dbg = format!("{e:?}");
+        assert!(
+            !dbg.contains("pw-abc"),
+            "the secret leaked through Debug: {dbg}"
+        );
+        assert!(
+            !dbg.contains("Access denied"),
+            "no FE text may leave through Debug either: {dbg}"
+        );
+        assert!(dbg.contains("1064"), "the code still reaches a log: {dbg}");
+        assert!(dbg.contains("withheld"), "and says why: {dbg}");
     }
 
     /// `normalize_mysql_async_wrapper` in isolation: strips EXACTLY the

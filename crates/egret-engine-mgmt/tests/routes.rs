@@ -374,6 +374,37 @@ async fn seed_provisioned_warehouse_with_secret(f: &Fixture) -> Uuid {
     wh.id
 }
 
+/// A storage connection whose `secret_ref` is a global named secret sealed
+/// with the SAME crypto key `build_app` uses, so the app can resolve it. A
+/// catalog over this renders BOTH `aws.s3.access_key` (Plain, and a key the FE
+/// masks) and `aws.s3.secret_key` (Secret) — the pairing `Drift::Unverifiable`
+/// needs.
+async fn seed_storage_conn_with_secret(f: &Fixture) -> Uuid {
+    let secret_id = secret_store(f)
+        .create(
+            None,
+            &format!("engine-sc-sec-{}", Uuid::new_v4().simple()),
+            None,
+            "STORAGESECRETKEY",
+        )
+        .await
+        .expect("create global storage secret");
+    let (storage_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key, secret_ref, endpoint) \
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+    )
+    .bind(format!("engine-sc-only-{}", Uuid::new_v4().simple()))
+    .bind("us-east-1")
+    .bind("egret-engine-test")
+    .bind("AKIATEST")
+    .bind(secret_id)
+    .bind("http://minio:9000")
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert storage connection");
+    storage_id
+}
+
 /// [`seed_provisioned_warehouse`] under a CHOSEN warehouse name — the registry
 /// names a warehouse's catalog after its warehouse, so this is how a test
 /// decides what that catalog will be called.
@@ -7171,6 +7202,186 @@ async fn detach_drops_first_tolerates_an_unknown_catalog_and_still_refuses_the_p
         .await
         .unwrap()
         .is_some());
+}
+
+/// D1's reason for the detach ORDER, which nothing pinned before (fix round 1
+/// review, F3): "a `DROP CATALOG` that fails keeps the row, because a row
+/// egret has forgotten is worse than one it retries." Moving
+/// `delete_attachment` ahead of the DROP left every other detach test green —
+/// they only show that a DROP was sent and the row is gone, both true in
+/// either order. This is the assertion that can only hold one way round.
+#[tokio::test]
+async fn a_detach_whose_drop_fails_keeps_the_attachment_row() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_sr_detach_fail", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    let name = unique_catalog_name("es");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(elasticsearch_body(&name)),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+
+    // The FE refuses every statement naming this catalog.
+    f.starrocks_ddl
+        .fail_catalog(&name, "ERROR 1064 (HY000): drop refused by the FE");
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a detach whose DROP the FE refused is not a success; {j}"
+    );
+    assert!(
+        f.starrocks_ddl
+            .executed()
+            .iter()
+            .any(|s| s.starts_with("DROP CATALOG IF EXISTS")),
+        "the DROP was attempted: {:?}",
+        f.starrocks_ddl.executed()
+    );
+    // The whole point of the order: egret still remembers the attachment, so
+    // the operator can retry the detach instead of owning an orphan on the FE.
+    assert!(
+        registry(&f).get_attachment(e, c).await.unwrap().is_some(),
+        "the row survives a failed DROP (D1)"
+    );
+    assert!(
+        f.starrocks_ddl.catalog(&name).is_some(),
+        "and the catalog is still on the FE, which is what that row must keep matching"
+    );
+    // Nothing was given back either: a detach that did not happen must not
+    // retire the credential the surviving attachment still names.
+    let row = registry(&f).get_attachment(e, c).await.unwrap().unwrap();
+    assert_eq!(row.apply_status, "applied", "the attachment is untouched");
+}
+
+/// D3's third present-state, which D3's letter does not name and which nothing
+/// drove through `converge_attachment` before (fix round 1 review, F4):
+/// `Drift::Unverifiable` — every comparable plain key agrees, but a key the FE
+/// MASKS (`aws.s3.access_key`) is present, so "matching" cannot be concluded.
+/// Egret ALTERs rather than refusing, deliberately: refusing on "cannot tell"
+/// would make a legitimate re-attach of an S3-backed catalog permanently
+/// impossible, since nothing an operator can do makes a masked value
+/// comparable. This pins the arm so a future change cannot flip it in silence.
+#[tokio::test]
+async fn an_unverifiable_catalog_is_altered_not_refused() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_sr_unverifiable", true).await;
+    let (engine_a, _) = create_starrocks_via_api(&f, &token).await;
+    let (engine_b, _) = create_starrocks_via_api(&f, &token).await;
+
+    // A hive catalog over a storage connection: its render carries
+    // `aws.s3.access_key` (Plain, so it IS compared, and MASKED by the FE) and
+    // `aws.s3.secret_key` (Secret, so it is never compared). That pairing is
+    // the only way to reach `Unverifiable`.
+    let storage = seed_storage_conn_with_secret(&f).await;
+    let name = unique_catalog_name("hv");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(
+            serde_json::json!({ "name": name, "kind": "hive", "config": {
+                "metastore": { "type": "hive", "uri": "thrift://hms:9083" },
+                "storage_connection_id": storage,
+            }}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = j["id"].as_str().unwrap().to_string();
+
+    // Put the catalog on the FE by attaching it to engine A — so what the fake
+    // holds is what egret's own renderer produces, byte for byte. Hand-writing
+    // the property map here would let the premise drift away from the renderer
+    // and quietly stop being `Unverifiable` at all.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_a}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(f.starrocks_ddl.created(), vec![name.clone()]);
+    f.starrocks_ddl.clear_executed();
+
+    // Now attach it to engine B, which shares the fake's FE. From B's side
+    // this is a catalog it did not create (`already_ours` is false: no
+    // `applied_at` on B's row), present, with every plain key equal and
+    // `aws.s3.access_key` masked — `Drift::Unverifiable`.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_b}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(
+        j["applyStatus"], "applied",
+        "an unverifiable catalog is converged, not refused; {j}"
+    );
+    assert!(j["applyError"].is_null(), "no refusal was recorded; {j}");
+    let sent = f.starrocks_ddl.executed();
+    assert!(
+        sent.iter().any(|s| s.starts_with("ALTER CATALOG")),
+        "the masked key forces an ALTER rather than a no-op; sent={sent:?}"
+    );
+    assert!(
+        sent.iter()
+            .all(|s| !s.starts_with("CREATE EXTERNAL CATALOG")),
+        "the catalog was already there; sent={sent:?}"
+    );
+    // And the ALTER really delivered egret's own credential, which is the
+    // whole reason "cannot tell" converges instead of refusing.
+    assert_eq!(
+        f.starrocks_ddl.catalog(&name).unwrap()["aws.s3.secret_key"],
+        "STORAGESECRETKEY"
+    );
 }
 
 /// D7: the DDL succeeded and the attachment row could not be settled — egret

@@ -13,7 +13,11 @@ export interface CatalogAttachmentDto {
   engineId: string;
   engineName: string;
   engineType: string;
-  /** `applied` | `failed`. */
+  /**
+     * `applied` | `failed` | `pending` (recorded by egret, not yet accepted
+     * by the engine — SP3b D1; only a StarRocks attachment is ever written
+     * that way, and only for as long as its convergence takes).
+     */
   applyStatus: string;
   /** @nullable */
   applyError?: string | null;

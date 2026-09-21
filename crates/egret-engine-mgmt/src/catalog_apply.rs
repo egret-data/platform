@@ -43,11 +43,21 @@ pub(crate) enum ApplyError {
     NotSupported(&'static str),
     /// The request could not be assembled (missing warehouse, secret, …).
     Build(CpError),
-    /// The engine ACCEPTED the change but egret could not record it. Distinct
-    /// from every variant above because it must not become an `apply_error`:
-    /// there is no row left to write one to. For StarRocks the catalog this
-    /// apply created has already been dropped again (D7) by the time this is
-    /// returned, so the engine and the registry agree once more.
+    /// The engine ACCEPTED the change but egret could not record it — the
+    /// `set_apply_applied` write failed. Distinct from every variant above
+    /// because it is not a statement about the engine: for StarRocks the
+    /// catalog this apply created has already been dropped again (D7) by the
+    /// time this is returned, so the engine and the registry agree once more.
+    ///
+    /// Two causes, and the callers must survive BOTH (fix round 1 review, F5 —
+    /// this doc used to claim only the first): the attachment row VANISHED
+    /// (`RegistryError::NotFound`, the race D7 is about), or an ordinary
+    /// database failure hit the write while the row is still there. So the
+    /// attach path removes the row best-effort before giving back what it
+    /// minted — otherwise the second case leaves a `pending` attachment naming
+    /// a credential secret that was just deleted — and `retry_apply` does NOT
+    /// flag this on the row, because the row's status write is the thing that
+    /// just failed.
     Unrecorded(CpError),
 }
 
@@ -321,11 +331,23 @@ pub(crate) async fn converge_attachment(
         .map_err(|e| ApplyError::Rejected(e.scrubbed(&secrets)))?
         .contains(&name);
 
-    let (sql, outcome) = if present {
-        let fe_props = show_create_catalog(runner, fe, &name)
+    // `None` from the second read means the FE said "Unknown catalog" — the
+    // catalog was dropped between the two reads. That is ABSENT, not drifted
+    // (fix round 1 review, F7): `.unwrap_or_default()` used to turn it into an
+    // empty property map, which `compare_to_fe` reads as EVERY key differing,
+    // so a fresh attach was refused with "a catalog named X already exists on
+    // this engine with different properties … detach it or drop it on the
+    // engine" — about a catalog that does not exist, with a remedy the
+    // operator cannot perform. The later, more specific read wins.
+    let fe_props = if present {
+        show_create_catalog(runner, fe, &name)
             .await
             .map_err(|e| ApplyError::Rejected(e.scrubbed(&secrets)))?
-            .unwrap_or_default();
+    } else {
+        None
+    };
+
+    let (sql, outcome) = if let Some(fe_props) = fe_props {
         match compare_to_fe(&ddl, &fe_props) {
             Drift::Different(keys) if !already_ours => {
                 // D3: a catalog of this name egret did not create — the
@@ -340,20 +362,42 @@ pub(crate) async fn converge_attachment(
             }
             // Nothing to send, and nothing to compensate later.
             Drift::Matching if !already_ours => return Ok(Converged::AlreadyMatching),
-            // Both remaining cases, for the same reason: what egret cannot
-            // SEE may still have changed. `Drift::Unverifiable` means every
-            // plain key agreed but at least one key the FE MASKS is set, so
-            // "matching" cannot be concluded; and anything `already_ours` may
-            // have had a secret rotated under it, which the comparison is
-            // blind to by construction. An `ALTER … SET` is safe to run
-            // unconditionally, so it is what both get.
+            // Everything else ALTERs, and the two cases it covers share one
+            // reason: WHAT EGRET CANNOT SEE MAY STILL HAVE CHANGED.
             //
-            // The consequence, said out loud rather than buried: a catalog
-            // egret did NOT create, whose every comparable key nonetheless
-            // matches what egret would render and which has a masked key set,
-            // is ALTERed rather than refused. Refusing on "cannot tell" would
-            // make a legitimate re-attach of an S3-backed catalog permanently
-            // unattachable, which is the worse failure.
+            //   * `already_ours` — this attachment converged before, so the FE
+            //     holds a catalog egret created. Its secrets may have rotated
+            //     since, and the comparison is blind to that by construction
+            //     (`SHOW CREATE CATALOG` DELETES `password` and masks the
+            //     rest), so `Matching` here means "nothing I can see changed",
+            //     not "nothing changed".
+            //   * `Drift::Unverifiable` — every plain key agreed, but at least
+            //     one key the FE MASKS (`xx******yy`) is set, so `Matching`
+            //     cannot be concluded at all. Task 3's `Drift` doc is explicit
+            //     that a caller must not fold this into `Matching`.
+            //
+            // An `ALTER … SET` is safe to run unconditionally — it rewrites
+            // properties on an existing definition and destroys no data — so
+            // it is what both get.
+            //
+            // THE DIVERGENCE FROM D3'S LETTER, stated where it happens rather
+            // than left to a report (fix round 1 review, F4). D3 names two
+            // present-states, matching and different; `Unverifiable` is a
+            // third, and on a catalog egret did NOT create this arm ALTERs it
+            // instead of refusing. That is deliberate:
+            //   - it is narrower than it sounds. The catalog D3 actually names
+            //     — the hand-made `egret` warehouse catalog — never reaches
+            //     here: `iceberg.catalog.credential` is `PropValue::Secret`,
+            //     so it is excluded from `comparable()`, and the Egret
+            //     metastore branch renders no `aws.s3.*`. Reaching
+            //     `Unverifiable` needs a storage-backed catalog whose masked
+            //     `aws.s3.access_key` is PRESENT while every plain key already
+            //     equals what egret would render — i.e. the same warehouse,
+            //     URI, endpoint and bucket.
+            //   - refusing on "cannot tell" would make a legitimate re-attach
+            //     of an S3-backed catalog permanently impossible, because
+            //     nothing an operator can do makes a masked value comparable.
+            // `an_unverifiable_catalog_is_altered_not_refused` pins it.
             _ => (
                 ddl.alter_sql(&secrets).map_err(|e| render_err(&name, e))?,
                 Converged::Altered,
@@ -913,10 +957,26 @@ pub(crate) async fn attach_to_engine(
             // `converge_and_record` already settled the row to `applied`.
             Ok(()) => Ok(()),
             // D7: the FE took the catalog, egret could not record it, and the
-            // compensating DROP has already run. There is no row left to
-            // flag, and the minted credential belongs to an attachment that
-            // no longer exists.
+            // compensating DROP has already run — so nothing on the engine
+            // references the credential any more, and this attach did not
+            // happen.
+            //
+            // The row is USUALLY already gone (that race is what `Unrecorded`
+            // is normally about), but not always: a transient database failure
+            // on the `set_apply_applied` write leaves the `pending` row in
+            // place (fix round 1 review, F5). Deleting it first is what makes
+            // giving back the credential safe — otherwise the surviving row
+            // names a `credential_secret_id` that `rollback_minted` is about
+            // to delete, every Retry then fails to resolve it, and only a
+            // detach plus a fresh attach can repair it. Best effort, and it
+            // runs BEFORE the rollback, never after.
             Err(ApplyError::Unrecorded(e)) => {
+                if let Err(err) = registry.delete_attachment(engine.id, catalog.id).await {
+                    tracing::error!(engine = %engine.name, catalog = %catalog.name, error = %err,
+                        "could not remove the attachment of an attach that did not happen; \
+                         keeping its credential secret so the row stays repairable");
+                    return Err(CatalogOpError::Http(e));
+                }
                 rollback_minted(st, engine, minted).await;
                 Err(CatalogOpError::Http(e))
             }
@@ -1029,10 +1089,19 @@ pub(crate) async fn retry_apply(
         return Err(CatalogOpError::Apply(ApplyError::Conflict));
     }
     if let Err(e) = apply_catalog_change(st, engine, CatalogChange::ReapplyOne(catalog_id)).await {
-        st.engine_mgmt
-            .registry()
-            .set_apply_failed(engine.id, catalog_id, &e.message())
-            .await?;
+        // `Unrecorded` is the one failure that must NOT be flagged on the row
+        // (fix round 1 review, F5): it means the engine took the change and
+        // the `apply_status` WRITE is what failed. Writing a second status to
+        // the same row through the same database would either hit the same
+        // failure or — worse — succeed, recording `failed` for an engine that
+        // is actually converged. It is the caller's error, not the
+        // attachment's state.
+        if !matches!(e, ApplyError::Unrecorded(_)) {
+            st.engine_mgmt
+                .registry()
+                .set_apply_failed(engine.id, catalog_id, &e.message())
+                .await?;
+        }
         return Err(CatalogOpError::Apply(e));
     }
     Ok(())
