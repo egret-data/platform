@@ -16,10 +16,13 @@
 //! error code pulled out separately. This is the first code to see the FE's
 //! raw text, which is why the pipeline lives here.
 //!
-//! **The guarantee `FeError::excerpt` makes, stated plainly (fix round 3 —
-//! rounds 1 and 2 both overstated this, corrected live each time by
-//! measured probes)**: it never contains a whole secret; it never contains a
-//! `scheme://…` URL or a 20-plus-character unquoted opaque run; and it never
+//! **The guarantee the excerpt makes, stated plainly (fix round 3 — rounds 1
+//! and 2 both overstated this, corrected live each time by measured probes;
+//! Task 4 corrected the opening clause once more, which still said "never
+//! contains a whole secret" and was contradicted by this module's own
+//! boundary paragraph below)**: it never contains a secret in any shape this
+//! module can RECOGNISE — it never contains a `scheme://…` URL or a
+//! 20-plus-character unquoted opaque run, and it never
 //! contains a quoted fragment of the FE's echo — INCLUDING a malformed one. A
 //! stray apostrophe in prose, a SQL-escaped `\'`, a `\"` (reachable from
 //! egret's own `escape_dq`), or an unterminated echo all make the quoting
@@ -29,15 +32,15 @@
 //! [`MIN_OPAQUE_RUN`] in every case measured so far), or — when it isn't long
 //! enough for that — the fail-closed check finds the leftover quote character
 //! and withholds the WHOLE excerpt rather than ship a partial redaction this
-//! module cannot prove correct. Either way the secret does not survive; which
-//! of the two happens is not something a caller should rely on.
+//! module cannot prove correct. Either way a secret of THOSE shapes does not
+//! survive; which of the two happens is not something a caller should rely on.
 //!
 //! **What it does NOT guarantee, and cannot, stated as an honest boundary
 //! rather than another absolute sentence**: this module has no secrets map,
 //! so a SHORT (under [`MIN_OPAQUE_RUN`] characters), entirely UNQUOTED token
 //! that merely looks like ordinary prose is invisible to every check here —
 //! there is a real, standing shape where such a token reaches
-//! `FeError::excerpt` and, from there, `apply_error`: an FE message that
+//! the excerpt and, from there, `apply_error`: an FE message that
 //! contains a short unquoted secret alongside OTHER, unrelated, correctly
 //! paired quoted content elsewhere (so the fail-closed check finds nothing
 //! wrong) and no `scheme://` prefix and no adjacent long run to be swept up
@@ -45,19 +48,20 @@
 //! live 4.1.4 FE takes this shape — StarRocks always quotes what it echoes —
 //! but this module cannot prove no FE message ever will. Closing THAT needs
 //! the caller's own resolved secret values, which is exactly why
-//! `egret_catalog_registry::scrub_secrets` over `excerpt` is **REQUIRED at
-//! the caller, not defensive**: Tasks 4 and 5, as the ones that resolve a
-//! catalog's secrets and write `apply_error`, own running it before any
-//! `FeError::excerpt` reaches that column or an API response.
+//! [`FeError::scrubbed`] is the ONLY way out of this type: Task 3 wrote that
+//! obligation down and Task 4 made it structural — the excerpt is private,
+//! `scrubbed(&secrets)` is the only accessor that yields it, and `Display`
+//! carries the FE's error code alone, so `apply_error = e.to_string()` can no
+//! longer compile into a leak. Every caller that resolves a catalog's secrets
+//! and writes `apply_error` (or an API response) runs it.
 //!
-//! SP3b Task 3 introduces this seam without yet wiring it in:
-//! `spawn_starrocks_catalog_wire`'s bootstrap and `run_starrocks_ddl` (both in
-//! `engines.rs`) keep dialing `mysql_async` directly for now — Tasks 4 and 5
-//! are the ones that move the apply path and the bootstrap onto
-//! [`StarRocksDdl`] and retire the old call sites. Nothing in production
-//! constructs a [`FeTarget`] yet either (fix round 1 review, F-5): only
-//! [`fe_target`]'s own test exercises it, so the pinned-cert fix (D6) is
-//! *implemented*, not yet *applied* — that lands with Task 4/5's callers.
+//! SP3b Task 4 wired the apply path onto this seam:
+//! `catalog_apply::{apply_starrocks, converge_attachment}` construct a
+//! [`FeTarget`] through [`fe_target`] and reach the FE only through
+//! [`StarRocksDdl`], so D6's pinned certificate is now *applied*, not merely
+//! implemented. `spawn_starrocks_catalog_wire`'s bootstrap and
+//! `run_starrocks_ddl` (both in `engines.rs`) still dial `mysql_async`
+//! directly; Task 5 moves them and retires those call sites.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -95,7 +99,7 @@ pub struct FeTarget {
     pub tls_cert_pem: Option<String>,
 }
 
-/// How much of the FE's (already redacted) error text [`FeError::excerpt`]
+/// How much of the FE's (already redacted) error text a [`FeError`]
 /// keeps, once the whole [`fe_error`] pipeline has decided the text is not
 /// withheld. Long enough to be diagnostic — the FE's own `ERROR <code>
 /// (<sqlstate>): …` preamble is well under this — short enough to bound how
@@ -236,17 +240,45 @@ pub struct FeError {
     pub code: Option<u32>,
     /// A bounded, redacted excerpt of the FE's message — or [`WITHHELD`]
     /// when [`fe_error`]'s fail-closed check found a quote character it
-    /// could not account for. Not additionally scrubbed against any
-    /// particular catalog's secrets — this trait is never given that map;
-    /// see the module doc for why a caller must still run `scrub_secrets`.
-    pub excerpt: String,
+    /// could not account for.
+    ///
+    /// **Private on purpose** (Task 4, carried from Task 3's review): this
+    /// module has no secrets map, so the excerpt closes only the secret
+    /// SHAPES it can recognise — the module doc's boundary paragraph names a
+    /// real, standing shape it cannot. [`FeError::scrubbed`] is the only way
+    /// to read it, and it takes the caller's resolved secrets, so the
+    /// remaining obligation is enforced by the type rather than remembered
+    /// from a doc comment.
+    excerpt: String,
 }
 
+impl FeError {
+    /// The only form that may be logged, stored in `apply_error`, or returned
+    /// to an API caller (D6): this module's shape-based redaction, PLUS the
+    /// caller's own resolved secret values, which close the short-unquoted
+    /// residual the module doc describes. Pass every secret the failed
+    /// statement carried — `StarRocksCatalogDdl::secret_ids` resolved — or an
+    /// empty map for a statement that carries none (a `DROP`, a `SHOW`).
+    pub fn scrubbed(&self, secrets: &BTreeMap<uuid::Uuid, String>) -> String {
+        let text = egret_catalog_registry::scrub_secrets(&self.excerpt, secrets);
+        match self.code {
+            Some(c) => format!("FE error {c}: {text}"),
+            None => text,
+        }
+    }
+}
+
+/// The FE's error code and nothing else. Deliberately NOT the excerpt: this
+/// is what `format!("{e}")` and `e.to_string()` produce, and those are exactly
+/// the expressions a caller reaches for when assembling an `apply_error`. A
+/// `Display` that carried the excerpt made the leak in the module doc's
+/// boundary paragraph a one-line mistake; this makes it unrepresentable. Use
+/// [`FeError::scrubbed`] for the diagnosis.
 impl std::fmt::Display for FeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.code {
-            Some(c) => write!(f, "FE error {c}: {}", self.excerpt),
-            None => write!(f, "{}", self.excerpt),
+            Some(c) => write!(f, "FE error {c}"),
+            None => write!(f, "FE error (no code)"),
         }
     }
 }
@@ -1100,6 +1132,49 @@ mod tests {
             e.excerpt
         );
         assert!(e.excerpt.contains("rejected"), "excerpt={}", e.excerpt);
+    }
+
+    /// The module doc's honest boundary, and the accessor that closes it
+    /// (SP3b Task 4, carried from Task 3's review). A SHORT, unquoted secret
+    /// in an otherwise well-formed message survives every shape-based pass
+    /// here — that is the residual, reproduced rather than asserted away —
+    /// and `scrubbed`, which is the only way to read the excerpt at all,
+    /// removes it. `Display` carries the FE code and no text, so the
+    /// `apply_error = e.to_string()` shortcut can no longer leak.
+    #[test]
+    fn scrubbed_closes_the_short_unquoted_residual_and_display_carries_no_text() {
+        let raw = "ERROR 1064 (HY000): Access denied using password pw-abc for user \"reader\"";
+        let e = fe_error(raw);
+        assert_eq!(e.code, Some(1064));
+        // The residual, stated as a measurement: no pass in this module sees
+        // `pw-abc` (8 chars, unquoted, and the one quoted span here is
+        // correctly paired, so the fail-closed check finds nothing).
+        assert!(
+            e.excerpt.contains("pw-abc"),
+            "the documented residual changed shape; excerpt={}",
+            e.excerpt
+        );
+
+        let mut secrets = BTreeMap::new();
+        secrets.insert(uuid::Uuid::nil(), "pw-abc".to_string());
+        let out = e.scrubbed(&secrets);
+        assert!(!out.contains("pw-abc"), "scrubbed={out}");
+        assert!(out.contains("Access denied"), "diagnosis survives: {out}");
+        assert!(out.starts_with("FE error 1064: "), "scrubbed={out}");
+
+        assert_eq!(
+            e.to_string(),
+            "FE error 1064",
+            "Display must carry the code alone — the excerpt leaves only through `scrubbed`"
+        );
+        assert_eq!(
+            FeError {
+                code: None,
+                excerpt: "whatever".into()
+            }
+            .to_string(),
+            "FE error (no code)"
+        );
     }
 
     /// `normalize_mysql_async_wrapper` in isolation: strips EXACTLY the

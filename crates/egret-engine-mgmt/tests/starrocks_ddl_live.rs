@@ -31,12 +31,12 @@
 //! map before they're formatted into a panic message (review F-3/F-13): this
 //! is the pattern a real caller (Task 4/5, which DOES hold the secrets map at
 //! the point it calls `execute`/`query`) is expected to follow before an
-//! `FeError::excerpt` reaches `apply_error` or an API response.
+//! `FeError::scrubbed` reaches `apply_error` or an API response.
 
 use std::collections::BTreeMap;
 
 use egret_catalog_registry::{
-    escape_ident, render_starrocks, scrub_secrets, CatalogDef, StarRocksRenderInput,
+    escape_ident, render_starrocks, CatalogDef, StarRocksRenderInput,
 };
 use egret_engine_mgmt::{compare_to_fe, show_catalogs, show_create_catalog};
 use egret_engine_mgmt::{Drift, FeTarget, MysqlDdlRunner, StarRocksDdl};
@@ -88,7 +88,10 @@ async fn run(fe: &FeTarget, name: &str) -> Result<(), String> {
         render_starrocks(name, &def, &StarRocksRenderInput::probe()).map_err(|e| e.to_string())?;
     let mut secrets = BTreeMap::new();
     secrets.insert(pw_id, "egret".to_string());
-    let scrub = |e: &egret_engine_mgmt::FeError| scrub_secrets(&e.to_string(), &secrets);
+    // Task 4 made this structural: `excerpt` is private and `Display` is the
+    // FE code alone, so `scrubbed` is the only way to read the diagnosis — the
+    // pattern every production caller now follows by construction.
+    let scrub = |e: &egret_engine_mgmt::FeError| e.scrubbed(&secrets);
 
     runner
         .execute(fe, &ddl.create_sql(&secrets).map_err(|e| e.to_string())?)
@@ -130,7 +133,7 @@ async fn run(fe: &FeTarget, name: &str) -> Result<(), String> {
         .execute(fe, &ddl.create_sql(&secrets).map_err(|e| e.to_string())?)
         .await
     {
-        Err(e) if e.excerpt.to_lowercase().contains("already exists") => {}
+        Err(e) if scrub(&e).to_lowercase().contains("already exists") => {}
         Err(e) => {
             return Err(format!(
                 "second CREATE failed for a different reason: {}",
