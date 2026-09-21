@@ -8,13 +8,27 @@
 //! whole secret occurrences is not enough on its own — an FE error that
 //! quotes a *truncated* statement can leak a fragment no substring match
 //! catches — so an error out of this module is never the raw FE message: it
-//! is [`FeError`], capped to [`FE_ERROR_EXCERPT_MAX`] with the FE's own error
-//! code pulled out where present. Capping and code-extraction happen here,
-//! because this is the first code to see the FE's raw text; *secret-aware*
-//! scrubbing (`egret_catalog_registry::scrub_secrets`) still needs the
-//! statement's own secrets map, which this trait is never given, so a caller
-//! that resolved one (Task 4/5's apply path) must still run it over
-//! `FeError::excerpt` before the result reaches `apply_error` or a response.
+//! is [`FeError`], and [`FeError::excerpt`] has already had every quoted
+//! fragment replaced (fix round 2 review, F-14's follow-up) before it was
+//! capped to [`FE_ERROR_EXCERPT_MAX`], with the FE's own error code pulled
+//! out separately. Redaction and code-extraction happen here, because this
+//! is the first code to see the FE's raw text.
+//!
+//! **The guarantee `FeError::excerpt` makes, stated plainly**: it never
+//! contains a whole secret, and it never contains a quoted fragment of the
+//! statement the FE echoed back — single-, double- or backtick-quoted spans
+//! are replaced with a marker regardless of whether egret's caller knows
+//! that span is secret, so the leak is closed even when no secrets map is
+//! available and even when the FE's own echo was itself truncated (measured
+//! live: a real FE's `'S3CRET'` fragment is a PREFIX of a 16-char secret,
+//! but the quotes around it are still well-formed — StarRocks' own error
+//! formatter closes them — so a quote-pair redaction catches it whole).
+//! **What it does NOT guarantee**: an FE that puts secret material in its
+//! UNQUOTED prose (nothing observed here does; StarRocks always quotes the
+//! token it echoes) would still leak, and a caller with a resolved secrets
+//! map should still run `egret_catalog_registry::scrub_secrets` over
+//! `excerpt` as a second, defensive layer before it reaches `apply_error` or
+//! a response — this module has no secrets map to do that itself.
 //!
 //! SP3b Task 3 introduces this seam without yet wiring it in:
 //! `spawn_starrocks_catalog_wire`'s bootstrap and `run_starrocks_ddl` (both in
@@ -61,21 +75,51 @@ pub struct FeTarget {
     pub tls_cert_pem: Option<String>,
 }
 
-/// How much of the FE's raw error text [`FeError::excerpt`] keeps. Long
-/// enough to be diagnostic — the FE's own `ERROR <code> (<sqlstate>): …`
-/// preamble is well under this — short enough that a truncated statement
-/// echo cannot smuggle a long credential through in one piece. **This cap
-/// alone does not prove the excerpt is secret-free**: a short credential can
-/// still fall entirely inside it (measured live: `Unexpected input
-/// 'S3CRET'` from a real FE, well inside 200 chars). Capping and FE
-/// error-code extraction are this seam's job; a caller holding the
-/// statement's own secrets map must still run `scrub_secrets` over
-/// `excerpt` before it is stored or returned.
+/// How much of the FE's (already quote-redacted) error text
+/// [`FeError::excerpt`] keeps. Long enough to be diagnostic — the FE's own
+/// `ERROR <code> (<sqlstate>): …` preamble is well under this — short enough
+/// to bound how much unquoted prose an unusually verbose FE message can
+/// carry. **This cap is a secondary bound, not the mechanism that keeps a
+/// secret out**: on its own it does nothing against a short credential that
+/// falls entirely inside it (measured live: a real FE's `'S3CRET'` fragment,
+/// a prefix of a 16-char secret, lands around character 130 of a 189-char
+/// message — well inside 200 either way). [`redact_quoted`] is what actually
+/// closes that: it runs on the RAW, uncapped text and removes every quoted
+/// span whole, so a quoted fragment that happens to straddle this cap's
+/// boundary is never split into an unredacted, unterminated remainder.
 pub const FE_ERROR_EXCERPT_MAX: usize = 200;
 
+/// What every quoted fragment in a raw FE message is replaced with.
+const REDACTED: &str = "<redacted>";
+
+/// Replace every single-, double- or backtick-quoted fragment in `raw` with
+/// [`REDACTED`], keeping the quote characters and everything outside them.
+/// In an FE error the quoted fragments ARE the echoed statement text — the
+/// token the parser choked on, a property name, a value (or a truncated
+/// prefix of one) — so this closes the WHOLE class D6's addendum exists for,
+/// not just the specific secrets a caller happens to know about: it works
+/// whether or not a secrets map is ever available, and whether or not the
+/// FE's own echo was truncated relative to the real value, because the
+/// quotes StarRocks' error formatter prints around whatever it echoes are
+/// still well-formed even when what's inside them is only a prefix.
+///
+/// MUST run before [`FE_ERROR_EXCERPT_MAX`] capping, not after: a quoted
+/// span that straddles the cap boundary would otherwise leave a truncated,
+/// unredacted prefix in the capped output with no closing quote left for a
+/// later pass to find — exactly the leak this exists to close.
+fn redact_quoted(raw: &str) -> String {
+    static QUOTED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = QUOTED.get_or_init(|| {
+        regex::Regex::new(r#"'[^']*'|"[^"]*"|`[^`]*`"#)
+            .expect("static quoted-fragment pattern compiles")
+    });
+    re.replace_all(raw, REDACTED).into_owned()
+}
+
 /// The FE's answer to a failed statement, reduced to what may safely leave
-/// this module: never the statement (D6 addendum), and never unboundedly
-/// long (see [`FE_ERROR_EXCERPT_MAX`]).
+/// this module: never the statement (D6 addendum), never a quoted fragment
+/// of it (see [`redact_quoted`]), and never unboundedly long (see
+/// [`FE_ERROR_EXCERPT_MAX`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeError {
     /// The FE's own numeric error code (StarRocks' `ERROR <code>
@@ -83,8 +127,11 @@ pub struct FeError {
     /// contains one. `None` for a failure that never reached the FE at all
     /// (a connect or statement timeout has no FE error code).
     pub code: Option<u32>,
-    /// A bounded excerpt of the FE's message, **not** scrubbed against any
-    /// particular catalog's secrets — this trait is never given that map.
+    /// A bounded excerpt of the FE's message with every quoted fragment
+    /// already replaced by [`REDACTED`] — see the module doc's "guarantee"
+    /// paragraph for exactly what that does and does not promise. Not
+    /// additionally scrubbed against any particular catalog's secrets — this
+    /// trait is never given that map.
     pub excerpt: String,
 }
 
@@ -100,7 +147,8 @@ impl std::fmt::Display for FeError {
 /// Build a [`FeError`] from a raw failure (a `mysql_async::Error`, a timeout
 /// message, or — in [`FakeStarRocksDdl`] — a test-authored string): pull the
 /// FE's own error code out of the `ERROR <code> (…)` preamble when present,
-/// and cap the text at [`FE_ERROR_EXCERPT_MAX`].
+/// [`redact_quoted`] the RAW text (before capping — see that function's doc
+/// for why the order matters), then cap at [`FE_ERROR_EXCERPT_MAX`].
 fn fe_error(raw: impl std::fmt::Display) -> FeError {
     let raw = raw.to_string();
     static CODE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -108,7 +156,10 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
         regex::Regex::new(r"ERROR (\d+)").expect("static FE error code pattern compiles")
     });
     let code = re.captures(&raw).and_then(|c| c[1].parse::<u32>().ok());
-    let excerpt: String = raw.chars().take(FE_ERROR_EXCERPT_MAX).collect();
+    let excerpt: String = redact_quoted(&raw)
+        .chars()
+        .take(FE_ERROR_EXCERPT_MAX)
+        .collect();
     FeError { code, excerpt }
 }
 
@@ -703,6 +754,102 @@ mod tests {
             root_password: None,
             tls_cert_pem: None,
         }
+    }
+
+    // ---- fe_error / redact_quoted (fix round 2 review, F-14) ----
+
+    /// F-14: `fe_error` itself had no test at all — the reviewer replaced its
+    /// two substantive lines (code extraction, capping) with `code = None`
+    /// and an uncapped `excerpt = raw`, and every one of the 129 lib tests
+    /// still passed. No quote characters here at all, so `redact_quoted` is a
+    /// no-op and this isolates the cap + code-extraction mechanism (that gets
+    /// its own tests below).
+    #[test]
+    fn fe_error_extracts_the_code_and_caps_the_excerpt_char_safely() {
+        let preamble = "ERROR 5078 (42000): ";
+        // Multi-byte UTF-8 scalars straddling the cap boundary: proves the
+        // cap can never split a codepoint (it can't, using `.chars()` — but
+        // that is exactly the invariant a future rewrite to byte-slicing
+        // would break, and this is what would catch it).
+        let body: String = std::iter::repeat_n('é', 400).collect();
+        let raw = format!("{preamble}{body}");
+        assert!(
+            raw.chars().count() > FE_ERROR_EXCERPT_MAX,
+            "the raw text must be longer than the cap for this test to mean anything"
+        );
+
+        let e = fe_error(raw);
+        assert_eq!(e.code, Some(5078));
+        assert_eq!(
+            e.excerpt.chars().count(),
+            FE_ERROR_EXCERPT_MAX,
+            "excerpt={}",
+            e.excerpt
+        );
+        assert!(e.excerpt.starts_with(preamble), "excerpt={}", e.excerpt);
+    }
+
+    /// The class this fix round exists to close: an FE truncates the value
+    /// it echoes back to a PREFIX, but the quotes around that prefix are
+    /// still well-formed (measured live against a real FE). Modeled on the
+    /// exact reply the original F-3 investigation captured for a rotated
+    /// `password` value `S3CRET-PLAINTEXT…`.
+    #[test]
+    fn redact_quoted_removes_a_secret_prefix_the_fe_only_echoed_a_truncated_form_of() {
+        let raw = "Server error: `ERROR 1064 (HY000): Getting syntax error at line 1, \
+                    column 78. Detail message: Unexpected input 'S3CRET', the most \
+                    similar input is {'a', 'b'}.'";
+        let e = fe_error(raw);
+        assert_eq!(e.code, Some(1064));
+        assert!(!e.excerpt.contains("S3CRET"), "excerpt={}", e.excerpt);
+        // mysql_async's own wrapper is `` `...'`` (asymmetric — opens with a
+        // backtick, closes with a bare single quote that pairs with
+        // nothing), so a lone trailing `'` surviving is expected punctuation,
+        // not a leak. What must be gone is the secret-bearing PAIR.
+        assert!(e.excerpt.contains(REDACTED), "excerpt={}", e.excerpt);
+        // The unquoted prose — what an operator actually reads — survives.
+        assert!(
+            e.excerpt.contains("Getting syntax error"),
+            "excerpt={}",
+            e.excerpt
+        );
+        assert!(
+            e.excerpt.contains("Unexpected input"),
+            "excerpt={}",
+            e.excerpt
+        );
+    }
+
+    /// The other half: an error with no quoted fragment at all must survive
+    /// byte-for-byte (besides capping, which doesn't trigger here) — the
+    /// redaction must not eat prose it has no reason to.
+    #[test]
+    fn redact_quoted_leaves_quote_free_prose_untouched() {
+        let raw = "ERROR 5081 (42000): Getting analyzing error. Detail message: \
+                    [type : benchmark] is not supported.";
+        let e = fe_error(raw);
+        assert_eq!(e.code, Some(5081));
+        assert_eq!(
+            e.excerpt, raw,
+            "no quotes present; must pass through unchanged"
+        );
+    }
+
+    /// A double- or backtick-quoted fragment is redacted too, not only
+    /// single-quoted ones — StarRocks' own DDL echoes use double quotes
+    /// around property values (`"password" = "s3cr3t"`), and identifiers are
+    /// backtick-quoted.
+    #[test]
+    fn redact_quoted_covers_double_and_backtick_quotes_too() {
+        let raw = r#"rejected: "password" = "s3cr3t" for catalog `sales`"#;
+        let e = fe_error(raw);
+        assert!(!e.excerpt.contains("s3cr3t"), "excerpt={}", e.excerpt);
+        assert!(!e.excerpt.contains("password"), "excerpt={}", e.excerpt);
+        assert!(!e.excerpt.contains("sales"), "excerpt={}", e.excerpt);
+        assert_eq!(
+            e.excerpt,
+            format!("rejected: {REDACTED} = {REDACTED} for catalog {REDACTED}")
+        );
     }
 
     /// The shape `SHOW CREATE CATALOG` really returns: the statement text with
