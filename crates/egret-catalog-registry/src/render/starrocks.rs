@@ -1,0 +1,1033 @@
+//! StarRocks rendering: a catalog definition + resolved inputs → the property
+//! map of a `CREATE EXTERNAL CATALOG`, plus the `ALTER`/`DROP` forms and a
+//! redacted form for display and logs.
+//!
+//! Unlike Trino's, this output is NOT a file egret hands to Kubernetes: it is a
+//! statement egret runs as `root` on a live FE, with secrets INLINE (StarRocks
+//! has no `${ENV:…}`). Two consequences shape this module:
+//!   - the rendered map keeps secrets as ids (`PropValue::Secret`) so the
+//!     plaintext exists only inside `create_sql`/`alter_sql`, and
+//!     [`StarRocksCatalogDdl::redacted`] is the only form that may be logged;
+//!   - every interpolated value goes through [`escape_dq`] and every identifier
+//!     through [`escape_ident`].
+//!
+//! Property names verified against the vendored StarRocks FE
+//! (`../starrocks` relative to `data-portal/`) on 2026-09-21:
+//!   - Catalog type `type` ∈ `iceberg, hive, deltalake, hudi, jdbc, es,
+//!     benchmark, …` — `fe/fe-core/.../connector/ConnectorType.java:39-67`.
+//!   - Iceberg sub-type `iceberg.catalog.type` ∈ `rest, hive, glue, hadoop,
+//!     jdbc` — `IcebergCatalogProperties.java:27`, `IcebergCatalogType.java:18-36`.
+//!   - Every `iceberg.catalog.<k>` is stripped to `<k>` and handed to the
+//!     Iceberg `RESTSessionCatalog` — `IcebergRESTCatalog.java:107-113`.
+//!   - Hive-family metastore: `hive.metastore.type` (`hive`\|`glue`\|`dlf`,
+//!     default `hive`), `hive.metastore.uris` (**plural**, unlike Trino's
+//!     `hive.metastore.uri`) — `HiveConnector.java:31-34`,
+//!     `HiveConnectorInternalMgr.java:42,88-97`, `DeltaLakeConnector.java:34`,
+//!     `HudiConnector.java:33-34`.
+//!   - Glue: `aws.glue.region`, `aws.glue.use_instance_profile`,
+//!     `aws.glue.access_key`, `aws.glue.secret_key` —
+//!     `CloudConfigurationConstants.java:66-79`. The `aws.hive.metastore.glue.*`
+//!     keys in `CREATE_EXTERNAL_CATALOG.md` are stale — they appear nowhere in
+//!     the FE as credentials.
+//!   - S3: `aws.s3.endpoint`, `aws.s3.region`, `aws.s3.access_key`,
+//!     `aws.s3.secret_key`, `aws.s3.enable_path_style_access`,
+//!     `aws.s3.enable_ssl`, `aws.s3.use_instance_profile` —
+//!     `CloudConfigurationConstants.java:29-64`, parsed in
+//!     `AwsCloudConfigurationProvider.java:77-109`.
+//!   - JDBC: `jdbc_uri`, `user`, `password`, `driver_url`, `driver_class`,
+//!     `schema_resolver` — **never `checksum`**, which the FE computes itself
+//!     from `driver_url` — `JDBCResource.java:49-57`, `JDBCConnector.java:46-56,74-100`.
+//!   - Elasticsearch: `hosts` (comma-separated URLs), `user`, `password`,
+//!     `es.net.ssl` — `EsConfig.java:30-58`, `EsTable.java:69-86`.
+//!   - Benchmark: `scale` only (a double > 0, default `1`); tpch/tpcds/ssb is
+//!     the database you `USE`, not a property —
+//!     `BenchmarkConfig.java:21-24`, `BenchmarkCatalogConfig.java:31-47`,
+//!     `BenchmarkSuiteFactory.java:27-44`.
+//!   - Grammar: keys *and* values are quoted strings; `PROPERTIES(...)` is
+//!     mandatory on `CREATE`; `ALTER CATALOG <n> SET (...)` — **not**
+//!     `SET PROPERTIES` — `StarRocks.g4:866-883,1140-1142,3135-3152`.
+//!   - `ALTER`: only `type` is refused, by key and regardless of value;
+//!     properties merge and cannot be unset; an unknown catalog is a **silent
+//!     no-op** — `CatalogAnalyzer.java:39-41,113-126`, `CatalogMgr.java:180-240`.
+//!   - Names: `^[a-zA-Z]\w{0,63}$` (64 max); `default_catalog` and the
+//!     `resource_mapping_inside_catalog_` prefix are reserved —
+//!     `FeNameFormat.java:41,177-195`, `CatalogAnalyzer.java:61-65,89-91`.
+//!
+//! MySQL is the odd one out: the FE rewrites `jdbc:mysql` → `jdbc:mariadb` and
+//! always loads `org.mariadb.jdbc.Driver` ("because of gpl protocol"),
+//! `JDBCMetadata.java:123-125,189-191` — so egret sends the MariaDB URL form
+//! and pins the MariaDB driver for both `mysql` and `mariadb` dialects. That
+//! form's SSL vocabulary is `disable|trust|verify-full`, not Trino/Connector-J's
+//! `DISABLED|REQUIRED|VERIFY_IDENTITY`.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use uuid::Uuid;
+
+use crate::config::{
+    CatalogConfig, CatalogDef, EngineType, IcebergMetastore, JdbcConfig, JdbcDialect, RestAuth,
+};
+use crate::sensitive::is_sensitive_key;
+
+use super::{RenderError, StorageRender, WarehouseRender};
+
+/// A rendered property's value: either a literal, or a secret whose plaintext
+/// is resolved only inside `create_sql`/`alter_sql` (never in `properties`
+/// itself, so a `Debug`/log of the map cannot leak it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PropValue {
+    Plain(String),
+    Secret(Uuid),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct StarRocksRenderInput<'a> {
+    /// In-cluster egret URL (REST catalog + token endpoint).
+    pub egret_url: &'a str,
+    pub warehouse: Option<WarehouseRender<'a>>,
+    pub storage: Option<StorageRender<'a>>,
+    /// The attachment's minted Catalog Client credential (egret catalogs only).
+    pub credential_secret_id: Option<Uuid>,
+    pub drivers: &'a JdbcDrivers,
+}
+
+impl StarRocksRenderInput<'static> {
+    /// Inputs that satisfy every kind: rendering with these tells which keys
+    /// the typed form sets, which is what the save-time collision check needs.
+    pub fn probe() -> Self {
+        StarRocksRenderInput {
+            egret_url: "http://probe",
+            warehouse: Some(WarehouseRender {
+                name: "probe",
+                s3_endpoint: "http://probe",
+            }),
+            storage: Some(StorageRender {
+                endpoint: Some("http://probe"),
+                region: "probe",
+                path_style: true,
+                access_key: "probe",
+                secret_key_secret_id: Some(Uuid::nil()),
+            }),
+            credential_secret_id: Some(Uuid::nil()),
+            drivers: &DEFAULT_SR_JDBC_DRIVERS,
+        }
+    }
+}
+
+/// One dialect's pinned JDBC driver jar and class.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JdbcDriver {
+    pub driver_url: String,
+    pub driver_class: String,
+}
+
+/// The JDBC driver StarRocks pins per dialect (`driver_url` downloaded by the
+/// FE, `driver_class` loaded by it — `JDBCResource.java:49-57`). A per-catalog
+/// `advanced.starrocks.driver_url`/`driver_class` overrides these (`SR_OVERRIDABLE`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct JdbcDrivers;
+
+impl JdbcDrivers {
+    pub fn get(&self, dialect: JdbcDialect) -> Option<JdbcDriver> {
+        let (driver_url, driver_class) = match dialect {
+            JdbcDialect::Postgresql => (
+                "https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar",
+                "org.postgresql.Driver",
+            ),
+            // MariaDB's driver, for both `mysql` and `mariadb` — see the module doc.
+            JdbcDialect::Mysql | JdbcDialect::Mariadb => (
+                "https://repo1.maven.org/maven2/org/mariadb/jdbc/mariadb-java-client/3.4.1/mariadb-java-client-3.4.1.jar",
+                "org.mariadb.jdbc.Driver",
+            ),
+            JdbcDialect::Oracle => (
+                "https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc10/19.18.0.0/ojdbc10-19.18.0.0.jar",
+                "oracle.jdbc.driver.OracleDriver",
+            ),
+            JdbcDialect::Sqlserver => (
+                "https://repo1.maven.org/maven2/com/microsoft/sqlserver/mssql-jdbc/12.6.3.jre11/mssql-jdbc-12.6.3.jre11.jar",
+                "com.microsoft.sqlserver.jdbc.SQLServerDriver",
+            ),
+            JdbcDialect::Clickhouse => (
+                "https://repo1.maven.org/maven2/com/clickhouse/clickhouse-jdbc/0.6.3/clickhouse-jdbc-0.6.3.jar",
+                "com.clickhouse.jdbc.ClickHouseDriver",
+            ),
+        };
+        Some(JdbcDriver {
+            driver_url: driver_url.into(),
+            driver_class: driver_class.into(),
+        })
+    }
+}
+
+pub const DEFAULT_SR_JDBC_DRIVERS: JdbcDrivers = JdbcDrivers;
+
+/// The two `advanced.starrocks` keys a JDBC catalog may override per-catalog
+/// instead of colliding at save time (plan D5).
+pub const SR_OVERRIDABLE: [&str; 2] = ["driver_url", "driver_class"];
+
+/// StarRocks reserves `default_catalog` (`CatalogAnalyzer.java:61-65`) and the
+/// resource-mapping prefix (`CatalogMgr.java:493`).
+pub fn is_reserved_starrocks_name(name: &str) -> bool {
+    name == "default_catalog" || name.starts_with("resource_mapping_inside_catalog_")
+}
+
+pub fn escape_dq(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+pub fn escape_ident(s: &str) -> String {
+    s.replace('`', "``")
+}
+
+/// Replace every known secret's plaintext with `******`. The only thing that
+/// may stand between an FE error (which can quote the statement it rejected,
+/// secrets and all) and `apply_error`/an API response.
+pub fn scrub_secrets(text: &str, secrets: &BTreeMap<Uuid, String>) -> String {
+    let mut out = text.to_string();
+    for v in secrets.values() {
+        if !v.is_empty() {
+            out = out.replace(v.as_str(), "******");
+        }
+    }
+    out
+}
+
+fn bool_str(b: bool) -> &'static str {
+    if b {
+        "true"
+    } else {
+        "false"
+    }
+}
+
+struct Out {
+    props: BTreeMap<String, PropValue>,
+}
+
+impl Out {
+    fn set(&mut self, k: &str, v: impl Into<String>) {
+        self.props.insert(k.to_string(), PropValue::Plain(v.into()));
+    }
+
+    fn secret(&mut self, k: &str, id: Uuid) {
+        self.props.insert(k.to_string(), PropValue::Secret(id));
+    }
+
+    fn s3(&mut self, input: &StarRocksRenderInput<'_>) -> Result<(), RenderError> {
+        let s = input
+            .storage
+            .ok_or(RenderError::MissingInput("storage connection"))?;
+        if let Some(ep) = s.endpoint {
+            self.set("aws.s3.endpoint", ep);
+            // The FE has no default for this key; MinIO over http needs it off.
+            self.set(
+                "aws.s3.enable_ssl",
+                if ep.starts_with("https://") {
+                    "true"
+                } else {
+                    "false"
+                },
+            );
+        }
+        self.set("aws.s3.region", s.region);
+        self.set("aws.s3.enable_path_style_access", bool_str(s.path_style));
+        self.set("aws.s3.use_instance_profile", "false");
+        self.set("aws.s3.access_key", s.access_key);
+        self.secret(
+            "aws.s3.secret_key",
+            s.secret_key_secret_id
+                .ok_or(RenderError::MissingInput("storage secret"))?,
+        );
+        Ok(())
+    }
+
+    fn glue(&mut self, region: &str, access_key: Option<&str>, secret: Option<Uuid>) {
+        self.set("aws.glue.region", region);
+        self.set(
+            "aws.glue.use_instance_profile",
+            bool_str(access_key.is_none()),
+        );
+        if let Some(a) = access_key {
+            self.set("aws.glue.access_key", a);
+        }
+        if let Some(id) = secret {
+            self.secret("aws.glue.secret_key", id);
+        }
+    }
+}
+
+/// The `jdbc_uri` a StarRocks JDBC catalog gets. Identical to Trino's URL for
+/// every dialect EXCEPT MySQL: `JDBCMetadata.getDriverName`/`getJdbcUrl`
+/// (JDBCMetadata.java:121-128, 187-194) force `org.mariadb.jdbc.Driver` and
+/// rewrite `jdbc:mysql` → `jdbc:mariadb` "because of gpl protocol", so a URL
+/// carrying Connector/J's `sslMode=VERIFY_IDENTITY` would reach a driver whose
+/// vocabulary is `disable|trust|verify-full`. egret therefore sends the MariaDB
+/// form for both dialects, and pins the MariaDB driver for both.
+pub fn starrocks_jdbc_uri(c: &JdbcConfig) -> String {
+    match c.dialect {
+        JdbcDialect::Mysql => {
+            let mut c = c.clone();
+            c.dialect = JdbcDialect::Mariadb;
+            crate::render::trino::jdbc_url(&c)
+        }
+        _ => crate::render::trino::jdbc_url(c),
+    }
+}
+
+pub fn render_starrocks(
+    name: &str,
+    def: &CatalogDef,
+    input: &StarRocksRenderInput<'_>,
+) -> Result<StarRocksCatalogDdl, RenderError> {
+    if is_reserved_starrocks_name(name) {
+        return Err(RenderError::ReservedName(name.into()));
+    }
+    if !def.can_read(EngineType::StarRocks) {
+        return Err(RenderError::NotReadable(name.into()));
+    }
+    let mut out = Out {
+        props: BTreeMap::new(),
+    };
+    match &def.config {
+        CatalogConfig::Iceberg(c) => {
+            out.set("type", "iceberg");
+            match &c.metastore {
+                IcebergMetastore::Egret { .. } => {
+                    let wh = input
+                        .warehouse
+                        .ok_or(RenderError::MissingInput("warehouse"))?;
+                    let credential = input
+                        .credential_secret_id
+                        .ok_or(RenderError::MissingInput("catalog client credential"))?;
+                    out.set("iceberg.catalog.type", "rest");
+                    out.set(
+                        "iceberg.catalog.uri",
+                        format!("{}/catalog", input.egret_url),
+                    );
+                    out.set("iceberg.catalog.warehouse", wh.name);
+                    out.secret("iceberg.catalog.credential", credential);
+                    out.set(
+                        "iceberg.catalog.oauth2-server-uri",
+                        format!("{}/oauth/token", input.egret_url),
+                    );
+                }
+                IcebergMetastore::Rest {
+                    uri,
+                    warehouse,
+                    auth,
+                } => {
+                    out.set("iceberg.catalog.type", "rest");
+                    out.set("iceberg.catalog.uri", uri.as_str());
+                    out.set("iceberg.catalog.warehouse", warehouse.as_str());
+                    if let RestAuth::Oauth2 {
+                        credential_secret_id,
+                        scope,
+                        token_uri,
+                    } = auth
+                    {
+                        out.secret("iceberg.catalog.credential", *credential_secret_id);
+                        if let Some(s) = scope {
+                            out.set("iceberg.catalog.scope", s.as_str());
+                        }
+                        if let Some(t) = token_uri {
+                            out.set("iceberg.catalog.oauth2-server-uri", t.as_str());
+                        }
+                    }
+                    out.s3(input)?;
+                }
+                IcebergMetastore::Hive { uri } => {
+                    out.set("iceberg.catalog.type", "hive");
+                    out.set("hive.metastore.uris", uri.as_str());
+                    out.s3(input)?;
+                }
+                IcebergMetastore::Glue {
+                    region,
+                    access_key,
+                    secret_key_secret_id,
+                } => {
+                    out.set("iceberg.catalog.type", "glue");
+                    out.glue(region, access_key.as_deref(), *secret_key_secret_id);
+                    out.s3(input)?;
+                }
+            }
+        }
+        CatalogConfig::Hive(c) | CatalogConfig::DeltaLake(c) | CatalogConfig::Hudi(c) => {
+            out.set(
+                "type",
+                def.starrocks_catalog_type()
+                    .expect("hive-family kinds always have a StarRocks type"),
+            );
+            match &c.metastore {
+                crate::config::HiveMetastore::Hive { uri } => {
+                    out.set("hive.metastore.type", "hive");
+                    out.set("hive.metastore.uris", uri.as_str());
+                }
+                crate::config::HiveMetastore::Glue {
+                    region,
+                    access_key,
+                    secret_key_secret_id,
+                } => {
+                    out.set("hive.metastore.type", "glue");
+                    out.glue(region, access_key.as_deref(), *secret_key_secret_id);
+                }
+            }
+            out.s3(input)?;
+        }
+        CatalogConfig::Jdbc(c) => {
+            out.set("type", "jdbc");
+            out.set("jdbc_uri", starrocks_jdbc_uri(c));
+            out.set("user", c.user.as_str());
+            out.secret("password", c.password_secret_id);
+            let pinned = input.drivers.get(c.dialect);
+            let driver_url = match def.advanced.starrocks.get("driver_url") {
+                Some(v) => v.clone(),
+                None => pinned
+                    .as_ref()
+                    .ok_or(RenderError::NoJdbcDriver(c.dialect))?
+                    .driver_url
+                    .clone(),
+            };
+            let driver_class = match def.advanced.starrocks.get("driver_class") {
+                Some(v) => v.clone(),
+                None => pinned
+                    .ok_or(RenderError::NoJdbcDriver(c.dialect))?
+                    .driver_class
+                    .clone(),
+            };
+            out.set("driver_url", driver_url);
+            out.set("driver_class", driver_class);
+            out.set("schema_resolver", c.dialect.starrocks_schema_resolver());
+        }
+        CatalogConfig::Elasticsearch(c) => {
+            out.set("type", "es");
+            let scheme = if c.tls { "https" } else { "http" };
+            out.set(
+                "hosts",
+                c.hosts
+                    .iter()
+                    .map(|h| format!("{scheme}://{h}:{}", c.port))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            out.set("es.net.ssl", bool_str(c.tls));
+            if let Some(user) = &c.user {
+                out.set("user", user.as_str());
+                if let Some(id) = c.password_secret_id {
+                    out.secret("password", id);
+                }
+            }
+        }
+        CatalogConfig::Tpch(s) | CatalogConfig::Tpcds(s) => {
+            out.set("type", "benchmark");
+            if let Some(scale) = s.scale {
+                out.set("scale", scale.to_string());
+            }
+        }
+        CatalogConfig::Generic(g) => {
+            for (k, v) in &def.advanced.starrocks {
+                out.set(k, v.as_str());
+            }
+            for (k, id) in &g.secret_properties.starrocks {
+                out.secret(k, *id);
+            }
+        }
+    }
+    if !matches!(def.config, CatalogConfig::Generic(_)) {
+        for (k, v) in &def.advanced.starrocks {
+            if SR_OVERRIDABLE.contains(&k.as_str()) {
+                continue;
+            }
+            if out.props.contains_key(k) {
+                return Err(RenderError::Collision(k.clone()));
+            }
+            out.set(k, v.as_str());
+        }
+    }
+    if let Some((k, _)) = out.props.iter().find(|(_, v)| match v {
+        PropValue::Plain(s) => s.contains(['\n', '\r']),
+        PropValue::Secret(_) => false,
+    }) {
+        return Err(RenderError::LineBreak(k.clone()));
+    }
+    Ok(StarRocksCatalogDdl {
+        name: name.to_string(),
+        properties: out.props,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StarRocksCatalogDdl {
+    pub name: String,
+    pub properties: BTreeMap<String, PropValue>,
+}
+
+impl StarRocksCatalogDdl {
+    fn body(
+        &self,
+        secrets: &BTreeMap<Uuid, String>,
+        skip_type: bool,
+    ) -> Result<String, RenderError> {
+        let mut parts = Vec::new();
+        for (k, v) in &self.properties {
+            if skip_type && k == "type" {
+                continue;
+            }
+            let value = match v {
+                PropValue::Plain(s) => s.clone(),
+                PropValue::Secret(id) => secrets
+                    .get(id)
+                    .cloned()
+                    .ok_or(RenderError::MissingSecret(*id))?,
+            };
+            parts.push(format!(r#""{}" = "{}""#, escape_dq(k), escape_dq(&value)));
+        }
+        Ok(parts.join(", "))
+    }
+
+    /// `CREATE` carries no `IF NOT EXISTS`: D3 decides absent/matching/drifted
+    /// from `SHOW CATALOGS` first, and `IF NOT EXISTS` would silently adopt a
+    /// catalog egret did not create.
+    pub fn create_sql(&self, secrets: &BTreeMap<Uuid, String>) -> Result<String, RenderError> {
+        Ok(format!(
+            "CREATE EXTERNAL CATALOG `{}` PROPERTIES ({})",
+            escape_ident(&self.name),
+            self.body(secrets, false)?
+        ))
+    }
+
+    /// `ALTER CATALOG … SET (…)` — not `SET PROPERTIES`, which is not in the
+    /// grammar (StarRocks.g4:1140-1142). `type` is dropped: the analyzer
+    /// refuses it by key even when the value is unchanged
+    /// (`CatalogAnalyzer.java:39-41`). Properties merge; a key this render no
+    /// longer emits stays on the FE, which is why a kind change is impossible
+    /// by design (the registry forbids it) rather than by ALTER.
+    pub fn alter_sql(&self, secrets: &BTreeMap<Uuid, String>) -> Result<String, RenderError> {
+        Ok(format!(
+            "ALTER CATALOG `{}` SET ({})",
+            escape_ident(&self.name),
+            self.body(secrets, true)?
+        ))
+    }
+
+    /// `IF EXISTS` is in the grammar (StarRocks.g4:874-875), so a detach of a
+    /// catalog the FE never had succeeds without parsing an error string (D7).
+    pub fn drop_sql(&self) -> String {
+        format!("DROP CATALOG IF EXISTS `{}`", escape_ident(&self.name))
+    }
+
+    /// The ONLY form that may be logged or shown (D6). Secret-valued
+    /// properties become `******`, and so does any plain value under a
+    /// sensitive key — `advanced` cannot hold one (validation refuses it), but
+    /// a redaction that depends on that invariant holding elsewhere is a
+    /// redaction waiting to fail.
+    pub fn redacted(&self) -> String {
+        let props: Vec<String> = self
+            .properties
+            .iter()
+            .map(|(k, v)| {
+                let shown = match v {
+                    PropValue::Secret(_) => "******",
+                    PropValue::Plain(_) if is_sensitive_key(k) => "******",
+                    PropValue::Plain(s) => s.as_str(),
+                };
+                format!(r#""{}" = "{}""#, escape_dq(k), escape_dq(shown))
+            })
+            .collect();
+        format!(
+            "CREATE EXTERNAL CATALOG `{}` PROPERTIES ({})",
+            escape_ident(&self.name),
+            props.join(", ")
+        )
+    }
+
+    pub fn secret_ids(&self) -> BTreeSet<Uuid> {
+        self.properties
+            .values()
+            .filter_map(|v| match v {
+                PropValue::Secret(id) => Some(*id),
+                PropValue::Plain(_) => None,
+            })
+            .collect()
+    }
+
+    /// The properties a drift comparison may use (Task 3): the plain ones only.
+    /// A secret value can never be compared — `SHOW CREATE CATALOG` masks some
+    /// of them and DELETES `password` outright (`CredentialUtil.java:88-91`).
+    pub fn comparable(&self) -> BTreeMap<String, String> {
+        self.properties
+            .iter()
+            .filter_map(|(k, v)| match v {
+                PropValue::Plain(s) => Some((k.clone(), s.clone())),
+                PropValue::Secret(_) => None,
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{CatalogDef, ValidationError};
+    use serde_json::json;
+
+    const PW: &str = "11111111-1111-1111-1111-111111111111";
+    const SC: &str = "22222222-2222-2222-2222-222222222222";
+    const WH: &str = "33333333-3333-3333-3333-333333333333";
+    const S3: &str = "44444444-4444-4444-4444-444444444444";
+    const CRED: &str = "55555555-5555-5555-5555-555555555555";
+
+    fn id(s: &str) -> Uuid {
+        Uuid::parse_str(s).unwrap()
+    }
+
+    fn input() -> StarRocksRenderInput<'static> {
+        StarRocksRenderInput {
+            egret_url: "http://egret:8080",
+            warehouse: Some(WarehouseRender {
+                name: "wh-a",
+                s3_endpoint: "http://minio:9000",
+            }),
+            storage: Some(StorageRender {
+                endpoint: Some("http://minio:9000"),
+                region: "eu-west-1",
+                path_style: true,
+                access_key: "AKIA",
+                secret_key_secret_id: Some(id(S3)),
+            }),
+            credential_secret_id: Some(id(CRED)),
+            drivers: &DEFAULT_SR_JDBC_DRIVERS,
+        }
+    }
+
+    fn def(kind: &str, config: serde_json::Value, advanced: serde_json::Value) -> CatalogDef {
+        CatalogDef::parse(kind, &config, &advanced).unwrap()
+    }
+
+    fn plain(pairs: &[(&str, &str)]) -> BTreeMap<String, PropValue> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), PropValue::Plain(v.to_string())))
+            .collect()
+    }
+
+    fn secrets() -> BTreeMap<Uuid, String> {
+        [
+            (id(CRED), "cid:csecret".to_string()),
+            (id(PW), "p4ssw0rd".to_string()),
+            (id(S3), "s3kr3t".to_string()),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    /// The egret warehouse catalog must render EXACTLY what
+    /// `engines.rs::starrocks_external_catalog_sql` produced before SP3b, so an
+    /// upgraded engine's FE sees no drift. OAuth2 uses the Iceberg-STANDARD
+    /// property names (`credential`, `oauth2-server-uri`) reached through the
+    /// `iceberg.catalog.` pass-through, NOT StarRocks' own
+    /// `iceberg.catalog.oauth2.*` form: verified live on 3.3, where the dot-form
+    /// is silently ignored and catalog reads fail with "missing bearer token"
+    /// (StarRocks issue #57766).
+    #[test]
+    fn an_egret_warehouse_renders_the_ddl_the_bootstrap_used_to_build() {
+        let d = CatalogDef::egret_warehouse(id(WH));
+        let ddl = render_starrocks("egret", &d, &input()).unwrap();
+        assert_eq!(
+            ddl.properties,
+            [
+                ("type".to_string(), PropValue::Plain("iceberg".into())),
+                (
+                    "iceberg.catalog.type".to_string(),
+                    PropValue::Plain("rest".into())
+                ),
+                (
+                    "iceberg.catalog.uri".to_string(),
+                    PropValue::Plain("http://egret:8080/catalog".into())
+                ),
+                (
+                    "iceberg.catalog.warehouse".to_string(),
+                    PropValue::Plain("wh-a".into())
+                ),
+                (
+                    "iceberg.catalog.credential".to_string(),
+                    PropValue::Secret(id(CRED))
+                ),
+                (
+                    "iceberg.catalog.oauth2-server-uri".to_string(),
+                    PropValue::Plain("http://egret:8080/oauth/token".into())
+                ),
+            ]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+        );
+        let sql = ddl.create_sql(&secrets()).unwrap();
+        assert!(
+            sql.starts_with("CREATE EXTERNAL CATALOG `egret` PROPERTIES ("),
+            "sql={sql}"
+        );
+        assert!(
+            sql.contains(r#""iceberg.catalog.credential" = "cid:csecret""#),
+            "sql={sql}"
+        );
+        assert!(
+            sql.contains(
+                r#""iceberg.catalog.oauth2-server-uri" = "http://egret:8080/oauth/token""#
+            ),
+            "sql={sql}"
+        );
+        assert!(
+            !sql.contains("IF NOT EXISTS"),
+            "D3: create is preceded by a read, never adopted blindly"
+        );
+        assert!(!sql.contains("iceberg.catalog.token"), "no static bearer");
+        // D6: the redacted form is the only one that may be logged.
+        let red = ddl.redacted();
+        assert!(
+            red.contains(r#""iceberg.catalog.credential" = "******""#),
+            "red={red}"
+        );
+        assert!(!red.contains("csecret"), "red={red}");
+    }
+
+    #[test]
+    fn alter_omits_type_and_drop_is_if_exists() {
+        let d = CatalogDef::egret_warehouse(id(WH));
+        let ddl = render_starrocks("egret", &d, &input()).unwrap();
+        let alter = ddl.alter_sql(&secrets()).unwrap();
+        assert!(
+            alter.starts_with("ALTER CATALOG `egret` SET ("),
+            "alter={alter}"
+        );
+        // CatalogAnalyzer refuses `type` by key, even unchanged.
+        assert!(!alter.contains(r#""type" ="#), "alter={alter}");
+        assert!(
+            alter.contains(r#""iceberg.catalog.credential" = "cid:csecret""#),
+            "alter={alter}"
+        );
+        assert_eq!(ddl.drop_sql(), "DROP CATALOG IF EXISTS `egret`");
+    }
+
+    #[test]
+    fn iceberg_rest_hive_and_glue_with_s3() {
+        let d = def(
+            "iceberg",
+            json!({
+                "metastore": { "type": "rest", "uri": "https://cat/api", "warehouse": "lake",
+                               "auth": { "type": "oauth2", "credential_secret_id": PW, "scope": "ALL", "token_uri": "https://idp/token" } },
+                "storage_connection_id": SC
+            }),
+            json!(null),
+        );
+        let p = render_starrocks("lake", &d, &input()).unwrap().properties;
+        assert_eq!(p["type"], PropValue::Plain("iceberg".into()));
+        assert_eq!(p["iceberg.catalog.type"], PropValue::Plain("rest".into()));
+        assert_eq!(
+            p["iceberg.catalog.uri"],
+            PropValue::Plain("https://cat/api".into())
+        );
+        assert_eq!(
+            p["iceberg.catalog.warehouse"],
+            PropValue::Plain("lake".into())
+        );
+        assert_eq!(p["iceberg.catalog.credential"], PropValue::Secret(id(PW)));
+        assert_eq!(p["iceberg.catalog.scope"], PropValue::Plain("ALL".into()));
+        assert_eq!(
+            p["iceberg.catalog.oauth2-server-uri"],
+            PropValue::Plain("https://idp/token".into())
+        );
+        // The S3 block every non-egret lakehouse kind carries.
+        assert_eq!(
+            p["aws.s3.endpoint"],
+            PropValue::Plain("http://minio:9000".into())
+        );
+        assert_eq!(p["aws.s3.region"], PropValue::Plain("eu-west-1".into()));
+        assert_eq!(
+            p["aws.s3.enable_path_style_access"],
+            PropValue::Plain("true".into())
+        );
+        assert_eq!(
+            p["aws.s3.use_instance_profile"],
+            PropValue::Plain("false".into())
+        );
+        assert_eq!(p["aws.s3.access_key"], PropValue::Plain("AKIA".into()));
+        assert_eq!(p["aws.s3.secret_key"], PropValue::Secret(id(S3)));
+        // http endpoint ⇒ TLS off; the FE has no default for this key.
+        assert_eq!(p["aws.s3.enable_ssl"], PropValue::Plain("false".into()));
+
+        let d = def(
+            "iceberg",
+            json!({ "metastore": { "type": "hive", "uri": "thrift://hms:9083" }, "storage_connection_id": SC }),
+            json!(null),
+        );
+        let p = render_starrocks("h", &d, &input()).unwrap().properties;
+        assert_eq!(p["iceberg.catalog.type"], PropValue::Plain("hive".into()));
+        assert_eq!(
+            p["hive.metastore.uris"],
+            PropValue::Plain("thrift://hms:9083".into())
+        );
+
+        let d = def(
+            "iceberg",
+            json!({ "metastore": { "type": "glue", "region": "eu-west-1", "access_key": "AKG", "secret_key_secret_id": PW }, "storage_connection_id": SC }),
+            json!(null),
+        );
+        let p = render_starrocks("g", &d, &input()).unwrap().properties;
+        assert_eq!(p["iceberg.catalog.type"], PropValue::Plain("glue".into()));
+        assert_eq!(p["aws.glue.region"], PropValue::Plain("eu-west-1".into()));
+        assert_eq!(
+            p["aws.glue.use_instance_profile"],
+            PropValue::Plain("false".into())
+        );
+        assert_eq!(p["aws.glue.access_key"], PropValue::Plain("AKG".into()));
+        assert_eq!(p["aws.glue.secret_key"], PropValue::Secret(id(PW)));
+    }
+
+    /// StarRocks spells Delta Lake `deltalake`, with no underscore.
+    #[test]
+    fn hive_family_type_names() {
+        for (kind, ty) in [
+            ("hive", "hive"),
+            ("delta_lake", "deltalake"),
+            ("hudi", "hudi"),
+        ] {
+            let d = def(
+                kind,
+                json!({ "metastore": { "type": "hive", "uri": "thrift://hms:9083" }, "storage_connection_id": SC }),
+                json!(null),
+            );
+            let p = render_starrocks("x", &d, &input()).unwrap().properties;
+            assert_eq!(p["type"], PropValue::Plain(ty.into()), "{kind}");
+            assert_eq!(
+                p["hive.metastore.type"],
+                PropValue::Plain("hive".into()),
+                "{kind}"
+            );
+            assert_eq!(
+                p["hive.metastore.uris"],
+                PropValue::Plain("thrift://hms:9083".into()),
+                "{kind}"
+            );
+        }
+        let d = def(
+            "hive",
+            json!({ "metastore": { "type": "glue", "region": "eu-west-1" }, "storage_connection_id": SC }),
+            json!(null),
+        );
+        let p = render_starrocks("x", &d, &input()).unwrap().properties;
+        assert_eq!(p["hive.metastore.type"], PropValue::Plain("glue".into()));
+        assert_eq!(
+            p["aws.glue.use_instance_profile"],
+            PropValue::Plain("true".into()),
+            "no key ⇒ instance profile"
+        );
+    }
+
+    /// One `jdbc` type for every dialect, with the pinned driver — and the URI
+    /// in the vocabulary the driver the FE actually loads understands.
+    #[test]
+    fn jdbc_per_dialect_with_the_pinned_driver() {
+        let cases = [
+            ("postgresql", Some("sales"), "org.postgresql.Driver", "postgresql",
+             "jdbc:postgresql://db:5432/sales?sslmode=require"),
+            // The FE rewrites `jdbc:mysql` → `jdbc:mariadb` and loads
+            // org.mariadb.jdbc.Driver whatever we send (GPL avoidance,
+            // JDBCMetadata.java:121-128,187-194) — so egret sends the MariaDB
+            // form itself, whose sslMode vocabulary is `disable|trust|verify-full`,
+            // not MySQL's `DISABLED|REQUIRED|VERIFY_IDENTITY`.
+            ("mysql", None, "org.mariadb.jdbc.Driver", "mysql",
+             "jdbc:mariadb://db:5432?sslMode=trust"),
+            ("mariadb", None, "org.mariadb.jdbc.Driver", "mysql",
+             "jdbc:mariadb://db:5432?sslMode=trust"),
+            ("oracle", Some("ORCL"), "oracle.jdbc.driver.OracleDriver", "oracle",
+             "jdbc:oracle:thin:@tcps://db:5432/ORCL"),
+            ("sqlserver", Some("sales"), "com.microsoft.sqlserver.jdbc.SQLServerDriver", "sqlserver",
+             "jdbc:sqlserver://db:5432;databaseName=sales;encrypt=true;trustServerCertificate=true"),
+            ("clickhouse", Some("events"), "com.clickhouse.jdbc.ClickHouseDriver", "clickhouse",
+             "jdbc:clickhouse://db:5432/events?ssl=true&sslmode=none"),
+        ];
+        for (dialect, database, class, resolver, uri) in cases {
+            let mut cfg = json!({ "dialect": dialect, "host": "db", "port": 5432, "user": "u",
+                                  "password_secret_id": PW, "ssl": { "mode": "require" } });
+            if let Some(d) = database {
+                cfg["database"] = json!(d);
+            }
+            let d = def("jdbc", cfg, json!(null));
+            let p = render_starrocks("j", &d, &input()).unwrap().properties;
+            assert_eq!(p["type"], PropValue::Plain("jdbc".into()), "{dialect}");
+            assert_eq!(p["jdbc_uri"], PropValue::Plain(uri.into()), "{dialect}");
+            assert_eq!(p["user"], PropValue::Plain("u".into()), "{dialect}");
+            assert_eq!(p["password"], PropValue::Secret(id(PW)), "{dialect}");
+            assert_eq!(
+                p["driver_class"],
+                PropValue::Plain(class.into()),
+                "{dialect}"
+            );
+            assert_eq!(
+                p["schema_resolver"],
+                PropValue::Plain(resolver.into()),
+                "{dialect}"
+            );
+            assert_eq!(
+                p["driver_url"],
+                PropValue::Plain(
+                    DEFAULT_SR_JDBC_DRIVERS
+                        .get(d.jdbc_dialect().unwrap())
+                        .unwrap()
+                        .driver_url
+                        .clone()
+                ),
+                "{dialect}"
+            );
+            // The FE computes `checksum` itself from `driver_url`; sending one
+            // would show up as permanent drift (JDBCConnector.java:52-56).
+            assert!(!p.contains_key("checksum"), "{dialect}");
+        }
+    }
+
+    /// D5: the two overridable keys, and the one that is still a collision.
+    #[test]
+    fn the_driver_can_be_overridden_per_catalog_but_nothing_else_can() {
+        let d = def(
+            "jdbc",
+            json!({ "dialect": "postgresql", "host": "db", "port": 5432, "database": "s",
+                                    "user": "u", "password_secret_id": PW, "ssl": { "mode": "require" } }),
+            json!({ "starrocks": { "driver_url": "file:///opt/pg.jar", "driver_class": "org.postgresql.Driver" } }),
+        );
+        let p = render_starrocks("j", &d, &input()).unwrap().properties;
+        assert_eq!(
+            p["driver_url"],
+            PropValue::Plain("file:///opt/pg.jar".into())
+        );
+        assert_eq!(
+            p["driver_class"],
+            PropValue::Plain("org.postgresql.Driver".into())
+        );
+
+        // Anything else that the form sets is still refused — at parse time.
+        let err = CatalogDef::parse(
+            "jdbc",
+            &json!({ "dialect": "postgresql", "host": "db", "port": 5432, "database": "s",
+                     "user": "u", "password_secret_id": PW, "ssl": { "mode": "require" } }),
+            &json!({ "starrocks": { "jdbc_uri": "jdbc:postgresql://evil/x" } }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::Collision {
+                engine: "starrocks".into(),
+                key: "jdbc_uri".into(),
+                kind: "jdbc".into()
+            }
+        );
+    }
+
+    #[test]
+    fn elasticsearch_and_benchmark() {
+        let d = def(
+            "elasticsearch",
+            json!({ "hosts": ["es-a", "es-b"], "port": 9200, "tls": true,
+                                             "user": "u", "password_secret_id": PW }),
+            json!(null),
+        );
+        let p = render_starrocks("e", &d, &input()).unwrap().properties;
+        assert_eq!(p["type"], PropValue::Plain("es".into()));
+        assert_eq!(
+            p["hosts"],
+            PropValue::Plain("https://es-a:9200,https://es-b:9200".into())
+        );
+        assert_eq!(p["es.net.ssl"], PropValue::Plain("true".into()));
+        assert_eq!(p["user"], PropValue::Plain("u".into()));
+        assert_eq!(p["password"], PropValue::Secret(id(PW)));
+
+        // tpch and tpcds are both the one `benchmark` connector; the suite is
+        // the DATABASE you query (BenchmarkSuiteFactory.java:27-44).
+        for kind in ["tpch", "tpcds"] {
+            let d = def(kind, json!({ "scale": 10 }), json!(null));
+            let p = render_starrocks("b", &d, &input()).unwrap().properties;
+            assert_eq!(p["type"], PropValue::Plain("benchmark".into()), "{kind}");
+            assert_eq!(p["scale"], PropValue::Plain("10".into()), "{kind}");
+        }
+        let d = def("tpch", json!({}), json!(null));
+        assert!(!render_starrocks("b", &d, &input())
+            .unwrap()
+            .properties
+            .contains_key("scale"));
+    }
+
+    #[test]
+    fn generic_is_advanced_plus_its_secret_properties() {
+        let d = def(
+            "generic",
+            json!({ "engines": ["starrocks"], "secret_properties": { "starrocks": { "paimon.password": PW } } }),
+            json!({ "starrocks": { "type": "paimon", "paimon.catalog.type": "filesystem" } }),
+        );
+        let p = render_starrocks("pm", &d, &input()).unwrap().properties;
+        assert_eq!(p["type"], PropValue::Plain("paimon".into()));
+        assert_eq!(
+            p["paimon.catalog.type"],
+            PropValue::Plain("filesystem".into())
+        );
+        assert_eq!(p["paimon.password"], PropValue::Secret(id(PW)));
+
+        // A Trino-only generic is not renderable here.
+        let d = def(
+            "generic",
+            json!({ "engines": ["trino"] }),
+            json!({ "trino": { "connector.name": "memory" } }),
+        );
+        assert_eq!(
+            render_starrocks("m", &d, &input()).unwrap_err(),
+            RenderError::NotReadable("m".into())
+        );
+    }
+
+    /// The escaping tests that guarded `starrocks_external_catalog_sql`, moved
+    /// verbatim: this DDL runs as `root` on the FE and its inputs (warehouse
+    /// name, registry name) are not charset-validated everywhere upstream.
+    #[test]
+    fn values_and_identifiers_cannot_break_out() {
+        let evil = r#"wh" ) ; DROP DATABASE x ; -- "#;
+        assert_eq!(escape_dq(evil), r#"wh\" ) ; DROP DATABASE x ; -- "#);
+        assert_eq!(escape_dq(r#"a\b"#), r#"a\\b"#);
+        assert_eq!(escape_ident("cat`evil"), "cat``evil");
+        let ddl = StarRocksCatalogDdl {
+            name: "cat`evil".into(),
+            properties: plain(&[("type", "iceberg"), ("iceberg.catalog.warehouse", evil)]),
+        };
+        let sql = ddl.create_sql(&secrets()).unwrap();
+        assert!(sql.contains("`cat``evil`"), "sql={sql}");
+        assert!(!sql.contains(r#"wh" ) ; DROP DATABASE x"#), "sql={sql}");
+        assert_eq!(ddl.drop_sql(), "DROP CATALOG IF EXISTS `cat``evil`");
+    }
+
+    #[test]
+    fn a_reserved_name_is_refused_and_a_missing_secret_is_an_error_not_an_empty_value() {
+        let d = CatalogDef::egret_warehouse(id(WH));
+        assert_eq!(
+            render_starrocks("default_catalog", &d, &input()).unwrap_err(),
+            RenderError::ReservedName("default_catalog".into())
+        );
+        assert!(is_reserved_starrocks_name(
+            "resource_mapping_inside_catalog_x"
+        ));
+        let ddl = render_starrocks("egret", &d, &input()).unwrap();
+        assert_eq!(
+            ddl.create_sql(&BTreeMap::new()).unwrap_err(),
+            RenderError::MissingSecret(id(CRED))
+        );
+    }
+
+    /// D6: `scrub_secrets` is what stands between an FE error and `apply_error`.
+    #[test]
+    fn an_fe_error_quoting_the_statement_is_scrubbed() {
+        let err = "Getting analyzing error. Detail message: \
+                   CREATE EXTERNAL CATALOG `x` PROPERTIES (\"password\" = \"p4ssw0rd\") is invalid";
+        let out = scrub_secrets(err, &secrets());
+        assert!(!out.contains("p4ssw0rd"), "out={out}");
+        assert!(out.contains("******"), "out={out}");
+        assert!(
+            out.contains("Getting analyzing error"),
+            "the diagnosis survives; out={out}"
+        );
+    }
+}

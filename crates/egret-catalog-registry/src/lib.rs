@@ -31,10 +31,13 @@ pub use name::{
     first_free_name, is_valid_catalog_name, join_truncated, normalize_catalog_name, with_suffix,
     MAX_NAME_LEN,
 };
-pub use render::trino::{
-    jdbc_url, render_trino, RenderError, StorageRender, TrinoCatalogFile, TrinoRenderInput,
-    WarehouseRender,
+pub use render::starrocks::{
+    escape_dq, escape_ident, is_reserved_starrocks_name, render_starrocks, scrub_secrets,
+    starrocks_jdbc_uri, JdbcDriver, JdbcDrivers, PropValue, StarRocksCatalogDdl,
+    StarRocksRenderInput, DEFAULT_SR_JDBC_DRIVERS,
 };
+pub use render::trino::{jdbc_url, render_trino, TrinoCatalogFile, TrinoRenderInput};
+pub use render::{RenderError, StorageRender, WarehouseRender};
 pub use report::{ReportEntry, ReportRow, Severity};
 pub use sensitive::{is_plaintext_secret, is_sensitive_key};
 pub use store::{

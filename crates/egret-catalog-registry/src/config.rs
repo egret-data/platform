@@ -176,6 +176,21 @@ impl JdbcDialect {
             JdbcDialect::Clickhouse => "clickhouse",
         }
     }
+
+    /// The StarRocks JDBC `schema_resolver` for this dialect. The FE has no
+    /// `mariadb` resolver — `mariadb` (and `mysql`, which StarRocks always
+    /// treats as MariaDB, see `render::starrocks`) both use `"mysql"`
+    /// (`JDBCMetadata.java:95-96,168-184`: `SUPPORTED_SCHEMA_RESOLVERS` lists
+    /// `postgresql, mysql, oracle, sqlserver, clickhouse` — no `mariadb`).
+    pub fn starrocks_schema_resolver(self) -> &'static str {
+        match self {
+            JdbcDialect::Postgresql => "postgresql",
+            JdbcDialect::Mysql | JdbcDialect::Mariadb => "mysql",
+            JdbcDialect::Oracle => "oracle",
+            JdbcDialect::Sqlserver => "sqlserver",
+            JdbcDialect::Clickhouse => "clickhouse",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -636,19 +651,37 @@ impl CatalogDef {
         // What the typed form sets is exactly what rendering produces; probing
         // with inputs that satisfy every kind finds any advanced key that would
         // silently override the form (§4.3). SP3b adds the StarRocks probe.
-        use crate::render::trino::{render_trino, RenderError, TrinoRenderInput};
-        match render_trino("probe", self, &TrinoRenderInput::probe()) {
-            Err(RenderError::Collision(key)) => Err(ValidationError::Collision {
-                engine: "trino".into(),
-                key,
-                kind: self.kind().as_str().into(),
-            }),
-            Err(RenderError::LineBreak(key)) => Err(ValidationError::Config {
-                kind: self.kind().as_str().into(),
-                msg: format!("{key} contains a line break"),
-            }),
-            _ => Ok(()),
+        use crate::render::starrocks::{render_starrocks, StarRocksRenderInput};
+        use crate::render::trino::{render_trino, TrinoRenderInput};
+        use crate::render::RenderError;
+        for (engine, result) in [
+            (
+                "trino",
+                render_trino("probe", self, &TrinoRenderInput::probe()).map(|_| ()),
+            ),
+            (
+                "starrocks",
+                render_starrocks("probe", self, &StarRocksRenderInput::probe()).map(|_| ()),
+            ),
+        ] {
+            match result {
+                Err(RenderError::Collision(key)) => {
+                    return Err(ValidationError::Collision {
+                        engine: engine.into(),
+                        key,
+                        kind: self.kind().as_str().into(),
+                    })
+                }
+                Err(RenderError::LineBreak(key)) => {
+                    return Err(ValidationError::Config {
+                        kind: self.kind().as_str().into(),
+                        msg: format!("{key} contains a line break"),
+                    })
+                }
+                _ => {}
+            }
         }
+        Ok(())
     }
 
     pub fn kind(&self) -> CatalogKind {
@@ -761,6 +794,30 @@ impl CatalogDef {
                 .get("connector.name")
                 .cloned()
                 .unwrap_or_else(|| "generic".into()),
+        }
+    }
+
+    /// The StarRocks `"type"` property, or `None` for a catalog StarRocks
+    /// cannot read. Note the spellings differ from Trino's connector names:
+    /// `deltalake` (no underscore), `es`, `benchmark` for both TPC suites, and
+    /// one `jdbc` for every dialect (spec §3).
+    pub fn starrocks_catalog_type(&self) -> Option<String> {
+        Some(match &self.config {
+            CatalogConfig::Iceberg(_) => "iceberg".into(),
+            CatalogConfig::Hive(_) => "hive".into(),
+            CatalogConfig::DeltaLake(_) => "deltalake".into(),
+            CatalogConfig::Hudi(_) => "hudi".into(),
+            CatalogConfig::Jdbc(_) => "jdbc".into(),
+            CatalogConfig::Elasticsearch(_) => "es".into(),
+            CatalogConfig::Tpch(_) | CatalogConfig::Tpcds(_) => "benchmark".into(),
+            CatalogConfig::Generic(_) => self.advanced.starrocks.get("type")?.clone(),
+        })
+    }
+
+    pub fn jdbc_dialect(&self) -> Option<JdbcDialect> {
+        match &self.config {
+            CatalogConfig::Jdbc(j) => Some(j.dialect),
+            _ => None,
         }
     }
 }

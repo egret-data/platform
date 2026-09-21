@@ -11,22 +11,7 @@ use crate::config::{
     JdbcDialect, JdbcSsl, RestAuth,
 };
 
-/// The warehouse behind an egret catalog.
-#[derive(Clone, Copy, Debug)]
-pub struct WarehouseRender<'a> {
-    pub name: &'a str,
-    pub s3_endpoint: &'a str,
-}
-
-/// A resolved storage connection (secret still an id).
-#[derive(Clone, Copy, Debug)]
-pub struct StorageRender<'a> {
-    pub endpoint: Option<&'a str>,
-    pub region: &'a str,
-    pub path_style: bool,
-    pub access_key: &'a str,
-    pub secret_key_secret_id: Option<Uuid>,
-}
+use super::{RenderError, StorageRender, WarehouseRender};
 
 #[derive(Clone, Copy, Debug)]
 pub struct TrinoRenderInput<'a> {
@@ -89,18 +74,6 @@ impl TrinoCatalogFile {
         }
         (plain, secret)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum RenderError {
-    #[error("catalog {0} cannot be read by Trino")]
-    NotReadable(String),
-    #[error("missing render input: {0}")]
-    MissingInput(&'static str),
-    #[error("advanced.trino key {0:?} collides with a property the catalog form sets")]
-    Collision(String),
-    #[error("property {0:?} has a value with a line break")]
-    LineBreak(String),
 }
 
 struct Out<'a> {
