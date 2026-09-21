@@ -330,7 +330,7 @@ impl FeError {
     ///
     /// The old, forgettable shape no longer type-checks:
     ///
-    /// ```compile_fail,E0061
+    /// ```compile_fail
     /// # use std::collections::BTreeMap;
     /// # use egret_engine_mgmt::FeError;
     /// fn diagnose(e: &FeError, statement_secrets: &BTreeMap<uuid::Uuid, String>) -> String {
@@ -355,14 +355,29 @@ impl FeError {
     /// ```
     ///
     /// Nor can a caller re-derive the connection half by hand and get it
-    /// wrong, because [`FeTarget::secrets`] is private:
+    /// wrong, because `FeTarget::secrets` is private:
     ///
-    /// ```compile_fail,E0624
+    /// ```compile_fail
     /// # use egret_engine_mgmt::FeTarget;
     /// fn connection_secrets(fe: &FeTarget) -> usize {
     ///     fe.secrets().len()
     /// }
     /// ```
+    ///
+    /// **What those two blocks do and do not prove.** `compile_fail` asserts
+    /// only that the snippet does not build; rustdoc checks an appended error
+    /// code (`compile_fail,E0061`) on NIGHTLY ONLY, and this workspace pins
+    /// stable, so such an annotation is decorative — measured, not assumed: it
+    /// was written, deliberately falsified to `E0308`, and the doctest still
+    /// passed. So the reasons are pinned by mutation instead, and both were
+    /// run: making `secrets` `pub` again turns the second block green (it is
+    /// about privacy and nothing else), and reverting this signature to one
+    /// argument turns the first green (it is about the arity and nothing
+    /// else). The middle block is the control: it is the same snippet plus the
+    /// `fe` argument, so a snippet failing for some unrelated reason would
+    /// show up there.
+    // The positive block above is deliberately NOT `no_run`: it must be
+    // type-checked, since type-checking is the entire assertion.
     pub fn scrubbed(&self, fe: &FeTarget, secrets: &BTreeMap<uuid::Uuid, String>) -> String {
         // The FE's own go in LAST, so nothing a caller passes can displace
         // them — not even a map that happens to key on the nil UUID.
