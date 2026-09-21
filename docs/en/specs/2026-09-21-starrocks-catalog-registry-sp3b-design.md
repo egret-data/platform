@@ -25,7 +25,10 @@ FE holds credentials egret cannot indirect away.
 
 **D1 — Attach records, then converges.** An attach writes the attachment row and attempts the
 DDL. On failure it stores `apply_status = 'failed'` with the error, and returns 201 with that
-status rather than 502. Convergence comes from the generalised bootstrap (D2) and the existing
+status rather than 502. **Migration 0149 adds a third status, `pending`**: `apply_status` today is
+`CHECK (applied|failed)` defaulting to `applied`, so a row written before its DDL runs claims to be
+applied — which `create_starrocks_engine` already does for the primary attachment, for the five to
+ten minutes the FE is unreachable. Recorded-but-not-yet-converged needs a name of its own. Convergence comes from the generalised bootstrap (D2) and the existing
 Retry route. This differs from Trino's apply-then-write, and deliberately: a StarRocks FE is
 unreachable for five to ten minutes after `create_engine`, which is exactly when the create-engine
 wizard attaches catalogs. Detach still applies first: a `DROP CATALOG` that fails keeps the row,
@@ -50,24 +53,51 @@ a second `CREATE`, because `IF NOT EXISTS` makes a credential rotation a silent 
 gates on that: iceberg, hive, deltalake, hudi, elasticsearch, tpch/tpcds (rendered `benchmark`),
 and jdbc for postgresql, mysql, mariadb, oracle, sqlserver and clickhouse. The image is
 overridable, so an engine pinned to an older FE can still refuse a kind egret allows; that refusal
-surfaces as the DDL error on the attachment, not as a validation error. Today `can_read` returns
-`true` for every typed kind on both engines, which is simply wrong, and SP3b is where it stops
-being wrong.
+surfaces as the DDL error on the attachment, not as a validation error. Today `can_read` answers
+`true` for every typed kind on both engines through a `_ => true` arm. At a 4.x floor the matrix
+**denies nothing that exists today**, so this is a structural change, not a behavioural one: an
+exhaustive match with no wildcard, so that adding a kind forces a decision per engine instead of
+inheriting a silent yes.
 
 **D5 — JDBC drivers are pinned in egret config, overridable per catalog.** StarRocks makes the FE
 download the driver named by `driver_url`. Egret ships a `driver_url` and `driver_class` per
-dialect, pinned to an exact version, in configuration rather than in code, so an air-gapped
-platform can repoint them at an internal mirror. `advanced.starrocks.driver_url` overrides for one
-catalog. A dialect with no pinned URL and no override is refused at validation time.
+dialect, pinned to an exact version. The table is compiled in, because `CatalogDef::validate` is
+pure and cannot read deployment configuration; `[starrocks.jdbc_drivers]` may **override** an entry,
+so an air-gapped platform can repoint them at an internal mirror. `driver_url` and `driver_class`
+are the only typed keys `advanced.starrocks` may override — §4.3's collision rule would otherwise
+refuse the override before it could take effect — and they are consumed before the typed block.
+Validation refuses an incomplete override, which is what it can see; a blanked driver is refused at
+render time and surfaces as the attachment's `apply_error`.
+
+**`mysql` renders a MariaDB URL on StarRocks.** The FE rewrites `jdbc:mysql` to `jdbc:mariadb` and
+loads `org.mariadb.jdbc.Driver` (`JDBCMetadata.java:123-125,189-191`, "because of gpl protocol"), so
+Trino's `sslMode=VERIFY_IDENTITY` would reach a driver that only understands
+`disable|trust|verify-full`. This is the first place one registry row must render different text for
+each engine.
 
 **D6 — Secrets are resolved at DDL-build time and never logged.** There is no `${ENV:…}` for
 StarRocks; the plaintext goes into the statement. Therefore: the DDL text is never logged, not even
 at debug, and errors returned from the FE are scrubbed before they reach an `apply_error` column or
 an API response. The catalog DDL also starts using the engine's pinned FE certificate, which the
 delegation path already passes and the catalog path does not — today an OAuth2 credential crosses
-the wire in cleartext on a TLS-capable engine. Anyone with FE admin rights can still read the
+the wire in cleartext on a TLS-capable engine, and so does the FE **root password** on the
+login probe that precedes it. Every statement goes through one target so neither can be forgotten
+again. The pinned certificate only exists when delegation is configured and TLS is on, so the
+cleartext path remains for engines without it; that is a limit, not a fix. Anyone with FE admin rights can still read the
 credential back with `SHOW CREATE CATALOG`; that is StarRocks' model, and SP4 is where per-user
 authorization stops mattering less than it should.
+
+**D3 addendum — drift comparison is blind to secrets.** `SHOW CREATE CATALOG` masks credential
+values as `xx******yy` and removes a JDBC `password` outright (`CredentialUtil.java:88-99`), and its
+`checksum` is the FE's own. The comparison therefore covers plain, non-masked keys only: egret
+cannot tell a rotated password from an unchanged one by reading the FE, and must not pretend to.
+
+**Known gap, not fixed here.** Egret sends the warehouse credential as `iceberg.catalog.credential`
+and `iceberg.catalog.oauth2-server-uri` — the Iceberg-standard names, which are the ones that
+actually work on 3.3 (the `iceberg.catalog.oauth2.*` dot-form is silently ignored). `CredentialUtil`
+masks the dot-form, so `SHOW CREATE CATALOG` may return egret's credential **in clear** to any FE
+admin. SP3b keeps the names that work, records the live output verbatim in its kind check, and
+leaves the fix to SP4.
 
 **D7 — Egret compensates its own half-writes.** If the DDL succeeds and the attachment row cannot
 be written, egret drops the catalog again. SP3a's comment says the next apply prunes it; that is
