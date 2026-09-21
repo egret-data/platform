@@ -3617,6 +3617,7 @@ async fn delete_engine_removes_cluster_row_secrets_and_minted_clients_only() {
         minted_client: false,
         applied_now: true,
         created_at: None,
+        apply_status: egret_catalog_registry::store::apply_status::APPLIED,
     })
     .await
     .unwrap();
@@ -6069,6 +6070,7 @@ async fn registry_catalog_crud_validation_and_delete_refusal() {
         minted_client: false,
         applied_now: true,
         created_at: None,
+        apply_status: egret_catalog_registry::store::apply_status::APPLIED,
     })
     .await
     .unwrap();
@@ -6158,6 +6160,7 @@ async fn registry_update_propagates_and_flags_the_failed_engine() {
             minted_client: false,
             applied_now: true,
             created_at: None,
+            apply_status: egret_catalog_registry::store::apply_status::APPLIED,
         })
         .await
         .unwrap();

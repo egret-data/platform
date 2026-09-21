@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::legacy::{classify, plaintext_secrets, ClassifyOutcome, LegacyCatalog};
 use crate::name::{first_free_name, join_truncated, normalize_catalog_name};
 use crate::report::ReportEntry;
-use crate::store::{CatalogRow, NewAttachment, RegistryStore, WarehouseIdentity};
+use crate::store::{apply_status, CatalogRow, NewAttachment, RegistryStore, WarehouseIdentity};
 use crate::{RegistryError, Severity};
 
 /// `pg_advisory_lock` key ("SP3A") serialising replicas booting together.
@@ -607,6 +607,7 @@ async fn migrate_warehouse_row(
                     != Some(false),
                 applied_now: false,
                 created_at: Some(row.created_at),
+                apply_status: apply_status::APPLIED,
             },
             row.id,
             &entries,
@@ -689,6 +690,7 @@ async fn migrate_connector_row(
                             minted_client: false,
                             applied_now: false,
                             created_at: Some(row.created_at),
+                            apply_status: apply_status::APPLIED,
                         },
                         row.id,
                         &entries,

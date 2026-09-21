@@ -594,6 +594,7 @@ pub(crate) async fn attach_to_engine(
             minted_client: minted.is_some(),
             applied_now: true,
             created_at: None,
+            apply_status: egret_catalog_registry::store::apply_status::APPLIED,
         })
         .await
         .map_err(|e| {

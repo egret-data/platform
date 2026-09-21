@@ -2884,6 +2884,7 @@ async fn create_engine(
             minted_client: true,
             applied_now: false,
             created_at: None,
+            apply_status: egret_catalog_registry::store::apply_status::APPLIED,
         })
         .await
     {
@@ -3613,6 +3614,7 @@ async fn create_starrocks_engine(
             minted_client: true,
             applied_now: false,
             created_at: None,
+            apply_status: egret_catalog_registry::store::apply_status::APPLIED,
         })
         .await
     {
