@@ -59,9 +59,11 @@
 //! `catalog_apply::{apply_starrocks, converge_attachment}` construct a
 //! [`FeTarget`] through [`fe_target`] and reach the FE only through
 //! [`StarRocksDdl`], so D6's pinned certificate is now *applied*, not merely
-//! implemented. `spawn_starrocks_catalog_wire`'s bootstrap and
-//! `run_starrocks_ddl` (both in `engines.rs`) still dial `mysql_async`
-//! directly; Task 5 moves them and retires those call sites.
+//! implemented. Task 5 finished the job: `engines::spawn_starrocks_catalog_wire`
+//! — its root-login probe, its per-attachment convergence and its delegation
+//! statements — comes through here too, and the `run_starrocks_ddl` it used to
+//! dial `mysql_async` with is deleted. [`MysqlDdlRunner`] is the only place in
+//! egret that opens a connection to a StarRocks FE for a statement.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -373,10 +375,10 @@ const FE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const FE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The real runner: one `mysql_async` connection per statement, exactly like
-/// today's `run_starrocks_ddl` (`engines.rs`) — a one-shot admin statement has
-/// no caller-facing row cap/cancellation/result shape to thread through, so
-/// this stays direct `mysql_async` rather than `egret_query`'s interactive
-/// `StarRocksConnector`.
+/// the `run_starrocks_ddl` it replaced (Task 5 deleted that) — a one-shot
+/// admin statement has no caller-facing row cap/cancellation/result shape to
+/// thread through, so this stays direct `mysql_async` rather than
+/// `egret_query`'s interactive `StarRocksConnector`.
 pub struct MysqlDdlRunner;
 
 impl MysqlDdlRunner {
@@ -448,18 +450,22 @@ impl StarRocksDdl for MysqlDdlRunner {
 }
 
 /// Where and how to reach this engine's FE. The cert is the engine's own
-/// (`engines.coordinator_cert`, minted by `ensure_tls_cert`), used whenever the
-/// stored spec has `starrocksConfig.delegation.tlsEnabled` — the same condition
-/// under which the FE actually serves TLS. Before SP3b the catalog DDL and the
-/// root-login probe both passed `None` while the delegation DDL passed the
-/// cert, so an OAuth2 credential AND the FE root password crossed the wire in
-/// cleartext on a TLS-capable engine (D6). This function is the fix, and since
-/// SP3b Task 4 it is applied: `catalog_apply::apply_starrocks` builds its
-/// `FeTarget` here, so every attach, re-apply and detach statement carries the
-/// pinned cert and the root password. The BOOTSTRAP
-/// (`spawn_starrocks_catalog_wire`) still dials `mysql_async` directly and is
-/// Task 5's to move; until it does, the cleartext path survives for exactly
-/// the primary catalog of a freshly created engine.
+/// (`engines.coordinator_cert`, minted by `ensure_tls_cert`), used whenever
+/// [`crate::engines::sr_tls_enabled`] says the FE actually serves TLS — the
+/// same predicate `build_starrocks_provision_req` provisions by, which is the
+/// point of it being one function (Task 5 found the two apart: this one read
+/// `tlsEnabled` with `unwrap_or(false)`, so a delegation-enabled engine with
+/// no explicit `tlsEnabled` was provisioned with TLS and dialled without the
+/// cert).
+///
+/// Before SP3b the catalog DDL and the root-login probe both passed `None`
+/// while the delegation DDL passed the cert, so an OAuth2 credential AND the FE
+/// root password crossed the wire in cleartext on a TLS-capable engine (D6).
+/// This function is the fix, and since Task 5 it is applied EVERYWHERE: the
+/// attach/re-apply/detach path (`catalog_apply::apply_starrocks`) and the
+/// bootstrap (`engines::spawn_starrocks_catalog_wire` — its root-login probe,
+/// its per-attachment convergence and its delegation statements alike) all take
+/// their target from here. There is no second way to reach a StarRocks FE left.
 // `pub(crate)`, not the public API: only this crate's apply/bootstrap code
 // calls it. (The `#[allow(dead_code)]` that used to sit here for the window
 // where it had no production caller is gone with that window — fix round 1
@@ -474,10 +480,7 @@ pub(crate) async fn fe_target(st: &CpState, engine: &Engine) -> Result<FeTarget,
         ),
         None => None,
     };
-    let tls = crate::engines::sr_delegation_block(&engine.spec)
-        .get("tlsEnabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let tls = crate::engines::sr_tls_enabled(&engine.spec);
     Ok(FeTarget {
         host: engine.coordinator_host(),
         port: engine.coordinator_port() as u16,

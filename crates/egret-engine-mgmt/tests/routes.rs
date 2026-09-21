@@ -5764,10 +5764,13 @@ async fn legacy_put_flags_a_failed_apply_without_reverting_and_a_later_apply_cle
 }
 
 /// `POST /engines` for a StarRocks engine with the wizard defaults; returns
-/// `(engine id, its warehouse id)`. The engine's own post-provision FE wire is
-/// spawned in the background and still dials `mysql_async` directly (Task 5
-/// moves it), so it records nothing on `f.starrocks_ddl` — every statement the
-/// fake sees below was sent by the apply path under test.
+/// `(engine id, its warehouse id)`. The engine's own post-provision FE wire IS
+/// on `f.starrocks_ddl` since SP3b Task 5 — but it never reaches a statement
+/// here: it polls `EngineProvisioningPort::status` for a pod whose name
+/// contains `-fe-`, and `FakeEnginePort`'s single pod is `coordinator-0`, so
+/// the spawned task is still waiting on its poll budget when the test ends.
+/// Every statement the fake sees below was therefore sent by the apply path
+/// under test.
 async fn create_starrocks_via_api(f: &Fixture, token: &str) -> (String, Uuid) {
     let wh_id = seed_provisioned_warehouse_with_secret(f).await;
     let (status, j) = call(f, "POST", "/engines", token, Some(serde_json::json!({
@@ -5778,6 +5781,49 @@ async fn create_starrocks_via_api(f: &Fixture, token: &str) -> (String, Uuid) {
     }))).await;
     assert_eq!(status, StatusCode::CREATED, "create starrocks; body={j}");
     (j["id"].as_str().unwrap().to_string(), wh_id)
+}
+
+/// SP3b D1 (migration 0149): `POST /engines` for StarRocks RECORDS its primary
+/// attachment and leaves the converging to the background wire, so the row is
+/// `pending` — not `applied`, which is what it claimed for the five to ten
+/// minutes the FE is unreachable, about a cluster nothing had yet spoken to.
+/// Task 5 is the task that made this safe: before it, the bootstrap wrote no
+/// per-attachment status at all, so a `pending` row here would have stayed
+/// `pending` for ever.
+#[tokio::test]
+async fn a_new_starrocks_engines_primary_attachment_is_recorded_pending() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_sr_pending_admin", true).await;
+    let (engine_id, wh_id) = create_starrocks_via_api(&f, &token).await;
+
+    let cat = warehouse_catalog(&f, wh_id).await;
+    let row = registry(&f)
+        .get_attachment(Uuid::parse_str(&engine_id).unwrap(), cat.id)
+        .await
+        .unwrap()
+        .expect("primary attachment written");
+    assert_eq!(row.apply_status, "pending");
+    assert!(row.apply_error.is_none());
+    assert!(
+        row.applied_at.is_none(),
+        "nothing has applied it: the FE has not been spoken to"
+    );
+    // And the wire really has not spoken to the fake FE — `FakeEnginePort`'s
+    // only pod is `coordinator-0`, which is not an FE, so the bootstrap is
+    // still in its readiness poll.
+    assert!(
+        f.starrocks_ddl.executed().is_empty(),
+        "{:?}",
+        f.starrocks_ddl.executed()
+    );
 }
 
 /// A `jdbc` catalog body whose password lives in `secret_id` — the kind whose

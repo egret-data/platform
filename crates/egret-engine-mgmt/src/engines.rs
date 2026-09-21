@@ -59,8 +59,13 @@ const ENGINE_ROLE_NAME: &str = "engine";
 /// end-to-end on 4.1.3 (per-user JWT over pinned TLS returning a row).
 const DEFAULT_SR_FE_IMAGE: &str = "starrocks/fe-ubuntu:4.1-latest";
 const DEFAULT_SR_CN_IMAGE: &str = "starrocks/cn-ubuntu:4.1-latest";
-/// StarRocks FE MySQL-protocol (query) port — where the Iceberg external-catalog
-/// auto-wire runs its `CREATE EXTERNAL CATALOG` DDL (`query_port` in `fe.conf`).
+/// StarRocks FE MySQL-protocol (query) port — `query_port` in `fe.conf`, and
+/// what [`crate::store::Engine::coordinator_port`] answers for a StarRocks
+/// engine. Since SP3b Task 5 nothing in production reads it here: every
+/// statement's port comes from the engine row through
+/// `starrocks_ddl::fe_target`. It is kept for the connection-opts tests below,
+/// which assert the port the FE really listens on.
+#[cfg(test)]
 const STARROCKS_FE_MYSQL_PORT: u16 = 9030;
 
 // Canonical engine-spec DTOs now live in the dependency-free `egret-engine-mgmt-api`
@@ -3054,11 +3059,7 @@ async fn build_starrocks_provision_req(
         .and_then(|d| d.get("mode"))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
-    let tls_enabled = delegation_mode.is_some()
-        && delegation_cfg
-            .and_then(|d| d.get("tlsEnabled"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+    let tls_enabled = sr_tls_enabled(&engine.spec);
 
     // Ranger resolution — the SAME snippet `build_provision_req` uses for Trino:
     // bound profile (authz_service_id set) → RangerBinding named after the
@@ -3118,7 +3119,9 @@ async fn build_starrocks_provision_req(
         jwks_url: st.engine_jwks_uri.clone(),
         issuer: st.engine_oidc_issuer.clone(),
         audience: "engine".into(),
-        tls_cert_pem: delegation_cert_pem.clone(),
+        // No `tls_cert_pem`: `ensure_tls_cert` above has already persisted the
+        // cert on the engine row, and `starrocks_ddl::fe_target` reads it back
+        // for EVERY statement the bootstrap sends (D6).
         service_user: crate::delegator_policy::DELEGATOR_USERNAME.into(),
         service_password: delegation_service_password.clone().unwrap_or_default(),
     });
@@ -3433,9 +3436,10 @@ fn build_starrocks_spec(
 /// client-credentials exchange itself, driven by the `client_id:client_secret`
 /// credential — StarRocks' external catalog is handed that SAME credential +
 /// egret's token endpoint and self-refreshes its access token (no static
-/// bearer to expire). A background step (spawned after `provision` succeeds,
-/// see [`spawn_starrocks_catalog_wire`]) runs
-/// [`starrocks_external_catalog_sql`] against the FE once it's Ready.
+/// bearer to expire). The attachment is recorded `pending` (D1); a background
+/// step (spawned after `provision` succeeds, see
+/// [`spawn_starrocks_catalog_wire`]) converges it — and every other attachment
+/// of this engine — once the FE is Ready, and records what happened per row.
 /// Any failure up to and including `provision` rolls back (revoke the client +
 /// delete the engine row) exactly like the Trino path; the post-provision wire
 /// step is best-effort and never fails the create (see its own docs).
@@ -3614,7 +3618,14 @@ async fn create_starrocks_engine(
             minted_client: true,
             applied_now: false,
             created_at: None,
-            apply_status: egret_catalog_registry::store::apply_status::APPLIED,
+            // `pending`, not `applied` (D1, migration 0149): the FE is
+            // unreachable for the five to ten minutes after `provision`, so a
+            // row claiming `applied` here would be a claim about a cluster
+            // nothing has spoken to yet. `spawn_starrocks_catalog_wire` settles
+            // it once the FE answers, and a Retry converges it if that never
+            // runs — which is what made this change safe to make only now
+            // (Task 5), and not in Task 3's mechanical sweep.
+            apply_status: egret_catalog_registry::store::apply_status::PENDING,
         })
         .await
     {
@@ -3707,90 +3718,15 @@ async fn create_starrocks_engine(
     // `req.starrocks.root_password` by `build_starrocks_provision_req`) on the
     // post-Ready bootstrap connection; `None` for legacy engines keeps it
     // passwordless.
-    let root_password = req.starrocks.as_ref().and_then(|s| s.root_password.clone());
     spawn_starrocks_catalog_wire(
-        prov.clone(),
-        st.engine_mgmt.clone(),
+        st.clone(),
         engine.id,
-        engine.namespace.clone(),
         engine.name.clone(),
-        st.engine_egret_url.clone(),
-        wh.name.clone(),
-        wh_catalog.name.clone(),
-        client.client_id.clone(),
-        client.client_secret.clone(),
-        root_password,
+        engine.namespace.clone(),
         delegation_bootstrap,
     );
 
     Ok((StatusCode::CREATED, Json(engine.into())))
-}
-
-/// Escape a value for embedding inside a double-quoted StarRocks property
-/// string (`"…"`). Backslash and double-quote are the only two metacharacters
-/// that can break out of a `"…"` value, so a `wh.name` (free-form, NOT
-/// charset-validated anywhere) containing a `"` can't inject arbitrary DDL that
-/// then runs as `root` on the FE. Backslash is escaped first so the escape
-/// character it introduces isn't itself re-escaped.
-fn sr_escape_dq(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-/// Escape an identifier for a backtick-quoted StarRocks/MySQL identifier
-/// (`` `…` ``). A literal backtick is escaped by doubling it — the same rule
-/// MySQL/StarRocks use — so an identifier containing a backtick can't close the
-/// quoting early and inject DDL.
-fn sr_escape_ident(s: &str) -> String {
-    s.replace('`', "``")
-}
-
-/// Build the StarRocks `CREATE EXTERNAL CATALOG` DDL that points a provisioned
-/// StarRocks at egret's embedded Iceberg REST catalog, authenticating with
-/// OAuth2 client-credentials — the EXACT same egret token endpoint +
-/// `client_id:client_secret` credential the Trino path renders
-/// for an egret warehouse catalog (`iceberg.rest-catalog.security=OAUTH2` /
-/// `…oauth2.server-uri` / `…oauth2.credential`). StarRocks' REST catalog client
-/// self-refreshes its access token from these props, so — unlike a static
-/// `iceberg.catalog.token` — the catalog does NOT die when a token expires.
-///
-/// StarRocks Iceberg-REST OAuth2 property keys — the Iceberg-STANDARD names
-/// `iceberg.catalog.credential` (`client_id:client_secret`) +
-/// `iceberg.catalog.oauth2-server-uri`. VERIFIED LIVE on StarRocks 3.3 (T8
-/// smoke): the `iceberg.catalog.oauth2.credential`/`.server-uri` dot-form the
-/// docs suggest (and StarRocks issue #57766 flags) is silently IGNORED — no
-/// bearer is exchanged and catalog reads fail with "missing bearer token". The
-/// standard names make StarRocks' Iceberg REST client self-exchange + refresh
-/// the token, so — unlike a static `iceberg.catalog.token` — the catalog does
-/// NOT die on expiry.
-///
-/// All interpolated values are escaped ([`sr_escape_dq`] / [`sr_escape_ident`])
-/// so a warehouse/catalog name is never a DDL-injection vector (this DDL runs as
-/// `root` on the FE).
-fn starrocks_external_catalog_sql(
-    catalog_name: &str,
-    egret_url: &str,
-    warehouse: &str,
-    credential: &str,
-) -> String {
-    let name = sr_escape_ident(catalog_name);
-    let uri = sr_escape_dq(&format!("{egret_url}/catalog"));
-    let warehouse = sr_escape_dq(warehouse);
-    let server_uri = sr_escape_dq(&format!("{egret_url}/oauth/token"));
-    let credential = sr_escape_dq(credential);
-    // OAuth2 uses the Iceberg-standard REST property NAMES (`credential` +
-    // `oauth2-server-uri`), NOT the `iceberg.catalog.oauth2.*` dot-form —
-    // verified live on StarRocks 3.3: the dot-form is silently ignored (no
-    // bearer sent -> catalog reads fail with "missing bearer token"), while
-    // these names make StarRocks' Iceberg REST client self-exchange + refresh
-    // the token (mirrors the Trino path's OAuth2 config, no static token).
-    format!(
-        "CREATE EXTERNAL CATALOG IF NOT EXISTS `{name}` \
-         PROPERTIES (\"type\"=\"iceberg\", \"iceberg.catalog.type\"=\"rest\", \
-         \"iceberg.catalog.uri\"=\"{uri}\", \
-         \"iceberg.catalog.warehouse\"=\"{warehouse}\", \
-         \"iceberg.catalog.credential\"=\"{credential}\", \
-         \"iceberg.catalog.oauth2-server-uri\"=\"{server_uri}\")"
-    )
 }
 
 /// Build the `mysql_async` connection options for egret's own FE `root`
@@ -3812,11 +3748,10 @@ fn starrocks_external_catalog_sql(
 /// CN won't match the in-cluster Service DNS we dial) and runs the DDL over
 /// TLS; `None` stays plain TCP.
 ///
-/// `pub(crate)` (SP3b Task 3): also the connection-opts primitive
-/// [`crate::starrocks_ddl::MysqlDdlRunner`] uses. `run_starrocks_ddl` below and
-/// `spawn_starrocks_catalog_wire`'s bootstrap keep calling it directly for now
-/// (Tasks 4/5 retire that path onto the injectable runner); this fn is the one
-/// piece both sides already share.
+/// `pub(crate)` (SP3b Task 3): the connection-opts primitive
+/// [`crate::starrocks_ddl::MysqlDdlRunner`] uses. Since Task 5 that runner is
+/// the ONLY caller — the bootstrap's own `run_starrocks_ddl` is gone, and every
+/// statement egret sends a StarRocks FE goes through the injectable seam.
 pub(crate) fn starrocks_root_conn_opts(
     host: &str,
     port: u16,
@@ -3843,31 +3778,6 @@ pub(crate) fn starrocks_root_conn_opts(
     opts
 }
 
-/// Run one DDL statement against a StarRocks FE over the raw MySQL protocol,
-/// as `root`. Direct `mysql_async` (not `egret_query`'s interactive
-/// `StarRocksConnector`): this is a one-shot admin statement with no
-/// caller-facing row cap/cancellation/result shape to thread through.
-/// `root_password` presents the minted FE `root` password when the engine has
-/// one (`None` -> passwordless, the legacy default); `tls_cert_pem` optionally
-/// pins the FE cert and runs over TLS. See [`starrocks_root_conn_opts`] for the
-/// connection-opts wiring.
-async fn run_starrocks_ddl(
-    host: &str,
-    port: u16,
-    sql: &str,
-    root_password: Option<&str>,
-    tls_cert_pem: Option<&str>,
-) -> Result<(), String> {
-    use mysql_async::prelude::Queryable;
-    let opts = starrocks_root_conn_opts(host, port, root_password, tls_cert_pem);
-    let mut conn = mysql_async::Conn::new(opts)
-        .await
-        .map_err(|e| e.to_string())?;
-    conn.query_drop(sql).await.map_err(|e| e.to_string())?;
-    let _ = conn.disconnect().await;
-    Ok(())
-}
-
 /// Build the `CREATE SECURITY INTEGRATION` + `authentication_chain` DDL that
 /// registers egret's OIDC/Keycloak JWKS with a StarRocks FE, mirroring
 /// slice-1's manual `deploy/starrocks/init/security-integration.sql` (now
@@ -3880,14 +3790,16 @@ async fn run_starrocks_ddl(
 /// keeps the existing native/password chain working alongside JWT logins
 /// (impersonate mode still needs the native chain for the service user).
 ///
-/// All interpolated values are escaped ([`sr_escape_dq`]) — same DDL-injection
-/// posture as [`starrocks_external_catalog_sql`]: this runs as `root` on the
-/// FE, and `jwks_url`/`issuer`/`audience` are admin-controlled config, not
-/// charset-validated anywhere upstream.
+/// All interpolated values are escaped with the registry's own
+/// [`egret_catalog_registry::escape_dq`] — this runs as `root` on the FE, and
+/// `jwks_url`/`issuer`/`audience` are admin-controlled config, not
+/// charset-validated anywhere upstream. (SP3b Task 5: the duplicate
+/// `sr_escape_dq`/`sr_escape_ident` this module carried are gone; the renderer
+/// and these statements now escape through one implementation.)
 fn starrocks_jwt_integration_sql(jwks_url: &str, issuer: &str, audience: &str) -> Vec<String> {
-    let jwks_url = sr_escape_dq(jwks_url);
-    let issuer = sr_escape_dq(issuer);
-    let audience = sr_escape_dq(audience);
+    let jwks_url = egret_catalog_registry::escape_dq(jwks_url);
+    let issuer = egret_catalog_registry::escape_dq(issuer);
+    let audience = egret_catalog_registry::escape_dq(audience);
     vec![
         format!(
             "CREATE SECURITY INTEGRATION egret_oidc PROPERTIES(\"type\"=\"authentication_jwt\", \
@@ -3923,12 +3835,13 @@ fn starrocks_jwt_integration_sql(jwks_url: &str, issuer: &str, audience: &str) -
 ///
 /// `type` is deliberately not re-sent: it is the integration's kind, not a
 /// setting, and StarRocks has no reason to accept it changing underneath.
-/// Escaping is [`sr_escape_dq`], identical to the `CREATE` above — this runs as
-/// `root` on the FE from the same admin-controlled config.
+/// Escaping is [`egret_catalog_registry::escape_dq`], identical to the
+/// `CREATE` above — this runs as `root` on the FE from the same
+/// admin-controlled config.
 fn starrocks_jwt_integration_repair_sql(jwks_url: &str, issuer: &str, audience: &str) -> String {
-    let jwks_url = sr_escape_dq(jwks_url);
-    let issuer = sr_escape_dq(issuer);
-    let audience = sr_escape_dq(audience);
+    let jwks_url = egret_catalog_registry::escape_dq(jwks_url);
+    let issuer = egret_catalog_registry::escape_dq(issuer);
+    let audience = egret_catalog_registry::escape_dq(audience);
     format!(
         "ALTER SECURITY INTEGRATION egret_oidc SET (\"jwks_url\"=\"{jwks_url}\", \
          \"principal_field\"=\"preferred_username\", \"required_issuer\"=\"{issuer}\", \
@@ -3970,7 +3883,8 @@ fn starrocks_create_service_user_sql(service_user: &str, password: &str) -> Stri
 /// `EXECUTE AS <any user> WITH NO REVERT` (the impersonate-mode primitive —
 /// see `crate::execution::connector::starrocks::StarRocksConnector::switch_identity`
 /// in `egret-query`). Backticks in the identifier are doubled (MySQL/StarRocks
-/// identifier-escaping rule), matching [`sr_escape_ident`]'s convention.
+/// identifier-escaping rule), matching
+/// [`egret_catalog_registry::escape_ident`]'s convention.
 fn starrocks_impersonation_grant_sql(service_user: &str) -> String {
     let esc = service_user.replace('`', "``");
     format!("GRANT IMPERSONATE ON ALL USERS TO `{esc}`")
@@ -3984,41 +3898,21 @@ fn starrocks_impersonation_grant_sql(service_user: &str) -> String {
 /// into) and `Some(..)` for either delegation mode, built from
 /// `st.engine_jwks_uri`/`engine_oidc_issuer` plus a minted
 /// [`crate::delegator_policy::DELEGATOR_USERNAME`] secret.
+///
+/// SP3b Task 5 removed this bundle's `tls_cert_pem`: the certificate is now
+/// read off the engine row by [`crate::starrocks_ddl::fe_target`], which every
+/// statement of the bootstrap shares, so there is no second place to forget it
+/// (D6). The two were always the same value — `ensure_tls_cert` persists the
+/// cert with `set_tls` before handing it back to the provisioning request.
+#[derive(Clone)]
 struct StarRocksDelegationBootstrap {
     jwks_url: String,
     issuer: String,
     audience: String,
-    /// `Some(pem)` runs the bootstrap DDL over TLS, pinning this cert (mirrors
-    /// the connector's `options.tls_cert`); `None` stays plain TCP.
-    tls_cert_pem: Option<String>,
     service_user: String,
     service_password: String,
 }
 
-/// Best-effort, non-blocking post-provision step (T6 step 3, extended by
-/// S3-T2 step 3): poll the provisioner's `status` until a StarRocks FE pod
-/// reports ready (bounded to ~5 minutes), then run
-/// [`starrocks_external_catalog_sql`] against the FE's in-cluster
-/// MySQL-protocol service, and — when `delegation` is `Some` — the JWT
-/// security integration + impersonation service-user bootstrap
-/// ([`starrocks_jwt_integration_sql`] / [`starrocks_create_service_user_sql`] /
-/// [`starrocks_impersonation_grant_sql`]), over TLS when the bundle carries a
-/// cert. The DDL embeds the OAuth2 `client_id:client_secret` credential
-/// directly (StarRocks self-refreshes its access token from it, so there is
-/// no short-lived bearer to mint here and no token-expiry to recover from).
-/// Spawned via `tokio::spawn` so `create_starrocks_engine` returns its HTTP
-/// response without waiting on any of this — the FE takes ~1-2 min to come
-/// up, and neither the poll budget nor FE/egret reachability in a given
-/// cluster is something the create request should block on. Every failure
-/// path only logs (`tracing::warn!`); it never has a channel back to the
-/// original HTTP response, by construction. The FE service DNS name
-/// (`<name>-fe-service.<namespace>.svc`) is the kube-starrocks operator's
-/// documented convention; UNVERIFIED against a live operator install as of
-/// this change (flagged for the Task 8 / S3-T4 live smoke — see plan doc).
-/// Returns the spawned task's `JoinHandle` purely so a test can `.await` it
-/// for a deterministic "the bootstrap has finished" signal instead of a
-/// guessed sleep (P7's `bootstrap_stops_before_any_provisioner_call_when_*`
-/// test does this); both production call sites ignore it.
 /// Whether a background StarRocks bootstrap may still write to the engine it
 /// was spawned for: the row must still exist under the same id and name and
 /// not be on its way out (`DELETING`) or already given up on (`FAILED` —
@@ -4041,7 +3935,7 @@ fn bootstrap_target_is_current(found: Option<&Engine>, engine_name: &str) -> boo
 /// failures (more than one bad connection acquisition in a row, fewer than a
 /// whole poll cycle) is what it takes to conclude the store, not the
 /// network, is the problem.
-const MAX_CONSECUTIVE_ENGINE_READ_ERRORS: u32 = 5;
+pub(crate) const MAX_CONSECUTIVE_ENGINE_READ_ERRORS: u32 = 5;
 
 /// Re-read the engine and apply [`bootstrap_target_is_current`]. A DEFINITE
 /// answer — the row is gone, renamed, deleting or failed — stops the
@@ -4055,7 +3949,7 @@ const MAX_CONSECUTIVE_ENGINE_READ_ERRORS: u32 = 5;
 /// bootstrap, threaded through every checkpoint, so only BACK-TO-BACK
 /// failures count — any successful read (whatever verdict it carries)
 /// resets it to 0.
-async fn engine_still_current(
+pub(crate) async fn engine_still_current(
     store: &crate::EngineMgmtStore,
     engine_id: Uuid,
     engine_name: &str,
@@ -4091,32 +3985,86 @@ async fn engine_still_current(
     current
 }
 
-#[allow(clippy::too_many_arguments)]
+/// How many times the two post-provision poll loops (FE readiness, then a real
+/// `root` login) ask before giving up: 30 × [`POLL_INTERVAL`] ≈ 5 minutes each.
+///
+/// It is a constant the TEST BUILD SHRINKS rather than a literal in the loop
+/// because the unhappy paths — an FE that never reports ready, a root login
+/// that never succeeds — are exactly what D8's behavioural tests drive, and at
+/// the production budget each such case would cost five minutes of real
+/// sleeping. The trade that buys: `MAX_POLLS` itself is not under test, and a
+/// happy-path test must make the FIRST poll succeed. What these tests are for
+/// is the checkpoints and the loop, not arithmetic on a constant.
+#[cfg(not(test))]
+const MAX_POLLS: u32 = 30;
+#[cfg(test)]
+const MAX_POLLS: u32 = 1;
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Best-effort, non-blocking post-provision convergence: poll until an FE pod
+/// is ready, wait for a real `root` login (the `initpwd` Job races the FE),
+/// then bring EVERY attachment of this engine onto the FE and record the
+/// outcome of each one (design D2) — where before it created exactly one
+/// catalog, with `CREATE EXTERNAL CATALOG IF NOT EXISTS` (which silently adopts
+/// whatever is already there, the hole D3 exists to close), and only logged
+/// what happened. When `delegation` is `Some`, the JWT integration and
+/// impersonation service user follow, as before.
+///
+/// It takes the whole [`CpState`] rather than twelve positional arguments
+/// because it now reads the registry, the secrets and the storage registry
+/// itself; `CpState` is `Clone` and `'static`, so the spawned task owns a
+/// clone. The provisioner comes from `st.engine_provisioner` — a `None` there
+/// ends the task with a warning, as every other path treats it.
+///
+/// Every statement — the root-login probe included — goes through
+/// `st.starrocks_ddl` with the one [`crate::starrocks_ddl::FeTarget`] this
+/// engine resolves to, so the FE root password and every catalog credential
+/// carry the engine's pinned certificate instead of crossing a TLS-capable
+/// wire in cleartext (D6), and an FE error reaches a log or a column only
+/// through [`crate::starrocks_ddl::FeError::scrubbed`].
+///
+/// Spawned via `tokio::spawn` so `create_starrocks_engine` returns its HTTP
+/// response without waiting on any of this — the FE takes ~1-2 min to come up,
+/// and neither the poll budget nor FE/egret reachability in a given cluster is
+/// something the create request should block on. Returns the spawned task's
+/// `JoinHandle` purely so a test can `.await` it for a deterministic "the
+/// bootstrap has finished" signal instead of a guessed sleep; both production
+/// call sites ignore it.
+///
+/// **Where the six `engine_still_current` checkpoints sit, and why.** They
+/// exist so a bootstrap cannot resurrect an engine that was deleted or renamed
+/// while it polled, and a loop over N attachments must not weaken that. One per
+/// iteration of each poll loop (1, 2); one per ATTACHMENT inside
+/// [`crate::catalog_apply::converge_starrocks_catalogs`] (3) — where before it
+/// guarded the single catalog statement, so a delete part-way through a
+/// ten-catalog engine now stops at the next catalog instead of finishing the
+/// batch; then one before the security integration (4), one before its repair
+/// (5), and one per remaining delegation statement (6). The rule is the same
+/// everywhere: re-read immediately before a WRITE to the cluster, never once
+/// for a batch of them.
 fn spawn_starrocks_catalog_wire(
-    prov: Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
-    store: crate::EngineMgmtStore,
+    st: CpState,
     engine_id: Uuid,
-    namespace: String,
     engine_name: String,
-    egret_url: String,
-    warehouse_name: String,
-    catalog_name: String,
-    client_id: String,
-    client_secret: String,
-    root_password: Option<String>,
+    namespace: String,
     delegation: Option<StarRocksDelegationBootstrap>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        const MAX_POLLS: u32 = 30;
-        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+        let Some(prov) = st.engine_provisioner.clone() else {
+            tracing::warn!(engine = %engine_name,
+                "starrocks bootstrap: kubernetes is not configured; nothing to poll");
+            return;
+        };
         // One counter for the whole bootstrap, threaded through every
-        // `engine_still_current` checkpoint: see
+        // `engine_still_current` checkpoint — including the per-attachment one
+        // inside `converge_starrocks_catalogs`, which is why that function
+        // borrows it rather than starting a fresh count: see
         // `MAX_CONSECUTIVE_ENGINE_READ_ERRORS`.
         let mut consecutive_read_errors: u32 = 0;
         let mut fe_ready = false;
-        for _ in 0..MAX_POLLS {
+        for poll in 0..MAX_POLLS {
             if !engine_still_current(
-                &store,
+                &st.engine_mgmt,
                 engine_id,
                 &engine_name,
                 &mut consecutive_read_errors,
@@ -4134,20 +4082,45 @@ fn spawn_starrocks_catalog_wire(
                 }
                 Err(e) => {
                     tracing::debug!(engine = %engine_name, error = %e,
-                        "starrocks catalog auto-wire: status poll failed");
+                        "starrocks bootstrap: status poll failed");
                 }
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            // No sleep after the LAST attempt: the budget is exhausted either
+            // way, and waiting one more interval only delays the warning.
+            if poll + 1 < MAX_POLLS {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
         }
         if !fe_ready {
             tracing::warn!(engine = %engine_name,
-                "starrocks catalog auto-wire: FE never reported ready within the poll budget; \
-                 skipping — the admin can retry (e.g. re-provision) once it is");
+                "starrocks bootstrap: FE never reported ready within the poll budget; \
+                 skipping — every attachment stays `pending` and a Retry converges it");
             return;
         }
 
-        let fe_host = format!("{engine_name}-fe-service.{namespace}.svc");
-        let root_pw = root_password.as_deref();
+        // The engine row itself, for the FE connection (host, port, root
+        // password, pinned certificate) and for the attachments to converge.
+        // A plain read, not a seventh checkpoint: the verdict this read cannot
+        // reach — a rename, a `deleting`/`failed` flip — is taken by the root
+        // login loop's own checkpoint immediately below, before anything is
+        // written.
+        let engine = match st.engine_mgmt.get_engine(engine_id).await {
+            Ok(Some(e)) => e,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(engine = %engine_name, error = %e,
+                    "starrocks bootstrap: could not re-read the engine; stopping");
+                return;
+            }
+        };
+        let fe = match crate::starrocks_ddl::fe_target(&st, &engine).await {
+            Ok(fe) => fe,
+            Err(e) => {
+                tracing::warn!(engine = %engine_name, error = %e,
+                    "starrocks bootstrap: could not resolve the FE connection; nothing applied");
+                return;
+            }
+        };
 
         // FE-pod-Ready is NOT root-login-ready: the `{name}-initpwd` Job (#268)
         // sets root's password via a SEPARATE Job that races the FE coming up, so
@@ -4156,9 +4129,9 @@ fn spawn_starrocks_catalog_wire(
         // Probe a real root login (a trivial `SELECT 1`) until it succeeds, so the
         // DDL below runs only once initpwd has won. Bounded like the pod poll.
         let mut auth_ready = false;
-        for _ in 0..MAX_POLLS {
+        for poll in 0..MAX_POLLS {
             if !engine_still_current(
-                &store,
+                &st.engine_mgmt,
                 engine_id,
                 &engine_name,
                 &mut consecutive_read_errors,
@@ -4167,56 +4140,42 @@ fn spawn_starrocks_catalog_wire(
             {
                 return;
             }
-            match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, "SELECT 1", root_pw, None)
-                .await
-            {
-                Ok(()) => {
+            match st.starrocks_ddl.query(&fe, "SELECT 1").await {
+                Ok(_) => {
                     auth_ready = true;
                     break;
                 }
                 Err(e) => {
-                    tracing::debug!(engine = %engine_name, error = %e,
-                        "starrocks auto-wire: root login not ready yet (initpwd race); retrying");
+                    // The probe carries the root password, so what comes back
+                    // can quote it: `scrubbed` is the only way to read it, and
+                    // there is no statement secret to scrub against here.
+                    tracing::debug!(engine = %engine_name,
+                        error = %e.scrubbed(&std::collections::BTreeMap::new()),
+                        "starrocks bootstrap: root login not ready yet (initpwd race); retrying");
                 }
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            if poll + 1 < MAX_POLLS {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
         }
         if !auth_ready {
             tracing::warn!(engine = %engine_name,
-                "starrocks auto-wire: root login never succeeded within the poll budget \
-                 (initpwd race?); skipping — the admin can retry (e.g. re-provision)");
+                "starrocks bootstrap: root login never succeeded within the poll budget \
+                 (initpwd race?); skipping — every attachment stays `pending`");
             return;
         }
 
-        if !engine_still_current(
-            &store,
-            engine_id,
-            &engine_name,
+        // Checkpoint 3 lives inside this loop, once per attachment.
+        crate::catalog_apply::converge_starrocks_catalogs(
+            &st,
+            &engine,
+            &fe,
             &mut consecutive_read_errors,
         )
-        .await
-        {
-            return;
-        }
-        // The OAuth2 credential is the SAME `client_id:client_secret` the Trino
-        // path renders (see `egret_catalog_registry::render_trino`); StarRocks
-        // exchanges it for an access token itself and refreshes on expiry.
-        let credential = format!("{client_id}:{client_secret}");
-        let sql =
-            starrocks_external_catalog_sql(&catalog_name, &egret_url, &warehouse_name, &credential);
-        match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, &sql, root_pw, None).await {
-            Ok(()) => {
-                tracing::info!(engine = %engine_name,
-                    "starrocks catalog auto-wire: external Iceberg catalog wired");
-            }
-            Err(e) => {
-                tracing::warn!(engine = %engine_name, %fe_host, error = %e,
-                    "starrocks catalog auto-wire: CREATE EXTERNAL CATALOG failed; admin can retry");
-            }
-        }
+        .await;
 
         // Delegation bootstrap (S3-T2 step 3): JWT integration + impersonation
-        // service user, best-effort + logged like the catalog wire above.
+        // service user, best-effort + logged like the catalog convergence above.
         if let Some(d) = delegation {
             let mut stmts = starrocks_jwt_integration_sql(&d.jwks_url, &d.issuer, &d.audience);
             stmts.push(starrocks_create_service_user_sql(
@@ -4225,6 +4184,13 @@ fn spawn_starrocks_catalog_wire(
             ));
             stmts.push(starrocks_impersonation_grant_sql(&d.service_user));
             let mut all_ok = true;
+            // The service user's password is inline in `CREATE USER … IDENTIFIED
+            // BY` (D6), so every FE error below is scrubbed against it before it
+            // reaches a log. The statements themselves are never logged.
+            let secrets: std::collections::BTreeMap<Uuid, String> =
+                [(Uuid::nil(), d.service_password.clone())]
+                    .into_iter()
+                    .collect();
 
             // The integration's `CREATE` is the one statement that is NOT
             // idempotent, and it is the one whose inputs drift: `required_issuer`
@@ -4237,7 +4203,7 @@ fn spawn_starrocks_catalog_wire(
             // it is a syntax error, as is `DROP … IF EXISTS`), so converging from
             // either starting state takes two statements, not one.
             if !engine_still_current(
-                &store,
+                &st.engine_mgmt,
                 engine_id,
                 &engine_name,
                 &mut consecutive_read_errors,
@@ -4247,19 +4213,11 @@ fn spawn_starrocks_catalog_wire(
                 return;
             }
             let create_integration = stmts.remove(0);
-            match run_starrocks_ddl(
-                &fe_host,
-                STARROCKS_FE_MYSQL_PORT,
-                &create_integration,
-                root_pw,
-                d.tls_cert_pem.as_deref(),
-            )
-            .await
-            {
+            match st.starrocks_ddl.execute(&fe, &create_integration).await {
                 Ok(()) => {}
-                Err(e) if sr_already_exists(&e) => {
+                Err(e) if sr_already_exists(&e.scrubbed(&secrets)) => {
                     if !engine_still_current(
-                        &store,
+                        &st.engine_mgmt,
                         engine_id,
                         &engine_name,
                         &mut consecutive_read_errors,
@@ -4270,21 +4228,13 @@ fn spawn_starrocks_catalog_wire(
                     }
                     let repair =
                         starrocks_jwt_integration_repair_sql(&d.jwks_url, &d.issuer, &d.audience);
-                    match run_starrocks_ddl(
-                        &fe_host,
-                        STARROCKS_FE_MYSQL_PORT,
-                        &repair,
-                        root_pw,
-                        d.tls_cert_pem.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok(()) => tracing::info!(engine = %engine_name, %fe_host,
+                    match st.starrocks_ddl.execute(&fe, &repair).await {
+                        Ok(()) => tracing::info!(engine = %engine_name,
                             "starrocks delegation bootstrap: egret_oidc already existed; \
                              properties re-applied so a changed issuer takes effect"),
                         Err(e) => {
                             all_ok = false;
-                            tracing::warn!(engine = %engine_name, %fe_host, error = %e,
+                            tracing::warn!(engine = %engine_name, error = %e.scrubbed(&secrets),
                                 "starrocks delegation bootstrap: egret_oidc exists but could not \
                                  be updated; JWT logins will fail if the issuer has changed");
                         }
@@ -4292,14 +4242,14 @@ fn spawn_starrocks_catalog_wire(
                 }
                 Err(e) => {
                     all_ok = false;
-                    tracing::warn!(engine = %engine_name, %fe_host, error = %e,
+                    tracing::warn!(engine = %engine_name, error = %e.scrubbed(&secrets),
                         "starrocks delegation bootstrap: statement failed; admin can retry");
                 }
             }
 
             for stmt in &stmts {
                 if !engine_still_current(
-                    &store,
+                    &st.engine_mgmt,
                     engine_id,
                     &engine_name,
                     &mut consecutive_read_errors,
@@ -4308,17 +4258,9 @@ fn spawn_starrocks_catalog_wire(
                 {
                     return;
                 }
-                if let Err(e) = run_starrocks_ddl(
-                    &fe_host,
-                    STARROCKS_FE_MYSQL_PORT,
-                    stmt,
-                    root_pw,
-                    d.tls_cert_pem.as_deref(),
-                )
-                .await
-                {
+                if let Err(e) = st.starrocks_ddl.execute(&fe, stmt).await {
                     all_ok = false;
-                    tracing::warn!(engine = %engine_name, %fe_host, error = %e,
+                    tracing::warn!(engine = %engine_name, error = %e.scrubbed(&secrets),
                         "starrocks delegation bootstrap: statement failed; admin can retry");
                 }
             }
@@ -4793,38 +4735,20 @@ async fn update_starrocks_engine(
     // a mode the FE has not finished (re)bootstrapping.
     if deleg_changed {
         // (a) Re-bootstrap, mirroring create's non-blocking post-Ready wire.
-        // Needs the primary catalog's OAuth2 credential (its attachment's
-        // credential secret); best-effort like create, so a missing credential
-        // warns rather than failing the update.
+        // It reads its own credentials now (SP3b Task 5: the convergence
+        // resolves each attachment's secret itself), so the primary-credential
+        // lookup this used to do — and the arm that SKIPPED the whole
+        // re-bootstrap when it found none — are gone: there is nothing left for
+        // that arm to protect, and a missing primary credential must not cost
+        // the engine its JWT integration.
         if let Some(boot) = bootstrap {
-            match sr_primary_catalog_credential(&st, &engine).await {
-                Some((catalog_name, client_id, client_secret)) => {
-                    // Same minted-root-password threading as create's wire.
-                    let root_password =
-                        req.starrocks.as_ref().and_then(|s| s.root_password.clone());
-                    spawn_starrocks_catalog_wire(
-                        prov.clone(),
-                        st.engine_mgmt.clone(),
-                        engine.id,
-                        engine.namespace.clone(),
-                        engine.name.clone(),
-                        st.engine_egret_url.clone(),
-                        wh.name.clone(),
-                        catalog_name,
-                        client_id,
-                        client_secret,
-                        root_password,
-                        Some(boot),
-                    );
-                }
-                None => {
-                    tracing::warn!(
-                        engine = %engine.name,
-                        "delegation changed but no primary catalog credential found; \
-                         skipping FE re-bootstrap (re-materialization still runs)"
-                    );
-                }
-            }
+            spawn_starrocks_catalog_wire(
+                st.clone(),
+                engine.id,
+                engine.name.clone(),
+                engine.namespace.clone(),
+                Some(boot),
+            );
         }
     }
     // (b) Re-materialize the per-workspace connections unconditionally.
@@ -4838,41 +4762,40 @@ async fn update_starrocks_engine(
 /// means the connector's auth mode or in-band TLS flipped. Comparing the WHOLE
 /// block (not just `mode`/`tlsEnabled`) is the safe side — at worst a future
 /// extra key triggers a spurious FE re-bootstrap, which is an idempotent no-op.
+/// Whether this StarRocks engine's FE actually serves TLS on its MySQL port:
+/// delegation is configured AND its `tlsEnabled` has not been turned off —
+/// which DEFAULTS TO ON, because that is the shape `build_starrocks_provision_req`
+/// provisions (it mints the cert and hands the operator a TLS listener unless
+/// the stored block opted out).
+///
+/// One function, called by both the provisioning side and
+/// [`crate::starrocks_ddl::fe_target`] (SP3b Task 5), because the two had
+/// silently disagreed: `fe_target` read `tlsEnabled` with `unwrap_or(false)`
+/// and ignored `mode` entirely, so the common engine — delegation on, no
+/// explicit `tlsEnabled` — was provisioned WITH TLS and then dialled WITHOUT
+/// the pinned certificate. Task 5 moves the delegation DDL onto `fe_target`'s
+/// one target (D6); leaving the two predicates apart would have downgraded
+/// every such engine's statements to cleartext on the way.
+pub(crate) fn sr_tls_enabled(spec: &serde_json::Value) -> bool {
+    let delegation = spec
+        .get("starrocksConfig")
+        .and_then(|c| c.get("delegation"));
+    let mode_configured = delegation
+        .and_then(|d| d.get("mode"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    mode_configured
+        && delegation
+            .and_then(|d| d.get("tlsEnabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+}
+
 pub(crate) fn sr_delegation_block(spec: &serde_json::Value) -> serde_json::Value {
     spec.get("starrocksConfig")
         .and_then(|c| c.get("delegation"))
         .cloned()
         .unwrap_or(serde_json::Value::Null)
-}
-
-/// The StarRocks primary catalog's name and OAuth2 `(client_id, client_secret)`
-/// (the attachment's credential secret holds `"<client_id>:<client_secret>"`).
-/// `None` when there is no primary attachment or credential — the re-bootstrap
-/// then skips the catalog-wire step (best-effort, like create).
-async fn sr_primary_catalog_credential(
-    st: &CpState,
-    engine: &Engine,
-) -> Option<(String, String, String)> {
-    let attached = st
-        .engine_mgmt
-        .registry()
-        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
-        .await
-        .ok()?;
-    let primary = attached
-        .into_iter()
-        .find(|a| a.catalog.warehouse_id == Some(engine.warehouse_id))?;
-    let credential = st
-        .secrets
-        .resolve_plaintext(None, primary.attachment.credential_secret_id?)
-        .await
-        .ok()?;
-    let (client_id, client_secret) = credential.split_once(':')?;
-    Some((
-        primary.catalog.name,
-        client_id.to_string(),
-        client_secret.to_string(),
-    ))
 }
 
 #[utoipa::path(
@@ -8408,19 +8331,18 @@ mod tests {
         );
     }
 
-    /// SP3b Task 3 / D6: the OLD catalog DDL and root-login probe both pass
-    /// `tls_cert_pem = None` unconditionally while the delegation bootstrap
-    /// alone passes the pinned cert — so an OAuth2 credential and the FE root
-    /// password cross the wire in cleartext on a TLS-capable engine, TODAY,
-    /// on that untouched path (`run_starrocks_ddl`/`spawn_starrocks_catalog_wire`;
-    /// Task 4/5 retire it). `fe_target` is where the fix WILL live once a
-    /// production caller is wired: it decides the cert is threaded through
-    /// ONLY when `starrocksConfig.delegation.tlsEnabled` is true, whatever
-    /// `coordinator_cert` holds, and the root password only when the engine
-    /// actually carries a `root_secret_id` — this test proves that logic now,
-    /// ahead of Task 4/5 actually calling it (fix round 1 review, F-5: this
-    /// comment used to say "is the one place that decision is made now",
-    /// which was false — nothing calls `fe_target` in production yet).
+    /// D6: `fe_target` is the ONE place that decides how egret dials a
+    /// StarRocks FE — true since Task 5, which moved the bootstrap's own
+    /// statements (the root-login probe included) onto it and deleted the
+    /// `run_starrocks_ddl` that passed `tls_cert_pem = None` unconditionally,
+    /// so that an OAuth2 credential and the FE root password crossed the wire
+    /// in cleartext on a TLS-capable engine.
+    ///
+    /// What it decides, and this test pins: the certificate is threaded
+    /// through exactly when [`sr_tls_enabled`] says the FE serves TLS —
+    /// delegation configured, `tlsEnabled` not turned off, DEFAULTING ON —
+    /// whatever `coordinator_cert` holds; and the root password only when the
+    /// engine carries a `root_secret_id`.
     #[tokio::test]
     async fn fe_target_resolves_root_password_and_gates_the_cert_on_delegation_tls() {
         let Some(st) = test_state().await else {
@@ -8456,6 +8378,25 @@ mod tests {
         assert_eq!(fe.tls_cert_pem.as_deref(), Some("CERTPEM"));
         assert_eq!(fe.host, with_tls.coordinator_host());
         assert_eq!(fe.port, with_tls.coordinator_port() as u16);
+
+        // tlsEnabled OMITTED on a delegating engine: the cert is threaded
+        // through, because that is the engine
+        // `build_starrocks_provision_req` provisioned — `sr_tls_enabled`
+        // defaults it ON, and before Task 5 this function defaulted it OFF, so
+        // the commonest delegating engine was given a TLS listener and then
+        // dialled in cleartext (D6).
+        let mut default_tls = base.clone();
+        default_tls.spec = serde_json::json!({
+            "starrocksConfig": { "delegation": { "mode": "jwt" } }
+        });
+        let fe = crate::starrocks_ddl::fe_target(&st, &default_tls)
+            .await
+            .expect("fe_target (tls defaulted)");
+        assert_eq!(
+            fe.tls_cert_pem.as_deref(),
+            Some("CERTPEM"),
+            "an omitted tlsEnabled is TLS-ON, exactly as the provisioner reads it"
+        );
 
         // tlsEnabled=false: the cert is withheld even though the engine has
         // one pinned — the FE isn't actually serving TLS.
@@ -8641,10 +8582,23 @@ mod tests {
     }
 
     /// Counts `.status()` calls — proves a checkpoint trips BEFORE the
-    /// provisioner is ever touched, rather than merely reasoning about it.
+    /// provisioner is ever touched, rather than merely reasoning about it —
+    /// and reports whatever status a test sets. The DEFAULT status has no pods
+    /// at all, so an FE is never ready unless a test says so: that is what the
+    /// "an unreachable FE writes nothing" case needs, and it is also why
+    /// nothing in this module accidentally reaches the FE.
     #[derive(Default)]
     struct CountingStatusProvisioner {
         status_calls: std::sync::atomic::AtomicUsize,
+        status_response: std::sync::Mutex<Option<egret_engine_mgmt_api::EngineStatus>>,
+    }
+    impl CountingStatusProvisioner {
+        fn set_status(&self, status: egret_engine_mgmt_api::EngineStatus) {
+            *self.status_response.lock().unwrap() = Some(status);
+        }
+        fn calls(&self) -> usize {
+            self.status_calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
     #[async_trait::async_trait]
     impl egret_engine_mgmt_api::EngineProvisioningPort for CountingStatusProvisioner {
@@ -8659,6 +8613,9 @@ mod tests {
         ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
             self.status_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(s) = self.status_response.lock().unwrap().clone() {
+                return Ok(s);
+            }
             Ok(egret_engine_mgmt_api::EngineStatus::default())
         }
         async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
@@ -8679,25 +8636,11 @@ mod tests {
     /// once; that regression would NOT be caught by the two helper-level
     /// unit tests above it, only by driving the real spawned task.
     ///
-    /// The remaining five checkpoints are not exercised behaviorally here:
-    /// they only run after a real FE reports ready over
-    /// `EngineProvisioningPort::status`, at which point the function starts
-    /// making real MySQL-protocol connections via `run_starrocks_ddl` to a
-    /// `<name>-fe-service.<namespace>.svc` host that doesn't exist in a unit
-    /// test sandbox — DNS resolution failing (or hanging, environment
-    /// dependent) would be what stops the test, not the guard being proven.
-    /// Making that deterministic and fast would mean threading an injectable
-    /// DDL-runner through five call sites that each have different
-    /// retry/error-handling (the plain catalog DDL, the
-    /// create-then-repair-on-`already exists` JWT integration branch, and
-    /// the loop over the remaining delegation statements) — a materially
-    /// larger refactor of an already-large function that wasn't attempted
-    /// here. `spawn_starrocks_catalog_wire_keeps_all_six_guard_checkpoints`
-    /// below is the fallback the brief allows instead: a structural
-    /// regression guard so dropping any of the six calls fails the build.
+    /// The other five checkpoints are driven by the tests below it, through
+    /// the fake FE (D8).
     #[tokio::test]
     async fn bootstrap_stops_before_any_provisioner_call_when_engine_already_gone() {
-        let Some(st) = test_state().await else {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
             eprintln!(
                 "skipping bootstrap_stops_before_any_provisioner_call_when_engine_already_gone: DATABASE_URL not set"
             );
@@ -8709,60 +8652,657 @@ mod tests {
             .expect("connect");
         let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = seed_sr_engine(&st, wh.id).await;
+        prov.set_status(ready_fe_status(&engine.name));
         st.engine_mgmt.delete_engine(engine.id).await.unwrap();
 
-        let counting = std::sync::Arc::new(CountingStatusProvisioner::default());
-        let prov: Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort> = counting.clone();
-
-        let handle = spawn_starrocks_catalog_wire(
-            prov,
-            st.engine_mgmt.clone(),
+        spawn_starrocks_catalog_wire(
+            st.clone(),
             engine.id,
-            "egret-engines".into(),
             engine.name.clone(),
-            "https://egret.example".into(),
-            wh.name.clone(),
-            "egret".into(),
-            "client".into(),
-            "secret".into(),
+            engine.namespace.clone(),
             None,
-            None,
-        );
-        handle.await.expect("bootstrap task did not panic");
+        )
+        .await
+        .expect("bootstrap task did not panic");
 
         assert_eq!(
-            counting
-                .status_calls
-                .load(std::sync::atomic::Ordering::SeqCst),
+            prov.calls(),
             0,
             "the engine was already deleted before spawn; the first checkpoint must stop the \
              task before it ever calls the provisioner"
         );
+        assert!(
+            fake.executed().is_empty(),
+            "and before it says anything to the FE: {:?}",
+            fake.executed()
+        );
     }
 
-    /// Regression guard for the five checkpoints
-    /// `bootstrap_stops_before_any_provisioner_call_when_engine_already_gone`
-    /// above doesn't drive (it exercises only the first) — see that test's
-    /// doc comment for why a full behavioral seam wasn't added. Fails the
-    /// build if a checkpoint call is ever added to, or removed from,
-    /// `spawn_starrocks_catalog_wire`'s body.
-    #[test]
-    fn spawn_starrocks_catalog_wire_keeps_all_six_guard_checkpoints() {
-        let src = include_str!("engines.rs");
-        let start = src
-            .find("fn spawn_starrocks_catalog_wire(")
-            .expect("function present");
-        let end = src[start..]
-            .find("\nasync fn get_engine(")
-            .map(|i| start + i)
-            .expect("next handler present, bounding the search");
-        let body = &src[start..end];
-        let count = body.matches("engine_still_current(").count();
+    /// A `CpState` whose `starrocks_ddl` is a fake FE and whose provisioner is
+    /// a controllable one, returned alongside both handles so a test can say
+    /// what the cluster reports and read back what the FE was told. Everything
+    /// else is [`test_state`].
+    ///
+    /// (Deviation from the brief, which returns only `(CpState, fake)`: the
+    /// provisioner handle has to come back too, because a test that drives the
+    /// FE-ready poll has to be able to CHANGE what `status` reports, and
+    /// `CpState.engine_provisioner` is an `Arc<dyn EngineProvisioningPort>`
+    /// with no way back to the concrete fake.)
+    async fn test_state_with_fake_fe() -> Option<(
+        CpState,
+        crate::starrocks_ddl::FakeStarRocksDdl,
+        Arc<CountingStatusProvisioner>,
+    )> {
+        let mut st = test_state().await?;
+        let fake = crate::starrocks_ddl::FakeStarRocksDdl::default();
+        let prov = Arc::new(CountingStatusProvisioner::default());
+        st.starrocks_ddl = Arc::new(fake.clone());
+        st.engine_provisioner = Some(prov.clone());
+        Some((st, fake, prov))
+    }
+
+    /// The status a ready StarRocks FE reports: one pod whose name contains
+    /// `-fe-`, which is what the bootstrap's poll actually looks for. The
+    /// all-ready default of the route tests' `FakeEnginePort` will NOT do —
+    /// its single pod is called `coordinator-0`.
+    fn ready_fe_status(engine_name: &str) -> egret_engine_mgmt_api::EngineStatus {
+        egret_engine_mgmt_api::EngineStatus {
+            phase: "running".into(),
+            message: None,
+            pods: vec![egret_engine_mgmt_api::PodStatus {
+                name: format!("{engine_name}-fe-0"),
+                phase: "Running".into(),
+                ready: true,
+            }],
+        }
+    }
+
+    /// `names.len()` hive catalogs attached to this engine as `pending`,
+    /// attached IN THE ORDER GIVEN — which a caller deliberately makes
+    /// different from name order, so that a test asserting name order is
+    /// asserting the re-sort and not the store's own ordering (primary first,
+    /// then attachment time). Returns name → catalog id.
+    ///
+    /// (Deviation from the brief, which says `kind: tpch`: Task 3 established
+    /// that tpch/tpcds are REFUSED on StarRocks — `render_starrocks` returns
+    /// `NotReadable` for them — so every attachment would fail to render and
+    /// the loop under test would only ever be seen failing. `hive` renders
+    /// against the warehouse's own storage connection.)
+    async fn seed_pending_attachments(
+        st: &CpState,
+        engine: &Engine,
+        names: &[&str],
+    ) -> std::collections::BTreeMap<String, Uuid> {
+        let wh = st
+            .catalog
+            .get_warehouse(engine.warehouse_id)
+            .await
+            .expect("get_warehouse")
+            .expect("warehouse present");
+        let registry = st.engine_mgmt.registry();
+        let mut out = std::collections::BTreeMap::new();
+        for name in names {
+            let def = egret_catalog_registry::CatalogDef::parse(
+                "hive",
+                &serde_json::json!({
+                    "metastore": { "type": "hive", "uri": "thrift://hms:9083" },
+                    "storage_connection_id": wh.storage_conn_id,
+                }),
+                &serde_json::Value::Null,
+            )
+            .expect("hive catalog definition");
+            let row = registry
+                .create_catalog(name, &def, None)
+                .await
+                .expect("create catalog");
+            attach_pending(st, engine, row.id, None).await;
+            out.insert((*name).to_string(), row.id);
+        }
+        out
+    }
+
+    /// The engine's PRIMARY attachment — the warehouse's own `egret-warehouse`
+    /// catalog, with the OAuth2 credential its render needs — written
+    /// `pending`, exactly as `create_starrocks_engine` now writes it (D1).
+    async fn seed_primary_attachment(st: &CpState, engine: &Engine, name: &str) -> Uuid {
+        let wh = st
+            .catalog
+            .get_warehouse(engine.warehouse_id)
+            .await
+            .expect("get_warehouse")
+            .expect("warehouse present");
+        let (row, _) = st
+            .engine_mgmt
+            .registry()
+            .ensure_warehouse_catalog(
+                &WarehouseIdentity {
+                    id: wh.id,
+                    name: &wh.name,
+                    workspace_id: wh.workspace_id,
+                },
+                Some(name),
+                |_| Vec::new(),
+            )
+            .await
+            .expect("ensure warehouse catalog");
+        let credential = st
+            .secrets
+            .create(
+                None,
+                &format!("cred-{}", Uuid::new_v4().simple()),
+                None,
+                "client-id:client-secret",
+            )
+            .await
+            .expect("create credential secret");
+        attach_pending(st, engine, row.id, Some(credential)).await;
+        row.id
+    }
+
+    async fn attach_pending(
+        st: &CpState,
+        engine: &Engine,
+        catalog_id: Uuid,
+        credential_secret_id: Option<Uuid>,
+    ) {
+        st.engine_mgmt
+            .registry()
+            .insert_attachment(&egret_catalog_registry::NewAttachment {
+                engine_id: engine.id,
+                catalog_id,
+                catalog_client_id: None,
+                credential_secret_id,
+                minted_client: false,
+                applied_now: false,
+                created_at: None,
+                apply_status: egret_catalog_registry::store::apply_status::PENDING,
+            })
+            .await
+            .expect("attach");
+    }
+
+    async fn attachment_status(
+        st: &CpState,
+        engine_id: Uuid,
+        catalog_id: Uuid,
+    ) -> egret_catalog_registry::AttachmentRow {
+        st.engine_mgmt
+            .registry()
+            .get_attachment(engine_id, catalog_id)
+            .await
+            .expect("get_attachment")
+            .expect("attachment present")
+    }
+
+    /// D2: the bootstrap converges EVERY attachment, in catalog-NAME order,
+    /// and records each one — not just the primary, and not just in the log.
+    ///
+    /// The three are attached in an order that is neither name order nor
+    /// primary-first (`z`, then the primary `m`, then `a`), so an
+    /// implementation that simply took `list_engine_attachments`' own order
+    /// would produce `m, z, a` and fail here. It also proves the settle path
+    /// `create_starrocks_engine` now depends on (D1): the primary starts
+    /// `pending` and ends `applied`.
+    #[tokio::test]
+    async fn the_bootstrap_converges_every_attachment_in_name_order() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_bootstrap_converges_every_attachment_in_name_order: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        prov.set_status(ready_fe_status(&engine.name));
+
+        let sfx = Uuid::new_v4().simple().to_string();
+        let (a_name, m_name, z_name) = (format!("a_{sfx}"), format!("m_{sfx}"), format!("z_{sfx}"));
+        let z = seed_pending_attachments(&st, &engine, &[z_name.as_str()]).await[&z_name];
+        let m = seed_primary_attachment(&st, &engine, &m_name).await;
+        let a = seed_pending_attachments(&st, &engine, &[a_name.as_str()]).await[&a_name];
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            None,
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
         assert_eq!(
-            count, 6,
-            "expected 6 `engine_still_current(...)` checkpoints inside \
-             spawn_starrocks_catalog_wire; found {count} instead — a guard was added or removed"
+            fake.created(),
+            vec![a_name.clone(), m_name.clone(), z_name.clone()],
+            "name order, not attachment order; sent={:?}",
+            fake.executed()
         );
+        for (id, name) in [(a, &a_name), (m, &m_name), (z, &z_name)] {
+            let row = attachment_status(&st, engine.id, id).await;
+            assert_eq!(row.apply_status, "applied", "catalog {name}");
+            assert!(row.applied_at.is_some(), "catalog {name}");
+            assert!(row.apply_error.is_none(), "catalog {name}");
+        }
+    }
+
+    /// D2 + D8 (checkpoint 3): an engine deleted while the loop runs stops it,
+    /// and the attachments it never reached are never touched — not `applied`,
+    /// and not `failed`, because nothing was attempted. Before SP3b this
+    /// checkpoint could only be asserted by counting `engine_still_current(`
+    /// in the function's own source text.
+    #[tokio::test]
+    async fn deleting_the_engine_mid_loop_stops_the_bootstrap_and_leaves_the_rest_alone() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping deleting_the_engine_mid_loop_stops_the_bootstrap_and_leaves_the_rest_alone: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        prov.set_status(ready_fe_status(&engine.name));
+
+        let sfx = Uuid::new_v4().simple().to_string();
+        let names = [format!("a_{sfx}"), format!("m_{sfx}"), format!("z_{sfx}")];
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        seed_pending_attachments(&st, &engine, &refs).await;
+
+        // The fake deletes the engine row the moment the FIRST catalog is
+        // created, so the loop's next checkpoint is the one under test.
+        let store = st.engine_mgmt.clone();
+        let engine_id = engine.id;
+        fake.on_create(move |_name| {
+            let store = store.clone();
+            Box::pin(async move { store.delete_engine(engine_id).await.unwrap() })
+        });
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            None,
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        assert_eq!(
+            fake.created(),
+            vec![names[0].clone()],
+            "the loop stopped at the next catalog; sent={:?}",
+            fake.executed()
+        );
+        // The rows themselves are gone with the engine (the attachment FK
+        // cascades), so what the FE was told is the checkpoint's observable
+        // effect: exactly one CREATE, and nothing at all about m_ or z_.
+        assert_eq!(
+            fake.executed()
+                .iter()
+                .filter(|s| s.starts_with("CREATE EXTERNAL CATALOG"))
+                .count(),
+            1
+        );
+        for skipped in &names[1..] {
+            assert!(
+                !fake.executed().iter().any(|s| s.contains(skipped.as_str())),
+                "nothing was said about {skipped}: {:?}",
+                fake.executed()
+            );
+        }
+    }
+
+    /// D7 inside the loop: an attachment DETACHED while the bootstrap was
+    /// creating its catalog leaves the FE holding a catalog egret has
+    /// forgotten, and nothing on a StarRocks FE prunes it — so the convergence
+    /// drops what it just created. The row's disappearance is what
+    /// `set_apply_applied` reports (`NotFound`), and it is the ONLY write
+    /// failure that may compensate: an ordinary database error leaves the row
+    /// in place, and dropping then would destroy a catalog the registry still
+    /// claims.
+    #[tokio::test]
+    async fn a_catalog_whose_row_vanished_mid_bootstrap_is_dropped_again() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_catalog_whose_row_vanished_mid_bootstrap_is_dropped_again: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        prov.set_status(ready_fe_status(&engine.name));
+
+        let sfx = Uuid::new_v4().simple().to_string();
+        let names = [format!("a_{sfx}"), format!("z_{sfx}")];
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let ids = seed_pending_attachments(&st, &engine, &refs).await;
+
+        // The first catalog is detached the instant its CREATE reaches the FE.
+        let registry = st.engine_mgmt.registry();
+        let engine_id = engine.id;
+        let gone = ids[&names[0]];
+        fake.on_create(move |_name| {
+            let registry = registry.clone();
+            Box::pin(async move {
+                registry.delete_attachment(engine_id, gone).await.unwrap();
+            })
+        });
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            None,
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        assert!(
+            fake.executed()
+                .iter()
+                .any(|s| s.starts_with("DROP CATALOG IF EXISTS") && s.contains(names[0].as_str())),
+            "the created-then-forgotten catalog is dropped again: {:?}",
+            fake.executed()
+        );
+        assert!(
+            fake.catalog(&names[0]).is_none(),
+            "and it is really gone from the FE"
+        );
+        // The DROP is the whole compensation: the loop goes on, and the
+        // catalog whose row survived is applied and NOT dropped.
+        assert_eq!(
+            attachment_status(&st, engine.id, ids[&names[1]])
+                .await
+                .apply_status,
+            "applied"
+        );
+        assert!(
+            fake.catalog(&names[1]).is_some(),
+            "a catalog whose row is intact must never be compensated"
+        );
+    }
+
+    /// One catalog's DDL failing does not abandon the others, and what lands
+    /// in `apply_error` carries neither the statement nor a secret (D6).
+    #[tokio::test]
+    async fn a_failing_catalog_is_flagged_and_the_loop_goes_on() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping a_failing_catalog_is_flagged_and_the_loop_goes_on: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        prov.set_status(ready_fe_status(&engine.name));
+
+        let sfx = Uuid::new_v4().simple().to_string();
+        let names = [format!("a_{sfx}"), format!("m_{sfx}"), format!("z_{sfx}")];
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let ids = seed_pending_attachments(&st, &engine, &refs).await;
+        fake.fail_catalog(
+            &names[1],
+            "Getting analyzing error. Detail message: unsupported type",
+        );
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            None,
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        assert_eq!(
+            attachment_status(&st, engine.id, ids[&names[0]])
+                .await
+                .apply_status,
+            "applied"
+        );
+        let m = attachment_status(&st, engine.id, ids[&names[1]]).await;
+        assert_eq!(m.apply_status, "failed");
+        let err = m.apply_error.expect("the failure is recorded on the row");
+        assert!(err.contains("unsupported type"), "{err}");
+        assert!(
+            !err.contains("CREATE EXTERNAL CATALOG"),
+            "the statement must never reach apply_error (D6): {err}"
+        );
+        assert!(attachment_status(&st, engine.id, ids[&names[1]])
+            .await
+            .applied_at
+            .is_none());
+        assert_eq!(
+            attachment_status(&st, engine.id, ids[&names[2]])
+                .await
+                .apply_status,
+            "applied",
+            "a failure before it must not cost the last catalog its apply"
+        );
+    }
+
+    /// Checkpoints 1 and 2: an FE that never reports ready, and a root login
+    /// that never succeeds, each end the task having executed no catalog DDL —
+    /// and leave every attachment `pending`, because nothing was attempted.
+    /// Both loops are bounded at `MAX_POLLS` × `POLL_INTERVAL`, which the test
+    /// build shrinks to one poll; otherwise this would take five minutes per
+    /// case, which is a test nobody runs.
+    #[tokio::test]
+    async fn an_fe_that_never_becomes_ready_writes_nothing() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping an_fe_that_never_becomes_ready_writes_nothing: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        let name = format!("a_{}", Uuid::new_v4().simple());
+        let ids = seed_pending_attachments(&st, &engine, &[name.as_str()]).await;
+
+        // (a) status reports a pod that is not an FE.
+        prov.set_status(egret_engine_mgmt_api::EngineStatus {
+            phase: "provisioning".into(),
+            message: None,
+            pods: vec![egret_engine_mgmt_api::PodStatus {
+                name: "sr-cn-0".into(),
+                phase: "Running".into(),
+                ready: true,
+            }],
+        });
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            None,
+        )
+        .await
+        .expect("bootstrap task did not panic");
+        assert!(
+            fake.executed().is_empty(),
+            "no statement before the FE is ready: {:?}",
+            fake.executed()
+        );
+        assert!(prov.calls() > 0, "the poll really ran");
+        assert_eq!(
+            attachment_status(&st, engine.id, ids[&name])
+                .await
+                .apply_status,
+            "pending",
+            "an unreachable FE leaves `pending`, not `failed`: nothing was attempted"
+        );
+
+        // (b) FE ready, but root login never succeeds.
+        fake.set_fail(Some("Access denied for user 'root' (using password: YES)"));
+        prov.set_status(ready_fe_status(&engine.name));
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            None,
+        )
+        .await
+        .expect("bootstrap task did not panic");
+        assert!(
+            fake.created().is_empty(),
+            "no catalog before root can log in: {:?}",
+            fake.executed()
+        );
+        assert_eq!(
+            attachment_status(&st, engine.id, ids[&name])
+                .await
+                .apply_status,
+            "pending",
+            "an FE that will not take the root login leaves `pending` too"
+        );
+    }
+
+    /// Checkpoints 4-6: the delegation half still runs, and `already exists`
+    /// still repairs — driven through the fake runner instead of a real MySQL
+    /// port, which is what
+    /// `spawn_starrocks_catalog_wire_keeps_all_six_guard_checkpoints` existed
+    /// to approximate.
+    #[tokio::test]
+    async fn the_delegation_bootstrap_still_creates_then_repairs() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_delegation_bootstrap_still_creates_then_repairs: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_delegating_engine(&st, wh.id, "CERTPEM").await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let delegation = StarRocksDelegationBootstrap {
+            jwks_url: "https://idp/jwks".into(),
+            issuer: "https://idp/realms/egret".into(),
+            audience: "engine".into(),
+            service_user: "egret_delegator".into(),
+            service_password: "pw".into(),
+        };
+
+        // First run: the integration is created, the user and grant follow.
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            Some(delegation.clone()),
+        )
+        .await
+        .expect("bootstrap task did not panic");
+        let sent = fake.executed();
+        assert!(
+            sent.iter()
+                .any(|s| s.contains("CREATE SECURITY INTEGRATION egret_oidc")),
+            "{sent:?}"
+        );
+        assert!(
+            sent.iter().any(|s| s.contains("CREATE USER IF NOT EXISTS")),
+            "{sent:?}"
+        );
+        assert!(
+            sent.iter().any(|s| s.contains("GRANT IMPERSONATE")),
+            "{sent:?}"
+        );
+
+        // Second run against an FE that already has it: the repair ALTER runs,
+        // so a changed issuer takes effect instead of being lost to
+        // `already exists`.
+        fake.fail_matching(
+            "CREATE SECURITY INTEGRATION",
+            "Getting analyzing error. Detail message: security integration 'egret_oidc' already exists.",
+        );
+        fake.clear_executed();
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            Some(delegation),
+        )
+        .await
+        .expect("bootstrap task did not panic");
+        assert!(
+            fake.executed()
+                .iter()
+                .any(|s| s.contains("ALTER SECURITY INTEGRATION egret_oidc")),
+            "{:?}",
+            fake.executed()
+        );
+
+        // D6: the delegation statements now share the catalog path's
+        // `FeTarget`, so the engine's pinned certificate reaches all of them —
+        // and the root-login probe, which carries the root password.
+        assert_eq!(fake.last_target().tls_cert_pem.as_deref(), Some("CERTPEM"));
+    }
+
+    /// A stored StarRocks engine that has opted into delegation and carries a
+    /// pinned coordinator certificate — the shape whose FE really serves TLS,
+    /// and so the one whose every statement must go out over it (D6).
+    async fn seed_sr_delegating_engine(st: &CpState, wh_id: Uuid, cert: &str) -> Engine {
+        let spec = serde_json::json!({
+            "imageVersion": DEFAULT_SR_FE_IMAGE,
+            "starrocksConfig": {
+                "feImage": DEFAULT_SR_FE_IMAGE,
+                "cnImage": DEFAULT_SR_CN_IMAGE,
+                "feReplicas": 1,
+                "cnReplicas": 1,
+                // `tlsEnabled` deliberately OMITTED: it defaults to on, which
+                // is what `build_starrocks_provision_req` provisions.
+                "delegation": { "mode": "jwt" },
+            },
+        });
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("sr-{}", Uuid::new_v4().simple()),
+                "starrocks",
+                "egret-engines",
+                wh_id,
+                &spec,
+                None,
+            )
+            .await
+            .expect("create engine row");
+        let keystore = st
+            .secrets
+            .create(
+                None,
+                &format!("engine-tls-{}", engine.id),
+                None,
+                &format!("{cert}KEYPEM"),
+            )
+            .await
+            .expect("create tls secret");
+        st.engine_mgmt
+            .set_tls(engine.id, keystore, cert)
+            .await
+            .expect("pin the cert");
+        st.engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .expect("get_engine")
+            .expect("engine present")
     }
 
     #[test]
@@ -9690,84 +10230,6 @@ mod tests {
         assert_ne!(reminted.internal_id, first.internal_id);
     }
 
-    /// [`starrocks_external_catalog_sql`] (T6) renders a `CREATE EXTERNAL
-    /// CATALOG` DDL carrying the REST-catalog uri/warehouse properties + the
-    /// OAuth2 client-credentials block (self-refreshing, no static bearer)
-    /// StarRocks expects — pure/unit-testable; the live connection + execution
-    /// is smoke-only (Task 8).
-    #[test]
-    fn starrocks_external_catalog_sql_renders_oauth2_rest_properties() {
-        let sql = starrocks_external_catalog_sql(
-            "demo",
-            "http://host.docker.internal:8080",
-            "lakehouse",
-            "cid:secret",
-        );
-        assert!(sql.contains("CREATE EXTERNAL CATALOG"), "sql={sql}");
-        assert!(sql.contains(r#"iceberg.catalog.type"="rest"#), "sql={sql}");
-        assert!(
-            sql.contains(r#"iceberg.catalog.uri"="http://host.docker.internal:8080/catalog"#),
-            "sql={sql}"
-        );
-        assert!(
-            sql.contains(r#"iceberg.catalog.warehouse"="lakehouse"#),
-            "sql={sql}"
-        );
-        // OAuth2 self-refreshing credentials (mirrors the Trino path), NOT a
-        // static bearer — using the Iceberg-standard REST property NAMES
-        // (`credential` + `oauth2-server-uri`), verified live on StarRocks 3.3
-        // (the `iceberg.catalog.oauth2.*` dot-form is silently ignored).
-        assert!(
-            sql.contains(r#"iceberg.catalog.credential"="cid:secret"#),
-            "sql={sql}"
-        );
-        assert!(
-            sql.contains(
-                r#"iceberg.catalog.oauth2-server-uri"="http://host.docker.internal:8080/oauth/token"#
-            ),
-            "sql={sql}"
-        );
-        // No static token property remains.
-        assert!(!sql.contains("iceberg.catalog.token"), "sql={sql}");
-        assert!(sql.contains("`demo`"), "catalog name; sql={sql}");
-    }
-
-    /// A warehouse name (free-form, un-validated) containing a `"` must be
-    /// escaped so it can't break out of the double-quoted property value and
-    /// inject arbitrary DDL that then runs as `root` on the FE. Likewise a
-    /// backtick in the catalog identifier must be doubled, not close the
-    /// identifier quoting early.
-    #[test]
-    fn starrocks_external_catalog_sql_escapes_ddl_injection() {
-        // Warehouse name tries to close the value and append a DROP.
-        let evil_wh = r#"wh" ) ; DROP DATABASE x ; -- "#;
-        let sql =
-            starrocks_external_catalog_sql("cat`evil", "http://egret:8080", evil_wh, "cid:secret");
-        // The raw (unescaped) injection payload must NOT appear verbatim.
-        assert!(
-            !sql.contains(r#"wh" ) ; DROP DATABASE x"#),
-            "unescaped warehouse breakout present; sql={sql}"
-        );
-        // The `"` inside the warehouse is backslash-escaped in place, so the
-        // value stays a single quoted string (the trailing `"` is the property's
-        // own closing quote, unescaped).
-        assert!(
-            sql.contains(r#"iceberg.catalog.warehouse"="wh\" ) ; DROP DATABASE x ; -- ""#),
-            "warehouse not escaped; sql={sql}"
-        );
-        // The backtick in the identifier is doubled, not left to close early.
-        assert!(
-            sql.contains("`cat``evil`"),
-            "identifier not escaped; sql={sql}"
-        );
-        // Backslash is escaped before the quote so it isn't double-processed.
-        let sql2 = starrocks_external_catalog_sql("c", "http://egret:8080", r#"a\b"#, "x:y");
-        assert!(
-            sql2.contains(r#"warehouse"="a\\b"#),
-            "backslash not escaped; sql={sql2}"
-        );
-    }
-
     /// [`starrocks_jwt_integration_sql`] (S3-T2) renders the
     /// `authentication_jwt` integration + activates it via the
     /// `authentication_chain` frontend config — mirrors slice-1's manual
@@ -9862,8 +10324,8 @@ mod tests {
     }
 
     /// A malicious/free-form issuer/audience/jwks_url must not break out of
-    /// the double-quoted property value — same DDL-injection posture as
-    /// `starrocks_external_catalog_sql`.
+    /// the double-quoted property value: this statement runs as `root` on the
+    /// FE and none of its inputs is charset-validated upstream.
     #[test]
     fn starrocks_jwt_integration_sql_escapes_ddl_injection() {
         let evil = r#"kc" ) ; DROP DATABASE x ; -- "#;

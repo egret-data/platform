@@ -288,6 +288,98 @@ async fn converge_and_record(
     Ok(())
 }
 
+/// Bring EVERY attachment of a StarRocks engine onto its FE, in catalog-name
+/// order, recording `applied` / `failed` per attachment (D2). Never returns an
+/// error: each attachment's outcome is its own row, and one failure must not
+/// hide — or abandon — the others. An attachment the loop never reaches is left
+/// exactly as it was, which for a freshly created engine means `pending`: it
+/// has not been attempted, and `failed` would be a claim about the FE that
+/// nothing measured.
+///
+/// Re-entrant. This is what the bootstrap runs once the FE is ready, and a
+/// Retry (`POST /engines/{id}/catalogs/{cid}/apply`) runs the same
+/// [`converge_attachment`] for one row — including the engine's PRIMARY
+/// catalog, which is an attachment like any other. An engine whose bootstrap
+/// failed is therefore converged one Retry per catalog, where before it could
+/// only be fixed by re-creating the engine.
+///
+/// `fe` and `consecutive_read_errors` are the caller's: the bootstrap already
+/// resolved the one [`FeTarget`] its root-login probe used (D6 — one target for
+/// every statement), and its read-error counter is per bootstrap, not per loop,
+/// so this borrows it instead of starting a fresh count.
+pub(crate) async fn converge_starrocks_catalogs(
+    st: &CpState,
+    engine: &Engine,
+    fe: &FeTarget,
+    consecutive_read_errors: &mut u32,
+) {
+    let registry = st.engine_mgmt.registry();
+    let mut attachments = match registry
+        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(engine = %engine.name, error = %e,
+                "starrocks convergence: could not read the engine's attachments");
+            return;
+        }
+    };
+    // Name order (D2). The store's own order is primary-first, then attachment
+    // time — Trino's env-var numbering depends on it, so it is re-sorted here
+    // rather than changed there.
+    attachments.sort_by(|a, b| a.catalog.name.cmp(&b.catalog.name));
+
+    for a in &attachments {
+        // The checkpoint that used to guard one statement now guards each
+        // catalog: a delete part-way through stops at the next one.
+        if !crate::engines::engine_still_current(
+            &st.engine_mgmt,
+            engine.id,
+            &engine.name,
+            consecutive_read_errors,
+        )
+        .await
+        {
+            return;
+        }
+        // An attachment that has converged before is the engine's own catalog,
+        // so a match becomes an ALTER rather than a no-op — the same rule
+        // `ReapplyOne` applies, and for the same reason: a rotated secret is
+        // invisible to the drift comparison. `applied_at`, not `apply_status`:
+        // a row that failed its last apply may still have converged earlier.
+        let already_ours = a.attachment.applied_at.is_some();
+        let outcome = converge_attachment(st, engine, fe, a, already_ours).await;
+        let write = match &outcome {
+            Ok(_) => registry.set_apply_applied(engine.id, a.catalog.id).await,
+            Err(e) => {
+                registry
+                    .set_apply_failed(engine.id, a.catalog.id, &e.message())
+                    .await
+            }
+        };
+        match write {
+            Ok(()) => {}
+            // D7, the same half-write this function's caller-side twin
+            // (`converge_and_record`) compensates: the row VANISHED between
+            // the read that listed it and the write that would settle it — a
+            // concurrent detach — so the FE now holds a catalog egret has
+            // forgotten, and nothing on a StarRocks FE prunes it. Only for a
+            // catalog this pass CREATED: dropping one it altered, or found
+            // already matching, would destroy a catalog that was there before.
+            Err(egret_catalog_registry::RegistryError::NotFound(_))
+                if outcome.as_ref().ok() == Some(&Converged::Created) =>
+            {
+                compensate_created_catalog(st, engine, fe, &a.catalog.name).await;
+            }
+            Err(e) => {
+                tracing::warn!(engine = %engine.name, catalog = %a.catalog.name, error = %e,
+                    "starrocks convergence: the outcome could not be recorded");
+            }
+        }
+    }
+}
+
 /// What [`converge_attachment`] actually did — the difference matters only to
 /// D7's compensation: dropping a catalog egret CREATED restores the state the
 /// apply started from, while dropping one it merely ALTERed (or found already
