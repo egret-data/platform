@@ -90,6 +90,7 @@ fn build_app(
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled,
+            sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
         })
 }
 
