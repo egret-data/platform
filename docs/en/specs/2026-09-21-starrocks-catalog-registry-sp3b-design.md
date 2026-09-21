@@ -43,7 +43,14 @@ re-creating it.
 **D3 — Create is preceded by a read.** Before `CREATE EXTERNAL CATALOG`, egret reads
 `SHOW CATALOGS` and, when the name exists, `SHOW CREATE CATALOG`. Absent → create. Present and
 matching what the registry would render → treat as applied. Present and **different** → refuse,
-with an error naming the catalog and the differing properties, and leave the FE untouched. The
+with an error naming the catalog and the differing properties, and leave the FE untouched.
+There is a fourth state, because the FE masks some keys: present, with every comparable key equal
+but a masked key in play → **unverifiable**, and egret alters it. Refusing here would make a
+legitimate re-attach permanently impossible, since no read can ever settle the question; altering
+writes the registry's own configuration over a catalog that already looks like it. The arm is
+narrow: a hand-made `egret` catalog compares as matching, because the credential is a secret and
+excluded from comparison, so reaching it needs something like a masked `aws.s3.access_key` with
+every plain key already equal. The
 current DDL is `CREATE EXTERNAL CATALOG IF NOT EXISTS`, which silently adopts whatever is there —
 including the `egret` catalog today's Warehouse UI tells operators to create by hand, and any
 catalog left by a pre-SP3a engine. Re-applying an edited catalog uses `ALTER CATALOG … SET`, never
@@ -91,7 +98,18 @@ delegation path already passes and the catalog path does not — today an OAuth2
 the wire in cleartext on a TLS-capable engine, and so does the FE **root password** on the
 login probe that precedes it. Every statement goes through one target so neither can be forgotten
 again. The pinned certificate only exists when delegation is configured and TLS is on, so the
-cleartext path remains for engines without it; that is a limit, not a fix. Anyone with FE admin rights can still read the
+cleartext path remains for engines without it; that is a limit, not a fix.
+
+**A disagreement found while unifying the target (Task 5).** `build_starrocks_provision_req`
+defaults `tlsEnabled` to **true** for any delegating engine, while the code that dialled the FE read
+that field with `unwrap_or(false)` and ignored `mode`. So an engine provisioned *with* a TLS
+listener could be dialled *without* the pinned certificate — the two halves disagreed about whether
+the engine speaks TLS at all. The reach is narrower than it first looked: `build_starrocks_spec`
+always writes `tlsEnabled` beside `mode`, so engines created through the wizard were never bitten.
+What was bitten is an engine whose stored delegation block predates the key and survives through the
+preserving arm, plus any hand-written spec. Both now derive it from one function. This is why D6 insists on a
+single target: the bug was not that someone forgot the certificate, but that there were two places
+to remember it. Anyone with FE admin rights can still read the
 credential back with `SHOW CREATE CATALOG`; that is StarRocks' model, and SP4 is where per-user
 authorization stops mattering less than it should.
 
@@ -106,6 +124,12 @@ actually work on 3.3 (the `iceberg.catalog.oauth2.*` dot-form is silently ignore
 masks the dot-form, so `SHOW CREATE CATALOG` may return egret's credential **in clear** to any FE
 admin. SP3b keeps the names that work, records the live output verbatim in its kind check, and
 leaves the fix to SP4.
+
+**When SP4 makes that move, it changes D3's fourth state too.** `iceberg.catalog.oauth2.credential`
+is a key the FE masks, so the warehouse catalog — the one D3 cites as comparing *matching* today —
+becomes *unverifiable*, and egret will alter it rather than refuse. That is still the right
+behaviour, but the reasoning that made the unverifiable arm narrow stops holding, and SP4 should
+re-check it rather than inherit it.
 
 **D7 — Egret compensates its own half-writes.** If the DDL succeeds and the attachment row cannot
 be written, egret drops the catalog again. SP3a's comment says the next apply prunes it; that is
