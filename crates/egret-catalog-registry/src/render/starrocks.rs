@@ -61,6 +61,7 @@
 //! `DISABLED|REQUIRED|VERIFY_IDENTITY`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
 
 use uuid::Uuid;
 
@@ -122,45 +123,112 @@ pub struct JdbcDriver {
     pub driver_class: String,
 }
 
-/// The JDBC driver StarRocks pins per dialect (`driver_url` downloaded by the
-/// FE, `driver_class` loaded by it — `JDBCResource.java:49-57`). A per-catalog
-/// `advanced.starrocks.driver_url`/`driver_class` overrides these (`SR_OVERRIDABLE`).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct JdbcDrivers;
+/// One pinned driver per dialect. StarRocks makes the FE DOWNLOAD the jar
+/// named by `driver_url` (`JDBCConnector.java:74-100`, which also MD5s it
+/// into `checksum`), so the URL must be reachable from the FE pods — which is
+/// why this table is configuration (`[starrocks.jdbc_drivers]`), not a
+/// constant: an air-gapped platform repoints it at an internal mirror or a
+/// `file:///` path baked into the image (D5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JdbcDrivers {
+    pub postgresql: JdbcDriver,
+    pub mysql: JdbcDriver,
+    pub mariadb: JdbcDriver,
+    pub oracle: JdbcDriver,
+    pub sqlserver: JdbcDriver,
+    pub clickhouse: JdbcDriver,
+}
 
-impl JdbcDrivers {
-    pub fn get(&self, dialect: JdbcDialect) -> Option<JdbcDriver> {
-        let (driver_url, driver_class) = match dialect {
-            JdbcDialect::Postgresql => (
-                "https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar",
-                "org.postgresql.Driver",
-            ),
-            // MariaDB's driver, for both `mysql` and `mariadb` — see the module doc.
-            JdbcDialect::Mysql | JdbcDialect::Mariadb => (
-                "https://repo1.maven.org/maven2/org/mariadb/jdbc/mariadb-java-client/3.4.1/mariadb-java-client-3.4.1.jar",
-                "org.mariadb.jdbc.Driver",
-            ),
-            JdbcDialect::Oracle => (
-                "https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc10/19.18.0.0/ojdbc10-19.18.0.0.jar",
-                "oracle.jdbc.driver.OracleDriver",
-            ),
-            JdbcDialect::Sqlserver => (
-                "https://repo1.maven.org/maven2/com/microsoft/sqlserver/mssql-jdbc/12.6.3.jre11/mssql-jdbc-12.6.3.jre11.jar",
-                "com.microsoft.sqlserver.jdbc.SQLServerDriver",
-            ),
-            JdbcDialect::Clickhouse => (
-                "https://repo1.maven.org/maven2/com/clickhouse/clickhouse-jdbc/0.6.3/clickhouse-jdbc-0.6.3.jar",
-                "com.clickhouse.jdbc.ClickHouseDriver",
-            ),
+/// The pinned table (verified live, 200 + matching artifact, on 2026-09-21 —
+/// see the task-2 report). `mysql` and `mariadb` are pinned to the same
+/// MariaDB Connector/J entry, at the version the FE itself bundles
+/// (`fe/pom.xml:1241-1246`: `mariadb-java-client 3.3.2` in the vendored
+/// source; egret pins the newer `3.4.1`, verified reachable the same way),
+/// because the FE loads `org.mariadb.jdbc.Driver` for both — see the module
+/// doc's MySQL note.
+impl Default for JdbcDrivers {
+    fn default() -> Self {
+        let mariadb = JdbcDriver {
+            driver_url: "https://repo1.maven.org/maven2/org/mariadb/jdbc/mariadb-java-client/3.4.1/mariadb-java-client-3.4.1.jar".into(),
+            driver_class: "org.mariadb.jdbc.Driver".into(),
         };
-        Some(JdbcDriver {
-            driver_url: driver_url.into(),
-            driver_class: driver_class.into(),
-        })
+        JdbcDrivers {
+            postgresql: JdbcDriver {
+                driver_url: "https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar".into(),
+                driver_class: "org.postgresql.Driver".into(),
+            },
+            mysql: mariadb.clone(),
+            mariadb,
+            oracle: JdbcDriver {
+                driver_url: "https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc10/19.18.0.0/ojdbc10-19.18.0.0.jar".into(),
+                driver_class: "oracle.jdbc.driver.OracleDriver".into(),
+            },
+            sqlserver: JdbcDriver {
+                driver_url: "https://repo1.maven.org/maven2/com/microsoft/sqlserver/mssql-jdbc/12.6.3.jre11/mssql-jdbc-12.6.3.jre11.jar".into(),
+                driver_class: "com.microsoft.sqlserver.jdbc.SQLServerDriver".into(),
+            },
+            clickhouse: JdbcDriver {
+                driver_url: "https://repo1.maven.org/maven2/com/clickhouse/clickhouse-jdbc/0.6.3/clickhouse-jdbc-0.6.3.jar".into(),
+                driver_class: "com.clickhouse.jdbc.ClickHouseDriver".into(),
+            },
+        }
     }
 }
 
-pub const DEFAULT_SR_JDBC_DRIVERS: JdbcDrivers = JdbcDrivers;
+impl JdbcDrivers {
+    /// The pinned (or overridden) driver for a dialect, or `None` when the
+    /// entry's `driver_url` is empty — an operator's way of saying "not
+    /// available here" (a `[starrocks.jdbc_drivers]` override can blank one
+    /// deliberately; `render_starrocks` then refuses with `NoJdbcDriver`
+    /// unless the catalog's own `advanced.starrocks` supplies both keys).
+    pub fn get(&self, dialect: JdbcDialect) -> Option<&JdbcDriver> {
+        let driver = match dialect {
+            JdbcDialect::Postgresql => &self.postgresql,
+            JdbcDialect::Mysql => &self.mysql,
+            JdbcDialect::Mariadb => &self.mariadb,
+            JdbcDialect::Oracle => &self.oracle,
+            JdbcDialect::Sqlserver => &self.sqlserver,
+            JdbcDialect::Clickhouse => &self.clickhouse,
+        };
+        if driver.driver_url.is_empty() {
+            None
+        } else {
+            Some(driver)
+        }
+    }
+
+    /// Applies this deployment's `[starrocks.jdbc_drivers]` overrides (D5)
+    /// on top of `self` (normally the pinned table). Each dialect's
+    /// `driver_url`/`driver_class` are overridden independently — a
+    /// deployment that only names one field of one dialect leaves every
+    /// other field, and every other dialect, at its compiled-in value, so a
+    /// partially-written table can never leave a dialect without a driver by
+    /// accident.
+    pub fn with_overrides(&self, settings: &egret_config::StarRocksSettings) -> JdbcDrivers {
+        fn apply(driver: &mut JdbcDriver, ov: Option<&egret_config::JdbcDriverOverride>) {
+            let Some(ov) = ov else { return };
+            if let Some(url) = &ov.driver_url {
+                driver.driver_url = url.clone();
+            }
+            if let Some(class) = &ov.driver_class {
+                driver.driver_class = class.clone();
+            }
+        }
+        let mut out = self.clone();
+        let o = &settings.jdbc_drivers;
+        apply(&mut out.postgresql, o.postgresql.as_ref());
+        apply(&mut out.mysql, o.mysql.as_ref());
+        apply(&mut out.mariadb, o.mariadb.as_ref());
+        apply(&mut out.oracle, o.oracle.as_ref());
+        apply(&mut out.sqlserver, o.sqlserver.as_ref());
+        apply(&mut out.clickhouse, o.clickhouse.as_ref());
+        out
+    }
+}
+
+/// The compiled-in pinned table, lazily built once. `&DEFAULT_SR_JDBC_DRIVERS`
+/// derefs to `&JdbcDrivers` wherever an input wants one (`LazyLock<T>: Deref<Target = T>`).
+pub static DEFAULT_SR_JDBC_DRIVERS: LazyLock<JdbcDrivers> = LazyLock::new(JdbcDrivers::default);
 
 /// The two `advanced.starrocks` keys a JDBC catalog may override per-catalog
 /// instead of colliding at save time (plan D5).
@@ -188,10 +256,14 @@ pub fn escape_ident(s: &str) -> String {
 /// interpolate [`escape_dq`]'s output (`:483`), and an FE error quoting the
 /// rejected statement quotes THAT escaped text back. A secret containing a
 /// `"` or `\` therefore appears in the wild only in its escaped form, so both
-/// forms must be scrubbed, escaped first (it is the superset: it always
-/// contains the raw form as a substring once its own backslashes/quotes are
-/// accounted for, so scrubbing it first cannot leave a partial raw match
-/// behind for the second pass to miss).
+/// forms must be scrubbed. The two passes are independent substring
+/// replacements, so which runs first does not change the result — the
+/// escaped form is NOT a superset of the raw one (`escape_dq("p4ss\"w0rd\\x")`
+/// = `p4ss\"w0rd\\x`, which does not contain `p4ss"w0rd\x`), so a raw-first
+/// order would leave nothing behind either. Escaped is scrubbed first simply
+/// because it is the form actually rendered into the statement; the raw pass
+/// is a second, defensive layer for any other path a secret's plaintext might
+/// reach.
 pub fn scrub_secrets(text: &str, secrets: &BTreeMap<Uuid, String>) -> String {
     let mut out = text.to_string();
     for v in secrets.values() {
@@ -399,7 +471,6 @@ pub fn render_starrocks(
             let driver_url = match def.advanced.starrocks.get("driver_url") {
                 Some(v) => v.clone(),
                 None => pinned
-                    .as_ref()
                     .ok_or(RenderError::NoJdbcDriver(c.dialect))?
                     .driver_url
                     .clone(),
@@ -957,6 +1028,94 @@ mod tests {
         );
     }
 
+    /// D5: `with_overrides` repoints only the field(s) a deployment actually
+    /// named — one dialect's `driver_url`, say — and leaves every other field
+    /// of every other dialect at its compiled-in pinned value.
+    #[test]
+    fn with_overrides_repoints_only_the_named_field_of_the_named_dialect() {
+        let mut settings = egret_config::StarRocksSettings::default();
+        settings.jdbc_drivers.mysql = Some(egret_config::JdbcDriverOverride {
+            driver_url: Some("file:///opt/mirror/mariadb.jar".into()),
+            driver_class: None,
+        });
+        let drivers = DEFAULT_SR_JDBC_DRIVERS.with_overrides(&settings);
+
+        // The named field changed.
+        assert_eq!(
+            drivers.get(JdbcDialect::Mysql).unwrap().driver_url,
+            "file:///opt/mirror/mariadb.jar"
+        );
+        // The field the override left unnamed on that SAME dialect kept its
+        // pinned value.
+        assert_eq!(
+            drivers.get(JdbcDialect::Mysql).unwrap().driver_class,
+            DEFAULT_SR_JDBC_DRIVERS
+                .get(JdbcDialect::Mysql)
+                .unwrap()
+                .driver_class
+        );
+        // `mariadb` shares mysql's pinned entry but has no override of its
+        // own, so it is untouched.
+        assert_eq!(
+            drivers.get(JdbcDialect::Mariadb).unwrap(),
+            DEFAULT_SR_JDBC_DRIVERS.get(JdbcDialect::Mariadb).unwrap()
+        );
+        // Every other dialect is untouched too.
+        for d in [
+            JdbcDialect::Postgresql,
+            JdbcDialect::Oracle,
+            JdbcDialect::Sqlserver,
+            JdbcDialect::Clickhouse,
+        ] {
+            assert_eq!(
+                drivers.get(d).unwrap(),
+                DEFAULT_SR_JDBC_DRIVERS.get(d).unwrap(),
+                "{d:?}"
+            );
+        }
+    }
+
+    /// A `[starrocks.jdbc_drivers]` entry overridden to an empty `driver_url`
+    /// is an operator's deliberate "not available here" (module doc on
+    /// `JdbcDrivers::get`): `get` reads that as `None`, and a `jdbc` catalog
+    /// of that dialect with no PER-CATALOG override then fails to render.
+    #[test]
+    fn a_blanked_override_disables_the_dialect_unless_the_catalog_overrides_it_too() {
+        let mut settings = egret_config::StarRocksSettings::default();
+        settings.jdbc_drivers.postgresql = Some(egret_config::JdbcDriverOverride {
+            driver_url: Some(String::new()),
+            driver_class: None,
+        });
+        let drivers = DEFAULT_SR_JDBC_DRIVERS.with_overrides(&settings);
+        assert!(drivers.get(JdbcDialect::Postgresql).is_none());
+
+        let d = def(
+            "jdbc",
+            json!({ "dialect": "postgresql", "host": "db", "port": 5432, "database": "s",
+                    "user": "u", "password_secret_id": PW, "ssl": { "mode": "require" } }),
+            json!(null),
+        );
+        let mut in_: StarRocksRenderInput<'_> = input();
+        in_.drivers = &drivers;
+        assert_eq!(
+            render_starrocks("j", &d, &in_).unwrap_err(),
+            RenderError::NoJdbcDriver(JdbcDialect::Postgresql)
+        );
+
+        // A per-catalog override still fills the gap.
+        let d = def(
+            "jdbc",
+            json!({ "dialect": "postgresql", "host": "db", "port": 5432, "database": "s",
+                    "user": "u", "password_secret_id": PW, "ssl": { "mode": "require" } }),
+            json!({ "starrocks": { "driver_url": "file:///opt/pg.jar", "driver_class": "org.postgresql.Driver" } }),
+        );
+        let p = render_starrocks("j", &d, &in_).unwrap().properties;
+        assert_eq!(
+            p["driver_url"],
+            PropValue::Plain("file:///opt/pg.jar".into())
+        );
+    }
+
     #[test]
     fn elasticsearch_and_benchmark() {
         let d = def(
@@ -1121,12 +1280,11 @@ mod tests {
         assert_eq!(ddl, before, "a refused render must not mutate the ddl");
     }
 
-    /// M7: `secret_ids`, `comparable` and `redacted` for a kind other than
-    /// the egret warehouse, carrying both a typed secret (`password`) and a
-    /// `secret_properties.starrocks` entry (`paimon.password`) — the path
-    /// most likely to regress since it is assembled from two different
-    /// sources (the typed JDBC-ish arm equivalent and the generic pass-
-    /// through) rather than one.
+    /// M7: `secret_ids`, `comparable` and `redacted` for a `generic` catalog
+    /// (no typed arm at all), whose one secret comes from
+    /// `secret_properties.starrocks` (`paimon.password`) rather than any
+    /// typed field — the pass-through path, as opposed to the typed-kind
+    /// coverage the other tests in this module already give.
     #[test]
     fn secret_ids_comparable_and_redacted_for_a_non_egret_kind() {
         let d = def(

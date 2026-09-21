@@ -3151,6 +3151,7 @@ name = "egret-catalog-registry"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "egret-config",
  "egret-metastore",
  "egret-secrets",
  "egret-test-db",

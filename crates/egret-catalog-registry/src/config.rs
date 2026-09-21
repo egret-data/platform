@@ -608,6 +608,23 @@ fn validate_advanced(def: &CatalogDef) -> Result<(), ValidationError> {
             }
         }
     }
+    // D5: `driver_url`/`driver_class` are the only advanced keys that may
+    // override what the typed JDBC form sets (plan table #2), so a
+    // half-written override is refused here rather than silently mixing a
+    // pinned class with an operator's jar.
+    if matches!(def.config, CatalogConfig::Jdbc(_)) {
+        let url = def.advanced.starrocks.get("driver_url");
+        let class = def.advanced.starrocks.get("driver_class");
+        if url.is_some() != class.is_some()
+            || url.is_some_and(|v| v.trim().is_empty())
+            || class.is_some_and(|v| v.trim().is_empty())
+        {
+            return Err(ValidationError::Config {
+                kind: "jdbc".into(),
+                msg: "advanced.starrocks.driver_url and driver_class go together, and neither may be empty".into(),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -767,12 +784,39 @@ impl CatalogDef {
         out
     }
 
-    /// Whether an engine type can read this catalog (spec §3: every typed kind is
-    /// readable by both engines; `generic` only by the engines it names).
+    /// Whether an engine type can read this catalog (spec §3, design D4).
+    ///
+    /// Exhaustive on purpose: no `_` arm, so a new kind or a new JDBC dialect
+    /// cannot be added without someone deciding, for both engines, whether it
+    /// is readable. Today every typed kind is readable by both — StarRocks 4.x
+    /// is the floor egret provisions (`DEFAULT_SR_FE_IMAGE`), and it reads all
+    /// of them. An engine pinned to an older FE can still refuse one; that
+    /// refusal arrives as the attachment's `apply_error`, not as a validation
+    /// error, because egret cannot know an overridden image's version.
     pub fn can_read(&self, engine: EngineType) -> bool {
-        match &self.config {
-            CatalogConfig::Generic(g) => g.engines.contains(&engine),
-            _ => true,
+        match (&self.config, engine) {
+            (CatalogConfig::Generic(g), e) => g.engines.contains(&e),
+            (CatalogConfig::Iceberg(_), EngineType::Trino | EngineType::StarRocks) => true,
+            (CatalogConfig::Hive(_), EngineType::Trino | EngineType::StarRocks) => true,
+            (CatalogConfig::DeltaLake(_), EngineType::Trino | EngineType::StarRocks) => true,
+            (CatalogConfig::Hudi(_), EngineType::Trino | EngineType::StarRocks) => true,
+            (CatalogConfig::Elasticsearch(_), EngineType::Trino | EngineType::StarRocks) => true,
+            (
+                CatalogConfig::Tpch(_) | CatalogConfig::Tpcds(_),
+                EngineType::Trino | EngineType::StarRocks,
+            ) => true,
+            (CatalogConfig::Jdbc(_), EngineType::Trino) => true,
+            (CatalogConfig::Jdbc(j), EngineType::StarRocks) => match j.dialect {
+                // v3.0; Oracle/SQL Server v3.2.9/3.3.1; ClickHouse v3.3.0
+                // (docs/en/data_source/catalog/jdbc_catalog.md:5,15,21). All
+                // below the 4.x floor.
+                JdbcDialect::Postgresql
+                | JdbcDialect::Mysql
+                | JdbcDialect::Mariadb
+                | JdbcDialect::Oracle
+                | JdbcDialect::Sqlserver
+                | JdbcDialect::Clickhouse => true,
+            },
         }
     }
 
@@ -833,6 +877,14 @@ mod tests {
 
     fn parse(kind: &str, config: serde_json::Value) -> Result<CatalogDef, ValidationError> {
         CatalogDef::parse(kind, &config, &serde_json::Value::Null)
+    }
+
+    fn parse_with_advanced(
+        kind: &str,
+        config: serde_json::Value,
+        advanced: serde_json::Value,
+    ) -> Result<CatalogDef, ValidationError> {
+        CatalogDef::parse(kind, &config, &advanced)
     }
 
     fn jdbc(dialect: &str, database: Option<&str>) -> serde_json::Value {
@@ -985,6 +1037,51 @@ mod tests {
         assert!(parse("iceberg", json!({ "metastore": { "type": "glue", "region": "eu-west-1", "access_key": "AKIA" }, "storage_connection_id": SC })).is_err(), "access key without secret");
     }
 
+    /// D5: `advanced.starrocks.driver_url`/`driver_class` on a `jdbc` catalog
+    /// go together, and neither may be blank — an incomplete override is
+    /// refused at parse time rather than silently mixing a pinned class with
+    /// an operator's jar (or vice versa) at render time.
+    #[test]
+    fn a_jdbc_driver_override_must_be_complete() {
+        let cfg = jdbc("postgresql", Some("sales"));
+        // Both keys: accepted.
+        parse_with_advanced(
+            "jdbc",
+            cfg.clone(),
+            json!({ "starrocks": { "driver_url": "file:///opt/pg.jar", "driver_class": "org.postgresql.Driver" } }),
+        )
+        .unwrap();
+        // Neither key: accepted (falls back to the pinned table).
+        parse_with_advanced("jdbc", cfg.clone(), json!({})).unwrap();
+        // Only `driver_url`: refused.
+        assert!(matches!(
+            parse_with_advanced(
+                "jdbc",
+                cfg.clone(),
+                json!({ "starrocks": { "driver_url": "file:///opt/pg.jar" } })
+            ),
+            Err(ValidationError::Config { kind, .. }) if kind == "jdbc"
+        ));
+        // Only `driver_class`: refused.
+        assert!(matches!(
+            parse_with_advanced(
+                "jdbc",
+                cfg.clone(),
+                json!({ "starrocks": { "driver_class": "org.postgresql.Driver" } })
+            ),
+            Err(ValidationError::Config { kind, .. }) if kind == "jdbc"
+        ));
+        // Both keys present but one blank: refused.
+        assert!(matches!(
+            parse_with_advanced(
+                "jdbc",
+                cfg,
+                json!({ "starrocks": { "driver_url": "  ", "driver_class": "org.postgresql.Driver" } })
+            ),
+            Err(ValidationError::Config { kind, .. }) if kind == "jdbc"
+        ));
+    }
+
     #[test]
     fn generic_rules() {
         let adv = json!({ "trino": { "connector.name": "bigquery" } });
@@ -1017,6 +1114,73 @@ mod tests {
     fn a_line_break_cannot_reach_a_properties_file() {
         let err = CatalogDef::parse("tpch", &json!({}), &json!({ "trino": { "a.b": "x\ny=z" } }));
         assert!(matches!(err, Err(ValidationError::Advanced(_))), "{err:?}");
+    }
+
+    /// D4: `can_read` names every (kind, engine) pair rather than leaving it
+    /// as an implication of the match arms — the matrix is a document.
+    #[test]
+    fn every_kind_and_dialect_has_a_stated_answer_for_both_engines() {
+        let cases: &[(&str, serde_json::Value, bool, bool)] = &[
+            (
+                "iceberg",
+                json!({ "metastore": { "type": "hive", "uri": "thrift://h:9083" }, "storage_connection_id": SC }),
+                true,
+                true,
+            ),
+            (
+                "hive",
+                json!({ "metastore": { "type": "hive", "uri": "thrift://h:9083" }, "storage_connection_id": SC }),
+                true,
+                true,
+            ),
+            (
+                "delta_lake",
+                json!({ "metastore": { "type": "hive", "uri": "thrift://h:9083" }, "storage_connection_id": SC }),
+                true,
+                true,
+            ),
+            (
+                "hudi",
+                json!({ "metastore": { "type": "hive", "uri": "thrift://h:9083" }, "storage_connection_id": SC }),
+                true,
+                true,
+            ),
+            (
+                "elasticsearch",
+                json!({ "hosts": ["e"], "port": 9200, "tls": false }),
+                true,
+                true,
+            ),
+            ("tpch", json!({}), true, true),
+            ("tpcds", json!({}), true, true),
+        ];
+        for (kind, cfg, trino, sr) in cases {
+            let d = parse(kind, cfg.clone()).unwrap();
+            assert_eq!(d.can_read(EngineType::Trino), *trino, "{kind}/trino");
+            assert_eq!(d.can_read(EngineType::StarRocks), *sr, "{kind}/starrocks");
+        }
+        for dialect in [
+            "postgresql",
+            "mysql",
+            "mariadb",
+            "oracle",
+            "sqlserver",
+            "clickhouse",
+        ] {
+            let db = matches!(dialect, "postgresql" | "oracle" | "sqlserver").then_some("d");
+            let d = parse("jdbc", jdbc(dialect, db)).unwrap();
+            assert!(d.can_read(EngineType::Trino), "{dialect}/trino");
+            assert!(d.can_read(EngineType::StarRocks), "{dialect}/starrocks");
+        }
+        // The only refusal that exists today.
+        let d = parse_with_advanced(
+            "generic",
+            json!({ "engines": ["trino"] }),
+            json!({ "trino": { "connector.name": "memory" } }),
+        )
+        .unwrap();
+        assert!(d.can_read(EngineType::Trino));
+        assert!(!d.can_read(EngineType::StarRocks));
     }
 
     #[test]
