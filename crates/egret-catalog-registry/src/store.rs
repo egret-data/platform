@@ -29,6 +29,10 @@ macro_rules! attachment_cols {
 pub mod apply_status {
     pub const APPLIED: &str = "applied";
     pub const FAILED: &str = "failed";
+    /// Recorded by egret, not yet accepted by the engine (SP3b D1). Only a
+    /// StarRocks attachment is ever written this way: a Trino apply happens
+    /// before the row exists at all.
+    pub const PENDING: &str = "pending";
 }
 
 #[derive(Clone, Debug, sqlx::FromRow)]
@@ -122,6 +126,10 @@ pub struct NewAttachment {
     /// Keep a legacy row's creation time, so attachment order — and with it the
     /// rendered env-var names — is unchanged after the migration.
     pub created_at: Option<DateTime<Utc>>,
+    /// One of `apply_status::{APPLIED, FAILED, PENDING}`. Every existing call
+    /// site passes `APPLIED` (SP3b Task 3 keeps this step behaviour-neutral);
+    /// Task 5 is the one that starts writing `PENDING` for a StarRocks attach.
+    pub apply_status: &'static str,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -227,8 +235,8 @@ pub(crate) async fn insert_attachment_row(
 ) -> Result<AttachmentRow, sqlx::Error> {
     sqlx::query_as::<_, AttachmentRow>(concat!(
         "INSERT INTO registry.engine_catalog_attachments \
-           (engine_id, catalog_id, catalog_client_id, credential_secret_id, minted_client, applied_at, created_at) \
-         VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN now() END, COALESCE($7, now())) RETURNING ",
+           (engine_id, catalog_id, catalog_client_id, credential_secret_id, minted_client, apply_status, applied_at, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN now() END, COALESCE($8, now())) RETURNING ",
         attachment_cols!()
     ))
     .bind(a.engine_id)
@@ -236,6 +244,7 @@ pub(crate) async fn insert_attachment_row(
     .bind(a.catalog_client_id)
     .bind(a.credential_secret_id)
     .bind(a.minted_client)
+    .bind(a.apply_status)
     .bind(a.applied_now)
     .bind(a.created_at)
     .fetch_one(&mut *conn)
@@ -749,6 +758,37 @@ impl RegistryStore {
         Ok(())
     }
 
+    /// One attachment converged (SP3b). `mark_engine_applied` stays as it is:
+    /// it is Trino's whole-engine apply, which settles every attachment at once
+    /// and compares `catalogs.updated_at`; a StarRocks apply is per catalog.
+    /// Returns `NotFound` when the row is gone (a race D2's
+    /// `engine_still_current` checkpoints exist precisely because it's real:
+    /// the engine, or just this attachment, was deleted mid-bootstrap).
+    /// `Ok(())` on zero rows would let Task 5's bootstrap record a
+    /// convergence success for an attachment that no longer exists to
+    /// converge (fix round 1 review, F-12).
+    pub async fn set_apply_applied(
+        &self,
+        engine_id: Uuid,
+        catalog_id: Uuid,
+    ) -> Result<(), RegistryError> {
+        let result = sqlx::query(
+            "UPDATE registry.engine_catalog_attachments \
+                SET apply_status = 'applied', apply_error = NULL, applied_at = now() \
+              WHERE engine_id = $1 AND catalog_id = $2",
+        )
+        .bind(engine_id)
+        .bind(catalog_id)
+        .execute(self.pool())
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(RegistryError::NotFound(format!(
+                "attachment engine={engine_id} catalog={catalog_id}"
+            )));
+        }
+        Ok(())
+    }
+
     // workspaces ---------------------------------------------------------------
 
     pub async fn list_catalog_workspaces(
@@ -929,6 +969,7 @@ impl RegistryStore {
                 minted_client: false,
                 applied_now: false,
                 created_at: Some(created_at),
+                apply_status: apply_status::APPLIED,
             },
         )
         .await?;

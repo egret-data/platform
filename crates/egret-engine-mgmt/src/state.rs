@@ -74,6 +74,15 @@ pub struct EngineMgmtState {
     /// makes per-user delegated impersonation queries work. An admin explicitly
     /// passing `authz_service_id` still binds regardless of this flag.
     pub ranger_enabled: bool,
+    /// The JDBC drivers a StarRocks `jdbc` catalog makes the FE download
+    /// (design D5): the compiled-in pinned table with this deployment's
+    /// `[starrocks.jdbc_drivers]` overrides applied. Populated from config in
+    /// egret-bin; tests use `JdbcDrivers::default()`.
+    pub sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers,
+    /// Runs statements on a StarRocks FE. A real `MysqlDdlRunner` in egret-bin;
+    /// a fake in tests, which is what makes the bootstrap and the apply path
+    /// testable at all (design D8).
+    pub starrocks_ddl: Arc<dyn crate::starrocks_ddl::StarRocksDdl>,
 }
 
 impl FromRef<EngineMgmtState> for SessionService {

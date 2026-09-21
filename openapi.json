@@ -4265,7 +4265,7 @@
         ],
         "responses": {
           "201": {
-            "description": "Applied to the engine, then attached (an egret warehouse catalog mints a Catalog Client for the engine)",
+            "description": "Attached. Trino: the catalog was applied to the cluster first, so `applyStatus` is `applied`. StarRocks: the attachment is recorded first and the catalog is created on the FE immediately afterwards, so `applyStatus` is `applied` on success and `failed` (with `applyError`) when the FE could not be reached or refused — the attachment still exists and is converged by `POST …/catalogs/{cid}/apply` or by the engine's next bootstrap",
             "content": {
               "application/json": {
                 "schema": {
@@ -4275,7 +4275,7 @@
             }
           },
           "400": {
-            "description": "The engine cannot read this catalog, StarRocks attachment is not supported yet, or Kubernetes is not configured",
+            "description": "The engine cannot read this catalog, the name is one StarRocks reserves, or Kubernetes is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -4335,7 +4335,7 @@
             }
           },
           "502": {
-            "description": "Kubernetes rejected the apply (`code` = `engine_cluster_apply_failed`); nothing was attached",
+            "description": "Trino only: Kubernetes rejected the apply (`code` = `engine_cluster_apply_failed`); nothing was attached. A StarRocks FE that rejects the DDL is reported as a `failed` attachment in the 201 body, not as a 502",
             "content": {
               "application/json": {
                 "schema": {
@@ -4470,7 +4470,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Re-applied; the attachment is `applied`",
+            "description": "Re-applied; the attachment is `applied`. StarRocks: an absent catalog is created and an existing one is updated in place with `ALTER CATALOG … SET`",
             "content": {
               "application/json": {
                 "schema": {
@@ -4480,7 +4480,7 @@
             }
           },
           "400": {
-            "description": "StarRocks re-apply is not supported yet, or Kubernetes is not configured",
+            "description": "Kubernetes is not configured (Trino), or the catalog cannot be rendered for this engine",
             "content": {
               "application/json": {
                 "schema": {
@@ -4540,7 +4540,7 @@
             }
           },
           "502": {
-            "description": "Kubernetes rejected the apply; the attachment stays `failed` with the new error",
+            "description": "The engine rejected the apply — Kubernetes for Trino, the FE for StarRocks (including a catalog of this name the FE already holds with different properties); the attachment stays `failed` with the new error",
             "content": {
               "application/json": {
                 "schema": {
@@ -29959,7 +29959,7 @@
           },
           "applyStatus": {
             "type": "string",
-            "description": "`applied` | `failed`."
+            "description": "`applied` | `failed` | `pending`. `pending` means egret has recorded the\nattachment and has not yet been able to tell the engine — a StarRocks\nengine whose FE is still coming up (5-10 minutes after create), which\nthe bootstrap or a Retry converges."
           },
           "applyError": {
             "type": [

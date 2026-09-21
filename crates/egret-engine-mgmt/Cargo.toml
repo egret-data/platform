@@ -105,3 +105,6 @@ pem = "3"
 x509-parser = "0.18"
 # Reads back the log line the database-error backstop writes (tests/error_mapping.rs).
 tracing-subscriber.workspace = true
+# Parses EGRET_TEST_STARROCKS_URL for the engine-gated DDL-runner live suite
+# (tests/starrocks_ddl_live.rs), same convention as egret-query's connector suites.
+url.workspace = true

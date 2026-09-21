@@ -11,22 +11,7 @@ use crate::config::{
     JdbcDialect, JdbcSsl, RestAuth,
 };
 
-/// The warehouse behind an egret catalog.
-#[derive(Clone, Copy, Debug)]
-pub struct WarehouseRender<'a> {
-    pub name: &'a str,
-    pub s3_endpoint: &'a str,
-}
-
-/// A resolved storage connection (secret still an id).
-#[derive(Clone, Copy, Debug)]
-pub struct StorageRender<'a> {
-    pub endpoint: Option<&'a str>,
-    pub region: &'a str,
-    pub path_style: bool,
-    pub access_key: &'a str,
-    pub secret_key_secret_id: Option<Uuid>,
-}
+use super::{RenderError, StorageRender, WarehouseRender};
 
 #[derive(Clone, Copy, Debug)]
 pub struct TrinoRenderInput<'a> {
@@ -89,18 +74,6 @@ impl TrinoCatalogFile {
         }
         (plain, secret)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum RenderError {
-    #[error("catalog {0} cannot be read by Trino")]
-    NotReadable(String),
-    #[error("missing render input: {0}")]
-    MissingInput(&'static str),
-    #[error("advanced.trino key {0:?} collides with a property the catalog form sets")]
-    Collision(String),
-    #[error("property {0:?} has a value with a line break")]
-    LineBreak(String),
 }
 
 struct Out<'a> {
@@ -697,6 +670,37 @@ mod tests {
                 ("elasticsearch.tls.enabled", "false"),
             ])
         );
+    }
+
+    /// SP3b D4's tpch/tpcds coverage lived only on the StarRocks side
+    /// (`elasticsearch_and_benchmark`, deleted when StarRocks' `can_read`
+    /// started refusing both kinds — there is no `type = "benchmark"`
+    /// spelling to pin on this engine at all, Trino's connector names are
+    /// literally `tpch`/`tpcds`). What DOES transfer is the other half of
+    /// that deleted test: `scale` must never become a rendered property here
+    /// — Trino's tpch/tpcds connectors take it from the SCHEMA name
+    /// (`tiny`/`sf1`/`sf10`/…, `SampleConfig`'s doc: "Trino ignores `scale`
+    /// (schema names carry it)"), not from a catalog property, so a `scale`
+    /// key must be absent whether it's set on the registry row or not (fix
+    /// round 1: restoring the coverage the coordinator asked to keep).
+    #[test]
+    fn tpch_and_tpcds_never_render_scale_trino_takes_it_from_the_schema_name() {
+        for kind in ["tpch", "tpcds"] {
+            let d = def(kind, json!({ "scale": 10 }), json!(null));
+            let p = render_trino("b", &d, &input()).unwrap().properties;
+            assert_eq!(p["connector.name"], kind, "{kind}: connector.name spelling");
+            assert!(
+                !p.contains_key("scale"),
+                "{kind}: scale must never be rendered, even when set: {p:?}"
+            );
+
+            let d = def(kind, json!({}), json!(null));
+            let p = render_trino("b", &d, &input()).unwrap().properties;
+            assert!(
+                !p.contains_key("scale"),
+                "{kind}: scale must never be rendered when absent either: {p:?}"
+            );
+        }
     }
 
     #[test]

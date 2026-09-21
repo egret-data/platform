@@ -1,38 +1,65 @@
-//! Registry catalogs ↔ engines (SP3 §4.4–4.5): render an attachment for Trino,
-//! attach, detach, re-apply, and the per-engine-type dispatch. The StarRocks arm
-//! is the SP3b seam: today it refuses everything but detaching a catalog that
-//! was never created on the FE.
+//! Registry catalogs ↔ engines (SP3 §4.4–4.5): render an attachment for Trino
+//! or StarRocks, attach, detach, re-apply, and the per-engine-type dispatch.
+//!
+//! The two engine types differ in more than their rendered text (SP3b §1): a
+//! Trino apply writes a Kubernetes object and re-renders every catalog every
+//! time, so it is idempotent and prunes what it omits; a StarRocks apply is
+//! one `CREATE`/`ALTER`/`DROP CATALOG` statement against a LIVE FE, which is
+//! not idempotent, prunes nothing, and cannot be reached at all for the five
+//! to ten minutes after the engine is provisioned. Everything asymmetric below
+//! — attach ordering (D1), the read before the create (D3), the compensating
+//! drop (D7) — follows from that.
 
 use std::collections::BTreeMap;
 
 use egret_catalog_api::{CreatedClient, NewClient};
 use egret_catalog_registry::{
-    plaintext_secrets, render_trino, AttachedCatalog, CatalogDef, CatalogRow, EngineType,
-    LegacyCatalog, NewAttachment, StorageRender, TrinoCatalogFile, TrinoRenderInput,
+    plaintext_secrets, render_starrocks, render_trino, AttachedCatalog, AttachmentRow, CatalogDef,
+    CatalogRow, EngineType, LegacyCatalog, NewAttachment, RenderError, StarRocksCatalogDdl,
+    StarRocksRenderInput, StatementForm, StorageRender, TrinoCatalogFile, TrinoRenderInput,
     WarehouseRender,
 };
+use egret_storage::StorageConn;
 use uuid::Uuid;
 
 use crate::engines::{
     apply_built, apply_conflict, build_provision_req_with, ensure_engine_role, ApplyBuiltError,
     ApplyOp, BuildOpts, CatalogReq, PendingAttachment,
 };
+use crate::starrocks_ddl::{
+    compare_to_fe, fe_target, show_catalogs, show_create_catalog, Drift, FeTarget,
+};
 use crate::Engine;
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
-
-pub(crate) const STARROCKS_NOT_YET: &str =
-    "applying registry catalogs to StarRocks engines is not supported yet";
 
 #[derive(Debug)]
 pub(crate) enum ApplyError {
     /// The engine row is gone or `deleting` (a concurrent delete).
     Conflict,
-    /// Kubernetes rejected (or never answered) the apply.
+    /// The engine (Kubernetes, or a StarRocks FE) rejected the change, or
+    /// never answered. Already scrubbed: a StarRocks FE error reaches this
+    /// through `FeError::scrubbed` (D6), never through `Display`.
     Rejected(String),
     NotSupported(&'static str),
     /// The request could not be assembled (missing warehouse, secret, …).
     Build(CpError),
+    /// The engine ACCEPTED the change but egret could not record it — the
+    /// `set_apply_applied` write failed. Distinct from every variant above
+    /// because it is not a statement about the engine: for StarRocks the
+    /// catalog this apply created has already been dropped again (D7) by the
+    /// time this is returned, so the engine and the registry agree once more.
+    ///
+    /// Two causes, and the callers must survive BOTH (fix round 1 review, F5 —
+    /// this doc used to claim only the first): the attachment row VANISHED
+    /// (`RegistryError::NotFound`, the race D7 is about), or an ordinary
+    /// database failure hit the write while the row is still there. So the
+    /// attach path removes the row best-effort before giving back what it
+    /// minted — otherwise the second case leaves a `pending` attachment naming
+    /// a credential secret that was just deleted — and `retry_apply` does NOT
+    /// flag this on the row, because the row's status write is the thing that
+    /// just failed.
+    Unrecorded(CpError),
 }
 
 impl ApplyError {
@@ -43,7 +70,7 @@ impl ApplyError {
             }
             ApplyError::Rejected(m) => m.clone(),
             ApplyError::NotSupported(m) => (*m).to_string(),
-            ApplyError::Build(e) => e.to_string(),
+            ApplyError::Build(e) | ApplyError::Unrecorded(e) => e.to_string(),
         }
     }
 }
@@ -51,7 +78,14 @@ impl ApplyError {
 pub(crate) enum CatalogChange {
     Attach(PendingAttachment),
     Detach(Uuid),
-    Reapply,
+    /// Re-apply ONE attachment. Trino cannot express that — `apply_trino`
+    /// re-renders the whole engine whatever changed, because a Trino apply is
+    /// the entire ConfigMap either way — but a StarRocks apply is one
+    /// statement about one catalog, and a Retry on catalog A must not restate
+    /// catalog B or rewrite its `apply_status`. The whole-engine StarRocks
+    /// convergence is the bootstrap's (D2), and it calls
+    /// [`converge_attachment`] directly rather than coming through here.
+    ReapplyOne(Uuid),
 }
 
 #[derive(Debug)]
@@ -82,7 +116,9 @@ impl CatalogOpError {
     /// Today's engine-catalog routes: a rejected apply is a 400.
     pub(crate) fn into_legacy(self) -> CpError {
         match self {
-            CatalogOpError::Http(e) | CatalogOpError::Apply(ApplyError::Build(e)) => e,
+            CatalogOpError::Http(e)
+            | CatalogOpError::Apply(ApplyError::Build(e))
+            | CatalogOpError::Apply(ApplyError::Unrecorded(e)) => e,
             CatalogOpError::Apply(ApplyError::Conflict) => apply_conflict(),
             CatalogOpError::Apply(ApplyError::Rejected(m)) => {
                 CpError::BadRequest(format!("engine update failed: {m}"))
@@ -144,7 +180,9 @@ async fn apply_trino(
             exclude_catalog: Some(id),
             ..BuildOpts::default()
         },
-        CatalogChange::Reapply => BuildOpts::default(),
+        // A Trino apply is the whole ConfigMap, so "re-apply this one
+        // attachment" and "re-apply everything" are the same request.
+        CatalogChange::ReapplyOne(_) => BuildOpts::default(),
     };
     let built = build_provision_req_with(st, engine, opts)
         .await
@@ -157,21 +195,408 @@ async fn apply_trino(
         })
 }
 
-/// SP3b replaces this with CREATE / ALTER / DROP CATALOG on the FE. In SP3a the
-/// FE bootstrap creates only the engine's primary catalog, which cannot be
-/// detached, so any other attachment was never on the FE and detaching it has
-/// nothing to drop.
+/// CREATE / ALTER / DROP CATALOG on the engine's live FE (SP3b). Every
+/// statement goes through one [`FeTarget`], so D6's pinned certificate and the
+/// FE root password cannot be forgotten on one path and passed on another the
+/// way they were before SP3b.
 async fn apply_starrocks(
-    _st: &CpState,
-    _engine: &Engine,
+    st: &CpState,
+    engine: &Engine,
     change: CatalogChange,
 ) -> Result<(), ApplyError> {
+    let fe = fe_target(st, engine).await.map_err(ApplyError::Build)?;
+    let registry = st.engine_mgmt.registry();
     match change {
-        CatalogChange::Detach(_) => Ok(()),
-        CatalogChange::Attach(_) | CatalogChange::Reapply => {
-            Err(ApplyError::NotSupported(STARROCKS_NOT_YET))
+        CatalogChange::Attach(p) => {
+            let catalog = load_catalog(st, p.catalog_id).await?;
+            // The row `attach_to_engine` has just written, as this apply must
+            // render it: the credential it minted is what the statement
+            // carries, and it is not readable back through `get_attachment`
+            // any more cheaply than this.
+            let a = AttachedCatalog {
+                catalog,
+                attachment: AttachmentRow::pending(
+                    engine.id,
+                    p.catalog_id,
+                    p.catalog_client_id,
+                    p.credential_secret_id,
+                ),
+            };
+            converge_and_record(st, engine, &fe, &a, false).await
+        }
+        CatalogChange::ReapplyOne(catalog_id) => {
+            let attachment = registry
+                .get_attachment(engine.id, catalog_id)
+                .await
+                .map_err(|e| ApplyError::Build(e.into()))?
+                .ok_or(ApplyError::Build(CpError::NotFound))?;
+            // `applied_at` is the only durable record that THIS engine's FE
+            // once held this catalog under egret's hand. An attachment that
+            // has never converged is treated exactly like a fresh attach, so
+            // a catalog of the same name it did not create is still refused
+            // (D3) rather than silently adopted by an ALTER.
+            let already_ours = attachment.applied_at.is_some();
+            let a = AttachedCatalog {
+                catalog: load_catalog(st, catalog_id).await?,
+                attachment,
+            };
+            converge_and_record(st, engine, &fe, &a, already_ours).await
+        }
+        CatalogChange::Detach(catalog_id) => {
+            let catalog = load_catalog(st, catalog_id).await?;
+            // `drop_ddl`, not a full render: a detach must work even for a
+            // catalog whose CURRENT definition no longer renders (a blanked
+            // JDBC driver, a deleted secret), or a row could become
+            // impossible to clean up. `DROP … IF EXISTS` makes a catalog the
+            // FE never had a success (D7).
+            let sql = drop_ddl(&catalog.name).drop_sql();
+            st.starrocks_ddl
+                .execute(&fe, &sql)
+                .await
+                // The DROP carries no secret of its own, which is all the
+                // empty map here says. The CONNECTION's secrets — the root
+                // password a refused login echoes — are not this call site's
+                // to remember: `scrubbed` takes the `&FeTarget` and reads them
+                // itself (final whole-branch review, F2; before that fix this
+                // line passed `BTreeMap::new()` alone and the comment reasoned
+                // only about the statement).
+                .map_err(|e| ApplyError::Rejected(e.scrubbed(&fe, &BTreeMap::new())))
         }
     }
+}
+
+/// [`converge_attachment`], then settle the attachment's `apply_status`.
+/// Split from the convergence itself because the FAILURE of that write is
+/// what D7 is about: the FE has a catalog egret is about to forget, and
+/// nothing on a StarRocks FE prunes it.
+async fn converge_and_record(
+    st: &CpState,
+    engine: &Engine,
+    fe: &FeTarget,
+    a: &AttachedCatalog,
+    already_ours: bool,
+) -> Result<(), ApplyError> {
+    let converged = converge_attachment(st, engine, fe, a, already_ours).await?;
+    if let Err(e) = st
+        .engine_mgmt
+        .registry()
+        .set_apply_applied(engine.id, a.catalog.id)
+        .await
+    {
+        if converged == Converged::Created {
+            compensate_created_catalog(st, engine, fe, &a.catalog.name).await;
+        }
+        tracing::error!(engine = %engine.name, catalog = %a.catalog.name, error = %e,
+            "the catalog reached the FE but the attachment could not be settled");
+        return Err(ApplyError::Unrecorded(e.into()));
+    }
+    Ok(())
+}
+
+/// Bring EVERY attachment of a StarRocks engine onto its FE, in catalog-name
+/// order, recording `applied` / `failed` per attachment (D2). Never returns an
+/// error: each attachment's outcome is its own row, and one failure must not
+/// hide — or abandon — the others. An attachment the loop never reaches is left
+/// exactly as it was, which for a freshly created engine means `pending`: it
+/// has not been attempted, and `failed` would be a claim about the FE that
+/// nothing measured.
+///
+/// Re-entrant. This is what the bootstrap runs once the FE is ready, and a
+/// Retry (`POST /engines/{id}/catalogs/{cid}/apply`) runs the same
+/// [`converge_attachment`] for one row — including the engine's PRIMARY
+/// catalog, which is an attachment like any other. An engine whose bootstrap
+/// failed is therefore converged one Retry per catalog, where before it could
+/// only be fixed by re-creating the engine.
+///
+/// `fe` and `consecutive_read_errors` are the caller's: the bootstrap already
+/// resolved the one [`FeTarget`] its root-login probe used (D6 — one target for
+/// every statement), and its read-error counter is per bootstrap, not per loop,
+/// so this borrows it instead of starting a fresh count.
+pub(crate) async fn converge_starrocks_catalogs(
+    st: &CpState,
+    engine: &Engine,
+    fe: &FeTarget,
+    consecutive_read_errors: &mut u32,
+) {
+    let registry = st.engine_mgmt.registry();
+    let mut attachments = match registry
+        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(engine = %engine.name, error = %e,
+                "starrocks convergence: could not read the engine's attachments");
+            return;
+        }
+    };
+    // Name order (D2). The store's own order is primary-first, then attachment
+    // time — Trino's env-var numbering depends on it, so it is re-sorted here
+    // rather than changed there.
+    attachments.sort_by(|a, b| a.catalog.name.cmp(&b.catalog.name));
+
+    for a in &attachments {
+        // The checkpoint that used to guard one statement now guards each
+        // catalog: a delete part-way through stops at the next one.
+        if !crate::engines::engine_still_current(
+            &st.engine_mgmt,
+            engine.id,
+            &engine.name,
+            consecutive_read_errors,
+        )
+        .await
+        {
+            return;
+        }
+        // An attachment that has converged before is the engine's own catalog,
+        // so a match becomes an ALTER rather than a no-op — the same rule
+        // `ReapplyOne` applies, and for the same reason: a rotated secret is
+        // invisible to the drift comparison. `applied_at`, not `apply_status`:
+        // a row that failed its last apply may still have converged earlier.
+        let already_ours = a.attachment.applied_at.is_some();
+        let outcome = converge_attachment(st, engine, fe, a, already_ours).await;
+        let write = match &outcome {
+            Ok(_) => registry.set_apply_applied(engine.id, a.catalog.id).await,
+            Err(e) => {
+                registry
+                    .set_apply_failed(engine.id, a.catalog.id, &e.message())
+                    .await
+            }
+        };
+        match write {
+            Ok(()) => {}
+            // D7, the same half-write this function's caller-side twin
+            // (`converge_and_record`) compensates: the row VANISHED between
+            // the read that listed it and the write that would settle it — a
+            // concurrent detach — so the FE now holds a catalog egret has
+            // forgotten, and nothing on a StarRocks FE prunes it. Only for a
+            // catalog this pass CREATED: dropping one it altered, or found
+            // already matching, would destroy a catalog that was there before.
+            Err(egret_catalog_registry::RegistryError::NotFound(_))
+                if outcome.as_ref().ok() == Some(&Converged::Created) =>
+            {
+                compensate_created_catalog(st, engine, fe, &a.catalog.name).await;
+            }
+            Err(e) => {
+                tracing::warn!(engine = %engine.name, catalog = %a.catalog.name, error = %e,
+                    "starrocks convergence: the outcome could not be recorded");
+            }
+        }
+    }
+}
+
+/// What [`converge_attachment`] actually did — the difference matters only to
+/// D7's compensation: dropping a catalog egret CREATED restores the state the
+/// apply started from, while dropping one it merely ALTERed (or found already
+/// matching) would destroy a catalog that was there before and is still in
+/// use.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Converged {
+    Created,
+    Altered,
+    AlreadyMatching,
+}
+
+/// Bring one catalog on the FE in line with the registry (D3): absent →
+/// CREATE; present and matching → nothing; present and DIFFERENT → refuse,
+/// naming the keys, FE untouched. `already_ours` (an attachment that has
+/// converged before) turns a match into an ALTER instead of a no-op, because a
+/// rotated secret is invisible to the comparison — `SHOW CREATE CATALOG`
+/// deletes `password` and masks the rest — and `CREATE … IF NOT EXISTS`, which
+/// the renderer deliberately does not emit, would make that rotation a silent
+/// no-op.
+///
+/// `pub(crate)`: the bootstrap's whole-engine convergence (D2, Task 5) calls
+/// this per attachment rather than going through [`CatalogChange`].
+pub(crate) async fn converge_attachment(
+    st: &CpState,
+    engine: &Engine,
+    fe: &FeTarget,
+    a: &AttachedCatalog,
+    already_ours: bool,
+) -> Result<Converged, ApplyError> {
+    let name = a.catalog.name.clone();
+    let ddl = render_starrocks_attached(st, a)
+        .await
+        .map_err(ApplyError::Build)?;
+    // The STATEMENT's secrets. The connection's — the FE root password every
+    // statement below logs in with — are added by `FeError::scrubbed` from the
+    // `&FeTarget` it is handed, not here: this function is the second place
+    // that half was forgotten (final whole-branch review, F2), and the fix was
+    // to stop asking call sites to remember it. It mattered: the leak was
+    // closed only by a minted root password being 32 unbroken characters,
+    // which `redact_opaque_runs` catches by SHAPE, and a short one would have
+    // fallen straight into the documented residual.
+    let secrets = resolve_ddl_secrets(st, &ddl)
+        .await
+        .map_err(ApplyError::Build)?;
+    let runner = st.starrocks_ddl.as_ref();
+    let present = show_catalogs(runner, fe)
+        .await
+        .map_err(|e| ApplyError::Rejected(e.scrubbed(fe, &secrets)))?
+        .contains(&name);
+
+    // `None` from the second read means the FE said "Unknown catalog" — the
+    // catalog was dropped between the two reads. That is ABSENT, not drifted
+    // (fix round 1 review, F7): `.unwrap_or_default()` used to turn it into an
+    // empty property map, which `compare_to_fe` reads as EVERY key differing,
+    // so a fresh attach was refused with "a catalog named X already exists on
+    // this engine with different properties … detach it or drop it on the
+    // engine" — about a catalog that does not exist, with a remedy the
+    // operator cannot perform. The later, more specific read wins.
+    let fe_props = if present {
+        show_create_catalog(runner, fe, &name)
+            .await
+            .map_err(|e| ApplyError::Rejected(e.scrubbed(fe, &secrets)))?
+    } else {
+        None
+    };
+
+    let (sql, outcome) = if let Some(fe_props) = fe_props {
+        match compare_to_fe(&ddl, &fe_props) {
+            Drift::Different(keys) if !already_ours => {
+                // D3: a catalog of this name egret did not create — the
+                // `egret` catalog the Warehouse UI told operators to make by
+                // hand, or one left by a pre-SP3a engine. Key NAMES only: a
+                // value could be anything the FE holds.
+                return Err(ApplyError::Rejected(format!(
+                    "a catalog named {name} already exists on this engine with different \
+                     properties ({}); detach it or drop it on the engine before attaching",
+                    keys.join(", ")
+                )));
+            }
+            // Nothing to send, and nothing to compensate later.
+            Drift::Matching if !already_ours => return Ok(Converged::AlreadyMatching),
+            // Everything else ALTERs, and the two cases it covers share one
+            // reason: WHAT EGRET CANNOT SEE MAY STILL HAVE CHANGED.
+            //
+            //   * `already_ours` — this attachment converged before, so the FE
+            //     holds a catalog egret created. Its secrets may have rotated
+            //     since, and the comparison is blind to that by construction
+            //     (`SHOW CREATE CATALOG` DELETES `password` and masks the
+            //     rest), so `Matching` here means "nothing I can see changed",
+            //     not "nothing changed".
+            //   * `Drift::Unverifiable` — every plain key agreed, but at least
+            //     one key the FE MASKS (`xx******yy`) is set, so `Matching`
+            //     cannot be concluded at all. Task 3's `Drift` doc is explicit
+            //     that a caller must not fold this into `Matching`.
+            //
+            // An `ALTER … SET` is safe to run unconditionally — it rewrites
+            // properties on an existing definition and destroys no data — so
+            // it is what both get.
+            //
+            // THE DIVERGENCE FROM D3'S LETTER, stated where it happens rather
+            // than left to a report (fix round 1 review, F4). D3 names two
+            // present-states, matching and different; `Unverifiable` is a
+            // third, and on a catalog egret did NOT create this arm ALTERs it
+            // instead of refusing. That is deliberate:
+            //   - it is narrower than it sounds. The catalog D3 actually names
+            //     — the hand-made `egret` warehouse catalog — never reaches
+            //     here: `iceberg.catalog.credential` is `PropValue::Secret`,
+            //     so it is excluded from `comparable()`, and the Egret
+            //     metastore branch renders no `aws.s3.*`. Reaching
+            //     `Unverifiable` needs a storage-backed catalog whose masked
+            //     `aws.s3.access_key` is PRESENT while every plain key already
+            //     equals what egret would render — i.e. the same warehouse,
+            //     URI, endpoint and bucket.
+            //   - refusing on "cannot tell" would make a legitimate re-attach
+            //     of an S3-backed catalog permanently impossible, because
+            //     nothing an operator can do makes a masked value comparable.
+            // `an_unverifiable_catalog_is_altered_not_refused` pins it.
+            _ => (
+                ddl.alter_sql(&secrets).map_err(|e| render_err(&name, e))?,
+                Converged::Altered,
+            ),
+        }
+    } else {
+        (
+            ddl.create_sql(&secrets).map_err(|e| render_err(&name, e))?,
+            Converged::Created,
+        )
+    };
+
+    match runner.execute(fe, &sql).await {
+        Ok(()) => Ok(outcome),
+        Err(e) => {
+            // D6: what the FE said, with every secret this statement carries
+            // removed — and never the statement itself. `redacted()` is the
+            // only form of a statement that may ever be logged, and it is told
+            // WHICH statement failed: `outcome` is the one thing that knows
+            // whether `sql` above was the CREATE or the ALTER, and a log
+            // naming a statement that was never sent is worse than no log
+            // (final whole-branch review, F4).
+            let form = match outcome {
+                Converged::Altered => StatementForm::Alter,
+                _ => StatementForm::Create,
+            };
+            tracing::warn!(engine = %engine.name, catalog = %name,
+                statement = %ddl.redacted(form), "starrocks catalog DDL failed");
+            Err(ApplyError::Rejected(e.scrubbed(fe, &secrets)))
+        }
+    }
+}
+
+/// D7: the DDL ran but egret could not record it, so egret undoes its own
+/// write. SP3a's "the next apply of this engine removes it again" is true of a
+/// Trino ConfigMap and false here, where nothing prunes anything. Best effort
+/// and logged — the operation this compensates has already failed, and a drop
+/// that fails too leaves a catalog an operator must remove by hand, which is
+/// what the log line says.
+async fn compensate_created_catalog(st: &CpState, engine: &Engine, fe: &FeTarget, name: &str) {
+    let sql = drop_ddl(name).drop_sql();
+    if let Err(e) = st.starrocks_ddl.execute(fe, &sql).await {
+        tracing::error!(engine = %engine.name, catalog = %name,
+            // Same as the detach above: the DROP carries no secret of its
+            // own, and the connection's come from the `&FeTarget`.
+            error = %e.scrubbed(fe, &BTreeMap::new()),
+            "created a catalog egret could not record, and the compensating DROP failed too — \
+             drop it on the engine by hand");
+    }
+}
+
+/// A statement-shaped handle for a catalog egret only needs to NAME.
+/// `drop_sql` reads nothing but the name, so this renders exactly what a full
+/// render would — while needing neither the definition nor its secrets, which
+/// is what lets a detach (and D7's compensation) work for a catalog whose
+/// definition no longer renders.
+fn drop_ddl(name: &str) -> StarRocksCatalogDdl {
+    StarRocksCatalogDdl {
+        name: name.to_string(),
+        properties: BTreeMap::new(),
+    }
+}
+
+fn render_err(name: &str, e: RenderError) -> ApplyError {
+    ApplyError::Build(CpError::BadRequest(format!("render catalog {name}: {e}")))
+}
+
+async fn load_catalog(st: &CpState, id: Uuid) -> Result<CatalogRow, ApplyError> {
+    st.engine_mgmt
+        .registry()
+        .get_catalog(id)
+        .await
+        .map_err(|e| ApplyError::Build(e.into()))?
+        .ok_or(ApplyError::Build(CpError::NotFound))
+}
+
+/// The plaintext of every secret a statement will interpolate. Resolved once,
+/// then used for BOTH the statement and the scrubbing of whatever the FE says
+/// about it — so the scrub can never be given a smaller map than the statement
+/// carried.
+async fn resolve_ddl_secrets(
+    st: &CpState,
+    ddl: &StarRocksCatalogDdl,
+) -> Result<BTreeMap<Uuid, String>, CpError> {
+    let mut out = BTreeMap::new();
+    for id in ddl.secret_ids() {
+        let value = st
+            .secrets
+            .resolve_plaintext(None, id)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("resolve secret: {e}")))?;
+        out.insert(id, value);
+    }
+    Ok(out)
 }
 
 fn catalog_def(catalog: &CatalogRow) -> Result<CatalogDef, CpError> {
@@ -180,13 +605,15 @@ fn catalog_def(catalog: &CatalogRow) -> Result<CatalogDef, CpError> {
         .map_err(|e| CpError::BadRequest(format!("catalog {}: {e}", catalog.name)))
 }
 
-/// Render an attached catalog with its inputs resolved (secrets still ids).
-pub(crate) async fn render_attached(
+/// The database-backed inputs a render needs, resolved once: the egret
+/// warehouse this catalog mirrors (its name and its storage endpoint) and the
+/// storage connection it names. Shared by both renderers so a Trino and a
+/// StarRocks render of the same row can never disagree about what they were
+/// given — only about how they spell it.
+async fn resolve_render_inputs(
     st: &CpState,
-    a: &AttachedCatalog,
-    env_prefix: &str,
-) -> Result<TrinoCatalogFile, CpError> {
-    let def = catalog_def(&a.catalog)?;
+    def: &CatalogDef,
+) -> Result<(Option<(String, String)>, Option<StorageConn>), CpError> {
     let warehouse = match def.warehouse_id() {
         Some(id) => {
             let wh = st
@@ -212,6 +639,17 @@ pub(crate) async fn render_attached(
         ),
         None => None,
     };
+    Ok((warehouse, storage))
+}
+
+/// Render an attached catalog with its inputs resolved (secrets still ids).
+pub(crate) async fn render_attached(
+    st: &CpState,
+    a: &AttachedCatalog,
+    env_prefix: &str,
+) -> Result<TrinoCatalogFile, CpError> {
+    let def = catalog_def(&a.catalog)?;
+    let (warehouse, storage) = resolve_render_inputs(st, &def).await?;
     let input = TrinoRenderInput {
         env_prefix,
         egret_url: &st.engine_egret_url,
@@ -229,6 +667,40 @@ pub(crate) async fn render_attached(
         credential_secret_id: a.attachment.credential_secret_id,
     };
     render_trino(&a.catalog.name, &def, &input)
+        .map_err(|e| CpError::BadRequest(format!("render catalog {}: {e}", a.catalog.name)))
+}
+
+/// [`render_attached`]'s StarRocks twin: the same inputs, plus this
+/// deployment's JDBC driver table (D5), producing one `CREATE`/`ALTER`/`DROP`
+/// statement's worth of properties. Secret-valued properties are still ids
+/// here — [`resolve_ddl_secrets`] turns them into plaintext only inside
+/// `create_sql`/`alter_sql`, so a `Debug` or a log of this value cannot leak
+/// one (D6).
+///
+/// `pub(crate)`: the bootstrap (Task 5) renders the same way.
+pub(crate) async fn render_starrocks_attached(
+    st: &CpState,
+    a: &AttachedCatalog,
+) -> Result<StarRocksCatalogDdl, CpError> {
+    let def = catalog_def(&a.catalog)?;
+    let (warehouse, storage) = resolve_render_inputs(st, &def).await?;
+    let input = StarRocksRenderInput {
+        egret_url: &st.engine_egret_url,
+        warehouse: warehouse.as_ref().map(|(name, ep)| WarehouseRender {
+            name,
+            s3_endpoint: ep,
+        }),
+        storage: storage.as_ref().map(|s| StorageRender {
+            endpoint: s.endpoint.as_deref(),
+            region: &s.region,
+            path_style: s.path_style,
+            access_key: &s.access_key,
+            secret_key_secret_id: s.secret_ref,
+        }),
+        credential_secret_id: a.attachment.credential_secret_id,
+        drivers: &st.sr_jdbc_drivers,
+    };
+    render_starrocks(&a.catalog.name, &def, &input)
         .map_err(|e| CpError::BadRequest(format!("render catalog {}: {e}", a.catalog.name)))
 }
 
@@ -441,10 +913,10 @@ pub(crate) async fn retire_minted_credential(
     }
 }
 
-/// The refusals that depend only on the engine type and the catalog's own
-/// definition: a kind this engine type cannot read, and StarRocks (SP3b owns
-/// the renderer; plan decision #21). They mint nothing, write nothing and
-/// destroy nothing, so they can — and must — be decided before anything else.
+/// The refusals that depend only on the engine type, the catalog's own
+/// definition and its name: a kind this engine type cannot read, and a name
+/// the engine reserves. They mint nothing, write nothing and destroy nothing,
+/// so they can — and must — be decided before anything else.
 ///
 /// Both paths into an attach go through this one function so the two cannot
 /// drift: `attach_to_engine` runs it as its first step, and the legacy add
@@ -467,18 +939,28 @@ pub(crate) fn check_engine_supports(
             catalog_name
         ))));
     }
-    if engine_type == EngineType::StarRocks {
-        return Err(CatalogOpError::Apply(ApplyError::NotSupported(
-            STARROCKS_NOT_YET,
-        )));
+    // The FE would reject these itself, but only after egret had minted a
+    // Catalog Client for the attachment and written a row for it — and the
+    // renderer refuses them too (`RenderError::ReservedName`), which would
+    // surface as a `failed` attachment rather than a refusal. Deciding it
+    // here keeps it where the other engine-type refusal already is: before
+    // anything is minted or destroyed.
+    if engine_type == EngineType::StarRocks
+        && egret_catalog_registry::is_reserved_starrocks_name(catalog_name)
+    {
+        return Err(CatalogOpError::Http(CpError::BadRequest(format!(
+            "StarRocks reserves the catalog name {catalog_name}"
+        ))));
     }
     Ok(())
 }
 
-/// Attach a registry catalog to an engine: apply first, then write the
-/// attachment (SP1 Part B ordering). An egret warehouse catalog mints a Catalog
-/// Client for this engine — under `role_from_client`'s role when given (today's
-/// `config.clientId`), else the shared engine role.
+/// Attach a registry catalog to an engine. An egret warehouse catalog mints a
+/// Catalog Client for this engine — under `role_from_client`'s role when given
+/// (today's `config.clientId`), else the shared engine role. The two engine
+/// types then differ in ORDER ONLY, and the reason is written where the branch
+/// is: Trino applies first and writes after (SP1 Part B), StarRocks writes
+/// first and converges after (SP3b D1).
 pub(crate) async fn attach_to_engine(
     st: &CpState,
     engine: &Engine,
@@ -559,50 +1041,148 @@ pub(crate) async fn attach_to_engine(
         credential_secret_id: minted.map(|m| m.1),
     };
 
-    if let Err(e) = apply_catalog_change(st, engine, CatalogChange::Attach(pending)).await {
-        // Only delete egret's copy of the credential once the client that
-        // holds it is actually revoked. If the failed apply got as far as the
-        // engine's env Secret, a live, unrevoked client whose egret copy is
-        // gone is a credential nobody can clean up; keep it and log loudly
-        // instead so an operator can find and revoke it. `retire_minted_
-        // credential` (detach, engine delete) applies the same order for the
-        // same reason — the rule holds on every path, not just this one.
-        if let Some((client_id, secret_id)) = minted {
-            match st.catalog.revoke_client(client_id).await {
-                Ok(()) => {
-                    if let Err(err) = st.secrets.delete(None, secret_id).await {
-                        tracing::warn!(engine = %engine.name, %secret_id, error = %err,
-                            "attach rollback: secret delete failed");
-                    }
+    // StarRocks records first and converges after (D1); Trino applies first
+    // and writes after (SP1 Part B). The reason is not taste: a StarRocks FE
+    // is unreachable for five to ten minutes after `create_engine` — exactly
+    // when the create-engine wizard attaches catalogs — and a row egret has
+    // forgotten is worse than one it retries. A Trino apply has no such
+    // window, and writing its row first would claim an attachment the cluster
+    // may still refuse.
+    if engine.is_starrocks() {
+        if let Err(e) = registry
+            .insert_attachment(&NewAttachment {
+                engine_id: engine.id,
+                catalog_id: catalog.id,
+                catalog_client_id: pending.catalog_client_id,
+                credential_secret_id: pending.credential_secret_id,
+                minted_client: minted.is_some(),
+                applied_now: false,
+                created_at: None,
+                // Recorded, not yet converged — the state migration 0149 exists
+                // for. It becomes `applied` or `failed` a few lines below;
+                // it survives as `pending` only if this process dies between.
+                apply_status: egret_catalog_registry::store::apply_status::PENDING,
+            })
+            .await
+        {
+            rollback_minted(st, engine, minted).await;
+            return Err(e.into());
+        }
+        match apply_catalog_change(st, engine, CatalogChange::Attach(pending)).await {
+            // `converge_and_record` already settled the row to `applied`.
+            Ok(()) => Ok(()),
+            // D7: the FE took the statement, egret could not record it, so
+            // this attach did not happen and the minted credential goes back.
+            //
+            // WHAT HAS ACTUALLY RUN ON THE FE BY NOW depends on how
+            // `converge_attachment` converged, and only ONE of the three ways
+            // is compensated (`converge_and_record` drops only for
+            // `Converged::Created`) — the comment here used to claim the DROP
+            // unconditionally (final whole-branch review, F3):
+            //
+            //   * `Created` — the catalog egret made is dropped again, so
+            //     nothing on the engine references the credential.
+            //   * `Altered` — a catalog egret did NOT create (the
+            //     `Drift::Unverifiable` arm, `an_unverifiable_catalog_is_
+            //     altered_not_refused`) has been rewritten with the minted
+            //     credential, and no DROP runs. `rollback_minted` below
+            //     REVOKES that client before deleting the secret, so nothing
+            //     live is orphaned and the standing secret rule holds — but
+            //     the FE is left holding a pre-existing catalog whose
+            //     credential egret has just revoked, and no row names it any
+            //     more. Dropping it is not an option: egret did not create it.
+            //     An operator's repair is to re-attach, which converges it
+            //     with a fresh credential.
+            //   * `AlreadyMatching` — nothing was sent at all, so the FE is
+            //     exactly as it was and the minted credential was never used.
+            //
+            // Both uncompensated cases need the DATABASE write to have failed
+            // on a fresh attach, which is why this is accepted untested (the
+            // ledger's F5) rather than defended.
+            //
+            // The row is USUALLY already gone (that race is what `Unrecorded`
+            // is normally about), but not always: a transient database failure
+            // on the `set_apply_applied` write leaves the `pending` row in
+            // place (fix round 1 review, F5). Deleting it first is what makes
+            // giving back the credential safe — otherwise the surviving row
+            // names a `credential_secret_id` that `rollback_minted` is about
+            // to delete, every Retry then fails to resolve it, and only a
+            // detach plus a fresh attach can repair it. Best effort, and it
+            // runs BEFORE the rollback, never after.
+            Err(ApplyError::Unrecorded(e)) => {
+                if let Err(err) = registry.delete_attachment(engine.id, catalog.id).await {
+                    tracing::error!(engine = %engine.name, catalog = %catalog.name, error = %err,
+                        "could not remove the attachment of an attach that did not happen; \
+                         keeping its credential secret so the row stays repairable");
+                    return Err(CatalogOpError::Http(e));
                 }
-                Err(err) => {
-                    tracing::error!(engine = %engine.name, %client_id, %secret_id, error = ?err,
-                        "attach rollback: revoke failed; leaving the credential secret in place \
-                         so it is not lost while the client may still be live — clean up manually");
-                }
+                rollback_minted(st, engine, minted).await;
+                Err(CatalogOpError::Http(e))
+            }
+            // D1: everything else — an unreachable FE, a refused statement, a
+            // definition that will not render — is the attachment's state,
+            // not the request's. The row is the point; Retry converges it.
+            // The minted credential is KEPT: the failed apply may have
+            // reached the FE, and the retry needs it either way.
+            Err(e) => {
+                registry
+                    .set_apply_failed(engine.id, catalog.id, &e.message())
+                    .await?;
+                Ok(())
             }
         }
-        return Err(CatalogOpError::Apply(e));
+    } else {
+        if let Err(e) = apply_catalog_change(st, engine, CatalogChange::Attach(pending)).await {
+            rollback_minted(st, engine, minted).await;
+            return Err(CatalogOpError::Apply(e));
+        }
+        registry
+            .insert_attachment(&NewAttachment {
+                engine_id: engine.id,
+                catalog_id: catalog.id,
+                catalog_client_id: pending.catalog_client_id,
+                credential_secret_id: pending.credential_secret_id,
+                minted_client: minted.is_some(),
+                applied_now: true,
+                created_at: None,
+                apply_status: egret_catalog_registry::store::apply_status::APPLIED,
+            })
+            .await
+            .map_err(|e| {
+                tracing::error!(engine = %engine.name, catalog = %catalog.name, error = %e,
+                    "catalog applied to the engine but the attachment could not be written; \
+                     the next apply of this engine removes it again");
+                CatalogOpError::from(e)
+            })?;
+        Ok(())
     }
+}
 
-    registry
-        .insert_attachment(&NewAttachment {
-            engine_id: engine.id,
-            catalog_id: catalog.id,
-            catalog_client_id: pending.catalog_client_id,
-            credential_secret_id: pending.credential_secret_id,
-            minted_client: minted.is_some(),
-            applied_now: true,
-            created_at: None,
-        })
-        .await
-        .map_err(|e| {
-            tracing::error!(engine = %engine.name, catalog = %catalog.name, error = %e,
-                "catalog applied to the engine but the attachment could not be written; \
-                 the next apply of this engine removes it again");
-            CatalogOpError::from(e)
-        })?;
-    Ok(())
+/// Give back what an attach minted, after that attach failed.
+///
+/// Only delete egret's copy of the credential once the client that holds it is
+/// actually revoked. If the failed apply got as far as the engine, a live,
+/// unrevoked client whose egret copy is gone is a credential nobody can clean
+/// up; keep it and log loudly instead so an operator can find and revoke it.
+/// [`retire_minted_credential`] (detach, engine delete) applies the same order
+/// for the same reason — the rule holds on every path, not just this one.
+async fn rollback_minted(st: &CpState, engine: &Engine, minted: Option<(Uuid, Uuid)>) {
+    let Some((client_id, secret_id)) = minted else {
+        return;
+    };
+    match st.catalog.revoke_client(client_id).await {
+        Ok(()) => {
+            if let Err(err) = st.secrets.delete(None, secret_id).await {
+                tracing::warn!(engine = %engine.name, %secret_id, error = %err,
+                    "attach rollback: secret delete failed");
+            }
+        }
+        Err(err) => {
+            tracing::error!(engine = %engine.name, %client_id, %secret_id, error = ?err,
+                "attach rollback: revoke failed; leaving the credential secret in place \
+                 so it is not lost while the client may still be live — clean up manually");
+        }
+    }
 }
 
 /// Detach: apply the engine without the catalog, then delete the attachment and
@@ -647,11 +1227,20 @@ pub(crate) async fn retry_apply(
     if engine.status == crate::engine_status::DELETING {
         return Err(CatalogOpError::Apply(ApplyError::Conflict));
     }
-    if let Err(e) = apply_catalog_change(st, engine, CatalogChange::Reapply).await {
-        st.engine_mgmt
-            .registry()
-            .set_apply_failed(engine.id, catalog_id, &e.message())
-            .await?;
+    if let Err(e) = apply_catalog_change(st, engine, CatalogChange::ReapplyOne(catalog_id)).await {
+        // `Unrecorded` is the one failure that must NOT be flagged on the row
+        // (fix round 1 review, F5): it means the engine took the change and
+        // the `apply_status` WRITE is what failed. Writing a second status to
+        // the same row through the same database would either hit the same
+        // failure or — worse — succeed, recording `failed` for an engine that
+        // is actually converged. It is the caller's error, not the
+        // attachment's state.
+        if !matches!(e, ApplyError::Unrecorded(_)) {
+            st.engine_mgmt
+                .registry()
+                .set_apply_failed(engine.id, catalog_id, &e.message())
+                .await?;
+        }
         return Err(CatalogOpError::Apply(e));
     }
     Ok(())

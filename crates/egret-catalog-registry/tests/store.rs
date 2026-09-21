@@ -286,6 +286,7 @@ async fn attachments_order_status_and_block_deletes() {
             minted_client: false,
             applied_now: true,
             created_at: None,
+            apply_status: apply_status::APPLIED,
         })
         .await
         .unwrap();
@@ -298,6 +299,7 @@ async fn attachments_order_status_and_block_deletes() {
             minted_client: false,
             applied_now: false,
             created_at: None,
+            apply_status: apply_status::APPLIED,
         })
         .await
         .unwrap();
@@ -311,6 +313,7 @@ async fn attachments_order_status_and_block_deletes() {
                 minted_client: false,
                 applied_now: true,
                 created_at: None,
+                apply_status: apply_status::APPLIED,
             })
             .await,
         Err(RegistryError::AlreadyExists(_))
@@ -372,6 +375,76 @@ async fn attachments_order_status_and_block_deletes() {
     assert_eq!(store.unmigrated_legacy_catalog_count(eng).await.unwrap(), 0);
 }
 
+/// SP3b D1/migration 0149: an attachment can be written before its DDL runs
+/// (`pending`), then `set_apply_applied` marks it converged — the same
+/// transition `spawn_starrocks_catalog_wire`'s bootstrap (Task 5) drives.
+#[tokio::test]
+async fn a_pending_attachment_converges_to_applied() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let ws = workspace(&db).await;
+    let wh = warehouse(&db, &unique("wh"), ws).await;
+    let eng = engine(&db, wh).await;
+    let tpch = store
+        .create_catalog(
+            &unique("bench"),
+            &CatalogDef::parse("tpch", &json!({}), &json!(null)).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    store
+        .insert_attachment(&NewAttachment {
+            engine_id: eng,
+            catalog_id: tpch.id,
+            catalog_client_id: None,
+            credential_secret_id: None,
+            minted_client: false,
+            applied_now: false,
+            created_at: None,
+            apply_status: apply_status::PENDING,
+        })
+        .await
+        .unwrap();
+    let a = store.get_attachment(eng, tpch.id).await.unwrap().unwrap();
+    assert_eq!(a.apply_status, apply_status::PENDING);
+    assert!(a.applied_at.is_none());
+
+    store.set_apply_applied(eng, tpch.id).await.unwrap();
+    let a = store.get_attachment(eng, tpch.id).await.unwrap().unwrap();
+    assert_eq!(a.apply_status, apply_status::APPLIED);
+    assert!(a.applied_at.is_some());
+    assert!(a.apply_error.is_none());
+}
+
+/// Fix round 1 (review F-12): a vanished attachment — deleted out from under
+/// a converging bootstrap, the exact race D2's `engine_still_current`
+/// checkpoints exist for — must not report success for a write that changed
+/// nothing.
+#[tokio::test]
+async fn set_apply_applied_on_a_gone_attachment_is_not_found() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let ws = workspace(&db).await;
+    let wh = warehouse(&db, &unique("wh"), ws).await;
+    let eng = engine(&db, wh).await;
+    let tpch = store
+        .create_catalog(
+            &unique("bench"),
+            &CatalogDef::parse("tpch", &json!({}), &json!(null)).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // No attachment was ever inserted for (eng, tpch) — nothing to converge.
+    assert!(matches!(
+        store.set_apply_applied(eng, tpch.id).await,
+        Err(RegistryError::NotFound(_))
+    ));
+}
+
 /// `WorkspaceSecretStore::used_by` counts
 /// `engine_catalog_attachments.credential_secret_id` (T5, promoted by the
 /// whole-branch review §2): that subquery is the single mechanism keeping a
@@ -426,6 +499,7 @@ async fn an_attachments_credential_secret_cannot_be_deleted() {
             minted_client: true,
             applied_now: true,
             created_at: None,
+            apply_status: apply_status::APPLIED,
         })
         .await
         .unwrap();

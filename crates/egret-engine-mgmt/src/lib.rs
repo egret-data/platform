@@ -10,6 +10,7 @@ pub mod engines;
 pub mod error;
 pub mod http_error;
 pub mod monitor;
+pub mod starrocks_ddl;
 pub mod state;
 pub mod store;
 pub mod tls_cert;
@@ -22,6 +23,13 @@ pub use engines::router as engine_mgmt_router;
 pub use engines::workspace_engines_router;
 pub use error::EngineMgmtError;
 pub use http_error::EngineHttpError;
+// `fe_target` stays `pub(crate)` (used by Task 4/5 apply/bootstrap code within
+// this crate via `crate::starrocks_ddl::fe_target`) and is not re-exported here.
+pub use starrocks_ddl::{
+    compare_to_fe, parse_show_create_properties, show_catalogs, show_create_catalog, Drift,
+    FakeStarRocksDdl, FeError, FeTarget, MysqlDdlRunner, StarRocksDdl, FE_ERROR_EXCERPT_MAX,
+    FE_MASKED_KEYS, FE_UNCOMPARABLE_KEYS,
+};
 pub use state::EngineMgmtState;
 pub use store::{engine_status, Engine, EngineCatalog, EngineMgmtStore};
 
