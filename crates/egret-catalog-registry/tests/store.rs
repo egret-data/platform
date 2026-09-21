@@ -418,6 +418,33 @@ async fn a_pending_attachment_converges_to_applied() {
     assert!(a.apply_error.is_none());
 }
 
+/// Fix round 1 (review F-12): a vanished attachment — deleted out from under
+/// a converging bootstrap, the exact race D2's `engine_still_current`
+/// checkpoints exist for — must not report success for a write that changed
+/// nothing.
+#[tokio::test]
+async fn set_apply_applied_on_a_gone_attachment_is_not_found() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let ws = workspace(&db).await;
+    let wh = warehouse(&db, &unique("wh"), ws).await;
+    let eng = engine(&db, wh).await;
+    let tpch = store
+        .create_catalog(
+            &unique("bench"),
+            &CatalogDef::parse("tpch", &json!({}), &json!(null)).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // No attachment was ever inserted for (eng, tpch) — nothing to converge.
+    assert!(matches!(
+        store.set_apply_applied(eng, tpch.id).await,
+        Err(RegistryError::NotFound(_))
+    ));
+}
+
 /// `WorkspaceSecretStore::used_by` counts
 /// `engine_catalog_attachments.credential_secret_id` (T5, promoted by the
 /// whole-branch review §2): that subquery is the single mechanism keeping a

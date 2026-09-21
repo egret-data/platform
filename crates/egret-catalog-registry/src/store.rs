@@ -761,12 +761,18 @@ impl RegistryStore {
     /// One attachment converged (SP3b). `mark_engine_applied` stays as it is:
     /// it is Trino's whole-engine apply, which settles every attachment at once
     /// and compares `catalogs.updated_at`; a StarRocks apply is per catalog.
+    /// Returns `NotFound` when the row is gone (a race D2's
+    /// `engine_still_current` checkpoints exist precisely because it's real:
+    /// the engine, or just this attachment, was deleted mid-bootstrap).
+    /// `Ok(())` on zero rows would let Task 5's bootstrap record a
+    /// convergence success for an attachment that no longer exists to
+    /// converge (fix round 1 review, F-12).
     pub async fn set_apply_applied(
         &self,
         engine_id: Uuid,
         catalog_id: Uuid,
     ) -> Result<(), RegistryError> {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE registry.engine_catalog_attachments \
                 SET apply_status = 'applied', apply_error = NULL, applied_at = now() \
               WHERE engine_id = $1 AND catalog_id = $2",
@@ -775,6 +781,11 @@ impl RegistryStore {
         .bind(catalog_id)
         .execute(self.pool())
         .await?;
+        if result.rows_affected() == 0 {
+            return Err(RegistryError::NotFound(format!(
+                "attachment engine={engine_id} catalog={catalog_id}"
+            )));
+        }
         Ok(())
     }
 

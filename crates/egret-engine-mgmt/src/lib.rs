@@ -27,7 +27,8 @@ pub use http_error::EngineHttpError;
 // this crate via `crate::starrocks_ddl::fe_target`) and is not re-exported here.
 pub use starrocks_ddl::{
     compare_to_fe, parse_show_create_properties, show_catalogs, show_create_catalog, Drift,
-    FakeStarRocksDdl, FeTarget, MysqlDdlRunner, StarRocksDdl, FE_UNCOMPARABLE_KEYS,
+    FakeStarRocksDdl, FeError, FeTarget, MysqlDdlRunner, StarRocksDdl, FE_ERROR_EXCERPT_MAX,
+    FE_MASKED_KEYS, FE_UNCOMPARABLE_KEYS,
 };
 pub use state::EngineMgmtState;
 pub use store::{engine_status, Engine, EngineCatalog, EngineMgmtStore};

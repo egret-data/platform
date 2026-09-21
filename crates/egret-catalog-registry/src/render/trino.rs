@@ -672,6 +672,37 @@ mod tests {
         );
     }
 
+    /// SP3b D4's tpch/tpcds coverage lived only on the StarRocks side
+    /// (`elasticsearch_and_benchmark`, deleted when StarRocks' `can_read`
+    /// started refusing both kinds — there is no `type = "benchmark"`
+    /// spelling to pin on this engine at all, Trino's connector names are
+    /// literally `tpch`/`tpcds`). What DOES transfer is the other half of
+    /// that deleted test: `scale` must never become a rendered property here
+    /// — Trino's tpch/tpcds connectors take it from the SCHEMA name
+    /// (`tiny`/`sf1`/`sf10`/…, `SampleConfig`'s doc: "Trino ignores `scale`
+    /// (schema names carry it)"), not from a catalog property, so a `scale`
+    /// key must be absent whether it's set on the registry row or not (fix
+    /// round 1: restoring the coverage the coordinator asked to keep).
+    #[test]
+    fn tpch_and_tpcds_never_render_scale_trino_takes_it_from_the_schema_name() {
+        for kind in ["tpch", "tpcds"] {
+            let d = def(kind, json!({ "scale": 10 }), json!(null));
+            let p = render_trino("b", &d, &input()).unwrap().properties;
+            assert_eq!(p["connector.name"], kind, "{kind}: connector.name spelling");
+            assert!(
+                !p.contains_key("scale"),
+                "{kind}: scale must never be rendered, even when set: {p:?}"
+            );
+
+            let d = def(kind, json!({}), json!(null));
+            let p = render_trino("b", &d, &input()).unwrap().properties;
+            assert!(
+                !p.contains_key("scale"),
+                "{kind}: scale must never be rendered when absent either: {p:?}"
+            );
+        }
+    }
+
     #[test]
     fn samples_generic_and_advanced_merge() {
         let d = def(

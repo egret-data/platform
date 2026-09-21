@@ -8407,15 +8407,19 @@ mod tests {
         );
     }
 
-    /// SP3b Task 3 / D6: before this seam, the catalog DDL and the root-login
-    /// probe both passed `tls_cert_pem = None` unconditionally while the
-    /// delegation bootstrap alone passed the pinned cert — so an OAuth2
-    /// credential and the FE root password crossed the wire in cleartext on a
-    /// TLS-capable engine. `fe_target` is the one place that decision is made
-    /// now: the cert is threaded through ONLY when
-    /// `starrocksConfig.delegation.tlsEnabled` is true, whatever
+    /// SP3b Task 3 / D6: the OLD catalog DDL and root-login probe both pass
+    /// `tls_cert_pem = None` unconditionally while the delegation bootstrap
+    /// alone passes the pinned cert — so an OAuth2 credential and the FE root
+    /// password cross the wire in cleartext on a TLS-capable engine, TODAY,
+    /// on that untouched path (`run_starrocks_ddl`/`spawn_starrocks_catalog_wire`;
+    /// Task 4/5 retire it). `fe_target` is where the fix WILL live once a
+    /// production caller is wired: it decides the cert is threaded through
+    /// ONLY when `starrocksConfig.delegation.tlsEnabled` is true, whatever
     /// `coordinator_cert` holds, and the root password only when the engine
-    /// actually carries a `root_secret_id`.
+    /// actually carries a `root_secret_id` — this test proves that logic now,
+    /// ahead of Task 4/5 actually calling it (fix round 1 review, F-5: this
+    /// comment used to say "is the one place that decision is made now",
+    /// which was false — nothing calls `fe_target` in production yet).
     #[tokio::test]
     async fn fe_target_resolves_root_password_and_gates_the_cert_on_delegation_tls() {
         let Some(st) = test_state().await else {

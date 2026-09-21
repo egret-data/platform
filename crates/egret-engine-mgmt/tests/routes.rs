@@ -11,7 +11,7 @@ use axum::http::{Request as HttpRequest, StatusCode};
 use axum::response::Response;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
-use egret_engine_mgmt::{engine_mgmt_router, EngineMgmtState};
+use egret_engine_mgmt::{engine_mgmt_router, EngineMgmtState, FakeStarRocksDdl};
 use egret_engine_mgmt_api::EngineProvisioningPort;
 use egret_metastore::Db;
 use egret_provisioner::KubeClient;
@@ -28,6 +28,15 @@ struct Fixture {
     engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
     kube: Option<Arc<dyn KubeClient>>,
     ranger_enabled: bool,
+    /// The `FakeStarRocksDdl` `f.app`'s `EngineMgmtState` was built with.
+    /// `FakeStarRocksDdl` is `Clone` over shared `Arc<Mutex<…>>` interior
+    /// state, so `f.starrocks_ddl.executed()`/`.catalog(...)`/etc. observe
+    /// whatever `f.app` did even across the two `f.app = build_app(...)`
+    /// rebuilds below (`attach_real_pdp`, the Ranger-toggle test) — both pass
+    /// `f.starrocks_ddl.clone()` through rather than a fresh fake, so a test
+    /// holding this handle doesn't have its recorded state silently
+    /// discarded by a mid-test rebuild (fix round 1 review, F-8).
+    starrocks_ddl: FakeStarRocksDdl,
 }
 
 /// Incidental PDP for `EngineMgmtState`: every existing route test authenticates
@@ -51,9 +60,15 @@ impl egret_core::authz::Pdp for AllowAllPdp {
     }
 }
 
-/// Build the engine-mgmt `Router` for a given db + provisioner + kube + PDP.
-/// Shared by `setup_full` (allow-all PDP) and `attach_real_pdp` (real Cedar
-/// PDP) so the two only differ in the injected decision point.
+/// Build the engine-mgmt `Router` for a given db + provisioner + kube + PDP +
+/// StarRocks DDL fake. Shared by `setup_full` (allow-all PDP) and
+/// `attach_real_pdp` (real Cedar PDP) so the two only differ in the injected
+/// decision point — and by the Ranger-toggle test's mid-test rebuild, which is
+/// why `starrocks_ddl` is a parameter (fix round 1 review, F-8) rather than a
+/// fresh default built inside: there ARE three callers today (below, and
+/// `attach_real_pdp`, and the Ranger-toggle rebuild further down), and a
+/// caller that wants to inspect what its app's fake recorded needs the SAME
+/// fake threaded through every rebuild, not a new one each time.
 fn build_app(
     db: &Db,
     sessions: &SessionService,
@@ -61,6 +76,7 @@ fn build_app(
     kube: Option<Arc<dyn KubeClient>>,
     pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     ranger_enabled: bool,
+    starrocks_ddl: FakeStarRocksDdl,
 ) -> axum::Router {
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
@@ -91,11 +107,7 @@ fn build_app(
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
-            // SP3b Task 3: the injectable DDL runner (design D8). No route test
-            // in this crate yet drives a StarRocks attach/bootstrap through the
-            // HTTP surface (Task 4/5 own that), so `build_app` wires a fresh
-            // default fake rather than adding a parameter with no caller.
-            starrocks_ddl: std::sync::Arc::new(egret_engine_mgmt::FakeStarRocksDdl::default()),
+            starrocks_ddl: std::sync::Arc::new(starrocks_ddl),
         })
 }
 
@@ -116,6 +128,7 @@ async fn attach_real_pdp(f: &mut Fixture) {
         f.kube.clone(),
         pdp,
         f.ranger_enabled,
+        f.starrocks_ddl.clone(),
     );
 }
 
@@ -156,6 +169,7 @@ async fn setup_with_ranger(
     // Existing route tests authenticate a platform_admin and assert non-authz
     // behavior, so an allow-all PDP suffices. The authz test rebuilds with a real
     // Cedar PDP via `attach_real_pdp`.
+    let starrocks_ddl = FakeStarRocksDdl::default();
     let app = build_app(
         &db,
         &sessions,
@@ -163,6 +177,7 @@ async fn setup_with_ranger(
         kube.clone(),
         std::sync::Arc::new(AllowAllPdp),
         ranger_enabled,
+        starrocks_ddl.clone(),
     );
 
     Some(Fixture {
@@ -173,6 +188,7 @@ async fn setup_with_ranger(
         engine_provisioner,
         kube,
         ranger_enabled,
+        starrocks_ddl,
     })
 }
 
@@ -5085,6 +5101,7 @@ async fn apply_late_binds_ranger_once_it_is_enabled_after_an_unbound_create() {
         f.kube.clone(),
         std::sync::Arc::new(AllowAllPdp),
         true,
+        f.starrocks_ddl.clone(),
     );
     f.ranger_enabled = true;
 

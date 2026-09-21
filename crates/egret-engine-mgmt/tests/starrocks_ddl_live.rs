@@ -18,15 +18,26 @@
 //! is NOT an ancestor of the running build's revision (`4a9848edf03`,
 //! 2026-08-05) and vice versa — divergent history, i.e. the `benchmark`
 //! connector lives on `main` only and has never shipped in any released 4.1.x
-//! branch build. So no `4.1-latest`-pinned engine egret actually provisions
-//! (design D4) can take a `tpch`/`tpcds` catalog today either; that is a
-//! rendering-layer (Task 1/2) / D4 concern, out of this task's scope to fix.
+//! branch build (`can_read` now refuses `tpch`/`tpcds` on StarRocks; see
+//! `render/starrocks.rs`'s `tpch_and_tpcds_are_refused_on_starrocks_…` test).
 //! `jdbc` is the next-best infra-free target: no extra service beyond what
 //! `docker-compose.dev.yml` already runs, and it is fully supported by 4.1.4.
+//!
+//! Fix round 1 (review F-13): the whole body runs behind `run()`, which never
+//! panics (every assertion is a returned `Err(String)`), so the `#[tokio::test]`
+//! wrapper can run a `DROP CATALOG IF EXISTS` cleanup unconditionally — a
+//! failing run no longer leaves `egret_sp3b_*` behind on the FE for the next
+//! one to trip over. Errors are also scrubbed against this run's own secrets
+//! map before they're formatted into a panic message (review F-3/F-13): this
+//! is the pattern a real caller (Task 4/5, which DOES hold the secrets map at
+//! the point it calls `execute`/`query`) is expected to follow before an
+//! `FeError::excerpt` reaches `apply_error` or an API response.
 
 use std::collections::BTreeMap;
 
-use egret_catalog_registry::{render_starrocks, CatalogDef, StarRocksRenderInput};
+use egret_catalog_registry::{
+    escape_ident, render_starrocks, scrub_secrets, CatalogDef, StarRocksRenderInput,
+};
 use egret_engine_mgmt::{compare_to_fe, show_catalogs, show_create_catalog};
 use egret_engine_mgmt::{Drift, FeTarget, MysqlDdlRunner, StarRocksDdl};
 use serde_json::json;
@@ -67,77 +78,148 @@ fn jdbc_def(database: &str) -> (CatalogDef, Uuid) {
     (def, password_secret_id)
 }
 
+/// The whole exercise, panic-free: every check is a returned `Err(String)`
+/// (already scrubbed against `secrets`) so the caller can run cleanup exactly
+/// once, regardless of how this ends.
+async fn run(fe: &FeTarget, name: &str) -> Result<(), String> {
+    let runner = MysqlDdlRunner;
+    let (def, pw_id) = jdbc_def("egret");
+    let ddl =
+        render_starrocks(name, &def, &StarRocksRenderInput::probe()).map_err(|e| e.to_string())?;
+    let mut secrets = BTreeMap::new();
+    secrets.insert(pw_id, "egret".to_string());
+    let scrub = |e: &egret_engine_mgmt::FeError| scrub_secrets(&e.to_string(), &secrets);
+
+    runner
+        .execute(fe, &ddl.create_sql(&secrets).map_err(|e| e.to_string())?)
+        .await
+        .map_err(|e| format!("CREATE failed: {}", scrub(&e)))?;
+    if !show_catalogs(&runner, fe)
+        .await
+        .map_err(|e| scrub(&e))?
+        .contains(name)
+    {
+        return Err(format!(
+            "{name} missing from SHOW CATALOGS right after CREATE"
+        ));
+    }
+    let props = show_create_catalog(&runner, fe, name)
+        .await
+        .map_err(|e| scrub(&e))?
+        .ok_or_else(|| {
+            format!("{name} present in SHOW CATALOGS but SHOW CREATE CATALOG says absent")
+        })?;
+    if props.get("type").map(String::as_str) != Some("jdbc") {
+        return Err(format!("props={props:?}"));
+    }
+    // `password` never comes back — CredentialUtil deletes it outright — so
+    // the create above must not have failed to actually run.
+    if props.contains_key("password") {
+        return Err(format!(
+            "password leaked back from SHOW CREATE CATALOG: props={props:?}"
+        ));
+    }
+    if compare_to_fe(&ddl, &props) != Drift::Matching {
+        return Err(format!(
+            "freshly-created catalog must compare Matching: props={props:?}"
+        ));
+    }
+
+    // A second CREATE is an error, not a no-op — which is why D3 reads first.
+    match runner
+        .execute(fe, &ddl.create_sql(&secrets).map_err(|e| e.to_string())?)
+        .await
+    {
+        Err(e) if e.excerpt.to_lowercase().contains("already exists") => {}
+        Err(e) => {
+            return Err(format!(
+                "second CREATE failed for a different reason: {}",
+                scrub(&e)
+            ))
+        }
+        Ok(()) => {
+            return Err(
+                "second CREATE unexpectedly succeeded — D3 requires an error, not a silent no-op"
+                    .into(),
+            )
+        }
+    }
+
+    // ALTER really changes a property (here `jdbc_uri`, via `database`), and
+    // `type` is not re-sent.
+    let (def2, pw_id2) = jdbc_def("postgres");
+    let ddl2 =
+        render_starrocks(name, &def2, &StarRocksRenderInput::probe()).map_err(|e| e.to_string())?;
+    let mut secrets2 = BTreeMap::new();
+    secrets2.insert(pw_id2, "egret".to_string());
+    if !matches!(compare_to_fe(&ddl2, &props), Drift::Different(_)) {
+        return Err(format!(
+            "an edited jdbc_uri must compare Different before the ALTER: props={props:?}"
+        ));
+    }
+    runner
+        .execute(fe, &ddl2.alter_sql(&secrets2).map_err(|e| e.to_string())?)
+        .await
+        .map_err(|e| format!("ALTER failed: {}", scrub(&e)))?;
+    let props2 = show_create_catalog(&runner, fe, name)
+        .await
+        .map_err(|e| scrub(&e))?
+        .ok_or_else(|| format!("{name} vanished after ALTER"))?;
+    let jdbc_uri = props2.get("jdbc_uri").cloned().unwrap_or_default();
+    if !(jdbc_uri.contains("/postgres?") || jdbc_uri.ends_with("/postgres")) {
+        return Err(format!(
+            "ALTER must have really changed jdbc_uri to the new database: props2={props2:?}"
+        ));
+    }
+    if compare_to_fe(&ddl2, &props2) != Drift::Matching {
+        return Err(format!(
+            "post-ALTER catalog must compare Matching: props2={props2:?}"
+        ));
+    }
+
+    // DROP IF EXISTS twice: the second is a success, which is what lets a
+    // detach clean up a row whose catalog the FE never had (D7).
+    runner
+        .execute(fe, &ddl.drop_sql())
+        .await
+        .map_err(|e| format!("first DROP failed: {}", scrub(&e)))?;
+    runner
+        .execute(fe, &ddl.drop_sql())
+        .await
+        .map_err(|e| format!("second (already-gone) DROP failed: {}", scrub(&e)))?;
+    if show_catalogs(&runner, fe)
+        .await
+        .map_err(|e| scrub(&e))?
+        .contains(name)
+    {
+        return Err(format!("{name} still listed after DROP"));
+    }
+    if show_create_catalog(&runner, fe, name)
+        .await
+        .map_err(|e| scrub(&e))?
+        .is_some()
+    {
+        return Err(format!("{name} still describable after DROP"));
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn create_show_alter_and_drop_a_real_catalog() {
     let Some(fe) = fe() else {
         eprintln!("skip");
         return;
     };
-    let runner = MysqlDdlRunner;
     let name = format!("egret_sp3b_{}", &Uuid::new_v4().simple().to_string()[..8]);
-    let (def, pw_id) = jdbc_def("egret");
-    let ddl = render_starrocks(&name, &def, &StarRocksRenderInput::probe()).unwrap();
-    let mut secrets = BTreeMap::new();
-    secrets.insert(pw_id, "egret".to_string());
-
-    runner
-        .execute(&fe, &ddl.create_sql(&secrets).unwrap())
-        .await
-        .unwrap();
-    assert!(show_catalogs(&runner, &fe).await.unwrap().contains(&name));
-    let props = show_create_catalog(&runner, &fe, &name)
-        .await
-        .unwrap()
-        .expect("present");
-    assert_eq!(props["type"], "jdbc", "props={props:?}");
-    // `password` never comes back — CredentialUtil deletes it outright — so
-    // the create above must not have failed to actually run.
-    assert!(!props.contains_key("password"), "props={props:?}");
-    assert_eq!(
-        compare_to_fe(&ddl, &props),
-        Drift::Matching,
-        "props={props:?}"
-    );
-
-    // A second CREATE is an error, not a no-op — which is why D3 reads first.
-    let err = runner
-        .execute(&fe, &ddl.create_sql(&secrets).unwrap())
-        .await
-        .unwrap_err();
-    assert!(err.to_lowercase().contains("already exists"), "err={err}");
-
-    // ALTER really changes a property (here `jdbc_uri`, via `database`), and
-    // `type` is not re-sent.
-    let (def2, pw_id2) = jdbc_def("postgres");
-    let ddl2 = render_starrocks(&name, &def2, &StarRocksRenderInput::probe()).unwrap();
-    let mut secrets2 = BTreeMap::new();
-    secrets2.insert(pw_id2, "egret".to_string());
-    assert!(matches!(compare_to_fe(&ddl2, &props), Drift::Different(_)));
-    runner
-        .execute(&fe, &ddl2.alter_sql(&secrets2).unwrap())
-        .await
-        .unwrap();
-    let props2 = show_create_catalog(&runner, &fe, &name)
-        .await
-        .unwrap()
-        .expect("present");
-    assert!(
-        props2["jdbc_uri"].contains("/postgres?") || props2["jdbc_uri"].ends_with("/postgres"),
-        "ALTER must have really changed jdbc_uri to the new database: props2={props2:?}"
-    );
-    assert_eq!(
-        compare_to_fe(&ddl2, &props2),
-        Drift::Matching,
-        "props2={props2:?}"
-    );
-
-    // DROP IF EXISTS twice: the second is a success, which is what lets a
-    // detach clean up a row whose catalog the FE never had (D7).
-    runner.execute(&fe, &ddl.drop_sql()).await.unwrap();
-    runner.execute(&fe, &ddl.drop_sql()).await.unwrap();
-    assert!(!show_catalogs(&runner, &fe).await.unwrap().contains(&name));
-    assert!(show_create_catalog(&runner, &fe, &name)
-        .await
-        .unwrap()
-        .is_none());
+    let result = run(&fe, &name).await;
+    // Self-healing regardless of outcome (F-13): `run` never panics, so this
+    // always executes, even on a failed assertion — no leftover catalog for
+    // the next run to trip over.
+    let _ = MysqlDdlRunner
+        .execute(
+            &fe,
+            &format!("DROP CATALOG IF EXISTS `{}`", escape_ident(&name)),
+        )
+        .await;
+    result.unwrap();
 }
