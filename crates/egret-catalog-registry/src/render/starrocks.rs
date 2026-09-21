@@ -1513,8 +1513,14 @@ mod tests {
         assert!(!looks_like_url("org.postgresql.Driver"));
         assert!(!looks_like_url("hive"));
         assert!(!looks_like_url("us-east-1"));
-        assert!(!looks_like_url("://no-scheme"));
+        // One negative per guard, so each can be killed on its own:
+        assert!(!looks_like_url("://no-scheme"), "nothing before the `://`");
         assert!(!looks_like_url("https://"), "a bare scheme names nothing");
+        assert!(
+            !looks_like_url("42://not-a-scheme"),
+            "a scheme starts with a letter — the same rule `redact_urls`' \
+             `[A-Za-z][A-Za-z0-9+.-]*://` encodes"
+        );
     }
 
     /// F4, half two: the failure log for an `ALTER CATALOG … SET` used to
