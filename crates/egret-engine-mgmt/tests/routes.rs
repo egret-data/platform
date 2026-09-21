@@ -5764,14 +5764,33 @@ async fn legacy_put_flags_a_failed_apply_without_reverting_and_a_later_apply_cle
 }
 
 /// `POST /engines` for a StarRocks engine with the wizard defaults; returns
-/// `(engine id, its warehouse id)`. The engine's own post-provision FE wire IS
-/// on `f.starrocks_ddl` since SP3b Task 5 — but it never reaches a statement
-/// here: it polls `EngineProvisioningPort::status` for a pod whose name
-/// contains `-fe-`, and `FakeEnginePort`'s single pod is `coordinator-0`, so
-/// the spawned task is still waiting on its poll budget when the test ends.
-/// Every statement the fake sees below was therefore sent by the apply path
-/// under test.
+/// `(engine id, its warehouse id)`.
+///
+/// **Do not give a StarRocks fixture an `-fe-` pod.** The engine's own
+/// post-provision FE wire IS on `f.starrocks_ddl` since SP3b Task 5, and in
+/// THIS binary it runs at the production budget (`MAX_POLLS = 30` × 10s — the
+/// `#[cfg(test)]` shrink applies only to the lib's own unit-test build). It
+/// never reaches a statement only because it polls
+/// `EngineProvisioningPort::status` for a pod whose name contains `-fe-` and
+/// `FakeEnginePort`'s single pod is `coordinator-0`; a `set_status` naming an
+/// `-fe-` pod would put a live convergence task alongside the test's own
+/// assertions. The assertion below makes that dependency a loud failure here
+/// rather than a flake somewhere else (fix round 1, F7). Every statement the
+/// fake sees in these tests was sent by the apply path under test.
 async fn create_starrocks_via_api(f: &Fixture, token: &str) -> (String, Uuid) {
+    if let Some(prov) = f.engine_provisioner.as_ref() {
+        let reported = prov
+            .status("starrocks", "egret-engines", "probe")
+            .await
+            .expect("fake status");
+        assert!(
+            !reported.pods.iter().any(|p| p.name.contains("-fe-")),
+            "this fixture reports an `-fe-` pod, so the background bootstrap this \
+             create spawns WILL converge catalogs concurrently with the test's own \
+             assertions. Drive the bootstrap from the lib's unit tests (where \
+             MAX_POLLS is 1) instead, or await it deliberately."
+        );
+    }
     let wh_id = seed_provisioned_warehouse_with_secret(f).await;
     let (status, j) = call(f, "POST", "/engines", token, Some(serde_json::json!({
         "name": format!("sr-{}", Uuid::new_v4().simple()), "warehouseId": wh_id, "kind": "starrocks",

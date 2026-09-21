@@ -3849,15 +3849,6 @@ fn starrocks_jwt_integration_repair_sql(jwks_url: &str, issuer: &str, audience: 
     )
 }
 
-/// Does this FE error mean "the object is already there", as opposed to a real
-/// failure? StarRocks answers `CREATE` on an existing integration with
-/// `Getting analyzing error. Detail message: security integration 'egret_oidc'
-/// already exists.` — matched loosely on the phrase so a reworded prefix does
-/// not turn a repairable state into a warning nobody acts on.
-fn sr_already_exists(err: &str) -> bool {
-    err.to_ascii_lowercase().contains("already exists")
-}
-
 /// Build the `CREATE USER IF NOT EXISTS` DDL for the impersonation service
 /// user (the connection's basic-auth login on the impersonate path — S3-T1's
 /// `StarRocksConnector` logs in as this user, then runs `EXECUTE AS
@@ -3883,11 +3874,15 @@ fn starrocks_create_service_user_sql(service_user: &str, password: &str) -> Stri
 /// `EXECUTE AS <any user> WITH NO REVERT` (the impersonate-mode primitive —
 /// see `crate::execution::connector::starrocks::StarRocksConnector::switch_identity`
 /// in `egret-query`). Backticks in the identifier are doubled (MySQL/StarRocks
-/// identifier-escaping rule), matching
-/// [`egret_catalog_registry::escape_ident`]'s convention.
+/// identifier-escaping rule) by [`egret_catalog_registry::escape_ident`] —
+/// the function itself since fix round 1 (F6), not a local copy of it under a
+/// comment claiming to match its "convention", which a future edit could
+/// falsify without anything noticing.
 fn starrocks_impersonation_grant_sql(service_user: &str) -> String {
-    let esc = service_user.replace('`', "``");
-    format!("GRANT IMPERSONATE ON ALL USERS TO `{esc}`")
+    format!(
+        "GRANT IMPERSONATE ON ALL USERS TO `{}`",
+        egret_catalog_registry::escape_ident(service_user)
+    )
 }
 
 /// Runtime bundle for the post-Ready delegation bootstrap (S3-T2 step 3,
@@ -4122,6 +4117,19 @@ fn spawn_starrocks_catalog_wire(
             }
         };
 
+        // Everything on this connection logs in as `root`, so the root
+        // password is a secret EVERY error below could quote — a failed login
+        // echoes the credential it was given (fix round 1, F3: this used to
+        // scrub against an empty map under a comment that said exactly this).
+        // The key is synthetic: `scrub_secrets` reads only the values, and a
+        // root password resolved from `engines.root_secret_id` has no id worth
+        // carrying here.
+        let fe_secrets: std::collections::BTreeMap<Uuid, String> = fe
+            .root_password
+            .iter()
+            .map(|pw| (Uuid::nil(), pw.clone()))
+            .collect();
+
         // FE-pod-Ready is NOT root-login-ready: the `{name}-initpwd` Job (#268)
         // sets root's password via a SEPARATE Job that races the FE coming up, so
         // the pod reports Ready before the password is set. Running the bootstrap
@@ -4148,9 +4156,9 @@ fn spawn_starrocks_catalog_wire(
                 Err(e) => {
                     // The probe carries the root password, so what comes back
                     // can quote it: `scrubbed` is the only way to read it, and
-                    // there is no statement secret to scrub against here.
-                    tracing::debug!(engine = %engine_name,
-                        error = %e.scrubbed(&std::collections::BTreeMap::new()),
+                    // `fe_secrets` is what closes the module's documented
+                    // short-unquoted residual for that value.
+                    tracing::debug!(engine = %engine_name, error = %e.scrubbed(&fe_secrets),
                         "starrocks bootstrap: root login not ready yet (initpwd race); retrying");
                 }
             }
@@ -4186,11 +4194,12 @@ fn spawn_starrocks_catalog_wire(
             let mut all_ok = true;
             // The service user's password is inline in `CREATE USER … IDENTIFIED
             // BY` (D6), so every FE error below is scrubbed against it before it
-            // reaches a log. The statements themselves are never logged.
-            let secrets: std::collections::BTreeMap<Uuid, String> =
-                [(Uuid::nil(), d.service_password.clone())]
-                    .into_iter()
-                    .collect();
+            // reaches a log — AND against the root password this connection
+            // logged in with, which is on the wire for these statements exactly
+            // as it was for the probe (fix round 1, F3). The statements
+            // themselves are never logged.
+            let mut secrets = fe_secrets.clone();
+            secrets.insert(Uuid::from_u128(1), d.service_password.clone());
 
             // The integration's `CREATE` is the one statement that is NOT
             // idempotent, and it is the one whose inputs drift: `required_issuer`
@@ -4215,7 +4224,12 @@ fn spawn_starrocks_catalog_wire(
             let create_integration = stmts.remove(0);
             match st.starrocks_ddl.execute(&fe, &create_integration).await {
                 Ok(()) => {}
-                Err(e) if sr_already_exists(&e.scrubbed(&secrets)) => {
+                // `is_already_exists`, NOT a `contains` on `scrubbed` (fix
+                // round 1, F2): the scrubbed string is capped and, when the
+                // fail-closed check fires, replaced entirely — so a message
+                // carrying a SQL-escaped apostrophe would answer `false` here
+                // and leave a stale `required_issuer` in place for ever.
+                Err(e) if e.is_already_exists() => {
                     if !engine_still_current(
                         &st.engine_mgmt,
                         engine_id,
@@ -8591,6 +8605,10 @@ mod tests {
     struct CountingStatusProvisioner {
         status_calls: std::sync::atomic::AtomicUsize,
         status_response: std::sync::Mutex<Option<egret_engine_mgmt_api::EngineStatus>>,
+        #[allow(clippy::type_complexity)]
+        on_status: std::sync::Mutex<
+            Option<Arc<dyn Fn() -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>>,
+        >,
     }
     impl CountingStatusProvisioner {
         fn set_status(&self, status: egret_engine_mgmt_api::EngineStatus) {
@@ -8598,6 +8616,17 @@ mod tests {
         }
         fn calls(&self) -> usize {
             self.status_calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        /// Run this on every `status` poll, before it answers. The cluster
+        /// poll is the ONLY thing that happens between the FE-ready
+        /// checkpoint and the root-login one, so it is the only place a test
+        /// can make the engine stop being current in that window (fix round
+        /// 1, F1).
+        fn on_status(
+            &self,
+            hook: impl Fn() -> futures_util::future::BoxFuture<'static, ()> + Send + Sync + 'static,
+        ) {
+            *self.on_status.lock().unwrap() = Some(Arc::new(hook));
         }
     }
     #[async_trait::async_trait]
@@ -8613,6 +8642,10 @@ mod tests {
         ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
             self.status_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let hook = self.on_status.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook().await;
+            }
             if let Some(s) = self.status_response.lock().unwrap().clone() {
                 return Ok(s);
             }
@@ -9028,8 +9061,17 @@ mod tests {
         );
     }
 
-    /// One catalog's DDL failing does not abandon the others, and what lands
-    /// in `apply_error` carries neither the statement nor a secret (D6).
+    /// One catalog's DDL failing does not abandon the others, and the FE's
+    /// words reach `apply_error` scrubbed.
+    ///
+    /// It does NOT claim to pin D6's statement/secret guarantee: the message
+    /// this fake injects never contained the statement, so an assertion that
+    /// the statement is absent could not fail for the reason it named (fix
+    /// round 1, F5 — that line is deleted rather than dressed up). The real
+    /// cover is Task 4's
+    /// `an_fe_error_stored_on_the_attachment_carries_no_ddl_and_no_secret`
+    /// (`tests/routes.rs`), which injects an FE error that DOES echo the
+    /// statement and the secret and asserts neither survives.
     #[tokio::test]
     async fn a_failing_catalog_is_flagged_and_the_loop_goes_on() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
@@ -9075,10 +9117,6 @@ mod tests {
         assert_eq!(m.apply_status, "failed");
         let err = m.apply_error.expect("the failure is recorded on the row");
         assert!(err.contains("unsupported type"), "{err}");
-        assert!(
-            !err.contains("CREATE EXTERNAL CATALOG"),
-            "the statement must never reach apply_error (D6): {err}"
-        );
         assert!(attachment_status(&st, engine.id, ids[&names[1]])
             .await
             .applied_at
@@ -9174,6 +9212,259 @@ mod tests {
         );
     }
 
+    /// Make this engine stop being `current` — a status flip to `deleting`,
+    /// which `bootstrap_target_is_current` refuses exactly like a delete, but
+    /// WITHOUT removing the row. That difference is the point: a deleted row
+    /// makes the bootstrap's own `get_engine` bail before the checkpoint under
+    /// test, so only a flip can isolate a checkpoint that sits after it (fix
+    /// round 1, F1).
+    async fn stop_being_current(store: &crate::EngineMgmtStore, engine_id: Uuid) {
+        store
+            .set_engine_status(engine_id, crate::engine_status::DELETING)
+            .await
+            .expect("flip the engine to deleting");
+    }
+
+    /// Checkpoint 2 — the one guarding the root-login probe
+    /// (`engines.rs`, the `for poll in 0..MAX_POLLS` loop after `fe_target`).
+    ///
+    /// The cluster poll is the only thing that happens between checkpoint 1
+    /// and checkpoint 2, so the engine is flipped to `deleting` from inside
+    /// `status()`. The probe is a `query`, not an `execute`, so `executed()`
+    /// cannot see it — `queried()` is what makes this checkpoint observable at
+    /// all, and its absence is why deleting this checkpoint left the whole
+    /// suite green before this round.
+    #[tokio::test]
+    async fn the_root_login_checkpoint_stops_a_bootstrap_whose_engine_is_being_deleted() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_root_login_checkpoint_stops_a_bootstrap_whose_engine_is_being_deleted: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let name = format!("a_{}", Uuid::new_v4().simple());
+        let ids = seed_pending_attachments(&st, &engine, &[name.as_str()]).await;
+
+        let store = st.engine_mgmt.clone();
+        let engine_id = engine.id;
+        prov.on_status(move || {
+            let store = store.clone();
+            Box::pin(async move { stop_being_current(&store, engine_id).await })
+        });
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            None,
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        assert!(
+            fake.queried().is_empty(),
+            "the root-login probe presents the FE root password; it must not be \
+             attempted against an engine that is on its way out: {:?}",
+            fake.queried()
+        );
+        assert!(fake.executed().is_empty(), "{:?}", fake.executed());
+        assert_eq!(
+            attachment_status(&st, engine.id, ids[&name])
+                .await
+                .apply_status,
+            "pending"
+        );
+    }
+
+    /// Checkpoint 4 — the one before `CREATE SECURITY INTEGRATION`.
+    ///
+    /// One attachment, and the engine is flipped while its catalog is being
+    /// created: checkpoint 3 has already passed for that attachment, the loop
+    /// then ends, and checkpoint 4 is the next thing between the bootstrap and
+    /// a write. Nothing of the delegation half may reach the FE.
+    #[tokio::test]
+    async fn the_delegation_checkpoint_stops_before_the_security_integration() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_delegation_checkpoint_stops_before_the_security_integration: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_delegating_engine(&st, wh.id, "CERTPEM").await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let name = format!("a_{}", Uuid::new_v4().simple());
+        seed_pending_attachments(&st, &engine, &[name.as_str()]).await;
+
+        let store = st.engine_mgmt.clone();
+        let engine_id = engine.id;
+        fake.on_create(move |_name| {
+            let store = store.clone();
+            Box::pin(async move { stop_being_current(&store, engine_id).await })
+        });
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            Some(test_delegation()),
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        assert_eq!(fake.created().len(), 1, "premise: the catalog ran first");
+        assert!(
+            !fake
+                .executed()
+                .iter()
+                .any(|s| s.contains("SECURITY INTEGRATION")),
+            "no delegation statement may reach an engine that is being deleted: {:?}",
+            fake.executed()
+        );
+    }
+
+    /// Checkpoint 5 — the one before the repair `ALTER SECURITY INTEGRATION`.
+    ///
+    /// The FE answers the `CREATE` with `already exists`, which is the branch
+    /// that leads to the repair; the engine stops being current while that
+    /// very statement is in flight (`on_execute` fires BEFORE the fake decides
+    /// to reject it, which is the whole reason that hook exists). The `ALTER`
+    /// must not be sent.
+    #[tokio::test]
+    async fn the_repair_checkpoint_stops_before_the_alter() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping the_repair_checkpoint_stops_before_the_alter: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_delegating_engine(&st, wh.id, "CERTPEM").await;
+        prov.set_status(ready_fe_status(&engine.name));
+        fake.fail_matching(
+            "CREATE SECURITY INTEGRATION",
+            "Getting analyzing error. Detail message: security integration 'egret_oidc' already exists.",
+        );
+        let store = st.engine_mgmt.clone();
+        let engine_id = engine.id;
+        fake.on_execute(move |sql| {
+            let store = store.clone();
+            Box::pin(async move {
+                if sql.contains("CREATE SECURITY INTEGRATION") {
+                    stop_being_current(&store, engine_id).await;
+                }
+            })
+        });
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            Some(test_delegation()),
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        let sent = fake.executed();
+        assert!(
+            sent.iter()
+                .any(|s| s.contains("CREATE SECURITY INTEGRATION")),
+            "premise: the CREATE was attempted and refused as already existing: {sent:?}"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|s| s.contains("ALTER SECURITY INTEGRATION")),
+            "the repair must not be sent to an engine that is being deleted: {sent:?}"
+        );
+    }
+
+    /// Checkpoint 6 — the one inside the loop over the remaining delegation
+    /// statements (`ADMIN SET FRONTEND CONFIG`, `CREATE USER`,
+    /// `GRANT IMPERSONATE`).
+    ///
+    /// Same hook, but the integration SUCCEEDS this time, so the repair branch
+    /// is not taken and the next thing between the bootstrap and a write is
+    /// checkpoint 6. None of the three may be sent.
+    #[tokio::test]
+    async fn the_remaining_delegation_statements_stop_at_their_own_checkpoint() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_remaining_delegation_statements_stop_at_their_own_checkpoint: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_delegating_engine(&st, wh.id, "CERTPEM").await;
+        prov.set_status(ready_fe_status(&engine.name));
+        let store = st.engine_mgmt.clone();
+        let engine_id = engine.id;
+        fake.on_execute(move |sql| {
+            let store = store.clone();
+            Box::pin(async move {
+                if sql.contains("CREATE SECURITY INTEGRATION") {
+                    stop_being_current(&store, engine_id).await;
+                }
+            })
+        });
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            Some(test_delegation()),
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        let sent = fake.executed();
+        assert!(
+            sent.iter()
+                .any(|s| s.contains("CREATE SECURITY INTEGRATION")),
+            "premise: the integration was created: {sent:?}"
+        );
+        for stopped in [
+            "ADMIN SET FRONTEND CONFIG",
+            "CREATE USER IF NOT EXISTS",
+            "GRANT IMPERSONATE",
+        ] {
+            assert!(
+                !sent.iter().any(|s| s.contains(stopped)),
+                "{stopped} must not be sent to an engine that is being deleted: {sent:?}"
+            );
+        }
+    }
+
+    /// The delegation bundle every bootstrap test passes. Its
+    /// `service_password` is what the delegation half scrubs FE errors
+    /// against, alongside the engine's root password.
+    fn test_delegation() -> StarRocksDelegationBootstrap {
+        StarRocksDelegationBootstrap {
+            jwks_url: "https://idp/jwks".into(),
+            issuer: "https://idp/realms/egret".into(),
+            audience: "engine".into(),
+            service_user: "egret_delegator".into(),
+            service_password: "pw".into(),
+        }
+    }
+
     /// Checkpoints 4-6: the delegation half still runs, and `already exists`
     /// still repairs — driven through the fake runner instead of a real MySQL
     /// port, which is what
@@ -9192,13 +9483,7 @@ mod tests {
         let (wh, _s) = seed_sr_warehouse(&st, &db).await;
         let engine = seed_sr_delegating_engine(&st, wh.id, "CERTPEM").await;
         prov.set_status(ready_fe_status(&engine.name));
-        let delegation = StarRocksDelegationBootstrap {
-            jwks_url: "https://idp/jwks".into(),
-            issuer: "https://idp/realms/egret".into(),
-            audience: "engine".into(),
-            service_user: "egret_delegator".into(),
-            service_password: "pw".into(),
-        };
+        let delegation = test_delegation();
 
         // First run: the integration is created, the user and grant follow.
         spawn_starrocks_catalog_wire(
@@ -9228,9 +9513,18 @@ mod tests {
         // Second run against an FE that already has it: the repair ALTER runs,
         // so a changed issuer takes effect instead of being lost to
         // `already exists`.
+        //
+        // The message deliberately carries a SQL-escaped apostrophe (fix round
+        // 1, F2). That shape is unpairable by the redaction pipeline, so the
+        // EXCERPT is withheld in full — and the commit under review decided
+        // repair-vs-warn by asking `contains("already exists")` of exactly that
+        // withheld string, which answers `false`. The plain-quoting shape is
+        // covered by `already_exists_is_decided_for_the_caller_from_the_raw_message`;
+        // this is the shape that has to be driven through the real call site,
+        // because the bug was in the call site, not in the predicate.
         fake.fail_matching(
             "CREATE SECURITY INTEGRATION",
-            "Getting analyzing error. Detail message: security integration 'egret_oidc' already exists.",
+            r#"Getting analyzing error. Detail message: security integration 'egret\'s oidc' already exists."#,
         );
         fake.clear_executed();
         spawn_starrocks_catalog_wire(
@@ -10297,30 +10591,6 @@ mod tests {
             sql.contains(r#"required_issuer"="kc\" ) ; DROP DATABASE x ; -- ""#),
             "issuer not escaped; sql={sql}"
         );
-    }
-
-    /// The predicate that decides repair-vs-warn, against the message StarRocks
-    /// actually sends. Measured on a live FE 3.x:
-    ///
-    /// ```text
-    /// Getting analyzing error. Detail message: security integration 'egret_oidc' already exists.
-    /// ```
-    ///
-    /// The negative cases matter more than the positive one: treating an
-    /// unrelated failure as "already exists" would run an `ALTER` against an FE
-    /// that has no integration, which StarRocks answers with `not found` — a
-    /// second confusing error instead of the real one.
-    #[test]
-    fn sr_already_exists_matches_only_the_exists_error() {
-        assert!(sr_already_exists(
-            "Getting analyzing error. Detail message: security integration 'egret_oidc' already exists."
-        ));
-        assert!(sr_already_exists("SECURITY INTEGRATION ALREADY EXISTS"));
-        assert!(!sr_already_exists(
-            "Getting analyzing error. Detail message: security integration 'egret_oidc' not found."
-        ));
-        assert!(!sr_already_exists("Access denied for user 'root'"));
-        assert!(!sr_already_exists("Connection refused (os error 111)"));
     }
 
     /// A malicious/free-form issuer/audience/jwks_url must not break out of

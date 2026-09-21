@@ -255,6 +255,25 @@ pub struct FeError {
     /// remaining obligation is enforced by the type rather than remembered
     /// from a doc comment.
     excerpt: String,
+    /// Whether the FE said the object was already there — decided in
+    /// [`fe_error`] from the RAW message, before a single redaction pass
+    /// touches it, and carried here so that no caller has to.
+    ///
+    /// This is the fix for fix-round-1 F2. The delegation bootstrap used to
+    /// ask `sr_already_exists(&e.scrubbed(&secrets))`, which runs a question
+    /// about WHAT THE FE MEANT against a string built to be safe to PRINT:
+    /// capped at [`FE_ERROR_EXCERPT_MAX`], and replaced wholesale by
+    /// [`WITHHELD`] when the fail-closed check fires. An FE message carrying
+    /// a SQL-escaped apostrophe — a shape this module's own doc names as
+    /// reachable — therefore answered `false`, the repair `ALTER SECURITY
+    /// INTEGRATION` never ran, and a changed `required_issuer` stayed stale
+    /// for ever behind a "statement failed; admin can retry" warning.
+    ///
+    /// The rule this encodes: **redaction is for what humans and columns
+    /// see, never for what code branches on.** Any future predicate about
+    /// the FE's meaning belongs here, next to this one, and not at a call
+    /// site holding a `scrubbed` string.
+    already_exists: bool,
 }
 
 impl FeError {
@@ -271,6 +290,29 @@ impl FeError {
             None => text,
         }
     }
+
+    /// Did the FE mean "the object is already there", as opposed to a real
+    /// failure? The delegation bootstrap branches on this to repair an
+    /// `egret_oidc` integration that already exists instead of leaving its
+    /// properties stale. Read off [`Self::already_exists`], which was decided
+    /// from the unredacted message — see that field for why this is not a
+    /// call-site `contains` on [`Self::scrubbed`].
+    pub fn is_already_exists(&self) -> bool {
+        self.already_exists
+    }
+}
+
+/// Does this FE message mean "the object is already there"? StarRocks answers
+/// `CREATE` on an existing integration with `Getting analyzing error. Detail
+/// message: security integration 'egret_oidc' already exists.` — matched
+/// loosely on the phrase so a reworded prefix does not turn a repairable state
+/// into a warning nobody acts on.
+///
+/// Lives here, beside [`fe_error`], rather than in `engines.rs` where it used
+/// to (`sr_already_exists`): the only text it may ever be shown is the raw
+/// message, and the only code holding that is [`fe_error`] itself.
+fn says_already_exists(raw: &str) -> bool {
+    raw.to_ascii_lowercase().contains("already exists")
 }
 
 /// The FE's error code and nothing else. Deliberately NOT the excerpt: this
@@ -307,6 +349,7 @@ impl std::fmt::Debug for FeError {
         f.debug_struct("FeError")
             .field("code", &self.code)
             .field("excerpt", &"<withheld: use FeError::scrubbed(&secrets)>")
+            .field("already_exists", &self.already_exists)
             .finish()
     }
 }
@@ -327,7 +370,9 @@ impl std::fmt::Debug for FeError {
 ///
 /// The FE's own error code is read off the ORIGINAL raw text (never inside
 /// a quoted span, so redaction never touches it) regardless of whether the
-/// excerpt ends up withheld.
+/// excerpt ends up withheld. So is [`FeError::already_exists`], and for a
+/// stronger reason: the excerpt may be withheld entirely, and a caller
+/// branching on the withheld string would silently take the wrong branch.
 fn fe_error(raw: impl std::fmt::Display) -> FeError {
     let raw = raw.to_string();
     static CODE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -337,6 +382,11 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
     let code = code_re
         .captures(&raw)
         .and_then(|c| c[1].parse::<u32>().ok());
+
+    // Decided on the RAW text, and deliberately BEFORE the pipeline below
+    // (fix round 1, F2): this is a question about what the FE meant, and the
+    // redacted form is allowed to be lossy — capped, or withheld entirely.
+    let already_exists = says_already_exists(&raw);
 
     let redacted = normalize_mysql_async_wrapper(&raw);
     let redacted = redact_quoted(&redacted);
@@ -348,7 +398,11 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
     } else {
         redacted.chars().take(FE_ERROR_EXCERPT_MAX).collect()
     };
-    FeError { code, excerpt }
+    FeError {
+        code,
+        excerpt,
+        already_exists,
+    }
 }
 
 /// One statement/query channel to a StarRocks FE. A trait so the apply and
@@ -684,6 +738,12 @@ pub fn compare_to_fe(rendered: &StarRocksCatalogDdl, fe: &BTreeMap<String, Strin
 #[derive(Clone, Default)]
 pub struct FakeStarRocksDdl {
     executed: Arc<Mutex<Vec<String>>>,
+    /// Every `query` this FE was asked, in order — the read half of
+    /// `executed`. Without it the root-login probe (a `SELECT 1`, a query)
+    /// is INVISIBLE to a test, which is why the checkpoint standing between
+    /// the FE-ready poll and that probe could be deleted with the whole suite
+    /// staying green (fix round 1, F1).
+    queried: Arc<Mutex<Vec<String>>>,
     catalogs: Arc<Mutex<BTreeMap<String, BTreeMap<String, String>>>>,
     /// When set, every `execute`/`query` fails with this message.
     fail: Arc<Mutex<Option<String>>>,
@@ -695,8 +755,13 @@ pub struct FakeStarRocksDdl {
     selective_fail: Arc<Mutex<Vec<(String, String)>>>,
     /// The `FeTarget` of the most recent call, so a test can assert the cert.
     last_target: Arc<Mutex<Option<FeTarget>>>,
+    /// Runs on EVERY `execute`, with the statement text, after it is
+    /// recorded and BEFORE the fail/succeed decision — so a hook can fire for
+    /// a statement the FE is about to reject, which is what the delegation
+    /// checkpoints need (fix round 1, F1). [`FakeStarRocksDdl::on_create`] is
+    /// a filter over this one hook, not a second one with its own timing.
     #[allow(clippy::type_complexity)]
-    on_create: Arc<
+    on_execute: Arc<
         Mutex<
             Option<
                 Arc<dyn Fn(String) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>,
@@ -709,8 +774,16 @@ impl FakeStarRocksDdl {
     pub fn executed(&self) -> Vec<String> {
         self.executed.lock().unwrap().clone()
     }
+    /// Every `query` the FE was asked (`SELECT 1`, `SHOW CATALOGS`,
+    /// `SHOW CREATE CATALOG …`), in order. `executed()` records statements
+    /// only, so this is the only way to see that the root-login probe was —
+    /// or, for a checkpoint test, was NOT — attempted.
+    pub fn queried(&self) -> Vec<String> {
+        self.queried.lock().unwrap().clone()
+    }
     pub fn clear_executed(&self) {
-        self.executed.lock().unwrap().clear()
+        self.executed.lock().unwrap().clear();
+        self.queried.lock().unwrap().clear();
     }
     /// Catalog names in the order `CREATE EXTERNAL CATALOG` ran for them.
     pub fn created(&self) -> Vec<String> {
@@ -748,12 +821,31 @@ impl FakeStarRocksDdl {
     }
     /// Run this when a `CREATE EXTERNAL CATALOG` is executed, before it is
     /// applied — the only way to make something happen BETWEEN two iterations
-    /// of the bootstrap's loop (deleting the engine, say).
+    /// of the bootstrap's loop (deleting the engine, say). The hook receives
+    /// the catalog's name.
     pub fn on_create(
         &self,
         hook: impl Fn(String) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync + 'static,
     ) {
-        *self.on_create.lock().unwrap() = Some(Arc::new(hook));
+        self.on_execute(
+            move |sql| match statement_target("CREATE EXTERNAL CATALOG", &sql) {
+                Some(name) => hook(name),
+                None => Box::pin(std::future::ready(())),
+            },
+        )
+    }
+
+    /// Run this on EVERY statement, receiving its text, before the fake
+    /// decides whether to accept or reject it. The general form of
+    /// [`Self::on_create`], and what a test uses to make the engine vanish
+    /// between two statements of the delegation bootstrap — including
+    /// between a statement that FAILS and the repair that follows it, which
+    /// `on_create`'s catalog filter cannot express.
+    pub fn on_execute(
+        &self,
+        hook: impl Fn(String) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync + 'static,
+    ) {
+        *self.on_execute.lock().unwrap() = Some(Arc::new(hook));
     }
     pub fn catalog(&self, name: &str) -> Option<BTreeMap<String, String>> {
         self.catalogs.lock().unwrap().get(name).cloned()
@@ -796,17 +888,19 @@ impl StarRocksDdl for FakeStarRocksDdl {
         // still show up in `executed()`, so a test can assert both "we sent
         // it" and "it failed" instead of only one.
         self.executed.lock().unwrap().push(sql.to_string());
+        // BEFORE the fail/succeed decision (fix round 1, F1): a hook must be
+        // able to fire for a statement the FE is about to reject — that is
+        // exactly the window the delegation bootstrap's repair checkpoint
+        // sits in.
+        let hook = self.on_execute.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(sql.to_string()).await;
+        }
         if let Some(msg) = self.fail.lock().unwrap().clone() {
             return Err(fe_error(msg));
         }
         if let Some(msg) = self.selective_failure(sql) {
             return Err(fe_error(msg));
-        }
-        if let Some(name) = statement_target("CREATE EXTERNAL CATALOG", sql) {
-            let hook = self.on_create.lock().unwrap().clone();
-            if let Some(hook) = hook {
-                hook(name.clone()).await;
-            }
         }
         let mut cats = self.catalogs.lock().unwrap();
         if let Some(name) = statement_target("CREATE EXTERNAL CATALOG", sql) {
@@ -838,6 +932,7 @@ impl StarRocksDdl for FakeStarRocksDdl {
 
     async fn query(&self, fe: &FeTarget, sql: &str) -> Result<Vec<Vec<Option<String>>>, FeError> {
         *self.last_target.lock().unwrap() = Some(fe.clone());
+        self.queried.lock().unwrap().push(sql.to_string());
         if let Some(msg) = self.fail.lock().unwrap().clone() {
             return Err(fe_error(msg));
         }
@@ -1173,6 +1268,87 @@ mod tests {
     /// in an otherwise well-formed message survives every shape-based pass
     /// here — that is the residual, reproduced rather than asserted away —
     /// and `scrubbed`, which is the only way to read the excerpt at all,
+    /// The predicate that decides repair-vs-warn, against the message
+    /// StarRocks actually sends. Measured on a live FE 3.x:
+    ///
+    /// ```text
+    /// Getting analyzing error. Detail message: security integration 'egret_oidc' already exists.
+    /// ```
+    ///
+    /// The negative cases matter more than the positive one: treating an
+    /// unrelated failure as "already exists" would run an `ALTER` against an
+    /// FE that has no integration, which StarRocks answers with `not found` —
+    /// a second confusing error instead of the real one.
+    ///
+    /// It asserts through `fe_error`, not on the bare `says_already_exists`
+    /// helper: what the bootstrap actually holds is a [`FeError`], and the
+    /// bug fix round 1's F2 names is exactly that the two can disagree.
+    #[test]
+    fn already_exists_is_decided_for_the_caller_from_the_raw_message() {
+        assert!(fe_error(
+            "Getting analyzing error. Detail message: security integration 'egret_oidc' already exists."
+        )
+        .is_already_exists());
+        assert!(fe_error("SECURITY INTEGRATION ALREADY EXISTS").is_already_exists());
+        assert!(!fe_error(
+            "Getting analyzing error. Detail message: security integration 'egret_oidc' not found."
+        )
+        .is_already_exists());
+        assert!(!fe_error("Access denied for user 'root'").is_already_exists());
+        assert!(!fe_error("Connection refused (os error 111)").is_already_exists());
+    }
+
+    /// Fix round 1, F2 — the regression this decision was moved to prevent.
+    /// An FE message whose quoting this module cannot pair (a SQL-escaped
+    /// apostrophe, the shape the module doc names as reachable from egret's
+    /// own escaping) has its excerpt WITHHELD in full. Asking
+    /// `scrubbed(...).contains("already exists")` of that string answers
+    /// `false`, so the repair `ALTER SECURITY INTEGRATION` would never run and
+    /// a changed `required_issuer` would stay stale for ever. The verdict is
+    /// taken from the raw text, so it survives the withholding.
+    #[test]
+    fn already_exists_survives_an_excerpt_that_is_withheld_entirely() {
+        let e = fe_error(
+            r#"Getting analyzing error. Detail message: security integration 'egret's oidc' already exists."#,
+        );
+        let printable = e.scrubbed(&BTreeMap::new());
+        assert!(
+            printable.contains(WITHHELD),
+            "premise: this message's quoting cannot be paired, so the excerpt is \
+             withheld — if this ever stops being true, find another unpairable \
+             message rather than deleting the test; scrubbed={printable}"
+        );
+        assert!(
+            !printable.to_ascii_lowercase().contains("already exists"),
+            "premise: the phrase is gone from what a caller may print; scrubbed={printable}"
+        );
+        assert!(
+            e.is_already_exists(),
+            "and the DECISION survives it: the repair ALTER must still run"
+        );
+    }
+
+    /// The other half of the same fix: a capped excerpt. An FE that echoes a
+    /// long statement can push the phrase past [`FE_ERROR_EXCERPT_MAX`], which
+    /// a `contains` on the excerpt would also answer `false` for.
+    #[test]
+    fn already_exists_survives_an_excerpt_the_cap_truncates() {
+        // Whitespace-separated short words: nothing here is a quoted span, a
+        // URL, or a >=MIN_OPAQUE_RUN token, so the redaction passes leave the
+        // length alone and the CAP is what moves the phrase out of reach.
+        let long = format!(
+            "Getting analyzing error. Detail message: {}already exists.",
+            "detail word ".repeat(FE_ERROR_EXCERPT_MAX / 4)
+        );
+        let e = fe_error(&long);
+        let printable = e.scrubbed(&BTreeMap::new());
+        assert!(
+            !printable.to_ascii_lowercase().contains("already exists"),
+            "premise: the phrase falls outside the cap; scrubbed={printable}"
+        );
+        assert!(e.is_already_exists());
+    }
+
     /// removes it. `Display` carries the FE code and no text, so the
     /// `apply_error = e.to_string()` shortcut can no longer leak.
     #[test]
@@ -1204,7 +1380,8 @@ mod tests {
         assert_eq!(
             FeError {
                 code: None,
-                excerpt: "whatever".into()
+                excerpt: "whatever".into(),
+                already_exists: false,
             }
             .to_string(),
             "FE error (no code)"
