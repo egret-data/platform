@@ -598,7 +598,10 @@ fn looks_like_url(value: &str) -> bool {
     let Some(pos) = value.find("://") else {
         return false;
     };
-    if pos == 0 || pos + 3 >= value.len() {
+    // Nothing after the `://` means the value names no resource. (Nothing
+    // BEFORE it needs no guard of its own: the scheme walk below finds no
+    // character at all and answers `false`.)
+    if pos + 3 >= value.len() {
         return false;
     }
     // Walk back from `://` over scheme-legal characters; the earliest one
