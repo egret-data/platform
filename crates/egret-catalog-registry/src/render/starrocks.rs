@@ -183,12 +183,26 @@ pub fn escape_ident(s: &str) -> String {
 /// Replace every known secret's plaintext with `******`. The only thing that
 /// may stand between an FE error (which can quote the statement it rejected,
 /// secrets and all) and `apply_error`/an API response.
+///
+/// `create_sql`/`alter_sql` never interpolate a secret's raw plaintext — they
+/// interpolate [`escape_dq`]'s output (`:483`), and an FE error quoting the
+/// rejected statement quotes THAT escaped text back. A secret containing a
+/// `"` or `\` therefore appears in the wild only in its escaped form, so both
+/// forms must be scrubbed, escaped first (it is the superset: it always
+/// contains the raw form as a substring once its own backslashes/quotes are
+/// accounted for, so scrubbing it first cannot leave a partial raw match
+/// behind for the second pass to miss).
 pub fn scrub_secrets(text: &str, secrets: &BTreeMap<Uuid, String>) -> String {
     let mut out = text.to_string();
     for v in secrets.values() {
-        if !v.is_empty() {
-            out = out.replace(v.as_str(), "******");
+        if v.is_empty() {
+            continue;
         }
+        let escaped = escape_dq(v);
+        if !escaped.is_empty() {
+            out = out.replace(escaped.as_str(), "******");
+        }
+        out = out.replace(v.as_str(), "******");
     }
     out
 }
@@ -220,7 +234,9 @@ impl Out {
             .ok_or(RenderError::MissingInput("storage connection"))?;
         if let Some(ep) = s.endpoint {
             self.set("aws.s3.endpoint", ep);
-            // The FE has no default for this key; MinIO over http needs it off.
+            // The FE defaults this to `true` (`AwsCloudConfiguration.java:40`),
+            // so an http endpoint (MinIO, most in-cluster S3-compatible stores)
+            // needs it set explicitly to `false`.
             self.set(
                 "aws.s3.enable_ssl",
                 if ep.starts_with("https://") {
@@ -434,8 +450,16 @@ pub fn render_starrocks(
         }
     }
     if !matches!(def.config, CatalogConfig::Generic(_)) {
+        // `SR_OVERRIDABLE` is exempt from the collision check only where the
+        // typed form actually consumes it — JDBC, which already read
+        // `driver_url`/`driver_class` out of `def.advanced.starrocks` above.
+        // On every other kind these are ordinary advanced properties: the
+        // normal collision rule applies, so a `driver_url` on e.g. a `hive`
+        // catalog is rendered (or refused as a collision), never silently
+        // dropped (M2).
+        let jdbc = matches!(def.config, CatalogConfig::Jdbc(_));
         for (k, v) in &def.advanced.starrocks {
-            if SR_OVERRIDABLE.contains(&k.as_str()) {
+            if jdbc && SR_OVERRIDABLE.contains(&k.as_str()) {
                 continue;
             }
             if out.props.contains_key(k) {
@@ -463,6 +487,13 @@ pub struct StarRocksCatalogDdl {
 }
 
 impl StarRocksCatalogDdl {
+    /// Builds the `"key" = "value"` list. `render_starrocks`'s line-break
+    /// refusal only ever sees `PropValue::Plain` values — a secret's
+    /// plaintext isn't available until it is resolved here (M4), so this is
+    /// the one place that can make "one statement, no embedded newline" hold
+    /// unconditionally, for a secret's plaintext as much as for a typed or
+    /// `advanced` value. A secret containing a line break is therefore
+    /// refused here rather than rendered across two lines.
     fn body(
         &self,
         secrets: &BTreeMap<Uuid, String>,
@@ -480,6 +511,9 @@ impl StarRocksCatalogDdl {
                     .cloned()
                     .ok_or(RenderError::MissingSecret(*id))?,
             };
+            if value.contains(['\n', '\r']) {
+                return Err(RenderError::LineBreak(k.clone()));
+            }
             parts.push(format!(r#""{}" = "{}""#, escape_dq(k), escape_dq(&value)));
         }
         Ok(parts.join(", "))
@@ -752,7 +786,8 @@ mod tests {
         );
         assert_eq!(p["aws.s3.access_key"], PropValue::Plain("AKIA".into()));
         assert_eq!(p["aws.s3.secret_key"], PropValue::Secret(id(S3)));
-        // http endpoint ⇒ TLS off; the FE has no default for this key.
+        // http endpoint ⇒ TLS off; the FE defaults this to `true`
+        // (`AwsCloudConfiguration.java:40`), so it must be set explicitly.
         assert_eq!(p["aws.s3.enable_ssl"], PropValue::Plain("false".into()));
 
         let d = def(
@@ -1018,17 +1053,116 @@ mod tests {
         );
     }
 
-    /// D6: `scrub_secrets` is what stands between an FE error and `apply_error`.
+    /// D6: `scrub_secrets` is what stands between an FE error and
+    /// `apply_error`. `create_sql`/`alter_sql` never interpolate a secret's
+    /// raw plaintext, only `escape_dq`'s output — so an FE error that quotes
+    /// the rejected statement back quotes the ESCAPED form. A password with a
+    /// `"`, a `\` and a newline exercises exactly that (C1): the raw text
+    /// never appears verbatim in valid DDL, only its escaped form does.
     #[test]
     fn an_fe_error_quoting_the_statement_is_scrubbed() {
-        let err = "Getting analyzing error. Detail message: \
-                   CREATE EXTERNAL CATALOG `x` PROPERTIES (\"password\" = \"p4ssw0rd\") is invalid";
-        let out = scrub_secrets(err, &secrets());
-        assert!(!out.contains("p4ssw0rd"), "out={out}");
+        let nasty = "p4ss\"w0rd\\x\ntrailer";
+        let mut secrets = secrets();
+        secrets.insert(id(PW), nasty.to_string());
+        let escaped = escape_dq(nasty);
+        let err = format!(
+            "Getting analyzing error. Detail message: \
+             CREATE EXTERNAL CATALOG `x` PROPERTIES (\"password\" = \"{escaped}\") is invalid"
+        );
+        let out = scrub_secrets(&err, &secrets);
+        assert!(!out.contains(nasty), "out={out}");
+        assert!(!out.contains(&escaped), "out={out}");
         assert!(out.contains("******"), "out={out}");
         assert!(
             out.contains("Getting analyzing error"),
             "the diagnosis survives; out={out}"
         );
+    }
+
+    /// M2: `driver_url`/`driver_class` are exempt from the collision check
+    /// only where JDBC's typed arm actually consumes them. On any other kind
+    /// they are ordinary `advanced.starrocks` properties — rendered, not
+    /// silently dropped, and still subject to the normal collision rule.
+    #[test]
+    fn sr_overridable_keys_are_only_exempt_for_jdbc_catalogs() {
+        let d = def(
+            "hive",
+            json!({ "metastore": { "type": "hive", "uri": "thrift://hms:9083" }, "storage_connection_id": SC }),
+            json!({ "starrocks": { "driver_url": "file:///opt/x.jar" } }),
+        );
+        let p = render_starrocks("h", &d, &input()).unwrap().properties;
+        assert_eq!(
+            p["driver_url"],
+            PropValue::Plain("file:///opt/x.jar".into())
+        );
+    }
+
+    /// M4: a secret whose plaintext contains a line break cannot be resolved
+    /// into DDL text — `render_starrocks`'s line-break refusal only ever sees
+    /// `PropValue::Plain` values (a secret's plaintext isn't known at render
+    /// time), so the invariant is enforced again once `create_sql`/
+    /// `alter_sql` resolve the secret. It must also assert nothing else
+    /// changed about the DDL (the refusal is a refusal, not a rewrite).
+    #[test]
+    fn a_secret_line_break_is_refused_at_ddl_time_not_silently_split_across_lines() {
+        let d = CatalogDef::egret_warehouse(id(WH));
+        let ddl = render_starrocks("egret", &d, &input()).unwrap();
+        let before = ddl.clone();
+        let mut secrets = secrets();
+        secrets.insert(id(CRED), "line1\nline2".to_string());
+        assert_eq!(
+            ddl.create_sql(&secrets).unwrap_err(),
+            RenderError::LineBreak("iceberg.catalog.credential".into())
+        );
+        assert_eq!(
+            ddl.alter_sql(&secrets).unwrap_err(),
+            RenderError::LineBreak("iceberg.catalog.credential".into())
+        );
+        assert_eq!(ddl, before, "a refused render must not mutate the ddl");
+    }
+
+    /// M7: `secret_ids`, `comparable` and `redacted` for a kind other than
+    /// the egret warehouse, carrying both a typed secret (`password`) and a
+    /// `secret_properties.starrocks` entry (`paimon.password`) — the path
+    /// most likely to regress since it is assembled from two different
+    /// sources (the typed JDBC-ish arm equivalent and the generic pass-
+    /// through) rather than one.
+    #[test]
+    fn secret_ids_comparable_and_redacted_for_a_non_egret_kind() {
+        let d = def(
+            "generic",
+            json!({ "engines": ["starrocks"], "secret_properties": { "starrocks": { "paimon.password": PW } } }),
+            json!({ "starrocks": { "type": "paimon", "paimon.catalog.type": "filesystem" } }),
+        );
+        let ddl = render_starrocks("pm", &d, &input()).unwrap();
+
+        assert_eq!(
+            ddl.secret_ids(),
+            [id(PW)].into_iter().collect::<BTreeSet<_>>()
+        );
+
+        let comparable = ddl.comparable();
+        assert_eq!(
+            comparable,
+            [
+                ("type".to_string(), "paimon".to_string()),
+                ("paimon.catalog.type".to_string(), "filesystem".to_string()),
+            ]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+        );
+        assert!(
+            !comparable.contains_key("paimon.password"),
+            "a secret-valued property must never be comparable: comparable={comparable:?}"
+        );
+
+        let red = ddl.redacted();
+        assert!(red.contains(r#""type" = "paimon""#), "red={red}");
+        assert!(
+            red.contains(r#""paimon.catalog.type" = "filesystem""#),
+            "red={red}"
+        );
+        assert!(red.contains(r#""paimon.password" = "******""#), "red={red}");
+        assert!(!red.contains("p4ssw0rd"), "red={red}");
     }
 }
