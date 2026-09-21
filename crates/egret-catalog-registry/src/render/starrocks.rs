@@ -42,7 +42,10 @@
 //!   - Benchmark: `scale` only (a double > 0, default `1`); tpch/tpcds/ssb is
 //!     the database you `USE`, not a property —
 //!     `BenchmarkConfig.java:21-24`, `BenchmarkCatalogConfig.java:31-47`,
-//!     `BenchmarkSuiteFactory.java:27-44`.
+//!     `BenchmarkSuiteFactory.java:27-44`. **Currently unreachable**: the
+//!     `BENCHMARK` connector itself ships on no StarRocks release branch or
+//!     tag (`c019a148`, 2026-01-22, `main`-only), so `can_read` refuses
+//!     `tpch`/`tpcds` for StarRocks before this shape is ever rendered (D4).
 //!   - Grammar: keys *and* values are quoted strings; `PROPERTIES(...)` is
 //!     mandatory on `CREATE`; `ALTER CATALOG <n> SET (...)` — **not**
 //!     `SET PROPERTIES` — `StarRocks.g4:866-883,1140-1142,3135-3152`.
@@ -510,11 +513,19 @@ pub fn render_starrocks(
                 }
             }
         }
-        CatalogConfig::Tpch(s) | CatalogConfig::Tpcds(s) => {
-            out.set("type", "benchmark");
-            if let Some(scale) = s.scale {
-                out.set("scale", scale.to_string());
-            }
+        CatalogConfig::Tpch(_) | CatalogConfig::Tpcds(_) => {
+            // Unreachable today: `can_read` above already refused StarRocks
+            // for tpch/tpcds (D4 correction: StarRocks' `BENCHMARK`
+            // connector — `c019a148`, 2026-01-22 — ships on no release
+            // branch or tag, verified against the vendored source). This arm
+            // stays explicit, rather than folded into the `can_read` guard's
+            // silence, for two reasons: the match must remain exhaustive
+            // over `CatalogConfig`'s kinds without a wildcard, and a second,
+            // independent refusal here means this path can never regress
+            // into emitting `type = "benchmark"` DDL a real FE rejects, even
+            // if a future edit ever let the top-of-function guard and
+            // `can_read` disagree.
+            return Err(RenderError::NotReadable(name.into()));
         }
         CatalogConfig::Generic(g) => {
             for (k, v) in &def.advanced.starrocks {
@@ -1151,7 +1162,7 @@ mod tests {
     }
 
     #[test]
-    fn elasticsearch_and_benchmark() {
+    fn elasticsearch() {
         let d = def(
             "elasticsearch",
             json!({ "hosts": ["es-a", "es-b"], "port": 9200, "tls": true,
@@ -1167,20 +1178,28 @@ mod tests {
         assert_eq!(p["es.net.ssl"], PropValue::Plain("true".into()));
         assert_eq!(p["user"], PropValue::Plain("u".into()));
         assert_eq!(p["password"], PropValue::Secret(id(PW)));
+    }
 
-        // tpch and tpcds are both the one `benchmark` connector; the suite is
-        // the DATABASE you query (BenchmarkSuiteFactory.java:27-44).
+    /// D4 correction: StarRocks has no `BENCHMARK` connector on any release
+    /// branch or tag (`c019a148`, 2026-01-22, `main`-only) — a `tpch`/`tpcds`
+    /// catalog must never reach a live FE as `type = "benchmark"` DDL. Two
+    /// independent refusals are proven here: `can_read` itself, and
+    /// `render_starrocks` refusing even when handed a `tpch`/`tpcds`
+    /// `CatalogDef` directly (the only production entry point, and it
+    /// refuses before the per-kind match is reached).
+    #[test]
+    fn tpch_and_tpcds_are_refused_on_starrocks_pending_a_supporting_fe() {
         for kind in ["tpch", "tpcds"] {
             let d = def(kind, json!({ "scale": 10 }), json!(null));
-            let p = render_starrocks("b", &d, &input()).unwrap().properties;
-            assert_eq!(p["type"], PropValue::Plain("benchmark".into()), "{kind}");
-            assert_eq!(p["scale"], PropValue::Plain("10".into()), "{kind}");
+            assert!(!d.can_read(EngineType::StarRocks), "{kind}");
+            assert_eq!(
+                render_starrocks("b", &d, &input()).unwrap_err(),
+                RenderError::NotReadable("b".into()),
+                "{kind}"
+            );
+            // Trino is unaffected — same catalog, other engine.
+            assert!(d.can_read(EngineType::Trino), "{kind}");
         }
-        let d = def("tpch", json!({}), json!(null));
-        assert!(!render_starrocks("b", &d, &input())
-            .unwrap()
-            .properties
-            .contains_key("scale"));
     }
 
     #[test]

@@ -5353,6 +5353,18 @@ fn tpch_body(name: &str) -> serde_json::Value {
     serde_json::json!({ "name": name, "kind": "tpch", "config": { "properties": {} } })
 }
 
+/// A zero-config catalog kind `can_read` on BOTH engines (D4 correction:
+/// `tpch`/`tpcds` no longer are — StarRocks has no `BENCHMARK` connector on
+/// any shipped release, `c019a148`). Used where a test targets a StarRocks
+/// engine and needs the request to get PAST the can_read gate, to exercise
+/// something else (the "StarRocks apply not supported yet" gate, an
+/// orphan-preservation check, …) instead of re-testing can_read itself,
+/// which has its own dedicated coverage in egret-catalog-registry.
+fn elasticsearch_body(name: &str) -> serde_json::Value {
+    serde_json::json!({ "name": name, "kind": "elasticsearch",
+        "config": { "hosts": ["es1"], "port": 9200, "tls": false } })
+}
+
 /// Plan decisions #19/#27: a legacy DELETE detaches and keeps the registry
 /// catalog; re-adding the same name replaces that orphan (new id, new body),
 /// while a name another engine still attaches is 409 and leaves it alone.
@@ -5816,10 +5828,16 @@ async fn legacy_add_refused_by_engine_type_leaves_the_orphan_byte_identical() {
     assert_eq!(status, StatusCode::CREATED, "create starrocks; body={j}");
     let sr_id = j["id"].as_str().unwrap().to_string();
 
+    // D4 correction: `tpch` is now refused by `can_read` itself — checked
+    // BEFORE the "StarRocks apply not supported yet" gate
+    // (`check_engine_supports`) — so the refusal reason changed from
+    // not-implemented to not-readable. Still exactly the refusal this test
+    // is about: decided before the registry is touched, so the orphan
+    // survives byte-identical either way.
     let (status, j) = add_catalog_via_api(&f, &token, &sr_id, tpch_body(&name)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "starrocks add; body={j}");
     assert!(
-        j["error"].as_str().unwrap().contains("not supported yet"),
+        j["error"].as_str().unwrap().contains("cannot read catalog"),
         "{j}"
     );
 
@@ -6623,12 +6641,15 @@ async fn nothing_is_attached_to_a_starrocks_engine_yet() {
     }))).await;
     assert_eq!(status, StatusCode::CREATED, "{j}");
     let engine_id = j["id"].as_str().unwrap().to_string();
+    // A readable-by-starrocks kind: this test is about the "StarRocks apply
+    // not supported yet" gate, not can_read (D4: `tpch` is refused by
+    // can_read now, for an unrelated, dedicated-elsewhere reason).
     let (_, j) = call(
         &f,
         "POST",
         "/catalogs",
         &token,
-        Some(serde_json::json!({ "name": unique_catalog_name("b"), "kind": "tpch", "config": {} })),
+        Some(elasticsearch_body(&unique_catalog_name("b"))),
     )
     .await;
     let (status, j) = call(

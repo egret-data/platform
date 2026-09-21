@@ -788,11 +788,21 @@ impl CatalogDef {
     ///
     /// Exhaustive on purpose: no `_` arm, so a new kind or a new JDBC dialect
     /// cannot be added without someone deciding, for both engines, whether it
-    /// is readable. Today every typed kind is readable by both — StarRocks 4.x
-    /// is the floor egret provisions (`DEFAULT_SR_FE_IMAGE`), and it reads all
-    /// of them. An engine pinned to an older FE can still refuse one; that
-    /// refusal arrives as the attachment's `apply_error`, not as a validation
-    /// error, because egret cannot know an overridden image's version.
+    /// is readable. StarRocks 4.x is the floor egret provisions
+    /// (`DEFAULT_SR_FE_IMAGE`), and almost every typed kind is readable by
+    /// both engines at that floor — but `tpch`/`tpcds` is now the first pair
+    /// whose answer actually DIFFERS per engine, not merely a structural
+    /// possibility the exhaustiveness leaves room for: StarRocks' `BENCHMARK`
+    /// connector was added by commit `c019a148` (2026-01-22) and, verified
+    /// against the vendored StarRocks source, has shipped on no release
+    /// branch and no tag — not 4.0, not 4.1, only `main`. So a `benchmark`
+    /// catalog fails to create on every FE egret can actually provision, and
+    /// `can_read` says so rather than leaving the next engine bump to
+    /// discover it live. An engine pinned to an older (or newer, once
+    /// `BENCHMARK` ships) FE can still disagree with the platform-wide
+    /// answer here; that disagreement arrives as the attachment's
+    /// `apply_error`, not as a validation error, because egret cannot know
+    /// an overridden image's exact version.
     pub fn can_read(&self, engine: EngineType) -> bool {
         match (&self.config, engine) {
             (CatalogConfig::Generic(g), e) => g.engines.contains(&e),
@@ -801,10 +811,11 @@ impl CatalogDef {
             (CatalogConfig::DeltaLake(_), EngineType::Trino | EngineType::StarRocks) => true,
             (CatalogConfig::Hudi(_), EngineType::Trino | EngineType::StarRocks) => true,
             (CatalogConfig::Elasticsearch(_), EngineType::Trino | EngineType::StarRocks) => true,
-            (
-                CatalogConfig::Tpch(_) | CatalogConfig::Tpcds(_),
-                EngineType::Trino | EngineType::StarRocks,
-            ) => true,
+            // `BENCHMARK` (StarRocks' tpch/tpcds connector) is `main`-only —
+            // see the doc comment above. Trino's tpch/tpcds connectors are
+            // unaffected.
+            (CatalogConfig::Tpch(_) | CatalogConfig::Tpcds(_), EngineType::Trino) => true,
+            (CatalogConfig::Tpch(_) | CatalogConfig::Tpcds(_), EngineType::StarRocks) => false,
             (CatalogConfig::Jdbc(_), EngineType::Trino) => true,
             (CatalogConfig::Jdbc(j), EngineType::StarRocks) => match j.dialect {
                 // v3.0; Oracle/SQL Server v3.2.9/3.3.1; ClickHouse v3.3.0
@@ -1151,8 +1162,13 @@ mod tests {
                 true,
                 true,
             ),
-            ("tpch", json!({}), true, true),
-            ("tpcds", json!({}), true, true),
+            // D4 correction: StarRocks' `BENCHMARK` connector is `main`-only
+            // (`c019a148`, 2026-01-22) — ships on no release branch or tag —
+            // so `tpch`/`tpcds` is readable by Trino but refused for
+            // StarRocks. The first pair in this table whose two engine
+            // answers actually differ.
+            ("tpch", json!({}), true, false),
+            ("tpcds", json!({}), true, false),
         ];
         for (kind, cfg, trino, sr) in cases {
             let d = parse(kind, cfg.clone()).unwrap();
@@ -1172,7 +1188,8 @@ mod tests {
             assert!(d.can_read(EngineType::Trino), "{dialect}/trino");
             assert!(d.can_read(EngineType::StarRocks), "{dialect}/starrocks");
         }
-        // The only refusal that exists today.
+        // A generic catalog naming only `trino` is refused for `starrocks`
+        // too — a per-catalog refusal, unlike tpch/tpcds' per-kind one above.
         let d = parse_with_advanced(
             "generic",
             json!({ "engines": ["trino"] }),
