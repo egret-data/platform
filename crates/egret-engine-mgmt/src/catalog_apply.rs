@@ -340,10 +340,20 @@ pub(crate) async fn converge_attachment(
             }
             // Nothing to send, and nothing to compensate later.
             Drift::Matching if !already_ours => return Ok(Converged::AlreadyMatching),
-            // `Unverifiable` never lands here: the FE masks those keys, so
-            // "matching" cannot be concluded and an ALTER — which is safe to
-            // run unconditionally — is the only way to be sure. Same for
-            // anything already ours, whose secrets may have rotated.
+            // Both remaining cases, for the same reason: what egret cannot
+            // SEE may still have changed. `Drift::Unverifiable` means every
+            // plain key agreed but at least one key the FE MASKS is set, so
+            // "matching" cannot be concluded; and anything `already_ours` may
+            // have had a secret rotated under it, which the comparison is
+            // blind to by construction. An `ALTER … SET` is safe to run
+            // unconditionally, so it is what both get.
+            //
+            // The consequence, said out loud rather than buried: a catalog
+            // egret did NOT create, whose every comparable key nonetheless
+            // matches what egret would render and which has a masked key set,
+            // is ALTERed rather than refused. Refusing on "cannot tell" would
+            // make a legitimate re-attach of an S3-backed catalog permanently
+            // unattachable, which is the worse failure.
             _ => (
                 ddl.alter_sql(&secrets).map_err(|e| render_err(&name, e))?,
                 Converged::Altered,
