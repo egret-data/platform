@@ -14,9 +14,10 @@ export interface CatalogAttachmentDto {
   engineName: string;
   engineType: string;
   /**
-     * `applied` | `failed` | `pending` (recorded by egret, not yet accepted
-     * by the engine — SP3b D1; only a StarRocks attachment is ever written
-     * that way, and only for as long as its convergence takes).
+     * `applied` | `failed` | `pending`. `pending` means egret has recorded the
+     * attachment and has not yet been able to tell the engine — a StarRocks
+     * engine whose FE is still coming up (5-10 minutes after create), which
+     * the bootstrap or a Retry converges.
      */
   applyStatus: string;
   /** @nullable */

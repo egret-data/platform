@@ -56,9 +56,10 @@ pub(crate) struct CatalogAttachmentDto {
     engine_id: Uuid,
     engine_name: String,
     engine_type: String,
-    /// `applied` | `failed` | `pending` (recorded by egret, not yet accepted
-    /// by the engine — SP3b D1; only a StarRocks attachment is ever written
-    /// that way, and only for as long as its convergence takes).
+    /// `applied` | `failed` | `pending`. `pending` means egret has recorded the
+    /// attachment and has not yet been able to tell the engine — a StarRocks
+    /// engine whose FE is still coming up (5-10 minutes after create), which
+    /// the bootstrap or a Retry converges.
     apply_status: String,
     apply_error: Option<String>,
     applied_at: Option<DateTime<Utc>>,
@@ -584,13 +585,13 @@ async fn attachment_dto(
         ("cid" = Uuid, Path, description = "Registry catalog id"),
     ),
     responses(
-        (status = 201, description = "Attached (an egret warehouse catalog mints a Catalog Client for the engine). For Trino the apply happened first; for StarRocks the attachment is recorded first and converged after, so a 201 may carry `applyStatus: failed` with the engine's error — the Retry route converges it (SP3b D1)", body = CatalogAttachmentDto),
-        (status = 400, description = "The engine cannot read this catalog, the engine reserves this catalog name, or Kubernetes is not configured", body = ErrorBody),
+        (status = 201, description = "Attached. Trino: the catalog was applied to the cluster first, so `applyStatus` is `applied`. StarRocks: the attachment is recorded first and the catalog is created on the FE immediately afterwards, so `applyStatus` is `applied` on success and `failed` (with `applyError`) when the FE could not be reached or refused — the attachment still exists and is converged by `POST …/catalogs/{cid}/apply` or by the engine's next bootstrap", body = CatalogAttachmentDto),
+        (status = 400, description = "The engine cannot read this catalog, the name is one StarRocks reserves, or Kubernetes is not configured", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine or catalog", body = ErrorBody),
         (status = 409, description = "Already attached, or the engine is being deleted", body = ErrorBody),
-        (status = 502, description = "Kubernetes rejected the apply (`code` = `engine_cluster_apply_failed`); nothing was attached", body = ErrorBody),
+        (status = 502, description = "Trino only: Kubernetes rejected the apply (`code` = `engine_cluster_apply_failed`); nothing was attached. A StarRocks FE that rejects the DDL is reported as a `failed` attachment in the 201 body, not as a 502", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -620,13 +621,13 @@ pub(crate) async fn attach_catalog(
         ("cid" = Uuid, Path, description = "Registry catalog id"),
     ),
     responses(
-        (status = 200, description = "Re-applied; the attachment is `applied`", body = ApplyOutcomeDto),
-        (status = 400, description = "The change could not be assembled, or Kubernetes is not configured", body = ErrorBody),
+        (status = 200, description = "Re-applied; the attachment is `applied`. StarRocks: an absent catalog is created and an existing one is updated in place with `ALTER CATALOG … SET`", body = ApplyOutcomeDto),
+        (status = 400, description = "Kubernetes is not configured (Trino), or the catalog cannot be rendered for this engine", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
         (status = 404, description = "No such engine, or the catalog is not attached to it", body = ErrorBody),
         (status = 409, description = "The engine is being deleted", body = ErrorBody),
-        (status = 502, description = "Kubernetes rejected the apply; the attachment stays `failed` with the new error", body = ErrorBody),
+        (status = 502, description = "The engine rejected the apply — Kubernetes for Trino, the FE for StarRocks (including a catalog of this name the FE already holds with different properties); the attachment stays `failed` with the new error", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

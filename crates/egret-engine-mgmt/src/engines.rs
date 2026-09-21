@@ -4121,14 +4121,9 @@ fn spawn_starrocks_catalog_wire(
         // password is a secret EVERY error below could quote — a failed login
         // echoes the credential it was given (fix round 1, F3: this used to
         // scrub against an empty map under a comment that said exactly this).
-        // The key is synthetic: `scrub_secrets` reads only the values, and a
-        // root password resolved from `engines.root_secret_id` has no id worth
-        // carrying here.
-        let fe_secrets: std::collections::BTreeMap<Uuid, String> = fe
-            .root_password
-            .iter()
-            .map(|pw| (Uuid::nil(), pw.clone()))
-            .collect();
+        // `FeTarget::secrets` is the one place this is derived, so a future
+        // caller can't forget the root password the way that fix was needed.
+        let fe_secrets: std::collections::BTreeMap<Uuid, String> = fe.secrets();
 
         // FE-pod-Ready is NOT root-login-ready: the `{name}-initpwd` Job (#268)
         // sets root's password via a SEPARATE Job that races the FE coming up, so
@@ -9358,6 +9353,25 @@ mod tests {
             "CREATE SECURITY INTEGRATION",
             "Getting analyzing error. Detail message: security integration 'egret_oidc' already exists.",
         );
+        // Premise: the injected FE message is recognized as already-exists —
+        // checked independently of the run below, because if `is_already_exists`
+        // ever regressed to `false` here, the general `Err(e)` arm would take
+        // over, stop at its OWN checkpoint before ever reaching checkpoint 5,
+        // and still send no `ALTER` — leaving every assertion below green while
+        // no longer exercising checkpoint 5 at all.
+        let probe_fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe target");
+        assert!(
+            matches!(
+                st.starrocks_ddl
+                    .execute(&probe_fe, "CREATE SECURITY INTEGRATION premise_probe")
+                    .await,
+                Err(e) if e.is_already_exists()
+            ),
+            "premise: the injected FE failure must be recognized as already-exists"
+        );
+        fake.clear_executed();
         let store = st.engine_mgmt.clone();
         let engine_id = engine.id;
         fake.on_execute(move |sql| {

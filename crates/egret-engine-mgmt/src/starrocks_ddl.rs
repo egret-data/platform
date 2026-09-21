@@ -102,6 +102,23 @@ pub struct FeTarget {
     pub tls_cert_pem: Option<String>,
 }
 
+impl FeTarget {
+    /// The secrets this target's own fields carry, keyed the way
+    /// [`FeError::scrubbed`] wants them: synthetically, since `scrub_secrets`
+    /// reads only the values. Today that is just the root password every
+    /// statement on this connection logs in with (fix round 1, F3: a caller
+    /// that scrubs against a hand-rolled map instead of this one can forget
+    /// it, which is exactly what happened once already). A third caller
+    /// resolving an FE target should build its secrets map from here rather
+    /// than re-deriving it.
+    pub fn secrets(&self) -> BTreeMap<uuid::Uuid, String> {
+        self.root_password
+            .iter()
+            .map(|pw| (uuid::Uuid::nil(), pw.clone()))
+            .collect()
+    }
+}
+
 /// How much of the FE's (already redacted) error text a [`FeError`]
 /// keeps, once the whole [`fe_error`] pipeline has decided the text is not
 /// withheld. Long enough to be diagnostic — the FE's own `ERROR <code>
@@ -1263,11 +1280,6 @@ mod tests {
         assert!(e.excerpt.contains("rejected"), "excerpt={}", e.excerpt);
     }
 
-    /// The module doc's honest boundary, and the accessor that closes it
-    /// (SP3b Task 4, carried from Task 3's review). A SHORT, unquoted secret
-    /// in an otherwise well-formed message survives every shape-based pass
-    /// here — that is the residual, reproduced rather than asserted away —
-    /// and `scrubbed`, which is the only way to read the excerpt at all,
     /// The predicate that decides repair-vs-warn, against the message
     /// StarRocks actually sends. Measured on a live FE 3.x:
     ///
@@ -1349,6 +1361,11 @@ mod tests {
         assert!(e.is_already_exists());
     }
 
+    /// The module doc's honest boundary, and the accessor that closes it
+    /// (SP3b Task 4, carried from Task 3's review). A SHORT, unquoted secret
+    /// in an otherwise well-formed message survives every shape-based pass
+    /// here — that is the residual, reproduced rather than asserted away —
+    /// and `scrubbed`, which is the only way to read the excerpt at all,
     /// removes it. `Display` carries the FE code and no text, so the
     /// `apply_error = e.to_string()` shortcut can no longer leak.
     #[test]
