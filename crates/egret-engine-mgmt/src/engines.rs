@@ -9108,8 +9108,7 @@ mod tests {
             crate::catalog_apply::CatalogChange::Detach(ids[&name]),
         )
         .await
-        .err()
-        .expect("premise: the FE refused the DROP");
+        .expect_err("premise: the FE refused the DROP");
         let msg = err.message();
         assert!(
             !msg.contains(SHORT_ROOT_PW),
