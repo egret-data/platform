@@ -8,27 +8,47 @@
 //! whole secret occurrences is not enough on its own — an FE error that
 //! quotes a *truncated* statement can leak a fragment no substring match
 //! catches — so an error out of this module is never the raw FE message: it
-//! is [`FeError`], and [`FeError::excerpt`] has already had every quoted
-//! fragment replaced (fix round 2 review, F-14's follow-up) before it was
-//! capped to [`FE_ERROR_EXCERPT_MAX`], with the FE's own error code pulled
-//! out separately. Redaction and code-extraction happen here, because this
-//! is the first code to see the FE's raw text.
+//! is [`FeError`], built by [`fe_error`] through a pipeline (normalise
+//! `mysql_async`'s own quote convention, redact quoted spans, redact
+//! unquoted URL-like and opaque-token shapes, then — the fail-closed step —
+//! withhold the excerpt entirely if any quote character survives all of
+//! that) before it is capped to [`FE_ERROR_EXCERPT_MAX`], with the FE's own
+//! error code pulled out separately. This is the first code to see the FE's
+//! raw text, which is why the pipeline lives here.
 //!
-//! **The guarantee `FeError::excerpt` makes, stated plainly**: it never
-//! contains a whole secret, and it never contains a quoted fragment of the
-//! statement the FE echoed back — single-, double- or backtick-quoted spans
-//! are replaced with a marker regardless of whether egret's caller knows
-//! that span is secret, so the leak is closed even when no secrets map is
-//! available and even when the FE's own echo was itself truncated (measured
-//! live: a real FE's `'S3CRET'` fragment is a PREFIX of a 16-char secret,
-//! but the quotes around it are still well-formed — StarRocks' own error
-//! formatter closes them — so a quote-pair redaction catches it whole).
-//! **What it does NOT guarantee**: an FE that puts secret material in its
-//! UNQUOTED prose (nothing observed here does; StarRocks always quotes the
-//! token it echoes) would still leak, and a caller with a resolved secrets
-//! map should still run `egret_catalog_registry::scrub_secrets` over
-//! `excerpt` as a second, defensive layer before it reaches `apply_error` or
-//! a response — this module has no secrets map to do that itself.
+//! **The guarantee `FeError::excerpt` makes, stated plainly (fix round 3 —
+//! rounds 1 and 2 both overstated this, corrected live each time by
+//! measured probes)**: it never contains a whole secret; it never contains a
+//! `scheme://…` URL or a 20-plus-character unquoted opaque run; and it never
+//! contains a quoted fragment of the FE's echo — INCLUDING a malformed one. A
+//! stray apostrophe in prose, a SQL-escaped `\'`, a `\"` (reachable from
+//! egret's own `escape_dq`), or an unterminated echo all make the quoting
+//! unpairable, and an unpairable span is never trusted on its own: either it
+//! gets swept up whole by the opaque-run redaction (the mis-paired remainder
+//! plus the `<redacted>` marker glued to it is long enough to cross
+//! [`MIN_OPAQUE_RUN`] in every case measured so far), or — when it isn't long
+//! enough for that — the fail-closed check finds the leftover quote character
+//! and withholds the WHOLE excerpt rather than ship a partial redaction this
+//! module cannot prove correct. Either way the secret does not survive; which
+//! of the two happens is not something a caller should rely on.
+//!
+//! **What it does NOT guarantee, and cannot, stated as an honest boundary
+//! rather than another absolute sentence**: this module has no secrets map,
+//! so a SHORT (under [`MIN_OPAQUE_RUN`] characters), entirely UNQUOTED token
+//! that merely looks like ordinary prose is invisible to every check here —
+//! there is a real, standing shape where such a token reaches
+//! `FeError::excerpt` and, from there, `apply_error`: an FE message that
+//! contains a short unquoted secret alongside OTHER, unrelated, correctly
+//! paired quoted content elsewhere (so the fail-closed check finds nothing
+//! wrong) and no `scheme://` prefix and no adjacent long run to be swept up
+//! by (so neither redaction pass reaches it either). Nothing observed on a
+//! live 4.1.4 FE takes this shape — StarRocks always quotes what it echoes —
+//! but this module cannot prove no FE message ever will. Closing THAT needs
+//! the caller's own resolved secret values, which is exactly why
+//! `egret_catalog_registry::scrub_secrets` over `excerpt` is **REQUIRED at
+//! the caller, not defensive**: Tasks 4 and 5, as the ones that resolve a
+//! catalog's secrets and write `apply_error`, own running it before any
+//! `FeError::excerpt` reaches that column or an API response.
 //!
 //! SP3b Task 3 introduces this seam without yet wiring it in:
 //! `spawn_starrocks_catalog_wire`'s bootstrap and `run_starrocks_ddl` (both in
@@ -75,38 +95,86 @@ pub struct FeTarget {
     pub tls_cert_pem: Option<String>,
 }
 
-/// How much of the FE's (already quote-redacted) error text
-/// [`FeError::excerpt`] keeps. Long enough to be diagnostic — the FE's own
-/// `ERROR <code> (<sqlstate>): …` preamble is well under this — short enough
-/// to bound how much unquoted prose an unusually verbose FE message can
-/// carry. **This cap is a secondary bound, not the mechanism that keeps a
-/// secret out**: on its own it does nothing against a short credential that
-/// falls entirely inside it (measured live: a real FE's `'S3CRET'` fragment,
-/// a prefix of a 16-char secret, lands around character 130 of a 189-char
-/// message — well inside 200 either way). [`redact_quoted`] is what actually
-/// closes that: it runs on the RAW, uncapped text and removes every quoted
-/// span whole, so a quoted fragment that happens to straddle this cap's
-/// boundary is never split into an unredacted, unterminated remainder.
+/// How much of the FE's (already redacted) error text [`FeError::excerpt`]
+/// keeps, once the whole [`fe_error`] pipeline has decided the text is not
+/// withheld. Long enough to be diagnostic — the FE's own `ERROR <code>
+/// (<sqlstate>): …` preamble is well under this — short enough to bound how
+/// much unquoted prose an unusually verbose FE message can carry. **This cap
+/// is a secondary bound, not the mechanism that keeps a secret out**: on its
+/// own it does nothing against a short credential that falls entirely inside
+/// it (measured live: a real FE's `'S3CRET'` fragment, a prefix of a 16-char
+/// secret, lands around character 130 of a 189-char message — well inside
+/// 200 either way). Redaction is what actually closes that, and it MUST run
+/// on the RAW, uncapped text before this cap is applied: a quoted span that
+/// straddles the cap boundary would otherwise leave a truncated, unredacted
+/// prefix in the capped output with no closing quote left for a later pass
+/// to find.
 pub const FE_ERROR_EXCERPT_MAX: usize = 200;
 
-/// What every quoted fragment in a raw FE message is replaced with.
+/// What a redacted fragment is replaced with.
 const REDACTED: &str = "<redacted>";
+
+/// What the excerpt becomes when the fail-closed check in [`fe_error`] finds
+/// a quote character survived every redaction pass — the text was not
+/// something this module could reason about, so no excerpt is a smaller harm
+/// than a credential in `apply_error`. The FE error code, when the raw text
+/// had one, is still preserved on [`FeError::code`].
+const WITHHELD: &str =
+    "(diagnostic withheld: could not confirm the FE's message was fully redacted)";
+
+/// The shortest unbroken (no-whitespace) run of characters this pipeline
+/// treats as an opaque token worth redacting even with no quoting at all — a
+/// credential, a base64 blob, a `user:pass` pair. **20, justified in one
+/// line**: short enough that no FE message this module has observed (error
+/// codes, sqlstates, short identifiers, the ordinary words around them)
+/// reaches it, long enough that the accepted cost — an unquoted long
+/// class/package name or path the FE might someday echo gets redacted too —
+/// is a smaller loss than letting a credential-length token of the same
+/// shape through unredacted.
+const MIN_OPAQUE_RUN: usize = 20;
+
+/// `mysql_async`'s own `Error` Display wraps its cause as `` `…' `` — an
+/// ASCII "smart quote" convention (`thiserror`'s `#[error("… \`{}'", _0)]`
+/// on `Error::Server`/`Driver`/`Url`; verified against
+/// `third_party/mysql_async/src/error/mod.rs`), backtick to open, a bare
+/// apostrophe to close. Left alone this is a quote character with no
+/// matching partner of its own kind, which does two kinds of damage: it can
+/// pair against an UNRELATED inner quote (shifting a later redaction's span
+/// off whatever it was supposed to cover), and — because [`fe_error`]'s
+/// fail-closed step withholds on ANY residual quote — it would make every
+/// single real error withhold, since this wrapper is present on nearly
+/// everything `MysqlDdlRunner` can return. Must run before anything else.
+/// Targeted at the EXACT format above (`": \`"` then the cause then a
+/// trailing `'`), not a generic "strip the ends" heuristic, so it does
+/// nothing to text that doesn't have this specific shape (an `Io` or
+/// `Other` variant, `FakeStarRocksDdl`'s own plain test strings, …).
+fn normalize_mysql_async_wrapper(raw: &str) -> String {
+    let Some(rest) = raw.strip_suffix('\'') else {
+        return raw.to_string();
+    };
+    let Some(idx) = rest.find(": `") else {
+        return raw.to_string();
+    };
+    let mut out = String::with_capacity(rest.len());
+    out.push_str(&rest[..idx]);
+    out.push_str(": ");
+    out.push_str(&rest[idx + ": `".len()..]);
+    out
+}
 
 /// Replace every single-, double- or backtick-quoted fragment in `raw` with
 /// [`REDACTED`], keeping the quote characters and everything outside them.
 /// In an FE error the quoted fragments ARE the echoed statement text — the
 /// token the parser choked on, a property name, a value (or a truncated
-/// prefix of one) — so this closes the WHOLE class D6's addendum exists for,
-/// not just the specific secrets a caller happens to know about: it works
-/// whether or not a secrets map is ever available, and whether or not the
-/// FE's own echo was truncated relative to the real value, because the
-/// quotes StarRocks' error formatter prints around whatever it echoes are
-/// still well-formed even when what's inside them is only a prefix.
-///
-/// MUST run before [`FE_ERROR_EXCERPT_MAX`] capping, not after: a quoted
-/// span that straddles the cap boundary would otherwise leave a truncated,
-/// unredacted prefix in the capped output with no closing quote left for a
-/// later pass to find — exactly the leak this exists to close.
+/// prefix of one). **This step alone is not sound** — it assumes quoting is
+/// balanced and unescaped, which a stray apostrophe in prose, a SQL-escaped
+/// `\'`, or a `\"` (reachable from egret's own [`escape_dq`]) all violate,
+/// each one re-pairing the regex against the WRONG partner quote and leaving
+/// a secret exposed between two quote characters that individually look
+/// fine. That is exactly why [`fe_error`] does not trust this function's
+/// output on its own: it checks afterward for any leftover quote character
+/// and withholds the whole excerpt if it finds one, rather than shipping a
+/// redaction this function cannot itself prove correct.
 fn redact_quoted(raw: &str) -> String {
     static QUOTED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = QUOTED.get_or_init(|| {
@@ -116,22 +184,61 @@ fn redact_quoted(raw: &str) -> String {
     re.replace_all(raw, REDACTED).into_owned()
 }
 
+/// Replace every `scheme://…` token in `text` with [`REDACTED`], up to the
+/// next whitespace or quote character — closes the leak fix round 1's live
+/// investigation measured: a `driver_url` (which can carry embedded HTTP
+/// Basic credentials) echoed by the FE with NO quoting at all
+/// (`… msg: Cannot get driver from url: http://127.0.0.1:1/x.jar}`).
+fn redact_urls(text: &str) -> String {
+    static URL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = URL.get_or_init(|| {
+        regex::Regex::new(r#"[A-Za-z][A-Za-z0-9+.-]*://[^\s'"`]+"#)
+            .expect("static URL pattern compiles")
+    });
+    re.replace_all(text, REDACTED).into_owned()
+}
+
+/// Replace every unbroken run of [`MIN_OPAQUE_RUN`] or more non-whitespace
+/// characters in `text` with [`REDACTED`] — the catch-all for a secret the
+/// FE echoes with no quoting and no `scheme://` prefix: a bare credential, a
+/// base64 blob, a `user:pass` pair.
+fn redact_opaque_runs(text: &str) -> String {
+    static OPAQUE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = OPAQUE.get_or_init(|| {
+        regex::Regex::new(&format!(r"\S{{{MIN_OPAQUE_RUN},}}"))
+            .expect("static opaque-run pattern compiles")
+    });
+    re.replace_all(text, REDACTED).into_owned()
+}
+
+/// Whether any single-, double- or backtick-quote character remains in
+/// `text` — the fail-closed check [`fe_error`] runs after every redaction
+/// pass. A survivor means the quoting could not be confidently paired
+/// (unbalanced, escaped, or truncated), so nothing this pipeline redacted
+/// can be trusted either: the whole excerpt is withheld rather than shipped
+/// partially redacted.
+fn has_residual_quote(text: &str) -> bool {
+    text.contains(['\'', '"', '`'])
+}
+
 /// The FE's answer to a failed statement, reduced to what may safely leave
 /// this module: never the statement (D6 addendum), never a quoted fragment
-/// of it (see [`redact_quoted`]), and never unboundedly long (see
-/// [`FE_ERROR_EXCERPT_MAX`]).
+/// of it, never a bare URL or long opaque token, and — when [`fe_error`]'s
+/// fail-closed check can't confirm all of that held — no text at all. See
+/// the module doc's "guarantee" paragraph for exactly what this promises.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeError {
     /// The FE's own numeric error code (StarRocks' `ERROR <code>
     /// (<sqlstate>): …` convention, e.g. `1064`, `5078`), when the message
     /// contains one. `None` for a failure that never reached the FE at all
-    /// (a connect or statement timeout has no FE error code).
+    /// (a connect or statement timeout has no FE error code), or when the
+    /// excerpt was withheld and the raw text simply had none.
     pub code: Option<u32>,
-    /// A bounded excerpt of the FE's message with every quoted fragment
-    /// already replaced by [`REDACTED`] — see the module doc's "guarantee"
-    /// paragraph for exactly what that does and does not promise. Not
-    /// additionally scrubbed against any particular catalog's secrets — this
-    /// trait is never given that map.
+    /// A bounded, redacted excerpt of the FE's message — or [`WITHHELD`]
+    /// when [`fe_error`]'s fail-closed check found a quote character it
+    /// could not account for. Not additionally scrubbed against any
+    /// particular catalog's secrets — this trait is never given that map;
+    /// see the module doc for why a caller must still run `scrub_secrets`.
     pub excerpt: String,
 }
 
@@ -145,21 +252,42 @@ impl std::fmt::Display for FeError {
 }
 
 /// Build a [`FeError`] from a raw failure (a `mysql_async::Error`, a timeout
-/// message, or — in [`FakeStarRocksDdl`] — a test-authored string): pull the
-/// FE's own error code out of the `ERROR <code> (…)` preamble when present,
-/// [`redact_quoted`] the RAW text (before capping — see that function's doc
-/// for why the order matters), then cap at [`FE_ERROR_EXCERPT_MAX`].
+/// message, or — in [`FakeStarRocksDdl`] — a test-authored string).
+///
+/// Pipeline, in order (each step's own doc explains why this order):
+/// 1. [`normalize_mysql_async_wrapper`] — strip the dependency's own
+///    asymmetric `` `…' `` quoting before anything else can be confused by it.
+/// 2. [`redact_quoted`] — balanced quoted spans.
+/// 3. [`redact_urls`] then [`redact_opaque_runs`] — unquoted shapes that
+///    still carry secrets.
+/// 4. [`has_residual_quote`] — fail closed: if the four steps above could
+///    not fully account for every quote character in the text, withhold the
+///    whole excerpt (keep [`WITHHELD`]) rather than ship a partial redaction
+///    this module cannot prove correct.
+///
+/// The FE's own error code is read off the ORIGINAL raw text (never inside
+/// a quoted span, so redaction never touches it) regardless of whether the
+/// excerpt ends up withheld.
 fn fe_error(raw: impl std::fmt::Display) -> FeError {
     let raw = raw.to_string();
     static CODE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = CODE.get_or_init(|| {
+    let code_re = CODE.get_or_init(|| {
         regex::Regex::new(r"ERROR (\d+)").expect("static FE error code pattern compiles")
     });
-    let code = re.captures(&raw).and_then(|c| c[1].parse::<u32>().ok());
-    let excerpt: String = redact_quoted(&raw)
-        .chars()
-        .take(FE_ERROR_EXCERPT_MAX)
-        .collect();
+    let code = code_re
+        .captures(&raw)
+        .and_then(|c| c[1].parse::<u32>().ok());
+
+    let redacted = normalize_mysql_async_wrapper(&raw);
+    let redacted = redact_quoted(&redacted);
+    let redacted = redact_urls(&redacted);
+    let redacted = redact_opaque_runs(&redacted);
+
+    let excerpt = if has_residual_quote(&redacted) {
+        WITHHELD.to_string()
+    } else {
+        redacted.chars().take(FE_ERROR_EXCERPT_MAX).collect()
+    };
     FeError { code, excerpt }
 }
 
@@ -770,8 +898,10 @@ mod tests {
         // Multi-byte UTF-8 scalars straddling the cap boundary: proves the
         // cap can never split a codepoint (it can't, using `.chars()` — but
         // that is exactly the invariant a future rewrite to byte-slicing
-        // would break, and this is what would catch it).
-        let body: String = std::iter::repeat_n('é', 400).collect();
+        // would break, and this is what would catch it). Space-separated so
+        // no single run reaches `MIN_OPAQUE_RUN` and gets redacted out from
+        // under this test — that redaction gets its own tests below.
+        let body: String = std::iter::repeat_n("é ", 200).collect();
         let raw = format!("{preamble}{body}");
         assert!(
             raw.chars().count() > FE_ERROR_EXCERPT_MAX,
@@ -849,6 +979,166 @@ mod tests {
         assert_eq!(
             e.excerpt,
             format!("rejected: {REDACTED} = {REDACTED} for catalog {REDACTED}")
+        );
+    }
+
+    // ---- Fix round 3: the four ways round 2's `redact_quoted` alone leaked
+    // a secret, all measured live by the re-reviewer, plus the unquoted-URL
+    // case round 1 measured. Each of the first four makes the quoting
+    // unpairable — a naive single-pass regex cannot tell that apart from
+    // ordinary text, which is exactly why `fe_error` never trusts it alone.
+    // What saves each case is either `redact_opaque_runs` (when the
+    // mis-paired remainder glued to the `<redacted>` marker crosses
+    // `MIN_OPAQUE_RUN`) or the fail-closed residual-quote check (when it
+    // doesn't) — these tests assert the one thing that must hold either way:
+    // the secret is gone. `an_unterminated_echo_no_longer_leaks_the_secret`
+    // is the one case short enough to rely on the fail-closed path alone,
+    // and asserts that explicitly.
+
+    /// Case 1, the re-reviewer's exact string: a stray apostrophe earlier in
+    /// the prose (`couldn't`) re-pairs the regex against the wrong partner,
+    /// which shifts the "redacted" span off the secret entirely — round 2's
+    /// `redact_quoted` alone produced `FE couldn<redacted>S3CRET-PLAINTEXT'
+    /// here`, leaking the secret in the clear.
+    #[test]
+    fn an_apostrophe_in_prose_no_longer_leaks_the_secret_it_shifts_past() {
+        let raw = "FE couldn't parse input 'S3CRET-PLAINTEXT' here";
+        let e = fe_error(raw);
+        // Round 2's `redact_quoted` alone produced `FE couldn<redacted>S3CRET-PLAINTEXT'
+        // here` — the secret in the clear. Here the mis-paired span plus the
+        // `<redacted>` marker glued to the leftover `S3CRET-PLAINTEXT'` forms
+        // one 20+-char run, which `redact_opaque_runs` sweeps whole — the
+        // secret never has to reach the fail-closed check at all. Whichever
+        // path actually saves it (redaction or withholding), the one thing
+        // that must hold is the secret being gone.
+        assert!(!e.excerpt.contains("S3CRET"), "excerpt={}", e.excerpt);
+    }
+
+    /// Case 2, the re-reviewer's exact string: a SQL-escaped `\'` inside the
+    /// echoed value has the same effect as case 1 — an odd number of `'`
+    /// characters, so the last one pairs with nothing.
+    #[test]
+    fn a_sql_escaped_quote_no_longer_leaks_the_secret_it_shifts_past() {
+        let raw = "Unexpected input 'O\\'BRIEN-S3CRET', try again";
+        let e = fe_error(raw);
+        // Same shape as the apostrophe case: the leftover `BRIEN-S3CRET',`
+        // glued to the `<redacted>` marker is long enough for
+        // `redact_opaque_runs` to sweep whole.
+        assert!(!e.excerpt.contains("S3CRET"), "excerpt={}", e.excerpt);
+    }
+
+    /// Case 3, the re-reviewer's exact string: a `\"`-escaped double quote —
+    /// reachable from egret's OWN renderer (`escape_dq` emits exactly this
+    /// shape for a secret containing a literal `"`), not only from the FE.
+    #[test]
+    fn a_backslash_escaped_double_quote_no_longer_leaks_the_secret_it_shifts_past() {
+        let raw = "rejected \"pass\\\"word-S3CRET\" value";
+        let e = fe_error(raw);
+        // Same shape again: `word-S3CRET"` glued to the `<redacted>` marker
+        // is long enough for `redact_opaque_runs` to sweep whole.
+        assert!(!e.excerpt.contains("S3CRET"), "excerpt={}", e.excerpt);
+    }
+
+    /// Case 4, the re-reviewer's exact string: the FE's own echo is cut off
+    /// mid-value, with no closing quote anywhere — round 2's `redact_quoted`
+    /// left this one completely untouched (no pair to match at all).
+    #[test]
+    fn an_unterminated_echo_no_longer_leaks_the_secret() {
+        let raw = "Unexpected input 'S3CRET-PLAINTEXT";
+        let e = fe_error(raw);
+        assert!(!e.excerpt.contains("S3CRET"), "excerpt={}", e.excerpt);
+        assert_eq!(e.excerpt, WITHHELD, "excerpt={}", e.excerpt);
+    }
+
+    /// The fix round 1 case, re-closed: an unquoted URL, no quote characters
+    /// anywhere in the message, so the fail-closed check must NOT withhold —
+    /// `redact_urls` has to do the actual work, and the surrounding unquoted
+    /// prose (what an operator reads) must survive. Exact reply the original
+    /// F-3 investigation captured for a `driver_url` echoed by a real FE.
+    #[test]
+    fn an_unquoted_url_is_redacted_without_being_withheld() {
+        let raw = "Server error: `ERROR 1064 (HY000): connector create failed {… msg: \
+                    Cannot get driver from url: http://127.0.0.1:1/x.jar}'";
+        let e = fe_error(raw);
+        assert_eq!(e.code, Some(1064));
+        assert!(!e.excerpt.contains("127.0.0.1"), "excerpt={}", e.excerpt);
+        assert!(!e.excerpt.contains(".jar"), "excerpt={}", e.excerpt);
+        assert_ne!(
+            e.excerpt, WITHHELD,
+            "the unquoted-URL case must not fail closed: excerpt={}",
+            e.excerpt
+        );
+        assert!(e.excerpt.contains(REDACTED), "excerpt={}", e.excerpt);
+        assert!(
+            e.excerpt.contains("connector create failed"),
+            "excerpt={}",
+            e.excerpt
+        );
+        assert!(
+            e.excerpt.contains("Cannot get driver from url"),
+            "excerpt={}",
+            e.excerpt
+        );
+    }
+
+    /// The other unquoted shape: a bare opaque token (credential, base64
+    /// blob, `user:pass`) with no `scheme://` prefix at all.
+    #[test]
+    fn a_long_unquoted_opaque_token_is_redacted_without_being_withheld() {
+        let raw = "auth failed for token AKIAABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 rejected";
+        let e = fe_error(raw);
+        assert!(
+            !e.excerpt
+                .contains("AKIAABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+            "excerpt={}",
+            e.excerpt
+        );
+        assert_ne!(e.excerpt, WITHHELD, "excerpt={}", e.excerpt);
+        assert!(
+            e.excerpt.contains("auth failed for token"),
+            "excerpt={}",
+            e.excerpt
+        );
+        assert!(e.excerpt.contains("rejected"), "excerpt={}", e.excerpt);
+    }
+
+    /// `normalize_mysql_async_wrapper` in isolation: strips EXACTLY the
+    /// `": \`" ... "'"` shape `thiserror` produces for `Error::Server` (and
+    /// `Driver`/`Url`), and leaves everything else — no wrapper present, or
+    /// text that merely happens to end in a quote — untouched.
+    #[test]
+    fn normalize_mysql_async_wrapper_strips_exactly_the_known_shape() {
+        assert_eq!(
+            normalize_mysql_async_wrapper("Server error: `ERROR 1064 (HY000): boom'"),
+            "Server error: ERROR 1064 (HY000): boom"
+        );
+        assert_eq!(
+            normalize_mysql_async_wrapper("Input/output error: connection reset"),
+            "Input/output error: connection reset",
+            "no wrapper shape present; must pass through unchanged"
+        );
+        assert_eq!(
+            normalize_mysql_async_wrapper("plain text ending in a quote'"),
+            "plain text ending in a quote'",
+            "ends in a quote but has no `: \\`` — not this wrapper"
+        );
+    }
+
+    /// The `MIN_OPAQUE_RUN` boundary, pinned directly: one character under
+    /// is left alone, exactly at it is redacted.
+    #[test]
+    fn redact_opaque_runs_threshold_is_exactly_min_opaque_run() {
+        let just_under = "x".repeat(MIN_OPAQUE_RUN - 1);
+        let just_at = "x".repeat(MIN_OPAQUE_RUN);
+        assert_eq!(
+            redact_opaque_runs(&just_under),
+            just_under,
+            "one char under the threshold must survive untouched"
+        );
+        assert_eq!(
+            redact_opaque_runs(&just_at),
+            REDACTED,
+            "exactly at the threshold must be redacted"
         );
     }
 
