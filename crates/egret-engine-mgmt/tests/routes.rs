@@ -7232,9 +7232,13 @@ async fn a_catalog_egret_cannot_remember_is_dropped_again() {
         None,
     )
     .await;
-    assert_ne!(
+    // Not a success, and pinned exactly: `set_apply_applied` answers
+    // `NotFound` for a row that is gone, which the route maps to 404. The
+    // invariant is that it is not a 201 — a response claiming the attach
+    // happened while the FE has been rolled back would be the worst of both.
+    assert_eq!(
         status,
-        StatusCode::CREATED,
+        StatusCode::NOT_FOUND,
         "an attach egret could not record is not a success; {j}"
     );
     let sent = f.starrocks_ddl.executed();
