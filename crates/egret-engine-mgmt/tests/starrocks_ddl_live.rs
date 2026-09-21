@@ -131,7 +131,11 @@ async fn run(fe: &FeTarget, name: &str) -> Result<(), String> {
         .execute(fe, &ddl.create_sql(&secrets).map_err(|e| e.to_string())?)
         .await
     {
-        Err(e) if scrub(&e).to_lowercase().contains("already exists") => {}
+        // `is_already_exists`, decided inside `fe_error` from the RAW message,
+        // and NOT a `contains` on the scrubbed string this used to ask: a
+        // withheld or over-capped excerpt would turn a correct FE reply into a
+        // named failure here (final whole-branch review, F1).
+        Err(e) if e.is_already_exists() => {}
         Err(e) => {
             return Err(format!(
                 "second CREATE failed for a different reason: {}",

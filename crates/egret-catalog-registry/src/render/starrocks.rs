@@ -573,6 +573,45 @@ pub struct StarRocksCatalogDdl {
     pub properties: BTreeMap<String, PropValue>,
 }
 
+/// Which statement [`StarRocksCatalogDdl::redacted`] renders. Exists so the
+/// log line next to a failed statement names the statement that actually ran:
+/// `converge_attachment` sends a `CREATE` or an `ALTER` depending on what the
+/// FE already holds, and `redacted` used to say `CREATE` either way (final
+/// whole-branch review, F4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatementForm {
+    Create,
+    Alter,
+}
+
+/// Whether a plain property value is shaped like a URL, and so may carry
+/// credentials in its userinfo or its query — `https://user:pass@mirror/…`,
+/// the shape `driver_url` can legitimately take against an internal artifact
+/// mirror.
+///
+/// The same judgement `egret_engine_mgmt::starrocks_ddl::redact_urls` makes
+/// about the same strings when they appear in an FE error, expressed here for
+/// property VALUES rather than prose: a scheme, `://`, and a non-empty
+/// remainder. `jdbc:postgresql://…` matches (on its inner `postgresql://`),
+/// which is what `redact_urls`' regex does too.
+fn looks_like_url(value: &str) -> bool {
+    let Some(pos) = value.find("://") else {
+        return false;
+    };
+    if pos == 0 || pos + 3 >= value.len() {
+        return false;
+    }
+    // Walk back from `://` over scheme-legal characters; the earliest one
+    // reached is the scheme's first character, which a scheme must start with
+    // a letter at.
+    value[..pos]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+        .last()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+}
+
 impl StarRocksCatalogDdl {
     /// Builds the `"key" = "value"` list. `render_starrocks`'s line-break
     /// refusal only ever sees `PropValue::Plain` values — a secret's
@@ -642,24 +681,53 @@ impl StarRocksCatalogDdl {
     /// sensitive key — `advanced` cannot hold one (validation refuses it), but
     /// a redaction that depends on that invariant holding elsewhere is a
     /// redaction waiting to fail.
-    pub fn redacted(&self) -> String {
+    ///
+    /// …and so does any plain value shaped like a URL (final whole-branch
+    /// review, F4). `driver_url` matches no sensitive key, so it used to be
+    /// printed verbatim — while `egret_engine_mgmt::starrocks_ddl`'s
+    /// `redact_urls` masks exactly that value out of an FE error message, with
+    /// a doc saying why: *"a `driver_url` (which can carry embedded HTTP Basic
+    /// credentials)"*. An air-gapped deployment repointing
+    /// `[starrocks.jdbc_drivers]` at an internal mirror behind basic auth, or a
+    /// per-catalog `advanced.starrocks.driver_url` (validated for presence, not
+    /// shape), wrote that credential into a WARN log through this function
+    /// while the other half of the codebase called the same string a secret.
+    /// The two now agree, and they agree by the same rule — the whole URL, not
+    /// a cleverer partial mask that has to be right about where the userinfo
+    /// ends.
+    ///
+    /// `form` picks the statement this renders as. It is NOT cosmetic: the
+    /// only caller logs this next to a failed statement, and hard-coding
+    /// `CREATE EXTERNAL CATALOG` reported a statement that was never sent
+    /// whenever the failure was an `ALTER`.
+    pub fn redacted(&self, form: StatementForm) -> String {
         let props: Vec<String> = self
             .properties
             .iter()
+            // `ALTER CATALOG … SET` never re-sends `type` (CatalogAnalyzer
+            // refuses it by key), so neither does its redaction — same rule as
+            // `body(.., alter = true)`.
+            .filter(|(k, _)| !(form == StatementForm::Alter && k.as_str() == "type"))
             .map(|(k, v)| {
                 let shown = match v {
                     PropValue::Secret(_) => "******",
                     PropValue::Plain(_) if is_sensitive_key(k) => "******",
+                    PropValue::Plain(s) if looks_like_url(s) => "******",
                     PropValue::Plain(s) => s.as_str(),
                 };
                 format!(r#""{}" = "{}""#, escape_dq(k), escape_dq(shown))
             })
             .collect();
-        format!(
-            "CREATE EXTERNAL CATALOG `{}` PROPERTIES ({})",
-            escape_ident(&self.name),
-            props.join(", ")
-        )
+        let name = escape_ident(&self.name);
+        match form {
+            StatementForm::Create => format!(
+                "CREATE EXTERNAL CATALOG `{name}` PROPERTIES ({})",
+                props.join(", ")
+            ),
+            StatementForm::Alter => {
+                format!("ALTER CATALOG `{name}` SET ({})", props.join(", "))
+            }
+        }
     }
 
     pub fn secret_ids(&self) -> BTreeSet<Uuid> {
@@ -803,7 +871,7 @@ mod tests {
         );
         assert!(!sql.contains("iceberg.catalog.token"), "no static bearer");
         // D6: the redacted form is the only one that may be logged.
-        let red = ddl.redacted();
+        let red = ddl.redacted(StatementForm::Create);
         assert!(
             red.contains(r#""iceberg.catalog.credential" = "******""#),
             "red={red}"
@@ -1367,7 +1435,7 @@ mod tests {
             "a secret-valued property must never be comparable: comparable={comparable:?}"
         );
 
-        let red = ddl.redacted();
+        let red = ddl.redacted(StatementForm::Create);
         assert!(red.contains(r#""type" = "paimon""#), "red={red}");
         assert!(
             red.contains(r#""paimon.catalog.type" = "filesystem""#),
@@ -1375,5 +1443,108 @@ mod tests {
         );
         assert!(red.contains(r#""paimon.password" = "******""#), "red={red}");
         assert!(!red.contains("p4ssw0rd"), "red={red}");
+    }
+
+    /// F4 (final whole-branch review), half one: `redacted` is the only form
+    /// of a statement that may be logged, and it used to print `driver_url`
+    /// verbatim — while `egret_engine_mgmt::starrocks_ddl::redact_urls` masks
+    /// exactly that value out of an FE ERROR, documenting it as able to carry
+    /// embedded HTTP Basic credentials. The two halves of the codebase
+    /// disagreed about the same string; the log was the half that leaked.
+    ///
+    /// The rule is now the URL SHAPE, the same judgement `redact_urls` makes,
+    /// so `jdbc_uri` goes with it: a JDBC URI can carry a password in its
+    /// query string just as a driver mirror can carry one in its userinfo.
+    /// What a reader of the log keeps is the catalog name (in the log line
+    /// itself), every property KEY, and every non-URL value.
+    #[test]
+    fn redacted_masks_url_valued_properties_the_way_fe_errors_are_redacted() {
+        let d = def(
+            "jdbc",
+            json!({ "dialect": "postgresql", "host": "db", "port": 5432, "database": "s",
+                    "user": "u", "password_secret_id": PW, "ssl": { "mode": "require" } }),
+            json!({ "starrocks": {
+                "driver_url": "https://mirror-user:hunter2@artifacts.internal/pg.jar",
+                "driver_class": "org.postgresql.Driver" } }),
+        );
+        let ddl = render_starrocks("j", &d, &input()).unwrap();
+        // Premise: the credential really is in the rendered property, so this
+        // is about the redaction and not about the render.
+        assert_eq!(
+            ddl.properties["driver_url"],
+            PropValue::Plain("https://mirror-user:hunter2@artifacts.internal/pg.jar".into())
+        );
+
+        let red = ddl.redacted(StatementForm::Create);
+        assert!(
+            !red.contains("hunter2"),
+            "a driver-mirror credential reached a log: {red}"
+        );
+        assert!(
+            red.contains(r#""driver_url" = "******""#),
+            "the key still names what was withheld: {red}"
+        );
+        assert!(
+            red.contains(r#""jdbc_uri" = "******""#),
+            "same rule for the other URL-valued property: {red}"
+        );
+        // Everything that is not a URL and not a secret still reads.
+        assert!(red.contains(r#""user" = "u""#), "red={red}");
+        assert!(red.contains(r#""type" = "jdbc""#), "red={red}");
+        assert!(
+            red.contains(r#""driver_class" = "org.postgresql.Driver""#),
+            "a class name is not a URL: {red}"
+        );
+        assert!(red.contains(r#""password" = "******""#), "red={red}");
+    }
+
+    /// The predicate itself, since it decides what a WARN log may carry.
+    /// Positives are the shapes `redact_urls`' regex matches; negatives are
+    /// the ordinary property values that must stay readable.
+    #[test]
+    fn looks_like_url_matches_what_redact_urls_matches() {
+        assert!(looks_like_url("https://artifacts.internal/pg.jar"));
+        assert!(looks_like_url("file:///opt/pg.jar"));
+        assert!(looks_like_url("thrift://hms:9083"));
+        assert!(looks_like_url("s3://bucket/prefix"));
+        // A JDBC URI's inner scheme is what `redact_urls` matches on too.
+        assert!(looks_like_url("jdbc:postgresql://db:5432/s"));
+
+        assert!(!looks_like_url("org.postgresql.Driver"));
+        assert!(!looks_like_url("hive"));
+        assert!(!looks_like_url("us-east-1"));
+        assert!(!looks_like_url("://no-scheme"));
+        assert!(!looks_like_url("https://"), "a bare scheme names nothing");
+    }
+
+    /// F4, half two: the failure log for an `ALTER CATALOG … SET` used to
+    /// report a `CREATE EXTERNAL CATALOG` — a statement that was never sent.
+    /// `redacted` now renders the form it is told, and drops `type` for an
+    /// ALTER exactly as `alter_sql` does (CatalogAnalyzer refuses the key).
+    #[test]
+    fn redacted_renders_the_statement_that_actually_ran() {
+        let d = CatalogDef::egret_warehouse(id(WH));
+        let ddl = render_starrocks("egret", &d, &input()).unwrap();
+
+        let create = ddl.redacted(StatementForm::Create);
+        assert!(
+            create.starts_with("CREATE EXTERNAL CATALOG `egret` PROPERTIES ("),
+            "create={create}"
+        );
+        assert!(create.contains(r#""type" = "iceberg""#), "create={create}");
+
+        let alter = ddl.redacted(StatementForm::Alter);
+        assert!(
+            alter.starts_with("ALTER CATALOG `egret` SET ("),
+            "alter={alter}"
+        );
+        assert!(
+            !alter.contains(r#""type" ="#),
+            "an ALTER never re-sends `type`, so neither does its redaction: {alter}"
+        );
+        assert!(
+            alter.contains(r#""iceberg.catalog.credential" = "******""#),
+            "and the secret is still masked in this form: {alter}"
+        );
     }
 }

@@ -3712,8 +3712,9 @@ async fn create_starrocks_engine(
     // concern, so this is spawned rather than awaited — the create response
     // below returns as soon as `provision` above has kicked off, not after the
     // FE is actually queryable. A failure is logged, never surfaced to the
-    // caller: the admin can retry by re-provisioning or (future) an explicit
-    // "rewire catalog" action.
+    // caller: the admin can retry by re-provisioning, or per attachment with
+    // `POST /engines/{id}/catalogs/{cid}/apply` (D2), which converges exactly
+    // one attachment — the primary included — and settles its row either way.
     // Present the minted FE `root` password (resolved into
     // `req.starrocks.root_password` by `build_starrocks_provision_req`) on the
     // post-Ready bootstrap connection; `None` for legacy engines keeps it
@@ -4026,6 +4027,13 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 /// bootstrap has finished" signal instead of a guessed sleep; both production
 /// call sites ignore it.
 ///
+/// **Two call sites, two starting states** (final whole-branch review, F5).
+/// [`create_starrocks_engine`] reaches this with every attachment `pending`;
+/// Task 5 also reaches it from [`update_starrocks_engine`], where the engine's
+/// attachments are already `applied`. So the give-up paths below say the
+/// attachments keep the status they already have — they must not claim
+/// `pending`, which is only the create path's starting state.
+///
 /// **Where the six `engine_still_current` checkpoints sit, and why.** They
 /// exist so a bootstrap cannot resurrect an engine that was deleted or renamed
 /// while it polled, and a loop over N attachments must not weaken that. One per
@@ -4089,7 +4097,8 @@ fn spawn_starrocks_catalog_wire(
         if !fe_ready {
             tracing::warn!(engine = %engine_name,
                 "starrocks bootstrap: FE never reported ready within the poll budget; \
-                 skipping — every attachment stays `pending` and a Retry converges it");
+                 skipping — every attachment keeps the status it already has and a \
+                 Retry converges it");
             return;
         }
 
@@ -4164,7 +4173,8 @@ fn spawn_starrocks_catalog_wire(
         if !auth_ready {
             tracing::warn!(engine = %engine_name,
                 "starrocks bootstrap: root login never succeeded within the poll budget \
-                 (initpwd race?); skipping — every attachment stays `pending`");
+                 (initpwd race?); skipping — every attachment keeps the status it \
+                 already has");
             return;
         }
 
@@ -8913,6 +8923,105 @@ mod tests {
             assert!(row.applied_at.is_some(), "catalog {name}");
             assert!(row.apply_error.is_none(), "catalog {name}");
         }
+    }
+
+    /// F2 (final whole-branch review). Every statement the apply path sends
+    /// travels on a connection that logs in as `root` with the FE root
+    /// password, so that password is a secret each of those FE errors could
+    /// quote — and `converge_attachment` scrubbed against the CATALOG's
+    /// secrets alone, never `FeTarget::secrets()`.
+    ///
+    /// **The luck this test removes.** `ensure_root_password_secret` mints 24
+    /// random bytes as URL-safe base64: 32 unbroken characters, which
+    /// `redact_opaque_runs` masks by SHAPE whatever the scrub map holds. So
+    /// the hole was closed by the length of the generated password and not by
+    /// the code under test. A SHORT, unquoted password in an otherwise
+    /// well-formed message is precisely the residual `starrocks_ddl`'s module
+    /// doc names as the one shape its redaction cannot see — for that value,
+    /// the scrub map is the ONLY thing between the FE's reply and
+    /// `apply_error`, which is a column an API caller reads.
+    ///
+    /// Written against the bootstrap because that is the cheapest driver of
+    /// `converge_attachment`; the merge it pins is in `converge_attachment`
+    /// itself, shared by the attach, re-apply and Retry routes.
+    #[tokio::test]
+    async fn the_apply_path_scrubs_the_fe_root_password_out_of_apply_error() {
+        let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping the_apply_path_scrubs_the_fe_root_password_out_of_apply_error: DATABASE_URL not set");
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+
+        // Eight characters, no whitespace, no quoting, no `scheme://`: too
+        // short for `redact_opaque_runs` (>= 20), invisible to
+        // `redact_quoted` and `redact_urls`, and it leaves the message's own
+        // quoting well-formed so the fail-closed check does not withhold.
+        const SHORT_ROOT_PW: &str = "sh0rt-pw";
+        let sid = st
+            .secrets
+            .create(
+                None,
+                &format!("egret-root-{}", engine.id),
+                Some("StarRocks FE root password (short, for this test)"),
+                SHORT_ROOT_PW,
+            )
+            .await
+            .expect("store the short root password");
+        st.engine_mgmt
+            .set_root_secret(engine.id, sid)
+            .await
+            .expect("set root secret");
+        let engine = st
+            .engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .expect("reload")
+            .expect("engine present");
+        prov.set_status(ready_fe_status(&engine.name));
+
+        let name = format!("a_{}", Uuid::new_v4().simple());
+        let ids = seed_pending_attachments(&st, &engine, &[name.as_str()]).await;
+
+        // The FE refuses the convergence's very first read and echoes the
+        // credential it was given, the way a real `Access denied` does. Not
+        // `SELECT 1`: the root-login probe has to pass, or the bootstrap gives
+        // up before it reaches an attachment at all.
+        fake.fail_matching(
+            "SHOW CATALOGS",
+            &format!(
+                "ERROR 1045 (28000): Access denied for user root using password {SHORT_ROOT_PW}"
+            ),
+        );
+
+        spawn_starrocks_catalog_wire(
+            st.clone(),
+            engine.id,
+            engine.name.clone(),
+            engine.namespace.clone(),
+            None,
+        )
+        .await
+        .expect("bootstrap task did not panic");
+
+        let row = attachment_status(&st, engine.id, ids[&name]).await;
+        assert_eq!(row.apply_status, "failed", "premise: the FE refused");
+        let err = row.apply_error.expect("a failed apply records why");
+        assert!(
+            !err.contains(SHORT_ROOT_PW),
+            "the FE root password reached `apply_error`: {err}"
+        );
+        // …and it was scrubbed, not withheld: a blank excerpt would pass the
+        // assertion above for a reason that has nothing to do with the fix.
+        assert!(
+            err.contains("Access denied"),
+            "premise: this message survives redaction intact apart from the \
+             credential, so the scrub map is what removed it; apply_error={err}"
+        );
     }
 
     /// D2 + D8 (checkpoint 3): an engine deleted while the loop runs stops it,

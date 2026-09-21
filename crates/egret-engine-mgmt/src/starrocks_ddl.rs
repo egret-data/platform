@@ -291,6 +291,21 @@ pub struct FeError {
     /// the FE's meaning belongs here, next to this one, and not at a call
     /// site holding a `scrubbed` string.
     already_exists: bool,
+    /// Whether the FE said the catalog does not exist
+    /// (`ERR_BAD_CATALOG_ERROR` 5078, `Unknown catalog '<name>'`), decided
+    /// from the RAW message for exactly the reasons [`Self::already_exists`]
+    /// gives.
+    ///
+    /// The second predicate to move here, and the reason the rule above is
+    /// written as a rule (final whole-branch review, F1):
+    /// [`show_create_catalog`] used to ask `e.excerpt.contains("Unknown
+    /// catalog")` of the redacted string, one field access away from the
+    /// `already_exists` fix. It failed SAFE — a withheld or over-capped
+    /// excerpt answers `false`, so the error propagates and the attachment
+    /// records an honest `failed` instead of a wrong `Absent` — but it was
+    /// a predicate on a string built to be printed, and the branch claimed
+    /// in two places that no such predicate was left.
+    unknown_catalog: bool,
 }
 
 impl FeError {
@@ -317,6 +332,15 @@ impl FeError {
     pub fn is_already_exists(&self) -> bool {
         self.already_exists
     }
+
+    /// Did the FE mean "there is no catalog by that name"?
+    /// [`show_create_catalog`] branches on this to turn a `SemanticException`
+    /// into `Ok(None)` — the FE answers an unknown catalog with an error, not
+    /// an empty result. Read off [`Self::unknown_catalog`], decided from the
+    /// unredacted message.
+    pub fn is_unknown_catalog(&self) -> bool {
+        self.unknown_catalog
+    }
 }
 
 /// Does this FE message mean "the object is already there"? StarRocks answers
@@ -330,6 +354,19 @@ impl FeError {
 /// message, and the only code holding that is [`fe_error`] itself.
 fn says_already_exists(raw: &str) -> bool {
     raw.to_ascii_lowercase().contains("already exists")
+}
+
+/// Does this FE message mean "there is no catalog by that name"? StarRocks
+/// answers `SHOW CREATE CATALOG` on an absent catalog with
+/// `ERROR 5078 (HY000): Unknown catalog '<name>'` (`ERR_BAD_CATALOG_ERROR`).
+/// Matched on the phrase, case-insensitively, for the same reason
+/// [`says_already_exists`] is: a reworded prefix must not turn "absent" into
+/// a hard failure.
+///
+/// Lives here, beside [`fe_error`], and not at [`show_create_catalog`]'s
+/// call site, which is where it used to be — see [`FeError::unknown_catalog`].
+fn says_unknown_catalog(raw: &str) -> bool {
+    raw.to_ascii_lowercase().contains("unknown catalog")
 }
 
 /// The FE's error code and nothing else. Deliberately NOT the excerpt: this
@@ -367,6 +404,7 @@ impl std::fmt::Debug for FeError {
             .field("code", &self.code)
             .field("excerpt", &"<withheld: use FeError::scrubbed(&secrets)>")
             .field("already_exists", &self.already_exists)
+            .field("unknown_catalog", &self.unknown_catalog)
             .finish()
     }
 }
@@ -404,6 +442,7 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
     // (fix round 1, F2): this is a question about what the FE meant, and the
     // redacted form is allowed to be lossy — capped, or withheld entirely.
     let already_exists = says_already_exists(&raw);
+    let unknown_catalog = says_unknown_catalog(&raw);
 
     let redacted = normalize_mysql_async_wrapper(&raw);
     let redacted = redact_quoted(&redacted);
@@ -419,6 +458,7 @@ fn fe_error(raw: impl std::fmt::Display) -> FeError {
         code,
         excerpt,
         already_exists,
+        unknown_catalog,
     }
 }
 
@@ -579,6 +619,10 @@ pub async fn show_catalogs(
 /// (`ERR_BAD_CATALOG_ERROR` 5078, text `Unknown catalog '<name>'`) — that is a
 /// SemanticException, not an empty result, so it arrives as an Err and is
 /// translated here rather than at every call site.
+///
+/// The "is this an unknown catalog" verdict is [`FeError::is_unknown_catalog`],
+/// taken from the raw FE text inside [`fe_error`] — never a `contains` on the
+/// redacted excerpt, which this used to be (final review, F1).
 pub async fn show_create_catalog(
     ddl: &dyn StarRocksDdl,
     fe: &FeTarget,
@@ -591,7 +635,7 @@ pub async fn show_create_catalog(
             .next()
             .and_then(|row| row.into_iter().nth(1).flatten())
             .map(|text| parse_show_create_properties(&text))),
-        Err(e) if e.excerpt.contains("Unknown catalog") => Ok(None),
+        Err(e) if e.is_unknown_catalog() => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -1361,6 +1405,87 @@ mod tests {
         assert!(e.is_already_exists());
     }
 
+    /// F1 (final whole-branch review), the positive/negative half: the
+    /// "unknown catalog" verdict is taken from the raw FE text, against the
+    /// message a real FE sends for `SHOW CREATE CATALOG` on an absent
+    /// catalog (`ERR_BAD_CATALOG_ERROR`, code 5078).
+    ///
+    /// The negatives matter more: reading an unrelated failure as "absent"
+    /// would make `converge_attachment` CREATE a catalog that is already
+    /// there, and a genuine connection failure would be reported as a
+    /// successful read of nothing.
+    #[test]
+    fn unknown_catalog_is_decided_for_the_caller_from_the_raw_message() {
+        assert!(fe_error("ERROR 5078 (HY000): Unknown catalog 'sales'").is_unknown_catalog());
+        assert!(fe_error("UNKNOWN CATALOG 'sales'").is_unknown_catalog());
+        assert!(!fe_error("ERROR 1064 (HY000): Unknown database 'sales'").is_unknown_catalog());
+        assert!(!fe_error("Access denied for user 'root'").is_unknown_catalog());
+        assert!(!fe_error("Connection refused (os error 111)").is_unknown_catalog());
+    }
+
+    /// F1's point, at the call site that had the defect: `show_create_catalog`
+    /// must answer `Ok(None)` for an FE "unknown catalog" reply even when the
+    /// excerpt a caller may PRINT no longer carries the phrase.
+    ///
+    /// Two independent ways for that to happen, both exercised here — the
+    /// fail-closed withholding and the [`FE_ERROR_EXCERPT_MAX`] cap. Before
+    /// this fix the predicate was `e.excerpt.contains("Unknown catalog")`, so
+    /// both answered `false` and the drop-between-the-two-reads race
+    /// (`a_catalog_that_vanishes_between_the_two_reads_is_absent_not_drifted`)
+    /// came back as a hard `failed` instead of `Absent`.
+    #[tokio::test]
+    async fn show_create_catalog_reads_absent_from_the_raw_text_not_the_excerpt() {
+        for (label, raw) in [
+            (
+                "withheld: the FE's quoting cannot be paired",
+                r#"ERROR 5078 (HY000): Unknown catalog 'sales' in db 'ops"#.to_string(),
+            ),
+            (
+                "capped: the phrase falls past FE_ERROR_EXCERPT_MAX",
+                format!(
+                    "{}Unknown catalog sales",
+                    "detail word ".repeat(FE_ERROR_EXCERPT_MAX / 4)
+                ),
+            ),
+        ] {
+            // Premise first: the printable form really has lost the phrase,
+            // so this test cannot pass for the wrong reason.
+            let e = fe_error(&raw);
+            let printable = e.scrubbed(&BTreeMap::new());
+            assert!(
+                !printable.to_ascii_lowercase().contains("unknown catalog"),
+                "premise ({label}): the phrase must be gone from the excerpt; \
+                 scrubbed={printable}"
+            );
+
+            let ddl = FakeStarRocksDdl::default();
+            let fe = fe();
+            ddl.seed("sales", &[("type", "jdbc")]);
+            ddl.fail_matching("SHOW CREATE CATALOG", &raw);
+            assert_eq!(
+                show_create_catalog(&ddl, &fe, "sales").await,
+                Ok(None),
+                "({label}) the FE said the catalog is unknown; that is ABSENT"
+            );
+        }
+    }
+
+    /// The other side of the same predicate: an FE error that is NOT about an
+    /// unknown catalog must still propagate as an error. A `show_create` that
+    /// swallowed a connection failure into `Ok(None)` would make
+    /// `converge_attachment` CREATE over a catalog it never managed to read.
+    #[tokio::test]
+    async fn show_create_catalog_propagates_an_unrelated_failure() {
+        let ddl = FakeStarRocksDdl::default();
+        let fe = fe();
+        ddl.seed("sales", &[("type", "jdbc")]);
+        ddl.fail_matching("SHOW CREATE CATALOG", "ERROR 1045 (28000): Access denied");
+        let err = show_create_catalog(&ddl, &fe, "sales")
+            .await
+            .expect_err("an unrelated failure is not `absent`");
+        assert_eq!(err.code, Some(1045));
+    }
+
     /// The module doc's honest boundary, and the accessor that closes it
     /// (SP3b Task 4, carried from Task 3's review). A SHORT, unquoted secret
     /// in an otherwise well-formed message survives every shape-based pass
@@ -1399,6 +1524,7 @@ mod tests {
                 code: None,
                 excerpt: "whatever".into(),
                 already_exists: false,
+                unknown_catalog: false,
             }
             .to_string(),
             "FE error (no code)"

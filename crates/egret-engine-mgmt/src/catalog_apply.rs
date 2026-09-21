@@ -16,7 +16,8 @@ use egret_catalog_api::{CreatedClient, NewClient};
 use egret_catalog_registry::{
     plaintext_secrets, render_starrocks, render_trino, AttachedCatalog, AttachmentRow, CatalogDef,
     CatalogRow, EngineType, LegacyCatalog, NewAttachment, RenderError, StarRocksCatalogDdl,
-    StarRocksRenderInput, StorageRender, TrinoCatalogFile, TrinoRenderInput, WarehouseRender,
+    StarRocksRenderInput, StatementForm, StorageRender, TrinoCatalogFile, TrinoRenderInput,
+    WarehouseRender,
 };
 use egret_storage::StorageConn;
 use uuid::Uuid;
@@ -252,10 +253,13 @@ async fn apply_starrocks(
             st.starrocks_ddl
                 .execute(&fe, &sql)
                 .await
-                // The DROP carries no secret, so there is none to scrub
-                // against — `scrubbed` is still the only way to read an
-                // `FeError`, which is the point of it being the only way.
-                .map_err(|e| ApplyError::Rejected(e.scrubbed(&BTreeMap::new())))
+                // The DROP carries no secret of its own — but the CONNECTION
+                // does: it logs in as `root` with `fe.root_password`, which a
+                // failed login echoes. `fe.secrets()`, not `BTreeMap::new()`
+                // (final whole-branch review, F2): the old comment reasoned
+                // only about the statement and missed the channel it travels
+                // on.
+                .map_err(|e| ApplyError::Rejected(e.scrubbed(&fe.secrets())))
         }
     }
 }
@@ -414,9 +418,18 @@ pub(crate) async fn converge_attachment(
     let ddl = render_starrocks_attached(st, a)
         .await
         .map_err(ApplyError::Build)?;
-    let secrets = resolve_ddl_secrets(st, &ddl)
+    // The statement's own secrets PLUS the FE root password this connection
+    // logs in with. Both halves are on the wire for every statement below, so
+    // both belong in every scrub below (final whole-branch review, F2: this
+    // used to be the catalog's secrets alone, and was closed only by the fact
+    // that a minted root password is 32 unbroken characters, which
+    // `redact_opaque_runs` catches by shape — a SHORT one would have fallen
+    // straight into the documented residual). `FeTarget::secrets` is the one
+    // place that half is derived.
+    let mut secrets = resolve_ddl_secrets(st, &ddl)
         .await
         .map_err(ApplyError::Build)?;
+    secrets.extend(fe.secrets());
     let runner = st.starrocks_ddl.as_ref();
     let present = show_catalogs(runner, fe)
         .await
@@ -507,9 +520,17 @@ pub(crate) async fn converge_attachment(
         Err(e) => {
             // D6: what the FE said, with every secret this statement carries
             // removed — and never the statement itself. `redacted()` is the
-            // only form of a statement that may ever be logged.
+            // only form of a statement that may ever be logged, and it is told
+            // WHICH statement failed: `outcome` is the one thing that knows
+            // whether `sql` above was the CREATE or the ALTER, and a log
+            // naming a statement that was never sent is worse than no log
+            // (final whole-branch review, F4).
+            let form = match outcome {
+                Converged::Altered => StatementForm::Alter,
+                _ => StatementForm::Create,
+            };
             tracing::warn!(engine = %engine.name, catalog = %name,
-                statement = %ddl.redacted(), "starrocks catalog DDL failed");
+                statement = %ddl.redacted(form), "starrocks catalog DDL failed");
             Err(ApplyError::Rejected(e.scrubbed(&secrets)))
         }
     }
@@ -525,7 +546,9 @@ async fn compensate_created_catalog(st: &CpState, engine: &Engine, fe: &FeTarget
     let sql = drop_ddl(name).drop_sql();
     if let Err(e) = st.starrocks_ddl.execute(fe, &sql).await {
         tracing::error!(engine = %engine.name, catalog = %name,
-            error = %e.scrubbed(&BTreeMap::new()),
+            // Same as the detach above: the DROP carries no secret, the
+            // connection carries the root password (final review, F2).
+            error = %e.scrubbed(&fe.secrets()),
             "created a catalog egret could not record, and the compensating DROP failed too — \
              drop it on the engine by hand");
     }
@@ -1048,10 +1071,34 @@ pub(crate) async fn attach_to_engine(
         match apply_catalog_change(st, engine, CatalogChange::Attach(pending)).await {
             // `converge_and_record` already settled the row to `applied`.
             Ok(()) => Ok(()),
-            // D7: the FE took the catalog, egret could not record it, and the
-            // compensating DROP has already run — so nothing on the engine
-            // references the credential any more, and this attach did not
-            // happen.
+            // D7: the FE took the statement, egret could not record it, so
+            // this attach did not happen and the minted credential goes back.
+            //
+            // WHAT HAS ACTUALLY RUN ON THE FE BY NOW depends on how
+            // `converge_attachment` converged, and only ONE of the three ways
+            // is compensated (`converge_and_record` drops only for
+            // `Converged::Created`) — the comment here used to claim the DROP
+            // unconditionally (final whole-branch review, F3):
+            //
+            //   * `Created` — the catalog egret made is dropped again, so
+            //     nothing on the engine references the credential.
+            //   * `Altered` — a catalog egret did NOT create (the
+            //     `Drift::Unverifiable` arm, `an_unverifiable_catalog_is_
+            //     altered_not_refused`) has been rewritten with the minted
+            //     credential, and no DROP runs. `rollback_minted` below
+            //     REVOKES that client before deleting the secret, so nothing
+            //     live is orphaned and the standing secret rule holds — but
+            //     the FE is left holding a pre-existing catalog whose
+            //     credential egret has just revoked, and no row names it any
+            //     more. Dropping it is not an option: egret did not create it.
+            //     An operator's repair is to re-attach, which converges it
+            //     with a fresh credential.
+            //   * `AlreadyMatching` — nothing was sent at all, so the FE is
+            //     exactly as it was and the minted credential was never used.
+            //
+            // Both uncompensated cases need the DATABASE write to have failed
+            // on a fresh attach, which is why this is accepted untested (the
+            // ledger's F5) rather than defended.
             //
             // The row is USUALLY already gone (that race is what `Unrecorded`
             // is normally about), but not always: a transient database failure

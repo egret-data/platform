@@ -34,7 +34,7 @@ pub use name::{
 pub use render::starrocks::{
     escape_dq, escape_ident, is_reserved_starrocks_name, render_starrocks, scrub_secrets,
     starrocks_jdbc_uri, JdbcDriver, JdbcDrivers, PropValue, StarRocksCatalogDdl,
-    StarRocksRenderInput, DEFAULT_SR_JDBC_DRIVERS, SR_OVERRIDABLE,
+    StarRocksRenderInput, StatementForm, DEFAULT_SR_JDBC_DRIVERS, SR_OVERRIDABLE,
 };
 pub use render::trino::{jdbc_url, render_trino, TrinoCatalogFile, TrinoRenderInput};
 pub use render::{RenderError, StorageRender, WarehouseRender};
