@@ -3811,7 +3811,13 @@ fn starrocks_external_catalog_sql(
 /// validation skipped, same rationale as `StarRocksConnector::new`: the cert's
 /// CN won't match the in-cluster Service DNS we dial) and runs the DDL over
 /// TLS; `None` stays plain TCP.
-fn starrocks_root_conn_opts(
+///
+/// `pub(crate)` (SP3b Task 3): also the connection-opts primitive
+/// [`crate::starrocks_ddl::MysqlDdlRunner`] uses. `run_starrocks_ddl` below and
+/// `spawn_starrocks_catalog_wire`'s bootstrap keep calling it directly for now
+/// (Tasks 4/5 retire that path onto the injectable runner); this fn is the one
+/// piece both sides already share.
+pub(crate) fn starrocks_root_conn_opts(
     host: &str,
     port: u16,
     root_password: Option<&str>,
@@ -4832,7 +4838,7 @@ async fn update_starrocks_engine(
 /// means the connector's auth mode or in-band TLS flipped. Comparing the WHOLE
 /// block (not just `mode`/`tlsEnabled`) is the safe side — at worst a future
 /// extra key triggers a spurious FE re-bootstrap, which is an idempotent no-op.
-fn sr_delegation_block(spec: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn sr_delegation_block(spec: &serde_json::Value) -> serde_json::Value {
     spec.get("starrocksConfig")
         .and_then(|c| c.get("delegation"))
         .cloned()
@@ -7068,6 +7074,7 @@ mod tests {
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled: false,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
+            starrocks_ddl: std::sync::Arc::new(crate::starrocks_ddl::FakeStarRocksDdl::default()),
         })
     }
 
@@ -8398,6 +8405,77 @@ mod tests {
             req.starrocks.as_ref().expect("sr config").root_password,
             Some(plaintext)
         );
+    }
+
+    /// SP3b Task 3 / D6: before this seam, the catalog DDL and the root-login
+    /// probe both passed `tls_cert_pem = None` unconditionally while the
+    /// delegation bootstrap alone passed the pinned cert — so an OAuth2
+    /// credential and the FE root password crossed the wire in cleartext on a
+    /// TLS-capable engine. `fe_target` is the one place that decision is made
+    /// now: the cert is threaded through ONLY when
+    /// `starrocksConfig.delegation.tlsEnabled` is true, whatever
+    /// `coordinator_cert` holds, and the root password only when the engine
+    /// actually carries a `root_secret_id`.
+    #[tokio::test]
+    async fn fe_target_resolves_root_password_and_gates_the_cert_on_delegation_tls() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping fe_target_resolves_root_password_and_gates_the_cert_on_delegation_tls: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let legacy = seed_sr_engine(&st, wh.id).await;
+        let (secret_id, plaintext) = ensure_root_password_secret(&st, &legacy)
+            .await
+            .expect("mint root password");
+        let base = Engine {
+            root_secret_id: Some(secret_id),
+            coordinator_cert: Some("CERTPEM".into()),
+            ..legacy.clone()
+        };
+
+        // tlsEnabled=true: the pinned cert is threaded through.
+        let mut with_tls = base.clone();
+        with_tls.spec = serde_json::json!({
+            "starrocksConfig": { "delegation": { "mode": "impersonate", "tlsEnabled": true } }
+        });
+        let fe = crate::starrocks_ddl::fe_target(&st, &with_tls)
+            .await
+            .expect("fe_target (tls on)");
+        assert_eq!(fe.root_password.as_deref(), Some(plaintext.as_str()));
+        assert_eq!(fe.tls_cert_pem.as_deref(), Some("CERTPEM"));
+        assert_eq!(fe.host, with_tls.coordinator_host());
+        assert_eq!(fe.port, with_tls.coordinator_port() as u16);
+
+        // tlsEnabled=false: the cert is withheld even though the engine has
+        // one pinned — the FE isn't actually serving TLS.
+        let mut without_tls = base.clone();
+        without_tls.spec = serde_json::json!({
+            "starrocksConfig": { "delegation": { "mode": "impersonate", "tlsEnabled": false } }
+        });
+        let fe = crate::starrocks_ddl::fe_target(&st, &without_tls)
+            .await
+            .expect("fe_target (tls off)");
+        assert!(fe.tls_cert_pem.is_none());
+
+        // No delegation block at all: same as tlsEnabled=false.
+        let mut no_delegation = base.clone();
+        no_delegation.spec = serde_json::json!({ "starrocksConfig": {} });
+        let fe = crate::starrocks_ddl::fe_target(&st, &no_delegation)
+            .await
+            .expect("fe_target (no delegation)");
+        assert!(fe.tls_cert_pem.is_none());
+
+        // Legacy engine (no root_secret_id): stays passwordless.
+        let fe = crate::starrocks_ddl::fe_target(&st, &legacy)
+            .await
+            .expect("fe_target (legacy)");
+        assert!(fe.root_password.is_none());
     }
 
     /// A minimal StarRocks-shaped `CreateEngineBody` for update tests (only

@@ -2006,6 +2006,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // `[starrocks.jdbc_drivers]` overrides applied (design D5).
         sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default()
             .with_overrides(&config.starrocks),
+        // The real DDL runner (design D8): a live `mysql_async` connection per
+        // statement. Tests substitute `FakeStarRocksDdl`.
+        starrocks_ddl: std::sync::Arc::new(egret_engine_mgmt::MysqlDdlRunner),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

@@ -91,6 +91,11 @@ fn build_app(
             engine_oidc_issuer: "https://idp/realms/egret".into(),
             ranger_enabled,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
+            // SP3b Task 3: the injectable DDL runner (design D8). No route test
+            // in this crate yet drives a StarRocks attach/bootstrap through the
+            // HTTP surface (Task 4/5 own that), so `build_app` wires a fresh
+            // default fake rather than adding a parameter with no caller.
+            starrocks_ddl: std::sync::Arc::new(egret_engine_mgmt::FakeStarRocksDdl::default()),
         })
 }
 

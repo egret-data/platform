@@ -101,6 +101,14 @@ test-shipping-resolution:
 test-no-db:
     env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 {{ no_engine }} {{ no_docker }} cargo test --workspace
 
+# The StarRocks catalog DDL this branch builds, against a real FE — the only
+# instrument that judges the property names in `render/starrocks.rs`.
+# Opt-in behind `EGRET_TEST_STARROCKS_URL`; CI has no engine.
+# Prereq: `just up`.
+test-engine-mgmt-starrocks:
+    {{ no_db_skip }} DATABASE_URL={{ test_database_url }} EGRET_TEST_STARROCKS_URL=mysql://localhost:9030 \
+      cargo test -p egret-engine-mgmt --test starrocks_ddl_live -- --nocapture
+
 # The one Data API test executed by a REAL engine, rather than a fake `QueryExecPort`.
 #
 # Every other suite in `egret-dataapi` drives `serving_common::FakePort`, so nothing

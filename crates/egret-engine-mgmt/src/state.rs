@@ -79,6 +79,10 @@ pub struct EngineMgmtState {
     /// `[starrocks.jdbc_drivers]` overrides applied. Populated from config in
     /// egret-bin; tests use `JdbcDrivers::default()`.
     pub sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers,
+    /// Runs statements on a StarRocks FE. A real `MysqlDdlRunner` in egret-bin;
+    /// a fake in tests, which is what makes the bootstrap and the apply path
+    /// testable at all (design D8).
+    pub starrocks_ddl: Arc<dyn crate::starrocks_ddl::StarRocksDdl>,
 }
 
 impl FromRef<EngineMgmtState> for SessionService {
