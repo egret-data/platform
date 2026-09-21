@@ -610,18 +610,19 @@ async fn ws_database_list_and_detail_expose_engine_id() {
     );
 }
 
-/// Seed an engine assigned to `workspace_id`, with one catalog whose
-/// `secret_ref` points at a named workspace secret. The engine name is
-/// `{prefix}-{uuid}` (engines.name is globally UNIQUE across the shared test
-/// DB). Returns `(engine_id, engine_name, storage_name, secret_name)` for the
-/// ws-member view assertions.
+/// Seed an engine assigned to `workspace_id`, with one registry catalog
+/// (attached to the engine) whose secret ref points at a named workspace
+/// secret. The engine name is `{prefix}-{uuid}` (engines.name is globally
+/// UNIQUE across the shared test DB). Returns `(engine_id, engine_name,
+/// storage_name, secret_name, catalog_name)` for the ws-member view
+/// assertions.
 async fn seed_assigned_engine_with_catalog(
     db: &Db,
     workspace_secrets: &egret_secrets::WorkspaceSecretStore,
     workspace_id: Uuid,
     owner: UserId,
     prefix: &str,
-) -> (Uuid, String, String, String) {
+) -> (Uuid, String, String, String, String) {
     let engine_name = format!("{prefix}-{}", Uuid::new_v4().simple());
     // A storage connection + warehouse + engine (known storage name).
     let store_name = format!("store_{}", Uuid::new_v4().simple());
@@ -662,16 +663,33 @@ async fn seed_assigned_engine_with_catalog(
         .await
         .expect("seed named catalog secret");
 
-    // A catalog bound to the secret.
+    // A registry catalog (the engine's warehouse) referencing the secret,
+    // attached to the engine.
+    let catalog_name = format!("lakehouse_{}", Uuid::new_v4().simple());
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) RETURNING id",
+    )
+    .bind(&catalog_name)
+    .bind(wh_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed registry catalog");
+    sqlx::query("INSERT INTO registry.catalog_secret_refs (catalog_id, secret_id) VALUES ($1, $2)")
+        .bind(catalog_id)
+        .bind(secret_ref)
+        .execute(&db.pool)
+        .await
+        .expect("seed secret ref");
     sqlx::query(
-        "INSERT INTO engine_mgmt.engine_catalogs (engine_id, name, kind, config, secret_ref, is_primary) \
-         VALUES ($1, 'lakehouse', 'egret-warehouse', '{}'::jsonb, $2, true)",
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
     )
     .bind(engine_id)
-    .bind(secret_ref)
+    .bind(catalog_id)
     .execute(&db.pool)
     .await
-    .expect("seed engine catalog");
+    .expect("seed attachment");
 
     // The assignment row.
     sqlx::query(
@@ -685,7 +703,13 @@ async fn seed_assigned_engine_with_catalog(
     .await
     .expect("seed engine_workspaces assignment");
 
-    (engine_id, engine_name, store_name, secret_name)
+    (
+        engine_id,
+        engine_name,
+        store_name,
+        secret_name,
+        catalog_name,
+    )
 }
 
 /// B2: a workspace member sees its assigned engines read-only, with each
@@ -699,14 +723,15 @@ async fn ws_engine_view_lists_assigned_engines_with_catalogs() {
     };
     let token = add_member(&f, f.ws_a, "admin", "ws_admin").await;
 
-    let (engine_id, engine_name, storage_name, secret_name) = seed_assigned_engine_with_catalog(
-        &f.db,
-        &f.workspace_secrets,
-        f.ws_a.0,
-        f.owner,
-        "trino-prod",
-    )
-    .await;
+    let (engine_id, engine_name, storage_name, secret_name, catalog_name) =
+        seed_assigned_engine_with_catalog(
+            &f.db,
+            &f.workspace_secrets,
+            f.ws_a.0,
+            f.owner,
+            "trino-prod",
+        )
+        .await;
 
     // LIST → exactly the one assigned engine.
     let resp = f
@@ -747,7 +772,7 @@ async fn ws_engine_view_lists_assigned_engines_with_catalogs() {
     assert_eq!(d["type"], serde_json::json!("trino"));
     let cats = d["catalogs"].as_array().expect("catalogs array");
     assert_eq!(cats.len(), 1, "one catalog; body={d}");
-    assert_eq!(cats[0]["name"], serde_json::json!("lakehouse"));
+    assert_eq!(cats[0]["name"], serde_json::json!(catalog_name));
     assert_eq!(cats[0]["kind"], serde_json::json!("egret-warehouse"));
     assert_eq!(
         cats[0]["storage_name"].as_str(),
@@ -780,6 +805,306 @@ async fn ws_engine_view_lists_assigned_engines_with_catalogs() {
     );
 }
 
+/// Whole-branch review F-8: `storage_name` is a property of the CATALOG, not
+/// of the engine. Since the view started listing every attached catalog, the
+/// engine's primary warehouse storage was copied onto all of them — a
+/// confidently wrong storage for a second warehouse's catalog, and an invented
+/// one for a jdbc catalog that has no warehouse at all.
+#[tokio::test]
+async fn ws_engine_view_resolves_storage_name_per_catalog() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+    let (engine_id, _engine_name, primary_storage, _secret_name, primary_catalog) =
+        seed_assigned_engine_with_catalog(
+            &f.db,
+            &f.workspace_secrets,
+            f.ws_a.0,
+            f.owner,
+            "trino-storage",
+        )
+        .await;
+
+    // A SECOND warehouse, on its own storage connection, attached to the same
+    // engine as a non-primary catalog.
+    let second_storage = format!("store_{}", Uuid::new_v4().simple());
+    let sc2: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections \
+           (name, provider, region, bucket, access_key, path_style) \
+         VALUES ($1, 's3', 'eu-west-1', 'second', 'egret', true) RETURNING id",
+    )
+    .bind(&second_storage)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed second storage connection");
+    let wh2: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(format!("wh_{}", Uuid::new_v4().simple()))
+    .bind(f.ws_a.0)
+    .bind(sc2)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed second warehouse");
+    let second_catalog = format!("second_{}", Uuid::new_v4().simple());
+    let cat2: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) RETURNING id",
+    )
+    .bind(&second_catalog)
+    .bind(wh2)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed second warehouse catalog");
+
+    // A jdbc catalog: no warehouse, therefore no storage at all. Assigned to
+    // this workspace, since only warehouse catalogs have the owner fallback.
+    let jdbc_catalog = format!("pg_{}", Uuid::new_v4().simple());
+    let cat3: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config) \
+         VALUES ($1, 'jdbc', jsonb_build_object('dialect', 'postgresql', 'host', 'db', \
+                 'port', 5432, 'database', 'sales', 'user', 'u')) RETURNING id",
+    )
+    .bind(&jdbc_catalog)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed jdbc catalog");
+    sqlx::query(
+        "INSERT INTO registry.catalog_workspaces (catalog_id, workspace_id) VALUES ($1,$2)",
+    )
+    .bind(cat3)
+    .bind(f.ws_a.0)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign jdbc catalog");
+    for cat in [cat2, cat3] {
+        sqlx::query(
+            "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+        )
+        .bind(engine_id)
+        .bind(cat)
+        .execute(&f.db.pool)
+        .await
+        .expect("attach catalog");
+    }
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/engines/{engine_id}", f.slug_a),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, d) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "engine detail; body={d}");
+    let by_name: std::collections::HashMap<&str, &serde_json::Value> = d["catalogs"]
+        .as_array()
+        .expect("catalogs array")
+        .iter()
+        .map(|c| (c["name"].as_str().unwrap(), c))
+        .collect();
+    assert_eq!(by_name.len(), 3, "three attached catalogs; body={d}");
+    assert_eq!(
+        by_name[primary_catalog.as_str()]["storage_name"].as_str(),
+        Some(primary_storage.as_str()),
+        "the primary warehouse catalog keeps its own storage; body={d}"
+    );
+    assert_eq!(
+        by_name[second_catalog.as_str()]["storage_name"].as_str(),
+        Some(second_storage.as_str()),
+        "the second warehouse's catalog must show ITS storage; body={d}"
+    );
+    assert_eq!(
+        by_name[jdbc_catalog.as_str()]["storage_name"],
+        serde_json::Value::Null,
+        "a jdbc catalog has no warehouse and therefore no storage; body={d}"
+    );
+    assert_eq!(
+        by_name[jdbc_catalog.as_str()]["kind"],
+        serde_json::json!("postgresql")
+    );
+}
+
+/// SP3 catalog-registry review N2 (user ruling: filter by registry
+/// assignment now, in SP3a). The workspace engine view's per-engine catalog
+/// list is visibility-filtered by `registry.catalog_workspaces`, mirroring
+/// `RegistryStore::warehouse_visible_to_workspace`'s two-branch shape:
+///   1. a catalog explicitly assigned to this workspace is listed, even when
+///      a DIFFERENT workspace owns the underlying warehouse;
+///   2. a catalog attached to the SAME engine but assigned only to another
+///      workspace is absent;
+///   3. an un-backfilled warehouse catalog (no `catalog_workspaces` row at
+///      all yet) still appears for the workspace that OWNS the warehouse
+///      directly — the fallback.
+/// This is READ VISIBILITY only, not enforcement: a hidden catalog's engine
+/// would still answer a direct query for it (unchanged, untested here).
+#[tokio::test]
+async fn ws_engine_view_catalogs_filtered_by_registry_assignment() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+
+    // Scenario 3: the engine's PRIMARY warehouse catalog, seeded directly (no
+    // `catalog_workspaces` row at all), owned by ws_a via
+    // `catalog.warehouses.workspace_id` — the un-backfilled fallback.
+    let (engine_id, _engine_name, _storage_name, _secret_name, primary_catalog_name) =
+        seed_assigned_engine_with_catalog(
+            &f.db,
+            &f.workspace_secrets,
+            f.ws_a.0,
+            f.owner,
+            "n2-primary",
+        )
+        .await;
+
+    // Scenario 1: a SECOND warehouse, owned by ws_B, whose registry catalog is
+    // attached to the SAME engine as a secondary catalog and explicitly
+    // ASSIGNED to ws_A — proves assignment, not warehouse ownership, drives
+    // visibility.
+    let sc2: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections \
+           (name, provider, region, bucket, access_key, path_style) \
+         VALUES ($1, 's3', 'us-east-1', 'warehouse', 'egret', true) RETURNING id",
+    )
+    .bind(format!("n2-sc-{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed second storage connection");
+    let wh2: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(format!("n2-wh-{}", Uuid::new_v4().simple()))
+    .bind(f.ws_b.0)
+    .bind(sc2)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed second warehouse");
+    let assigned_catalog_name = format!("n2_assigned_{}", Uuid::new_v4().simple());
+    let assigned_catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) RETURNING id",
+    )
+    .bind(&assigned_catalog_name)
+    .bind(wh2)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed second registry catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
+    )
+    .bind(engine_id)
+    .bind(assigned_catalog_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("attach second catalog");
+    sqlx::query(
+        "INSERT INTO registry.catalog_workspaces (catalog_id, workspace_id) VALUES ($1, $2)",
+    )
+    .bind(assigned_catalog_id)
+    .bind(f.ws_a.0)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign second catalog to ws_a");
+
+    // Scenario 2: a THIRD catalog, attached to the SAME engine, assigned ONLY
+    // to ws_B — must be absent from ws_A's view.
+    let sc3: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections \
+           (name, provider, region, bucket, access_key, path_style) \
+         VALUES ($1, 's3', 'us-east-1', 'warehouse', 'egret', true) RETURNING id",
+    )
+    .bind(format!("n2-sc3-{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed third storage connection");
+    let wh3: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(format!("n2-wh3-{}", Uuid::new_v4().simple()))
+    .bind(f.ws_b.0)
+    .bind(sc3)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed third warehouse");
+    let hidden_catalog_name = format!("n2_hidden_{}", Uuid::new_v4().simple());
+    let hidden_catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) RETURNING id",
+    )
+    .bind(&hidden_catalog_name)
+    .bind(wh3)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed third registry catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
+    )
+    .bind(engine_id)
+    .bind(hidden_catalog_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("attach third catalog");
+    sqlx::query(
+        "INSERT INTO registry.catalog_workspaces (catalog_id, workspace_id) VALUES ($1, $2)",
+    )
+    .bind(hidden_catalog_id)
+    .bind(f.ws_b.0)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign third catalog to ws_b only");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/engines/{engine_id}", f.slug_a),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, d) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "engine detail; body={d}");
+    let names: Vec<String> = d["catalogs"]
+        .as_array()
+        .expect("catalogs array")
+        .iter()
+        .map(|c| c["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        names.contains(&primary_catalog_name),
+        "the un-backfilled owned warehouse catalog must still appear; got {names:?}"
+    );
+    assert!(
+        names.contains(&assigned_catalog_name),
+        "a catalog explicitly assigned to ws_a must appear even though ws_b owns its warehouse; got {names:?}"
+    );
+    assert!(
+        !names.contains(&hidden_catalog_name),
+        "a catalog attached to the engine but assigned only to ws_b must NOT appear; got {names:?}"
+    );
+    assert_eq!(
+        names.len(),
+        2,
+        "exactly the two visible catalogs, got {names:?}"
+    );
+}
+
 /// B2: a non-admin member (ws_viewer holds `catalog:read`) may read the engine
 /// view — it is a member read, not a manage-only action.
 #[tokio::test]
@@ -789,7 +1114,7 @@ async fn ws_engine_view_allows_non_admin_member() {
         return;
     };
     let token = add_member(&f, f.ws_a, "viewer", "ws_viewer").await;
-    let (_engine_id, _name, _s, _sec) = seed_assigned_engine_with_catalog(
+    let (_engine_id, _name, _s, _sec, _cat) = seed_assigned_engine_with_catalog(
         &f.db,
         &f.workspace_secrets,
         f.ws_a.0,
@@ -848,5 +1173,104 @@ async fn test_unsaved_unreachable_host_is_200_not_ok() {
         json["ok"],
         serde_json::json!(false),
         "an unreachable host must report ok=false; body={json}"
+    );
+}
+
+/// Pins the B1b-2 `==` anti-leak for the SAME-NAME case: even if a platform
+/// role held `catalog:read` ITSELF — the literal workspace-scope key from
+/// 0024 — Cedar still cannot let that platform grant satisfy the workspace
+/// check, because `template_for_role` (`crates/egret-auth/src/pdp/templates.rs`)
+/// gives a non-`platform_admin` platform-scoped role `resource == ?resource`,
+/// and `scope_uid("platform", ..)` (`entities.rs`) binds that slot to
+/// `Egret::Platform::"root"` — which can never `==` an `Egret::Workspace::<id>`
+/// entity, same action name or not. (SP3 still keeps `catalog_registry:*`
+/// DISTINCT from `catalog:read` — not because Cedar would confuse them, but
+/// because permission keys are scope-blind strings everywhere else they're
+/// read: `rbac::is_known`, the effective-permission lists the admin
+/// permission UI renders, and the single Cedar action namespace a policy
+/// names by string.) The HTTP 403 below is also produced by WsContext's
+/// membership gate, so the direct PDP assertions are what actually
+/// discriminate: they fail if `template_for_role`'s platform-scope operator
+/// ever regresses from `==` to `in` (verified by hand — see the task-8 fix
+/// report for the RED/GREEN transcript of temporarily making that change).
+#[tokio::test]
+async fn platform_grant_never_satisfies_workspace_scope_check() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let email = format!("regreader_{}@egret.local", Uuid::new_v4().simple());
+    let uid = f
+        .users
+        .insert_local(&email, "Test", "x")
+        .await
+        .expect("insert user");
+    let role_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (scope, name, description) VALUES ('platform', $1, 'test-only role') RETURNING id",
+    )
+    .bind(format!("test_role_{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert role");
+    // The COLLIDING key itself: this role holds `catalog:read` — the literal
+    // workspace-scope permission — but only ever granted at PLATFORM scope.
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'catalog:read')")
+        .bind(role_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("grant permission");
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL)",
+    )
+    .bind(uid.0)
+    .bind(role_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign role");
+    let token = f
+        .sessions
+        .create(uid, "test", "127.0.0.1")
+        .await
+        .expect("session")
+        .token;
+
+    // Not a member of ws_a: the workspace engine view is 403.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/engines", f.slug_a),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // The PDP itself: the role was seeded after `setup()` built its PDP, so build
+    // a fresh one that sees it.
+    let pdp = egret_auth::pdp::CedarPdp::build(f.db.clone(), &egret_events::EventBus::new())
+        .await
+        .expect("build CedarPdp");
+    use egret_core::authz::{Pdp, Resource, Subject};
+    let subject = Subject {
+        user_id: uid,
+        group_ids: vec![],
+    };
+    let platform = pdp
+        .authorize(&subject, "catalog:read", &Resource::Platform)
+        .await
+        .expect("authorize");
+    assert!(platform.allow, "positive control: the platform grant works");
+    let workspace = pdp
+        .authorize(&subject, "catalog:read", &Resource::Workspace(f.ws_a))
+        .await
+        .expect("authorize");
+    assert!(
+        !workspace.allow,
+        "a platform-scope grant of catalog:read must not satisfy the workspace-scope \
+         catalog:read check on a specific workspace (B1b-2 anti-leak)"
     );
 }

@@ -15,6 +15,9 @@ egret-events.workspace = true
 egret-workspace.workspace = true
 egret-query.workspace = true
 egret-query-api.workspace = true
+# `bump_bound_tag_versions`: the one service-resolution the tag export, the
+# assign/unassign bump and the boot backfill all share (SP3 review F-1).
+egret-catalog-registry.workspace = true
 axum.workspace = true
 sqlx.workspace = true
 serde.workspace = true

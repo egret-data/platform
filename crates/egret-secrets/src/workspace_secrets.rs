@@ -31,7 +31,8 @@ pub struct WorkspaceSecretMeta {
     pub name: String,
     pub description: Option<String>,
     pub created_at: DateTime<Utc>,
-    /// Number of connections (storages + databases) referencing this secret.
+    /// References to this secret: storage and database connections, registry
+    /// catalogs, and engine catalog credentials.
     pub used_by: i64,
     /// k8s-style secret type (Opaque / kubernetes.io/tls / kubernetes.io/basic-auth).
     pub r#type: String,
@@ -171,7 +172,9 @@ impl WorkspaceSecretStore {
         let rows: Vec<MetaRow> = sqlx::query_as(
             "SELECT ws.id, ws.name, ws.description, ws.created_at, \
              (SELECT count(*) FROM storage.storage_connections WHERE secret_ref = ws.id) \
-             + (SELECT count(*) FROM query.databases WHERE secret_id = ws.id) AS used_by, \
+             + (SELECT count(*) FROM query.databases WHERE secret_id = ws.id) \
+             + (SELECT count(*) FROM registry.catalog_secret_refs WHERE secret_id = ws.id) \
+             + (SELECT count(*) FROM registry.engine_catalog_attachments WHERE credential_secret_id = ws.id) AS used_by, \
              s.type, \
              ARRAY(SELECT key FROM secret_data WHERE secret_id = ws.secret_ref ORDER BY key) AS keys \
              FROM workspace_secrets ws JOIN secrets s ON s.id = ws.secret_ref \
@@ -193,7 +196,9 @@ impl WorkspaceSecretStore {
         let row: Option<MetaRow> = sqlx::query_as(
             "SELECT ws.id, ws.name, ws.description, ws.created_at, \
              (SELECT count(*) FROM storage.storage_connections WHERE secret_ref = ws.id) \
-             + (SELECT count(*) FROM query.databases WHERE secret_id = ws.id) AS used_by, \
+             + (SELECT count(*) FROM query.databases WHERE secret_id = ws.id) \
+             + (SELECT count(*) FROM registry.catalog_secret_refs WHERE secret_id = ws.id) \
+             + (SELECT count(*) FROM registry.engine_catalog_attachments WHERE credential_secret_id = ws.id) AS used_by, \
              s.type, \
              ARRAY(SELECT key FROM secret_data WHERE secret_id = ws.secret_ref ORDER BY key) AS keys \
              FROM workspace_secrets ws JOIN secrets s ON s.id = ws.secret_ref \

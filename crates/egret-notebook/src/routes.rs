@@ -678,6 +678,7 @@ fn cat_err(e: egret_catalog_engine::CatalogError) -> NotebookApiError {
         C::AlreadyExists(m) => Error::Conflict(m),
         C::InUse => Error::Conflict("in use".into()),
         C::BadRequest(m) => Error::InvalidInput(m),
+        C::Conflict(m) => Error::Conflict(m),
         C::Db(db) => Error::Internal(anyhow::anyhow!(db)),
     })
 }
@@ -706,7 +707,14 @@ async fn set_notebook_warehouse(
         .map_err(NotebookApiError::from)?;
 
     // The warehouse must exist AND belong to this workspace (cross-tenant → 400,
-    // no partial mutation).
+    // no partial mutation). Deliberately OWNER-ONLY, not
+    // `warehouse_visible_to_workspace` (SP3 registry-assignment visibility,
+    // §4.6): notebook selection provisions ONE shared `notebook` catalog role
+    // + namespace-scoped grant per warehouse (below), so letting an assigned
+    // (non-owning) workspace pick it would hand it read/write on the OWNER's
+    // private notebook namespace, with no way to revoke it short of deleting
+    // the role. Assignment-based selection needs its own per-workspace role +
+    // namespace (and a re-check at token-mint time) — deferred to SP4.
     let wh = st
         .catalog
         .get_warehouse(b.warehouse_id)

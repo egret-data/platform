@@ -164,6 +164,130 @@ impl CatalogStore {
         Ok(())
     }
 
+    /// Delete a warehouse, releasing its registry catalog's workspace
+    /// assignments and letting the catalog go with it (FK cascade) — unless an
+    /// engine still attaches the catalog, in which case nothing is mutated and
+    /// this returns `CatalogError::Conflict` naming the attached engine(s).
+    ///
+    /// Runs in ONE transaction (SP3 catalog-registry review M2/M3):
+    /// `registry.catalog_workspaces.catalog_id` is NO ACTION, not cascaded from
+    /// `registry.catalogs` (migration 0147 §decision 5), so the assignments
+    /// must be released before the warehouse row goes or the delete hits a raw
+    /// FK 500 — and checking attachments in a SEPARATE statement before the
+    /// transaction let a race land between the check and the delete (a
+    /// concurrent attach lands, then the delete hits the attachments FK — also
+    /// NO ACTION — as a raw 500, not this 409). `SELECT … FOR UPDATE` locks the
+    /// catalog row before the attachment check, so a racing attach either
+    /// commits first (and is then seen and 409s here) or blocks until this
+    /// transaction ends (and then finds the catalog gone). A warehouse with no
+    /// registry catalog yet (the boot backfill has not reached it) falls
+    /// straight through to the plain delete; a warehouse that is still an
+    /// un-migrated engine's `engines.warehouse_id` primary hits that FK
+    /// (`engines_warehouse_id_fkey`, migration 0056) and is mapped to a 409
+    /// naming the engine(s) too, instead of a raw 500.
+    pub async fn delete_warehouse_releasing_catalog(&self, id: Uuid) -> Result<(), CatalogError> {
+        let mut tx = self.pool().begin().await?;
+        let catalog: Option<(Uuid, String)> = sqlx::query_as(
+            "SELECT id, name FROM registry.catalogs WHERE warehouse_id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((catalog_id, catalog_name)) = catalog {
+            let engine_names: Vec<String> = sqlx::query_scalar(
+                "SELECT e.name FROM registry.engine_catalog_attachments a \
+                   JOIN engine_mgmt.engines e ON e.id = a.engine_id \
+                  WHERE a.catalog_id = $1 ORDER BY e.name",
+            )
+            .bind(catalog_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            if !engine_names.is_empty() {
+                // Dropping `tx` here rolls back (nothing was mutated yet).
+                return Err(CatalogError::Conflict(format!(
+                    "the warehouse's catalog {} is attached to engine(s) {}; detach it first",
+                    catalog_name,
+                    engine_names.join(", ")
+                )));
+            }
+            sqlx::query("DELETE FROM registry.catalog_workspaces WHERE catalog_id = $1")
+                .bind(catalog_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        let result = sqlx::query("DELETE FROM catalog.warehouses WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await;
+        match result {
+            Ok(_) => {
+                tx.commit().await?;
+                Ok(())
+            }
+            Err(sqlx::Error::Database(d))
+                if d.constraint() == Some("engines_warehouse_id_fkey") =>
+            {
+                // `tx` rolls back on drop below. A fresh, unparameterized-by-tx
+                // read names the still-pointing engine(s) for the message.
+                drop(tx);
+                let names: Vec<String> = sqlx::query_scalar(
+                    "SELECT name FROM engine_mgmt.engines WHERE warehouse_id = $1 ORDER BY name",
+                )
+                .bind(id)
+                .fetch_all(self.pool())
+                .await?;
+                Err(CatalogError::Conflict(format!(
+                    "the warehouse is still engine(s) {}'s primary warehouse; delete or repoint them first",
+                    names.join(", ")
+                )))
+            }
+            // SP3 catalog-registry review N4: our own `SELECT … FOR UPDATE`
+            // above only locks a registry catalog that already exists when we
+            // read it — it cannot lock the ABSENCE of one. If the warehouse had
+            // no registry catalog yet (the boot backfill has not reached it),
+            // the SELECT returns nothing and we fall straight through to this
+            // DELETE; a backfill that creates the catalog (+ its
+            // `catalog_workspaces` assignment, atomically, in its own
+            // transaction) between our SELECT and this DELETE commits fine,
+            // and this DELETE then cascades into deleting that brand-new
+            // catalog row — which its `catalog_workspaces` row (NO ACTION)
+            // blocks, same shape as the engines FK above. Racing the boot
+            // backfill this way is rare but the failure mode without this arm
+            // is a raw 500, not a 409, so it is mapped the same way.
+            Err(sqlx::Error::Database(d))
+                if d.constraint() == Some("catalog_workspaces_catalog_id_fkey") =>
+            {
+                Err(CatalogError::Conflict(
+                    "the warehouse's registry catalog was just created and assigned to a \
+                     workspace; retry the delete"
+                        .into(),
+                ))
+            }
+            Err(e) => Err(CatalogError::Db(e)),
+        }
+    }
+
+    /// `RegistryStore::warehouse_visible_to_workspace` through the catalog
+    /// seam's store. Like it, this has NO production caller today (review
+    /// F-10): it is the executable form of the §4.6 assigned-or-owned rule
+    /// that `egret-query` mirrors in SQL, held for SP4's per-workspace
+    /// notebook role. It is not an authorization gate, and notebook warehouse
+    /// selection deliberately does not use it — read that function's doc
+    /// before calling this one.
+    pub async fn warehouse_visible_to_workspace(
+        &self,
+        warehouse_id: Uuid,
+        workspace_id: Uuid,
+    ) -> Result<bool, CatalogError> {
+        self.registry()
+            .warehouse_visible_to_workspace(warehouse_id, workspace_id)
+            .await
+            .map_err(|e| match e {
+                egret_catalog_registry::RegistryError::Db(e) => CatalogError::Db(e),
+                other => CatalogError::BadRequest(other.to_string()),
+            })
+    }
+
     // roles + grants -----------------------------------------------------------
 
     pub async fn create_role(

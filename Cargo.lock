@@ -3013,6 +3013,7 @@ dependencies = [
  "egret-analytics-api",
  "egret-audit",
  "egret-auth",
+ "egret-catalog-registry",
  "egret-config",
  "egret-core",
  "egret-events",
@@ -3053,6 +3054,7 @@ dependencies = [
  "egret-automation",
  "egret-bi",
  "egret-catalog-engine",
+ "egret-catalog-registry",
  "egret-config",
  "egret-controlplane",
  "egret-core",
@@ -3115,6 +3117,7 @@ dependencies = [
  "egret-auth",
  "egret-catalog-api",
  "egret-catalog-engine",
+ "egret-catalog-registry",
  "egret-config",
  "egret-core",
  "egret-events",
@@ -3140,6 +3143,24 @@ dependencies = [
  "tracing",
  "url",
  "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "egret-catalog-registry"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "egret-metastore",
+ "egret-secrets",
+ "egret-test-db",
+ "regex",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -3278,6 +3299,7 @@ dependencies = [
  "egret-auth",
  "egret-catalog-api",
  "egret-catalog-engine",
+ "egret-catalog-registry",
  "egret-core",
  "egret-engine-mgmt-api",
  "egret-events",
@@ -3452,10 +3474,12 @@ dependencies = [
  "axum",
  "chrono",
  "egret-auth",
+ "egret-catalog-registry",
  "egret-core",
  "egret-events",
  "egret-metastore",
  "egret-policy-api",
+ "egret-secrets",
  "egret-test-db",
  "http-body-util",
  "serde",
@@ -3594,6 +3618,7 @@ dependencies = [
  "egret-policy",
  "egret-query",
  "egret-query-api",
+ "egret-test-db",
  "egret-workflow",
  "egret-workspace",
  "http-body-util",

@@ -39,3 +39,7 @@ tower.workspace = true
 http-body-util = "0.1"
 # Real CedarPdp in authz-asserting HTTP tests (B1b-2).
 egret-events.workspace = true
+# `download_tags_after_backfill`: drives the real boot backfill against the
+# real tag-download route (SP3 catalog-registry review F-1).
+egret-catalog-registry.workspace = true
+egret-secrets.workspace = true

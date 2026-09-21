@@ -5,8 +5,10 @@
 //! When a catalog tag is (un)assigned, the bound policy service's
 //! `tag_version` must bump so the Ranger tag-download plugin re-polls
 //! `download_tags` (otherwise it 304s forever and never sees the change). The
-//! binding is `engine_mgmt.engines.authz_service_id` -> the warehouse's engine
-//! (same join `PolicyStore::tag_assignments_for_service` documents).
+//! binding is `engine_mgmt.engines.authz_service_id` -> the warehouse's
+//! engine(s), reached EITHER as the engine's own primary warehouse (legacy) OR
+//! through a registry catalog attachment (SP3 D5) — the same union
+//! `PolicyStore::tag_assignments_for_service` serves under.
 
 use egret_bi::catalog_tags::CatalogTagRepo;
 use egret_bi::TagRepo;
@@ -54,6 +56,80 @@ async fn seed_bound_warehouse(pool: &sqlx::PgPool, service_id: i64) -> Uuid {
     .await
     .expect("insert engine");
     wh_id
+}
+
+/// A bare workspace + storage connection + warehouse, no engine attached.
+/// Returns the warehouse id.
+async fn seed_warehouse(pool: &sqlx::PgPool) -> Uuid {
+    let (ws_id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("tvws-{}", Uuid::new_v4().simple()))
+            .bind("Tag Version WS")
+            .fetch_one(pool)
+            .await
+            .expect("insert workspace");
+    let (sc_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(format!("tvsc-{}", Uuid::new_v4().simple()))
+    .bind("us-east-1")
+    .bind("egret-tv-test")
+    .bind("AKIATEST")
+    .fetch_one(pool)
+    .await
+    .expect("insert storage connection");
+    let (wh_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(format!("tvwh_{}", Uuid::new_v4().simple()))
+    .bind(ws_id)
+    .bind(sc_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert warehouse");
+    wh_id
+}
+
+/// A Trino engine bound to `service_id`, whose PRIMARY warehouse is
+/// `warehouse_id`. Returns the engine id.
+async fn seed_engine(pool: &sqlx::PgPool, service_id: i64, warehouse_id: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, authz_service_id) \
+         VALUES ($1,'trino','egret',$2,'{}'::jsonb,$3) RETURNING id",
+    )
+    .bind(format!("tveng-{}", Uuid::new_v4().simple()))
+    .bind(warehouse_id)
+    .bind(service_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert engine")
+}
+
+/// A registry catalog for `warehouse_id`. Returns the catalog id.
+async fn seed_registry_catalog(pool: &sqlx::PgPool, warehouse_id: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) RETURNING id",
+    )
+    .bind(format!("tvcat_{}", Uuid::new_v4().simple()))
+    .bind(warehouse_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert registry catalog")
+}
+
+/// Attach `catalog_id` to `engine_id` (`registry.engine_catalog_attachments`).
+async fn attach_catalog(pool: &sqlx::PgPool, engine_id: Uuid, catalog_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
+    )
+    .bind(engine_id)
+    .bind(catalog_id)
+    .execute(pool)
+    .await
+    .expect("attach catalog");
 }
 
 async fn create_service(pool: &sqlx::PgPool) -> i64 {
@@ -141,5 +217,64 @@ async fn assign_and_unassign_bump_bound_service_tag_version() {
         tag_version(&pool, service_id).await,
         3,
         "unassign_catalog must bump the bound service's tag_version"
+    );
+}
+
+/// SP3 catalog-registry review I1: a tag change on a warehouse attached to an
+/// engine as a SECONDARY catalog (not its `engines.warehouse_id` primary) must
+/// still bump that engine's bound service `tag_version` — otherwise
+/// `download_tags` keeps 304-ing and the new mask/tag never reaches the
+/// Ranger plugin. Pins `bump_bound_tag_versions`'s registry-attachment branch.
+#[tokio::test]
+async fn secondary_attachment_bump_reaches_engines_bound_service() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
+
+    let service_id = create_service(&pool).await;
+    // Engine B's OWN (primary) warehouse — untagged, irrelevant to this test;
+    // just here to prove the bump is not accidentally reached through it.
+    let wh_b_primary = seed_warehouse(&pool).await;
+    let eng_b = seed_engine(&pool, service_id, wh_b_primary).await;
+
+    // Warehouse W is NOT engine B's primary; B attaches W's registry catalog
+    // as a SECONDARY catalog.
+    let wh_w = seed_warehouse(&pool).await;
+    let catalog_w = seed_registry_catalog(&pool, wh_w).await;
+    attach_catalog(&pool, eng_b, catalog_w).await;
+
+    assert_eq!(tag_version(&pool, service_id).await, 1);
+
+    let by: Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(format!("tv_{}@egret.local", Uuid::new_v4().simple()))
+            .fetch_one(&pool)
+            .await
+            .expect("insert user");
+    let tags = TagRepo::new(db.clone());
+    let repo = CatalogTagRepo::new(db.clone());
+    let tag = tags
+        .create(
+            &format!("pii-{}", Uuid::new_v4().simple()),
+            "PII",
+            "Personal data",
+            "#ff0000",
+            Some(by),
+        )
+        .await
+        .expect("create tag");
+
+    // Tag a column on W — NOT B's primary warehouse.
+    repo.assign_catalog(tag.id, wh_w, "sales", "orders", "email", Some(by))
+        .await
+        .expect("assign");
+    assert_eq!(
+        tag_version(&pool, service_id).await,
+        2,
+        "a tag change on a SECONDARY attachment must bump the attaching engine's bound service"
     );
 }

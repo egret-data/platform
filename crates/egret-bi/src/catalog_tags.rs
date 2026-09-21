@@ -128,31 +128,23 @@ impl CatalogTagRepo {
         Ok(())
     }
 
-    /// Bump `policy.authz_services.tag_version` for every policy service bound to
-    /// `warehouse_id`. The binding is the engine seam:
-    /// `engine_mgmt.engines.authz_service_id` -> the warehouse's engine(s) (the
-    /// same join `PolicyStore::tag_assignments_for_service` uses on the serving
-    /// side). A monotonic `tag_version` is how the Ranger tag-download plugin
-    /// (which polls `download_tags?lastKnownVersion=`) learns a warehouse's
-    /// catalog-tag assignments changed; without the bump it 304s forever. Runs on
-    /// the caller's transaction. Parameterized, cross-seam-but-same-DB write.
+    /// Bump the `tag_version` of every policy service that serves
+    /// `warehouse_id`'s catalog tags, so the Ranger tag plugin stops 304ing and
+    /// re-downloads. Runs on the caller's transaction (cross-seam, same DB).
+    ///
+    /// The resolution itself — the registry∪legacy `profiles` union and the
+    /// `tagService` fan-out the plugin actually polls — lives in
+    /// `egret_catalog_registry::bump_bound_tag_versions`, because the boot
+    /// backfill has to bump the same services for the same reason (SP3
+    /// catalog-registry review C1/I1/N1/F-1). One implementation, three
+    /// callers, no drift: read that function for why each branch is there.
     async fn bump_bound_tag_versions(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         warehouse_id: Uuid,
     ) -> Result<(), BiApiError> {
-        sqlx::query(
-            "UPDATE policy.authz_services s \
-                SET tag_version = tag_version + 1, updated_at = now() \
-             WHERE s.id IN ( \
-                 SELECT DISTINCT e.authz_service_id \
-                 FROM engine_mgmt.engines e \
-                 WHERE e.warehouse_id = $1 AND e.authz_service_id IS NOT NULL \
-             )",
-        )
-        .bind(warehouse_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(crate::error::BiError::from)?;
+        egret_catalog_registry::bump_bound_tag_versions(&mut **tx, warehouse_id)
+            .await
+            .map_err(crate::error::BiError::from)?;
         Ok(())
     }
 

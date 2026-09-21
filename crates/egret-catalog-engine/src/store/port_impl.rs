@@ -116,6 +116,11 @@ impl From<CatalogError> for CatalogApiError {
             CatalogError::AlreadyExists(m) => CatalogApiError::AlreadyExists(m),
             CatalogError::InUse => CatalogApiError::InUse,
             CatalogError::BadRequest(m) => CatalogApiError::BadRequest(m),
+            // `CatalogPort` exposes no warehouse-delete call, so `Conflict`
+            // (warehouse-delete-only, SP3 catalog-registry review M2/M3) is
+            // unreachable through this boundary today; mapped for
+            // exhaustiveness only.
+            CatalogError::Conflict(m) => CatalogApiError::BadRequest(m),
             CatalogError::Db(e) => CatalogApiError::Backend(e.to_string()),
         }
     }

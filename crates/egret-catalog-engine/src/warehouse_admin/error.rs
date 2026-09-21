@@ -46,7 +46,24 @@ impl From<CatalogError> for CatalogHttpError {
                     .to_string(),
             ),
             CatalogError::BadRequest(s) => CatalogHttpError::BadRequest(s),
+            CatalogError::Conflict(s) => CatalogHttpError::Conflict(s),
             CatalogError::Db(_) => CatalogHttpError::Internal,
+        }
+    }
+}
+
+/// The registry store error (SP3): a warehouse's registry catalog (creation,
+/// visibility, attachment checks on delete).
+impl From<egret_catalog_registry::RegistryError> for CatalogHttpError {
+    fn from(e: egret_catalog_registry::RegistryError) -> Self {
+        use egret_catalog_registry::RegistryError as E;
+        match e {
+            E::NotFound(_) => CatalogHttpError::NotFound,
+            E::AlreadyExists(s) => CatalogHttpError::AlreadyExists(s),
+            E::Conflict(s) => CatalogHttpError::Conflict(s),
+            E::Invalid(v) => CatalogHttpError::BadRequest(v.to_string()),
+            E::Secrets(s) => s.into(),
+            E::Db(_) => CatalogHttpError::Internal,
         }
     }
 }

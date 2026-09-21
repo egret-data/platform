@@ -108,9 +108,14 @@ deps:
   mailpit:
     enabled: true
     image: axllent/mailpit:latest
+  # docker.io/minio/minio and docker.io/minio/mc no longer exist (MinIO moved
+  # its images to quay.io); `:latest` 404s and wedges `helm upgrade --wait`
+  # forever waiting on a deployment that can never pull. Pinned to specific
+  # quay.io releases, each verified with `docker pull` + a live run before
+  # being committed here.
   minio:
-    image: minio/minio:latest
-    mcImage: minio/mc:latest
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772
+    mcImage: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
     rootUser: egret
     rootPassword: egretsecret
     bucket: warehouse

@@ -39,9 +39,9 @@ fn get(uri: &str) -> Request<Body> {
         .unwrap()
 }
 
-/// Seed a workspace + storage connection + warehouse + a Trino engine bound to
-/// `service_id`. Returns (warehouse_id, warehouse_name).
-async fn seed_bound_warehouse(pool: &sqlx::PgPool, service_id: i64) -> (Uuid, String) {
+/// A bare workspace + storage connection + warehouse, no engine attached.
+/// Returns the warehouse id.
+async fn seed_warehouse(pool: &sqlx::PgPool) -> Uuid {
     let (ws_id,): (Uuid,) =
         sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
             .bind(format!("tagws-{}", Uuid::new_v4().simple()))
@@ -60,38 +60,115 @@ async fn seed_bound_warehouse(pool: &sqlx::PgPool, service_id: i64) -> (Uuid, St
     .fetch_one(pool)
     .await
     .expect("insert storage connection");
-    let wh_name = format!("tagwh_{}", Uuid::new_v4().simple());
     let (wh_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) VALUES ($1,$2,$3) RETURNING id",
     )
-    .bind(&wh_name)
+    .bind(format!("tagwh_{}", Uuid::new_v4().simple()))
     .bind(ws_id)
     .bind(sc_id)
     .fetch_one(pool)
     .await
     .expect("insert warehouse");
+    wh_id
+}
+
+/// A Trino engine bound to `service_id`, whose PRIMARY warehouse is
+/// `warehouse_id` (`engines.warehouse_id` — the legacy join's key).
+async fn seed_engine(pool: &sqlx::PgPool, service_id: i64, warehouse_id: Uuid) -> Uuid {
     let (eng_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, authz_service_id) \
          VALUES ($1,'trino','egret',$2,'{}'::jsonb,$3) RETURNING id",
     )
     .bind(format!("tageng-{}", Uuid::new_v4().simple()))
-    .bind(wh_id)
+    .bind(warehouse_id)
     .bind(service_id)
     .fetch_one(pool)
     .await
     .expect("insert engine");
-    // The engine's primary Trino catalog is named `egret` (a fixed name at
-    // provision time), NOT the warehouse name — `tag_assignments_for_service`
-    // emits THIS as the `catalog` so downloaded tags match the query's resource.
-    sqlx::query(
-        "INSERT INTO engine_mgmt.engine_catalogs (engine_id, name, kind, config, is_primary) \
-         VALUES ($1,'egret','egret-warehouse','{}'::jsonb,true)",
+    eng_id
+}
+
+/// A registry catalog for `warehouse_id`, named `{prefix}_<uuid>`. Returns
+/// `(catalog_id, catalog_name)`.
+async fn seed_registry_catalog(
+    pool: &sqlx::PgPool,
+    warehouse_id: Uuid,
+    prefix: &str,
+) -> (Uuid, String) {
+    let catalog_name = format!("{prefix}_{}", Uuid::new_v4().simple());
+    let (catalog_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) RETURNING id",
     )
-    .bind(eng_id)
+    .bind(&catalog_name)
+    .bind(warehouse_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert registry catalog");
+    (catalog_id, catalog_name)
+}
+
+/// Attach `catalog_id` to `engine_id` (`registry.engine_catalog_attachments`
+/// — the registry branch's key).
+async fn attach_catalog(pool: &sqlx::PgPool, engine_id: Uuid, catalog_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
+    )
+    .bind(engine_id)
+    .bind(catalog_id)
     .execute(pool)
     .await
-    .expect("insert engine catalog");
-    (wh_id, wh_name)
+    .expect("attach catalog");
+}
+
+/// The engine's legacy `engine_mgmt.engine_catalogs` PRIMARY row, named
+/// `name` — the pre-SP3 shape the backfill has not (or not yet) migrated away
+/// from, and the legacy branch's key.
+async fn seed_legacy_primary(pool: &sqlx::PgPool, engine_id: Uuid, name: &str) {
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engine_catalogs (engine_id, name, kind, config, is_primary) \
+         VALUES ($1, $2, 'egret-warehouse', '{}'::jsonb, true)",
+    )
+    .bind(engine_id)
+    .bind(name)
+    .execute(pool)
+    .await
+    .expect("insert legacy primary catalog");
+}
+
+/// One PII tag, assigned to `sales.orders.email` on `warehouse_id`.
+async fn seed_tag_assignment(pool: &sqlx::PgPool, warehouse_id: Uuid) {
+    let (tag_id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("pii-{}", Uuid::new_v4().simple()))
+            .bind("PII")
+            .fetch_one(pool)
+            .await
+            .expect("insert tag");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         VALUES ($1,$2,'sales','orders','email')",
+    )
+    .bind(tag_id)
+    .bind(warehouse_id)
+    .execute(pool)
+    .await
+    .expect("insert assignment");
+}
+
+/// Seed a workspace + storage connection + warehouse + a Trino engine bound to
+/// `service_id`, with a registry catalog attached (the modern, fully-migrated
+/// shape). Returns (warehouse_id, the registry catalog name the engine
+/// reaches it by).
+async fn seed_bound_warehouse(pool: &sqlx::PgPool, service_id: i64) -> (Uuid, String) {
+    let wh_id = seed_warehouse(pool).await;
+    let eng_id = seed_engine(pool, service_id, wh_id).await;
+    // The engine reaches the warehouse through its registry catalog; the tag
+    // export must emit THAT catalog's name (the SQL name Trino sees).
+    let (catalog_id, catalog_name) = seed_registry_catalog(pool, wh_id, "tagcat").await;
+    attach_catalog(pool, eng_id, catalog_id).await;
+    (wh_id, catalog_name)
 }
 
 #[tokio::test]
@@ -149,7 +226,7 @@ async fn download_tags_serves_seeded_assignment() {
         .await
         .expect("create service");
 
-    let (wh_id, _wh_name) = seed_bound_warehouse(&pool, svc_row.id).await;
+    let (wh_id, catalog_name) = seed_bound_warehouse(&pool, svc_row.id).await;
 
     // One classification tag, assigned to a column of a table in this warehouse.
     let (tag_id,): (Uuid,) =
@@ -186,12 +263,12 @@ async fn download_tags_serves_seeded_assignment() {
     assert_eq!(st["tags"]["1"]["type"], "PII");
     // One resource. `resourceElements` sits directly on the entry (Ranger
     // `RangerServiceResource` shape), and `catalog` resolves to the engine's
-    // Trino catalog name (`egret`), NOT the warehouse name.
+    // registry catalog name, NOT the warehouse name.
     let srs = st["serviceResources"].as_array().unwrap();
     assert_eq!(srs.len(), 1, "one resource, got {srs:?}");
     assert_eq!(srs[0]["isEnabled"], true);
     let els = &srs[0]["resourceElements"];
-    assert_eq!(els["catalog"]["values"][0], "egret");
+    assert_eq!(els["catalog"]["values"][0], json!(catalog_name));
     assert_eq!(els["schema"]["values"][0], "sales");
     assert_eq!(els["table"]["values"][0], "orders");
     assert_eq!(els["column"]["values"][0], "email");
@@ -226,7 +303,7 @@ async fn download_tags_via_tag_service_resolves_owning_trino_profile() {
         .create_service(&tag_svc, "tag", &json!({}))
         .await
         .expect("create tag service");
-    let (wh_id, _wh) = seed_bound_warehouse(&pool, trino_row.id).await;
+    let (wh_id, catalog_name) = seed_bound_warehouse(&pool, trino_row.id).await;
     let (tag_id,): (Uuid,) =
         sqlx::query_as("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
             .bind(format!("pii-{base}"))
@@ -258,6 +335,292 @@ async fn download_tags_via_tag_service_resolves_owning_trino_profile() {
         1,
         "polling the tag service must resolve the owning trino profile's assignments, got {srs:?}"
     );
-    assert_eq!(srs[0]["resourceElements"]["catalog"]["values"][0], "egret");
+    assert_eq!(
+        srs[0]["resourceElements"]["catalog"]["values"][0],
+        json!(catalog_name)
+    );
     assert_eq!(srs[0]["resourceElements"]["column"]["values"][0], "email");
+}
+
+/// C1: an engine the backfill has not migrated (no attachment at all, only its
+/// legacy `engine_catalogs` primary row) must still export tags — under the
+/// LEGACY name, since that's the only name it actually serves.
+#[tokio::test]
+async fn download_tags_legacy_only_engine_exports_legacy_name() {
+    let Some(db) = db().await else {
+        eprintln!("skip");
+        return;
+    };
+    let pool = db.pool.clone();
+    let store = PolicyStore::new(db);
+    seed_trino(&store).await.expect("seed");
+    let svc = format!("trino_{}", Uuid::new_v4().simple());
+    let svc_row = store
+        .create_service(&svc, "trino", &json!({}))
+        .await
+        .expect("create service");
+
+    let wh_id = seed_warehouse(&pool).await;
+    let eng_id = seed_engine(&pool, svc_row.id, wh_id).await;
+    let legacy_name = format!("legacy_{}", Uuid::new_v4().simple());
+    seed_legacy_primary(&pool, eng_id, &legacy_name).await;
+    // No registry catalog, no attachment: this engine is exactly what the
+    // backfill leaves behind on a `backfill_failed` row or a run that errored
+    // out entirely (SP3 catalog-registry review, C1).
+    seed_tag_assignment(&pool, wh_id).await;
+
+    let r = app(store)
+        .oneshot(get(&format!("/tags/download/{svc}")))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let bytes = r.into_body().collect().await.unwrap().to_bytes();
+    let st: Value = serde_json::from_slice(&bytes).unwrap();
+    let srs = st["serviceResources"].as_array().unwrap();
+    assert_eq!(
+        srs.len(),
+        1,
+        "un-migrated engine must still export under its legacy name, got {srs:?}"
+    );
+    assert_eq!(
+        srs[0]["resourceElements"]["catalog"]["values"][0],
+        json!(legacy_name)
+    );
+}
+
+/// C1: an engine mid rename-window — its registry catalog was renamed by the
+/// backfill (or an edit) but the engine has not been re-applied yet — must
+/// export tags under BOTH names: the OLD one it is still actually serving,
+/// and the NEW one it will serve after its next apply. Dropping either one is
+/// the fail-open this union closes; emitting an extra name that matches
+/// nothing live costs nothing.
+#[tokio::test]
+async fn download_tags_rename_window_exports_both_names() {
+    let Some(db) = db().await else {
+        eprintln!("skip");
+        return;
+    };
+    let pool = db.pool.clone();
+    let store = PolicyStore::new(db);
+    seed_trino(&store).await.expect("seed");
+    let svc = format!("trino_{}", Uuid::new_v4().simple());
+    let svc_row = store
+        .create_service(&svc, "trino", &json!({}))
+        .await
+        .expect("create service");
+
+    let wh_id = seed_warehouse(&pool).await;
+    let eng_id = seed_engine(&pool, svc_row.id, wh_id).await;
+    let old_name = format!("old_{}", Uuid::new_v4().simple());
+    seed_legacy_primary(&pool, eng_id, &old_name).await;
+    let (catalog_id, new_name) = seed_registry_catalog(&pool, wh_id, "new").await;
+    attach_catalog(&pool, eng_id, catalog_id).await;
+    assert_ne!(old_name, new_name);
+    seed_tag_assignment(&pool, wh_id).await;
+
+    let r = app(store)
+        .oneshot(get(&format!("/tags/download/{svc}")))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let bytes = r.into_body().collect().await.unwrap().to_bytes();
+    let st: Value = serde_json::from_slice(&bytes).unwrap();
+    let srs = st["serviceResources"].as_array().unwrap();
+    assert_eq!(
+        srs.len(),
+        2,
+        "rename window must export under BOTH the old and the new name, got {srs:?}"
+    );
+    let catalogs: std::collections::BTreeSet<String> = srs
+        .iter()
+        .map(|r| {
+            r["resourceElements"]["catalog"]["values"][0]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        catalogs,
+        std::collections::BTreeSet::from([old_name, new_name])
+    );
+    // Both resources link to the SAME tag (one tag row, one warehouse_id).
+    let tags = st["tags"].as_object().unwrap();
+    assert_eq!(tags.len(), 1, "one underlying tag, got {tags:?}");
+}
+
+/// I3: a SECONDARY attachment — a warehouse that is NOT the attaching engine's
+/// own `engines.warehouse_id` primary — is exported under its registry
+/// catalog name; an engine bound to the SAME service that does NOT attach
+/// that warehouse's catalog sees nothing for it, even though another engine
+/// (bound to the same service) does. This pins the attachment join: a mutant
+/// that drops it and falls back to `e.warehouse_id = a.warehouse_id` would
+/// pass neither half of this test (it would show W's tags to the
+/// non-attaching engine's service via a `warehouse_id` match it doesn't have,
+/// or fail to show them to the attaching one).
+#[tokio::test]
+async fn download_tags_secondary_attachment_scoped_to_attaching_engine() {
+    let Some(db) = db().await else {
+        eprintln!("skip");
+        return;
+    };
+    let pool = db.pool.clone();
+    let store = PolicyStore::new(db);
+    seed_trino(&store).await.expect("seed");
+    let svc = format!("trino_{}", Uuid::new_v4().simple());
+    let svc_row = store
+        .create_service(&svc, "trino", &json!({}))
+        .await
+        .expect("create service");
+
+    // Two engines bound to the SAME service, each with its own (untagged,
+    // unattached-to-W) primary warehouse.
+    let wh_a = seed_warehouse(&pool).await;
+    let eng_a = seed_engine(&pool, svc_row.id, wh_a).await;
+    let wh_b = seed_warehouse(&pool).await;
+    let eng_b = seed_engine(&pool, svc_row.id, wh_b).await;
+
+    // A THIRD warehouse W, tagged, whose catalog only engine B attaches — a
+    // secondary attachment (W is not B's primary warehouse either).
+    let wh_w = seed_warehouse(&pool).await;
+    let (catalog_w, catalog_name_w) = seed_registry_catalog(&pool, wh_w, "secondary").await;
+    attach_catalog(&pool, eng_b, catalog_w).await;
+    seed_tag_assignment(&pool, wh_w).await;
+
+    let r = app(store)
+        .oneshot(get(&format!("/tags/download/{svc}")))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let bytes = r.into_body().collect().await.unwrap().to_bytes();
+    let st: Value = serde_json::from_slice(&bytes).unwrap();
+    let srs = st["serviceResources"].as_array().unwrap();
+    assert_eq!(
+        srs.len(),
+        1,
+        "only the secondary attachment's tag must be exported, got {srs:?}"
+    );
+    assert_eq!(
+        srs[0]["resourceElements"]["catalog"]["values"][0],
+        json!(catalog_name_w)
+    );
+    let _ = (eng_a, wh_b);
+}
+
+/// I3: an engine bound to a DIFFERENT service exports nothing for a warehouse
+/// it attaches — confirming the service scope (`e.authz_service_id =
+/// COALESCE(tp.id, s.id)`) still holds on both branches of the union.
+#[tokio::test]
+async fn download_tags_unrelated_service_exports_nothing() {
+    let Some(db) = db().await else {
+        eprintln!("skip");
+        return;
+    };
+    let pool = db.pool.clone();
+    let store = PolicyStore::new(db);
+    seed_trino(&store).await.expect("seed");
+
+    // The service under test binds NO engine at all.
+    let empty_svc = format!("trino_{}", Uuid::new_v4().simple());
+    store
+        .create_service(&empty_svc, "trino", &json!({}))
+        .await
+        .expect("create empty service");
+
+    // A DIFFERENT service, with a fully-migrated engine + tagged warehouse —
+    // proves the fixture actually has tags to (not) leak.
+    let other_svc = format!("trino_{}", Uuid::new_v4().simple());
+    let other_row = store
+        .create_service(&other_svc, "trino", &json!({}))
+        .await
+        .expect("create other service");
+    let (wh_id, _catalog_name) = seed_bound_warehouse(&pool, other_row.id).await;
+    seed_tag_assignment(&pool, wh_id).await;
+
+    let r = app(store)
+        .oneshot(get(&format!("/tags/download/{empty_svc}")))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let bytes = r.into_body().collect().await.unwrap().to_bytes();
+    let st: Value = serde_json::from_slice(&bytes).unwrap();
+    let srs = st["serviceResources"].as_array().unwrap();
+    assert!(
+        srs.is_empty(),
+        "a service with no bound engine must export nothing, got {srs:?}"
+    );
+}
+
+/// I3 leftover (SP3 catalog-registry review re-review): an engine whose own
+/// PRIMARY warehouse (`engines.warehouse_id`) IS the tagged one, but which
+/// has neither an attachment (registry branch) nor a legacy primary row
+/// (legacy branch) — the fail-closed direction, e.g. right after a detach
+/// with nothing re-attached — exports nothing for it. This needs the
+/// exporting-nothing engine and the engine that DOES export it on TWO
+/// DIFFERENT services: sharing one service (as the secondary-attachment test
+/// above does) cannot isolate "this specific engine's own export" from "the
+/// service's export via some other bound engine".
+#[tokio::test]
+async fn download_tags_owning_engine_with_neither_attachment_nor_legacy_row_exports_nothing() {
+    let Some(db) = db().await else {
+        eprintln!("skip");
+        return;
+    };
+    let pool = db.pool.clone();
+    let store = PolicyStore::new(db);
+    seed_trino(&store).await.expect("seed");
+
+    // Engine C: its OWN primary warehouse is W (tagged below), bound to
+    // service S1. No attachment, no legacy primary row for C at all — the
+    // state right after a detach with nothing re-attached.
+    let svc_c = format!("trino_{}", Uuid::new_v4().simple());
+    let svc_c_row = store
+        .create_service(&svc_c, "trino", &json!({}))
+        .await
+        .expect("create service C");
+    let wh_w = seed_warehouse(&pool).await;
+    let _eng_c = seed_engine(&pool, svc_c_row.id, wh_w).await;
+    seed_tag_assignment(&pool, wh_w).await;
+
+    // Engine D: a DIFFERENT service S2, its OWN primary is a different,
+    // untagged warehouse; it attaches W's registry catalog as a secondary.
+    let svc_d = format!("trino_{}", Uuid::new_v4().simple());
+    let svc_d_row = store
+        .create_service(&svc_d, "trino", &json!({}))
+        .await
+        .expect("create service D");
+    let wh_d = seed_warehouse(&pool).await;
+    let eng_d = seed_engine(&pool, svc_d_row.id, wh_d).await;
+    let (catalog_w, catalog_name_w) = seed_registry_catalog(&pool, wh_w, "detached_owner").await;
+    attach_catalog(&pool, eng_d, catalog_w).await;
+
+    // S1 (engine C, the owning-but-detached engine) exports NOTHING for W.
+    let r = app(store.clone())
+        .oneshot(get(&format!("/tags/download/{svc_c}")))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let bytes = r.into_body().collect().await.unwrap().to_bytes();
+    let st: Value = serde_json::from_slice(&bytes).unwrap();
+    let srs = st["serviceResources"].as_array().unwrap();
+    assert!(
+        srs.is_empty(),
+        "an engine whose primary IS the tagged warehouse, with no attachment \
+         and no legacy row, must export nothing for it, got {srs:?}"
+    );
+
+    // S2 (engine D, the actual attaching engine) exports it correctly.
+    let r = app(store)
+        .oneshot(get(&format!("/tags/download/{svc_d}")))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let bytes = r.into_body().collect().await.unwrap().to_bytes();
+    let st: Value = serde_json::from_slice(&bytes).unwrap();
+    let srs = st["serviceResources"].as_array().unwrap();
+    assert_eq!(srs.len(), 1, "one resource, got {srs:?}");
+    assert_eq!(
+        srs[0]["resourceElements"]["catalog"]["values"][0],
+        json!(catalog_name_w)
+    );
 }

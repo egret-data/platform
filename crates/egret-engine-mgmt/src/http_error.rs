@@ -51,6 +51,19 @@ pub enum EngineHttpError {
     /// spec. The stored state was restored; the cause is surfaced verbatim.
     #[error("engine cluster apply failed: {0}")]
     ClusterApplyFailed(String),
+    /// A registry catalog is still attached to engines or assigned to
+    /// workspaces; nothing was changed. 409 listing both.
+    #[error("catalog is still in use")]
+    CatalogInUse {
+        engines: Vec<crate::catalogs::CatalogConflictEngine>,
+        workspaces: Vec<crate::catalogs::CatalogConflictWorkspace>,
+    },
+    /// A registry catalog is an egret warehouse catalog: it goes with its
+    /// warehouse and can never be deleted through `/catalogs`. 409, unconditional
+    /// (checked before attachments/assignments, since telling the caller to
+    /// detach/unassign it would be pointless — it stays refused either way).
+    #[error("catalog is an egret warehouse")]
+    WarehouseCatalog(String),
     #[error("internal error")]
     Internal,
 }
@@ -111,6 +124,20 @@ impl From<crate::EngineMgmtError> for EngineHttpError {
             crate::EngineMgmtError::NotFound(_) => EngineHttpError::NotFound,
             crate::EngineMgmtError::NotAssignable(s) => EngineHttpError::BadRequest(s),
             crate::EngineMgmtError::Db(e) => db_error(e),
+        }
+    }
+}
+
+impl From<egret_catalog_registry::RegistryError> for EngineHttpError {
+    fn from(e: egret_catalog_registry::RegistryError) -> Self {
+        use egret_catalog_registry::RegistryError as E;
+        match e {
+            E::NotFound(_) => EngineHttpError::NotFound,
+            E::AlreadyExists(s) => EngineHttpError::AlreadyExists(s),
+            E::Conflict(s) => EngineHttpError::Conflict(s),
+            E::Invalid(v) => EngineHttpError::BadRequest(v.to_string()),
+            E::Secrets(s) => s.into(),
+            E::Db(e) => db_error(e),
         }
     }
 }
@@ -200,6 +227,32 @@ impl IntoResponse for EngineHttpError {
                 Json(serde_json::json!({ "error": msg, "code": "engine_cluster_apply_failed" })),
             )
                 .into_response(),
+            EngineHttpError::CatalogInUse {
+                engines,
+                workspaces,
+            } => {
+                let body = crate::catalogs::CatalogConflictBody {
+                    error: format!(
+                        "{msg}: attached to {} engine(s) and assigned to {} workspace(s); \
+                         detach and unassign it first",
+                        engines.len(),
+                        workspaces.len()
+                    ),
+                    code: "catalog_in_use".into(),
+                    engines,
+                    workspaces,
+                };
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            EngineHttpError::WarehouseCatalog(error) => {
+                let body = crate::catalogs::CatalogConflictBody {
+                    error,
+                    code: "warehouse_catalog".into(),
+                    engines: Vec::new(),
+                    workspaces: Vec::new(),
+                };
+                (StatusCode::CONFLICT, Json(body)).into_response()
+            }
             EngineHttpError::Forbidden => error_json(StatusCode::FORBIDDEN, msg),
             EngineHttpError::NotFound => error_json(StatusCode::NOT_FOUND, msg),
             EngineHttpError::AlreadyExists(_)

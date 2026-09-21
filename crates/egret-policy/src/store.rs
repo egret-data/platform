@@ -207,29 +207,33 @@ impl PolicyStore {
     /// Catalog resource → tag rows for a service's warehouse(s), feeding the
     /// Ranger tag download (`ServiceTags::from_assignments`).
     ///
-    /// SERVICE → CATALOG-NAME MAPPING (documented assumption, tuned in the live
-    /// smoke): a policy profile (`policy.authz_services`) is bound to warehouses
-    /// through the engine seam — `engine_mgmt.engines.authz_service_id`. Each such
-    /// warehouse's tag assignments (keyed by `warehouse_id`) are served under a
-    /// Trino catalog name taken as the **warehouse name** (`warehouses.name`),
-    /// which matches engine provisioning (it sets `iceberg.rest-catalog.warehouse
-    /// = <warehouse name>`). This is a bounded, read-only, parameterized cross-seam
-    /// read on the serving path; if the live Trino catalog name differs from the
-    /// warehouse name, this query's `w.name AS catalog` is the single tuning spot.
-    /// Distinct `(catalog, schema, table, column, tag)` rows only (multiple engines
-    /// on one warehouse are de-duplicated).
+    /// SERVICE → CATALOG-NAME MAPPING: a policy profile (`policy.authz_services`)
+    /// is bound to warehouses through the engine seam —
+    /// `engine_mgmt.engines.authz_service_id`. Each such warehouse's tag
+    /// assignments (keyed by `warehouse_id`) are served under EVERY Trino catalog
+    /// name the engine might actually be serving them under right now: the
+    /// UNION of
+    ///   (a) the registry branch — every catalog this engine attaches, reached
+    ///       through `registry.engine_catalog_attachments` (SP3 D5), and
+    ///   (b) the legacy branch — the engine's `engine_mgmt.engine_catalogs`
+    ///       primary row name, reached through `engines.warehouse_id` (the old
+    ///       behaviour).
+    /// The legacy branch stays until `engine_catalogs` is retired (SP3c): an
+    /// engine whose backfill failed (`backfill_failed`, or the whole run errored
+    /// and boot proceeded anyway) never gets an attachment and keeps serving its
+    /// legacy catalog name, and an engine whose registry catalog was renamed but
+    /// not yet re-applied keeps serving the OLD name until its next apply — both
+    /// populations are invisible to branch (a) alone. A name that ends up
+    /// matching no live catalog costs nothing (Ranger just never sees a resource
+    /// under it); a name that IS live but gets dropped here is the fail-open bug
+    /// this union exists to close, so over-emitting is the safe direction.
+    /// Distinct `(catalog, schema, table, column, tag)` rows only (multiple
+    /// engines on one warehouse, or the same catalog name reached by both
+    /// branches, are de-duplicated).
     pub async fn tag_assignments_for_service(
         &self,
         service_id: i64,
     ) -> Result<Vec<TagAssignmentRow>, PolicyStoreError> {
-        // The `catalog` dimension MUST be the catalog name Trino sees, not the
-        // egret warehouse name — the Ranger tag plugin matches downloaded tags
-        // against the query's `catalog.schema.table.column` resource. egret names
-        // every engine's primary warehouse catalog `egret` (a fixed name at
-        // provision time, see engines.rs), which usually differs from the
-        // warehouse name (e.g. `demo-catalog`). Emitting `w.name` here made tag
-        // masking silently no-op (resource paths never matched). Join the engine's
-        // primary `engine_catalogs` row and emit ITS name instead.
         // `$1` is the service the plugin polled. The Trino tag plugin polls the
         // TAG service (`<profile>_tag`), but engines bind to the TRINO profile —
         // so resolve the trino profile that owns this tag service (via its
@@ -237,10 +241,32 @@ impl PolicyStore {
         // also accepts the trino profile id directly, so callers that already hold
         // it (and the unit tests) keep working. Passing the tag service id straight
         // through — as the HTTP `download_tags` path did — matched no engine and
-        // made tag masking silently no-op.
+        // made tag masking silently no-op. Both branches repeat this resolution
+        // (a CTE would need to be materialized per-branch anyway); UNION (not
+        // UNION ALL) does the cross-branch de-duplication.
         Ok(sqlx::query_as::<_, TagAssignmentRow>(
-            r#"SELECT DISTINCT
+            r#"(SELECT
                    c.name           AS catalog,
+                   a.schema_name    AS schema_name,
+                   a.table_name     AS table_name,
+                   a.column_name    AS column_name,
+                   t.id::text       AS tag_id,
+                   t.name           AS tag_name
+               FROM catalog_tag_assignments a
+               JOIN tags t                 ON t.id = a.tag_id
+               JOIN policy.authz_services s ON s.id = $1
+               LEFT JOIN policy.authz_services tp
+                    ON tp.type = 'trino' AND tp.config_jsonb->>'tagService' = s.name
+               JOIN registry.catalogs c
+                    ON c.warehouse_id = a.warehouse_id
+               JOIN registry.engine_catalog_attachments ea
+                    ON ea.catalog_id = c.id
+               JOIN engine_mgmt.engines e
+                    ON e.id = ea.engine_id
+                   AND e.authz_service_id = COALESCE(tp.id, s.id))
+               UNION
+               (SELECT
+                   lc.name          AS catalog,
                    a.schema_name    AS schema_name,
                    a.table_name     AS table_name,
                    a.column_name    AS column_name,
@@ -254,9 +280,9 @@ impl PolicyStore {
                JOIN engine_mgmt.engines e
                     ON e.warehouse_id = a.warehouse_id
                    AND e.authz_service_id = COALESCE(tp.id, s.id)
-               JOIN engine_mgmt.engine_catalogs c
-                    ON c.engine_id = e.id AND c.is_primary AND c.kind = 'egret-warehouse'
-               ORDER BY c.name, a.schema_name, a.table_name, a.column_name, t.name"#,
+               JOIN engine_mgmt.engine_catalogs lc
+                    ON lc.engine_id = e.id AND lc.is_primary AND lc.kind = 'egret-warehouse')
+               ORDER BY catalog, schema_name, table_name, column_name, tag_name"#,
         )
         .bind(service_id)
         .fetch_all(&self.db.pool)

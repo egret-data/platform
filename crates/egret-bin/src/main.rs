@@ -292,12 +292,11 @@ impl egret_policy::EngineBindingReader for EngineBindingReaderImpl {
         &self,
         engine_id: uuid::Uuid,
     ) -> Result<Vec<String>, egret_policy::EngineReadError> {
-        let cats = self
-            .store
-            .list_engine_catalogs(engine_id)
+        self.store
+            .registry()
+            .attached_catalog_names(engine_id)
             .await
-            .map_err(|e| egret_policy::EngineReadError(e.to_string()))?;
-        Ok(cats.into_iter().map(|c| c.name).collect())
+            .map_err(|e| egret_policy::EngineReadError(e.to_string()))
     }
 
     async fn warehouse_schemas(
@@ -1257,6 +1256,21 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // the shared vault and threaded into the browse + database states so storage
     // and database connections reference named secrets.
     let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
+
+    // Catalog registry backfill (SP3 §4.8): idempotent, advisory-locked, on every
+    // boot. Not fatal: an engine whose catalogs could not be migrated refuses
+    // applies until a later boot migrates them, and the report says why.
+    match egret_catalog_registry::run_backfill(
+        &egret_catalog_registry::RegistryStore::new(db.clone()),
+        &workspace_secrets,
+    )
+    .await
+    {
+        Ok(s) => tracing::info!(run_id = %s.run_id, report_rows = s.report_rows,
+            failed_rows = s.failed_rows, "catalog registry backfill finished"),
+        Err(e) => tracing::error!(error = %e,
+            "catalog registry backfill failed; engines with unmigrated catalogs refuse applies"),
+    }
 
     // Externally-reachable catalog base URL, forwarded to the notebook-runtime
     // manifest as the catalog URL (what pyiceberg/Daft hit).

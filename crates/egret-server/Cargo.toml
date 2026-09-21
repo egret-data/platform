@@ -63,3 +63,8 @@ metrics.workspace = true
 # endpoint out of `DEFAULT_TIMEOUT_SECONDS` rather than typing `60`, so the
 # trial deadline's justification moves if that default ever does.
 egret-dataapi-api.workspace = true
+# `tag_bump_reaches_polled_tag_service.rs` is DB-gated (real Postgres, egret_bi
+# + egret_policy wired together — the only crate that already depends on
+# both) and self-skips without `DATABASE_URL` the same way every other
+# DB-gated suite in the tree does.
+egret-test-db.workspace = true

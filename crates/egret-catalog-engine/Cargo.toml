@@ -41,6 +41,7 @@ egret-metastore = { workspace = true }
 # by E3d-1) lives in `src/store/` and runs its SQL on the pool exposed by
 # `egret_metastore::Db`. The `CatalogPort` it implements + the leaf DTOs it maps to.
 egret-catalog-api = { workspace = true }
+egret-catalog-registry = { workspace = true }
 # The mini machine-IdP `ClientVerifier`/`VerifiedClient` the store implements.
 egret-machine-idp = { workspace = true }
 # Catalog Client secret hashing/verification + random client-id/secret material.

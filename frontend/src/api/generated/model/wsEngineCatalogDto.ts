@@ -8,8 +8,10 @@
 
 /**
  * One catalog of an assigned engine, with the storage/secret NAME it maps to.
- * `storage_name`/`secret_name` are best-effort (`null` when unresolvable); the
- * secret VALUE is never exposed.
+ * `storage_name` is the storage connection THIS catalog's own warehouse writes
+ * to — `null` for a jdbc or generic catalog, which has no warehouse and no
+ * storage. `storage_name`/`secret_name` are best-effort (`null` when
+ * unresolvable); the secret VALUE is never exposed.
  */
 export interface WsEngineCatalogDto {
   name: string;

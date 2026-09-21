@@ -103,6 +103,42 @@ pub static PERMISSIONS: &[Permission] = &[
         "Delete warehouses",
         Scope::Platform
     ),
+    // Registry catalogs (SP3). Deliberately NOT `catalog:*`: `catalog:read` is
+    // the workspace-scope key every workspace role holds (0024) for
+    // egret-query's workspace engine view. Cedar itself cannot confuse the two
+    // (a platform grant is `resource == Platform::"root"`, which never matches
+    // a Workspace entity even for the SAME action name — B1b-2's anti-leak; see
+    // `platform_grant_never_satisfies_workspace_scope_check`). The reason to
+    // keep them distinct is that permission KEYS are scope-blind strings
+    // everywhere else they are read: `rbac::is_known`, the effective-permission
+    // lists the frontend's admin permission UI renders, and the single Cedar
+    // action namespace a policy names by string — one key meaning two
+    // different things there is ambiguous even though Cedar's own enforcement
+    // is safe.
+    perm!(
+        "catalog_registry:read",
+        "Catalogs",
+        "View registry catalogs and their engine attachments",
+        Scope::Platform
+    ),
+    perm!(
+        "catalog_registry:create",
+        "Catalogs",
+        "Create registry catalogs",
+        Scope::Platform
+    ),
+    perm!(
+        "catalog_registry:update",
+        "Catalogs",
+        "Edit registry catalogs, re-apply them to engines, and assign them to workspaces",
+        Scope::Platform
+    ),
+    perm!(
+        "catalog_registry:delete",
+        "Catalogs",
+        "Delete registry catalogs",
+        Scope::Platform
+    ),
     perm!(
         "storage:read",
         "Storage",
@@ -536,6 +572,31 @@ mod tests {
         assert!(PERMISSIONS
             .iter()
             .any(|p| p.key == "tag:manage" && p.scope == Scope::Platform));
+    }
+    #[test]
+    fn catalog_registry_perms_are_platform_scoped_and_distinct() {
+        for k in [
+            "catalog_registry:read",
+            "catalog_registry:create",
+            "catalog_registry:update",
+            "catalog_registry:delete",
+        ] {
+            assert!(
+                PERMISSIONS
+                    .iter()
+                    .any(|p| p.key == k && p.scope == Scope::Platform),
+                "{k}"
+            );
+        }
+        assert!(groups().contains(&"Catalogs"));
+        // The workspace-scope `catalog:read` (0024) is NOT a platform key and
+        // must never become one. This is NOT because Cedar would confuse the
+        // two scopes (it can't — see `platform_grant_never_satisfies_workspace_scope_check`
+        // in egret-query's registry_workspace_routes_api tests): it's because
+        // `is_known`/the effective-permission lists/the admin permission UI all
+        // read permission keys as plain scope-blind strings, so one key with two
+        // meanings would be ambiguous there.
+        assert!(!is_known("catalog:read"));
     }
     #[test]
     fn workspace_actions_present_and_scoped() {

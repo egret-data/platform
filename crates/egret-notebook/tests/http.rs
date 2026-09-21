@@ -1514,6 +1514,69 @@ async fn set_notebook_warehouse_rejects_foreign_warehouse(pool: sqlx::PgPool) {
         .is_none());
 }
 
+/// SP3 §4.6: a warehouse OWNED by ws_B but whose registry catalog is ASSIGNED to
+/// ws_A is now visible to ws_A — the check follows the registry assignment, not
+/// `catalog.warehouses.workspace_id`. This is the behavior Step 8 actually
+/// changed (the old check compared `wh.workspace_id` directly and could never
+/// allow this).
+#[sqlx::test(migrations = "../../migrations")]
+async fn set_notebook_warehouse_registry_assignment_alone_is_refused(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    let (_uid, token) = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+    // Warehouse OWNED by ws_B...
+    let wh_b = seed_warehouse(&f, f.ws_b.0).await;
+    // ...whose registry catalog is ASSIGNED to ws_A (data-browsing visibility
+    // only — SP3 §4.6). Notebook selection is deliberately OWNER-ONLY: the
+    // shared `notebook` catalog role + namespace grant provisioned below would
+    // otherwise hand ws_A read/write on ws_B's private notebook namespace,
+    // with no way to revoke it. Assignment-based notebook selection needs its
+    // own per-workspace role + namespace and is deferred to SP4.
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) RETURNING id",
+    )
+    .bind(format!("nb_reg_cat_{}", Uuid::new_v4().simple()))
+    .bind(wh_b)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed registry catalog");
+    sqlx::query(
+        "INSERT INTO registry.catalog_workspaces (catalog_id, workspace_id) VALUES ($1, $2)",
+    )
+    .bind(catalog_id)
+    .bind(f.ws_a.0)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign catalog to ws_a");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/ws/{}/notebook-settings/warehouse", f.slug_a),
+            &token,
+            Some(serde_json::json!({ "warehouse_id": wh_b })),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a registry assignment alone must NOT grant notebook selection — only ownership does; body={json}"
+    );
+
+    // Nothing was persisted for ws_A.
+    let store = NotebookStore::new(f.db.clone());
+    assert!(store
+        .get_notebook_warehouse(f.ws_a.0)
+        .await
+        .unwrap()
+        .is_none());
+}
+
 /// `#[sqlx::test]` resolves `DATABASE_URL` through dotenvy, so an unexported
 /// variable does not skip these tests — it silently points them at the database
 /// `.env` names, which is the DEV one. See

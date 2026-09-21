@@ -410,6 +410,8 @@ struct FakeEnginePort {
     delete_error: Arc<std::sync::Mutex<Option<String>>>,
     fail_provision: Arc<std::sync::atomic::AtomicBool>,
     fail_update: Arc<std::sync::atomic::AtomicBool>,
+    /// Engine names whose `update` fails (the others succeed) — for propagation.
+    fail_update_for: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// When `Some`, `status` returns this instead of the hard-coded
     /// all-pods-ready `running` default — so a test can drive a not-ready /
     /// crash-looping cluster through `GET /engines/{id}` (I1).
@@ -439,6 +441,14 @@ impl FakeEnginePort {
     fn set_fail_update(&self, fail: bool) {
         self.fail_update
             .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn set_fail_update_for(&self, engine_name: &str, fail: bool) {
+        let mut names = self.fail_update_for.lock().unwrap();
+        if fail {
+            names.insert(engine_name.to_string());
+        } else {
+            names.remove(engine_name);
+        }
     }
     fn set_fail_provision(&self, fail: bool) {
         self.fail_provision
@@ -479,7 +489,9 @@ impl EngineProvisioningPort for FakeEnginePort {
     }
     async fn update(&self, req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
         self.updated.lock().unwrap().push(req.clone());
-        if self.fail_update.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.fail_update.load(std::sync::atomic::Ordering::SeqCst)
+            || self.fail_update_for.lock().unwrap().contains(&req.name)
+        {
             return Err("injected update failure".into());
         }
         Ok(())
@@ -699,6 +711,7 @@ async fn test_catalog_reports_ok_error_and_non_2xx() {
 
     // A catalog id that belongs to a DIFFERENT engine must 404 (ownership guard).
     let other_name = format!("trino-{}", Uuid::new_v4().simple());
+    let other_wh = seed_provisioned_warehouse(&f).await;
     let resp = f
         .app
         .clone()
@@ -707,7 +720,7 @@ async fn test_catalog_reports_ok_error_and_non_2xx() {
             "/engines",
             &token,
             Some(serde_json::json!({
-                "name": other_name, "warehouseId": wh_id,
+                "name": other_name, "warehouseId": other_wh,
                 "coordinatorReplicas": 1, "workerReplicas": 1,
                 "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
             })),
@@ -998,10 +1011,21 @@ async fn create_engine_starrocks_persists_starrocks_type() {
     );
     assert_eq!(cats[0]["kind"], "egret-warehouse", "catalog kind; body={j}");
     assert_eq!(cats[0]["isPrimary"], true, "catalog is primary; body={j}");
-    assert_eq!(cats[0]["name"], "egret", "catalog name; body={j}");
+    // D5: an engine reaches its warehouse under the warehouse catalog's name.
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+    assert_eq!(
+        cats[0]["name"],
+        serde_json::json!(wh_cat.name),
+        "catalog name; body={j}"
+    );
+    assert_eq!(
+        cats[0]["id"],
+        serde_json::json!(wh_cat.id),
+        "legacy id is the registry id; body={j}"
+    );
 
-    // The client's credential lives on the primary catalog row and is revoked
-    // when the engine is deleted, same as Trino's; confirm it was minted.
+    // The client's credential lives in a named secret on the attachment and is
+    // revoked when the engine is deleted, same as Trino's; confirm it was minted.
     let (client_count,): (i64,) = sqlx::query_as(
         "SELECT count(*) FROM catalog.catalog_clients WHERE warehouse_id = $1 AND name = $2",
     )
@@ -1559,6 +1583,19 @@ fn secret_store(f: &Fixture) -> egret_secrets::WorkspaceSecretStore {
             Some(egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("crypto")),
         ),
     )
+}
+
+fn registry(f: &Fixture) -> egret_catalog_registry::RegistryStore {
+    egret_catalog_registry::RegistryStore::new(f.db.clone())
+}
+
+/// The registry catalog of a warehouse (created with the engine that uses it).
+async fn warehouse_catalog(f: &Fixture, wh_id: Uuid) -> egret_catalog_registry::CatalogRow {
+    registry(f)
+        .get_catalog_for_warehouse(wh_id)
+        .await
+        .expect("read catalog")
+        .expect("warehouse has a catalog")
 }
 
 /// `(internal_secret_id, monitor_secret_id)` straight off the engine row.
@@ -2401,19 +2438,21 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
     };
     let token = session_for(&f, "engine_cat_clientid_admin", true).await;
     let wh_id = seed_provisioned_warehouse(&f).await;
+    // D5: a warehouse is one catalog per engine, so the governed catalog comes
+    // from a SECOND warehouse.
+    let governed_wh = seed_provisioned_warehouse(&f).await;
     let name = format!("trino-{}", Uuid::new_v4().simple());
 
     // Seed a pre-existing, user-owned client on a custom (non-default) role.
     let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
-    let engine_mgmt = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
     let wh = catalog_store
-        .get_warehouse(wh_id)
+        .get_warehouse(governed_wh)
         .await
         .expect("get warehouse")
         .expect("warehouse exists");
     let role = catalog_store
         .create_role(
-            wh_id,
+            governed_wh,
             "readonly_analyst",
             "external",
             Some("read-only role"),
@@ -2425,7 +2464,7 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
             name: "pre-existing-client".into(),
             consumer_type: "external".into(),
             workspace_id: wh.workspace_id,
-            warehouse_id: wh_id,
+            warehouse_id: governed_wh,
             catalog_role_id: role.id,
         })
         .await
@@ -2466,7 +2505,7 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
             Some(serde_json::json!({
                 "name": "governed",
                 "kind": "egret-warehouse",
-                "config": { "warehouseId": wh_id, "clientId": existing_client.id },
+                "config": { "warehouseId": governed_wh, "clientId": existing_client.id },
             })),
         ))
         .await
@@ -2497,24 +2536,22 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
     assert_eq!(j["config"]["mintedClient"], true, "mintedClient; body={j}");
     // credential/clientRowId are redacted from the HTTP response; inspect the
     // stored row directly via the storage layer instead.
-    let stored = engine_mgmt
-        .list_engine_catalogs(Uuid::parse_str(&engine_id).unwrap())
+    let stored = registry(&f)
+        .get_attachment(
+            Uuid::parse_str(&engine_id).unwrap(),
+            Uuid::parse_str(&cat_id).unwrap(),
+        )
         .await
-        .expect("list engine catalogs")
-        .into_iter()
-        .find(|c| c.id.to_string() == cat_id)
-        .expect("stored catalog row");
-    let minted_client_row_id = stored.config["clientRowId"]
-        .as_str()
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .expect("clientRowId present");
+        .expect("read attachment")
+        .expect("attachment row");
+    let minted_client_row_id = stored.catalog_client_id.expect("minted client id");
     assert_ne!(
         minted_client_row_id, existing_client.id,
         "a fresh client must be minted, not the referenced one reused"
     );
     // The minted client inherited the referenced client's role.
     let minted_row = catalog_store
-        .list_clients(wh_id)
+        .list_clients(governed_wh)
         .await
         .expect("list clients")
         .into_iter()
@@ -2541,7 +2578,7 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
     assert_eq!(resp.status(), StatusCode::OK, "delete catalog");
 
     let remaining = catalog_store
-        .list_clients(wh_id)
+        .list_clients(governed_wh)
         .await
         .expect("list clients after delete");
     assert!(
@@ -2570,6 +2607,10 @@ async fn add_catalog_with_foreign_client_id_400() {
     let token = session_for(&f, "engine_cat_bad_clientid_admin", true).await;
     let wh_id = seed_provisioned_warehouse(&f).await;
     let other_wh_id = seed_provisioned_warehouse(&f).await;
+    // The catalog to attach comes from a third warehouse (not the engine's
+    // primary), so the check under test — a client that is not the target
+    // warehouse's — is reached instead of "already attached".
+    let target_wh = seed_provisioned_warehouse(&f).await;
     let name = format!("trino-{}", Uuid::new_v4().simple());
 
     // A client that belongs to a DIFFERENT warehouse.
@@ -2628,7 +2669,7 @@ async fn add_catalog_with_foreign_client_id_400() {
             Some(serde_json::json!({
                 "name": "governed",
                 "kind": "egret-warehouse",
-                "config": { "warehouseId": wh_id, "clientId": foreign_client.id },
+                "config": { "warehouseId": target_wh, "clientId": foreign_client.id },
             })),
         ))
         .await
@@ -2650,7 +2691,7 @@ async fn add_catalog_with_foreign_client_id_400() {
             Some(serde_json::json!({
                 "name": "governed2",
                 "kind": "egret-warehouse",
-                "config": { "warehouseId": wh_id, "clientId": "not-a-uuid" },
+                "config": { "warehouseId": target_wh, "clientId": "not-a-uuid" },
             })),
         ))
         .await
@@ -3508,24 +3549,26 @@ async fn delete_engine_removes_cluster_row_secrets_and_minted_clients_only() {
     let mut engine_secrets = vec![delegator, root];
     engine_secrets.extend(engine.tls_secret_id);
 
-    let primary = store
-        .list_engine_catalogs(engine_id)
+    let reg = registry(&f);
+    let primary = reg
+        .get_attachment(engine_id, warehouse_catalog(&f, wh_id).await.id)
         .await
         .unwrap()
-        .into_iter()
-        .find(|c| c.is_primary)
-        .expect("primary catalog");
-    let minted: Uuid = primary.config["clientRowId"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
+        .expect("primary attachment");
+    let minted = primary.catalog_client_id.expect("minted client");
+    engine_secrets.push(primary.credential_secret_id.expect("credential secret"));
 
+    // A second warehouse's catalog, attached with a client the engine did NOT mint.
+    let foreign_wh = seed_provisioned_warehouse(&f).await;
     let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
-    let wh = catalog_store.get_warehouse(wh_id).await.unwrap().unwrap();
+    let wh = catalog_store
+        .get_warehouse(foreign_wh)
+        .await
+        .unwrap()
+        .unwrap();
     let role = catalog_store
         .create_role(
-            wh_id,
+            foreign_wh,
             "readonly_analyst",
             "external",
             Some("read-only role"),
@@ -3537,22 +3580,45 @@ async fn delete_engine_removes_cluster_row_secrets_and_minted_clients_only() {
             name: "not-minted-by-the-engine".into(),
             consumer_type: "external".into(),
             workspace_id: wh.workspace_id,
-            warehouse_id: wh_id,
+            warehouse_id: foreign_wh,
             catalog_role_id: role.id,
         })
         .await
         .unwrap();
-    store
-        .create_engine_catalog(
-            engine_id,
-            "external",
-            "egret-warehouse",
-            &serde_json::json!({ "clientRowId": foreign.id, "mintedClient": false }),
+    // Its credential is the admin's (not minted by this engine): it must
+    // survive the engine delete, like the client it belongs to.
+    let foreign_cred = secrets
+        .create(
             None,
-            false,
+            &format!("foreign-cred-{}", Uuid::new_v4().simple()),
+            None,
+            "x:y",
         )
         .await
         .unwrap();
+    let (foreign_cat, _) = reg
+        .ensure_warehouse_catalog(
+            &egret_catalog_registry::WarehouseIdentity {
+                id: foreign_wh,
+                name: &wh.name,
+                workspace_id: wh.workspace_id,
+            },
+            None,
+            |_| Vec::new(),
+        )
+        .await
+        .unwrap();
+    reg.insert_attachment(&egret_catalog_registry::NewAttachment {
+        engine_id,
+        catalog_id: foreign_cat.id,
+        catalog_client_id: Some(foreign.id),
+        credential_secret_id: Some(foreign_cred),
+        minted_client: false,
+        applied_now: true,
+        created_at: None,
+    })
+    .await
+    .unwrap();
 
     let resp = f
         .app
@@ -3608,6 +3674,10 @@ async fn delete_engine_removes_cluster_row_secrets_and_minted_clients_only() {
         client_count(foreign.id).await,
         1,
         "a client the engine did not mint survives"
+    );
+    assert!(
+        secrets.get_meta(None, foreign_cred).await.is_ok(),
+        "the credential of a client the engine did not mint survives"
     );
 }
 
@@ -3986,14 +4056,24 @@ async fn catalog_detail_masks_inline_secrets_and_a_resave_keeps_them() {
         .unwrap();
     let (status, detail) = into_json(resp).await;
     assert_eq!(status, StatusCode::OK, "catalog detail; body={detail}");
-    assert_eq!(
-        detail["config"]["properties"]["connection-password"],
-        "********"
-    );
+    let secret_id = detail["config"]["secretProperties"]["connection-password"]
+        .as_str()
+        .expect("password is a secret reference now")
+        .to_string();
+    assert!(detail["config"]["properties"]
+        .get("connection-password")
+        .is_none());
     assert_eq!(detail["config"]["properties"]["connection-user"], "u");
     assert!(
         !detail.to_string().contains("hunter2"),
         "no plaintext in GET; body={detail}"
+    );
+    assert_eq!(
+        secret_store(&f)
+            .resolve_plaintext(None, Uuid::parse_str(&secret_id).unwrap())
+            .await
+            .unwrap(),
+        "hunter2"
     );
 
     // Re-save exactly what the form received.
@@ -4011,14 +4091,14 @@ async fn catalog_detail_masks_inline_secrets_and_a_resave_keeps_them() {
     let (status, j) = into_json(resp).await;
     assert_eq!(status, StatusCode::OK, "re-save catalog; body={j}");
 
-    let stored = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
-        .get_engine_catalog(Uuid::parse_str(&cat_id).unwrap())
+    let stored = registry(&f)
+        .get_catalog(Uuid::parse_str(&cat_id).unwrap())
         .await
-        .expect("get catalog")
-        .expect("catalog row");
-    assert_eq!(
-        stored.config["properties"]["connection-password"],
-        "hunter2"
+        .unwrap()
+        .unwrap();
+    assert!(
+        !stored.advanced.to_string().contains("hunter2"),
+        "plaintext never stored"
     );
     let rendered = port
         .last_updated()
@@ -4026,7 +4106,12 @@ async fn catalog_detail_masks_inline_secrets_and_a_resave_keeps_them() {
         .into_iter()
         .find(|c| c.name == "pg")
         .expect("pg catalog rendered");
-    assert_eq!(rendered.properties["connection-password"], "hunter2");
+    let placeholder = &rendered.properties["connection-password"];
+    let var = placeholder
+        .strip_prefix("${ENV:")
+        .and_then(|v| v.strip_suffix('}'))
+        .expect("env placeholder");
+    assert_eq!(rendered.env[var], "hunter2");
 }
 
 async fn stored_status(f: &Fixture, engine_id: &str) -> String {
@@ -4508,6 +4593,7 @@ async fn remove_catalog_applies_before_deleting_and_revoking() {
     };
     let token = session_for(&f, "engine_p5_admin", true).await;
     let wh_id = seed_provisioned_warehouse(&f).await;
+    let extra_wh = seed_provisioned_warehouse(&f).await;
     let name = format!("trino-{}", Uuid::new_v4().simple());
     let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
     assert_eq!(status, StatusCode::CREATED, "create; body={j}");
@@ -4522,7 +4608,7 @@ async fn remove_catalog_applies_before_deleting_and_revoking() {
             &token,
             Some(serde_json::json!({
                 "name": "extra", "kind": "egret-warehouse",
-                "config": { "warehouseId": wh_id }
+                "config": { "warehouseId": extra_wh }
             })),
         ))
         .await
@@ -4534,16 +4620,16 @@ async fn remove_catalog_applies_before_deleting_and_revoking() {
         "add warehouse catalog; body={j}"
     );
     let cat_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
-    let store = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
-    let client_id = store
-        .get_engine_catalog(cat_id)
+    let cat_name = j["name"].as_str().unwrap().to_string();
+    let engine_uuid = Uuid::parse_str(&engine_id).unwrap();
+    let reg = registry(&f);
+    let attachment = reg
+        .get_attachment(engine_uuid, cat_id)
         .await
         .unwrap()
-        .unwrap()
-        .config["clientRowId"]
-        .as_str()
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .expect("minted client id");
+        .unwrap();
+    let client_id = attachment.catalog_client_id.expect("minted client id");
+    let credential = attachment.credential_secret_id.expect("credential secret");
     let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
     let remove = || {
         req(
@@ -4561,16 +4647,19 @@ async fn remove_catalog_applies_before_deleting_and_revoking() {
         port.last_updated()
             .catalogs
             .iter()
-            .all(|c| c.name != "extra"),
+            .all(|c| c.name != cat_name),
         "the apply rendered the engine without the catalog"
     );
     assert!(
-        store.get_engine_catalog(cat_id).await.unwrap().is_some(),
+        reg.get_attachment(engine_uuid, cat_id)
+            .await
+            .unwrap()
+            .is_some(),
         "row kept"
     );
     assert!(
         catalog_store
-            .list_clients(wh_id)
+            .list_clients(extra_wh)
             .await
             .unwrap()
             .iter()
@@ -4582,17 +4671,31 @@ async fn remove_catalog_applies_before_deleting_and_revoking() {
     let resp = f.app.clone().oneshot(remove()).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
-        store.get_engine_catalog(cat_id).await.unwrap().is_none(),
+        reg.get_attachment(engine_uuid, cat_id)
+            .await
+            .unwrap()
+            .is_none(),
         "row deleted"
     );
     assert!(
         !catalog_store
-            .list_clients(wh_id)
+            .list_clients(extra_wh)
             .await
             .unwrap()
             .iter()
             .any(|c| c.id == client_id),
         "minted client revoked"
+    );
+    assert!(
+        matches!(
+            secret_store(&f).get_meta(None, credential).await,
+            Err(egret_secrets::SecretsError::NotFound)
+        ),
+        "the minted client's credential secret is deleted with the attachment"
+    );
+    assert!(
+        reg.get_catalog(cat_id).await.unwrap().is_some(),
+        "detach keeps the registry catalog"
     );
 }
 
@@ -4625,6 +4728,24 @@ async fn failed_provision_rolls_back_row_client_and_cluster() {
             .unwrap()
         }
     };
+
+    // A minted client's credential secret is `catalog-client-<client id>`; one
+    // whose client no longer exists was leaked by a rollback.
+    let orphaned_credentials = || {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT s.name FROM workspace_secrets s \
+                  WHERE s.workspace_id IS NULL AND left(s.name, 15) = 'catalog-client-' \
+                    AND NOT EXISTS (SELECT 1 FROM catalog.catalog_clients c \
+                                     WHERE 'catalog-client-' || c.id::text = s.name)",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let orphans_before = orphaned_credentials().await;
 
     let wh_id = seed_provisioned_warehouse(&f).await;
     let name = format!("trino-{}", Uuid::new_v4().simple());
@@ -4680,6 +4801,11 @@ async fn failed_provision_rolls_back_row_client_and_cluster() {
         "egret-engines".to_string(),
         sr_name
     )));
+    assert_eq!(
+        orphaned_credentials().await,
+        orphans_before,
+        "both rollbacks deleted the credential secret of the client they revoked"
+    );
 }
 
 /// P2 regression: the resource-group validation move (now ahead of the
@@ -5190,5 +5316,1678 @@ async fn delete_engine_sweeps_orphaned_internal_secret_generations() {
         secrets.resolve_plaintext(None, lookalike_id).await.is_ok(),
         "a secret whose name only CONTAINS the prefix, without starting with it, \
          must survive the sweep"
+    );
+}
+
+// ── SP3a: engine catalogs over the registry ──────────────────────────────────
+
+/// `POST /engines/{id}/catalogs` with `body`; returns status + JSON.
+async fn add_catalog_via_api(
+    f: &Fixture,
+    token: &str,
+    engine_id: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            token,
+            Some(body),
+        ))
+        .await
+        .unwrap();
+    into_json(resp).await
+}
+
+fn tpch_body(name: &str) -> serde_json::Value {
+    serde_json::json!({ "name": name, "kind": "tpch", "config": { "properties": {} } })
+}
+
+/// Plan decisions #19/#27: a legacy DELETE detaches and keeps the registry
+/// catalog; re-adding the same name replaces that orphan (new id, new body),
+/// while a name another engine still attaches is 409 and leaves it alone.
+#[tokio::test]
+async fn legacy_readd_replaces_an_orphan_but_never_an_attached_catalog() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_orphan_admin", true).await;
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_a = j["id"].as_str().unwrap().to_string();
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_b = j["id"].as_str().unwrap().to_string();
+
+    let name = format!("bench_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let (status, j) = add_catalog_via_api(&f, &token, &engine_a, tpch_body(&name)).await;
+    assert_eq!(status, StatusCode::CREATED, "add; body={j}");
+    let first_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    // Engine B cannot take a name engine A still attaches.
+    let (status, j) = add_catalog_via_api(&f, &token, &engine_b, tpch_body(&name)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "in-use name; body={j}");
+    assert!(
+        registry(&f).get_catalog(first_id).await.unwrap().is_some(),
+        "the attached catalog is untouched"
+    );
+
+    // Remove = detach: the registry catalog stays, attached nowhere.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{engine_a}/catalogs/{first_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(registry(&f).get_catalog(first_id).await.unwrap().is_some());
+
+    // Re-adding the name adopts the orphan: replaced, attached to engine B.
+    let (status, j) = add_catalog_via_api(&f, &token, &engine_b, tpch_body(&name)).await;
+    assert_eq!(status, StatusCode::CREATED, "re-add; body={j}");
+    let second_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    assert_ne!(second_id, first_id, "the orphan was replaced");
+    assert!(registry(&f).get_catalog(first_id).await.unwrap().is_none());
+    assert_eq!(j["name"], serde_json::json!(name));
+}
+
+/// D5 (#12): a warehouse is one catalog per engine — adding the engine's own
+/// warehouse again is 409, and the body name of an `egret-warehouse` add is
+/// ignored in favour of the warehouse catalog's name.
+#[tokio::test]
+async fn legacy_warehouse_add_is_once_per_engine_under_the_catalog_name() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_d5_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        wh_id,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let (status, j) = add_catalog_via_api(
+        &f,
+        &token,
+        &engine_id,
+        serde_json::json!({ "name": "again", "kind": "egret-warehouse", "config": { "warehouseId": wh_id } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "already attached; body={j}");
+
+    let other = seed_provisioned_warehouse(&f).await;
+    let (status, j) = add_catalog_via_api(
+        &f,
+        &token,
+        &engine_id,
+        serde_json::json!({ "name": "ignored", "kind": "egret-warehouse", "config": { "warehouseId": other } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "add; body={j}");
+    assert_eq!(
+        j["name"],
+        serde_json::json!(warehouse_catalog(&f, other).await.name)
+    );
+    assert_eq!(j["isPrimary"], false);
+}
+
+/// Plan decisions #21/#31: an engine whose legacy `engine_catalogs` rows the
+/// backfill could not migrate refuses every apply, and says why and where to
+/// look; nothing is sent to Kubernetes.
+#[tokio::test]
+async fn an_engine_with_unmigrated_legacy_catalogs_refuses_applies() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_unmigrated_admin", true).await;
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    // A legacy row the backfill left unmapped (it reported backfill_failed).
+    egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .create_engine_catalog(
+            Uuid::parse_str(&engine_id).unwrap(),
+            "stuck",
+            "postgresql",
+            &serde_json::json!({ "properties": { "connection-url": "jdbc:postgresql://db:5432/x" } }),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    let updates_before = port.updated.lock().unwrap().len();
+
+    let bench = format!("bench_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let (status, j) = add_catalog_via_api(&f, &token, &engine_id, tpch_body(&bench)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "apply refused; body={j}");
+    let msg = j["error"].as_str().unwrap();
+    assert!(msg.contains("1 catalog(s)"), "{msg}");
+    assert!(msg.contains("migration report"), "{msg}");
+    assert!(msg.contains("backfill_failed"), "{msg}");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "nothing applied"
+    );
+    assert!(
+        registry(&f)
+            .get_catalog_by_name(&bench)
+            .await
+            .unwrap()
+            .is_none(),
+        "the refused add left no catalog behind"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/rotate-secrets"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert!(
+        j.to_string().contains("migration report"),
+        "rotate is an apply too: {status} {j}"
+    );
+}
+
+/// Spec §4.5: a legacy PUT stores the new definition and applies it; a
+/// rejected apply answers 400 WITHOUT reverting and flags the attachment, and
+/// the next successful apply clears the flag.
+#[tokio::test]
+async fn legacy_put_flags_a_failed_apply_without_reverting_and_a_later_apply_clears_it() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_put_admin", true).await;
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let engine_uuid = Uuid::parse_str(&engine_id).unwrap();
+    let name = format!("pg_{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let (status, j) = add_catalog_via_api(
+        &f,
+        &token,
+        &engine_id,
+        serde_json::json!({ "name": name, "kind": "postgresql", "config": { "properties": {
+            "connection-url": "jdbc:postgresql://db:5432/x", "connection-user": "u"
+        } } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "add; body={j}");
+    let cat_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    port.set_fail_update(true);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}/catalogs/{cat_id}"),
+            &token,
+            Some(serde_json::json!({ "config": { "properties": {
+                "connection-url": "jdbc:postgresql://db:5432/y", "connection-user": "u"
+            } } })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "rejected apply; body={j}");
+    let stored = registry(&f).get_catalog(cat_id).await.unwrap().unwrap();
+    assert!(
+        stored.config.to_string().contains("\"y\"") || stored.advanced.to_string().contains("/y"),
+        "not reverted: {} {}",
+        stored.config,
+        stored.advanced
+    );
+    let a = registry(&f)
+        .get_attachment(engine_uuid, cat_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.apply_status, "failed");
+    assert!(a.apply_error.is_some());
+
+    port.set_fail_update(false);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/rotate-secrets"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "rotate applies: {}",
+        resp.status()
+    );
+    let a = registry(&f)
+        .get_attachment(engine_uuid, cat_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        a.apply_status, "applied",
+        "a successful apply clears the flag"
+    );
+    assert!(a.apply_error.is_none());
+    let rendered = port
+        .last_updated()
+        .catalogs
+        .into_iter()
+        .find(|c| c.name == name)
+        .expect("catalog rendered");
+    assert_eq!(
+        rendered.properties["connection-url"],
+        "jdbc:postgresql://db:5432/y"
+    );
+}
+
+/// Plan decision #21: SP3a ships the StarRocks seam, not a renderer — attaching
+/// a registry catalog to a StarRocks engine is refused and leaves nothing behind.
+#[tokio::test]
+async fn attaching_to_a_starrocks_engine_is_refused() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_sr_attach_admin", true).await;
+    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": format!("sr-{}", Uuid::new_v4().simple()), "warehouseId": wh_id, "kind": "starrocks",
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create sr; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let other = seed_provisioned_warehouse(&f).await;
+    let clients_before = egret_catalog_engine::CatalogStore::new(f.db.clone())
+        .list_clients(other)
+        .await
+        .unwrap()
+        .len();
+    let (status, j) = add_catalog_via_api(
+        &f,
+        &token,
+        &engine_id,
+        serde_json::json!({ "name": "x", "kind": "egret-warehouse", "config": { "warehouseId": other } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert!(
+        j["error"].as_str().unwrap().contains("not supported yet"),
+        "{j}"
+    );
+    assert_eq!(
+        egret_catalog_engine::CatalogStore::new(f.db.clone())
+            .list_clients(other)
+            .await
+            .unwrap()
+            .len(),
+        clients_before,
+        "no client minted"
+    );
+    let cat = warehouse_catalog(&f, other).await;
+    assert!(registry(&f)
+        .get_attachment(Uuid::parse_str(&engine_id).unwrap(), cat.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// Whole-branch review F-2: the engine-type refusals are decided BEFORE the
+/// registry is touched. A legacy add of a connector catalog to a StarRocks
+/// engine 400s, and the same-named orphan that
+/// `create_catalog_replacing_orphan` would have destroyed is still there,
+/// byte-identical — a refusal must never cost the operator a catalog
+/// definition the response says nothing about.
+#[tokio::test]
+async fn legacy_add_refused_by_engine_type_leaves_the_orphan_byte_identical() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_f2_admin", true).await;
+
+    // An orphan: added through a Trino engine, then detached. Exactly what
+    // "remove then add again with the same name" leaves behind.
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create trino; body={j}");
+    let trino_id = j["id"].as_str().unwrap().to_string();
+    let name = unique_catalog_name("orph");
+    let (status, j) = add_catalog_via_api(&f, &token, &trino_id, tpch_body(&name)).await;
+    assert_eq!(status, StatusCode::CREATED, "add; body={j}");
+    let orphan_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{trino_id}/catalogs/{orphan_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "detach");
+
+    // The whole row as the database holds it, before the refused add.
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(c.*) FROM registry.catalogs c WHERE c.id = $1")
+            .bind(orphan_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("orphan row");
+
+    let sr_wh = seed_provisioned_warehouse_with_secret(&f).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": format!("sr-{}", Uuid::new_v4().simple()), "warehouseId": sr_wh,
+                "kind": "starrocks",
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create starrocks; body={j}");
+    let sr_id = j["id"].as_str().unwrap().to_string();
+
+    let (status, j) = add_catalog_via_api(&f, &token, &sr_id, tpch_body(&name)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "starrocks add; body={j}");
+    assert!(
+        j["error"].as_str().unwrap().contains("not supported yet"),
+        "{j}"
+    );
+
+    let after: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT to_jsonb(c.*) FROM registry.catalogs c WHERE c.id = $1")
+            .bind(orphan_id)
+            .fetch_optional(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after.as_ref(),
+        Some(&before),
+        "the refused add must leave the orphan untouched"
+    );
+}
+
+/// Whole-branch review F-5: two attachments can share one Catalog Client —
+/// the backfill takes it verbatim from the legacy row and derives the
+/// credential secret's name from it, so two engines end up on one client and
+/// one secret. Detaching one of them must revoke neither: the other engine's
+/// rendered Trino properties still present that credential.
+#[tokio::test]
+async fn detach_keeps_a_catalog_client_another_attachment_still_uses() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_shared_client_admin", true).await;
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create A; body={j}");
+    let engine_a = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let (status, j) = create_engine_via_api(
+        &f,
+        &token,
+        &format!("trino-{}", Uuid::new_v4().simple()),
+        seed_provisioned_warehouse(&f).await,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create B; body={j}");
+    let engine_b = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    // Engine A attaches a SECOND warehouse: a minted client + its credential
+    // secret, both retired on detach.
+    let shared_wh = seed_provisioned_warehouse(&f).await;
+    let (status, j) = add_catalog_via_api(
+        &f,
+        &token,
+        &engine_a.to_string(),
+        serde_json::json!({ "name": "shared", "kind": "egret-warehouse",
+                            "config": { "warehouseId": shared_wh } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "attach to A; body={j}");
+    let catalog = warehouse_catalog(&f, shared_wh).await;
+    let attachment = registry(&f)
+        .get_attachment(engine_a, catalog.id)
+        .await
+        .unwrap()
+        .expect("attachment");
+    let client_id = attachment.catalog_client_id.expect("minted client");
+    let secret_id = attachment.credential_secret_id.expect("credential secret");
+
+    // What the backfill produces: engine B reaches the same catalog through
+    // the SAME client and the SAME secret.
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments \
+           (engine_id, catalog_id, catalog_client_id, credential_secret_id, minted_client) \
+         VALUES ($1, $2, $3, $4, true)",
+    )
+    .bind(engine_b)
+    .bind(catalog.id)
+    .bind(client_id)
+    .bind(secret_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("seed the shared attachment");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{engine_a}/catalogs/{}", catalog.id),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "detach from A");
+    assert!(
+        registry(&f)
+            .get_attachment(engine_a, catalog.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "A is detached"
+    );
+
+    assert!(
+        egret_catalog_engine::CatalogStore::new(f.db.clone())
+            .list_clients(shared_wh)
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.id == client_id),
+        "the Catalog Client engine B still uses must not be revoked"
+    );
+    assert!(
+        secret_store(&f)
+            .resolve_plaintext(None, secret_id)
+            .await
+            .is_ok(),
+        "the credential secret engine B still holds must survive"
+    );
+}
+
+// ── Catalog registry (SP3a) ─────────────────────────────────────────────────────
+
+fn unique_catalog_name(prefix: &str) -> String {
+    format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..10])
+}
+
+async fn call(
+    f: &Fixture,
+    method: &str,
+    uri: &str,
+    token: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    into_json(
+        f.app
+            .clone()
+            .oneshot(req(method, uri, token, body))
+            .await
+            .unwrap(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn registry_catalog_crud_validation_and_delete_refusal() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_crud_admin", true).await;
+    let pw = seed_secret(&f, "hunter2").await;
+    let name = unique_catalog_name("pg");
+    let jdbc = serde_json::json!({
+        "dialect": "postgresql", "host": "db.internal", "port": 5432, "database": "sales",
+        "user": "reader", "password_secret_id": pw, "ssl": { "mode": "require" }
+    });
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "kind": "jdbc", "config": jdbc, "description": "sales db"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(
+        (j["name"].as_str(), j["kind"].as_str()),
+        (Some(name.as_str()), Some("jdbc"))
+    );
+    assert_eq!(j["engines"], serde_json::json!([]));
+    let id = j["id"].as_str().unwrap().to_string();
+
+    let (status, j) = call(&f, "GET", &format!("/catalogs?secretId={pw}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        j.as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == serde_json::json!(id)),
+        "{j}"
+    );
+
+    let (status, _) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": name, "kind": "jdbc", "config": jdbc })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "duplicate name");
+    for (why, body) in [
+        (
+            "bad name",
+            serde_json::json!({ "name": "Bad-Name", "kind": "tpch", "config": {} }),
+        ),
+        (
+            "unknown kind",
+            serde_json::json!({ "name": unique_catalog_name("x"), "kind": "mongo", "config": {} }),
+        ),
+        (
+            "unknown secret",
+            serde_json::json!({ "name": unique_catalog_name("x"), "kind": "jdbc", "config": {
+            "dialect": "postgresql", "host": "h", "port": 5432, "database": "d", "user": "u",
+            "password_secret_id": Uuid::new_v4(), "ssl": { "mode": "require" } } }),
+        ),
+        (
+            "plaintext advanced",
+            serde_json::json!({ "name": unique_catalog_name("x"), "kind": "tpch", "config": {},
+            "advanced": { "trino": { "a.password": "hunter2" } } }),
+        ),
+        (
+            "egret warehouse",
+            serde_json::json!({ "name": unique_catalog_name("x"), "kind": "iceberg",
+            "config": { "metastore": { "type": "egret", "warehouse_id": Uuid::new_v4() } } }),
+        ),
+    ] {
+        let (status, j) = call(&f, "POST", "/catalogs", &token, Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {j}");
+    }
+
+    // Refused while attached; the 409 names the engine.
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let catalog_id = Uuid::parse_str(&id).unwrap();
+    let reg = registry(&f);
+    reg.insert_attachment(&egret_catalog_registry::NewAttachment {
+        engine_id,
+        catalog_id,
+        catalog_client_id: None,
+        credential_secret_id: None,
+        minted_client: false,
+        applied_now: true,
+        created_at: None,
+    })
+    .await
+    .unwrap();
+    let (status, j) = call(&f, "DELETE", &format!("/catalogs/{id}"), &token, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(j["code"], "catalog_in_use");
+    assert_eq!(j["engines"][0]["name"], serde_json::json!(engine_name));
+    reg.delete_attachment(engine_id, catalog_id).await.unwrap();
+    let (status, _) = call(&f, "DELETE", &format!("/catalogs/{id}"), &token, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // A warehouse catalog goes with its warehouse, never through this route.
+    let lone_wh = seed_provisioned_warehouse(&f).await;
+    let wh = egret_catalog_engine::CatalogStore::new(f.db.clone())
+        .get_warehouse(lone_wh)
+        .await
+        .unwrap()
+        .unwrap();
+    let (lone, _) = reg
+        .ensure_warehouse_catalog(
+            &egret_catalog_registry::WarehouseIdentity {
+                id: lone_wh,
+                name: &wh.name,
+                workspace_id: wh.workspace_id,
+            },
+            None,
+            |_| Vec::new(),
+        )
+        .await
+        .unwrap();
+    // Still assigned to its warehouse's workspace (never unassigned): the
+    // warehouse refusal fires unconditionally, before the in-use check would
+    // otherwise see that assignment and report `catalog_in_use` instead.
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{}", lone.id),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(j["code"], "warehouse_catalog", "{j}");
+    assert!(j["error"].as_str().unwrap().contains("warehouse"), "{j}");
+}
+
+#[tokio::test]
+async fn registry_update_propagates_and_flags_the_failed_engine() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_prop_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name_a = format!("trino-a-{}", Uuid::new_v4().simple());
+    let name_b = format!("trino-b-{}", Uuid::new_v4().simple());
+    let mut engines = Vec::new();
+    for n in [&name_a, &name_b] {
+        let (status, j) = create_engine_via_api(&f, &token, n, wh_id, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::CREATED, "{j}");
+        engines.push(Uuid::parse_str(j["id"].as_str().unwrap()).unwrap());
+    }
+    let cat_name = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let catalog_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let reg = registry(&f);
+    for engine_id in &engines {
+        reg.insert_attachment(&egret_catalog_registry::NewAttachment {
+            engine_id: *engine_id,
+            catalog_id,
+            catalog_client_id: None,
+            credential_secret_id: None,
+            minted_client: false,
+            applied_now: true,
+            created_at: None,
+        })
+        .await
+        .unwrap();
+    }
+
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/catalogs/{catalog_id}/impact"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["engines"].as_array().unwrap().len(), 2);
+    assert!(
+        j["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["action"] == "restart"),
+        "{j}"
+    );
+
+    port.set_fail_update_for(&name_b, true);
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{catalog_id}"),
+        &token,
+        Some(serde_json::json!({
+            "config": {}, "advanced": { "trino": { "tpch.column-naming": "STANDARD" } }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    let outcome = |n: &str| {
+        j["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["engineName"] == n)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(outcome(&name_a)["status"], "applied");
+    assert_eq!(outcome(&name_b)["status"], "failed");
+    assert!(outcome(&name_b)["error"]
+        .as_str()
+        .unwrap()
+        .contains("injected update failure"));
+
+    // Engine A holds the new configuration; nothing was reverted.
+    let spec_a = port
+        .updated
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|s| s.name == name_a)
+        .cloned()
+        .unwrap();
+    let rendered = spec_a
+        .catalogs
+        .iter()
+        .find(|c| c.name == cat_name)
+        .expect("catalog rendered on A");
+    assert_eq!(rendered.properties["tpch.column-naming"], "STANDARD");
+    let stored = reg.get_catalog(catalog_id).await.unwrap().unwrap();
+    assert_eq!(stored.advanced["trino"]["tpch.column-naming"], "STANDARD");
+    let a = reg
+        .get_attachment(engines[0], catalog_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let b = reg
+        .get_attachment(engines[1], catalog_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.apply_status, "applied");
+    assert_eq!(b.apply_status, "failed");
+    assert!(b.apply_error.unwrap().contains("injected update failure"));
+
+    // Re-apply once the engine is healthy again.
+    port.set_fail_update_for(&name_b, false);
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{catalog_id}/reapply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert!(
+        j.as_array()
+            .unwrap()
+            .iter()
+            .all(|o| o["status"] == "applied"),
+        "{j}"
+    );
+    assert_eq!(
+        reg.get_attachment(engines[1], catalog_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .apply_status,
+        "applied"
+    );
+}
+
+#[tokio::test]
+async fn catalog_permissions_with_the_real_pdp() {
+    let Some(mut f) = setup_full(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let reader = session_for_with_permission(&f, "cat_reader", "catalog_registry:read").await;
+    let engine_reader = session_for_with_permission(&f, "cat_engine_reader", "engine:read").await;
+    attach_real_pdp(&mut f).await;
+    let body =
+        serde_json::json!({ "name": unique_catalog_name("x"), "kind": "tpch", "config": {} });
+    assert_eq!(
+        call(&f, "GET", "/catalogs", &reader, None).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&f, "POST", "/catalogs", &reader, Some(body)).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(&f, "GET", "/catalogs", &engine_reader, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    // 0148: every platform role holding warehouse:read now holds catalog_registry:read.
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM role_permissions rp JOIN roles r ON r.id = rp.role_id \
+          WHERE r.scope = 'platform' AND r.name = 'data_steward' AND rp.permission = 'catalog_registry:read'",
+    )
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[tokio::test]
+async fn registry_catalog_not_found_warehouse_change_and_permission_checks() {
+    let Some(mut f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "cat_404_admin", true).await;
+    let reader = session_for_with_permission(&f, "cat_404_reader", "catalog_registry:read").await;
+    attach_real_pdp(&mut f).await;
+
+    // Unknown id: 404 on every route (the admin holds platform_admin's
+    // unrestricted PDP bypass, so these reach `load`).
+    let missing = Uuid::new_v4();
+    assert_eq!(
+        call(&f, "GET", &format!("/catalogs/{missing}"), &admin, None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(
+            &f,
+            "PUT",
+            &format!("/catalogs/{missing}"),
+            &admin,
+            Some(serde_json::json!({ "config": {} })),
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(&f, "DELETE", &format!("/catalogs/{missing}"), &admin, None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+
+    // A read-only session (holds catalog_registry:read only) is forbidden from
+    // updating or deleting, even a catalog that doesn't exist — authz runs
+    // before the lookup.
+    assert_eq!(
+        call(
+            &f,
+            "PUT",
+            &format!("/catalogs/{missing}"),
+            &reader,
+            Some(serde_json::json!({ "config": {} })),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(&f, "DELETE", &format!("/catalogs/{missing}"), &reader, None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    // PUT that newly ADDS a warehouse_id to a plain (non-egret) iceberg catalog
+    // is refused: the warehouse of an egret catalog is immutable, and that
+    // includes going from none to one.
+    let sc_id = seed_exchange_storage_conn(&f).await;
+    let name = unique_catalog_name("ice");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &admin,
+        Some(serde_json::json!({
+            "name": name, "kind": "iceberg",
+            "config": { "metastore": { "type": "hive", "uri": "thrift://hms:9083" }, "storage_connection_id": sc_id }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let catalog_id = j["id"].as_str().unwrap().to_string();
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{catalog_id}"),
+        &admin,
+        Some(
+            serde_json::json!({ "config": { "metastore": { "type": "egret", "warehouse_id": Uuid::new_v4() } } }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    assert!(j["error"].as_str().unwrap().contains("warehouse"), "{j}");
+
+    // A 409 body that lists `workspaces`: assign a (non-warehouse) catalog to a
+    // workspace, then try to delete it.
+    let name2 = unique_catalog_name("bench2");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &admin,
+        Some(serde_json::json!({ "name": name2, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cat2_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let ws_id = seed_workspace(&f).await;
+    registry(&f)
+        .set_catalog_workspaces(cat2_id, &[ws_id])
+        .await
+        .unwrap();
+    let (status, j) = call(&f, "DELETE", &format!("/catalogs/{cat2_id}"), &admin, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(j["code"], "catalog_in_use");
+    assert_eq!(j["workspaces"].as_array().unwrap().len(), 1, "{j}");
+    assert_eq!(j["workspaces"][0]["id"], serde_json::json!(ws_id), "{j}");
+    assert!(
+        j.get("engines")
+            .map(|v| v.as_array().unwrap().is_empty())
+            .unwrap_or(true),
+        "{j}"
+    );
+}
+
+#[tokio::test]
+async fn attach_detach_and_retry_on_a_trino_engine() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_attach_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("bench");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let reg = registry(&f);
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+
+    // A rejected apply is a 502 and writes nothing.
+    port.set_fail_update(true);
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{j}");
+    assert_eq!(j["code"], "engine_cluster_apply_failed");
+    assert!(reg.get_attachment(e, c).await.unwrap().is_none());
+    port.set_fail_update(false);
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(j["applyStatus"], "applied");
+    assert!(port
+        .last_updated()
+        .catalogs
+        .iter()
+        .any(|c| c.name == cat_name));
+    let (status, _) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "already attached");
+
+    // A StarRocks-only generic catalog cannot be attached to Trino.
+    let sr_only_name = unique_catalog_name("paimon");
+    let (_, j) = call(&f, "POST", "/catalogs", &token, Some(serde_json::json!({
+        "name": sr_only_name, "kind": "generic",
+        "config": { "engines": ["starrocks"] }, "advanced": { "starrocks": { "type": "paimon" } }
+    }))).await;
+    let sr_only = j["id"].as_str().unwrap().to_string();
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{sr_only}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    let msg = j["error"].as_str().unwrap();
+    assert!(msg.contains("trino"), "{msg} should name the engine type");
+    assert!(msg.contains(&sr_only_name), "{msg} should name the catalog");
+
+    // Retry's IDOR guard: `sr_only` exists but was never attached to this
+    // (or any) engine — the path's engine id does not make it eligible.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{sr_only}/apply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
+    assert!(reg
+        .get_attachment(e, Uuid::parse_str(&sr_only).unwrap())
+        .await
+        .unwrap()
+        .is_none());
+
+    // Retry: a failed attachment is re-applied once the engine is healthy.
+    reg.set_apply_failed(e, c, "earlier failure").await.unwrap();
+    port.set_fail_update(true);
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}/apply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(j["code"], "engine_cluster_apply_failed");
+    assert!(reg
+        .get_attachment(e, c)
+        .await
+        .unwrap()
+        .unwrap()
+        .apply_error
+        .unwrap()
+        .contains("injected update failure"));
+    port.set_fail_update(false);
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}/apply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["status"], "applied");
+    let a = reg.get_attachment(e, c).await.unwrap().unwrap();
+    assert_eq!((a.apply_status.as_str(), a.apply_error), ("applied", None));
+
+    // Detach (the shared DELETE) applies first, then removes the attachment.
+    let (status, _) = call(
+        &f,
+        "DELETE",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(reg.get_attachment(e, c).await.unwrap().is_none());
+    assert!(port
+        .last_updated()
+        .catalogs
+        .iter()
+        .all(|c| c.name != cat_name));
+}
+
+#[tokio::test]
+async fn nothing_is_attached_to_a_starrocks_engine_yet() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_sr_admin", true).await;
+    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
+    let (status, j) = call(&f, "POST", "/engines", &token, Some(serde_json::json!({
+        "name": format!("sr-{}", Uuid::new_v4().simple()), "kind": "starrocks", "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1, "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+    }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": unique_catalog_name("b"), "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!(
+            "/engines/{engine_id}/catalogs/{}",
+            j["id"].as_str().unwrap()
+        ),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    assert!(j["error"].as_str().unwrap().contains("StarRocks"), "{j}");
+}
+
+#[tokio::test]
+async fn workspace_assignment_and_the_migration_report() {
+    let Some(f) = setup_full(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_ws_admin", true).await;
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": unique_catalog_name("b"), "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let ws1 = seed_workspace(&f).await;
+    let ws2 = seed_workspace(&f).await;
+
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &token,
+        Some(serde_json::json!({ "workspaceIds": [ws1, ws2] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j.as_array().unwrap().len(), 2);
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &token,
+        Some(serde_json::json!({ "workspaceIds": [ws2] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(j[0]["workspaceId"], serde_json::json!(ws2));
+    let (_, j) = call(
+        &f,
+        "GET",
+        &format!("/catalogs?workspaceId={ws2}"),
+        &token,
+        None,
+    )
+    .await;
+    assert!(j
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["id"] == serde_json::json!(cid)));
+    let (status, _) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &token,
+        Some(serde_json::json!({ "workspaceIds": [Uuid::new_v4()] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "unknown workspace");
+    let (status, j) = call(&f, "DELETE", &format!("/catalogs/{cid}"), &token, None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(j["workspaces"][0]["id"], serde_json::json!(ws2));
+
+    let run = Uuid::new_v4();
+    registry(&f)
+        .insert_report(&[egret_catalog_registry::ReportEntry::info(
+            run,
+            "warehouse_catalog_created",
+            "warehouse w",
+            "w is catalog w",
+        )])
+        .await
+        .unwrap();
+    let (status, j) = call(&f, "GET", "/catalogs/migration-report", &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        j.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["runId"] == serde_json::json!(run)),
+        "{j}"
+    );
+    let (status, _) = call(
+        &f,
+        "POST",
+        "/catalogs/migration-report/acknowledge",
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, j) = call(&f, "GET", "/catalogs/migration-report", &token, None).await;
+    assert!(j
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["runId"] != serde_json::json!(run)));
+    let (_, j) = call(
+        &f,
+        "GET",
+        "/catalogs/migration-report?all=true",
+        &token,
+        None,
+    )
+    .await;
+    assert!(j
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["runId"] == serde_json::json!(run)));
+}
+
+#[tokio::test]
+async fn new_catalog_routes_enforce_their_permission_gates() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // Ad-hoc single-permission roles must exist before the real PDP snapshots
+    // roles/permissions at build time (see `attach_real_pdp`).
+    let engine_updater = session_for_with_permission(&f, "cat_gate_eng_upd", "engine:update").await;
+    let registry_updater =
+        session_for_with_permission(&f, "cat_gate_reg_upd", "catalog_registry:update").await;
+    let registry_reader =
+        session_for_with_permission(&f, "cat_gate_reg_read", "catalog_registry:read").await;
+    attach_real_pdp(&mut f).await;
+    let admin = session_for(&f, "cat_gate_admin", true).await;
+
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &admin, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("gate");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &admin,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = j["id"].as_str().unwrap().to_string();
+    let reg = registry(&f);
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+
+    // Attach requires `engine:update`; `catalog_registry:update` alone is not
+    // enough — the two gates are distinct even though both mutate.
+    let (status, _) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &registry_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        reg.get_attachment(e, c).await.unwrap().is_none(),
+        "forbidden attach wrote nothing"
+    );
+
+    // Positive: a session holding exactly `engine:update` (not platform_admin)
+    // gets through — proves the gate checks the real key, not just "is admin".
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &engine_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(j["applyStatus"], "applied");
+
+    // Retry requires `catalog_registry:update`; `engine:update` alone is not enough.
+    let before = reg.get_attachment(e, c).await.unwrap().unwrap();
+    let (status, _) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}/apply"),
+        &engine_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let after = reg.get_attachment(e, c).await.unwrap().unwrap();
+    assert_eq!(
+        (before.apply_status, before.apply_error),
+        (after.apply_status, after.apply_error),
+        "forbidden retry changed nothing"
+    );
+
+    // PUT workspaces requires `catalog_registry:update`; `catalog_registry:read`
+    // alone is not enough.
+    let ws_id = seed_workspace(&f).await;
+    let (status, _) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &registry_reader,
+        Some(serde_json::json!({ "workspaceIds": [ws_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        reg.list_catalog_workspaces(c).await.unwrap().is_empty(),
+        "forbidden assignment wrote nothing"
+    );
+
+    // The migration-report GETs require `catalog_registry:read`; `engine:update`
+    // is not enough.
+    let (status, _) = call(
+        &f,
+        "GET",
+        "/catalogs/migration-report",
+        &engine_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(
+        &f,
+        "GET",
+        &format!("/catalogs/{cid}/workspaces"),
+        &engine_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Acknowledge requires `catalog_registry:update`; `catalog_registry:read`
+    // alone is not enough.
+    let run = Uuid::new_v4();
+    reg.insert_report(&[egret_catalog_registry::ReportEntry::info(
+        run,
+        "warehouse_catalog_created",
+        "warehouse w",
+        "w is catalog w",
+    )])
+    .await
+    .unwrap();
+    let (status, _) = call(
+        &f,
+        "POST",
+        "/catalogs/migration-report/acknowledge",
+        &registry_reader,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, j) = call(&f, "GET", "/catalogs/migration-report", &admin, None).await;
+    assert!(
+        j.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["runId"] == serde_json::json!(run)),
+        "forbidden acknowledge left the row open; {j}"
+    );
+}
+
+#[tokio::test]
+async fn retry_on_a_deleting_engine_is_409_and_writes_nothing() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_retry_deleting_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("del");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let (status, _) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let reg = registry(&f);
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+    // Leave the attachment in a known `failed` state so a wrongful write by
+    // the 409 path is visible: `set_apply_failed` would flip it back to
+    // `failed` with a different message, which the equality check below
+    // catches either way, but starting from `failed` also confirms the
+    // conflict path does not "helpfully" flip it to `applied`.
+    reg.set_apply_failed(e, c, "earlier failure").await.unwrap();
+    let before = reg.get_attachment(e, c).await.unwrap().unwrap();
+
+    sqlx::query("UPDATE engine_mgmt.engines SET status = 'deleting' WHERE id = $1")
+        .bind(e)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    let updates_before = port.updated.lock().unwrap().len();
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}/apply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{j}");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "a refused apply on a deleting engine must not reach the provisioner"
+    );
+    let after = reg.get_attachment(e, c).await.unwrap().unwrap();
+    assert_eq!(
+        (before.apply_status, before.apply_error),
+        (after.apply_status, after.apply_error),
+        "a refused apply on a deleting engine must leave the attachment unchanged"
     );
 }

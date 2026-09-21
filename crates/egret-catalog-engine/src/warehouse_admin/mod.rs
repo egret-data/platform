@@ -371,7 +371,7 @@ async fn list_warehouses(
     tag = "control-plane-catalog",
     request_body = CreateWarehouseBody,
     responses(
-        (status = 201, description = "Warehouse created (egret row + lakekeeper warehouse when a provisioner is wired)", body = WarehouseDto),
+        (status = 201, description = "Warehouse created (egret row + lakekeeper warehouse when a provisioner is wired) with its registry catalog, assigned to the workspace", body = WarehouseDto),
         (status = 400, description = "Unknown storage connection or invalid input", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing warehouse:create permission", body = ErrorBody),
@@ -408,6 +408,26 @@ async fn create_warehouse(
         .get_warehouse(w.id)
         .await?
         .ok_or(CatalogHttpError::NotFound)?;
+
+    // SP3: the warehouse is a registry catalog, assigned to this workspace. A
+    // failure is not fatal — engine create and the boot backfill ensure it too.
+    if let Err(e) = st
+        .store
+        .registry()
+        .ensure_warehouse_catalog(
+            &egret_catalog_registry::WarehouseIdentity {
+                id: w.id,
+                name: &w.name,
+                workspace_id: w.workspace_id,
+            },
+            None,
+            |_| Vec::new(),
+        )
+        .await
+    {
+        tracing::warn!(warehouse = %w.name, error = %e, "warehouse created but its registry catalog was not");
+    }
+
     Ok((StatusCode::CREATED, Json(w.into())))
 }
 
@@ -482,6 +502,7 @@ async fn get_warehouse(
         (status = 204, description = "Warehouse deleted"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing warehouse:delete permission", body = ErrorBody),
+        (status = 409, description = "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or the warehouse is still an engine's primary warehouse, or the boot backfill has just created and assigned its catalog (retry)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -491,7 +512,12 @@ async fn delete_warehouse(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CatalogHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "warehouse:delete").await?;
-    st.store.delete_warehouse(id).await?;
+    // SP3: `CatalogStore::delete_warehouse_releasing_catalog` owns the
+    // transaction that releases the registry catalog's workspace assignments
+    // and deletes the warehouse atomically, and 409s (naming the engine(s))
+    // instead of a raw FK 500 when an engine still attaches the catalog or
+    // still has this warehouse as its primary.
+    st.store.delete_warehouse_releasing_catalog(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

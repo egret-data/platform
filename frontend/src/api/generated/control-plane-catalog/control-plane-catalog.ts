@@ -959,6 +959,11 @@ export type controlPlaneCatalogDeleteWarehouseResponse403 = {
   status: 403
 }
 
+export type controlPlaneCatalogDeleteWarehouseResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneCatalogDeleteWarehouseResponse500 = {
   data: ErrorBody
   status: 500
@@ -967,7 +972,7 @@ export type controlPlaneCatalogDeleteWarehouseResponse500 = {
 export type controlPlaneCatalogDeleteWarehouseResponseSuccess = (controlPlaneCatalogDeleteWarehouseResponse204) & {
   headers: Headers;
 };
-export type controlPlaneCatalogDeleteWarehouseResponseError = (controlPlaneCatalogDeleteWarehouseResponse401 | controlPlaneCatalogDeleteWarehouseResponse403 | controlPlaneCatalogDeleteWarehouseResponse500) & {
+export type controlPlaneCatalogDeleteWarehouseResponseError = (controlPlaneCatalogDeleteWarehouseResponse401 | controlPlaneCatalogDeleteWarehouseResponse403 | controlPlaneCatalogDeleteWarehouseResponse409 | controlPlaneCatalogDeleteWarehouseResponse500) & {
   headers: Headers;
 };
 

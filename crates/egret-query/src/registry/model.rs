@@ -149,8 +149,10 @@ pub struct WsEngineListDto {
 }
 
 /// One catalog of an assigned engine, with the storage/secret NAME it maps to.
-/// `storage_name`/`secret_name` are best-effort (`null` when unresolvable); the
-/// secret VALUE is never exposed.
+/// `storage_name` is the storage connection THIS catalog's own warehouse writes
+/// to — `null` for a jdbc or generic catalog, which has no warehouse and no
+/// storage. `storage_name`/`secret_name` are best-effort (`null` when
+/// unresolvable); the secret VALUE is never exposed.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct WsEngineCatalogDto {
     pub name: String,
@@ -160,7 +162,8 @@ pub struct WsEngineCatalogDto {
 }
 
 /// Read-only detail of an assigned engine: its catalogs, each resolved to the
-/// storage connection (via the engine's warehouse) and secret name it uses.
+/// storage connection of its own warehouse (none for a jdbc/generic catalog)
+/// and the secret name it uses.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct WsEngineDetailDto {
     pub name: String,
