@@ -7011,6 +7011,72 @@ async fn a_drifted_catalog_is_refused_and_the_fe_is_left_alone() {
     );
 }
 
+/// D3's two reads are not atomic, and the second one is the more specific
+/// (fix round 1 review, F7). When `SHOW CATALOGS` lists a name but
+/// `SHOW CREATE CATALOG` then answers "Unknown catalog" — the catalog was
+/// dropped in between — egret must treat it as ABSENT and try to create it.
+/// Before this fix the `None` became an empty property map, every key read as
+/// differing, and the operator was told to "detach it or drop it on the
+/// engine" about a catalog that no longer existed.
+#[tokio::test]
+async fn a_catalog_that_vanishes_between_the_two_reads_is_absent_not_drifted() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_sr_vanish", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    let name = unique_catalog_name("es");
+    // Listed by `SHOW CATALOGS` …
+    f.starrocks_ddl.seed(&name, &[("type", "es")]);
+    // … but gone by the time the second read asks about it.
+    f.starrocks_ddl.fail_matching(
+        "SHOW CREATE CATALOG",
+        &format!("ERROR 5078 (HY000): Unknown catalog '{name}'"),
+    );
+
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(elasticsearch_body(&name)),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+
+    // Egret tried to CREATE it, which is the only thing "absent" can mean.
+    assert!(
+        f.starrocks_ddl
+            .executed()
+            .iter()
+            .any(|s| s.starts_with("CREATE EXTERNAL CATALOG")),
+        "a CREATE was attempted: {:?}",
+        f.starrocks_ddl.executed()
+    );
+    // Whatever the FE then said is the FE's own answer — never egret's
+    // "different properties, detach it" invention about a phantom catalog.
+    let err = j["applyError"].as_str().unwrap_or_default();
+    assert!(
+        !err.contains("different properties"),
+        "the drift refusal must not fire for a catalog the FE says is unknown: {err}"
+    );
+}
+
 /// D3: re-applying an edited catalog ALTERs — it never issues a second CREATE,
 /// which `IF NOT EXISTS` would have turned into a silent no-op. The rotated
 /// password has to actually reach the FE, which is the whole point: the drift
