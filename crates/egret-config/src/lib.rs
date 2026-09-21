@@ -396,6 +396,56 @@ pub struct Config {
     /// same reason `data_api` is: a deployment's TOML predates the section.
     #[serde(default = "default_workflow")]
     pub workflow: WorkflowConfig,
+    /// Deployment-level overrides for how egret talks to StarRocks FEs.
+    /// Serde-defaulted for the same reason `data_api`/`workflow` are: a
+    /// deployment's TOML predates the section.
+    #[serde(default = "default_starrocks")]
+    pub starrocks: StarRocksSettings,
+}
+
+/// `[starrocks]` — deployment-level overrides for how egret talks to
+/// StarRocks FEs. Today: the JDBC driver jars a `jdbc` catalog makes the FE
+/// download (design D5). Every field is optional: `egret-catalog-registry`
+/// compiles in a pinned driver per dialect, and this section only REPOINTS
+/// one — at an internal mirror, or at a `file:///` path baked into the FE
+/// image — so a partially-written table can never leave a dialect without a
+/// driver.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StarRocksSettings {
+    #[serde(default)]
+    pub jdbc_drivers: JdbcDriverOverrides,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct JdbcDriverOverrides {
+    #[serde(default)]
+    pub postgresql: Option<JdbcDriverOverride>,
+    #[serde(default)]
+    pub mysql: Option<JdbcDriverOverride>,
+    #[serde(default)]
+    pub mariadb: Option<JdbcDriverOverride>,
+    #[serde(default)]
+    pub oracle: Option<JdbcDriverOverride>,
+    #[serde(default)]
+    pub sqlserver: Option<JdbcDriverOverride>,
+    #[serde(default)]
+    pub clickhouse: Option<JdbcDriverOverride>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct JdbcDriverOverride {
+    #[serde(default)]
+    pub driver_url: Option<String>,
+    #[serde(default)]
+    pub driver_class: Option<String>,
+}
+
+/// Serde's fallback for a `[starrocks]` section a deployment's TOML predates.
+/// Every field of [`StarRocksSettings`] is itself optional, so its derived
+/// `Default` already is the correct fallback — unlike `[workflow]`, there is
+/// no unsafe-by-omission field here that needs its own named `default_*`.
+fn default_starrocks() -> StarRocksSettings {
+    StarRocksSettings::default()
 }
 
 /// `[workflow]` — what a deployment may switch on or off about the workflow
@@ -729,6 +779,7 @@ impl Default for Config {
             },
             data_api: default_data_api(),
             workflow: default_workflow(),
+            starrocks: default_starrocks(),
             audit: AuditConfig {
                 enabled: true,
                 retention_days: 90,
@@ -1551,5 +1602,30 @@ mod tests {
         );
 
         assert_eq!(accepted, 2, "arm 2 did not run for both spellings");
+    }
+
+    /// `Env::split("__")` is recursive, so three levels — section, map key,
+    /// field — work; this test is what proves that rather than assuming it
+    /// (D5: `[starrocks.jdbc_drivers]` reaches a per-dialect field from the
+    /// environment, which no other section in this file needs to do).
+    #[test]
+    fn a_driver_override_arrives_under_the_nested_env_name() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env(
+                "EGRET_STARROCKS__JDBC_DRIVERS__MYSQL__DRIVER_URL",
+                "file:///opt/mariadb.jar",
+            );
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.starrocks
+                    .jdbc_drivers
+                    .mysql
+                    .unwrap()
+                    .driver_url
+                    .as_deref(),
+                Some("file:///opt/mariadb.jar")
+            );
+            Ok(())
+        });
     }
 }
