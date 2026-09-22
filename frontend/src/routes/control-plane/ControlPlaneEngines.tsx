@@ -271,6 +271,16 @@ function EngineTable({
 
 type BadgeVariant = "success" | "warning" | "destructive" | "secondary";
 
+/**
+ * A live Kubernetes phase OR — when the per-row poll has not answered — the
+ * stored `engines.status`, which is why `deleting` is in the in-flight arm.
+ * `deleting` is one of that column's four values
+ * (`egret-engine-mgmt/src/store.rs`); it used to fall through to `secondary`
+ * while `EnginesTab`'s `EngineHealthBadge`, which reads the stored value
+ * directly, painted it `warning`, so the two pages showed the same word in two
+ * colours and a comment over there claimed they could not (whole-branch
+ * review, F6).
+ */
 function phaseVariant(phase: string): BadgeVariant {
   switch (phase.toLowerCase()) {
     case "running":
@@ -283,13 +293,6 @@ function phaseVariant(phase: string): BadgeVariant {
     case "pending":
     case "creating":
     case "updating":
-    // `engines.status` is this badge's FALLBACK when the live poll has not
-    // answered, and `deleting` is one of its four values
-    // (`egret-engine-mgmt/src/store.rs`). Without this arm it fell through to
-    // `secondary` while `EnginesTab`'s `EngineHealthBadge`, which reads the
-    // stored value directly, painted it `warning` — the two pages showed the
-    // same word in two colours, and a comment over there claimed they could
-    // not (whole-branch review, F6).
     case "deleting":
       return "warning";
     default:
