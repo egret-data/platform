@@ -1,15 +1,8 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, CircleSlash, Loader2, RefreshCw, Unlink, XCircle } from "lucide-react";
-import { toast } from "sonner";
+import { CheckCircle2, CircleSlash, Loader2, XCircle } from "lucide-react";
 
-import {
-  useControlPlaneCatalogRegistryDetachCatalog,
-  useControlPlaneCatalogRegistryRegistryAttachCatalog,
-  useControlPlaneCatalogRegistryRetryCatalogApply,
-  useControlPlaneCatalogRegistryTestRegistryCatalog,
-} from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
+import { useControlPlaneCatalogRegistryTestRegistryCatalog } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import { useControlPlaneEnginesListEngines } from "@/api/generated/control-plane-engines/control-plane-engines";
 import type { controlPlaneEnginesListEnginesResponse } from "@/api/generated/control-plane-engines/control-plane-engines";
 import type {
@@ -39,45 +32,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { catalogKey, catalogsQueryKey } from "../queryKeys";
-
-/**
- * The three `applyStatus` values, each with its own badge and its own meaning.
- *
- * The words come from `CatalogAttachmentDto.applyStatus`'s own JSDoc, which is
- * where they reach the client at all — a response description does not. The
- * three variants are deliberately distinct: one badge with three captions
- * makes `failed` read as calmly as `applied`.
- */
-function StatusBadge({ a }: { a: CatalogAttachmentDto }) {
-  if (a.applyStatus === "failed")
-    return (
-      <Badge variant="destructive" title={a.applyError ?? undefined}>
-        failed
-      </Badge>
-    );
-  if (a.applyStatus === "pending")
-    return (
-      <Badge
-        variant="outline"
-        title="egret has recorded this attachment and has not yet been able to tell the engine. A StarRocks FE takes 5-10 minutes to come up after create; the bootstrap or Retry converges it."
-      >
-        pending
-      </Badge>
-    );
-  if (a.applyStatus === "applied") return <Badge variant="secondary">applied</Badge>;
-  // `applyStatus` is generated as `string`, not an enum, so this arm is
-  // reachable. It renders the value egret actually sent, neutrally: falling
-  // through to the `applied` badge would be a false green asserting a property
-  // nothing measured — the exact failure `checkLine`'s exhaustive switch below
-  // exists to prevent, and it would be worse here because nothing would even
-  // hint that the value was unrecognised (SP3c review F5).
-  return (
-    <Badge variant="outline" className="text-muted-foreground italic">
-      {a.applyStatus}
-    </Badge>
-  );
-}
+import { AttachmentActions, StatusBadge, appliedCell, useAttachmentActions } from "./attachmentUi";
 
 /**
  * The engine's OWN lifecycle status, which is a different fact from the
@@ -117,26 +72,6 @@ function EngineHealthBadge({ status }: { status: string | null }) {
           ? "warning"
           : "secondary";
   return <Badge variant={v}>{status}</Badge>;
-}
-
-/**
- * The Applied cell.
- *
- * `applied_at` is NOT cleared by `set_apply_failed`
- * (`egret-catalog-registry/src/store.rs`), so a row that applied once and later
- * failed still carries a timestamp — which is worth showing and must not be
- * shown bare, because bare it reads as "this is live right now". And a row with
- * no timestamp is only "waiting" while it is `pending`: saying it on a `failed`
- * row makes the row contradict its own badge (SP3c review F4).
- */
-function appliedCell(a: CatalogAttachmentDto): string {
-  if (a.appliedAt) {
-    const when = new Date(a.appliedAt).toLocaleString();
-    return a.applyStatus === "applied" ? when : `last applied ${when}`;
-  }
-  if (a.applyStatus === "pending") return `waiting since ${new Date(a.createdAt).toLocaleString()}`;
-  if (a.applyStatus === "failed") return "never applied";
-  return "—";
 }
 
 type Tone = "ok" | "bad" | "neutral";
@@ -223,7 +158,6 @@ function ToneIcon({ tone }: { tone: Tone }) {
  */
 export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
   const { me } = useAuth();
-  const queryClient = useQueryClient();
 
   const isAdmin = !!me && me.platform_roles.includes("platform_admin");
   const canUpdate = isAdmin || !!me?.permissions.includes("catalog_registry:update");
@@ -235,29 +169,6 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
 
   const [pick, setPick] = useState("");
   const [detachTarget, setDetachTarget] = useState<CatalogAttachmentDto | null>(null);
-
-  /**
-   * What every successful attach, detach and Retry has to do.
-   *
-   * Both caches that describe this attachment set: the detail query is what
-   * this table reads; the list page draws an engine count and the stalled
-   * warning from its own query, and would keep showing the old one for
-   * `staleTime` otherwise. Both keys are imported, never written out — a
-   * hand-written triple matches no cache entry at all, and every test here
-   * would still be green.
-   *
-   * And the last Test verdict is DROPPED, because it was measured against an
-   * attachment set that no longer exists. The route picks `query` over `tcp`
-   * by looking for an applied Trino attachment, so attaching or detaching one
-   * can change which check would even run — leaving a red "Could not reach
-   * …:5432" box above a row that has just gone green is the same class of lie
-   * the `check` discriminant exists to prevent.
-   */
-  function afterChange() {
-    void queryClient.invalidateQueries({ queryKey: catalogKey(catalog.id) });
-    void queryClient.invalidateQueries({ queryKey: catalogsQueryKey });
-    test.reset();
-  }
 
   // `<…, ApiError>` for the same reason every other query on this page carries
   // it: the thrown value is an `ApiError` with `.message`, and the generated
@@ -271,53 +182,25 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
     // an engine is `failed`, which is the fact this tab was missing.
   >({ query: { retry: false, enabled: canReadEngines } });
 
-  const attach = useControlPlaneCatalogRegistryRegistryAttachCatalog<ApiError>({
-    mutation: {
-      onSuccess: (res) => {
-        afterChange();
-        setPick("");
-        // SP3b D1: a StarRocks attach returns 201 even when the FE refused it,
-        // with `applyStatus` `failed` and the reason in `applyError`.
-        // Reporting "attached" and nothing else would hide the half of the
-        // outcome that matters.
-        if (res.status === 201 && res.data.applyStatus === "failed")
-          toast.error(
-            `Attached, but the engine refused it: ${res.data.applyError ?? "no reason given"}`,
-          );
-        else toast.success("Attached.");
-      },
-      // `apiFetch` throws an `ApiError`, which carries `.message`. The
-      // generated `TError = ErrorBody` would make `.error` type-check and be
-      // `undefined` at runtime — an empty toast on every failure.
-      onError: (e) => toast.error(e.message || "Could not attach."),
-    },
-  });
-
-  const detach = useControlPlaneCatalogRegistryDetachCatalog<ApiError>({
-    mutation: {
-      onSuccess: () => {
-        afterChange();
-        toast.success("Detached.");
-      },
-      // Verbatim: the 400 a primary attachment returns names the only way out.
-      onError: (e) => toast.error(e.message || "Could not detach."),
-    },
-  });
-
-  const retry = useControlPlaneCatalogRegistryRetryCatalogApply<ApiError>({
-    mutation: {
-      onSuccess: () => {
-        afterChange();
-        toast.success("Re-applied.");
-      },
-      onError: (e) => toast.error(e.message || "The engine rejected the re-apply."),
-    },
-  });
-
   // ONE Test, in the header, not one per row: the route decides which of the
   // three checks is possible from the stored row and the attachments, and
   // duplicating that decision per row in the client is how the two drift.
   const test = useControlPlaneCatalogRegistryTestRegistryCatalog<ApiError>();
+
+  /**
+   * Attach, detach and Retry, and the two cache invalidations every one of
+   * them owes, live in `attachmentUi` — the engine's own Catalogs tab renders
+   * the same pair from the other side and must not carry a second copy of the
+   * "a 201 can be `failed`" rule.
+   *
+   * What is local is `onDone`: the last Test verdict is DROPPED, because it
+   * was measured against an attachment set that no longer exists. The route
+   * picks `query` over `tcp` by looking for an applied Trino attachment, so
+   * attaching or detaching one can change which check would even run —
+   * leaving a red "Could not reach …:5432" box above a row that has just gone
+   * green is the same class of lie the `check` discriminant exists to prevent.
+   */
+  const { attach, detach, retry } = useAttachmentActions({ onDone: () => test.reset() });
 
   const attached = new Set(catalog.engines.map((a) => a.engineId));
   const visibleEngines = enginesQ.data?.status === 200 ? enginesQ.data.data : [];
@@ -438,40 +321,17 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
                   </TableCell>
                   <TableCell className="text-right">
                     {canUpdate && (
-                      <div className="flex flex-col items-end gap-1">
-                        <div className="flex items-center justify-end gap-2">
-                          {a.applyStatus !== "applied" && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => retry.mutate({ id: a.engineId, cid: catalog.id })}
-                              disabled={retry.isPending}
-                            >
-                              <RefreshCw className="h-3.5 w-3.5" />
-                              Retry
-                            </Button>
-                          )}
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setDetachTarget(a)}
-                            disabled={a.isPrimary || detach.isPending}
-                          >
-                            <Unlink className="h-3.5 w-3.5" />
-                            Detach
-                          </Button>
-                        </div>
-                        {a.isPrimary && (
-                          // The server is still the refusal point — this
-                          // button is a courtesy, not a guarantee — but a
-                          // disabled button whose reason is on screen beats a
-                          // refusal collected after typing a confirmation word.
-                          <span className="text-xs text-muted-foreground">
-                            This is {a.engineName}&apos;s primary catalog. Detach it by deleting
-                            the engine.
-                          </span>
-                        )}
-                      </div>
+                      <AttachmentActions
+                        a={a}
+                        detachBlockedReason={
+                          a.isPrimary
+                            ? `This is ${a.engineName}'s primary catalog. Detach it by deleting the engine.`
+                            : null
+                        }
+                        busy={retry.isPending || detach.isPending}
+                        onRetry={() => retry.mutate({ id: a.engineId, cid: catalog.id })}
+                        onDetach={() => setDetachTarget(a)}
+                      />
                     )}
                   </TableCell>
                 </TableRow>
@@ -546,7 +406,16 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
                   </SelectContent>
                 </Select>
                 <Button
-                  onClick={() => attach.mutate({ id: catalog.id, engineId: pick })}
+                  onClick={() =>
+                    // The picker resets only on SUCCESS, and at the call site
+                    // rather than in the shared hook: a failed attach that
+                    // cleared the Select would make the operator find the
+                    // engine again to read the error against.
+                    attach.mutate(
+                      { id: catalog.id, engineId: pick },
+                      { onSuccess: () => setPick("") },
+                    )
+                  }
                   disabled={!pick || attach.isPending}
                 >
                   {attach.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
