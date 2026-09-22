@@ -871,3 +871,34 @@ describe("catalogKey", () => {
     expect(catalogKey("a/b")[0]).toContain("a%2Fb");
   });
 });
+
+/**
+ * Whole-branch review, ledger item 6. Task 8 carried this branch as
+ * unreachable — the route is gated on the same key the read needs — and Task 11
+ * §5.10 reproduced it live: a freshly granted permission had not reached every
+ * PDP replica, so the guard admitted the operator and the first read 403'd.
+ * `ApiError.message` for that is `Error::Forbidden`'s Display, the bare word
+ * "forbidden".
+ */
+describe("the top-level read failure", () => {
+  test("a 403 names the permission instead of printing the bare word forbidden", () => {
+    mockCatalog(null, new ApiError(403, "forbidden"));
+    renderDetail();
+
+    const alert = screen.getByTestId("catalog-read-error");
+    expect(alert).toHaveTextContent("catalog_registry:read");
+    expect(alert).not.toHaveTextContent(/^forbidden$/);
+    // It must not read as a statement about the catalog.
+    expect(alert).toHaveTextContent(/about your permissions/i);
+    // The way back to the list is still there.
+    expect(screen.getByRole("link", { name: /Catalogs/ })).toBeInTheDocument();
+  });
+
+  test("every other failure still shows the server's own message", () => {
+    mockCatalog(null, new ApiError(404, "catalog not found"));
+    renderDetail();
+    const alert = screen.getByTestId("catalog-read-error");
+    expect(alert).toHaveTextContent("catalog not found");
+    expect(alert).not.toHaveTextContent("catalog_registry:read");
+  });
+});

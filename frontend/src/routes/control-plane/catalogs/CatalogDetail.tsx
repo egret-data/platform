@@ -226,9 +226,20 @@ export default function CatalogDetail() {
     return (
       <div className="space-y-5">
         {backLink}
-        <Alert variant="destructive">
+        <Alert variant="destructive" data-testid="catalog-read-error">
           <AlertDescription>
-            {catalogQ.error?.message ?? "Couldn't load this catalog."}
+            {/* A 403 here reached a page whose ROUTE is gated on the same key,
+                so `me.permissions` and the PDP disagree: Task 11 §5.10
+                reproduced exactly that — a fresh grant had not reached every
+                PDP replica, and the first read after landing 403'd. Task 8
+                carried this as unreachable and it is not. `ApiError.message`
+                for it is `Error::Forbidden`'s Display, the bare word
+                "forbidden", which names no permission and offers no route
+                forward — the same shape Task 7's F3 removed from the attach
+                picker one tab over. */}
+            {catalogQ.error?.status === 403
+              ? "egret refused to read this catalog: that read needs the catalog_registry:read permission. This is an answer about your permissions and not about the catalog — nothing here says it is missing or broken. If the permission was granted moments ago, try again shortly; otherwise a platform administrator can grant it."
+              : (catalogQ.error?.message ?? "Couldn't load this catalog.")}
           </AlertDescription>
         </Alert>
       </div>
