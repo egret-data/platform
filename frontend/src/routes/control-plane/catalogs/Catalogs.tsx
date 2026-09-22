@@ -235,8 +235,13 @@ function catalogColumns(
  *
  * The registry list: name, kind, attached engines, assigned workspaces, and a
  * warning when an attachment is `failed` or has been `pending` longer than a
- * bootstrap takes. Warehouses still has its own section through SP3c-1 (D5);
- * Task 8 turns those routes into redirects here.
+ * bootstrap takes.
+ *
+ * Warehouses still has its own section through SP3c-1 (D5). Task 8 turned
+ * exactly ONE of its routes into a redirect here — `warehouses/:id`, because
+ * the warehouse detail PAGE is what moved onto `CatalogDetail`. The LIST route
+ * is deliberately still a page, and `App.tsx`'s own comment is emphatic about
+ * it; SP3c-2 retires it (whole-branch review, F7).
  */
 export default function Catalogs() {
   /**

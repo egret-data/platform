@@ -55,9 +55,17 @@ import {
  * probe: `ControlPlaneEngines.tsx` treats the same field as the *fallback* for
  * a per-row `getEngine` poll. Mounting that poll here would be one extra
  * request per attachment for a fact this page does not own, so this tab shows
- * the stored value and the table's footnote says that is what it is. The
- * variant mapping is `ControlPlaneEngines.tsx:274-290`'s, kept in step so the
- * two pages do not paint the same word two colours.
+ * the stored value and the table's footnote says that is what it is.
+ *
+ * The variant mapping agrees with `ControlPlaneEngines.tsx`'s `phaseVariant`
+ * on all FOUR `engine_status` values this badge can receive
+ * (`egret-engine-mgmt/src/store.rs`: `provisioning`, `running`, `failed`,
+ * `deleting`), so the two pages do not paint the same word two colours. It did
+ * not: `phaseVariant` had no `deleting` arm and fell through to `secondary`,
+ * which the whole-branch review (F6) caught and that function now covers. The
+ * agreement is only claimed over those four — `phaseVariant` also maps live
+ * Kubernetes PHASES (`ready`, `error`, `creating`, …) that never reach an
+ * `engines.status` column.
  */
 function EngineHealthBadge({ status }: { status: string | null }) {
   if (status === null)
@@ -168,9 +176,17 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
   const isAdmin = !!me && me.platform_roles.includes("platform_admin");
   const canUpdate = isAdmin || !!me?.permissions.includes("catalog_registry:update");
   // Reading the engine list, and linking to an engine page, is `engine:read` —
-  // which `catalog_registry:read` does not imply. Same reasoning as the
-  // warehouse link on this page's header: a link that 403s exactly the persona
-  // the section was built for is worse than a plain identifier.
+  // which `catalog_registry:read` does not imply. A link that 403s exactly the
+  // persona the section was built for is worse than a plain identifier, so the
+  // name is rendered as text instead.
+  //
+  // (This used to cite the warehouse link on `CatalogDetail`'s header as the
+  // precedent. It no longer carries that rationale: the link was removed
+  // because `/control-plane/warehouses/{id}` now redirects to the page it sat
+  // on, so it would have pointed at itself — whole-branch review, F7. The rule
+  // here stands on its own; the five blocked warehouse tabs on that page, and
+  // `EngineDetail`'s own `catalog_registry:read` sentence, are the live
+  // examples of it.)
   const canReadEngines = isAdmin || !!me?.permissions.includes("engine:read");
 
   const [pick, setPick] = useState("");

@@ -283,6 +283,14 @@ function phaseVariant(phase: string): BadgeVariant {
     case "pending":
     case "creating":
     case "updating":
+    // `engines.status` is this badge's FALLBACK when the live poll has not
+    // answered, and `deleting` is one of its four values
+    // (`egret-engine-mgmt/src/store.rs`). Without this arm it fell through to
+    // `secondary` while `EnginesTab`'s `EngineHealthBadge`, which reads the
+    // stored value directly, painted it `warning` — the two pages showed the
+    // same word in two colours, and a comment over there claimed they could
+    // not (whole-branch review, F6).
+    case "deleting":
       return "warning";
     default:
       return "secondary";
