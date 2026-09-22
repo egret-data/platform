@@ -80,6 +80,46 @@ function StatusBadge({ a }: { a: CatalogAttachmentDto }) {
 }
 
 /**
+ * The engine's OWN lifecycle status, which is a different fact from the
+ * attachment's `applyStatus` and was lost when Task 8 deleted the warehouse
+ * Engines tab.
+ *
+ * `applyStatus` answers "did this catalog reach that engine"; an engine whose
+ * cluster has since failed still answers `applied`, because it did. Scanning
+ * the Apply column for trouble therefore finds none on a broken engine — which
+ * is why the engine's own word sits beside its name and the apply column is
+ * named after the apply.
+ *
+ * The value is `engines.status` as the list route last stored it, NOT a live
+ * probe: `ControlPlaneEngines.tsx` treats the same field as the *fallback* for
+ * a per-row `getEngine` poll. Mounting that poll here would be one extra
+ * request per attachment for a fact this page does not own, so this tab shows
+ * the stored value and the table's footnote says that is what it is. The
+ * variant mapping is `ControlPlaneEngines.tsx:274-290`'s, kept in step so the
+ * two pages do not paint the same word two colours.
+ */
+function EngineHealthBadge({ status }: { status: string | null }) {
+  if (status === null)
+    // An attachment whose engine row is gone (Task 3's D9 path) — egret read
+    // the list and this engine was not in it. Saying nothing here would read
+    // as "fine".
+    return (
+      <Badge variant="outline" className="text-muted-foreground italic">
+        engine unknown
+      </Badge>
+    );
+  const v =
+    status.toLowerCase() === "running"
+      ? "success"
+      : status.toLowerCase() === "failed"
+        ? "destructive"
+        : status.toLowerCase() === "provisioning" || status.toLowerCase() === "deleting"
+          ? "warning"
+          : "secondary";
+  return <Badge variant={v}>{status}</Badge>;
+}
+
+/**
  * The Applied cell.
  *
  * `applied_at` is NOT cleared by `set_apply_failed`
@@ -226,7 +266,10 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
   const enginesQ = useControlPlaneEnginesListEngines<
     controlPlaneEnginesListEnginesResponse,
     ApiError
-  >({ query: { retry: false, enabled: canUpdate } });
+    // `enabled` follows the permission the ROUTE needs, not the one the attach
+    // picker needs: a read-only operator who may read engines can now be told
+    // an engine is `failed`, which is the fact this tab was missing.
+  >({ query: { retry: false, enabled: canReadEngines } });
 
   const attach = useControlPlaneCatalogRegistryRegistryAttachCatalog<ApiError>({
     mutation: {
@@ -279,6 +322,18 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
   const attached = new Set(catalog.engines.map((a) => a.engineId));
   const visibleEngines = enginesQ.data?.status === 200 ? enginesQ.data.data : [];
   const candidates = visibleEngines.filter((e) => !attached.has(e.id));
+  /**
+   * `null` means egret CANNOT KNOW any engine's health here — the list needs
+   * `engine:read` and this operator has not got it, or the request failed.
+   * That is a different state from "the list was read and this engine was not
+   * in it", which is a per-row `null` inside the map, and the two must not
+   * collapse: one is a gap in the operator's permissions, the other is a
+   * dangling attachment.
+   */
+  const engineHealth: Map<string, string> | null =
+    canReadEngines && enginesQ.data?.status === 200
+      ? new Map(enginesQ.data.data.map((e) => [e.id, e.status]))
+      : null;
   const failures = catalog.engines.filter((a) => a.applyStatus === "failed" && a.applyError);
 
   const result = test.data?.status === 200 ? test.data.data : null;
@@ -341,7 +396,10 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
                 <TableHead>Engine</TableHead>
                 <TableHead>Type</TableHead>
                 <TableHead>Primary</TableHead>
-                <TableHead>Status</TableHead>
+                {/* "Apply", not "Status". It is the CATALOG's state on that
+                    engine; the engine's own health sits beside its name,
+                    because a failed engine still reads `applied` here. */}
+                <TableHead>Apply</TableHead>
                 <TableHead>Applied</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
@@ -350,16 +408,21 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
               {catalog.engines.map((a) => (
                 <TableRow key={a.engineId}>
                   <TableCell className="font-medium">
-                    {canReadEngines ? (
-                      <Link
-                        to={`/control-plane/engines/${a.engineId}`}
-                        className="hover:underline"
-                      >
-                        {a.engineName}
-                      </Link>
-                    ) : (
-                      a.engineName
-                    )}
+                    <div className="flex flex-wrap items-center gap-2">
+                      {canReadEngines ? (
+                        <Link
+                          to={`/control-plane/engines/${a.engineId}`}
+                          className="hover:underline"
+                        >
+                          {a.engineName}
+                        </Link>
+                      ) : (
+                        a.engineName
+                      )}
+                      {engineHealth && (
+                        <EngineHealthBadge status={engineHealth.get(a.engineId) ?? null} />
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell>
                     <Badge variant="outline">{a.engineType}</Badge>
@@ -416,6 +479,17 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
             </TableBody>
           </Table>
         </div>
+      )}
+
+      {catalog.engines.length > 0 && (
+        <p className="text-xs text-muted-foreground" data-testid="catalog-apply-footnote">
+          <strong>Apply</strong> is this catalog&apos;s state on that engine, not the engine&apos;s
+          own health: an engine that has since failed still reads <code>applied</code> here,
+          because the catalog did apply before it broke.{" "}
+          {engineHealth
+            ? "The badge beside each engine name is that engine's lifecycle status as egret last recorded it — the engine's own page polls it live."
+            : "egret cannot show you engine health here: listing engines needs the engine:read permission, which this account does not have."}
+        </p>
       )}
 
       {/* `applyError` in full, below the table. It is the one string that says

@@ -340,6 +340,59 @@ describe("EnginesTab — the attachment table", () => {
     expect(within(rowFor("sr-pending")).getByText(/^waiting since /)).toBeInTheDocument();
   });
 
+  test("a failed ENGINE is visible even though its attachment reads applied", () => {
+    // The defect Task 8's review found: `applyStatus` answers "did the catalog
+    // reach that engine", and a cluster that died afterwards still answers
+    // `applied`. An operator scanning the apply column for trouble saw none.
+    mockEngines([
+      engine({ id: "e1", name: "trino-prod", status: "failed" }),
+      engine({ id: "e2", name: "sr-eu", type: "starrocks", status: "running" }),
+    ]);
+    renderTab(
+      catalog({
+        engines: [
+          attachment({ engineId: "e1", engineName: "trino-prod", applyStatus: "applied" }),
+          attachment({ engineId: "e2", engineName: "sr-eu", applyStatus: "applied" }),
+        ],
+      }),
+    );
+
+    const broken = rowFor("trino-prod");
+    expect(within(broken).getByText("applied")).toBeInTheDocument();
+    expect(within(broken).getByText("failed")).toBeInTheDocument();
+    // …and the healthy engine is not painted the same way.
+    expect(within(rowFor("sr-eu")).getByText("running")).toBeInTheDocument();
+    expect(within(rowFor("sr-eu")).queryByText("failed")).not.toBeInTheDocument();
+  });
+
+  test("the apply column is not named Status, and the table says what it is not", () => {
+    renderTab();
+    expect(screen.getByRole("columnheader", { name: "Apply" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "Status" })).not.toBeInTheDocument();
+    // The column header alone cannot carry this: the sentence is what stops
+    // "applied" being read as "this engine is fine".
+    expect(screen.getByTestId("catalog-apply-footnote")).toHaveTextContent(
+      /not the engine's own health/i,
+    );
+  });
+
+  test("an attachment whose engine is gone says so rather than reading as healthy", () => {
+    // The list was read and this engine was not in it — Task 3's D9 path, an
+    // attachment that outlived its engine row.
+    mockEngines([engine({ id: "e1", name: "trino-prod", status: "running" })]);
+    renderTab(catalog({ engines: [attachment({ engineId: "e9", engineName: "ghost" })] }));
+    expect(within(rowFor("ghost")).getByText("engine unknown")).toBeInTheDocument();
+  });
+
+  test("an operator who may not read engines is told egret cannot show engine health", () => {
+    renderTab(catalog(), READER);
+    // Not a silent blank: an absent badge reads as "fine", which is the same
+    // false green in a different costume.
+    expect(screen.queryByText("running")).not.toBeInTheDocument();
+    expect(screen.queryByText("engine unknown")).not.toBeInTheDocument();
+    expect(screen.getByTestId("catalog-apply-footnote")).toHaveTextContent("engine:read");
+  });
+
   test("a catalog attached to nothing says so, rather than rendering an empty table", () => {
     renderTab(catalog({ engines: [] }));
     expect(screen.getByText(/not attached to any engine/i)).toBeInTheDocument();
