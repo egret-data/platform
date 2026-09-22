@@ -2,25 +2,27 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `registry.catalogs` becomes something an operator can see and drive. Control Plane gains an Infrastructure → **Catalogs** section: a list that names every catalog's kind, engines, workspaces and failed applies; a create flow with a typed form per kind family and an Advanced block per engine; a detail page with Configuration, Engines (attach, detach, apply status, Retry, Test) and Workspaces, plus — when the catalog is an egret warehouse — the roles, clients, browse, connect and settings tabs that live on `WarehouseDetail.tsx` today, reused rather than rewritten. `/control-plane/warehouses/*` redirects onto the matching catalog and every literal link moves with it. Engine detail's Catalogs tab drops its inline `CatalogForm` for a registry picker, and the create-engine wizard attaches catalogs. One backend addition only: a registry-tagged detach route, so the generated client has a detach hook at all. **Nothing is removed** — that is SP3c-2.
+**Goal:** `registry.catalogs` becomes something an operator can see and drive. Control Plane gains an Infrastructure → **Catalogs** section: a list that names every catalog's kind, engines, workspaces and failed applies; a create flow with a typed form per kind family and an Advanced block per engine; a detail page with Configuration, Engines (attach, detach, apply status, Retry, Test) and Workspaces, plus — when the catalog is an egret warehouse — the roles, clients, browse, connect and settings tabs that live on `WarehouseDetail.tsx` today, reused rather than rewritten. `/control-plane/warehouses/*` redirects onto the matching catalog and every literal link moves with it. Engine detail's Catalogs tab drops its inline `CatalogForm` for a registry picker, and the create-engine wizard genuinely attaches several catalogs with one marked primary. Four backend additions, all of them additive: a registry-tagged detach route; `is_primary` on the attachment with its backfill (D2); an optional `warehouse_id` on the create-engine body; and the TCP reachability probe D4 asks for (§3, as amended 2026-09-22). **Nothing is removed** — that is SP3c-2, which now only drops `engines.warehouse_id`.
 
-**Architecture:** One backend change, in `crates/egret-engine-mgmt/src/catalogs.rs`: `DELETE /api/control-plane/catalogs/{id}/engines/{engine_id}` under the `control-plane-catalog-registry` tag, gated `catalog_registry:update`, calling the existing `catalog_apply::detach_from_engine` — the same function the legacy `DELETE /engines/{id}/catalogs/{cid}` calls, which stays exactly where it is (D5). Everything else is `frontend/src`. A new `routes/control-plane/catalogs/` directory holds the list, the create page, the detail shell and its three registry tabs, and a `kinds/` module with one typed form per kind family built from `ConfigSection` / `FieldLabel` / `SecretPicker` / the storage `<Select>`. A new `routes/control-plane/warehouse-tabs/` directory holds the five tab components lifted verbatim out of `WarehouseDetail.tsx` — they keep their `warehouseId: string` prop, so the catalog detail feeds them `catalog.warehouseId` and their bodies do not change. `WarehouseDetail.tsx` and `Warehouses.tsx` are then reduced to nothing and deleted, their routes replaced by two redirect components. `EngineDetail`'s `CatalogsCard` and `EngineCreate`'s warehouse `<Select>` are rewritten against the registry client.
+**Architecture:** Three backend changes. (1) `crates/egret-engine-mgmt/src/catalogs.rs` gains `DELETE /api/control-plane/catalogs/{id}/engines/{engine_id}` under the `control-plane-catalog-registry` tag, gated `catalog_registry:update`, calling the existing `catalog_apply::detach_from_engine` — the same function the legacy `DELETE /engines/{id}/catalogs/{cid}` calls, which stays exactly where it is (D5). (2) Migration `0150` adds `registry.engine_catalog_attachments.is_primary`, backfilled from `engines.warehouse_id` and unique per engine; `list_engine_attachments` stops deriving primacy from a warehouse comparison and reads the column; `CreateEngineBody.warehouse_id` becomes `Option<Uuid>` beside a new `catalogs: Vec<NewEngineCatalog>`, and the server derives the still-NOT-NULL `engines.warehouse_id` from whichever attached catalog is primary. (3) `CatalogDef::probe_target()` — a pure function in `egret-catalog-registry` that reads a host and port out of the **stored** configuration — plus `POST /api/control-plane/catalogs/{id}/test` in engine-mgmt, which runs `SHOW SCHEMAS` through an attached Trino engine when there is one and otherwise a connect-only TCP probe, and says in its response body which of the two it ran.
 
-**Tech Stack:** Rust (axum 0.8, utoipa 5, sqlx 0.9 / Postgres), orval via `npm run gen:api`; React 18, TanStack Query v5, react-router 6, shadcn/Radix + Tailwind v4 (OKLCH tokens), Vitest + Testing Library, Playwright.
+Everything else is `frontend/src`. A new `routes/control-plane/catalogs/` directory holds the list, the create page, the detail shell and its three registry tabs, and a `kinds/` module with one typed form per kind family built from `ConfigSection` / `FieldLabel` / the local pickers. A new `routes/control-plane/warehouse-tabs/` directory holds the five tab components lifted verbatim out of `WarehouseDetail.tsx` — they keep their `warehouseId: string` prop, so the catalog detail feeds them `catalog.warehouseId` and their bodies do not change. `WarehouseDetail.tsx` and `Warehouses.tsx` are then reduced to nothing and deleted, their routes replaced by two redirect components. `EngineDetail`'s `CatalogsCard` and `EngineCreate`'s warehouse `<Select>` are rewritten against the registry client.
 
-**Spec:** `docs/en/specs/2026-09-22-catalog-ui-and-legacy-removal-sp3c-design.md` — **D1–D5 govern, and §3 is the scope.** §4 (the removal) is SP3c-2 and is not in this plan. Over `docs/en/specs/2026-09-19-catalog-registry-design.md` §5, which §3 corrects in the places the table below records.
+**Tech Stack:** Rust (axum 0.8, utoipa 5, sqlx 0.9 / Postgres, tokio, url), orval via `npm run gen:api`; React 18, TanStack Query v5, react-router 6, shadcn/Radix + Tailwind v4 (OKLCH tokens), Vitest + Testing Library, Playwright.
+
+**Spec:** `docs/en/specs/2026-09-22-catalog-ui-and-legacy-removal-sp3c-design.md` at `6097d74e` — **D1–D5 govern, and §3 is the scope.** §4 (the removal) is SP3c-2 and is not in this plan. Over `docs/en/specs/2026-09-19-catalog-registry-design.md` §5, which §3 corrects in the places the table below records. **Read D2, D4 and §3 at `6097d74e`, not at `c0c9e06f`:** the 2026-09-22 amendment moved `is_primary`, the optional `warehouse_id` and the TCP probe out of SP3c-2 and into this plan, and an earlier reading of those three decisions is wrong about what SP3c-1 builds.
 
 ## Global Constraints
 
 - Branch: `feat/catalog-ui-sp3c-1`, cut from `origin/main` at or after `307cc006`. The plan document itself lands on `docs/sp3c-catalog-ui`; **do not implement on that branch.** Never commit on `main`; run `git branch --show-current` before every commit and stop if it does not print `feat/catalog-ui-sp3c-1`. Never `git stash`.
-- **D5 — nothing is removed.** Every legacy endpoint stays: `POST /api/control-plane/warehouses`, `DELETE /api/control-plane/warehouses/{id}`, the whole `warehouse_admin` surface, `POST|PUT|DELETE /engines/{id}/catalogs*`, `engines.warehouse_id`, `warehouse:*`. This plan deletes exactly four **frontend** files (`Warehouses.tsx`, `WarehouseDetail.tsx`, `CatalogForm.tsx` and `Warehouses.test.tsx`) and no backend line. A user who upgrades to 3c-1 alone has a working system with two ways to reach catalogs.
-- **D3's lock-out rule is a per-task invariant, not a final state.** `catalog_registry:read` enters `CONTROL_PLANE_PERMS` in **Task 2**, the same task that adds the section, the route guard and the sidebar entry. `warehouse:read` stays in that list for the whole of SP3c-1. At no commit in this branch is a user admitted to a section they cannot see or excluded from one they could see before.
+- **D5 — nothing is removed, and every backend change is additive.** Every legacy endpoint stays: `POST /api/control-plane/warehouses`, `DELETE /api/control-plane/warehouses/{id}`, the whole `warehouse_admin` surface, `POST|PUT|DELETE /engines/{id}/catalogs*`, `engines.warehouse_id`, `warehouse:*`. The four backend additions are two new routes (detach, test), one new column (`is_primary`) and one field that becomes optional (a **widening** — every body that was valid before is still valid, which Task 2 Step 6's first test exists to hold). This plan deletes exactly five **frontend** files and no backend line. A user who upgrades to 3c-1 alone has a working system with two ways to reach catalogs.
+- **Migrations are append-only once applied anywhere.** SP3c-1 adds exactly one, `0150_attachment_is_primary.sql` (Task 2). **Never edit it after it has run** — not on kind, not on a colleague's box, not on your own. SP3a edited an already-deployed migration and the checksum mismatch took the kind cluster's backend down until it was reconciled by hand. A task that needs to change a migration it already shipped adds a **new** migration; that rule has no exception for "it only ran locally", because you cannot prove where else it ran. After adding `0150`, drop the test template once: `psql postgres://egret:egret@localhost:5432/postgres -c 'DROP DATABASE IF EXISTS egret_test_template'` (the migrations CLI reads `EGRET_DATABASE__URL`, not `DATABASE_URL`).
+- **D3's lock-out rule is a per-task invariant, not a final state.** `catalog_registry:read` enters `CONTROL_PLANE_PERMS` in **Task 4**, the same task that adds the section, the route guard and the sidebar entry. `warehouse:read` stays in that list for the whole of SP3c-1. At no commit in this branch is a user admitted to a section they cannot see or excluded from one they could see before.
 - `export CARGO_TARGET_DIR=/Users/1pro-l4r8/Documents/github/data-portal/egret/target` in every shell that runs cargo.
 - DB tests: `export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test` and run cargo test under `env -u EGRET_ALLOW_DB_SKIP`. **Never** the dev database `egret`. A skipped DB test prints `ok`: read every `finished in` — a DB test binary that finishes in well under 0.3 s did no database work.
-- SP3c-1 adds **no migration**. If a step seems to need one, stop: it belongs in SP3c-2.
 - OpenAPI: regenerate with `rtk proxy cargo run -q -p egret-bin -- openapi > openapi.json` (without `rtk proxy` the RTK hook filters stdout and corrupts the file); drift gate `cargo test -p egret-server --lib committed_openapi_json_is_current`.
 - Frontend client: `cd frontend && npm run gen:api` — **never bare `orval`**, which drops `encodeURIComponent` from path parameters. CI's frontend job runs `npm run gen:api` and **fails on any drift**, so commit exactly what it produced (`git add -A frontend/src/api/generated`), including churn this branch did not cause. **Schema-property doc comments reach the generated client as JSDoc; response descriptions do not** — anything a UI author must read has to live on the DTO field, not in a `(status = …, description = …)`.
-- Frontend gate per task: `cd frontend && npm run lint && npm run typecheck && npx vitest run <the files this task touched>`. The full `npm test` and `npm run build` run exactly once, in Task 9.
+- Frontend gate per task: `cd frontend && npm run lint && npm run typecheck && npx vitest run <the files this task touched>`. The full `npm test` and `npm run build` run exactly once, in Task 11.
 - Generated query hooks return a discriminated union, not a bare body. Read them as `q.data?.status === 200 ? q.data.data : <empty>` — the pattern `WarehouseDetail.tsx:1140-1142` already uses. Never `q.data.data` unguarded.
 - **Two error types, two field names.** A generated hook's `TError` is `ErrorBody`, whose message is **`e.error`** (`model/errorBody.ts`). A hand-written `@/api/controlPlane` call rejects with `ApiError`, whose message is **`e.message`**. Both are objects with a string field, so writing `e.message` on an `ErrorBody` type-errors but writing `e.error` on neither does — read which client the call came from before reaching for the field.
 - Never add a hand-written fetch wrapper for a registry route. Components import the generated hooks directly (`useControlPlaneCatalogRegistry*`), the way `WarehouseDetail.tsx` imports `useControlPlaneEnginesListEngines`. The only hand-written calls this plan uses are the **legacy warehouse** ones that already exist in `frontend/src/api/controlPlane.ts` (`listWarehouses`, `createWarehouse`, `deleteWarehouse`).
@@ -34,26 +36,41 @@ Read on 2026-09-22 against `main` at `307cc006`. Where the design and the tree d
 
 | # | Statement | Verdict | Decision in this plan |
 |---|---|---|---|
-| 1 | §3 "Backend, only what is missing: **a detach endpoint** for the registry (the generated client has no detach hook today; removal still goes through the legacy engine route)" | **Half true.** The *handler* exists: `catalog_apply::detach_from_engine` (`catalog_apply.rs:1190`), reached by `DELETE /api/control-plane/engines/{id}/catalogs/{cid}` → `engines.rs::remove_catalog` (`:5757`), gated `engine:delete`, tagged `control-plane-engines`. What is missing is a **registry-tagged, `catalog_registry:update`-gated** route, so orval emits a hook into `control-plane-catalog-registry`. Re-tagging `remove_catalog` would rename the legacy generated function and break `deleteEngineCatalog` — a removal, which D5 forbids here. Axum cannot mount a second `DELETE` on the same path. | The new route is **`DELETE /api/control-plane/catalogs/{id}/engines/{engine_id}`**, mounted in `catalogs.rs::routes()`, symmetric with `/catalogs/{id}/workspaces`, delegating to the same `detach_from_engine`. The legacy route is untouched and SP3c-2 deletes it. Task 1. |
-| 2 | D4 "Without [an attached engine], a **TCP reachability check** of the configured host and port" | **No such endpoint exists anywhere.** `rtk grep -rn 'TcpStream\|tcp_probe\|reachab' crates/` returns only prose. The only test route is `POST /engines/{id}/catalogs/{cid}/test` (`engines.rs:5655`), which is **Trino-only**: it goes through `crate::monitor::coordinator_call`, whose fallback is the `{name}-trino` Service. Adding a TCP prober would be a second backend piece, which §3 says SP3c-1 does not have. | The Test control is **per attachment**, on the Engines tab, enabled only for a `trino` attachment. Its button reads `Test via <engine>` and its result reads **`SHOW SCHEMAS FROM <name> succeeded on <engine>`** — the statement it ran, so a green tick cannot be read as "the credentials work" for any other engine. A catalog with no Trino attachment shows the button **disabled** with the sentence "Testing needs a Trino engine attached — egret has no way to reach this catalog on its own yet." The TCP half and StarRocks testing are named as SP5's, per D4's own last line. Task 5. |
-| 3 | D1 "an iceberg-egret catalog additionally shows **today's six** warehouse tabs, reusing those components" | **Five, not six.** The six are `RolesTab`, `ClientsTab`, `EnginesTab`, `BrowseTab`, `ConnectTab`, `SettingsTab` (`WarehouseDetail.tsx:195-218`). The warehouse `EnginesTab` (`:1139`) lists `engines.filter(e => e.warehouseId === warehouseId)` — engines whose **primary** catalog this is. The catalog detail's own Engines tab lists `catalog.engines`, the registry attachments, which since SP3a **include** each engine's primary attachment. Showing both would put two tabs named "Engines" on one page, the second a strict subset of the first. | Five tabs move (`RolesTab`, `ClientsTab`, `BrowseTab`, `ConnectTab`, `SettingsTab`); the warehouse `EnginesTab` is **deleted**, superseded by the registry Engines tab, and Task 6 Step 1 records that its rows are a subset of the rows that replace them. D2's `is_primary` (SP3c-2) is what makes "primary" visible again as a badge. |
-| 4 | §3 "**Three places** link to that path by literal string — `WorkspaceDetail.tsx`, `StorageDetail.tsx`, `Sidebar.tsx`" | **Sidebar has no literal.** `Sidebar.tsx:107` is `{ label: "Warehouses", icon: Boxes, perm: "warehouse:read" }`; the path comes from `slug(label)` at `:171`. The literal `/control-plane/warehouses` route links outside the warehouse pages are exactly **three**: `WorkspaceDetail.tsx:377` (`?workspace=`), `WorkspaceDetail.tsx:403`, `StorageDetail.tsx:543`. Two more live inside the pages being deleted (`Warehouses.tsx:67,185`, `WarehouseDetail.tsx:162`). Two **tests** assert the string: `Sidebar.test.tsx:226`, `WorkspaceDetail.test.tsx:206,212`. `api/catalogTags.ts:42,53,70` uses `/control-plane/warehouses/{id}/resource-tags` — an **API** path, not a route; D3 re-gates it in SP3c-2 and this plan does not touch it. | Task 6 changes the three route links and the two tests, and states the API path is deliberately left alone. |
-| 5 | Research note: "`useUnsavedChangesWarning.ts` and a governance redirect test mention the string" | **Neither does.** The file is `frontend/src/lib/useUnsavedChangesWarning.ts` (not `src/hooks/`) and `rtk grep -n warehouse` on it exits 1. No test under `src/routes/governance` matches `warehouses`. | The grep in Task 6 Step 4 is re-run as a gate, so the plan is falsified rather than trusted if a site is missed. The real extra site the note omitted is `src/auth/__tests__/appAccess.test.ts:24`, handled in Task 2. |
-| 6 | §3 "**Control Plane → Infrastructure → Catalogs**" replacing Warehouses, with `/control-plane/warehouses/*` redirecting | **Deleting `Warehouses.tsx` deletes the only way to CREATE a warehouse.** `AddWarehouseDialog` (`Warehouses.tsx:245`) posts `createWarehouse`, which provisions the lakekeeper warehouse. The registry's own create **refuses** egret catalogs: `create_registry_catalog`'s 400 reads "…or an egret warehouse catalog (those are created with their warehouse)". `delete_registry_catalog` refuses them too, with `code = "warehouse_catalog"`. | The Catalogs **create** page offers `egret_warehouse` as its first kind and posts it to the legacy `createWarehouse(...)`, carrying `AddWarehouseDialog`'s workspace + storage fields verbatim (Task 3 Step 4). The Catalogs **list** delete calls `deleteWarehouse(c.warehouseId)` when `warehouseId != null` and `useControlPlaneCatalogRegistryDeleteRegistryCatalog` otherwise (Task 2 Step 5). Neither is a workaround: they are the endpoints D5 keeps. |
-| 7 | §3 "**Create-engine wizard** attaches catalogs instead of choosing one warehouse" | **`warehouseId` is still mandatory.** `CreateEngineBody.warehouse_id: Uuid` (`engines.rs:152`) is not `Option`. D2's `is_primary` migration is SP3c-2, so until then an engine without a warehouse cannot be created at all. `EngineCreate.tsx:119-123` makes `warehouseId.length > 0` a create precondition and `:129-146` sends it. | The wizard's field becomes **"Primary catalog"**, a picker over registry catalogs with `warehouseId != null`, and the body sends **`warehouseId: picked.warehouseId`**. Beneath it, a **multi-select of additional catalogs** attached after the create returns, one `attachCatalog` call each, with per-catalog failures surfaced and the engine kept. The screen says what it does; the body is unchanged; SP3c-2's `is_primary` is what lets the first field become optional. Task 8. |
-| 8 | §5 "the existing warehouse tabs move here (namespace browser, catalog roles, grants, clients, **tags**)" | Tags are not a warehouse tab. `CatalogTagDialog` from `components/access/CatalogTagEditor.tsx` is invoked from **inside** `BrowseTab`'s table detail, and its 168-line test mocks `api/catalogTags.ts` directly, not the page. | Tags move with `BrowseTab` because they are inside it. `CatalogTagEditor.tsx` and `CatalogTagEditor.test.tsx` are **not touched** — Task 6 Step 5 asserts that file is byte-identical at the end of the task. |
-| 9 | §3 "Create: choose a kind, fill the typed form… Built from the existing config primitives (`ConfigSection`, `FieldLabel`, the secret picker, the storage-connection picker)" | Three of four exist as named; there is **no storage-connection picker component**. `WarehouseDetail`/`Warehouses`/`EngineCreate` each inline a shadcn `<Select>` over `listStorage()`. `SecretPicker` (`components/SecretPicker.tsx:41`) takes a **workspace id** (`ws: string`) and offers inline creation — registry secrets are platform-scoped. | The typed forms use `ConfigSection` (`level={2}`, since the create page puts them under its `h1`), `FieldLabel`, a local `<StorageSelect>` and `<SecretSelect>` defined once in `catalogs/kinds/pickers.tsx` over `listStorage()` / `listSecrets()`, both plain controlled `<Select>`s returning an id. `SecretPicker` is **not** reused: its workspace scope and inline-create path are wrong for a platform catalog, and bending it would change a component six other screens depend on. Task 3 Step 2. |
-| 10 | §3 "List: name, kind, attached engines, assigned workspaces, and a warning when any attachment is `failed` or stuck `pending`" | `RegistryCatalogDto` carries all four directly (`engines: CatalogAttachmentDto[]`, `workspaceIds: string[]`), so no per-row fetch is needed. `applyStatus` is `applied \| failed \| pending`, documented on the DTO field, so the JSDoc reaches the client. **"Stuck" is not a value** — `pending` with a recent `attachment` is normal for 5–10 minutes after a StarRocks create (SP3b D1). | The warning badge is `failed` **or** `pending` **with no `appliedAt` and a catalog `updatedAt` older than 15 minutes**; the tooltip distinguishes the two. `workspaceIds` are resolved to names through `useMyWorkspaces(true)`, the same hook `Warehouses.tsx:127` uses. Task 2 Step 3. |
-| 11 | §5 "Workspace detail (Control Plane): assigned catalogs" | `WorkspaceDetail.tsx:365-410` renders a Warehouses card filtered by `w.workspaceId === workspaceId` — warehouse ownership, which is **not** the registry's workspace *assignment* (`registry.catalog_workspaces`, many-to-many). They answer different questions and both are true. | §5's bullet is **out of scope for SP3c-1** and this plan says so rather than half-doing it: Task 6 only re-points that card's two links at `/control-plane/catalogs`. Replacing ownership with assignment is a behaviour change that belongs with D2/SP4. |
-| 12 | §5 "`provisioning-ui-kind.spec.ts` is already stale" | **True, and worse than stated.** It expects `getByRole("dialog")` with the text "Add Trino engine" and fields `#cpe-name` / `#cpe-warehouse` / `#cpe-workers` / `#cpe-memory` (`:48-58`). The code navigates to a full page (`/control-plane/engines/new`, `EngineCreate.tsx`) whose fields are `#ec-name` / `#ec-warehouse` / … and whose button is "Create engine", not "Add engine". It is `EGRET_E2E_KIND`-opt-in, so it has been failing invisibly. | Task 9 rewrites it against the page the code actually renders **and** against Task 8's Primary-catalog field, so it can never again pass by not running. It also stops seeding a warehouse purely through the API: the rewritten spec creates the catalog through the Catalogs UI, which is the thing SP3c-1 adds. |
+| 1 | §3 (amended) "Backend, four pieces: **a registry-tagged detach route** — `DELETE /catalogs/{id}/engines/{engine_id}`, symmetric with `/catalogs/{id}/workspaces`, because re-tagging the existing engine route would rename a generated function and D5 forbids removals here" | **Half true.** The *handler* exists: `catalog_apply::detach_from_engine` (`catalog_apply.rs:1190`), reached by `DELETE /api/control-plane/engines/{id}/catalogs/{cid}` → `engines.rs::remove_catalog` (`:5757`), gated `engine:delete`, tagged `control-plane-engines`. What is missing is a **registry-tagged, `catalog_registry:update`-gated** route, so orval emits a hook into `control-plane-catalog-registry`. Re-tagging `remove_catalog` would rename the legacy generated function and break `deleteEngineCatalog` — a removal, which D5 forbids here. Axum cannot mount a second `DELETE` on the same path. | The new route is **`DELETE /api/control-plane/catalogs/{id}/engines/{engine_id}`**, mounted in `catalogs.rs::routes()`, symmetric with `/catalogs/{id}/workspaces`, delegating to the same `detach_from_engine`. The legacy route is untouched and SP3c-2 deletes it. Task 1. |
+| 2 | D4 "Without [an attached engine], a **TCP reachability check** of the configured host and port", which SP3c-1 now builds (§3, amended `6097d74e`) | **Nothing to build on.** `rtk grep -rn 'TcpStream\|tcp_probe\|reachab' crates/` returns only prose. The only test route is `POST /engines/{id}/catalogs/{cid}/test` (`engines.rs:5655`), which is **Trino-only**: it goes through `crate::monitor::coordinator_call`, whose fallback is the `{name}-trino` Service — so a StarRocks-only catalog has never had a working Test. And `tokio` is only a **dev**-dependency of `egret-catalog-registry` (`Cargo.toml:26`), so the probe's I/O cannot live in the crate that owns the configuration. | Split in two. The **pure** half, `CatalogDef::probe_target(&self) -> Option<(String, u16)>`, lives in `egret-catalog-registry` next to `trino_connector_name` and needs only `url` (already pinned in the workspace root). The **I/O** half is `POST /api/control-plane/catalogs/{id}/test` in `egret-engine-mgmt`, which picks: a Trino attachment → `SHOW SCHEMAS`; otherwise → connect-only TCP with a 3 s timeout; no probe target → `unsupported`, said plainly. The response body carries a `check` discriminant so the UI can never present one as the other. Task 3, Task 7. |
+| 3 | D1 "an iceberg-egret catalog additionally shows **today's six** warehouse tabs, reusing those components" | **Five, not six.** The six are `RolesTab`, `ClientsTab`, `EnginesTab`, `BrowseTab`, `ConnectTab`, `SettingsTab` (`WarehouseDetail.tsx:195-218`). The warehouse `EnginesTab` (`:1139`) lists `engines.filter(e => e.warehouseId === warehouseId)` — engines whose **primary** catalog this is. The catalog detail's own Engines tab lists `catalog.engines`, the registry attachments, which since SP3a **include** each engine's primary attachment. Showing both would put two tabs named "Engines" on one page, the second a strict subset of the first. | Five tabs move (`RolesTab`, `ClientsTab`, `BrowseTab`, `ConnectTab`, `SettingsTab`); the warehouse `EnginesTab` is **deleted**, superseded by the registry Engines tab, and Task 8 Step 1 records that its rows are a subset of the rows that replace them. Nothing is lost visually either: Task 2's `is_primary` reaches the client as `CatalogAttachmentDto.isPrimary`, so the registry tab carries the **primary** badge the old tab implied by filtering. |
+| 4 | §3 "**Three places** link to that path by literal string — `WorkspaceDetail.tsx`, `StorageDetail.tsx`, `Sidebar.tsx`" | **Sidebar has no literal.** `Sidebar.tsx:107` is `{ label: "Warehouses", icon: Boxes, perm: "warehouse:read" }`; the path comes from `slug(label)` at `:171`. The literal `/control-plane/warehouses` route links outside the warehouse pages are exactly **three**: `WorkspaceDetail.tsx:377` (`?workspace=`), `WorkspaceDetail.tsx:403`, `StorageDetail.tsx:543`. Two more live inside the pages being deleted (`Warehouses.tsx:67,185`, `WarehouseDetail.tsx:162`). Two **tests** assert the string: `Sidebar.test.tsx:226`, `WorkspaceDetail.test.tsx:206,212`. `api/catalogTags.ts:42,53,70` uses `/control-plane/warehouses/{id}/resource-tags` — an **API** path, not a route; D3 re-gates it in SP3c-2 and this plan does not touch it. | Task 8 changes the three route links and the two tests, and states the API path is deliberately left alone. |
+| 5 | Research note: "`useUnsavedChangesWarning.ts` and a governance redirect test mention the string" | **Neither does.** The file is `frontend/src/lib/useUnsavedChangesWarning.ts` (not `src/hooks/`) and `rtk grep -n warehouse` on it exits 1. No test under `src/routes/governance` matches `warehouses`. | The grep in Task 8 Step 4 is re-run as a gate, so the plan is falsified rather than trusted if a site is missed. The real extra site the note omitted is `src/auth/__tests__/appAccess.test.ts:24`, handled in Task 4. |
+| 6 | §3 "**Control Plane → Infrastructure → Catalogs**" replacing Warehouses, with `/control-plane/warehouses/*` redirecting | **Deleting `Warehouses.tsx` deletes the only way to CREATE a warehouse.** `AddWarehouseDialog` (`Warehouses.tsx:245`) posts `createWarehouse`, which provisions the lakekeeper warehouse. The registry's own create **refuses** egret catalogs: `create_registry_catalog`'s 400 reads "…or an egret warehouse catalog (those are created with their warehouse)". `delete_registry_catalog` refuses them too, with `code = "warehouse_catalog"`. | The Catalogs **create** page offers `egret_warehouse` as its first kind and posts it to the legacy `createWarehouse(...)`, carrying `AddWarehouseDialog`'s workspace + storage fields verbatim (Task 5 Step 4). The Catalogs **list** delete calls `deleteWarehouse(c.warehouseId)` when `warehouseId != null` and `useControlPlaneCatalogRegistryDeleteRegistryCatalog` otherwise (Task 4 Step 5). Neither is a workaround: they are the endpoints D5 keeps. |
+| 7 | D2 (amended) "`CreateEngineBody.warehouse_id` becomes optional so the wizard can attach several catalogs and mark one primary", with the column dropped in SP3c-2 | **The body field can be optional; the COLUMN cannot yet.** `migrations/0056_engines.sql:9` is `warehouse_id uuid NOT NULL REFERENCES warehouses(id)`, and ten non-test sites still read `engine.warehouse_id` — `ensure_engine_role` seeds the engine's Ranger role from the **warehouse** (`engines.rs:2321`), the StarRocks path derives storage from it (`:2664`, `:3553`), and `find_attached` passes it as the primacy key (`:331`, `:547`, `:4869`, `:5382`). Making the column nullable in SP3c-1 would mean rewriting all ten in the same commit as the UI, for a column SP3c-2 deletes outright. | The body widens; the column stays and is **derived**. `warehouse_id: Option<Uuid>` sits beside `catalogs: Vec<NewEngineCatalog>`, exactly one of which is `primary`; the server resolves `engines.warehouse_id` from that primary catalog's own `warehouse_id`. **Consequence, stated because it constrains the UI:** through SP3c-1 the *primary* catalog must still be an egret warehouse catalog — a `jdbc` catalog can be attached at create but not marked primary, and the wizard says so rather than offering a choice the server will refuse. Dropping the column in SP3c-2 is what lifts that. Task 2, Task 10. |
+| 8 | §5 "the existing warehouse tabs move here (namespace browser, catalog roles, grants, clients, **tags**)" | Tags are not a warehouse tab. `CatalogTagDialog` from `components/access/CatalogTagEditor.tsx` is invoked from **inside** `BrowseTab`'s table detail, and its 168-line test mocks `api/catalogTags.ts` directly, not the page. | Tags move with `BrowseTab` because they are inside it. `CatalogTagEditor.tsx` and `CatalogTagEditor.test.tsx` are **not touched** — Task 8 Step 5 asserts that file is byte-identical at the end of the task. |
+| 9 | §3 "Create: choose a kind, fill the typed form… Built from the existing config primitives (`ConfigSection`, `FieldLabel`, the secret picker, the storage-connection picker)" | Three of four exist as named; there is **no storage-connection picker component**. `WarehouseDetail`/`Warehouses`/`EngineCreate` each inline a shadcn `<Select>` over `listStorage()`. `SecretPicker` (`components/SecretPicker.tsx:41`) takes a **workspace id** (`ws: string`) and offers inline creation — registry secrets are platform-scoped. | The typed forms use `ConfigSection` (`level={2}`, since the create page puts them under its `h1`), `FieldLabel`, a local `<StorageSelect>` and `<SecretSelect>` defined once in `catalogs/kinds/pickers.tsx` over `listStorage()` / `listSecrets()`, both plain controlled `<Select>`s returning an id. `SecretPicker` is **not** reused: its workspace scope and inline-create path are wrong for a platform catalog, and bending it would change a component six other screens depend on. Task 5 Step 2. |
+| 10 | §3 "List: name, kind, attached engines, assigned workspaces, and a warning when any attachment is `failed` or stuck `pending`" | `RegistryCatalogDto` carries all four directly (`engines: CatalogAttachmentDto[]`, `workspaceIds: string[]`), so no per-row fetch is needed. `applyStatus` is `applied \| failed \| pending`, documented on the DTO field, so the JSDoc reaches the client. **"Stuck" is not a value** — `pending` with a recent `attachment` is normal for 5–10 minutes after a StarRocks create (SP3b D1). | The warning badge is `failed` **or** `pending` **with no `appliedAt` and a catalog `updatedAt` older than 15 minutes**; the tooltip distinguishes the two. `workspaceIds` are resolved to names through `useMyWorkspaces(true)`, the same hook `Warehouses.tsx:127` uses. Task 4 Step 3. |
+| 11 | §5 "Workspace detail (Control Plane): assigned catalogs" | `WorkspaceDetail.tsx:365-410` renders a Warehouses card filtered by `w.workspaceId === workspaceId` — warehouse ownership, which is **not** the registry's workspace *assignment* (`registry.catalog_workspaces`, many-to-many). They answer different questions and both are true. | §5's bullet is **out of scope for SP3c-1** and this plan says so rather than half-doing it: Task 8 only re-points that card's two links at `/control-plane/catalogs`. Replacing ownership with assignment is a behaviour change that belongs with D2/SP4. |
+| 12 | D2 (amended) "`is_primary boolean`, **unique per engine**" | **"Unique" is enforceable; "exactly one" is not.** A partial unique index gives *at most* one primary per engine. "Exactly one" is a per-engine cross-row invariant with no anchor row to hang a CHECK on, and a deferred constraint trigger would fire on every attach. Separately, `list_engine_attachments` currently orders `(c.warehouse_id IS NOT DISTINCT FROM $2) DESC, a.created_at, c.name` (`store.rs:662`) and **Trino's env-var numbering depends on that order** (SP3b plan row 9). | `CREATE UNIQUE INDEX … ON (engine_id) WHERE is_primary` is the constraint; the code owns "exactly one" and Task 2 Step 5 proves it with a test that attaches a second primary and expects a refusal. The ordering clause becomes `a.is_primary DESC, a.created_at, c.name` and the `primary_warehouse` parameter is **dropped** — the backfill makes the new predicate row-for-row identical to the old one for every existing attachment, which is a claim Task 2 Step 3 pins with a test rather than asserting in prose. |
+| 13 | D4 (amended) "it takes its host and port **from the stored catalog configuration**, never from request input — egret must not become a port scanner with a login page" | **Only some kinds have a host at all.** `jdbc` has `host`/`port`; `elasticsearch` has `hosts: Vec<String>`/`port`; an `iceberg` REST metastore has a `uri` and a Hive-family metastore a `thrift://` `uri`. An egret warehouse points at egret itself, Glue is an AWS **region** with no host, `tpch`/`tpcds` generate data, and `generic`'s properties are strings egret does not interpret. | `probe_target` returns `Option<(String, u16)>` over an **exhaustive match with no wildcard**, so a kind added later cannot silently inherit "probe nothing"; `None` surfaces as `check: "unsupported"` with the reason named per kind. The route never reads a host, a port or a URL from the request — its only input is a catalog id — and Task 3 Step 4 tests exactly that by sending a body full of hosts and asserting the dialled target came from the stored row. No private-range block list: egret's own engines are in-cluster, so blocking RFC1918 would break the real use case while stopping nobody who already holds `catalog_registry:create`. |
+| 14 | §5 "`provisioning-ui-kind.spec.ts` is already stale" | **True, and worse than stated.** It expects `getByRole("dialog")` with the text "Add Trino engine" and fields `#cpe-name` / `#cpe-warehouse` / `#cpe-workers` / `#cpe-memory` (`:48-58`). The code navigates to a full page (`/control-plane/engines/new`, `EngineCreate.tsx`) whose fields are `#ec-name` / `#ec-warehouse` / … and whose button is "Create engine", not "Add engine". It is `EGRET_E2E_KIND`-opt-in, so it has been failing invisibly. | Task 11 rewrites it against the page the code actually renders **and** against Task 10's Primary-catalog field, so it can never again pass by not running. It also stops seeding a warehouse purely through the API: the rewritten spec creates the catalog through the Catalogs UI, which is the thing SP3c-1 adds. |
 
 ## File Structure
 
-**`crates/egret-engine-mgmt`** — one route.
+**`crates/egret-catalog-registry`** — pure, engine-free.
 
 | File | Change |
 |---|---|
-| `src/catalogs.rs` | `detach_catalog` handler + its `#[utoipa::path]`; one `.route(…)` line in `routes()`; `detach_catalog` added to the `CatalogRegistryApi` `paths(…)` list |
+| `src/config.rs` | `CatalogDef::probe_target(&self) -> Option<(String, u16)>` next to `trino_connector_name`; `ProbeTarget` extraction per kind, exhaustive |
+| `src/store.rs` | `AttachmentRow`/`AttachedCatalog` gain `is_primary`; `NewAttachment::is_primary`; `list_engine_attachments` loses `primary_warehouse` and orders by the column; `set_primary_attachment(engine_id, catalog_id)` |
+| `src/lib.rs`, `Cargo.toml` | re-exports; `url.workspace = true` |
+
+**`crates/egret-engine-mgmt`**
+
+| File | Change |
+|---|---|
+| `src/catalogs.rs` | `detach_catalog` + `test_registry_catalog` handlers with their `#[utoipa::path]`s; `CatalogTestResultDto`; `CatalogAttachmentDto::is_primary`; two `.route(…)` lines; both handlers and the DTO added to the `CatalogRegistryApi` lists |
+| `src/probe.rs` | **new** — `tcp_probe(host, port, timeout) -> ProbeOutcome`, the only place this crate opens a socket it did not build from stored configuration |
+| `src/catalog_apply.rs` | `is_primary(engine, catalog)` → reads the attachment's column; `attach_to_engine` takes the primary flag |
+| `src/engines.rs` | `CreateEngineBody::{warehouse_id: Option<Uuid>, catalogs: Vec<NewEngineCatalog>}`; `resolve_primary_catalog`; the six `list_engine_attachments` call sites lose their second argument; `is_primary` reads at `:318` and `:5811` |
+
+**Migration:** `migrations/0150_attachment_is_primary.sql` — the only one, and append-only once it has run anywhere.
 
 **`frontend/src/routes/control-plane/catalogs/`** — new.
 
@@ -91,7 +108,7 @@ Read on 2026-09-22 against `main` at `307cc006`. Where the design and the tree d
 ---
 ### Task 1: The detach endpoint on the registry
 
-The only backend change in SP3c-1, and it must land first: Task 5 cannot call a hook that does not exist.
+The only backend change in SP3c-1, and it must land first: Task 7 cannot call a hook that does not exist.
 
 **Files:**
 - Modify: `crates/egret-engine-mgmt/src/catalogs.rs`
@@ -207,13 +224,378 @@ git add -A && git commit -m "feat(catalogs): detach a catalog from an engine thr
 ```
 
 ---
-### Task 2: The Catalogs section — list, route, sidebar, permission
+### Task 2: `is_primary`, and an optional `warehouse_id` on engine create
+
+D2's schema half (amended `6097d74e`). Must land before Task 10, which cannot honestly attach several catalogs while the API demands exactly one warehouse — and before Task 7, which shows the primary badge.
+
+**Files:**
+- Create: `migrations/0150_attachment_is_primary.sql`
+- Modify: `crates/egret-catalog-registry/src/store.rs`, `crates/egret-engine-mgmt/src/{catalog_apply.rs,catalogs.rs,engines.rs}`, `crates/egret-engine-mgmt/tests/routes.rs`
+- Regenerate: `openapi.json`, `frontend/src/api/generated/**`
+
+**Interfaces:**
+- Consumes: `RegistryStore`, `AttachmentRow`, `AttachedCatalog`, `NewAttachment`, `CatalogRow`, `Engine`.
+- Produces:
+  - `AttachmentRow::is_primary: bool`, `AttachedCatalog::is_primary: bool`, `NewAttachment::is_primary: bool`.
+  - `RegistryStore::list_engine_attachments(&self, engine_id: Uuid) -> Result<Vec<AttachedCatalog>, RegistryError>` — **one argument now**.
+  - `RegistryStore::set_primary_attachment(&self, engine_id: Uuid, catalog_id: Uuid) -> Result<(), RegistryError>`.
+  - `CatalogAttachmentDto::is_primary: bool` → `isPrimary` in the generated client.
+  - `CreateEngineBody::{warehouse_id: Option<Uuid>, catalogs: Vec<NewEngineCatalog>}`; `NewEngineCatalog { catalog_id: Uuid, primary: bool }`.
+
+- [ ] **Step 1: The migration**, `migrations/0150_attachment_is_primary.sql`. Write it once and never touch it again (see the Global Constraint):
+
+```sql
+-- SP3c D2: primary is a property of the RELATIONSHIP between an engine and a
+-- catalog, not of the engine. `engines.warehouse_id` forced one warehouse per
+-- engine; this column is what replaces it, and SP3c-2 drops the column once
+-- nothing reads it.
+ALTER TABLE registry.engine_catalog_attachments
+    ADD COLUMN is_primary boolean NOT NULL DEFAULT false;
+
+-- Backfill from the predicate the code used until now
+-- (`catalog.warehouse_id == Some(engine.warehouse_id)`, catalog_apply.rs:844),
+-- so every existing attachment keeps the primacy it already had and
+-- `list_engine_attachments` returns rows in exactly the order it did before.
+UPDATE registry.engine_catalog_attachments a
+   SET is_primary = true
+  FROM registry.catalogs c, engine_mgmt.engines e
+ WHERE c.id = a.catalog_id
+   AND e.id = a.engine_id
+   AND c.warehouse_id = e.warehouse_id;
+
+-- AT MOST one primary per engine. "Exactly one" is a cross-row invariant with
+-- no anchor row to hang a CHECK on, so the code owns it and a route test proves
+-- it; this index is what makes the failure a constraint violation rather than
+-- two primaries nobody notices.
+CREATE UNIQUE INDEX engine_catalog_attachments_primary_key
+    ON registry.engine_catalog_attachments (engine_id)
+    WHERE is_primary;
+```
+
+```bash
+psql postgres://egret:egret@localhost:5432/postgres -c 'DROP DATABASE IF EXISTS egret_test_template'
+```
+
+- [ ] **Step 2: The store** — `crates/egret-catalog-registry/src/store.rs`. Add `is_primary` to `AttachmentRow`'s `SELECT` list and to `AttachedCatalog`; add it to `NewAttachment` and its `INSERT`; and rewrite the ordering:
+
+```rust
+    pub async fn list_engine_attachments(
+        &self,
+        engine_id: Uuid,
+    ) -> Result<Vec<AttachedCatalog>, RegistryError> {
+        let attachments = sqlx::query_as::<_, AttachmentRow>(
+            "SELECT a.engine_id, a.catalog_id, a.catalog_client_id, a.credential_secret_id, a.minted_client, \
+                    a.apply_status, a.apply_error, a.applied_at, a.is_primary, a.created_at \
+               FROM registry.engine_catalog_attachments a JOIN registry.catalogs c ON c.id = a.catalog_id \
+              WHERE a.engine_id = $1 \
+              ORDER BY a.is_primary DESC, a.created_at, c.name",
+        )
+        .bind(engine_id)
+```
+
+The second bind goes; so does the `primary_warehouse` parameter. `set_primary_attachment` clears then sets inside one statement so the partial unique index is never transiently violated:
+
+```rust
+        sqlx::query(
+            "UPDATE registry.engine_catalog_attachments \
+                SET is_primary = (catalog_id = $2) \
+              WHERE engine_id = $1",
+        )
+```
+
+sqlx 0.9 takes `&'static str`: every string above is a literal. Never build this with `format!`.
+
+- [ ] **Step 3: Write the ordering test first**, in `crates/egret-catalog-registry/tests/store.rs`. This is the falsifiable half of the migration — the claim that the backfill leaves Trino's env-var numbering untouched:
+
+```rust
+/// Trino numbers its catalog env vars by this order (SP3b plan row 9), so a
+/// change here silently renumbers a live cluster's catalogs. The backfill makes
+/// `is_primary` row-for-row identical to the old
+/// `warehouse_id IS NOT DISTINCT FROM` predicate, and this test is what says so:
+/// it builds three attachments whose creation order differs from their name
+/// order, with the primary created LAST, and expects primary-first-then-created.
+#[tokio::test]
+async fn attachments_still_come_back_primary_first_then_created_then_name() { /* … */ }
+```
+
+- [ ] **Step 4: The call sites.** Six in `engines.rs` (`:331`, `:547`, `:4869`, `:5382`, plus the two in `catalog_apply.rs:323` and wherever `find_attached` resolves) lose their second argument. Two derive primacy by hand and now read the column:
+
+```rust
+// engines.rs:318 — was `a.catalog.warehouse_id == Some(engine.warehouse_id)`
+        is_primary: a.is_primary,
+```
+
+```rust
+// catalog_apply.rs:843 — the function keeps its name and loses its guesswork.
+fn is_primary(attachment: &AttachedCatalog) -> bool {
+    attachment.is_primary
+}
+```
+
+`detach_from_engine` already loads the attachment before it calls `is_primary`, so it passes that row; `engines.rs:5811` does the same. **Do not delete `engines.warehouse_id` reads** — the Ranger role seeding (`ensure_engine_role`, `:2321`) and the StarRocks storage derivation (`:2664`, `:3553`) still need a warehouse, and that is SP3c-2's to remove.
+
+- [ ] **Step 5: Engine create takes catalogs** — `engines.rs`:
+
+```rust
+/// One catalog to attach when the engine is created.
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NewEngineCatalog {
+    catalog_id: Uuid,
+    /// Exactly one catalog in the list carries this. Until SP3c-2 drops
+    /// `engines.warehouse_id`, the primary must be an egret warehouse catalog —
+    /// the engine's Ranger role and (for StarRocks) its storage are still
+    /// derived from that warehouse.
+    #[serde(default)]
+    primary: bool,
+}
+```
+
+and in `CreateEngineBody`:
+
+```rust
+    /// Superseded by `catalogs` and dropped in SP3c-2. A body that sends this
+    /// and no `catalogs` behaves exactly as it did before.
+    #[serde(default)]
+    warehouse_id: Option<Uuid>,
+    /// Registry catalogs to attach at create. Exactly one must be `primary`.
+    #[serde(default)]
+    catalogs: Vec<NewEngineCatalog>,
+```
+
+One resolution function, one refusal point — do not scatter these checks through the two create paths:
+
+```rust
+/// Resolve the warehouse the engine row still needs, from whichever shape the
+/// caller sent. Every refusal lives here so the Trino and StarRocks create
+/// paths cannot disagree about what a valid body is.
+async fn resolve_primary_catalog(
+    st: &CpState,
+    b: &CreateEngineBody,
+) -> Result<(Uuid, Vec<Uuid>), CpError> {
+    if !b.catalogs.is_empty() {
+        let primaries: Vec<_> = b.catalogs.iter().filter(|c| c.primary).collect();
+        let primary = match primaries.as_slice() {
+            [one] => *one,
+            [] => return Err(CpError::BadRequest("one attached catalog must be primary".into())),
+            _ => return Err(CpError::BadRequest("only one attached catalog may be primary".into())),
+        };
+        let row = st.engine_mgmt.registry().get_catalog(primary.catalog_id).await?
+            .ok_or(CpError::NotFound)?;
+        let wh = row.warehouse_id.ok_or_else(|| CpError::BadRequest(
+            "the primary catalog must be an egret warehouse catalog: the engine's Ranger role and storage are still derived from its warehouse".into()))?;
+        let others = b.catalogs.iter().filter(|c| !c.primary).map(|c| c.catalog_id).collect();
+        return Ok((wh, others));
+    }
+    match b.warehouse_id {
+        Some(id) => Ok((id, Vec::new())),
+        None => Err(CpError::BadRequest("an engine needs a primary catalog: send `catalogs` with one marked primary".into())),
+    }
+}
+```
+
+The non-primary catalogs attach after the engine row exists, through the same `attach_to_engine` the attach route uses — **not** a second attach implementation. A failure there leaves the engine created and the attachment absent, reported in the response, exactly as the wizard's own loop would.
+
+- [ ] **Step 6: Route tests** — `tests/routes.rs`:
+
+```rust
+#[tokio::test] async fn create_engine_still_accepts_a_bare_warehouse_id() { /* the back-compat floor */ }
+#[tokio::test] async fn create_engine_with_catalogs_marks_exactly_one_primary() { /* … */ }
+#[tokio::test] async fn create_engine_refuses_two_primaries_and_refuses_none() { /* … */ }
+#[tokio::test] async fn create_engine_refuses_a_non_warehouse_primary_with_the_reason() { /* asserts the message names Ranger/storage */ }
+#[tokio::test] async fn a_second_primary_attachment_is_refused_by_the_index() { /* … */ }
+#[tokio::test] async fn attachment_dto_reports_is_primary() { /* … */ }
+```
+
+The first is the one that matters most: `frontend/tests/e2e/helpers.ts:109` and `embedded-catalog.spec.ts` both still post a bare `warehouseId`, and so does every existing engine test. A widening that breaks them is not a widening.
+
+- [ ] **Step 7: Gate and commit**
+
+```bash
+export CARGO_TARGET_DIR=/Users/1pro-l4r8/Documents/github/data-portal/egret/target
+export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
+cargo fmt --all -- --check
+cargo clippy -p egret-catalog-registry -p egret-engine-mgmt --all-targets -- -D warnings
+env -u EGRET_ALLOW_DB_SKIP cargo test -p egret-catalog-registry -p egret-engine-mgmt
+rtk proxy cargo run -q -p egret-bin -- openapi > openapi.json
+cargo test -p egret-server --lib committed_openapi_json_is_current
+cd frontend && npm run gen:api && git status --short src/api/generated && cd ..
+```
+Expected: green, and `model/catalogAttachmentDto.ts` now carries `isPrimary` with the JSDoc from the field's doc comment.
+
+```bash
+git add -A && git commit -m "feat(catalogs): is_primary on the attachment; engine create takes catalogs"
+```
+
+---
+### Task 3: The TCP probe, and one Test that says which check it ran
+
+D4 delivered whole (amended `6097d74e`). Must land before Task 7, which draws its result.
+
+**Files:**
+- Modify: `crates/egret-catalog-registry/src/{config.rs,lib.rs}`, `crates/egret-catalog-registry/Cargo.toml`, `crates/egret-engine-mgmt/src/{catalogs.rs,lib.rs}`
+- Create: `crates/egret-engine-mgmt/src/probe.rs`
+- Regenerate: `openapi.json`, `frontend/src/api/generated/**`
+
+**Interfaces:**
+- Produces:
+  - `CatalogDef::probe_target(&self) -> Option<(String, u16)>`, re-exported from the crate root.
+  - `probe::{tcp_probe, ProbeOutcome, PROBE_TIMEOUT}`; `tcp_probe(host: &str, port: u16) -> ProbeOutcome`.
+  - `POST /api/control-plane/catalogs/{id}/test` → `CatalogTestResultDto`.
+  - Generated: `useControlPlaneCatalogRegistryTestRegistryCatalog({ id })`.
+
+- [ ] **Step 1: `probe_target`, exhaustive** — `crates/egret-catalog-registry/src/config.rs`, in the `impl CatalogDef` block that ends at `:878`. Add `url.workspace = true` to the crate's `[dependencies]` (the workspace already pins `url = { version = "2", features = ["serde"] }`, so there is no version to choose):
+
+```rust
+    /// The host and port a connect-only reachability probe should dial, read
+    /// from the STORED configuration — the probe never takes a target from
+    /// request input (D4), so this is the only function that decides one.
+    ///
+    /// `None` means this kind has no network endpoint egret can probe, and the
+    /// route says so rather than inventing one: an egret warehouse IS egret,
+    /// Glue is an AWS region and not a host, `tpch`/`tpcds` generate their data,
+    /// and `generic`'s properties are strings egret does not interpret.
+    ///
+    /// The match is exhaustive with no wildcard on purpose: a kind added later
+    /// must decide, rather than inherit "probe nothing" by omission.
+    pub fn probe_target(&self) -> Option<(String, u16)> {
+        match &self.config {
+            CatalogConfig::Iceberg(IcebergConfig { metastore, .. }) => match metastore {
+                IcebergMetastore::Egret { .. } => None,
+                IcebergMetastore::Rest { uri, .. } => host_port_from_uri(uri),
+                IcebergMetastore::Hive { uri } => host_port_from_uri(uri),
+                IcebergMetastore::Glue { .. } => None,
+            },
+            CatalogConfig::Hive(h) | CatalogConfig::DeltaLake(h) | CatalogConfig::Hudi(h) => {
+                match &h.metastore {
+                    HiveMetastore::Hive { uri } => host_port_from_uri(uri),
+                    HiveMetastore::Glue { .. } => None,
+                }
+            }
+            CatalogConfig::Jdbc(j) => Some((j.host.clone(), j.port)),
+            CatalogConfig::Elasticsearch(e) => e
+                .hosts
+                .first()
+                .map(|h| (strip_scheme(h), e.port)),
+            CatalogConfig::Tpch(_) | CatalogConfig::Tpcds(_) | CatalogConfig::Generic(_) => None,
+        }
+    }
+```
+
+`host_port_from_uri` parses with `url::Url` and falls back to the scheme's default (`https` 443, `http` 80, `thrift` 9083); `strip_scheme` takes `http://es-1:9200` or a bare `es-1` and returns the host. Both are private, both get unit tests naming the real shapes the forms produce.
+
+- [ ] **Step 2: The probe** — `crates/egret-engine-mgmt/src/probe.rs`:
+
+```rust
+//! A connect-only reachability probe (D4). It opens a TCP connection, learns
+//! whether it opened, and closes it: no bytes are sent, none are read, and no
+//! protocol is spoken. It cannot tell you that credentials work — which is
+//! exactly why the route reports WHICH check ran, and the UI prints it.
+//!
+//! The target always comes from `CatalogDef::probe_target`, never from a
+//! request body or query. There is deliberately no private-range block list:
+//! egret's own engines and metastores are in-cluster, so refusing RFC1918
+//! would break the real use case while stopping nobody who already holds
+//! `catalog_registry:create`.
+
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+pub enum ProbeOutcome {
+    Open,
+    Refused(String),
+    TimedOut,
+}
+
+pub async fn tcp_probe(host: &str, port: u16) -> ProbeOutcome {
+    match tokio::time::timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect((host, port))).await {
+        Ok(Ok(_stream)) => ProbeOutcome::Open,          // dropped here: connect, then close
+        Ok(Err(e)) => ProbeOutcome::Refused(e.to_string()),
+        Err(_) => ProbeOutcome::TimedOut,
+    }
+}
+```
+
+- [ ] **Step 3: The route** — `catalogs.rs`. The DTO carries the discriminant, and every field a UI author must read is a **schema property** so its doc comment reaches the generated client as JSDoc (a response description does not):
+
+```rust
+/// `POST /catalogs/{id}/test` payload.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogTestResultDto {
+    ok: bool,
+    /// Which check ran, so a green tick can never be read as the other one:
+    /// `query` — `SHOW SCHEMAS FROM <name>` ran on an attached Trino engine and
+    /// the catalog answered, credentials included.
+    /// `tcp` — a connect-only reachability check of the host and port in the
+    /// stored configuration. It proves the port answers. It proves NOTHING
+    /// about credentials, TLS or permissions.
+    /// `unsupported` — no Trino engine is attached and this kind has no network
+    /// endpoint egret can probe.
+    check: String,
+    /// The engine the query ran on; null for `tcp` and `unsupported`.
+    engine_name: Option<String>,
+    /// For `tcp`, the `host:port` that was dialled, so the result names what it
+    /// measured; null otherwise.
+    target: Option<String>,
+    message: String,
+}
+```
+
+```rust
+async fn test_registry_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<CatalogTestResultDto>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
+    let row = load(&st, id).await?;
+    // D4: a Trino attachment answers the better question, so prefer it. Today's
+    // per-engine test route reaches only Trino (`monitor::coordinator_call`,
+    // fallback service `{name}-trino`), so a StarRocks-only catalog falls back
+    // to the probe until SP4 — which is a narrower answer, not a wrong one, and
+    // `check` is what keeps it honest.
+    …
+}
+```
+
+- [ ] **Step 4: Tests** — `tests/routes.rs`, plus unit tests in `probe.rs` and `config.rs`:
+
+```rust
+#[test] fn probe_target_reads_every_kind_and_refuses_to_guess() { /* one assertion per kind, both Some and None arms */ }
+#[tokio::test] async fn probe_reports_open_for_a_listening_socket() { /* bind a TcpListener on 127.0.0.1:0 */ }
+#[tokio::test] async fn probe_reports_refused_for_a_closed_port() { /* bind, then drop the listener */ }
+
+#[tokio::test]
+async fn the_test_route_takes_its_target_from_the_row_not_the_request() {
+    // D4's whole point. POST a body carrying `host`, `port` and `uri` fields
+    // pointing somewhere else entirely; assert the dialled target is the one in
+    // the stored config, and that the response `target` names it.
+}
+
+#[tokio::test] async fn a_starrocks_only_catalog_falls_back_to_the_probe_and_says_so() { /* check == "tcp" */ }
+#[tokio::test] async fn a_tpch_catalog_with_no_engine_is_unsupported_not_failed() { /* ok:false is wrong here; check == "unsupported" */ }
+```
+
+- [ ] **Step 5: Gate and commit**
+
+```bash
+cargo fmt --all -- --check
+cargo clippy -p egret-catalog-registry -p egret-engine-mgmt --all-targets -- -D warnings
+env -u EGRET_ALLOW_DB_SKIP cargo test -p egret-catalog-registry -p egret-engine-mgmt
+rtk proxy cargo run -q -p egret-bin -- openapi > openapi.json
+cargo test -p egret-server --lib committed_openapi_json_is_current
+cd frontend && npm run gen:api && git status --short src/api/generated && cd ..
+git add -A && git commit -m "feat(catalogs): a connect-only TCP probe, and a Test that names which check it ran"
+```
+
+---
+### Task 4: The Catalogs section — list, route, sidebar, permission
 
 Everything a user needs to *reach* catalogs, in one commit, so `catalog_registry:read` never lags the section it gates.
 
 **Files:**
 - Create: `frontend/src/routes/control-plane/catalogs/Catalogs.tsx`, `frontend/src/routes/control-plane/catalogs/__tests__/Catalogs.test.tsx`
-- Create as placeholders (Step 2), replaced in full by later tasks: `catalogs/CatalogCreate.tsx` (Task 3), `catalogs/CatalogDetail.tsx` (Task 4)
+- Create as placeholders (Step 2), replaced in full by later tasks: `catalogs/CatalogCreate.tsx` (Task 5), `catalogs/CatalogDetail.tsx` (Task 6)
 - Modify: `frontend/src/App.tsx`, `frontend/src/auth/appAccess.ts`, `frontend/src/components/layout/Sidebar.tsx`, `frontend/src/auth/__tests__/appAccess.test.ts`, `frontend/src/components/layout/__tests__/Sidebar.test.tsx`
 
 **Interfaces:**
@@ -264,14 +646,14 @@ and in `ControlPlaneRoutes`, directly above the two `warehouses` routes (`:312-3
           <Route path="catalogs/:id" element={<RequirePermission perm="catalog_registry:read"><CatalogDetail /></RequirePermission>} />
 ```
 
-`CatalogCreate` and `CatalogDetail` land in Tasks 3 and 4. To keep this task's tree compiling, create both files now as a one-line placeholder that Task 3 / Task 4 replace **in full**:
+`CatalogCreate` and `CatalogDetail` land in Tasks 5 and 6. To keep this task's tree compiling, create both files now as a one-line placeholder that Task 5 / Task 6 replace **in full**:
 
 ```tsx
-// Replaced in full by Task 3 (CatalogCreate) / Task 4 (CatalogDetail).
+// Replaced in full by Task 5 (CatalogCreate) / Task 6 (CatalogDetail).
 export default function CatalogCreate() { return null; }
 ```
 
-The `warehouses` routes are **not** touched here — Task 6 turns them into redirects, and until then both sections work (D5).
+The `warehouses` routes are **not** touched here — Task 8 turns them into redirects, and until then both sections work (D5).
 
 - [ ] **Step 3: The list page** — `frontend/src/routes/control-plane/catalogs/Catalogs.tsx`, following `Warehouses.tsx`'s scaffold exactly (h1 + description + primary action, `SummaryStrip`, optional `?workspace=` banner, `FilterableTable`, `ConfirmDeleteDialog`).
 
@@ -317,7 +699,7 @@ Columns: **Name** (a `<Link to={`/control-plane/catalogs/${c.id}`}>`), **Kind** 
 
 `SummaryStrip`: `catalogs`, `attached to an engine`, `needing attention`.
 
-- [ ] **Step 4: The `?workspace=` filter** — `WorkspaceDetail.tsx:377` links `/control-plane/warehouses?workspace=<id>` today and Task 6 re-points it here, so the filter must exist before the link moves. Unlike the warehouse list, this is a **server-side** filter — the route already takes it:
+- [ ] **Step 4: The `?workspace=` filter** — `WorkspaceDetail.tsx:377` links `/control-plane/warehouses?workspace=<id>` today and Task 8 re-points it here, so the filter must exist before the link moves. Unlike the warehouse list, this is a **server-side** filter — the route already takes it:
 
 ```tsx
 const [searchParams] = useSearchParams();
@@ -363,7 +745,7 @@ The `ConfirmDeleteDialog` `description` differs per branch: the warehouse one ke
       { label: "Warehouses", icon: Boxes, perm: "warehouse:read" },
 ```
 
-Add `Library` to the `lucide-react` import. The path is `slug("Catalogs")` = `catalogs`, so no `to` is needed — do not add one. Both entries render through SP3c-1; Task 6 removes the Warehouses entry once its route is a redirect.
+Add `Library` to the `lucide-react` import. The path is `slug("Catalogs")` = `catalogs`, so no `to` is needed — do not add one. Both entries render through SP3c-1; Task 8 removes the Warehouses entry once its route is a redirect.
 
 `Sidebar.test.tsx:226` asserts the rendered hrefs; add `"/control-plane/catalogs"` to that array in the position the group renders it.
 
@@ -392,11 +774,11 @@ git add -A && git commit -m "feat(catalogs): Control Plane Catalogs list, route,
 ```
 
 ---
-### Task 3: The create flow
+### Task 5: The create flow
 
 **Files:**
 - Create: `frontend/src/routes/control-plane/catalogs/kinds/pickers.tsx`, `kinds/forms.tsx`, `kinds/AdvancedEditor.tsx`, `frontend/src/routes/control-plane/catalogs/__tests__/CatalogCreate.test.tsx`
-- Replace in full: `frontend/src/routes/control-plane/catalogs/CatalogCreate.tsx` (Task 2's placeholder)
+- Replace in full: `frontend/src/routes/control-plane/catalogs/CatalogCreate.tsx` (Task 4's placeholder)
 
 **Interfaces:**
 - Consumes: `useControlPlaneCatalogRegistryCreateRegistryCatalog`; `createWarehouse`, `listStorage`, `listSecrets`, `type CreateWarehouseInput` from `@/api/controlPlane`; `useMyWorkspaces(true)`; `ConfigSection`, `FieldLabel`.
@@ -598,7 +980,7 @@ async function handleCreate() {
 2. switching kind from `jdbc` to `tpch` sends `config: {}` — assert the mutation payload, because a merged leftover key is exactly what `deny_unknown_fields` rejects and exactly what a re-render still looks fine with;
 3. switching `ssl.mode` from `verify_full` to `disable` leaves no `ca_secret_id` in the payload;
 4. a name of `1bad` blocks submit and shows the rule; `good_name` does not;
-5. kind `egret_warehouse` calls `createWarehouse` and **never** the registry create mutation — and the converse for `jdbc` (assert both, per Task 2 Step 7's reasoning).
+5. kind `egret_warehouse` calls `createWarehouse` and **never** the registry create mutation — and the converse for `jdbc` (assert both, per Task 4 Step 7's reasoning).
 
 - [ ] **Step 7: Gate and commit**
 
@@ -608,15 +990,15 @@ git add -A && git commit -m "feat(catalogs): create flow with a typed form per k
 ```
 
 ---
-### Task 4: Detail — Configuration and Workspaces
+### Task 6: Detail — Configuration and Workspaces
 
 **Files:**
-- Replace in full: `frontend/src/routes/control-plane/catalogs/CatalogDetail.tsx` (Task 2's placeholder)
+- Replace in full: `frontend/src/routes/control-plane/catalogs/CatalogDetail.tsx` (Task 4's placeholder)
 - Create: `frontend/src/routes/control-plane/catalogs/ConfigurationTab.tsx`, `WorkspacesTab.tsx`, `__tests__/CatalogDetail.test.tsx`
-- Create as a placeholder (Step 1), replaced in full by Task 5: `catalogs/EnginesTab.tsx`
+- Create as a placeholder (Step 1), replaced in full by Task 7: `catalogs/EnginesTab.tsx`
 
 **Interfaces:**
-- Consumes: `useControlPlaneCatalogRegistryGetRegistryCatalog(id, options)` → `RegistryCatalogDto`; `useControlPlaneCatalogRegistryUpdateRegistryCatalog` → `CatalogUpdateResultDto`; `useControlPlaneCatalogRegistryCatalogImpact(id, options)` → `CatalogImpactDto`; `useControlPlaneCatalogRegistryListCatalogWorkspaces(id, options)` → `CatalogWorkspaceDto[]`; `useControlPlaneCatalogRegistrySetCatalogWorkspaces`; the Task 3 forms; `useMyWorkspaces(true)`.
+- Consumes: `useControlPlaneCatalogRegistryGetRegistryCatalog(id, options)` → `RegistryCatalogDto`; `useControlPlaneCatalogRegistryUpdateRegistryCatalog` → `CatalogUpdateResultDto`; `useControlPlaneCatalogRegistryCatalogImpact(id, options)` → `CatalogImpactDto`; `useControlPlaneCatalogRegistryListCatalogWorkspaces(id, options)` → `CatalogWorkspaceDto[]`; `useControlPlaneCatalogRegistrySetCatalogWorkspaces`; the Task 5 forms; `useMyWorkspaces(true)`.
 - Produces:
   - `CatalogDetail.tsx`: `export default function CatalogDetail()`; `export const catalogKey = (id: string) => ["control-plane", "catalogs", id] as const;`
   - `ConfigurationTab.tsx`: `export function ConfigurationTab({ catalog }: { catalog: RegistryCatalogDto })`
@@ -631,7 +1013,7 @@ const setTab = (v: string) =>
   setSp((prev) => { const n = new URLSearchParams(prev); n.set("tab", v); return n; }, { replace: true });
 ```
 
-The `<TabsList>` in this task holds exactly three triggers — `configuration`, `engines` (Task 5), `workspaces`. Task 6 adds the kind-conditional five. Task 5's `EnginesTab` is a placeholder here, the same one-liner convention Task 2 used.
+The `<TabsList>` in this task holds exactly three triggers — `configuration`, `engines` (Task 7), `workspaces`. Task 8 adds the kind-conditional five. Task 7's `EnginesTab` is a placeholder here, the same one-liner convention Task 4 used.
 
 The summary band shows name (monospace — it is a SQL identifier), `kindLabel`, engine count, workspace count, `createdAt`/`updatedAt`, and for an egret warehouse a link to its storage connection.
 
@@ -674,19 +1056,19 @@ git add -A && git commit -m "feat(catalogs): catalog detail with Configuration a
 ```
 
 ---
-### Task 5: Detail — the Engines tab
+### Task 7: Detail — the Engines tab
 
 Depends on Task 1: `useControlPlaneCatalogRegistryDetachCatalog` does not exist before it.
 
 **Files:**
-- Replace in full: `frontend/src/routes/control-plane/catalogs/EnginesTab.tsx` (Task 4's placeholder)
+- Replace in full: `frontend/src/routes/control-plane/catalogs/EnginesTab.tsx` (Task 6's placeholder)
 - Create: `frontend/src/routes/control-plane/catalogs/__tests__/EnginesTab.test.tsx`
 
 **Interfaces:**
 - Consumes: `useControlPlaneEnginesListEngines` (for the attach picker's candidates); `useControlPlaneCatalogRegistryAttachCatalog` (`{ id: engineId, cid: catalogId }`); `useControlPlaneCatalogRegistryDetachCatalog` (`{ id: catalogId, engineId }` — **note the inverted argument order versus attach**, because the routes are mounted under different resources); `useControlPlaneCatalogRegistryRetryCatalogApply` (`{ id: engineId, cid: catalogId }`); `testEngineCatalog(engineId, catalogId)` from `@/api/controlPlane` (`:1030`) → `CatalogTestResult { ok: boolean; message: string }` (`:1025`, the hand-written alias of the generated `CatalogTestDto`).
 - Produces: `export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto })`.
 
-- [ ] **Step 1: The attachment table** — one row per `catalog.engines`, columns Engine (a link to `/control-plane/engines/{engineId}`), Type (`<Badge>`), Status, Applied, Actions.
+- [ ] **Step 1: The attachment table** — one row per `catalog.engines`, columns Engine (a link to `/control-plane/engines/{engineId}`), Type (`<Badge>`), Primary, Status, Applied, Actions. The Primary cell is `a.isPrimary ? <Badge variant="secondary">primary</Badge> : null`, straight from Task 2's column — this is the badge the deleted warehouse `EnginesTab` implied by filtering (table row 3), now said outright.
 
 Status renders all three values with their meanings, taken from `CatalogAttachmentDto.applyStatus`'s own JSDoc — which is where they reach the client, since response descriptions do not:
 
@@ -721,7 +1103,7 @@ const attach = useControlPlaneCatalogRegistryAttachCatalog({
 });
 ```
 
-- [ ] **Step 3: Detach** — a `ConfirmDeleteDialog` with `confirmLabel="Detach"` and `confirmText` the catalog name, calling `detach.mutate({ id: catalog.id, engineId })`. The 400 the primary catalog returns is surfaced verbatim; do not pre-disable the button on a guess about which attachment is primary — SP3c-1 has no `is_primary` field to read (that is D2, SP3c-2), and a client-side guess from `engines.warehouseId` would be a second copy of a rule the backend already owns.
+- [ ] **Step 3: Detach** — a `ConfirmDeleteDialog` with `confirmLabel="Detach"` and `confirmText` the catalog name, calling `detach.mutate({ id: catalog.id, engineId })`. The 400 the primary catalog returns is surfaced verbatim. Task 2 gives the client `a.isPrimary`, so the button on a primary row is **disabled with the reason shown**, which is a better screen than a refusal after a confirm dialog — but the server stays the refusal point and the 400 path keeps its test, because a disabled button is a courtesy and not a guarantee.
 
 - [ ] **Step 4: Retry** — shown on a `failed` or `pending` row:
 
@@ -732,24 +1114,37 @@ const retry = useControlPlaneCatalogRegistryRetryCatalogApply({
 });
 ```
 
-- [ ] **Step 5: Test, labelled as what it is (D4, table row 2)** — one button per **Trino** attachment:
+- [ ] **Step 5: Test, which must say which check ran (D4, table rows 2 and 13)** — **one** button, in the tab header, not one per row: Task 3's route decides which check is possible, and duplicating that decision in the client is how the two drift apart.
+
+```tsx
+const test = useControlPlaneCatalogRegistryTestRegistryCatalog({ mutation: { … } });
+```
+
+The result is rendered from `check`, and every branch names what was measured. A bare green tick is the thing D4 exists to forbid:
 
 ```tsx
 /**
- * D4. There is exactly one test egret can run today:
- * `POST /engines/{id}/catalogs/{cid}/test` submits `SHOW SCHEMAS FROM "<name>"`
- * to the engine's TRINO coordinator (`engines.rs:5655` → `monitor::coordinator_call`,
- * whose fallback Service is `{name}-trino`). There is no TCP prober in the tree
- * and SP3c-1 adds no second backend route, so:
- *   - a Trino attachment gets the button, and the result names the statement;
- *   - every other row gets it disabled, with the reason;
- *   - "the port answers" is never shown, because nothing measures it yet (SP5).
+ * D4. The server picks the check and tells us which one it ran; the UI's whole
+ * job is to not launder one into the other. `tcp` proves the port answers and
+ * NOTHING about credentials — so its success line says so in the same sentence,
+ * not in a tooltip a screenshot will not carry.
  */
-const ok = `SHOW SCHEMAS FROM ${catalog.name} succeeded on ${a.engineName}`;
-const notRun = "Testing needs a Trino engine attached — egret has no way to reach this catalog on its own yet.";
+function TestResult({ r }: { r: CatalogTestResultDto }) {
+  if (r.check === "query")
+    return <Line ok={r.ok}>{`SHOW SCHEMAS FROM ${catalog.name} on ${r.engineName}: ${r.message}`}</Line>;
+  if (r.check === "tcp")
+    return (
+      <Line ok={r.ok}>
+        {r.ok
+          ? `${r.target} accepted a connection. This is a reachability check only — it does not verify credentials, TLS or permissions.`
+          : `Could not reach ${r.target}: ${r.message}`}
+      </Line>
+    );
+  return <Line ok={false} muted>{`No test available: ${r.message}`}</Line>;
+}
 ```
 
-The success text must name the statement and the engine. A bare green tick is what D4 exists to forbid.
+`unsupported` renders neutral, not red: a `tpch` catalog with no engine attached is not broken, and colouring it as a failure teaches operators to ignore the colour.
 
 - [ ] **Step 6: Tests** — `__tests__/EnginesTab.test.tsx`:
 1. the three statuses render their distinct badges, and a `failed` row shows `applyError` as text;
@@ -757,7 +1152,8 @@ The success text must name the statement and the engine. A bare green tick is wh
 3. detach calls the hook with `{ id: <catalogId>, engineId: <engineId> }` — same reason, opposite order;
 4. Retry appears on `failed` and `pending` rows and not on `applied`;
 5. a 201 whose `applyStatus` is `failed` produces the error toast, not the success one;
-6. the Test button is enabled for a `trino` attachment and its success text contains `SHOW SCHEMAS FROM`; for a `starrocks`-only catalog it is disabled and the reason sentence is present.
+6. an `isPrimary` row shows the primary badge and its Detach button is disabled with the reason; a non-primary row's is enabled;
+7. **the three `check` branches render differently** — `query` names `SHOW SCHEMAS FROM`, `tcp` contains "does not verify credentials" and the `host:port`, `unsupported` is neutral rather than an error. Assert all three: a renderer that prints the same line for two of them passes any test that only exercises one.
 
 - [ ] **Step 7: Gate and commit**
 
@@ -767,7 +1163,7 @@ git add -A && git commit -m "feat(catalogs): Engines tab with attach, detach, ap
 ```
 
 ---
-### Task 6: Kind-conditional tabs (D1), the redirects, and the moved links
+### Task 8: Kind-conditional tabs (D1), the redirects, and the moved links
 
 The largest task, because reusing five tabs means extracting them from a 2379-line file.
 
@@ -794,7 +1190,7 @@ The largest task, because reusing five tabs means extracting them from a 2379-li
 - `WarehouseDetail` itself (the shell) — replaced by `CatalogDetail`'s shell.
 - `WarehouseSummary` (`:270`) — `CatalogDetail`'s own summary band replaces it, and it reads `Warehouse` fields the catalog DTO does not carry.
 - the warehouse `EnginesTab` (`:1139`) — **superseded, not lost** (table row 3). It rendered `engines.filter(e => e.warehouseId === warehouseId)`: the engines whose *primary* catalog this warehouse is. `catalog.engines` is every attachment, which since SP3a includes each of those engines' primary attachment. Every row the old tab drew is a row the new tab draws, with an apply status the old one never had. Do not port it.
-- `Warehouses` + `AddWarehouseDialog` (`Warehouses.tsx:244`) — the list page. Creating a warehouse moved to `CatalogCreate`'s `egret_warehouse` kind (Task 3 Step 4); deleting one moved to the Catalogs list (Task 2 Step 5). Both call the same legacy endpoints.
+- `Warehouses` + `AddWarehouseDialog` (`Warehouses.tsx:244`) — the list page. Creating a warehouse moved to `CatalogCreate`'s `egret_warehouse` kind (Task 5 Step 4); deleting one moved to the Catalogs list (Task 4 Step 5). Both call the same legacy endpoints.
 
 `rolesKey` and `clientsKey` are currently **exported** from `WarehouseDetail.tsx`; re-check their importers before moving and update them:
 
@@ -875,7 +1271,7 @@ Remove the Warehouses entry from `Sidebar.tsx`'s Infrastructure group now that i
 cd frontend
 rtk proxy grep -rn "control-plane/warehouses" src tests | grep -v "src/api/generated"
 ```
-Expected, and nothing else: `src/api/catalogTags.ts:42,53,70` (an **API** path, re-gated in SP3c-2 under D3 — deliberately untouched), `src/App.tsx` (the two redirect routes), `src/routes/control-plane/WorkspaceDetail.tsx` and `StorageDetail.tsx` (links that now resolve through the redirect), `tests/e2e/helpers.ts:109` and `tests/e2e/embedded-catalog.spec.ts` (API paths). If anything else appears, fix it here rather than in Task 9.
+Expected, and nothing else: `src/api/catalogTags.ts:42,53,70` (an **API** path, re-gated in SP3c-2 under D3 — deliberately untouched), `src/App.tsx` (the two redirect routes), `src/routes/control-plane/WorkspaceDetail.tsx` and `StorageDetail.tsx` (links that now resolve through the redirect), `tests/e2e/helpers.ts:109` and `tests/e2e/embedded-catalog.spec.ts` (API paths). If anything else appears, fix it here rather than in Task 11.
 
 ```bash
 git diff --stat HEAD -- src/components/access/CatalogTagEditor.tsx
@@ -901,7 +1297,7 @@ function renderTab(ui: React.ReactElement) {
 //   `getWarehouse` no longer needed in the beforeEach.
 ```
 
-`Warehouses.test.tsx` is deleted with its page. Its three surviving assertions already have homes: the render/empty-state cases in Task 2 Step 7's cases 1 and 4, and the `?workspace=` case in Task 2 Step 7's case 3.
+`Warehouses.test.tsx` is deleted with its page. Its three surviving assertions already have homes: the render/empty-state cases in Task 4 Step 7's cases 1 and 4, and the `?workspace=` case in Task 4 Step 7's case 3.
 
 Add one case to `warehouseTabs.test.tsx` and two to `CatalogDetail.test.tsx`:
 
@@ -932,7 +1328,7 @@ git add -A && git commit -m "feat(catalogs): reuse the warehouse tabs on egret c
 ```
 
 ---
-### Task 7: Engine detail's Catalogs tab
+### Task 9: Engine detail's Catalogs tab
 
 **Files:**
 - Modify: `frontend/src/routes/control-plane/EngineDetail.tsx`, `frontend/src/routes/control-plane/__tests__/EngineDetail.test.tsx`
@@ -954,9 +1350,9 @@ const attached = all
 const candidates = all.filter((c) => !c.engines.some((e) => e.engineId === engine.id));
 ```
 
-Each row: catalog name (link to `/control-plane/catalogs/{id}`), kind, the same `StatusBadge` Task 5 defined, Retry on `failed`/`pending`, Detach. The picker attaches. The header prose stops promising a pod roll unconditionally — Trino restarts, StarRocks rebuilds in place — and says so per engine type.
+Each row: catalog name (link to `/control-plane/catalogs/{id}`), kind, the same `StatusBadge` Task 7 defined, Retry on `failed`/`pending`, Detach. The picker attaches. The header prose stops promising a pod roll unconditionally — Trino restarts, StarRocks rebuilds in place — and says so per engine type.
 
-Reuse Task 5's components rather than writing a second set: export `StatusBadge` and the attach/detach/retry action cells from `catalogs/EnginesTab.tsx` and import them here. Two copies of the "a 201 can be `failed`" rule is one copy too many.
+Reuse Task 7's components rather than writing a second set: export `StatusBadge` and the attach/detach/retry action cells from `catalogs/EnginesTab.tsx` and import them here. Two copies of the "a 201 can be `failed`" rule is one copy too many.
 
 - [ ] **Step 2: Delete `CatalogForm.tsx`** and its imports. Confirm nothing else referenced it:
 
@@ -980,70 +1376,72 @@ git add -A && git commit -m "feat(engines): pick catalogs from the registry inst
 ```
 
 ---
-### Task 8: The create-engine wizard
+### Task 10: The create-engine wizard
 
 **Files:**
 - Modify: `frontend/src/routes/control-plane/EngineCreate.tsx`, `frontend/src/routes/control-plane/__tests__/EngineCreate.test.tsx`
 
 **Interfaces:**
-- Consumes: `useControlPlaneCatalogRegistryListRegistryCatalogs`, `useControlPlaneCatalogRegistryAttachCatalog`, `createEngine` (unchanged).
-- Produces: no new export; `CreateEngineInput.warehouseId` is still sent, now derived (table row 7).
+- Consumes: `useControlPlaneCatalogRegistryListRegistryCatalogs`; `createEngine` with Task 2's widened body.
+- Produces: no new export. `CreateEngineInput` gains `catalogs?: { catalogId: string; primary?: boolean }[]` and its `warehouseId` becomes optional, mirroring `CreateEngineBody` (Task 2).
 
-- [ ] **Step 1: Primary catalog replaces the warehouse `<Select>`** (`:206-226`):
+- [ ] **Step 1: A catalog list replaces the warehouse `<Select>`** (`:206-226`). Task 2 made this honest — the body now takes the attachments, so the screen stops pretending one warehouse is the whole story:
 
 ```tsx
 /**
- * `CreateEngineBody.warehouse_id` is a `Uuid`, not an `Option` (engines.rs:152),
- * and D2's `is_primary` migration is SP3c-2 — so an engine still needs exactly
- * one primary catalog at create time. What changes here is the vocabulary and
- * the reach: the user picks a CATALOG (every egret warehouse catalog is one,
- * and `warehouseId` is the field that makes it one), and can attach more
- * catalogs in the same screen. The body is unchanged.
+ * Task 2 widened `CreateEngineBody`: `warehouseId` is optional beside
+ * `catalogs`, exactly one of which is `primary`, and the server derives the
+ * still-NOT-NULL `engines.warehouse_id` from that catalog's own warehouse.
+ *
+ * Which is why the primary radio is restricted to catalogs with a
+ * `warehouseId`: until SP3c-2 drops that column, the engine's Ranger role and
+ * (for StarRocks) its storage are still derived from a warehouse, so a `jdbc`
+ * catalog can be ATTACHED here but not made primary. The row says so inline
+ * rather than offering a radio the server will refuse.
  */
 const catalogsQ = useControlPlaneCatalogRegistryListRegistryCatalogs(undefined, { query: { retry: false } });
 const allCatalogs = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
-const primaryCandidates = allCatalogs.filter((c) => c.warehouseId);
+const [selected, setSelected] = useState<string[]>([]);
 const [primaryCatalogId, setPrimaryCatalogId] = useState("");
-const [extraCatalogIds, setExtraCatalogIds] = useState<string[]>([]);
-const primary = primaryCandidates.find((c) => c.id === primaryCatalogId);
+const canBePrimary = (c: RegistryCatalogDto) => c.warehouseId != null;
 ```
 
-Keep the element id `ec-warehouse` — the e2e spec Task 9 rewrites targets it, and changing the id and the spec in the same pass loses the ability to tell a selector break from a behaviour break. Relabel it "Primary catalog". The `canCreate` precondition (`:119-123`) becomes `primaryCatalogId.length > 0`.
+One table, two controls per row: a checkbox (attach) and a radio (primary, disabled with "needs an egret warehouse catalog" when `!canBePrimary(c)`). Ticking the primary radio also ticks its checkbox — a primary that is not attached is not a state the body can express.
 
-- [ ] **Step 2: Additional catalogs** — a checkbox list below it, over `allCatalogs.filter(c => c.id !== primaryCatalogId)`, each row showing kind and current engine count. Help text: "Attached after the engine is created. A catalog that fails to attach leaves the engine in place — attach it again from the engine's Catalogs tab."
+Keep the element id `ec-warehouse` on the primary control — the e2e spec Task 11 rewrites targets it, and changing the id and the spec in the same pass loses the ability to tell a selector break from a behaviour break. The `canCreate` precondition (`:119-123`) becomes `primaryCatalogId.length > 0`.
 
-- [ ] **Step 3: Submit** — `handleCreate` (`:125-152`) sends `warehouseId: primary!.warehouseId!` and then attaches:
+- [ ] **Step 2: Submit in one request** — `handleCreate` (`:125-152`) no longer creates-then-loops. Task 2's body carries the attachments, so the server attaches them inside the create it already performs:
 
 ```tsx
+const input: CreateEngineInput = {
+  name: name.trim(),
+  // No `warehouseId`: the server derives it from whichever catalog is primary.
+  catalogs: selected.map((id) => ({ catalogId: id, primary: id === primaryCatalogId })),
+  …
+};
 const engine = await createMutation.mutateAsync(input);
-const failures: string[] = [];
-for (const cid of extraCatalogIds) {
-  const res = await attach.mutateAsync({ id: engine.id, cid }).catch(() => null);
-  const c = allCatalogs.find((x) => x.id === cid);
-  // A 201 whose applyStatus is `failed` is a failure the user must see (SP3b D1).
-  if (!res || res.status !== 201 || res.data.applyStatus === "failed") failures.push(c?.name ?? cid);
-}
-if (failures.length > 0) toast.error(`Engine created. These catalogs did not attach: ${failures.join(", ")} — retry from the engine's Catalogs tab.`);
 navigate(`/control-plane/engines/${engine.id}`);
 ```
 
-Sequential, not `Promise.all`: each attach triggers a Trino config apply and, for Trino, a pod roll; firing them concurrently at one engine is how you get a 409 storm from your own UI.
+This is the second thing Task 2 bought, and it is worth naming: the previous shape — create, then one `attachCatalog` per extra catalog from the browser — put the engine in a half-attached state whenever the tab was closed mid-loop, and fired several config applies at a cluster that was still provisioning. One request has one outcome.
 
-- [ ] **Step 4: Tests** — `EngineCreate.test.tsx` (133 lines):
-1. the Primary catalog select lists only catalogs with a `warehouseId`;
-2. `createEngine` is called with `warehouseId` equal to the **picked catalog's** `warehouseId`, not its `id` — the two are both UUID strings, so this is the assertion that catches the confusion;
-3. two extra catalogs produce two `attach` calls, in order, after the create resolves;
-4. an attach that returns `applyStatus: "failed"` names that catalog in the error toast and still navigates to the engine.
+A per-catalog attach failure is reported by the create response's attachment statuses, not by a toast loop: render the engine detail page's Catalogs tab on arrival, which Task 9 already draws with `failed`/`pending` and Retry.
 
-- [ ] **Step 5: Gate and commit**
+- [ ] **Step 3: Tests** — `EngineCreate.test.tsx` (133 lines):
+1. the primary radio is enabled only for catalogs with a `warehouseId`, and disabled rows carry the reason;
+2. `createEngine` is called with `catalogs: [{ catalogId, primary: true }, { catalogId, primary: false }]` and **no** `warehouseId` — assert the absence, since a stale `warehouseId` alongside `catalogs` is precisely the body Task 2's resolver has to disambiguate;
+3. ticking the primary radio on an unticked row also ticks its checkbox;
+4. a body with no primary blocks submit client-side, and the server's refusal message is surfaced verbatim when it happens anyway.
+
+- [ ] **Step 4: Gate and commit**
 
 ```bash
 cd frontend && npm run lint && npm run typecheck && npx vitest run src/routes/control-plane/__tests__/EngineCreate.test.tsx && cd ..
-git add -A && git commit -m "feat(engines): create wizard picks a primary catalog and attaches more"
+git add -A && git commit -m "feat(engines): create wizard attaches catalogs and marks one primary"
 ```
 
 ---
-### Task 9: The e2e rewrite, the full gate, and a live check (stop before the PR)
+### Task 11: The e2e rewrite, the full gate, and a live check (stop before the PR)
 
 **Files:**
 - Rewrite: `frontend/tests/e2e/provisioning-ui-kind.spec.ts`
@@ -1100,7 +1498,7 @@ git branch --show-current
 git status --short
 git log --oneline origin/main..HEAD
 ```
-Expected: `feat/catalog-ui-sp3c-1`, a clean tree, nine commits (Tasks 1–8 plus Step 1).
+Expected: `feat/catalog-ui-sp3c-1`, a clean tree, eleven commits (Tasks 1–10 plus Step 1).
 
 - [ ] **Step 3: Rust gates**
 
@@ -1109,11 +1507,19 @@ export CARGO_TARGET_DIR=/Users/1pro-l4r8/Documents/github/data-portal/egret/targ
 export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
 export EGRET_TEST_SHARED_STORE_URL=redis://localhost:6399
 ./deploy/prune-target.sh
+psql postgres://egret:egret@localhost:5432/postgres -c 'DROP DATABASE IF EXISTS egret_test_template'
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 env -u EGRET_ALLOW_DB_SKIP EGRET_ALLOW_ENGINE_SKIP=1 EGRET_ALLOW_DOCKER_SKIP=1 cargo test --workspace --no-fail-fast
 ```
-Expected: no failures; record any pre-existing `egret-workflow` clippy findings rather than fixing them. Read `egret-engine-mgmt`'s `routes` binary `finished in`: seconds, not milliseconds, or the DB tests skipped and Task 1 proved nothing. A failure outside this branch's crates is called "pre-existing" only after running it on `origin/main` in a separate worktree and seeing it fail there too.
+Expected: no failures; record any pre-existing `egret-workflow` clippy findings rather than fixing them. Read `egret-engine-mgmt`'s `routes` binary and `egret-catalog-registry`'s `store` binary `finished in`: seconds, not milliseconds, or the DB tests skipped and Tasks 1–3 proved nothing. A failure outside this branch's crates is called "pre-existing" only after running it on `origin/main` in a separate worktree and seeing it fail there too.
+
+Then confirm the migration was not edited after it shipped — the SP3a failure mode, and the one gate that catches it before kind does:
+
+```bash
+git log --oneline --follow -- migrations/0150_attachment_is_primary.sql
+```
+Expected: exactly one commit, Task 2's. Two means the file was amended after it ran somewhere, and the fix is a new migration, not a rebase.
 
 - [ ] **Step 4: OpenAPI and the client have no drift**
 
@@ -1133,11 +1539,14 @@ npm run lint && npm run typecheck && npm test && npm run build
 rtk proxy grep -rn "control-plane/warehouses" src tests | grep -v "src/api/generated"
 cd ..
 ```
-Expected: green, and the grep returns only the six sites Task 6 Step 5 enumerates.
+Expected: green, and the grep returns only the six sites Task 8 Step 5 enumerates.
 
 - [ ] **Step 6: Kind cluster — manual, reported as manual.** Deploy with `just deploy-kind` (or the OIDC variant the cluster runs), sign in as `admin@egret.local` / `Admin12345!`, and walk §5's own list:
   - **Create** a catalog in the UI: a `jdbc`/PostgreSQL one pointed at the in-cluster `postgres`. It appears in the list with kind `jdbc`, no engines, no workspaces.
-  - **Attach** it to the Trino engine from the catalog's Engines tab. The status settles to `applied`. Press **Test** → the result names `SHOW SCHEMAS FROM <name>` and the engine. Record the text verbatim.
+  - **Attach** it to the Trino engine from the catalog's Engines tab. The status settles to `applied`. Press **Test** → `check` is `query` and the result names `SHOW SCHEMAS FROM <name>` and the engine. Record the text verbatim.
+  - **The probe, all three branches.** Detach the engine and press Test again → `check` is `tcp`, the result names the `host:port` from the stored row, and the sentence "does not verify credentials" is on screen. Point the catalog at a closed port, re-test → it fails within ~3 s, not after a hang. Then open a `tpch` catalog with nothing attached and press Test → `unsupported`, rendered neutral rather than red. **Record all three verbatim** — this is D4's whole delivery, and the wording is the deliverable.
+  - **The probe takes nothing from the request.** With devtools open, replay the Test request with an added `{"host":"example.com","port":80}` body → the response's `target` is still the stored one. A probe that honours request input is a port scanner with a login page (D4).
+  - **`is_primary`, live.** `kubectl --context kind-egret exec -n egret-system deploy/postgres -- psql -U egret -d egret -Atc "SELECT engine_id, catalog_id, is_primary FROM registry.engine_catalog_attachments ORDER BY engine_id, is_primary DESC"` → exactly one `t` per engine, and it is the engine's warehouse catalog. Then create an engine through the wizard with **two** catalogs, one marked primary, and check the same query: one row `t`, one `f`, and `engines.warehouse_id` equal to the primary catalog's `warehouse_id`.
   - **Retry** on a deliberately broken catalog (wrong password secret) → the row goes `failed` and `applyError` is readable on the page, not only in a tooltip.
   - **Detach** it → the row goes, the catalog stays in the list. Then attach it again and **detach the primary** → a 400 whose message is shown verbatim.
   - **Assign** it to a workspace in the Workspaces tab, then open that workspace in Explore and confirm the catalog is visible to it.
@@ -1147,26 +1556,28 @@ Expected: green, and the grep returns only the six sites Task 6 Step 5 enumerate
   - `EGRET_E2E_KIND=1 npx playwright test tests/e2e/provisioning-ui-kind.spec.ts` → green, in minutes of real work. A skip here means the rewritten spec is as unfalsifiable as the one it replaced.
   Report every result as "manual, on kind", never as a test.
 
-- [ ] **Step 7: Stop.** Do not push and do not open a PR. Report: the nine commit hashes, the gate outputs (with any recorded pre-existing clippy findings), the kind results verbatim — especially the Test button's exact wording and the `catalog_registry:read`-only sign-in — and anything left open.
+- [ ] **Step 7: Stop.** Do not push and do not open a PR. Report: the eleven commit hashes, the gate outputs (with any recorded pre-existing clippy findings and the one-commit `git log` on `0150`), the kind results verbatim — especially the three Test wordings, the replayed-request probe target, the `is_primary` query output and the `catalog_registry:read`-only sign-in — and anything left open.
 
 ---
 
 ## Self-review (against the design)
 
-**Coverage of §3, bullet by bullet.** "Control Plane → Infrastructure → Catalogs. List: name, kind, attached engines, assigned workspaces, and a warning when any attachment is `failed` or stuck `pending`" — Task 2 Steps 3 and 6, with the warning rule made falsifiable in Step 7 case 2 and the `pending` grace period justified in table row 10. "Create: choose a kind, fill the typed form, optionally an Advanced tab per engine. Built from the existing config primitives" — Task 3, with the missing fourth primitive recorded in table row 9. "Detail: Configuration, Engines (attach, detach, apply status, Retry), Workspaces (assign), plus the six existing warehouse tabs when the catalog is iceberg-egret (D1)" — Tasks 4, 5, 6; five tabs, not six, per table row 3. "`/control-plane/warehouses/*` redirects… Three places link to that path by literal string" — Task 6 Step 4, with the count corrected in table row 4 and a grep that fails the task if the list is wrong. "Engine detail → Catalogs replaces the inline `CatalogForm` with a picker over the registry, showing each attachment's status and offering Retry" — Task 7. "Create-engine wizard attaches catalogs instead of choosing one warehouse" — Task 8, as far as a non-nullable `warehouse_id` allows, per table row 7. "Permissions: `catalog_registry:read` gates the new section, in the route guard, the sidebar and `appAccess.ts`" — Task 2 Steps 1, 2, 6, all in one commit, which is the Global Constraint D3 turns into an invariant. "Backend, only what is missing: a detach endpoint" — Task 1, exactly one route, per table row 1.
+**Coverage of §3, bullet by bullet.** "Control Plane → Infrastructure → Catalogs. List: name, kind, attached engines, assigned workspaces, and a warning when any attachment is `failed` or stuck `pending`" — Task 4 Steps 3 and 6, with the warning rule made falsifiable in Step 7 case 2 and the `pending` grace period justified in table row 10. "Create: choose a kind, fill the typed form, optionally an Advanced tab per engine. Built from the existing config primitives" — Task 5, with the missing fourth primitive recorded in table row 9. "Detail: Configuration, Engines (attach, detach, apply status, Retry), Workspaces (assign), plus the six existing warehouse tabs when the catalog is iceberg-egret (D1)" — Tasks 6, 7, 8; five tabs, not six, per table row 3. "`/control-plane/warehouses/*` redirects… Three places link to that path by literal string" — Task 8 Step 4, with the count corrected in table row 4 and a grep that fails the task if the list is wrong. "Engine detail → Catalogs replaces the inline `CatalogForm` with a picker over the registry, showing each attachment's status and offering Retry" — Task 9. "Create-engine wizard attaches catalogs instead of choosing one warehouse" — Task 10, genuinely now that Task 2 widened the body, with the one remaining restriction (the primary must be a warehouse catalog) stated in table row 7 and shown inline in the UI. "Permissions: `catalog_registry:read` gates the new section, in the route guard, the sidebar and `appAccess.ts`" — Task 4 Steps 1, 2, 6, all in one commit, which is the Global Constraint D3 turns into an invariant. "Backend, four pieces" — Task 1 (detach), Task 2 (`is_primary` + the optional `warehouse_id`), Task 3 (the probe), per table rows 1, 7, 12 and 13.
 
-**Coverage of D1–D5.** D1 — Task 6 Step 3, tested by two cases in Step 6. D2 — **not in this plan**; it is SP3c-2, and tables rows 3 and 7 name the two places where its absence shapes what SP3c-1 can do (no `is_primary` badge; the wizard still sends `warehouseId`). D3 — the Global Constraints and Task 2 Step 1, with the live check in Task 9 Step 6. D4 — Task 5 Step 5, honestly narrowed by table row 2. D5 — the Global Constraints; this plan deletes four frontend files and no backend line, and Task 6 Step 1 lists exactly what dies and why each is superseded rather than lost.
+**Coverage of D1–D5.** D1 — Task 8 Step 3, tested by two cases in Step 6. D2 — **Task 2**: the column, the backfill, the unique index, the widened create body, with the ordering claim pinned by a test in Step 3 and the live check in Task 11 Step 6. SP3c-2 now only drops `engines.warehouse_id`. D3 — the Global Constraints and Task 4 Step 1, with the live check in Task 11 Step 6. D4 — **Task 3** (the route and the probe) and Task 7 Step 5 (the three-branch renderer), delivered whole rather than narrowed; the `check` discriminant is what keeps the two apart. D5 — the Global Constraints; this plan deletes five frontend files and no backend line, every backend change is additive, and Task 8 Step 1 lists exactly what dies and why each is superseded rather than lost.
 
-**Coverage of §5 (testing).** "Vitest for the new pages, including the kind-conditional tabs, the attach picker, the wizard's multi-select, and a redirect test per moved path" — Task 6 Step 6 (tabs, four redirect cases), Task 5 Step 6 and Task 7 Step 3 (the pickers), Task 8 Step 4 (the multi-select). "A permission test that a user holding only `catalog_registry:read` can enter Control Plane and see Catalogs" — Task 2 Step 1, and again live in Task 9 Step 6. "A migration test that every role holding `warehouse:*` ends with the matching `catalog_registry:*`" — **SP3c-2's**, since SP3c-1 adds no migration. "`provisioning-ui-kind.spec.ts` is already stale… SP3c-1 rewrites it" — Task 9 Step 1. "Live on kind, reported as manual" — Task 9 Step 6.
+**Coverage of §5 (testing).** "Vitest for the new pages, including the kind-conditional tabs, the attach picker, the wizard's multi-select, and a redirect test per moved path" — Task 8 Step 6 (tabs, four redirect cases), Task 7 Step 6 and Task 9 Step 3 (the pickers), Task 10 Step 3 (the multi-select). "A permission test that a user holding only `catalog_registry:read` can enter Control Plane and see Catalogs" — Task 4 Step 1, and again live in Task 11 Step 6. "A migration test that every role holding `warehouse:*` ends with the matching `catalog_registry:*`" — **SP3c-2's**; SP3c-1's one migration touches no role. "`provisioning-ui-kind.spec.ts` is already stale… SP3c-1 rewrites it" — Task 11 Step 1. "Live on kind, reported as manual" — Task 11 Step 6.
 
-**Placeholder scan.** Every task names real files, real symbols and real commands. The two deliberate placeholders — `CatalogCreate`/`CatalogDetail` in Task 2 Step 2 and `EnginesTab` in Task 4 Step 1 — exist so each commit compiles, and each names the task that replaces it **in full**. No step says "add appropriate tests", "handle errors" or "update the relevant files": Task 6 Step 1 enumerates every symbol that moves and every one that dies; Task 6 Step 5 is a grep whose expected output is listed; Task 9 Step 5 re-runs it.
+**Placeholder scan.** Every task names real files, real symbols and real commands. The two deliberate placeholders — `CatalogCreate`/`CatalogDetail` in Task 4 Step 2 and `EnginesTab` in Task 6 Step 1 — exist so each commit compiles, and each names the task that replaces it **in full**. No step says "add appropriate tests", "handle errors" or "update the relevant files": Task 2 Step 1 is the migration verbatim; Task 3 Step 1 is the match arm for every kind; Task 8 Step 1 enumerates every symbol that moves and every one that dies; Task 8 Step 5 is a grep whose expected output is listed; Task 11 Step 5 re-runs it.
 
-**Type consistency across tasks.** `RegistryCatalogDto` is the single currency: Task 2's list rows, Task 4's `ConfigurationTab({ catalog })`, Task 5's `EnginesTab({ catalog })`, Task 7's engine-side rows and Task 8's picker all read the same object, and none of them refetches a catalog another task already has. `isEgretWarehouse` is defined once (Task 2) and consumed by Tasks 3, 4 and 6 — the alternative, sniffing `config.metastore.type` at each site, is three chances to disagree with the CHECK constraint. `StatusBadge` and the attach/detach/retry cells are defined once (Task 5) and imported by Task 7, so the "a 201 can be `failed`" rule has one implementation. The five warehouse tabs keep their exact prop types through the move, so their tests move with a one-line change. The one asymmetry that will bite is called out twice, in Task 5's Interfaces and its test cases 2 and 3: **attach takes `{ id: engineId, cid: catalogId }` and detach takes `{ id: catalogId, engineId }`** — both are `{ [k: string]: string }`, so a swap compiles, runs, and 404s at the user.
+**Ordering, which the two rulings made load-bearing.** Task 1 before Task 7 (detach hook). Task 2 before Task 7 (the `isPrimary` badge and the disabled Detach) and before Task 10 (the widened body). Task 3 before Task 7 (the Test renderer needs `check`). Task 4 before Tasks 5–8 (the route and the permission). Task 5 before Task 6 (`ConfigurationTab` renders the `kinds/` forms read-only). Task 7 before Task 9 (`StatusBadge` and the action cells are imported, not re-implemented). `catalog_registry:read` enters `CONTROL_PLANE_PERMS` in Task 4, the same commit as the section, the guard and the sidebar. Running the three backend tasks out of order is the one way to get a branch that compiles and still cannot work.
+
+**Type consistency across tasks.** `RegistryCatalogDto` is the single currency: Task 4's list rows, Task 6's `ConfigurationTab({ catalog })`, Task 7's `EnginesTab({ catalog })`, Task 9's engine-side rows and Task 10's picker all read the same object, and none of them refetches a catalog another task already has. `isEgretWarehouse` is defined once (Task 4) and consumed by Tasks 5, 6, 8 and 10 — the alternative, sniffing `config.metastore.type` at each site, is four chances to disagree with the CHECK constraint, and Task 10's primary rule is exactly the same predicate. `CatalogAttachmentDto.isPrimary` (Task 2) is read by Task 7's badge, Task 7's disabled Detach and Task 9's engine-side rows — one column, one meaning, three screens. `CatalogTestResultDto.check` (Task 3) has exactly one renderer (Task 7 Step 5), so there is no second place to mistake `tcp` for `query`. `StatusBadge` and the attach/detach/retry cells are defined once (Task 7) and imported by Task 9, so the "a 201 can be `failed`" rule has one implementation. The five warehouse tabs keep their exact prop types through the move, so their tests move with a one-line change. The one asymmetry that will bite is called out twice, in Task 7's Interfaces and its test cases 2 and 3: **attach takes `{ id: engineId, cid: catalogId }` and detach takes `{ id: catalogId, engineId }`** — both are `{ [k: string]: string }`, so a swap compiles, runs, and 404s at the user.
 
 **Three things a reviewer should push on.**
 
-1. **The Test button is narrower than D4 promises, and the plan does not hide it.** D4 wants a TCP reachability check when no engine is attached. There is no TCP prober anywhere in the tree, and §3 says the backend delta is one detach route. Table row 2 resolves this by shipping only the check that exists — Trino's `SHOW SCHEMAS`, labelled with the statement it ran — and disabling the button elsewhere with the reason. A reviewer who wants D4 whole should ask for the prober as a second Task 1 route rather than let the UI imply a check nothing performs; that is a scope decision, not an oversight, and it is the one place this plan knowingly under-delivers against a decision.
+1. **The primary catalog must still be an egret warehouse catalog, and that is the seam the two rulings left open.** Task 2 widens the *body* but `migrations/0056_engines.sql:9` keeps `engines.warehouse_id NOT NULL`, and ten sites still read it — `ensure_engine_role` seeds Ranger from the warehouse, and the StarRocks path derives storage from it. So `resolve_primary_catalog` refuses a `jdbc` primary with a message naming the reason, and the wizard disables that radio rather than offering it. The wizard is now honest about attaching several catalogs; it is not yet honest about *which* may lead. Nulling the column in SP3c-1 was the alternative and it means rewriting those ten sites in the same branch as the UI, for a column SP3c-2 deletes — worth a second opinion, because it is the difference between one awkward restriction now and a larger backend diff now.
 
-2. **Deleting `Warehouses.tsx` nearly deleted warehouse creation.** The registry refuses egret catalogs on create and on delete, by design — they are created and destroyed with their warehouse. Table row 6 routes both operations back to the legacy endpoints D5 keeps, inside the new screens. It works, and it means the Catalogs create page has one branch that is not a registry call at all. The alternative — a registry create path for egret catalogs — is a backend change SP3c-1 does not have, and would duplicate warehouse provisioning. Worth a second opinion on whether the branch belongs in `CatalogCreate` or in a separate "New warehouse" affordance on the list.
+2. **The probe proves less than a Test button usually implies, and the whole defence is wording.** `tcp_probe` connects and closes: no bytes, no protocol, no credentials. It cannot distinguish a healthy database from an unrelated process on that port. Task 3's `check` discriminant and Task 7's three-branch renderer exist to keep that visible, and Task 11 Step 6 records all three strings verbatim rather than screenshotting a green tick. A reviewer should read those strings as the deliverable, not the code — and should push if any of them can be mistaken for the other. The one structural protection is that the target comes from `probe_target` and never from a request, which Task 3 Step 4 tests by replaying a request that tries.
 
-3. **Five tabs, not six, and the sixth's disappearance is an argument, not a measurement.** Table row 3 claims the registry Engines tab is a superset of the warehouse `EnginesTab` because SP3a records a primary attachment for every engine. That follows from `list_engine_attachments(engine.id, Some(engine.warehouse_id))` and the SP3a backfill, but it is a claim about data already in the database, not about code. Task 9 Step 6's kind walk should check it directly: open an egret warehouse catalog's Engines tab and confirm every engine that the old Warehouses → warehouse → Engines tab would have listed is there. If one is missing, the backfill is incomplete and that is a finding worth more than this task.
+3. **Five tabs, not six, and the sixth's disappearance is an argument, not a measurement.** Table row 3 claims the registry Engines tab is a superset of the warehouse `EnginesTab` because SP3a records a primary attachment for every engine. Task 2's backfill now depends on the same belief — `is_primary` is set only where `c.warehouse_id = e.warehouse_id`, so an engine with no such attachment row ends with **no** primary at all, which the unique index permits and nothing refuses. Task 11 Step 6's `SELECT … is_primary` query is what catches it: exactly one `t` per engine. If any engine comes back with none, the SP3a backfill was incomplete and that is a finding worth more than this task.
