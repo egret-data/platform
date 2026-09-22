@@ -4,7 +4,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use egret_auth::principal::Auth;
@@ -44,7 +44,10 @@ pub(crate) fn routes() -> Router<CpState> {
             "/catalogs/{id}/workspaces",
             get(list_catalog_workspaces).put(set_catalog_workspaces),
         )
-        .route("/catalogs/{id}/engines/{engine_id}", delete(detach_catalog))
+        .route(
+            "/catalogs/{id}/engines/{engine_id}",
+            post(registry_attach_catalog).delete(detach_catalog),
+        )
         .route(
             "/engines/{id}/catalogs/{cid}/apply",
             post(retry_catalog_apply),
@@ -615,6 +618,42 @@ pub(crate) async fn attach_catalog(
 }
 
 #[utoipa::path(
+    post,
+    path = "/api/control-plane/catalogs/{id}/engines/{engine_id}",
+    tag = "control-plane-catalog-registry",
+    params(
+        ("id" = Uuid, Path, description = "Registry catalog id"),
+        ("engine_id" = Uuid, Path, description = "Engine id"),
+    ),
+    responses(
+        (status = 201, description = "Attached. Trino: the catalog was applied to the cluster first, so `applyStatus` is `applied`. StarRocks: the attachment is recorded first and the catalog is created on the FE immediately afterwards, so `applyStatus` is `applied` on success and `failed` (with `applyError`) when the FE could not be reached or refused — the attachment still exists and is converged by `POST …/engines/{id}/catalogs/{cid}/apply` or by the engine's next bootstrap", body = CatalogAttachmentDto),
+        (status = 400, description = "The engine cannot read this catalog, the name is one StarRocks reserves, or Kubernetes is not configured", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
+        (status = 404, description = "No such catalog or engine", body = ErrorBody),
+        (status = 409, description = "Already attached, or the engine is being deleted", body = ErrorBody),
+        (status = 502, description = "Trino only: Kubernetes rejected the apply (`code` = `engine_cluster_apply_failed`); nothing was attached. A StarRocks FE that rejects the DDL is reported as a `failed` attachment in the 201 body, not as a 502", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn registry_attach_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, engine_id)): Path<(Uuid, Uuid)>,
+) -> Result<(StatusCode, Json<CatalogAttachmentDto>), CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
+    let engine = engine_or_404(&st, engine_id).await?;
+    let catalog = load(&st, id).await?;
+    attach_to_engine(&st, &engine, &catalog, None)
+        .await
+        .map_err(CatalogOpError::into_registry)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(attachment_dto(&st, engine.id, id).await?),
+    ))
+}
+
+#[utoipa::path(
     delete,
     path = "/api/control-plane/catalogs/{id}/engines/{engine_id}",
     tag = "control-plane-catalog-registry",
@@ -833,6 +872,7 @@ async fn acknowledge_migration_report(
         catalog_impact,
         reapply_registry_catalog,
         attach_catalog,
+        registry_attach_catalog,
         detach_catalog,
         retry_catalog_apply,
         list_catalog_workspaces,
