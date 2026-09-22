@@ -148,16 +148,26 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
   const [detachTarget, setDetachTarget] = useState<CatalogAttachmentDto | null>(null);
 
   /**
-   * Both caches that describe this attachment set. The detail query is what
+   * What every successful attach, detach and Retry has to do.
+   *
+   * Both caches that describe this attachment set: the detail query is what
    * this table reads; the list page draws an engine count and the stalled
    * warning from its own query, and would keep showing the old one for
    * `staleTime` otherwise. Both keys are imported, never written out — a
    * hand-written triple matches no cache entry at all, and every test here
    * would still be green.
+   *
+   * And the last Test verdict is DROPPED, because it was measured against an
+   * attachment set that no longer exists. The route picks `query` over `tcp`
+   * by looking for an applied Trino attachment, so attaching or detaching one
+   * can change which check would even run — leaving a red "Could not reach
+   * …:5432" box above a row that has just gone green is the same class of lie
+   * the `check` discriminant exists to prevent.
    */
-  function invalidate() {
+  function afterChange() {
     void queryClient.invalidateQueries({ queryKey: catalogKey(catalog.id) });
     void queryClient.invalidateQueries({ queryKey: catalogsQueryKey });
+    test.reset();
   }
 
   // `<…, ApiError>` for the same reason every other query on this page carries
@@ -172,7 +182,7 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
   const attach = useControlPlaneCatalogRegistryRegistryAttachCatalog<ApiError>({
     mutation: {
       onSuccess: (res) => {
-        invalidate();
+        afterChange();
         setPick("");
         // SP3b D1: a StarRocks attach returns 201 even when the FE refused it,
         // with `applyStatus` `failed` and the reason in `applyError`.
@@ -194,7 +204,7 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
   const detach = useControlPlaneCatalogRegistryDetachCatalog<ApiError>({
     mutation: {
       onSuccess: () => {
-        invalidate();
+        afterChange();
         toast.success("Detached.");
       },
       // Verbatim: the 400 a primary attachment returns names the only way out.
@@ -205,7 +215,7 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
   const retry = useControlPlaneCatalogRegistryRetryCatalogApply<ApiError>({
     mutation: {
       onSuccess: () => {
-        invalidate();
+        afterChange();
         toast.success("Re-applied.");
       },
       onError: (e) => toast.error(e.message || "The engine rejected the re-apply."),

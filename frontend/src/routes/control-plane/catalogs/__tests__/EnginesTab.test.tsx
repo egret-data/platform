@@ -396,6 +396,64 @@ describe("EnginesTab — attach, detach, retry", () => {
     await waitFor(() => expect(invalidated).toContainEqual(catalogKey("c-1")));
   });
 
+  test("a successful change drops the Test verdict it has just invalidated", async () => {
+    const user = setup();
+    testFn.mockResolvedValue({
+      status: 200,
+      data: {
+        ok: false,
+        check: "tcp",
+        engineName: null,
+        target: "db.internal:5432",
+        message: "Could not reach db.internal:5432: connection refused.",
+      },
+    });
+    renderTab(
+      catalog({
+        engines: [
+          attachment({ engineId: "e7", engineName: "sr-eu", applyStatus: "failed", applyError: "x" }),
+        ],
+      }),
+    );
+
+    await user.click(screen.getByRole("button", { name: /^Test$/ }));
+    expect(await screen.findByTestId("catalog-test-result")).toHaveTextContent(
+      "connection refused",
+    );
+
+    // The verdict was measured against an attachment set that no longer
+    // exists — the route chooses `query` over `tcp` by looking for an applied
+    // Trino attachment — so it must not sit there above a row that just went
+    // green.
+    await user.click(within(rowFor("sr-eu")).getByRole("button", { name: /Retry/ }));
+    await waitFor(() =>
+      expect(screen.queryByTestId("catalog-test-result")).not.toBeInTheDocument(),
+    );
+  });
+
+  test("an operator who may read engines gets a link to the engine", () => {
+    renderTab(catalog({ engines: [attachment({ engineId: "e1", engineName: "trino-prod" })] }));
+    expect(screen.getByRole("link", { name: "trino-prod" })).toHaveAttribute(
+      "href",
+      "/control-plane/engines/e1",
+    );
+  });
+
+  test("an operator who may not read engines gets the name, not a link that would 403", () => {
+    // `catalog_registry:read` does not imply `engine:read`, so the engine page
+    // would refuse exactly the persona this tab was built for. The name is
+    // still shown — a link that 403s is worse than a plain identifier. Two
+    // tests, not one: a second `render` in the same test leaves the first
+    // one's DOM in the document, so the negative assertion would be reading
+    // the positive case's markup.
+    renderTab(
+      catalog({ engines: [attachment({ engineId: "e1", engineName: "trino-prod" })] }),
+      READER,
+    );
+    expect(screen.getByText("trino-prod")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "trino-prod" })).not.toBeInTheDocument();
+  });
+
   test("an operator who may only read gets no attach, detach or retry controls", () => {
     renderTab(
       catalog({
@@ -413,16 +471,22 @@ describe("EnginesTab — attach, detach, retry", () => {
 });
 
 describe("EnginesTab — Test names the check that ran (D4)", () => {
-  test("`query` names the statement and the engine it ran on", async () => {
+  test("`query` names the statement and the engine it ran on, from the client's own line", async () => {
     const box = await runTest({
       ok: true,
+      // The server's real success sentence quotes the statement and the engine
+      // itself. Deliberately NOT used here: an assertion the mocked `message`
+      // already satisfies passes whether or not the renderer names the check,
+      // which is the one thing this branch exists to do. This message names
+      // neither, so only the client's line can satisfy the assertions below.
       check: "query",
       engineName: "trino-prod",
       target: null,
-      message: 'SHOW SCHEMAS FROM "sales" succeeded on `trino-prod`, so the catalog answered.',
+      message: "the catalog answered — credentials included.",
     });
-    expect(box).toHaveTextContent("SHOW SCHEMAS FROM");
+    expect(box).toHaveTextContent("SHOW SCHEMAS FROM sales");
     expect(box).toHaveTextContent("trino-prod");
+    expect(box).toHaveTextContent("credentials included");
     expect(box).toHaveAttribute("data-tone", "ok");
   });
 
