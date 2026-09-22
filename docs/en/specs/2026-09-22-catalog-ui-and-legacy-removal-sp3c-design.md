@@ -104,7 +104,12 @@ two ways to reach catalogs; a user who upgrades to both has one.
 
 1. `engine_mgmt.engine_catalogs`: no production writer remains. Move `egret-policy`'s legacy read
    onto the registry, then drop the table and the five dead store methods.
-2. The legacy `/engines/{id}/catalogs*` endpoints, once the new UI is the only caller.
+2. The legacy `/engines/{id}/catalogs*` endpoints, once the new UI is the only caller — **but first
+   move `configError` onto the registry list.** That field is what makes a stored row the tightened
+   validator now refuses visible and repairable instead of invisible, and `GET /engines/{id}/catalogs`
+   is the only route that reports it: `GET /catalogs` returns the raw column and never parses. Delete
+   the route before moving the field and a broken catalog silently disappears again, which is the
+   defect SP3c-1 built the degraded entry to prevent.
 3. `engines.warehouse_id`, whose `is_primary` replacement landed in SP3c-1.
 4. `warehouse:*`, after D3's grant migration and the `warehouse_admin` re-gating.
 
