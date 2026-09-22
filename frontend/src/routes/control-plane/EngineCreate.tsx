@@ -220,6 +220,17 @@ export default function EngineCreate() {
    * important half of that sentence is that nothing was created. Left as the
    * raw 400 it is a bare uuid and no indication of whether a cluster is now
    * running.
+   *
+   * THE MATCHED STRING IS THE BACKEND'S, AND NOTHING LINKS THE TWO (review
+   * F-4). It is built at `crates/egret-engine-mgmt/src/engines.rs:2822` and
+   * pinned there by `crates/egret-engine-mgmt/tests/routes.rs:9249`, which
+   * asserts `"bad request: no such catalog {id}"` verbatim. So a reword goes
+   * red on the Rust side, gets updated there, and this match silently stops
+   * firing — the fallback is safe (the server's own message is passed through
+   * untouched) but the "nothing was provisioned" reassurance is lost, and no
+   * test on either side would notice. If you are reading this because you
+   * changed that message: change this regex too. The durable fix is the shared
+   * fixture Task 5 already carries.
    */
   function explain(message: string | undefined): string {
     if (!message) return "Failed to provision engine.";
@@ -311,6 +322,35 @@ export default function EngineCreate() {
         </Alert>
       )}
 
+      {/*
+        WHAT IS IN THIS PANEL HAS NO ROW ON THE ENGINE, WHICH IS WHY IT SAYS
+        "attach again" AND NOT "Retry" (review F-1).
+
+        `attach_to_engine` splits by engine kind, and the split decides where a
+        failure becomes visible (`catalog_apply.rs:1053-1160`):
+
+          - **Trino applies first and writes after.** A failed apply
+            `rollback_minted`s and returns `Err` BEFORE `insert_attachment`, so
+            the catalog is reported here and the Catalogs tab has nothing to
+            list for it — Task 9's `failed` badge and its Retry never appear.
+            The pre-apply refusals (mint, warehouse, engine support) return
+            earlier still, likewise with no row.
+          - **StarRocks records first and converges after**, because its FE is
+            unreachable for minutes after `create_engine` — exactly when this
+            wizard attaches. A failed apply calls `set_apply_failed` and returns
+            **`Ok(())`**, so it is NOT in `catalogAttachErrors` at all: the
+            wizard navigates normally and the tab reports it with Retry.
+
+        The two paths are complementary and the panel names its own half. The
+        one exception is `ApplyError::Unrecorded` whose compensating
+        `delete_attachment` itself fails (`:1118-1127`) — a row survives and is
+        reported here too; "normally" below is doing that work.
+
+        F-2: NOTHING PERSISTS THIS LIST. The server only `tracing::warn!`s
+        (`engines.rs:2858-2866`), so this panel is the sole record and the
+        "← Engines" link directly above it destroys it. The copy says so
+        instead of letting the operator find out.
+      */}
       {created && (
         <Alert data-testid="ec-attach-errors">
           <AlertDescription className="space-y-2">
@@ -328,13 +368,30 @@ export default function EngineCreate() {
                 </li>
               ))}
             </ul>
+            <p>
+              {created.catalogAttachErrors.length === 1 ? "It is" : "They are"} not attached
+              at all, and an attach that fails this way normally leaves no row behind — so
+              the engine&apos;s Catalogs tab has nothing to Retry.{" "}
+              {created.catalogAttachErrors.length === 1 ? "Attach it" : "Attach them"} again
+              from the picker there.{" "}
+              <strong>
+                This list is not stored anywhere — leaving this page loses{" "}
+                {created.catalogAttachErrors.length === 1 ? "the name" : "the names"}.
+              </strong>
+            </p>
+            <p className="text-xs text-muted-foreground">
+              A catalog whose attach failed after the engine had already recorded it — the
+              StarRocks path — is not listed here: it shows as failed on that tab, with
+              Retry.
+            </p>
             <Button
               size="sm"
               onClick={() =>
                 navigate(`/control-plane/engines/${created.id}?tab=catalogs`)
               }
             >
-              Open «{created.name}» → Catalogs to retry
+              Open «{created.name}» → Catalogs to attach{" "}
+              {created.catalogAttachErrors.length === 1 ? "it" : "them"} again
             </Button>
           </AlertDescription>
         </Alert>
@@ -373,6 +430,16 @@ export default function EngineCreate() {
         rewrites the e2e spec that targets it, and changing the id and the spec
         in one pass would lose the ability to tell a selector break from a
         behaviour break.
+
+        FOR TASK 11 (review F-3): the id no longer names a `<Select>` trigger,
+        so `click #ec-warehouse` then pick an option does NOT work any more. It
+        is the `RadioGroup` root `<div>`. Drive it with
+        `#ec-warehouse [role="radio"]`, or by the per-row
+        `#ec-primary-<catalogId>`; the attach checkboxes are
+        `#ec-attach-<catalogId>`. `EngineCreate.test.tsx` asserts that the
+        anchor exists AND that it contains one driveable radio per row, so a
+        refactor that drops it goes red here rather than in Task 11's spec
+        months later, where it would read like a behaviour change.
       */}
       <section className="space-y-3 rounded-lg border p-4">
         <div className="space-y-1">

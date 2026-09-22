@@ -225,6 +225,24 @@ describe("EngineCreate", () => {
     expect(screen.getByRole("checkbox", { name: "Attach sales-pg" })).toBeEnabled();
   });
 
+  test("the ec-warehouse anchor survives, and has a radio Task 11 can drive", async () => {
+    mockCatalogs([EGRET, SECOND]);
+    const { container } = renderCreate("trino");
+
+    // The id is carried over from the warehouse <Select> this control replaced,
+    // on the brief's instruction, so Task 11 can tell a selector break from a
+    // behaviour break. Nothing asserted it until now, so a refactor could have
+    // dropped it with the suite green and broken Task 11's spec later, where it
+    // would have read like a behaviour change (review F-3).
+    const anchor = container.querySelector("#ec-warehouse");
+    expect(anchor).not.toBeNull();
+    // Existing is not enough — it has to be DRIVEABLE. It is a RadioGroup root
+    // now, not a Select trigger, so the handle is the radios inside it.
+    expect(anchor!.querySelectorAll('[role="radio"]')).toHaveLength(2);
+    expect(container.querySelector(`#ec-primary-${CAT_ID}`)).not.toBeNull();
+    expect(container.querySelector(`#ec-attach-${CAT_ID}`)).not.toBeNull();
+  });
+
   test("submits catalogs with exactly one primary and NO warehouseId", async () => {
     mockCatalogs([EGRET, SECOND]);
     const user = userEvent.setup();
@@ -362,10 +380,42 @@ describe("EngineCreate", () => {
     // …and creating again is not offered, because the engine already exists.
     expect(screen.getByRole("button", { name: "Create engine" })).toBeDisabled();
 
-    await user.click(within(panel).getByRole("button", { name: /Catalogs to retry/ }));
+    await user.click(within(panel).getByRole("button", { name: /attach it again/i }));
     expect(
       await screen.findByText("DETAIL /control-plane/engines/e9?tab=catalogs"),
     ).toBeInTheDocument();
+  });
+
+  test("the panel sends the operator to the picker, not to a Retry that is not there", async () => {
+    mockCatalogs([EGRET, SECOND]);
+    vi.mocked(api.createEngine).mockResolvedValue(
+      created({
+        id: "e9",
+        name: "analytics",
+        catalogAttachErrors: [
+          { catalogId: SECOND_ID, message: "the engine refused the apply" },
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+    renderCreate("trino");
+    await user.type(screen.getByLabelText("Name"), "analytics");
+    await attach(user, "archive");
+    await makePrimary(user, "demo-catalog");
+    await user.click(screen.getByRole("button", { name: "Create engine" }));
+
+    const panel = await screen.findByTestId("ec-attach-errors");
+    // A Trino attach that fails returns BEFORE `insert_attachment`, so nothing
+    // in this panel has a row on the Catalogs tab and Task 9's Retry is not
+    // offered for it. Telling the operator to Retry sends them to look for a
+    // control that will not exist.
+    expect(panel).toHaveTextContent(/nothing to Retry/i);
+    expect(panel).toHaveTextContent(/Attach it again from the picker/i);
+    // The list is the only record of the failure — nothing persists it, and the
+    // "← Engines" link sits directly above this panel.
+    expect(panel).toHaveTextContent(/not stored anywhere/i);
+    // And the button no longer promises a Retry either.
+    expect(within(panel).queryByRole("button", { name: /to retry/i })).toBeNull();
   });
 
   test("a 403 on the registry names the permission and offers no catalogs", async () => {
