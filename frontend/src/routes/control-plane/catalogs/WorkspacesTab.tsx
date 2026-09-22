@@ -129,11 +129,21 @@ export function WorkspacesTab({ catalogId }: { catalogId: string }) {
   return (
     <div className="space-y-4">
       <Alert>
-        <AlertDescription>
-          An assignment decides which catalogs a workspace sees in its engine view. It does not
-          restrict what an engine will answer — a query naming this catalog directly is still
-          served — and notebook warehouse selection ignores assignment entirely, staying with the
-          workspace that owns the warehouse.
+        <AlertDescription className="space-y-2" data-testid="workspace-assignment-rules">
+          <p>
+            An assignment decides which catalogs a workspace sees in its engine view. It does not
+            restrict what an engine will answer — a query naming this catalog directly is still
+            served — and notebook warehouse selection ignores assignment entirely, staying with
+            the workspace that owns the warehouse.
+          </p>
+          <p>
+            A catalog that is an egret warehouse is <span className="font-medium">also</span>{" "}
+            visible to the workspace that owns that warehouse for as long as it has{" "}
+            <span className="font-medium">no assignments at all</span>, and the first assignment
+            replaces that fallback. So emptying this list does not hide such a catalog from its
+            owner — and assigning it to one workspace takes it out of the owning workspace&apos;s
+            engine view unless that workspace is on the list too.
+          </p>
         </AlertDescription>
       </Alert>
 
@@ -143,7 +153,11 @@ export function WorkspacesTab({ catalogId }: { catalogId: string }) {
             {assignedQ.error?.message ?? "Couldn't load this catalog's workspaces."}
           </AlertDescription>
         </Alert>
-      ) : assignedQ.isLoading ? (
+      ) : assignedQ.isLoading || mine.isLoading ? (
+        // BOTH. The rows are the union of the two lists, so a slow
+        // `/me/workspaces` used to put "There are no workspaces to assign." on
+        // screen — a full sentence, and false — before popping the rows in
+        // (review F6).
         <ListSkeleton rows={4} cols={2} />
       ) : rows.length === 0 ? (
         <p className="text-sm text-muted-foreground">There are no workspaces to assign.</p>

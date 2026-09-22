@@ -1008,7 +1008,14 @@ export function submitProblem(
   config: Record<string, unknown>,
   advanced: Record<string, Record<string, string>>,
 ): string | null {
-  const c = config;
+  // `rec`, not a bare read. Every NESTED read here is already guarded, because
+  // until SP3c-1 this only ever saw a draft the create form had built. The
+  // detail page widened the input domain to arbitrary STORED bytes — a row the
+  // registry wrote before a rule tightened — and a `config` column holding
+  // JSON `null` threw inside the render body, blanking the whole detail page
+  // (no error boundary: the back link, header and tabs went with it) on the
+  // one screen whose job is to show a row nothing can parse.
+  const c = rec(config);
   const whole = (v: unknown, max: number) =>
     typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= max;
   const port = (v: unknown) => (whole(v, 65535) ? null : "port must be 1-65535");

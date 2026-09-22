@@ -361,6 +361,116 @@ describe("Configuration tab", () => {
     expect(saveButton()).not.toBeNull();
   });
 
+  /**
+   * The JSON editor is the repair path. Switching back to the form used to
+   * drop everything typed in it and then post the PRE-JSON draft under a
+   * "Configuration saved" toast — a save that repaired nothing while claiming
+   * success (review F2).
+   */
+  test("switching back from JSON carries the edit into the form, and into the save", async () => {
+    const user = setup();
+    renderDetail();
+    await user.click(await screen.findByRole("button", { name: /^Edit configuration$/ }));
+    await user.click(screen.getByRole("button", { name: /^Edit as JSON$/ }));
+    fireEvent.change(screen.getByLabelText(/Configuration JSON/), {
+      target: {
+        value: JSON.stringify({
+          dialect: "postgresql",
+          host: "repaired.internal",
+          port: 5432,
+          user: "egret",
+          password_secret_id: "sec-1",
+          database: "sales",
+          ssl: { mode: "require" },
+        }),
+      },
+    });
+    await user.click(screen.getByRole("button", { name: /^Edit as a form$/ }));
+    // The form took the typed value over rather than reverting to the stored one.
+    expect(screen.getByLabelText("Host")).toHaveValue("repaired.internal");
+    await user.click(saveButton()!);
+    await waitFor(() => expect(updateFn).toHaveBeenCalledTimes(1));
+    expect(putBody().data.config).toMatchObject({ host: "repaired.internal" });
+  });
+
+  test("unparseable JSON refuses the switch to the form instead of discarding it", async () => {
+    const user = setup();
+    renderDetail();
+    await user.click(await screen.findByRole("button", { name: /^Edit configuration$/ }));
+    await user.click(screen.getByRole("button", { name: /^Edit as JSON$/ }));
+    fireEvent.change(screen.getByLabelText(/Configuration JSON/), {
+      target: { value: '{"host": "half-typed' },
+    });
+    await user.click(screen.getByRole("button", { name: /^Edit as a form$/ }));
+    // Still in the JSON editor, with the text intact, and told why.
+    expect(screen.getByLabelText(/Configuration JSON/)).toHaveValue('{"host": "half-typed');
+    expect(screen.getByTestId("catalog-config-error")).toHaveTextContent(/not valid JSON/);
+  });
+
+  /**
+   * The banner's silence is reachable TODAY — a stored jdbc row with an
+   * unknown dialect and a non-UUID secret id shows nothing, because
+   * `submitProblem` is a subset of `validate_config`. A quiet page must
+   * therefore say what quiet means (review F3).
+   */
+  test("read mode bounds what the staleness check actually checked", async () => {
+    renderDetail();
+    expect(await screen.findByTestId("catalog-config-check-bound")).toHaveTextContent(
+      /checks only the rules it knows/i,
+    );
+  });
+
+  /**
+   * `submitProblem` guarded every nested read but not the top-level one, so a
+   * stored `config` of JSON `null` threw inside the render and took the back
+   * link, the header and the tabs with it — on the one page whose job is to
+   * show a row nothing can parse (review F4).
+   */
+  test("a stored config of JSON null renders the page instead of blanking it", async () => {
+    mockCatalog(jdbcCatalog({ config: null as unknown as RegistryCatalogDto["config"] }));
+    renderDetail();
+    expect(await screen.findByRole("heading", { level: 1, name: "sales" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Configuration/ })).toBeInTheDocument();
+    expect(screen.getByTestId("catalog-config-json")).toBeInTheDocument();
+  });
+
+  test("per-engine advanced properties are in the read pass, not only inside the JSON disclosure", async () => {
+    mockCatalog(
+      jdbcCatalog({
+        advanced: { trino: { "join-distribution-type": "BROADCAST" } },
+      }),
+    );
+    renderDetail();
+    const adv = await screen.findByTestId("catalog-advanced-read");
+    expect(adv).toHaveTextContent("join-distribution-type");
+    expect(adv).toHaveTextContent("BROADCAST");
+    expect(adv).toHaveTextContent("trino");
+  });
+
+  test("the impact headline counts the engines the impact query named", async () => {
+    const user = setup();
+    mockCatalog(
+      jdbcCatalog({
+        engines: [
+          attachment(),
+          attachment({ engineId: "e2", engineName: "sr-eu", engineType: "starrocks" }),
+        ],
+      }),
+    );
+    // The query answers for one engine only — attachments changed under the
+    // page. The headline must not say "2 engines" above a single bullet.
+    mockImpact([
+      { engineId: "e1", engineName: "trino-prod", engineType: "trino", action: "restart" },
+    ]);
+    renderDetail();
+    await user.click(await screen.findByRole("button", { name: /^Edit configuration$/ }));
+    const blast = screen.getByTestId("catalog-impact");
+    expect(blast).toHaveTextContent("Saving re-applies this catalog to 1 engine");
+    // The headline must not count the attachments while the bullets count the
+    // impact answer — "2 engines" above one bullet is the defect.
+    expect(blast).not.toHaveTextContent("to 2 engines");
+  });
+
   test("the JSON editor posts exactly what was typed, for a shape no form has", async () => {
     const user = setup();
     mockCatalog(
@@ -430,15 +540,45 @@ describe("Workspaces tab", () => {
   });
 
   test("a read-only operator cannot save, and the tab does not overstate what assignment does", async () => {
-    const user = setup();
     mockAssigned([]);
     renderDetail("/control-plane/catalogs/c-1?tab=workspaces", READER);
     expect(await screen.findByRole("checkbox", { name: /Engineering/ })).toBeInTheDocument();
-    await user.click(screen.getByRole("checkbox", { name: /Engineering/ }));
+    // No click: the box is `disabled={!canUpdate}`, so clicking it is inert and
+    // would read as if it had proved something. The absence of the Save button
+    // is the assertion that carries this test (review test-quality note).
     expect(screen.queryByRole("button", { name: /^Save assignments$/ })).toBeNull();
     expect(
       screen.getByText(/It does not restrict what an engine will answer/),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * `list_engine_catalogs` (`egret-query/src/registry/repo.rs:509-538`) ORs the
+   * assignment test with `warehouse_id IS NOT NULL AND NOT EXISTS (… any
+   * assignment at all …) AND the caller owns the warehouse`. So the fallback
+   * exists AND the first assignment — to anyone — destroys it. Both halves
+   * change what an operator should do and neither was on screen.
+   */
+  test("the tab states the ownership fallback and that the first assignment replaces it", async () => {
+    mockAssigned([]);
+    renderDetail("/control-plane/catalogs/c-1?tab=workspaces");
+    const note = await screen.findByTestId("workspace-assignment-rules");
+    expect(note).toHaveTextContent(/no assignments at all/);
+    expect(note).toHaveTextContent(/the first assignment replaces that/i);
+    // The consequence, not only the rule: assigning it elsewhere takes it away
+    // from the owner.
+    expect(note).toHaveTextContent(/takes it out of the owning workspace/i);
+  });
+
+  test("a still-loading workspace list is a skeleton, not the sentence 'no workspaces'", async () => {
+    vi.mocked(hooks.useMyWorkspaces).mockReturnValue({
+      data: undefined,
+      isLoading: true,
+    } as unknown as ReturnType<typeof hooks.useMyWorkspaces>);
+    mockAssigned([]);
+    renderDetail("/control-plane/catalogs/c-1?tab=workspaces");
+    expect(await screen.findByTestId("workspace-assignment-rules")).toBeInTheDocument();
+    expect(screen.queryByText("There are no workspaces to assign.")).toBeNull();
   });
 });
 

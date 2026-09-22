@@ -53,6 +53,22 @@ export function advancedMaps(advanced: unknown): AdvancedValue {
   return out;
 }
 
+/**
+ * The stored `config` as an object the forms can read.
+ *
+ * `RegistryCatalogDtoConfig` is `{ [key: string]: unknown }`, which TypeScript
+ * is happy to let a JSON `null` inhabit at runtime. `submitProblem` guards its
+ * own top-level read (see there), but the READ-MODE form does not go through
+ * `submitProblem` — `JdbcForm` and its siblings each open with `const c =
+ * config` and then `str(c.dialect)`. Both paths have to be safe, or fixing one
+ * simply moves the blank page a few lines down.
+ */
+function configObject(config: unknown): Record<string, unknown> {
+  return config && typeof config === "object" && !Array.isArray(config)
+    ? (config as Record<string, unknown>)
+    : {};
+}
+
 function asMaps(a: AdvancedValue): Record<string, Record<string, string>> {
   return {
     ...(a.trino ? { trino: a.trino } : {}),
@@ -84,6 +100,9 @@ function asMaps(a: AdvancedValue): Record<string, Record<string, string>> {
 export function storedConfigProblem(catalog: RegistryCatalogDto): string | null {
   if (isEgretWarehouse(catalog)) return null;
   if (!REGISTRY_KINDS.includes(catalog.kind)) return null;
+  // Deliberately the RAW stored value, not `configObject(...)`: `submitProblem`
+  // owns its own input domain (it is called from the create page too), so
+  // narrowing here would hide whether its guard is really there.
   return submitProblem(
     catalog.kind,
     catalog.config as Record<string, unknown>,
@@ -148,6 +167,7 @@ export function ConfigurationTab({ catalog }: { catalog: RegistryCatalogDto }) {
   });
   const impactEngines =
     impact.data?.status === 200 ? impact.data.data.engines : [];
+  const impactCount = impactEngines.length > 0 ? impactEngines.length : catalog.engines.length;
 
   // `<ApiError>`: `apiFetch` throws on every non-2xx, so what react-query
   // hands the error path is an `ApiError` carrying `.message`. The generated
@@ -185,7 +205,7 @@ export function ConfigurationTab({ catalog }: { catalog: RegistryCatalogDto }) {
   });
 
   function startEdit() {
-    setDraft({ ...(catalog.config as Record<string, unknown>) });
+    setDraft({ ...configObject(catalog.config) });
     setDraftAdvanced(advancedMaps(catalog.advanced));
     setDraftDescription(catalog.description ?? "");
     setJsonText(JSON.stringify(catalog.config, null, 2));
@@ -196,6 +216,41 @@ export function ConfigurationTab({ catalog }: { catalog: RegistryCatalogDto }) {
     setError(null);
     setIssues([]);
     setEditing(true);
+  }
+
+  /**
+   * Move the edit between the two editors, carrying it BOTH ways.
+   *
+   * The form→JSON direction always did. The JSON→form direction used to just
+   * flip the flag, so everything typed in the JSON editor was dropped on the
+   * floor and the next save posted the PRE-JSON draft under a "Configuration
+   * saved" toast — a save that repaired nothing while claiming success, on the
+   * path this tab exists for (SP3c review F2). JSON that does not parse into
+   * an object refuses the switch and says why, rather than being silently
+   * thrown away: half-typed JSON is work in progress, not a mistake to punish.
+   */
+  function switchEditor() {
+    if (!jsonMode) {
+      setJsonText(JSON.stringify(draft, null, 2));
+      setJsonMode(true);
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch (e) {
+      setError(
+        `That is not valid JSON, so the form cannot take it over: ${(e as Error).message}`,
+      );
+      return;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      setError("The configuration must be a JSON object before the form can take it over.");
+      return;
+    }
+    setDraft(parsed as Record<string, unknown>);
+    setError(null);
+    setJsonMode(false);
   }
 
   function save() {
@@ -241,12 +296,50 @@ export function ConfigurationTab({ catalog }: { catalog: RegistryCatalogDto }) {
       data: {
         config,
         ...(Object.keys(advanced).length > 0 ? { advanced } : {}),
-        // Explicitly `null` rather than omitted: PUT REPLACES, so an emptied
-        // box has to be able to clear the stored description.
+        // Sent explicitly rather than omitted because it SAYS what it does.
+        // Omitting it would clear the description just the same — the field is
+        // `#[serde(default)] Option<String>` and `update_catalog` binds it to
+        // `description = $4` unconditionally (`store.rs:421-429`) — so this is
+        // a legibility choice, not a correctness one (SP3c review F5).
         description: description === "" ? null : description,
       },
     });
   }
+
+  // Brief Step 2 asked for "the `advanced` map per engine" in the read pass and
+  // the first round left it only as a second <pre> INSIDE the stored-JSON
+  // disclosure — collapsed whenever the row has no problem, so a catalog whose
+  // behaviour on Trino is driven entirely by `advanced` showed none of it until
+  // someone clicked (review F7). Rendered here as its own section, at the same
+  // altitude as the typed form it overrides.
+  const storedAdvanced = advancedMaps(catalog.advanced);
+  const advancedEngines = (["trino", "starrocks"] as const).filter(
+    (e) => storedAdvanced[e] !== undefined,
+  );
+  const advancedRead =
+    advancedEngines.length === 0 ? null : (
+      <ConfigSection
+        level={2}
+        title="Advanced properties"
+        description="Written after the properties the form above sets, per engine."
+      >
+        <div data-testid="catalog-advanced-read" className="space-y-3">
+          {advancedEngines.map((engine) => (
+            <div key={engine} className="space-y-1 rounded-md border p-3">
+              <p className="text-sm font-medium">{engine}</p>
+              <dl className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+                {Object.entries(storedAdvanced[engine] ?? {}).map(([k, v]) => (
+                  <div key={k} className="contents">
+                    <dt className="truncate font-mono text-xs text-muted-foreground">{k}</dt>
+                    <dd className="break-all font-mono text-xs">{v}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          ))}
+        </div>
+      </ConfigSection>
+    );
 
   const storedJson = (
     <Collapsible
@@ -323,11 +416,28 @@ export function ConfigurationTab({ catalog }: { catalog: RegistryCatalogDto }) {
           <fieldset disabled className="space-y-4">
             <KindForm
               kind={catalog.kind}
-              config={catalog.config as Record<string, unknown>}
+              config={configObject(catalog.config)}
               onChange={() => {}}
             />
           </fieldset>
         ) : null}
+
+        {!systemManaged && typedForm && (
+          // The banner's SILENCE is reachable today, not only after some future
+          // tightening: `submitProblem` is a strict subset of `validate_config`,
+          // so a stored jdbc row with an unknown dialect and a non-UUID secret
+          // id fails at the backend and shows nothing here. A reader takes a
+          // quiet page as a healthy row. Naming the instrument is what makes
+          // the absence of a banner mean something falsifiable (review F3); the
+          // durable fix is the shared fixture Task 5 carried forward.
+          <p data-testid="catalog-config-check-bound" className="text-xs text-muted-foreground">
+            {problem === null
+              ? "Nothing here fails the rules this build checks — but it checks only the rules it knows, and egret validates the whole configuration when you save."
+              : "This page checks only the rules it knows, and egret validates the whole configuration when you save — so there may be more than the above."}
+          </p>
+        )}
+
+        {advancedRead}
 
         <ConfigSection level={2} title="Description">
           <p className="text-sm">
@@ -364,7 +474,13 @@ export function ConfigurationTab({ catalog }: { catalog: RegistryCatalogDto }) {
 
       {catalog.engines.length > 0 && (
         <Alert data-testid="catalog-impact">
-          <AlertTitle>Saving re-applies this catalog to {catalog.engines.length} engine{catalog.engines.length === 1 ? "" : "s"}</AlertTitle>
+          {/* Counted from the impact answer when there is one, so the headline
+              and the bullets below it describe the same set. Falling back to
+              the attachment count only while the query has not answered. */}
+          <AlertTitle>
+            Saving re-applies this catalog to {impactCount} engine
+            {impactCount === 1 ? "" : "s"}
+          </AlertTitle>
           <AlertDescription>
             {impact.isError ? (
               <p>Couldn&apos;t work out what saving does to each engine.</p>
@@ -390,17 +506,7 @@ export function ConfigurationTab({ catalog }: { catalog: RegistryCatalogDto }) {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => {
-              if (jsonMode) {
-                setJsonMode(false);
-              } else {
-                // Hand the JSON editor what the FORM currently holds, not what
-                // was loaded — otherwise switching modes silently discards
-                // whatever was just typed.
-                setJsonText(JSON.stringify(draft, null, 2));
-                setJsonMode(true);
-              }
-            }}
+            onClick={switchEditor}
           >
             {jsonMode ? "Edit as a form" : "Edit as JSON"}
           </Button>
