@@ -129,6 +129,11 @@ pub struct CatalogEngineRow {
     pub applied_at: Option<DateTime<Utc>>,
     /// This catalog is that engine's primary (SP3c D2).
     pub is_primary: bool,
+    /// When the attachment row was written. `apply_status` is only ever set to
+    /// `pending` by `insert_attachment_row`, so this is also the moment a
+    /// `pending` attachment started waiting — the clock a "still pending"
+    /// warning has to be measured against.
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, sqlx::FromRow)]
@@ -766,7 +771,7 @@ impl RegistryStore {
         catalog_id: Uuid,
     ) -> Result<Vec<CatalogEngineRow>, RegistryError> {
         Ok(sqlx::query_as::<_, CatalogEngineRow>(
-            "SELECT a.engine_id, e.name AS engine_name, e.type AS engine_type, a.apply_status, a.apply_error, a.applied_at, a.is_primary \
+            "SELECT a.engine_id, e.name AS engine_name, e.type AS engine_type, a.apply_status, a.apply_error, a.applied_at, a.is_primary, a.created_at \
                FROM registry.engine_catalog_attachments a JOIN engine_mgmt.engines e ON e.id = a.engine_id \
               WHERE a.catalog_id = $1 ORDER BY e.name",
         )

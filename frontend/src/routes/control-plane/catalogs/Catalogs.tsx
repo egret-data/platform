@@ -20,21 +20,12 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { catalogsQueryKey, warehousesQueryKey } from "../queryKeys";
 
-/**
- * The key the generated list query is cached under, so a delete on this page
- * invalidates the list the user is looking at.
- *
- * This is deliberately the GENERATED builder's value
- * (`getControlPlaneCatalogRegistryListRegistryCatalogsQueryKey()`), not a
- * hand-picked `["control-plane", "catalogs"]` pair: the rows come from the
- * generated hook, so only its own key refreshes them. The `?workspace=`
- * variant appends its params to this same first element, so invalidating on
- * this prefix catches every variant. `Catalogs.test.tsx` pins the literal to
- * the builder's output — a drift there would silently leave a deleted row on
- * screen with every other test still green.
- */
-export const catalogsQueryKey = ["/api/control-plane/catalogs"] as const;
+// Re-exported so this page stays the obvious home of its own key (Task 5's
+// `CatalogCreate.tsx` and this file's tests both import it from here). It is
+// DEFINED in `../queryKeys` because `Warehouses.tsx` needs it too — see there.
+export { catalogsQueryKey } from "../queryKeys";
 
 /**
  * Is this catalog the egret warehouse it mirrors?
@@ -58,9 +49,16 @@ const PENDING_GRACE_MS = 15 * 60 * 1000;
  * The list's warning column. `failed` is unambiguous. `pending` is NORMAL for
  * the first minutes of a StarRocks engine's life — SP3b writes it deliberately
  * — so it is only a warning once it has outlived the bootstrap that clears it.
- * `appliedAt` is the proof the attachment ever converged, and `updatedAt` is
- * the last time egret changed the catalog, which is when a re-apply would have
- * restarted the clock.
+ *
+ * The clock is the ATTACHMENT's `createdAt`, which is the moment the wait
+ * began: `pending` is written only by the INSERT that creates the row (engine
+ * create and attach), and nothing flips a settled attachment back to it. The
+ * catalog's `updatedAt` cannot stand in — attaching an EXISTING catalog never
+ * writes `registry.catalogs.updated_at`, so that clock is already arbitrarily
+ * old at the instant a fresh StarRocks attachment starts waiting, and the row
+ * would cry "still pending" throughout exactly the bootstrap this grace exists
+ * to cover. `appliedAt` is the independent proof the attachment ever
+ * converged, kept as a second guard.
  */
 export function attachmentWarning(c: RegistryCatalogDto, now: number): CatalogWarning {
   const failed = c.engines.filter((e) => e.applyStatus === "failed");
@@ -74,7 +72,7 @@ export function attachmentWarning(c: RegistryCatalogDto, now: number): CatalogWa
     (e) =>
       e.applyStatus === "pending" &&
       !e.appliedAt &&
-      now - new Date(c.updatedAt).getTime() > PENDING_GRACE_MS,
+      now - new Date(e.createdAt).getTime() > PENDING_GRACE_MS,
   );
   if (stalled.length > 0) {
     return {
@@ -85,6 +83,24 @@ export function attachmentWarning(c: RegistryCatalogDto, now: number): CatalogWa
     };
   }
   return null;
+}
+
+/**
+ * A catalog's workspace assignments split into the ones this operator can name
+ * and a count of the ones they cannot — see `wsName` for why some cannot be.
+ */
+function namedWorkspaces(
+  c: RegistryCatalogDto,
+  wsName: (id: string) => string | null,
+): { named: string[]; hidden: number } {
+  const named: string[] = [];
+  let hidden = 0;
+  for (const id of c.workspaceIds) {
+    const name = wsName(id);
+    if (name) named.push(name);
+    else hidden += 1;
+  }
+  return { named, hidden };
 }
 
 /** What the Kind column shows: the warehouse it is, or the raw kind. */
@@ -99,7 +115,7 @@ function kindLabel(c: RegistryCatalogDto): string {
  * beside the count for that reason.
  */
 function catalogColumns(
-  wsName: (id: string) => string,
+  wsName: (id: string) => string | null,
   now: number,
   onDelete: (c: RegistryCatalogDto) => void,
 ): Column<RegistryCatalogDto>[] {
@@ -146,17 +162,22 @@ function catalogColumns(
       key: "workspaces",
       label: "Workspaces",
       sortable: true,
-      value: (c) => c.workspaceIds.map(wsName).join(", "),
-      cell: (c) => (
-        <span className="flex items-baseline gap-2">
-          <span>{c.workspaceIds.length}</span>
-          {c.workspaceIds.length > 0 && (
-            <span className="truncate text-xs text-muted-foreground">
-              {c.workspaceIds.map(wsName).join(", ")}
-            </span>
-          )}
-        </span>
-      ),
+      // Only the names the operator can actually see are searchable, because
+      // only those are drawn; the hidden ones contribute a count, not a token.
+      value: (c) => namedWorkspaces(c, wsName).named.join(", "),
+      cell: (c) => {
+        const { named, hidden } = namedWorkspaces(c, wsName);
+        const parts = [...named];
+        if (hidden > 0) parts.push(`${hidden} not visible to you`);
+        return (
+          <span className="flex items-baseline gap-2">
+            <span>{c.workspaceIds.length}</span>
+            {parts.length > 0 && (
+              <span className="truncate text-xs text-muted-foreground">{parts.join(", ")}</span>
+            )}
+          </span>
+        );
+      },
     },
     {
       key: "status",
@@ -217,7 +238,15 @@ export default function Catalogs() {
 
   const [deleteTarget, setDeleteTarget] = useState<RegistryCatalogDto | null>(null);
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: catalogsQueryKey });
+  // BOTH keys, both branches. An egret-warehouse row is deleted through the
+  // very endpoint the Warehouses list calls, so refreshing only this page's
+  // cache leaves the deleted warehouse listed on the other one for the 30
+  // seconds of `staleTime` — reachable exactly because D5 keeps both sections
+  // live. `Warehouses.tsx` does the mirror of this.
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: catalogsQueryKey });
+    void queryClient.invalidateQueries({ queryKey: warehousesQueryKey });
+  };
 
   // The generated `TError` is `ErrorBody | CatalogConflictBody`, but `apiFetch`
   // throws and the runtime value is an `ApiError` carrying the body's `error`
@@ -255,8 +284,21 @@ export default function Catalogs() {
     return () => clearInterval(id);
   }, []);
 
-  const wsName = (id: string) => workspaces.data?.find((w) => w.id === id)?.name ?? id.slice(0, 8);
+  // Best-effort, and it says so when it cannot.
+  //
+  // `useMyWorkspaces` is `GET /me/workspaces` — the CALLER's workspaces, which
+  // is the only workspace list this page may assume it can read. The
+  // all-workspaces endpoint (`GET /api/admin/workspaces`) requires
+  // `workspace:read` and this page is gated on `catalog_registry:read`, which
+  // does not imply it, so fetching it would 403 exactly the persona the
+  // section was built for. A catalog assigned to a workspace the operator is
+  // not in therefore cannot be named here — and the UI says "not visible to
+  // you" rather than printing eight characters of a UUID, which reads like
+  // data and is not.
+  const wsName = (id: string): string | null =>
+    workspaces.data?.find((w) => w.id === id)?.name ?? null;
   const rows = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
+  const plan = deleteTarget ? deletePlan(deleteTarget, wsName) : null;
 
   const total = rows.length;
   const attached = rows.filter((c) => c.engines.length > 0).length;
@@ -296,7 +338,20 @@ export default function Catalogs() {
       {wsFilter && (
         <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm">
           <span className="text-muted-foreground">
-            Filtered to workspace <span className="font-medium text-foreground">{wsName(wsFilter)}</span>
+            {wsName(wsFilter) ? (
+              <>
+                Filtered to workspace{" "}
+                <span className="font-medium text-foreground">{wsName(wsFilter)}</span>
+              </>
+            ) : (
+              // The id is the only identifier available for a workspace the
+              // operator is not a member of, so it is shown AS an id rather
+              // than in the slot a name would occupy.
+              <>
+                Filtered to workspace id{" "}
+                <span className="font-mono text-xs text-foreground">{wsFilter}</span>
+              </>
+            )}
           </span>
           <Link to="/control-plane/catalogs" className="ml-auto text-primary hover:underline">
             Show all workspaces
@@ -340,37 +395,67 @@ export default function Catalogs() {
           if (!o) setDeleteTarget(null);
         }}
         title={deleteTarget ? `Delete «${deleteTarget.name}»?` : "Delete catalog?"}
-        description={deleteTarget ? deleteDescription(deleteTarget, wsName) : ""}
+        description={plan?.description ?? ""}
         confirmText="delete"
+        confirmDisabled={plan?.blocked ?? false}
         onConfirm={() => {
           if (deleteTarget) confirmDelete(deleteTarget);
         }}
-      />
+      >
+        {plan && plan.references.length > 0 ? (
+          <ul className="list-disc space-y-0.5 pl-5">
+            {plan.references.map((r) => (
+              <li key={r}>{r}</li>
+            ))}
+          </ul>
+        ) : null}
+      </ConfirmDeleteDialog>
     </div>
   );
 }
 
 /**
- * What the confirmation actually does, which differs by branch because the
- * endpoint does. The warehouse sentence is `Warehouses.tsx`'s, kept verbatim so
- * the two sections say the same thing while both exist (D5); the registry one
- * reads the references off the row, because deleting a catalog an engine or
- * workspace still uses is what the server refuses with a 409.
+ * What the confirm dialog says, what it lists, and whether it may proceed.
+ *
+ * The branch matters because the endpoint does. The warehouse sentence is
+ * `Warehouses.tsx`'s, kept verbatim so the two sections say the same thing
+ * while both exist (D5). The registry branch names the references off the row
+ * — the same engines and workspaces the server would send back in the 409's
+ * `catalog_in_use` body — and, when there are any, WITHHOLDS the confirm
+ * button: a dialog that explains the refusal and then invites the user to type
+ * "delete" and collect the error it just described is not a warning, it is a
+ * trap.
  */
-function deleteDescription(c: RegistryCatalogDto, wsName: (id: string) => string): string {
+type DeletePlan = { description: string; references: string[]; blocked: boolean };
+
+function deletePlan(c: RegistryCatalogDto, wsName: (id: string) => string | null): DeletePlan {
   if (isEgretWarehouse(c)) {
-    return "This catalog is an egret warehouse, so it is deleted with the warehouse itself. The egret warehouse record is removed. (The underlying lakekeeper warehouse is not dropped.)";
+    return {
+      description:
+        "This catalog is an egret warehouse, so it is deleted with the warehouse itself. The egret warehouse record is removed. (The underlying lakekeeper warehouse is not dropped.)",
+      references: [],
+      blocked: false,
+    };
   }
-  const refs: string[] = [];
-  if (c.engines.length > 0) {
-    refs.push(`${c.engines.length === 1 ? "engine" : "engines"} ${c.engines.map((e) => e.engineName).join(", ")}`);
-  }
-  if (c.workspaceIds.length > 0) {
-    refs.push(
-      `${c.workspaceIds.length === 1 ? "workspace" : "workspaces"} ${c.workspaceIds.map(wsName).join(", ")}`,
+  const references = c.engines.map((e) => `Attached to engine ${e.engineName}`);
+  const { named, hidden } = namedWorkspaces(c, wsName);
+  for (const n of named) references.push(`Assigned to workspace ${n}`);
+  if (hidden > 0) {
+    references.push(
+      `Assigned to ${hidden} workspace${hidden === 1 ? "" : "s"} not visible to you`,
     );
   }
-  return refs.length > 0
-    ? `Still referenced by ${refs.join(" and ")}. The server refuses a catalog that is still in use — detach and unassign it first.`
-    : "The catalog is removed from the registry. Nothing references it.";
+  if (references.length === 0) {
+    return {
+      description: "The catalog is removed from the registry. Nothing references it.",
+      references,
+      blocked: false,
+    };
+  }
+  return {
+    description:
+      "The server refuses a catalog that anything still uses, so this delete cannot go ahead yet. Detach it from every engine and unassign it from every workspace first. It still has:",
+    references,
+    blocked: true,
+  };
 }

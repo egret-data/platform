@@ -30270,7 +30270,8 @@
           "engineName",
           "engineType",
           "applyStatus",
-          "isPrimary"
+          "isPrimary",
+          "createdAt"
         ],
         "properties": {
           "engineId": {
@@ -30303,6 +30304,11 @@
           "isPrimary": {
             "type": "boolean",
             "description": "This catalog is that engine's PRIMARY: it leads the engine's render\norder and cannot be detached or edited. At most one of an engine's\ncatalogs carries it (SP3c D2, migration 0150)."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this attachment was recorded — `engine_catalog_attachments.created_at`.\n\nThe clock a `pending` attachment has been waiting on. `pending` is\nwritten only by the INSERT that creates the row (engine create and\nattach; nothing flips a settled attachment back), so this is the moment\nthe wait began. A UI deciding whether a `pending` has outlived the\nStarRocks bootstrap must measure against THIS and not against the\ncatalog's `updatedAt`: attaching an existing catalog never touches the\ncatalog row, so its `updatedAt` is already arbitrarily old."
           }
         }
       },

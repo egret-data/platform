@@ -25,6 +25,7 @@ import Catalogs, {
   catalogsQueryKey,
   isEgretWarehouse,
 } from "@/routes/control-plane/catalogs/Catalogs";
+import { warehousesQueryKey } from "@/routes/control-plane/queryKeys";
 
 const NOW = new Date("2026-09-22T12:00:00Z").getTime();
 
@@ -44,6 +45,7 @@ function catalog(over: Partial<RegistryCatalogDto> = {}): RegistryCatalogDto {
         applyStatus: "applied",
         appliedAt: "2026-09-22T11:00:00Z",
         isPrimary: true,
+        createdAt: "2026-09-22T10:30:00Z",
       },
     ],
     workspaceIds: ["ws1"],
@@ -73,16 +75,23 @@ function listResult(rows: RegistryCatalogDto[], over: Record<string, unknown> = 
 }
 
 let registryDelete: ReturnType<typeof vi.fn>;
+/** The options the page handed the generated delete hook, so a test can drive
+ * the `onSuccess` the page attached — the mocked hook never runs it itself. */
+let registryDeleteOptions:
+  | Parameters<typeof registry.useControlPlaneCatalogRegistryDeleteRegistryCatalog>[0]
+  | undefined;
 
 function renderPage(entry = "/control-plane/catalogs") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const utils = render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[entry]}>
         <Catalogs />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...utils, qc, invalidate };
 }
 
 /** Opens the row's Delete dialog and types the confirmation word. */
@@ -101,9 +110,15 @@ beforeEach(() => {
   vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
     listResult([]),
   );
-  vi.mocked(registry.useControlPlaneCatalogRegistryDeleteRegistryCatalog).mockReturnValue({
-    mutate: registryDelete,
-  } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryDeleteRegistryCatalog>);
+  registryDeleteOptions = undefined;
+  vi.mocked(registry.useControlPlaneCatalogRegistryDeleteRegistryCatalog).mockImplementation(
+    (options) => {
+      registryDeleteOptions = options;
+      return { mutate: registryDelete } as unknown as ReturnType<
+        typeof registry.useControlPlaneCatalogRegistryDeleteRegistryCatalog
+      >;
+    },
+  );
   vi.mocked(api.deleteWarehouse).mockResolvedValue(undefined);
 });
 
@@ -189,6 +204,7 @@ describe("Catalogs list", () => {
               applyStatus: "failed",
               appliedAt: null,
               isPrimary: false,
+              createdAt: "2026-09-22T10:30:00Z",
             },
           ],
         }),
@@ -204,6 +220,12 @@ describe("Catalogs list", () => {
  * tested without rendering. `pending` is NORMAL for the first minutes of a
  * StarRocks engine's life (SP3b writes it deliberately), so it is a warning
  * only once it has outlived the bootstrap that clears it.
+ *
+ * The clock is the ATTACHMENT's own `createdAt`, not the catalog's `updatedAt`
+ * (fix round 1, F2). The two are held apart on purpose in the first two cases
+ * below — each sets one clock to a value that would give the WRONG answer if
+ * the rule read it — so neither timestamp can stand in for the other and still
+ * pass.
  */
 describe("attachmentWarning", () => {
   const pending = (over: Record<string, unknown> = {}) => ({
@@ -213,8 +235,11 @@ describe("attachmentWarning", () => {
     applyStatus: "pending",
     appliedAt: null,
     isPrimary: false,
+    createdAt: new Date(NOW).toISOString(),
     ...over,
   });
+  const ago = (ms: number) => new Date(NOW - ms).toISOString();
+  const MONTH = 30 * 24 * 60 * 60_000;
 
   test("failed is unambiguous and names the engine", () => {
     const w = attachmentWarning(
@@ -224,24 +249,41 @@ describe("attachmentWarning", () => {
     expect(w).toEqual({ level: "failed", text: "Failed to apply on sr-a" });
   });
 
-  test("a pending attachment on a catalog updated a minute ago is not a warning", () => {
-    const updatedAt = new Date(NOW - 60_000).toISOString();
-    expect(attachmentWarning(catalog({ engines: [pending()], updatedAt }), NOW)).toBeNull();
+  // F2, and the reason the anchor moved. Attaching an EXISTING catalog to a
+  // fresh StarRocks engine inserts an attachment row and never touches
+  // `registry.catalogs.updated_at` (`store.rs` insert_attachment_row), so the
+  // catalog's clock is already a month old at the instant the wait begins.
+  // Read off the catalog, this row cried "Still pending on sr-new" from the
+  // very first render — throughout exactly the 5-10 minute bootstrap the grace
+  // exists to cover.
+  test("a pending attachment a minute old is not a warning, however old the catalog row is", () => {
+    const engines = [pending({ createdAt: ago(60_000) })];
+    expect(attachmentWarning(catalog({ engines, updatedAt: ago(MONTH) }), NOW)).toBeNull();
   });
 
-  test("a pending attachment on a catalog updated an hour ago is stalled", () => {
-    const updatedAt = new Date(NOW - 60 * 60_000).toISOString();
-    const w = attachmentWarning(catalog({ engines: [pending()], updatedAt }), NOW);
+  // The other direction, so the fix cannot be "ignore time entirely": a catalog
+  // edited a second ago (which always re-applies — `update_catalog` calls
+  // `propagate`) whose attachment has nonetheless been waiting an hour is
+  // stalled. The catalog clock would have hidden this one.
+  test("a pending attachment an hour old is stalled, however recently the catalog row changed", () => {
+    const engines = [pending({ createdAt: ago(60 * 60_000) })];
+    const w = attachmentWarning(catalog({ engines, updatedAt: ago(1_000) }), NOW);
     expect(w?.level).toBe("stalled");
     expect(w?.text).toContain("sr-new");
   });
 
+  test("a pending attachment still inside the 15-minute grace is not a warning", () => {
+    const engines = [pending({ createdAt: ago(14 * 60_000) })];
+    expect(attachmentWarning(catalog({ engines }), NOW)).toBeNull();
+  });
+
   test("failed outranks a stalled pending on the same catalog", () => {
-    const updatedAt = new Date(NOW - 60 * 60_000).toISOString();
     const w = attachmentWarning(
       catalog({
-        engines: [pending(), pending({ engineId: "e2", engineName: "trino-b", applyStatus: "failed" })],
-        updatedAt,
+        engines: [
+          pending({ createdAt: ago(60 * 60_000) }),
+          pending({ engineId: "e2", engineName: "trino-b", applyStatus: "failed" }),
+        ],
       }),
       NOW,
     );
@@ -249,15 +291,13 @@ describe("attachmentWarning", () => {
   });
 
   test("an old pending that has already applied once is not stalled", () => {
-    const updatedAt = new Date(NOW - 60 * 60_000).toISOString();
-    const engines = [pending({ appliedAt: "2026-09-22T09:00:00Z" })];
-    expect(attachmentWarning(catalog({ engines, updatedAt }), NOW)).toBeNull();
+    const engines = [pending({ createdAt: ago(60 * 60_000), appliedAt: "2026-09-22T09:00:00Z" })];
+    expect(attachmentWarning(catalog({ engines }), NOW)).toBeNull();
   });
 
   test("an applied attachment is never a warning, however old", () => {
-    const updatedAt = new Date(NOW - 60 * 60_000).toISOString();
-    const engines = [pending({ applyStatus: "applied", appliedAt: null })];
-    expect(attachmentWarning(catalog({ engines, updatedAt }), NOW)).toBeNull();
+    const engines = [pending({ createdAt: ago(MONTH), applyStatus: "applied", appliedAt: null })];
+    expect(attachmentWarning(catalog({ engines }), NOW)).toBeNull();
   });
 });
 
@@ -293,6 +333,44 @@ describe("delete routes by kind", () => {
     expect(registryDelete).not.toHaveBeenCalled();
   });
 
+  // F6: an egret-warehouse row is deleted through the very endpoint the
+  // Warehouses list calls, so refreshing only this page's cache leaves the
+  // deleted warehouse listed on the other section for the 30 seconds of
+  // `staleTime` — reachable precisely because D5 keeps both sections live.
+  test("an egret warehouse delete refreshes the Warehouses list too", async () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([catalog()]),
+    );
+    const user = userEvent.setup();
+    const { invalidate } = renderPage();
+    await confirmDelete(user, "analytics");
+
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: warehousesQueryKey }),
+    );
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: catalogsQueryKey });
+  });
+
+  // The registry branch reaches the same two caches: a jdbc catalog has no
+  // warehouse row of its own, but the page must not know two different
+  // invalidation rules for one button. Driven through the `onSuccess` the page
+  // attached, because the generated hook is mocked and never runs it.
+  test("a registry delete refreshes both lists", () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([JDBC]),
+    );
+    const { invalidate } = renderPage();
+    expect(registryDeleteOptions?.mutation?.onSuccess).toBeTypeOf("function");
+    registryDeleteOptions!.mutation!.onSuccess!(
+      undefined as never,
+      { id: "c2" },
+      undefined as never,
+      undefined as never,
+    );
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: catalogsQueryKey });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: warehousesQueryKey });
+  });
+
   test("a jdbc row deletes through the registry and never the warehouse endpoint", async () => {
     vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
       listResult([JDBC]),
@@ -303,6 +381,85 @@ describe("delete routes by kind", () => {
 
     await waitFor(() => expect(registryDelete).toHaveBeenCalledWith({ id: "c2" }));
     expect(api.deleteWarehouse).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Fix round 1, the two minors.
+ *
+ * The delete dialog used to explain that the server would refuse and then leave
+ * the Delete button enabled, so the user typed the confirmation word and
+ * collected the error they had just been warned about; and a workspace the
+ * operator is not a member of rendered as eight characters of a UUID, which
+ * reads like data and is not.
+ */
+describe("what the page tells the operator it cannot do", () => {
+  const REFERENCED = catalog({
+    id: "c3",
+    name: "crm-shared",
+    kind: "jdbc",
+    warehouseId: null,
+    engines: [
+      {
+        engineId: "e1",
+        engineName: "trino-prod",
+        engineType: "trino",
+        applyStatus: "applied",
+        appliedAt: "2026-09-22T11:00:00Z",
+        isPrimary: false,
+        createdAt: "2026-09-22T10:30:00Z",
+      },
+    ],
+    workspaceIds: ["ws1"],
+  });
+
+  test("a still-referenced catalog names its references and withholds Delete", async () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([REFERENCED]),
+    );
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: "Delete crm-shared" }));
+    // The 409's own reasons, read off the row and said BEFORE the user commits.
+    expect(await screen.findByText("Attached to engine trino-prod")).toBeInTheDocument();
+    expect(screen.getByText("Assigned to workspace Engineering")).toBeInTheDocument();
+
+    // Asserted as BEHAVIOUR, not as `toBeDisabled`: type the word, press the
+    // button, and show that nothing was sent. A disabled-attribute assertion
+    // can be satisfied by an ancestor the test did not mean to involve.
+    await user.type(screen.getByPlaceholderText("delete"), "delete");
+    await user.click(screen.getByRole("button", { name: /^Delete$/ }));
+    expect(registryDelete).not.toHaveBeenCalled();
+    expect(api.deleteWarehouse).not.toHaveBeenCalled();
+  });
+
+  test("an unreferenced catalog can still be deleted", async () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([JDBC]),
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await confirmDelete(user, "crm");
+    await waitFor(() => expect(registryDelete).toHaveBeenCalledWith({ id: "c2" }));
+  });
+
+  test("a workspace the operator cannot see is said to be hidden, not shown as a UUID", async () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([catalog({ workspaceIds: ["ws1", "3f2a91c4-0000-4000-8000-000000000001"] })]),
+    );
+    renderPage();
+    expect(await screen.findByText(/Engineering, 1 not visible to you/)).toBeInTheDocument();
+    expect(screen.queryByText(/3f2a91c4/)).not.toBeInTheDocument();
+  });
+
+  test("the ?workspace= banner labels an unresolvable id as an id", async () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([]),
+    );
+    renderPage("/control-plane/catalogs?workspace=3f2a91c4-0000-4000-8000-000000000001");
+    const banner = (await screen.findByText(/Filtered to workspace id/i)).closest("div")!;
+    expect(within(banner).getByText("3f2a91c4-0000-4000-8000-000000000001")).toBeInTheDocument();
   });
 });
 

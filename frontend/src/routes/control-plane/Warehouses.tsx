@@ -41,8 +41,12 @@ import {
   type Column,
 } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { catalogsQueryKey, warehousesQueryKey } from "./queryKeys";
 
-export const warehousesQueryKey = ["control-plane", "warehouses"] as const;
+// Re-exported so this page stays the obvious home of its own key. It is
+// DEFINED in `./queryKeys` because `catalogs/Catalogs.tsx` needs it too, and
+// this page needs that page's — see there.
+export { warehousesQueryKey } from "./queryKeys";
 
 /**
  * Column set for the warehouses table. `value` (used for search + sort) resolves
@@ -134,7 +138,15 @@ export default function Warehouses() {
   const queryClient = useQueryClient();
   const deleteMutation = useMutation<void, ApiError, string>({
     mutationFn: deleteWarehouse,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: warehousesQueryKey }),
+    // Also the catalogs list: every egret warehouse mirrors a registry catalog
+    // (migration 0147's CHECK), the delete cascades to it, and through SP3c-1
+    // both sections are live — so refreshing only this key leaves the deleted
+    // warehouse listed as a catalog for the 30 seconds of `staleTime`.
+    // `catalogs/Catalogs.tsx` does the mirror of this. Task 8 removes both.
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: warehousesQueryKey });
+      void queryClient.invalidateQueries({ queryKey: catalogsQueryKey });
+    },
   });
 
   const [addOpen, setAddOpen] = useState(false);

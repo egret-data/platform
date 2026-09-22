@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import Warehouses from "@/routes/control-plane/Warehouses";
+import { catalogsQueryKey, warehousesQueryKey } from "@/routes/control-plane/queryKeys";
 import * as api from "@/api/controlPlane";
 import * as hooks from "@/api/hooks";
 
@@ -21,13 +22,15 @@ const WAREHOUSE: api.Warehouse = {
 
 function renderPage(entry = "/control-plane/warehouses") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const utils = render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[entry]}>
         <Warehouses />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...utils, qc, invalidate };
 }
 
 describe("Warehouses", () => {
@@ -87,5 +90,25 @@ describe("Warehouses", () => {
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /Add warehouse/i })).toBeInTheDocument(),
     );
+  });
+
+  // SP3c-1 F6: every egret warehouse mirrors a registry catalog (migration
+  // 0147's CHECK) and the delete cascades to it, so a delete here must refresh
+  // the Catalogs list as well. Through SP3c-1 both sections are live (D5) and
+  // the app-wide `staleTime` is 30s, which is long enough to click the sidebar
+  // and see the row you just deleted. `catalogs/Catalogs.tsx` does the mirror
+  // of this; Task 8 removes both.
+  test("deleting a warehouse refreshes the Catalogs list too", async () => {
+    vi.mocked(api.listWarehouses).mockResolvedValue([WAREHOUSE]);
+    vi.mocked(api.deleteWarehouse).mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    const { invalidate } = renderPage();
+
+    await user.click(await screen.findByRole("button", { name: "Delete analytics" }));
+    await user.type(await screen.findByPlaceholderText("delete"), "delete");
+    await user.click(screen.getByRole("button", { name: /^Delete$/ }));
+
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: catalogsQueryKey }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: warehousesQueryKey });
   });
 });

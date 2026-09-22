@@ -9109,6 +9109,93 @@ async fn attachment_dto_reports_is_primary() {
     );
 }
 
+/// `CatalogAttachmentDto.createdAt` — the clock the Catalogs list measures a
+/// `pending` attachment against (SP3c-1 Task 4, fix round 1 F2).
+///
+/// The point is not that the field is present; it is that it belongs to the
+/// ATTACHMENT and not to the catalog. Attaching an existing catalog inserts an
+/// `engine_catalog_attachments` row and never writes `registry.catalogs
+/// .updated_at`, so a UI that judged "has this been pending too long?" from the
+/// catalog's clock would read an arbitrarily old timestamp at the exact moment
+/// the wait began — and cry "still pending" throughout the StarRocks bootstrap
+/// the grace window exists to cover. This asserts the ordering that makes the
+/// catalog clock unusable and the attachment clock correct: the attachment is
+/// created STRICTLY after the catalog it attaches, and the catalog's own
+/// `updatedAt` does not move when it is attached.
+#[tokio::test]
+async fn attachment_dto_reports_its_own_created_at() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_att_created", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let bench = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": bench, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let bench_id = j["id"].as_str().unwrap().to_string();
+    let catalog_updated_at = j["updatedAt"].as_str().unwrap().to_string();
+
+    // A real gap, so "strictly after" cannot be satisfied by two readings of
+    // the same clock tick. `now()` is transaction time and these are separate
+    // transactions, but a coincidence is exactly the failure this ordering
+    // assertion would hide.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{bench_id}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "attach; body={j}");
+    let attach_created_at = j["createdAt"]
+        .as_str()
+        .expect("the attach response carries the attachment's createdAt")
+        .to_string();
+
+    // Re-read the catalog: the attach must not have touched its clock…
+    let (status, j) = call(&f, "GET", &format!("/catalogs/{bench_id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j["updatedAt"].as_str().unwrap(),
+        catalog_updated_at,
+        "attaching a catalog must not bump the catalog's own updatedAt — the whole \
+         reason its clock cannot stand in for the attachment's; body={j}"
+    );
+
+    // …and the listed attachment reports the same, strictly later, timestamp.
+    let listed = j["engines"][0]["createdAt"]
+        .as_str()
+        .expect("the listed attachment carries createdAt");
+    assert_eq!(listed, attach_created_at, "body={j}");
+    assert!(
+        listed > catalog_updated_at.as_str(),
+        "the attachment was created after the catalog it attaches: attachment={listed} \
+         catalog={catalog_updated_at}",
+    );
+}
+
 // ── SP3c-1 Task 2, fix round 1 ────────────────────────────────────────────────
 
 /// F1: a mistyped catalog id must not buy you a running cluster.

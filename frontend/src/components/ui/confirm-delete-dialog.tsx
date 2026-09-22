@@ -18,16 +18,28 @@ interface ConfirmDeleteDialogProps {
   // should pass its own verb here rather than let the button lie about what
   // it does.
   confirmLabel?: string;
+  /**
+   * Withholds the confirm button when the caller already KNOWS the action will
+   * be refused — e.g. a catalog the server will not delete while an engine is
+   * still attached. Defaults to `false`, so every existing call site is
+   * unaffected; the same reasoning as `confirmLabel` above. A dialog that
+   * explains the refusal and then offers the button anyway invites the user to
+   * type the confirmation word and collect an error they were just warned
+   * about.
+   */
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   children?: React.ReactNode;
 }
 
 export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
-  open, onOpenChange, title, description, confirmText = 'delete', confirmLabel = 'Delete', onConfirm, children,
+  open, onOpenChange, title, description, confirmText = 'delete', confirmLabel = 'Delete',
+  confirmDisabled = false, onConfirm, children,
 }) => {
   const [inputValue, setInputValue] = useState('');
 
   const handleConfirm = () => {
+    if (confirmDisabled) return;
     if (inputValue.toLowerCase() === confirmText.toLowerCase()) {
       onConfirm();
       setInputValue('');
@@ -58,7 +70,7 @@ export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
           <Button
             variant="destructive"
             onClick={handleConfirm}
-            disabled={inputValue.toLowerCase() !== confirmText.toLowerCase()}
+            disabled={confirmDisabled || inputValue.toLowerCase() !== confirmText.toLowerCase()}
           >
             {confirmLabel}
           </Button>
