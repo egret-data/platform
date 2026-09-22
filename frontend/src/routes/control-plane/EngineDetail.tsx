@@ -28,6 +28,7 @@ import {
   getControlPlaneEnginesListEngineWorkspacesQueryKey,
   useControlPlaneEnginesListEngineWorkspaces,
   useControlPlaneEnginesSetEngineWorkspaces,
+  useControlPlaneEnginesTestCatalog,
 } from "@/api/generated/control-plane-engines/control-plane-engines";
 import { useAdminWorkspacesListWs } from "@/api/generated/admin-workspaces/admin-workspaces";
 import type { EngineDependentDto } from "@/api/generated/model/engineDependentDto";
@@ -1239,13 +1240,7 @@ function SecuritySection({
 }
 
 // ── Catalogs ─────────────────────────────────────────────────────────────────
-//
-// Config-style master-detail (mirrors ConfigurationTab's left-nav layout):
-// the left nav lists catalogs + a sentinel "add" entry; the right pane hosts
-// either the add form or an edit form for whichever catalog is selected.
 
-/** Sentinel `selected` value that shows the add-catalog form instead of an
- * existing catalog's detail. */
 /**
  * Control Plane → Engines → detail → **Catalogs** (SP3c-1 Task 9).
  *
@@ -1270,6 +1265,54 @@ function SecuritySection({
  * their union: rows the registry cannot show still list by name, with the
  * Apply column left honestly empty and the missing permission named.
  */
+/**
+ * What `POST /engines/{id}/catalogs/{cid}/test` measured, said in the client's
+ * own words (SP3c review F-3, restoring the capability D-6 dropped).
+ *
+ * This route is the ONLY one in the product that tests a *named* engine's view
+ * of a catalog: `show_schemas_verdict(&st, &engine, …)` runs
+ * `SHOW SCHEMAS FROM "<catalog>"` against the engine in the path. The
+ * registry's `POST /catalogs/{id}/test` picks an applied Trino attachment
+ * across ALL engines and cannot be pointed at one, and it needs
+ * `catalog_registry:read` — which the `engine:read`-only operator this tab
+ * serves does not have.
+ *
+ * Three states, kept apart the way Task 7's `checkLine` keeps its three:
+ *
+ *   - `ok` — the statement ran and succeeded, which is the only case that says
+ *     anything about the catalog's credentials **on this engine**;
+ *   - `bad` — it ran and failed. The credentials clause is absent, because a
+ *     statement that did not reach authentication proves nothing about it;
+ *   - `neutral` — it did not run at all (an unreachable coordinator, or
+ *     Kubernetes unconfigured, both of which arrive as a thrown `ApiError`).
+ *     Painting that red would assert the catalog is broken, which is a verdict
+ *     nothing measured.
+ */
+function testLine(
+  r: { ok: boolean } | null,
+  catalogName: string,
+  engineName: string,
+): { tone: "ok" | "bad" | "neutral"; what: string } {
+  const ran = `SHOW SCHEMAS FROM ${catalogName} on ${engineName}`;
+  if (r === null)
+    return {
+      tone: "neutral",
+      what: `No query ran, so nothing was measured about ${catalogName} on ${engineName}.`,
+    };
+  return {
+    tone: r.ok ? "ok" : "bad",
+    what: r.ok
+      ? `Query check — ${ran} succeeded, which exercises the catalog's credentials on this engine.`
+      : `Query check — ${ran}. It did not succeed, so nothing was shown about the catalog's credentials either.`,
+  };
+}
+
+const TEST_TONE_CLASS: Record<"ok" | "bad" | "neutral", string> = {
+  ok: "border-green-600/40 bg-green-600/5",
+  bad: "border-destructive/40 bg-destructive/5",
+  neutral: "border-border bg-muted/40",
+};
+
 type AttachedRow = {
   id: string;
   name: string;
@@ -1292,6 +1335,7 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
 
   const [pick, setPick] = useState("");
   const [detachTarget, setDetachTarget] = useState<AttachedRow | null>(null);
+  const [testTarget, setTestTarget] = useState<AttachedRow | null>(null);
 
   // `<…, ApiError>`: the thrown value is an `ApiError` with `.message`, and the
   // generated `TError = ErrorBody` would make `.error` type-check and be
@@ -1308,6 +1352,11 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
     retry: false,
   });
 
+  // `engine:read` only — the same key the route guard already demands — so
+  // every persona that can open this page can run it. It is a mutation because
+  // the route is a POST that runs a statement, not a cacheable read.
+  const test = useControlPlaneEnginesTestCatalog<ApiError>();
+
   const queryClient = useQueryClient();
   const { attach, detach, retry } = useAttachmentActions({
     // The registry keys are invalidated by the hook; this engine's own list is
@@ -1315,6 +1364,12 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
     // that stayed in it would keep its broken badge after it had gone.
     onDone: () => {
       void queryClient.invalidateQueries({ queryKey: engineCatalogsKey(engine.id) });
+      // The verdict was measured against an attachment that may no longer
+      // exist, or may have just been re-applied. Leaving a red box above a row
+      // that has gone green is the lie the three states exist to prevent
+      // (Task 7 fix round 1).
+      test.reset();
+      setTestTarget(null);
     },
   });
 
@@ -1361,17 +1416,74 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
   const broken = rows.filter((r) => r.configError);
   const applyFailures = rows.filter((r) => r.a?.applyStatus === "failed" && r.a.applyError);
   const busy = retry.isPending || detach.isPending;
+  const isTrino = !isStarRocksType(engine.type);
+
+  /**
+   * Whether egret READ each list. Both lists are `list_engine_attachments`, so
+   * ONE success is authoritative about which catalogs this engine has — but
+   * zero successes is not "none", and saying so is the defect this pair
+   * exists to prevent (SP3c review F-1). An error must never render as a fact
+   * about the system; Task 8's "isn't provisioned yet" was the same shape one
+   * screen over.
+   */
+  const registryRead = !registryQ.isError && registryQ.data !== undefined;
+  const engineListRead = configChecked;
+  const readNothing = !registryRead && !engineListRead;
+  const stillLoading = readNothing && !registryQ.isError && !legacyQ.isError;
 
   // The brief's "adding a catalog rolls the pods" was true of Trino and false
   // of StarRocks, and the difference is the one an operator plans around.
-  const applyProse = isStarRocksType(engine.type)
-    ? "Attaching or detaching a catalog creates or drops it on the StarRocks FE in place, without rolling the pods."
-    : "Attaching or detaching a catalog applies it to the cluster and restarts the Trino coordinator, so queries in flight are lost.";
+  const applyProse = isTrino
+    ? "Attaching or detaching a catalog applies it to the cluster and restarts the Trino coordinator, so queries in flight are lost."
+    : "Attaching or detaching a catalog creates or drops it on the StarRocks FE in place, without rolling the pods.";
 
-  const retryBlockedReason = (r: AttachedRow) =>
-    r.configError
-      ? "egret cannot parse this catalog's stored configuration, so it cannot render it for this engine. Repair it on the catalog's own page first."
-      : null;
+  /**
+   * The blocked scope is the BACKEND's, and the backend's is not row-scoped on
+   * Trino (SP3c review F-2).
+   *
+   * A Trino apply is the whole ConfigMap: `CatalogChange::ReapplyOne` uses
+   * `BuildOpts::default()` and `Detach(id)` only sets `exclude_catalog`, after
+   * which `build_provision_req_with` calls `trino_catalog_req` for EVERY
+   * remaining attachment and `render_attached` opens with `catalog_def(…)?`.
+   * So one unparseable row 400s a Retry or a Detach aimed at any *other* row,
+   * and it 400s a Settings save too (`update_trino_engine` →
+   * `build_provision_req`). The one change that still works is detaching the
+   * broken row itself, because that id is the one retained out.
+   *
+   * StarRocks is the mirror image: `ReapplyOne` is one statement about one
+   * catalog, `Detach` uses `drop_ddl` DELIBERATELY so an unrenderable row can
+   * still be cleaned up, and `update_starrocks_engine` →
+   * `build_starrocks_provision_req` never touches attachments at all.
+   */
+  const brokenNames = (except?: string) =>
+    broken
+      .filter((b) => b.id !== except)
+      .map((b) => b.name)
+      .join(", ");
+
+  const retryBlockedReason = (r: AttachedRow) => {
+    if (r.configError)
+      return "egret cannot parse this catalog's stored configuration, so it cannot render it for this engine. Repair it on the catalog's own page first.";
+    if (isTrino && broken.length > 0)
+      return `Blocked by ${brokenNames()}: a Trino apply rebuilds every catalog on this engine at once, so nothing here can be re-applied until that stored configuration is repaired.`;
+    return null;
+  };
+
+  const testVerdict = testLine(
+    test.data?.status === 200 ? test.data.data : null,
+    testTarget?.name ?? "",
+    engine.name,
+  );
+
+  const detachBlockedReason = (r: AttachedRow) => {
+    if (r.isPrimary)
+      return `${r.name} is this engine's primary catalog. Detach it by deleting the engine.`;
+    // A detach that removes the ONLY broken row escapes, because that row is
+    // the one `exclude_catalog` leaves out of the rebuild.
+    if (isTrino && broken.some((b) => b.id !== r.id))
+      return `Blocked by ${brokenNames(r.id)}: a Trino detach rebuilds every remaining catalog, so it cannot run while one of them has a stored configuration egret cannot parse.`;
+    return null;
+  };
 
   return (
     <section className="space-y-4">
@@ -1383,8 +1495,19 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
       </div>
 
       {rows.length === 0 ? (
-        legacyQ.isLoading || registryQ.isLoading ? (
+        stillLoading ? (
           <ListSkeleton rows={3} cols={4} />
+        ) : readNothing ? (
+          // NOT "this engine has no catalogs". Neither list answered, so the
+          // only honest sentence is about egret, not about the engine.
+          <Alert variant="destructive" data-testid="engine-catalogs-unreadable">
+            <AlertDescription>
+              egret could not read this engine&apos;s catalogs, from either route, so it cannot
+              tell you whether it has any — an empty table here is not evidence that there are
+              none. The registry said: {registryQ.error?.message ?? "nothing"}. The engine&apos;s
+              own catalog list said: {legacyQ.error?.message ?? "nothing"}.
+            </AlertDescription>
+          </Alert>
         ) : (
           <p className="text-sm text-muted-foreground">
             This engine has no catalogs, so it can query nothing yet.
@@ -1438,26 +1561,83 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
                     {r.a ? appliedCell(r.a) : "—"}
                   </TableCell>
                   <TableCell className="text-right">
-                    {canUpdate && r.a && (
-                      <AttachmentActions
-                        a={r.a}
-                        retryBlockedReason={retryBlockedReason(r)}
-                        detachBlockedReason={
-                          r.isPrimary
-                            ? `${r.name} is this engine's primary catalog. Detach it by deleting the engine.`
-                            : null
-                        }
-                        busy={busy}
-                        onRetry={() => retry.mutate({ id: engine.id, cid: r.id })}
-                        onDetach={() => setDetachTarget(r)}
-                      />
-                    )}
+                    <div className="flex flex-col items-end gap-1">
+                      {isTrino && (
+                        // Outside the `canUpdate` gate on purpose: this is a
+                        // read (`engine:read`), and the operator who holds
+                        // only the engine keys is exactly the one who has no
+                        // other way to test a catalog.
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            setTestTarget(r);
+                            test.mutate({ id: engine.id, cid: r.id });
+                          }}
+                          disabled={test.isPending}
+                        >
+                          {test.isPending && testTarget?.id === r.id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : null}
+                          Test
+                        </Button>
+                      )}
+                      {canUpdate && r.a && (
+                        <AttachmentActions
+                          a={r.a}
+                          retryBlockedReason={retryBlockedReason(r)}
+                          detachBlockedReason={detachBlockedReason(r)}
+                          busy={busy}
+                          onRetry={() => retry.mutate({ id: engine.id, cid: r.id })}
+                          onDetach={() => setDetachTarget(r)}
+                        />
+                      )}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
         </div>
+      )}
+
+      {testTarget && (test.data || test.isError) && (
+        <div
+          data-testid="engine-catalog-test-result"
+          data-tone={testVerdict.tone}
+          className={`flex flex-col gap-1 rounded-lg border p-3 text-sm ${
+            TEST_TONE_CLASS[testVerdict.tone]
+          }`}
+        >
+          <p className="font-medium">{testVerdict.what}</p>
+          {/* The server's own words, always and unedited: on a failure they
+              are the coordinator's message, which names neither the check nor
+              the catalog, and on a 502 they are the only thing that says what
+              went wrong. */}
+          <p className="text-muted-foreground">
+            {test.data?.status === 200
+              ? test.data.data.message
+              : (test.error?.message ?? "The test could not be run.")}
+          </p>
+        </div>
+      )}
+
+      {rows.some((r) => !r.a) && (
+        <p className="text-xs text-muted-foreground" data-testid="engine-catalogs-kind-vocabulary">
+          For the rows egret could read only from the engine, <strong>Kind</strong> is the Trino
+          connector name the engine uses (or <code>egret-warehouse</code>), not the registry kind
+          the catalog&apos;s own page shows — the same catalog can read <code>postgresql</code>
+          here and <code>jdbc</code> there. Both are true of it; they are not the same label.
+        </p>
+      )}
+
+      {rows.length > 0 && !isTrino && (
+        <p className="text-xs text-muted-foreground" data-testid="engine-catalogs-test-unavailable">
+          egret cannot test a catalog from this page on a StarRocks engine: the per-engine check
+          runs <code>SHOW SCHEMAS</code> through a Trino coordinator, and this engine has none. The
+          catalog&apos;s own page falls back to a reachability check of the host and port in its
+          stored configuration, which is a weaker measurement and says so.
+        </p>
       )}
 
       {rows.some((r) => r.a) && (
@@ -1499,8 +1679,15 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
               egret cannot parse what it stored for{" "}
               {broken.length === 1 ? "one of this engine's catalogs" : "these catalogs"}. They stay
               attached and the running cluster is untouched, but egret cannot render them for this
-              engine — so Retry, and any save on the Settings tab, is refused until they are
-              repaired.
+              engine.{" "}
+              {isTrino
+                ? // Verified at the source, not assumed: a Trino apply rebuilds
+                  // the whole ConfigMap, so the blast radius is the engine.
+                  "A Trino apply rebuilds this engine's entire catalog ConfigMap, so while that is true, Retry and Detach are refused on every catalog here — and so is any save on the Settings tab."
+                : "StarRocks applies each catalog on its own, so only these rows are affected: their Retry is refused. Every other catalog here, and this engine's Settings tab, is unaffected."}{" "}
+              {isTrino && broken.length > 1
+                ? "Detaching one of them still leaves the others in the rebuild, so repairing them is the only way out."
+                : "Detaching a broken catalog itself still works: a Trino detach leaves that one out of the rebuild, and a StarRocks detach is a DROP that needs no render at all."}
             </p>
             <ul className="space-y-1">
               {broken.map((r) => (
@@ -1583,7 +1770,11 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
         </div>
       )}
 
-      {!canUpdate && (
+      {/* Not repeated under the `catalog_registry:read` Alert: a reader blocked
+          one permission earlier cannot act on `:update` advice, and the two
+          blocks ended with near-identical "a platform administrator can grant
+          it" sentences (SP3c review F-4). */}
+      {!canUpdate && !(registryQ.isError && registryQ.error?.status === 403) && (
         <p className="text-xs text-muted-foreground" data-testid="engine-catalogs-readonly">
           Attaching, detaching and re-applying a catalog need the catalog_registry:update
           permission, which this account does not have. A platform administrator can grant it.
