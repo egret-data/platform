@@ -52,7 +52,7 @@ function catalog(over: Partial<RegistryCatalogDto> = {}): RegistryCatalogDto {
  * `rows`, and every other request rejects — so each page renders its error
  * state and only the routing is under test.
  */
-function openApp(url: string, rows: RegistryCatalogDto[]) {
+function openApp(url: string, rows: RegistryCatalogDto[], as: Me = ME) {
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL) => {
@@ -64,7 +64,7 @@ function openApp(url: string, rows: RegistryCatalogDto[]) {
             headers: { "content-type": "application/json" },
           }),
         );
-      if (u === "/api/auth/me") return json(ME);
+      if (u === "/api/auth/me") return json(as);
       if (u === "/api/control-plane/catalogs") return json(rows);
       // The destination page's own read, so "the URL changed" can be followed
       // by "and the page it named actually rendered".
@@ -130,5 +130,44 @@ describe("/control-plane/warehouses/:id redirects onto the catalog", () => {
     expect(screen.queryByText("403 — Forbidden")).not.toBeInTheDocument();
     // The sidebar entry that reaches it is still there (D5).
     expect(screen.getByRole("link", { name: /Warehouses/ })).toBeInTheDocument();
+  }, 15_000);
+});
+
+/**
+ * Whole-branch review, F5. Migration 0148 granted `catalog_registry:read` to
+ * every platform role that held `warehouse:read` — ONCE. A role created after
+ * the upgrade holds `warehouse:read` alone: it sees the Warehouses section in
+ * the sidebar, the list renders, and before this fix every row 403'd, taking
+ * roles/grants, Clients, Browse, Connect and Settings with it. That is the
+ * capability removal D5 exists to prevent, so the path is gated on the key the
+ * LIST uses and the missing destination key is explained rather than refused.
+ */
+describe("a role created after migration 0148, holding warehouse:read alone", () => {
+  const POST_0148: Me = {
+    user_id: "u2",
+    email: "wh@example.com",
+    platform_roles: [],
+    permissions: ["warehouse:read"],
+  };
+
+  it("reaches the moved page and is told which permission is missing, not 403'd", async () => {
+    openApp("/control-plane/warehouses/wh-1", [catalog()], POST_0148);
+    const blocked = await screen.findByTestId("warehouse-redirect-blocked", {}, TIMEOUT);
+    // The key by name, not the bare word "forbidden".
+    expect(blocked).toHaveTextContent("catalog_registry:read");
+    expect(screen.queryByText("403 — Forbidden")).not.toBeInTheDocument();
+    // It did not silently bounce somewhere else either.
+    expect(currentUrl()).toBe("/control-plane/warehouses/wh-1");
+    // And there is a way back to the list this row came from.
+    expect(screen.getByRole("link", { name: /Back to Warehouses/ })).toHaveAttribute(
+      "href",
+      "/control-plane/warehouses",
+    );
+  }, 15_000);
+
+  it("still sees the list whose rows link here — the row and the list agree", async () => {
+    openApp("/control-plane/warehouses", [catalog()], POST_0148);
+    await screen.findByTestId("app-sidebar", {}, TIMEOUT);
+    expect(screen.queryByText("403 — Forbidden")).not.toBeInTheDocument();
   }, 15_000);
 });
