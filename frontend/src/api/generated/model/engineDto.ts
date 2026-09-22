@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { CatalogAttachErrorDto } from './catalogAttachErrorDto';
 import type { EngineSpecDto } from './engineSpecDto';
 
 export interface EngineDto {
@@ -15,4 +16,15 @@ export interface EngineDto {
   warehouseId: string;
   status: string;
   spec: EngineSpecDto;
+  /**
+     * Only ever present on `POST /engines`, and only when some of the body's
+     * `catalogs` could not be attached. The engine EXISTS and is provisioned;
+     * these catalogs simply are not on it, and each can be retried with
+     * `POST /api/control-plane/engines/{id}/catalogs/{cid}`. The create is not
+     * rolled back for them: the cluster is already up by the time they are
+     * attached, and the alternative — the wizard's own attach loop — reports a
+     * per-catalog failure exactly the same way.
+     * @nullable
+     */
+  catalogAttachErrors?: CatalogAttachErrorDto[] | null;
 }

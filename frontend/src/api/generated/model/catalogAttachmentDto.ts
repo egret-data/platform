@@ -24,4 +24,10 @@ export interface CatalogAttachmentDto {
   applyError?: string | null;
   /** @nullable */
   appliedAt?: string | null;
+  /**
+     * This catalog is that engine's PRIMARY: it leads the engine's render
+     * order and cannot be detached or edited. At most one of an engine's
+     * catalogs carries it (SP3c D2, migration 0150).
+     */
+  isPrimary: boolean;
 }

@@ -30152,6 +30152,24 @@
           }
         }
       },
+      "CatalogAttachErrorDto": {
+        "type": "object",
+        "description": "One catalog from a create body's `catalogs` that the engine came up without.",
+        "required": [
+          "catalogId",
+          "message"
+        ],
+        "properties": {
+          "catalogId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "message": {
+            "type": "string",
+            "description": "Why the attach failed, in the words the attach route would have used."
+          }
+        }
+      },
       "CatalogAttachmentDto": {
         "type": "object",
         "description": "One engine a catalog is attached to.",
@@ -30159,7 +30177,8 @@
           "engineId",
           "engineName",
           "engineType",
-          "applyStatus"
+          "applyStatus",
+          "isPrimary"
         ],
         "properties": {
           "engineId": {
@@ -30188,6 +30207,10 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "isPrimary": {
+            "type": "boolean",
+            "description": "This catalog is that engine's PRIMARY: it leads the engine's render\norder and cannot be detached or edited. At most one of an engine's\ncatalogs carries it (SP3c D2, migration 0150)."
           }
         }
       },
@@ -31115,7 +31138,6 @@
         "type": "object",
         "required": [
           "name",
-          "warehouseId",
           "coordinatorReplicas",
           "workerReplicas",
           "cpuMin",
@@ -31127,8 +31149,19 @@
             "type": "string"
           },
           "warehouseId": {
-            "type": "string",
-            "format": "uuid"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Superseded by `catalogs` and dropped in SP3c-2. A body that sends this\nand no `catalogs` behaves exactly as it did before."
+          },
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NewEngineCatalog"
+            },
+            "description": "Registry catalogs to attach at create. Exactly one must be `primary`."
           },
           "imageVersion": {
             "type": [
@@ -33471,6 +33504,16 @@
           },
           "spec": {
             "$ref": "#/components/schemas/EngineSpecDto"
+          },
+          "catalogAttachErrors": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/CatalogAttachErrorDto"
+            },
+            "description": "Only ever present on `POST /engines`, and only when some of the body's\n`catalogs` could not be attached. The engine EXISTS and is provisioned;\nthese catalogs simply are not on it, and each can be retried with\n`POST /api/control-plane/engines/{id}/catalogs/{cid}`. The create is not\nrolled back for them: the cluster is already up by the time they are\nattached, and the alternative — the wizard's own attach loop — reports a\nper-catalog failure exactly the same way."
           }
         }
       },
@@ -34776,6 +34819,23 @@
           },
           "protected": {
             "type": "boolean"
+          }
+        }
+      },
+      "NewEngineCatalog": {
+        "type": "object",
+        "description": "One catalog to attach when the engine is created.",
+        "required": [
+          "catalogId"
+        ],
+        "properties": {
+          "catalogId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "primary": {
+            "type": "boolean",
+            "description": "Exactly one catalog in the list carries this. Until SP3c-2 drops\n`engines.warehouse_id`, the primary must be an egret warehouse catalog —\nthe engine's Ranger role and (for StarRocks) its storage are still\nderived from that warehouse."
           }
         }
       },

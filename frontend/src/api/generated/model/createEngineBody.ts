@@ -6,11 +6,19 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { CreateEngineBodyTrinoConfig } from './createEngineBodyTrinoConfig';
+import type { NewEngineCatalog } from './newEngineCatalog';
 import type { StarRocksConfigBody } from './starRocksConfigBody';
 
 export interface CreateEngineBody {
   name: string;
-  warehouseId: string;
+  /**
+     * Superseded by `catalogs` and dropped in SP3c-2. A body that sends this
+     * and no `catalogs` behaves exactly as it did before.
+     * @nullable
+     */
+  warehouseId?: string | null;
+  /** Registry catalogs to attach at create. Exactly one must be `primary`. */
+  catalogs?: NewEngineCatalog[];
   /** @nullable */
   imageVersion?: string | null;
   /** @minimum 0 */
