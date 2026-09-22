@@ -186,8 +186,31 @@ test.describe("catalog + engine provisioning via the UI", () => {
       // create with some renders `ec-attach-errors` INSTEAD and stays put. If
       // that panel is on screen the attach failed and the run must say so
       // rather than time out on a URL.
-      await expect(page.getByTestId("ec-attach-errors")).toHaveCount(0);
-      await page.waitForURL(/\/control-plane\/engines\/[0-9a-f-]{36}/, { timeout: 120_000 });
+      //
+      // RACED, not read before the POST has answered. This was a bare
+      // `toHaveCount(0)` on the line after the click, and `toHaveCount(0)`
+      // succeeds on its FIRST poll — so it passed while the request was still
+      // in flight, whatever the outcome, and the guard this comment describes
+      // could never fire: the run still timed out on `waitForURL` below and
+      // still said nothing (whole-branch review, F4). It is the same "absence
+      // read too early" shape as the engine delete at the end of this test,
+      // and as Task 10's M13.
+      //
+      // Both `.catch` arms are deliberate: the loser of the race rejects on
+      // its own timeout afterwards, and an unhandled rejection would be
+      // reported as a failure of whichever test is running by then.
+      const attachErrors = page.getByTestId("ec-attach-errors");
+      const settled = /\/control-plane\/engines\/[0-9a-f-]{36}/;
+      await Promise.race([
+        page.waitForURL(settled, { timeout: 120_000 }).catch(() => {}),
+        attachErrors.waitFor({ state: "visible", timeout: 120_000 }).catch(() => {}),
+      ]);
+      expect(
+        await attachErrors.count(),
+        "the wizard stayed on the create page and rendered the attach-error panel: the catalog " +
+          "attach failed, so the engine was created without it",
+      ).toBe(0);
+      await page.waitForURL(settled, { timeout: 120_000 });
       engineId = page.url().split("/").pop()?.split("?")[0];
       expect(engineId, "engine id from the URL after create").toBeTruthy();
 
