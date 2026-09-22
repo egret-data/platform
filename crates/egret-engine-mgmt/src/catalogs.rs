@@ -1111,3 +1111,42 @@ async fn acknowledge_migration_report(
     tags((name = "control-plane-catalog-registry", description = "Catalog registry: platform catalogs, their engine attachments and workspace assignment")),
 )]
 pub struct CatalogRegistryApi;
+
+#[cfg(test)]
+mod openapi_tests {
+    use super::*;
+    use egret_catalog_registry::CatalogKind;
+
+    /// `CreateRegistryCatalogBody.kind` is a plain `string` whose permitted
+    /// values exist only in its description. That sentence is therefore the
+    /// contract: `egret-server`'s `committed_openapi_json_is_current` copies it
+    /// into the repo-root `openapi.json`, orval copies it from there into the
+    /// generated model's JSDoc, and `CatalogCreate.test.tsx` pins the create
+    /// form's kind list to that JSDoc. This is the one link in that chain that
+    /// nothing else checks: the description against the kinds the backend
+    /// actually accepts.
+    ///
+    /// Written as an equality against `CatalogKind::ALL` rather than a "each
+    /// documented kind parses" loop, because the failure that matters is a kind
+    /// the backend accepts and the description omits — the UI then cannot offer
+    /// it, and a loop over the description would never notice.
+    #[test]
+    fn the_kind_description_lists_exactly_the_kinds_the_backend_accepts() {
+        use utoipa::OpenApi as _;
+        let doc = serde_json::to_value(CatalogRegistryApi::openapi()).unwrap();
+        let described = doc["components"]["schemas"]["CreateRegistryCatalogBody"]["properties"]
+            ["kind"]["description"]
+            .as_str()
+            .expect("CreateRegistryCatalogBody.kind has a description");
+        let expected = CatalogKind::ALL
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert_eq!(
+            described, expected,
+            "the documented kinds have drifted from CatalogKind::ALL — the create \
+             form's kind list is generated from this sentence"
+        );
+    }
+}

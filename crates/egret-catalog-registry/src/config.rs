@@ -54,6 +54,25 @@ pub enum CatalogKind {
 }
 
 impl CatalogKind {
+    /// Every kind, in the order the API documents them.
+    ///
+    /// The UI's kind picker and the OpenAPI description of
+    /// `CreateRegistryCatalogBody.kind` are both this list, and both are checked
+    /// against it by a test rather than maintained by hand — a kind added here
+    /// and nowhere else is a kind no operator can create (SP3c review, fix
+    /// round 1). `all_lists_every_kind` is what keeps the array itself honest.
+    pub const ALL: [CatalogKind; 9] = [
+        CatalogKind::Iceberg,
+        CatalogKind::Hive,
+        CatalogKind::DeltaLake,
+        CatalogKind::Hudi,
+        CatalogKind::Jdbc,
+        CatalogKind::Elasticsearch,
+        CatalogKind::Tpch,
+        CatalogKind::Tpcds,
+        CatalogKind::Generic,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             CatalogKind::Iceberg => "iceberg",
@@ -1043,6 +1062,44 @@ mod tests {
 
     fn parse(kind: &str, config: serde_json::Value) -> Result<CatalogDef, ValidationError> {
         CatalogDef::parse(kind, &config, &serde_json::Value::Null)
+    }
+
+    /// The position of each variant in [`CatalogKind::ALL`].
+    ///
+    /// This match is what makes `ALL` un-forgettable: adding a variant to
+    /// `CatalogKind` makes it non-exhaustive, so it does not compile until the
+    /// new kind is given an index — and the test below then fails until the
+    /// array carries it at that index. Neither half can be satisfied alone.
+    fn index_in_all(k: CatalogKind) -> usize {
+        match k {
+            CatalogKind::Iceberg => 0,
+            CatalogKind::Hive => 1,
+            CatalogKind::DeltaLake => 2,
+            CatalogKind::Hudi => 3,
+            CatalogKind::Jdbc => 4,
+            CatalogKind::Elasticsearch => 5,
+            CatalogKind::Tpch => 6,
+            CatalogKind::Tpcds => 7,
+            CatalogKind::Generic => 8,
+        }
+    }
+
+    #[test]
+    fn all_lists_every_kind_once_and_every_entry_parses() {
+        for (i, k) in CatalogKind::ALL.iter().enumerate() {
+            assert_eq!(index_in_all(*k), i, "ALL[{i}] is out of order or repeated");
+            assert_eq!(
+                CatalogKind::parse(k.as_str()),
+                Some(*k),
+                "{} does not round-trip through parse",
+                k.as_str()
+            );
+        }
+        assert_eq!(
+            CatalogKind::ALL.len(),
+            index_in_all(CatalogKind::Generic) + 1,
+            "a kind has an index but is not in ALL"
+        );
     }
 
     fn parse_with_advanced(
