@@ -1080,7 +1080,11 @@ mod tests {
     /// What it does NOT catch: a variant **appended after `Generic`** and given
     /// index 9. This match compiles, `ALL.len()` is still 8 + 1, and the loop
     /// simply never sees the new kind — so the description test one crate up
-    /// stays green while the UI cannot offer it. The length assertion below is
+    /// stays green while the UI cannot offer it. Measured, not assumed: adding
+    /// an `Iron` kind this way leaves BOTH tests green, having first been made
+    /// to compile by the unrelated non-exhaustive matches it breaks
+    /// (`CatalogConfig::from_json`, `as_str`, `parse`) — none of which points
+    /// at `ALL`. The length assertion below is
     /// a guard against a kind that has an index and no array entry, not a
     /// count of the enum's variants, which safe stable Rust cannot take.
     ///
