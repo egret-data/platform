@@ -87,6 +87,7 @@ import {
   AttachmentActions,
   StatusBadge,
   appliedCell,
+  isStarRocksType,
   useAttachmentActions,
 } from "./catalogs/attachmentUi";
 import { EngineDependentsTable, dependentsFromError } from "./EngineDependentsTable";
@@ -168,8 +169,6 @@ function statusDescription(
   }
   return { text: message };
 }
-
-const isStarRocksType = (t: string) => t.toLowerCase() === "starrocks";
 
 /**
  * Derive the engine's in-cluster `host:port` endpoint. The engine DTO carries no

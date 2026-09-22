@@ -12,6 +12,21 @@
  * What does NOT live here is the wording. Each screen names the other end of
  * the pair ("this engine's primary catalog" vs "this catalog is that engine's
  * primary"), and a shared sentence would have to be vague in both places.
+ *
+ * NEITHER DOES THE BLOCKED-REASON RULE, and that is a statement about the DATA,
+ * not about taste (whole-branch review, F1). The Trino rule — one unparseable
+ * catalog refuses a Retry or a Detach aimed at any OTHER catalog on the same
+ * engine — is a fact about an ENGINE's whole attachment set, and only one of
+ * the two screens can see that set: `configError` is reported by
+ * `GET /engines/{id}/catalogs` alone, so `EngineDetail` computes both reasons
+ * and `EnginesTab`, which reads one CATALOG across many engines, structurally
+ * cannot. (`GET /catalogs` never parses a stored config — that is what makes it
+ * the repair path — and moving the field is SP3c-2's, tracked as Task 9's
+ * critical carry.) So `AttachmentActions` takes both reasons as REQUIRED props:
+ * a caller that cannot compute one passes `null` deliberately, in the place a
+ * reader will look, rather than omitting it and leaving "not applicable" and
+ * "forgotten" spelled identically. `EnginesTab` says out loud, once, what its
+ * `null` costs.
  */
 import { RefreshCw, Unlink } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -27,6 +42,18 @@ import { ApiError } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { catalogKey, catalogsQueryKey } from "../queryKeys";
+
+/**
+ * Is this engine a StarRocks one?
+ *
+ * The whole Trino/StarRocks asymmetry in the blocked reasons below turns on it,
+ * and both screens now ask the question, so it is asked in one place. Phrased
+ * negatively-by-default on purpose: an engine type egret does not recognise is
+ * treated as Trino, which is the CAUTIOUS answer — a Trino Retry is the one
+ * that can be refused for a sibling's sake, so an unknown type inherits the
+ * warning rather than the silence.
+ */
+export const isStarRocksType = (t: string): boolean => t.toLowerCase() === "starrocks";
 
 /**
  * The three `applyStatus` values, each with its own badge and its own meaning.
@@ -96,18 +123,24 @@ export function appliedCell(a: CatalogAttachmentDto): string {
  *
  * Retry is offered only on a row that is not `applied`, because re-applying an
  * applied catalog is the one case where the button measures nothing.
+ *
+ * Both reasons are REQUIRED, with no default (whole-branch review, F1). They
+ * used to default to `null`, and the catalog-side screen — which cannot see the
+ * engine-scoped Trino rule at all, see this module's header — supplied neither;
+ * an omission and a considered "this screen cannot know" looked the same at
+ * every call site and in every test. `null` now has to be typed out.
  */
 export function AttachmentActions({
   a,
-  retryBlockedReason = null,
-  detachBlockedReason = null,
+  retryBlockedReason,
+  detachBlockedReason,
   busy = false,
   onRetry,
   onDetach,
 }: {
   a: CatalogAttachmentDto;
-  retryBlockedReason?: string | null;
-  detachBlockedReason?: string | null;
+  retryBlockedReason: string | null;
+  detachBlockedReason: string | null;
   busy?: boolean;
   onRetry: () => void;
   onDetach: () => void;

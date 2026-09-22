@@ -760,3 +760,59 @@ describe("EnginesTab — Test names the check that ran (D4)", () => {
     expect(box).toHaveTextContent("invalid hive configuration: uri must name a host");
   });
 });
+
+/**
+ * Whole-branch review, F1. `EngineDetail` disables Retry and Detach on EVERY
+ * row of a Trino engine while any of that engine's catalogs has a stored
+ * configuration egret cannot parse; this screen renders the same
+ * `AttachmentActions` from the other side and CANNOT compute that reason —
+ * `configError` is on `GET /engines/{id}/catalogs`, which this page does not
+ * read. The contract is therefore an explicit `null` plus one sentence saying
+ * what the `null` costs, and these tests pin the sentence to the engines it can
+ * actually be true of.
+ */
+describe("EnginesTab — the refusal scope this page cannot predict", () => {
+  test("names the Trino engines a Retry can be refused for, and leaves the button enabled", () => {
+    renderTab(
+      catalog({
+        engines: [
+          attachment({ engineId: "e1", engineName: "trino-prod", applyStatus: "failed", applyError: "boom" }),
+          attachment({ engineId: "e2", engineName: "sr-eu", engineType: "starrocks" }),
+        ],
+      }),
+    );
+
+    const note = screen.getByTestId("catalog-retry-scope-note");
+    expect(note).toHaveTextContent("trino-prod");
+    // The StarRocks engine must NOT be listed: its apply really is one
+    // statement about one catalog, so no sibling can refuse it. Naming it would
+    // be the same over-claim in the opposite direction.
+    expect(note).not.toHaveTextContent("sr-eu");
+    expect(note).toHaveTextContent(/different/i);
+    // And the server stays the refusal point: a disabled button with an
+    // invented reason would be worse than an enabled one that explains itself.
+    expect(within(rowFor("trino-prod")).getByRole("button", { name: /Retry/ })).toBeEnabled();
+  });
+
+  test("says nothing when every attached engine is StarRocks", () => {
+    renderTab(
+      catalog({
+        engines: [
+          attachment({ engineId: "e2", engineName: "sr-eu", engineType: "starrocks" }),
+          attachment({ engineId: "e3", engineName: "sr-us", engineType: "starrocks" }),
+        ],
+      }),
+    );
+    expect(screen.queryByTestId("catalog-retry-scope-note")).not.toBeInTheDocument();
+  });
+
+  test("treats an engine type egret does not recognise as the cautious case", () => {
+    renderTab(catalog({ engines: [attachment({ engineId: "e9", engineName: "duck-1", engineType: "duckdb" })] }));
+    expect(screen.getByTestId("catalog-retry-scope-note")).toHaveTextContent("duck-1");
+  });
+
+  test("is not shown to an operator who is offered no Retry or Detach at all", () => {
+    renderTab(catalog(), READER);
+    expect(screen.queryByTestId("catalog-retry-scope-note")).not.toBeInTheDocument();
+  });
+});

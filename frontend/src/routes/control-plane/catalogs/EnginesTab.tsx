@@ -32,7 +32,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { AttachmentActions, StatusBadge, appliedCell, useAttachmentActions } from "./attachmentUi";
+import {
+  AttachmentActions,
+  StatusBadge,
+  appliedCell,
+  isStarRocksType,
+  useAttachmentActions,
+} from "./attachmentUi";
 
 /**
  * The engine's OWN lifecycle status, which is a different fact from the
@@ -218,6 +224,13 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
       ? new Map(enginesQ.data.data.map((e) => [e.id, e.status]))
       : null;
   const failures = catalog.engines.filter((a) => a.applyStatus === "failed" && a.applyError);
+  /**
+   * The engines whose Retry and Detach have a scope wider than the row.
+   * StarRocks is excluded because its apply really is one statement about one
+   * catalog; an unrecognised type is NOT, for the reason `isStarRocksType`
+   * gives — the cautious answer is the one that warns.
+   */
+  const trinoAttachments = catalog.engines.filter((a) => !isStarRocksType(a.engineType));
 
   const result = test.data?.status === 200 ? test.data.data : null;
   const line = result ? checkLine(result, catalog.name) : null;
@@ -323,6 +336,19 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
                     {canUpdate && (
                       <AttachmentActions
                         a={a}
+                        // `null`, DELIBERATELY AND IN WRITING (whole-branch
+                        // review, F1). The engine's own Catalogs tab blocks
+                        // Retry when a Trino engine holds any catalog whose
+                        // stored configuration egret cannot parse; that rule is
+                        // about the ENGINE's whole attachment set, and this
+                        // page reads one catalog across many engines. The
+                        // `configError` it would need is reported only by
+                        // `GET /engines/{id}/catalogs` — one request per row
+                        // here, and SP3c-2 owns moving the field. So the button
+                        // stays enabled, the server stays the refusal point,
+                        // and `catalog-retry-scope-note` below says so once
+                        // instead of a per-row reason this page cannot write.
+                        retryBlockedReason={null}
                         detachBlockedReason={
                           a.isPrimary
                             ? `This is ${a.engineName}'s primary catalog. Detach it by deleting the engine.`
@@ -349,6 +375,25 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
           {engineHealth
             ? "The badge beside each engine name is that engine's lifecycle status as egret last recorded it — the engine's own page polls it live."
             : "egret cannot show you engine health here: listing engines needs the engine:read permission, which this account does not have."}
+        </p>
+      )}
+
+      {/* The scope of a refusal this page cannot predict, said ONCE rather than
+          per row — and only where it can apply (whole-branch review, F1). See
+          the `retryBlockedReason={null}` comment above for why the button is
+          enabled rather than disabled with an invented reason. */}
+      {canUpdate && trinoAttachments.length > 0 && (
+        <p className="text-xs text-muted-foreground" data-testid="catalog-retry-scope-note">
+          Retry and Detach on a Trino engine ({trinoAttachments.map((a) => a.engineName).join(", ")}
+          ) rebuild every catalog that engine has, all at once — so either can be refused because
+          a <em>different</em> catalog on the same engine has a stored configuration egret cannot
+          parse, and the message will name that other catalog rather than this one. This page
+          shows one catalog, so it cannot tell you in advance which engines are in that state;{" "}
+          {canReadEngines
+            ? "the engine's own Catalogs tab lists them and says which."
+            : "an operator holding engine:read can see that on the engine's own Catalogs tab."}{" "}
+          A refused Retry changes nothing: it never reaches the engine, and it leaves this
+          catalog&apos;s apply status exactly as it is.
         </p>
       )}
 
