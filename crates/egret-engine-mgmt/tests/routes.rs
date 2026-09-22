@@ -8683,8 +8683,14 @@ async fn engine_rows_named(f: &Fixture, name: &str) -> i64 {
 }
 
 async fn engines_fixture() -> Option<Fixture> {
+    engines_fixture_with(FakeEnginePort::default()).await
+}
+
+/// `engines_fixture` for a test that needs to look at what the provisioner was
+/// asked to do — "nothing was provisioned" is only checkable from this handle.
+async fn engines_fixture_with(port: FakeEnginePort) -> Option<Fixture> {
     setup_full(
-        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(port)),
         Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
     )
     .await
@@ -8713,8 +8719,9 @@ async fn create_engine_still_accepts_a_bare_warehouse_id() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "bare warehouseId; body={j}");
     assert_eq!(j["warehouseId"], serde_json::json!(wh_id), "body={j}");
-    assert!(
-        j.get("catalogAttachErrors").is_none(),
+    assert_eq!(
+        j["catalogAttachErrors"],
+        serde_json::json!([]),
         "nothing was asked to attach; body={j}"
     );
     let engine_id = j["id"].as_str().expect("engine id").to_string();
@@ -8791,8 +8798,9 @@ async fn create_engine_with_catalogs_marks_exactly_one_primary() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "body={j}");
-    assert!(
-        j.get("catalogAttachErrors").is_none(),
+    assert_eq!(
+        j["catalogAttachErrors"],
+        serde_json::json!([]),
         "both catalogs attached; body={j}"
     );
     assert_eq!(
@@ -9098,5 +9106,358 @@ async fn attachment_dto_reports_is_primary() {
         j["isPrimary"],
         serde_json::json!(false),
         "an attach never leads; body={j}"
+    );
+}
+
+// ── SP3c-1 Task 2, fix round 1 ────────────────────────────────────────────────
+
+/// F1: a mistyped catalog id must not buy you a running cluster.
+///
+/// Before the fix the primary's id was resolved up front (a clean refusal) and
+/// every OTHER id was resolved at attach time, AFTER the catalog client was
+/// minted, the engine row written and the cluster provisioned — so the same typo
+/// was a 400 on one entry and a 201-with-a-message on the next three. The
+/// provisioner handle is the point of this test: "nothing was created" is not
+/// the same claim as "nothing was provisioned", and it was the second one that
+/// was false.
+#[tokio::test]
+async fn an_unknown_catalog_id_refuses_the_create_before_anything_is_provisioned() {
+    let port = FakeEnginePort::default();
+    let Some(f) = engines_fixture_with(port.clone()).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_unknown_cat", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    // A first engine puts the warehouse's catalog in the registry.
+    let first = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &first,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+    let provisions_before = port.provisioned.lock().unwrap().len();
+    let ghost = Uuid::new_v4();
+
+    // The typo is on a NON-primary entry: the arm that used to get through.
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "catalogs": [
+            { "catalogId": wh_cat.id, "primary": true },
+            { "catalogId": ghost, "primary": false },
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert_eq!(
+        j["error"],
+        serde_json::json!(format!("bad request: no such catalog {ghost}")),
+        "names WHICH id is unknown; body={j}"
+    );
+    assert_eq!(engine_rows_named(&f, &name).await, 0, "no engine row");
+    assert_eq!(
+        port.provisioned.lock().unwrap().len(),
+        provisions_before,
+        "a refused create must not have provisioned a cluster"
+    );
+
+    // Same refusal when the typo is on the PRIMARY entry (F9: named, not a bare
+    // 404 — with four ids in a body the caller has to be told which one).
+    let name2 = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name2,
+        serde_json::json!({ "catalogs": [{ "catalogId": ghost, "primary": true }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert_eq!(
+        j["error"],
+        serde_json::json!(format!("bad request: no such catalog {ghost}")),
+        "body={j}"
+    );
+    assert_eq!(engine_rows_named(&f, &name2).await, 0, "no engine row");
+    assert_eq!(
+        port.provisioned.lock().unwrap().len(),
+        provisions_before,
+        "still nothing provisioned"
+    );
+
+    // A repeated id is the same outcome by a different route: it would attach
+    // once and 409 the second time, after the cluster was up.
+    let name3 = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name3,
+        serde_json::json!({ "catalogs": [
+            { "catalogId": wh_cat.id, "primary": true },
+            { "catalogId": wh_cat.id, "primary": false },
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert_eq!(
+        j["error"],
+        serde_json::json!(format!(
+            "bad request: catalog {} is listed twice",
+            wh_cat.id
+        )),
+        "body={j}"
+    );
+    assert_eq!(engine_rows_named(&f, &name3).await, 0, "no engine row");
+    assert_eq!(
+        port.provisioned.lock().unwrap().len(),
+        provisions_before,
+        "still nothing provisioned"
+    );
+}
+
+/// F2: the field nothing populated. A create whose engine comes up fine but
+/// whose extra catalog genuinely cannot be attached returns 201 AND says which
+/// catalog it is and why — this is the only state `catalogAttachErrors` exists
+/// for, and until now no test entered it, so an implementation that never
+/// populated the field passed every one.
+///
+/// The vehicle is `can_read`: a `generic` catalog declaring only `starrocks`
+/// cannot be attached to a Trino engine, and `check_engine_supports` refuses it
+/// before anything is minted — a failure that belongs to the catalog, with the
+/// engine already provisioned.
+#[tokio::test]
+async fn a_catalog_that_cannot_attach_is_reported_on_the_created_engine() {
+    let port = FakeEnginePort::default();
+    let Some(f) = engines_fixture_with(port.clone()).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_attach_err", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let first = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &first,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+
+    let sr_only_name = unique_catalog_name("paimon");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": sr_only_name, "kind": "generic",
+            "config": { "engines": ["starrocks"] },
+            "advanced": { "starrocks": { "type": "paimon" } }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let sr_only = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let provisions_before = port.provisioned.lock().unwrap().len();
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "catalogs": [
+            { "catalogId": wh_cat.id, "primary": true },
+            { "catalogId": sr_only, "primary": false },
+        ]}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the engine itself came up; body={j}"
+    );
+    assert_eq!(
+        port.provisioned.lock().unwrap().len(),
+        provisions_before + 1,
+        "the cluster WAS provisioned — this is not a refusal"
+    );
+    let errs = j["catalogAttachErrors"]
+        .as_array()
+        .expect("catalogAttachErrors is always an array");
+    assert_eq!(errs.len(), 1, "exactly the one that could not attach; {j}");
+    assert_eq!(errs[0]["catalogId"], serde_json::json!(sr_only), "{j}");
+    let msg = errs[0]["message"].as_str().expect("message");
+    assert!(msg.contains("trino"), "names the engine type; msg={msg}");
+    assert!(msg.contains(&sr_only_name), "names the catalog; msg={msg}");
+
+    // And the engine really is missing it: the primary attached, the other did
+    // not, and the reported catalog can be retried through the attach route.
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let listed = registry(&f)
+        .list_engine_attachments(engine_id)
+        .await
+        .expect("list");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|a| (a.catalog.id, a.is_primary()))
+            .collect::<Vec<_>>(),
+        vec![(wh_cat.id, true)],
+        "only the primary is on the engine"
+    );
+}
+
+/// F7: `warehouseId` and `catalogs` together. `catalogs` supersedes
+/// `warehouseId`, so honouring one and dropping the other without a word is how
+/// an integrator spends an afternoon working out which warehouse the engine got.
+#[tokio::test]
+async fn create_engine_refuses_both_warehouse_id_and_catalogs() {
+    let port = FakeEnginePort::default();
+    let Some(f) = engines_fixture_with(port.clone()).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_both_shapes", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let first = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &first,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+    let provisions_before = port.provisioned.lock().unwrap().len();
+
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({
+            "warehouseId": wh_id,
+            "catalogs": [{ "catalogId": wh_cat.id, "primary": true }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    let msg = j["error"].as_str().expect("error");
+    assert!(
+        msg.contains("not both"),
+        "says the two shapes are exclusive; msg={msg}"
+    );
+    assert!(
+        msg.contains("supersedes"),
+        "says which one wins so the caller knows what to drop; msg={msg}"
+    );
+    assert_eq!(engine_rows_named(&f, &name).await, 0, "no engine row");
+    assert_eq!(
+        port.provisioned.lock().unwrap().len(),
+        provisions_before,
+        "nothing provisioned"
+    );
+}
+
+/// F8: `PUT /engines/{id}` shares `CreateEngineBody` but has never attached
+/// anything. Accepting `catalogs` and dropping it would tell the caller their
+/// catalogs were attached.
+#[tokio::test]
+async fn update_engine_refuses_catalogs_and_changes_nothing() {
+    let port = FakeEnginePort::default();
+    let Some(f) = engines_fixture_with(port.clone()).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_update_cats", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+
+    let bench = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": bench, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let bench_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT spec FROM engine_mgmt.engines WHERE id = $1")
+            .bind(engine_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("engine spec");
+    let updates_before = port.updated.lock().unwrap().len();
+
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{engine_id}"),
+        &token,
+        Some(serde_json::json!({
+            "name": name,
+            "warehouseId": wh_id,
+            "coordinatorReplicas": 3, "workerReplicas": 3,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            "catalogs": [{ "catalogId": bench_id, "primary": false }],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    let msg = j["error"].as_str().expect("error");
+    assert!(
+        msg.contains("not accepted on update"),
+        "says the field is create-only; msg={msg}"
+    );
+    assert!(
+        msg.contains("/catalogs/"),
+        "points at the route that does attach; msg={msg}"
+    );
+
+    // Nothing changed: not the attachments, not the spec, not the cluster.
+    let listed = registry(&f)
+        .list_engine_attachments(engine_id)
+        .await
+        .expect("list");
+    assert_eq!(
+        listed.iter().map(|a| a.catalog.id).collect::<Vec<_>>(),
+        vec![wh_cat.id],
+        "the refused update attached nothing"
+    );
+    let after: serde_json::Value =
+        sqlx::query_scalar("SELECT spec FROM engine_mgmt.engines WHERE id = $1")
+            .bind(engine_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("engine spec");
+    assert_eq!(after, before, "the refused update wrote no spec");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "the refused update never reached the provisioner"
     );
 }

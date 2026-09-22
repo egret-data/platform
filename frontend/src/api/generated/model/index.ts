@@ -92,6 +92,7 @@ export * from './createdProfile';
 export * from './createEndpointInput';
 export * from './createEngineBody';
 export * from './createEngineBodyTrinoConfig';
+export * from './createEngineResponse';
 export * from './createFlowRequest';
 export * from './createFolder';
 export * from './createGroupInput';

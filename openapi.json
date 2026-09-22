@@ -3748,11 +3748,11 @@
         },
         "responses": {
           "201": {
-            "description": "Engine created and provisioned; primary catalog auto-wired to the warehouse",
+            "description": "Engine created and provisioned; the primary catalog is attached, and `catalogAttachErrors` lists any of the request's other `catalogs` the engine came up without",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/EngineDto"
+                  "$ref": "#/components/schemas/CreateEngineResponse"
                 }
               }
             }
@@ -3920,7 +3920,7 @@
             }
           },
           "400": {
-            "description": "Invalid config, Kubernetes not configured, or re-materializing workspace connections failed",
+            "description": "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), or re-materializing workspace connections failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -31154,14 +31154,14 @@
               "null"
             ],
             "format": "uuid",
-            "description": "Superseded by `catalogs` and dropped in SP3c-2. A body that sends this\nand no `catalogs` behaves exactly as it did before."
+            "description": "Superseded by `catalogs` and dropped in SP3c-2. A body that sends this\nand no `catalogs` behaves exactly as it did before; a body that sends\nBOTH is refused rather than having one of them quietly ignored."
           },
           "catalogs": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NewEngineCatalog"
             },
-            "description": "Registry catalogs to attach at create. Exactly one must be `primary`."
+            "description": "Registry catalogs to attach at create. Exactly one must be `primary`,\nand every id must exist — an unknown or repeated id refuses the create\nbefore anything is provisioned. Mutually exclusive with `warehouseId`.\nCREATE ONLY: `PUT /engines/{id}` refuses a body that carries it."
           },
           "imageVersion": {
             "type": [
@@ -31224,6 +31224,29 @@
             "description": "Optional: a kubernetes.io/tls named secret to back the coordinator TLS."
           }
         }
+      },
+      "CreateEngineResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EngineDto"
+          },
+          {
+            "type": "object",
+            "required": [
+              "catalogAttachErrors"
+            ],
+            "properties": {
+              "catalogAttachErrors": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CatalogAttachErrorDto"
+                },
+                "description": "Catalogs from the body's `catalogs` that could not be attached. Empty on\nsuccess. The engine EXISTS and is provisioned; these catalogs simply are\nnot on it, and each can be retried with\n`POST /api/control-plane/engines/{id}/catalogs/{cid}`. The create is not\nrolled back for them — the cluster is already up by the time they are\nattached, and the alternative (the wizard's own attach loop) reports a\nper-catalog failure exactly the same way. Every id in the body was\nresolved BEFORE provisioning, so nothing here is a mistyped id."
+              }
+            }
+          }
+        ],
+        "description": "What `POST /engines` returns: the engine, plus whichever of the body's\n`catalogs` the engine came up WITHOUT.\n\nIts own type rather than a field on [`EngineDto`] (review F2): `GET`, the\nlist and `PUT` all return `EngineDto` and can never have anything to say\nhere, and a schema that advertises a field an endpoint cannot send is a\npromise to its consumers that only create keeps. The engine's own fields are\nflattened, so the create response is byte-identical to `EngineDto` whenever\n`catalogAttachErrors` is empty — which is every create that does what it was\nasked."
       },
       "CreateFlowRequest": {
         "type": "object",
@@ -33504,16 +33527,6 @@
           },
           "spec": {
             "$ref": "#/components/schemas/EngineSpecDto"
-          },
-          "catalogAttachErrors": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "$ref": "#/components/schemas/CatalogAttachErrorDto"
-            },
-            "description": "Only ever present on `POST /engines`, and only when some of the body's\n`catalogs` could not be attached. The engine EXISTS and is provisioned;\nthese catalogs simply are not on it, and each can be retried with\n`POST /api/control-plane/engines/{id}/catalogs/{cid}`. The create is not\nrolled back for them: the cluster is already up by the time they are\nattached, and the alternative — the wizard's own attach loop — reports a\nper-catalog failure exactly the same way."
           }
         }
       },

@@ -111,8 +111,9 @@ impl AttachedCatalog {
     /// Whether this is the engine's primary catalog (SP3c D2). Read from the
     /// attachment rather than stored a second time here: primacy is one fact,
     /// and a copy on the pair could disagree with the row it was built from.
-    /// Until SP3c-1 this was recomputed at four call sites as
-    /// `catalog.warehouse_id == Some(engine.warehouse_id)`.
+    /// Until SP3c-1 this was recomputed at three call sites as
+    /// `catalog.warehouse_id == Some(engine.warehouse_id)` (`legacy_catalog_dto`,
+    /// `update_catalog`'s edit guard, and `catalog_apply::is_primary`).
     pub fn is_primary(&self) -> bool {
         self.attachment.is_primary
     }
@@ -622,28 +623,15 @@ impl RegistryStore {
         })
     }
 
-    /// Move primacy to `catalog_id`: exactly one UPDATE, so the partial unique
-    /// index `engine_catalog_attachments_primary_key` is never transiently
-    /// violated by a clear-then-set pair. A `catalog_id` not attached to this
-    /// engine clears the engine's primary and sets none — the caller checks
-    /// the attachment exists first (SP3c D2); this is why the ledger's
-    /// "exactly one" lower bound is the code's, not the schema's.
-    pub async fn set_primary_attachment(
-        &self,
-        engine_id: Uuid,
-        catalog_id: Uuid,
-    ) -> Result<(), RegistryError> {
-        sqlx::query(
-            "UPDATE registry.engine_catalog_attachments \
-                SET is_primary = (catalog_id = $2) \
-              WHERE engine_id = $1",
-        )
-        .bind(engine_id)
-        .bind(catalog_id)
-        .execute(self.pool())
-        .await?;
-        Ok(())
-    }
+    // NOTE (SP3c-1 review F4): there is deliberately no `set_primary_attachment`
+    // here. Nothing in SP3c-1 moves primacy after create, and the obvious
+    // one-statement implementation (`SET is_primary = (catalog_id = $2)`) turns a
+    // catalog_id that is NOT attached to this engine into a silent `Ok(())` that
+    // leaves the engine with ZERO primaries — a new door onto exactly the gap
+    // `list_engine_attachments` warns about, opened by the change that closed it.
+    // It also cannot check, on its own, that the new primary is an egret
+    // warehouse catalog, which SP3c-1 still requires. SP3c-2 adds it WITH its
+    // caller, its guard and its test.
 
     pub async fn get_attachment(
         &self,

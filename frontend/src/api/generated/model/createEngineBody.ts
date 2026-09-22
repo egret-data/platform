@@ -13,11 +13,17 @@ export interface CreateEngineBody {
   name: string;
   /**
      * Superseded by `catalogs` and dropped in SP3c-2. A body that sends this
-     * and no `catalogs` behaves exactly as it did before.
+     * and no `catalogs` behaves exactly as it did before; a body that sends
+     * BOTH is refused rather than having one of them quietly ignored.
      * @nullable
      */
   warehouseId?: string | null;
-  /** Registry catalogs to attach at create. Exactly one must be `primary`. */
+  /**
+     * Registry catalogs to attach at create. Exactly one must be `primary`,
+     * and every id must exist — an unknown or repeated id refuses the create
+     * before anything is provisioned. Mutually exclusive with `warehouseId`.
+     * CREATE ONLY: `PUT /engines/{id}` refuses a body that carries it.
+     */
   catalogs?: NewEngineCatalog[];
   /** @nullable */
   imageVersion?: string | null;
