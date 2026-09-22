@@ -55,10 +55,8 @@ import {
   controlPlaneCatalogWarehouseConfig,
 } from "./generated/control-plane-catalog/control-plane-catalog";
 import {
-  controlPlaneEnginesAddCatalog,
   controlPlaneEnginesCreateEngine,
   controlPlaneEnginesDeleteEngine,
-  controlPlaneEnginesGetCatalog,
   controlPlaneEnginesGetCluster,
   controlPlaneEnginesGetEngine,
   controlPlaneEnginesGetQuery,
@@ -67,11 +65,8 @@ import {
   controlPlaneEnginesListEngines,
   controlPlaneEnginesListQueries,
   controlPlaneEnginesPodLogs,
-  controlPlaneEnginesRemoveCatalog,
   controlPlaneEnginesRestartEngine,
   controlPlaneEnginesRotateEngineSecrets,
-  controlPlaneEnginesTestCatalog,
-  controlPlaneEnginesUpdateCatalog,
   controlPlaneEnginesUpdateEngine,
 } from "./generated/control-plane-engines/control-plane-engines";
 import {
@@ -989,51 +984,18 @@ export async function getCluster(engineId: string): Promise<ClusterInfo> {
  */
 export type EngineCatalog = EngineCatalogDto;
 
-export interface EngineCatalogDetail extends EngineCatalog {
-  config: Record<string, unknown>;
-}
-
-export interface AddCatalogInput {
-  name: string;
-  kind: string;
-  config: Record<string, unknown>;
-  secretRef?: string | null;
-}
-
 export async function listEngineCatalogs(id: string): Promise<EngineCatalog[]> {
   return (await controlPlaneEnginesListCatalogs(id)).data as EngineCatalog[];
 }
 
-export async function addEngineCatalog(id: string, input: AddCatalogInput): Promise<EngineCatalog> {
-  return (await controlPlaneEnginesAddCatalog(id, input)).data as EngineCatalog;
-}
-
-export async function deleteEngineCatalog(id: string, cid: string): Promise<void> {
-  await controlPlaneEnginesRemoveCatalog(id, cid);
-}
-
-export async function getEngineCatalog(id: string, cid: string): Promise<EngineCatalogDetail> {
-  return (await controlPlaneEnginesGetCatalog(id, cid)).data as EngineCatalogDetail;
-}
-
-export async function updateEngineCatalog(
-  id: string,
-  cid: string,
-  input: { config: Record<string, unknown>; secretRef?: string | null },
-): Promise<EngineCatalog> {
-  return (await controlPlaneEnginesUpdateCatalog(id, cid, input)).data as EngineCatalog;
-}
-
-/** Result of a "test connection" run — always 200; `ok` reflects whether the
- * catalog actually answered a query on the engine's coordinator. */
-export interface CatalogTestResult {
-  ok: boolean;
-  message: string;
-}
-
-export async function testEngineCatalog(id: string, cid: string): Promise<CatalogTestResult> {
-  return (await controlPlaneEnginesTestCatalog(id, cid)).data as CatalogTestResult;
-}
+/**
+ * The rest of the legacy `/engines/{id}/catalogs*` family — add, remove, get,
+ * update and the two-state "test connection" — had no caller left once the
+ * Catalogs tab stopped editing catalogs in place (SP3c-1 Task 9), so the
+ * wrappers are gone with `CatalogForm`. The ROUTES stay, which is what D5
+ * requires; SP3c-2 deletes them, and "nothing in the client calls them" is now
+ * literally true rather than an intention.
+ */
 
 // ── Engine pod logs (control-plane) ──────────────────────────────────────────
 //
