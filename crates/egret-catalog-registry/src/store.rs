@@ -614,9 +614,9 @@ impl RegistryStore {
                 // Migration 0150's partial unique index. An engine has ONE
                 // primary catalog, so a second `is_primary` insert is a
                 // conflict and not a silent overwrite (SP3c D2).
-                Some("engine_catalog_attachments_primary_key") => RegistryError::AlreadyExists(
-                    "this engine already has a primary catalog".into(),
-                ),
+                Some("engine_catalog_attachments_primary_key") => {
+                    RegistryError::AlreadyExists("this engine already has a primary catalog".into())
+                }
                 _ => RegistryError::Db(e),
             }
         })

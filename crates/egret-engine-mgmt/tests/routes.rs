@@ -8652,3 +8652,451 @@ async fn retry_on_a_deleting_engine_is_409_and_writes_nothing() {
         "a refused apply on a deleting engine must leave the attachment unchanged"
     );
 }
+
+// ── SP3c-1 Task 2: `is_primary` on the attachment, `catalogs` on engine create ──
+
+/// `POST /engines` for a Trino engine, with whatever catalog shape the caller
+/// wants (`warehouseId`, `catalogs`, or both).
+async fn create_engine_body(
+    f: &Fixture,
+    token: &str,
+    name: &str,
+    catalog_shape: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let mut body = serde_json::json!({
+        "name": name,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+    });
+    for (k, v) in catalog_shape.as_object().expect("object") {
+        body[k] = v.clone();
+    }
+    call(f, "POST", "/engines", token, Some(body)).await
+}
+
+async fn engine_rows_named(f: &Fixture, name: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM engine_mgmt.engines WHERE name = $1")
+        .bind(name)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count engines")
+}
+
+async fn engines_fixture() -> Option<Fixture> {
+    setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+}
+
+/// THE BACK-COMPAT FLOOR. `frontend/tests/e2e/helpers.ts` and
+/// `embedded-catalog.spec.ts` both still POST a bare `warehouseId`, and so does
+/// every other engine test in this file. Making `warehouseId` optional is a
+/// widening; a widening that breaks the old shape is not a widening.
+#[tokio::test]
+async fn create_engine_still_accepts_a_bare_warehouse_id() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_bare_wh", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "bare warehouseId; body={j}");
+    assert_eq!(j["warehouseId"], serde_json::json!(wh_id), "body={j}");
+    assert!(
+        j.get("catalogAttachErrors").is_none(),
+        "nothing was asked to attach; body={j}"
+    );
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{engine_id}/catalogs"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j.as_array().map(|a| a.len()), Some(1), "body={j}");
+    assert_eq!(
+        j[0]["isPrimary"],
+        serde_json::json!(true),
+        "the auto-wired warehouse catalog still leads; body={j}"
+    );
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+    let row = registry(&f)
+        .get_attachment(Uuid::parse_str(&engine_id).unwrap(), wh_cat.id)
+        .await
+        .expect("read attachment")
+        .expect("attached");
+    assert!(row.is_primary, "the COLUMN, not a derived guess");
+}
+
+/// `catalogs` attaches several and marks exactly one primary. The primary is
+/// attached by the create path itself; the rest go through the same
+/// `attach_to_engine` the attach route uses.
+#[tokio::test]
+async fn create_engine_with_catalogs_marks_exactly_one_primary() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_catalogs", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    // A first engine is what puts the warehouse's catalog in the registry.
+    let first = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &first,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+
+    let bench = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": bench, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let bench_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "catalogs": [
+            { "catalogId": bench_id, "primary": false },
+            { "catalogId": wh_cat.id, "primary": true },
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body={j}");
+    assert!(
+        j.get("catalogAttachErrors").is_none(),
+        "both catalogs attached; body={j}"
+    );
+    assert_eq!(
+        j["warehouseId"],
+        serde_json::json!(wh_id),
+        "the engine row's warehouse comes from the PRIMARY catalog; body={j}"
+    );
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{engine_id}/catalogs"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j.as_array().map(|a| a.len()),
+        Some(2),
+        "both catalogs on the engine; body={j}"
+    );
+    assert_eq!(
+        j.as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["isPrimary"].clone())
+            .collect::<Vec<_>>(),
+        vec![serde_json::json!(true), serde_json::json!(false)],
+        "exactly one primary, and it leads the render order; body={j}"
+    );
+    assert_eq!(
+        j[0]["id"],
+        serde_json::json!(wh_cat.id),
+        "the catalog the body marked primary is the one that leads; body={j}"
+    );
+}
+
+/// Two primaries and no primary are both refused, by the SAME resolution
+/// function, before anything is written.
+#[tokio::test]
+async fn create_engine_refuses_two_primaries_and_refuses_none() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_primaries", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let first = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &first,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+    let bench = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": bench, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let bench_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let two = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &two,
+        serde_json::json!({ "catalogs": [
+            { "catalogId": wh_cat.id, "primary": true },
+            { "catalogId": bench_id, "primary": true },
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "two primaries; body={j}");
+    assert_eq!(
+        j["error"],
+        serde_json::json!("bad request: only one attached catalog may be primary"),
+        "body={j}"
+    );
+    assert_eq!(engine_rows_named(&f, &two).await, 0, "nothing was created");
+
+    let none = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &none,
+        serde_json::json!({ "catalogs": [{ "catalogId": wh_cat.id, "primary": false }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "no primary; body={j}");
+    assert_eq!(
+        j["error"],
+        serde_json::json!("bad request: one attached catalog must be primary"),
+        "body={j}"
+    );
+    assert_eq!(engine_rows_named(&f, &none).await, 0, "nothing was created");
+
+    // Neither shape at all.
+    let empty = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(&f, &token, &empty, serde_json::json!({})).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "no catalogs at all; body={j}"
+    );
+    assert_eq!(
+        j["error"],
+        serde_json::json!(
+            "bad request: an engine needs a primary catalog: send `catalogs` with one marked primary"
+        ),
+        "body={j}"
+    );
+    assert_eq!(
+        engine_rows_named(&f, &empty).await,
+        0,
+        "nothing was created"
+    );
+}
+
+/// SP3c-1 does NOT let a non-warehouse catalog lead: `engines.warehouse_id` is
+/// still `NOT NULL` and ten sites read it, `ensure_engine_role` and the
+/// StarRocks storage derivation among them. The refusal must SAY so, because
+/// the wizard repeats the reason next to the disabled choice (D2, user decision
+/// 2026-09-22) — a bare "bad request" would leave it inventing one.
+#[tokio::test]
+async fn create_engine_refuses_a_non_warehouse_primary_with_the_reason() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_nonwh", true).await;
+    let bench = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": bench, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let bench_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "catalogs": [{ "catalogId": bench_id, "primary": true }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    let msg = j["error"].as_str().expect("error message");
+    assert!(
+        msg.contains("must be an egret warehouse catalog"),
+        "says what is wrong; msg={msg}"
+    );
+    assert!(msg.contains("Ranger"), "names Ranger; msg={msg}");
+    assert!(msg.contains("storage"), "names storage; msg={msg}");
+    assert_eq!(engine_rows_named(&f, &name).await, 0, "nothing was created");
+}
+
+/// The lower half of "exactly one primary per engine". There is no anchor row
+/// for a CHECK, so migration 0150's PARTIAL UNIQUE INDEX is what turns a second
+/// primary into a refusal instead of two rows that both sort first — which for
+/// Trino means two catalogs fighting over `C0`.
+#[tokio::test]
+async fn a_second_primary_attachment_is_refused_by_the_index() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_second_primary", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let reg = registry(&f);
+    let bench = reg
+        .create_catalog(
+            &unique_catalog_name("bench"),
+            &egret_catalog_registry::CatalogDef::parse(
+                "tpch",
+                &serde_json::json!({}),
+                &serde_json::json!(null),
+            )
+            .unwrap(),
+            None,
+        )
+        .await
+        .expect("create catalog");
+
+    let err = reg
+        .insert_attachment(&egret_catalog_registry::NewAttachment {
+            engine_id,
+            catalog_id: bench.id,
+            catalog_client_id: None,
+            credential_secret_id: None,
+            minted_client: false,
+            applied_now: true,
+            is_primary: true,
+            created_at: None,
+            apply_status: egret_catalog_registry::store::apply_status::APPLIED,
+        })
+        .await
+        .expect_err("a second primary must be refused");
+    assert!(
+        matches!(err, egret_catalog_registry::RegistryError::AlreadyExists(ref m)
+            if m.contains("already has a primary catalog")),
+        "{err:?}"
+    );
+
+    // And the refusal wrote nothing: the engine still has exactly one catalog,
+    // the warehouse's, and it is still the primary.
+    let listed = reg
+        .list_engine_attachments(engine_id)
+        .await
+        .expect("list attachments");
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+    assert_eq!(
+        listed
+            .iter()
+            .map(|a| (a.catalog.id, a.is_primary()))
+            .collect::<Vec<_>>(),
+        vec![(wh_cat.id, true)],
+    );
+}
+
+/// `CatalogAttachmentDto` — what `GET /catalogs/{id}` lists under `engines`,
+/// and what Task 7's primary badge reads — reports the column.
+#[tokio::test]
+async fn attachment_dto_reports_is_primary() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_dto", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+
+    let (status, j) = call(&f, "GET", &format!("/catalogs/{}", wh_cat.id), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j["engines"][0]["engineId"],
+        serde_json::json!(engine_id),
+        "body={j}"
+    );
+    assert_eq!(
+        j["engines"][0]["isPrimary"],
+        serde_json::json!(true),
+        "the warehouse catalog leads its engine; body={j}"
+    );
+
+    // A catalog attached afterwards is NOT primary, through the same DTO.
+    let bench = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": bench, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let bench_id = j["id"].as_str().unwrap().to_string();
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{bench_id}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "attach; body={j}");
+    assert_eq!(
+        j["isPrimary"],
+        serde_json::json!(false),
+        "an attach never leads; body={j}"
+    );
+}

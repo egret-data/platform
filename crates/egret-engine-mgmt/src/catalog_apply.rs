@@ -319,10 +319,7 @@ pub(crate) async fn converge_starrocks_catalogs(
     consecutive_read_errors: &mut u32,
 ) {
     let registry = st.engine_mgmt.registry();
-    let mut attachments = match registry
-        .list_engine_attachments(engine.id)
-        .await
-    {
+    let mut attachments = match registry.list_engine_attachments(engine.id).await {
         Ok(a) => a,
         Err(e) => {
             tracing::warn!(engine = %engine.name, error = %e,
