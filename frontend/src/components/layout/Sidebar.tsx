@@ -104,8 +104,10 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
     items: [
       { label: "Workspaces", icon: FolderKanban },
       { label: "Engines", icon: Server, perm: "engine:read" },
-      // SP3c-1 D5: both entries render through this release. Task 8 removes
-      // Warehouses once `/control-plane/warehouses/*` is a redirect.
+      // SP3c-1 D5: both entries render through this release, and SP3c-2
+      // retires Warehouses. Its LIST is still a page; only
+      // `/control-plane/warehouses/:id` became a redirect, onto the catalog
+      // that carries the five tabs the warehouse detail page used to.
       { label: "Catalogs", icon: Library, perm: "catalog_registry:read" },
       { label: "Warehouses", icon: Boxes, perm: "warehouse:read" },
       { label: "Storage", icon: HardDrive, perm: "storage:read" },

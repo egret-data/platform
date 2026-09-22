@@ -17,9 +17,12 @@
  * bodies is not a thing to leave for the next reader. Both pages re-export
  * their own key, so every existing import path still resolves.
  *
- * Task 8 deletes the warehouse half of this when the section becomes a
- * redirect; the catalog keys below outlive it, for the same reason — the
- * detail page's tabs each need the key its own page owns.
+ * D5 keeps the warehouse half alive through SP3c-1: only the warehouse
+ * DETAIL route became a redirect, so the Warehouses list is still a writer of
+ * both keys and SP3c-2 is what retires it. `warehousesQueryKey` gained a third
+ * reader in Task 8 — `CatalogDetail` keys its single-warehouse fetch UNDER it
+ * (`[...warehousesQueryKey, id]`), so the invalidations that already exist
+ * reach that row too.
  */
 import { getControlPlaneCatalogRegistryGetRegistryCatalogQueryKey } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 
