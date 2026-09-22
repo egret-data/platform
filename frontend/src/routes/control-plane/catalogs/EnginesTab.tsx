@@ -65,7 +65,38 @@ function StatusBadge({ a }: { a: CatalogAttachmentDto }) {
         pending
       </Badge>
     );
-  return <Badge variant="secondary">applied</Badge>;
+  if (a.applyStatus === "applied") return <Badge variant="secondary">applied</Badge>;
+  // `applyStatus` is generated as `string`, not an enum, so this arm is
+  // reachable. It renders the value egret actually sent, neutrally: falling
+  // through to the `applied` badge would be a false green asserting a property
+  // nothing measured — the exact failure `checkLine`'s exhaustive switch below
+  // exists to prevent, and it would be worse here because nothing would even
+  // hint that the value was unrecognised (SP3c review F5).
+  return (
+    <Badge variant="outline" className="text-muted-foreground italic">
+      {a.applyStatus}
+    </Badge>
+  );
+}
+
+/**
+ * The Applied cell.
+ *
+ * `applied_at` is NOT cleared by `set_apply_failed`
+ * (`egret-catalog-registry/src/store.rs`), so a row that applied once and later
+ * failed still carries a timestamp — which is worth showing and must not be
+ * shown bare, because bare it reads as "this is live right now". And a row with
+ * no timestamp is only "waiting" while it is `pending`: saying it on a `failed`
+ * row makes the row contradict its own badge (SP3c review F4).
+ */
+function appliedCell(a: CatalogAttachmentDto): string {
+  if (a.appliedAt) {
+    const when = new Date(a.appliedAt).toLocaleString();
+    return a.applyStatus === "applied" ? when : `last applied ${when}`;
+  }
+  if (a.applyStatus === "pending") return `waiting since ${new Date(a.createdAt).toLocaleString()}`;
+  if (a.applyStatus === "failed") return "never applied";
+  return "—";
 }
 
 type Tone = "ok" | "bad" | "neutral";
@@ -94,20 +125,38 @@ function checkLine(r: CatalogTestResultDto, catalogName: string): { tone: Tone; 
   // `check` added to the schema makes this function's declared return type
   // unsatisfiable instead of falling quietly into one of the three branches.
   switch (r.check) {
-    case "query":
+    case "query": {
+      const ran = `SHOW SCHEMAS FROM ${catalogName}${
+        r.engineName ? ` on ${r.engineName}` : ""
+      }`;
       return {
         tone: r.ok ? "ok" : "bad",
-        what: `Query check — SHOW SCHEMAS FROM ${catalogName}${
-          r.engineName ? ` on ${r.engineName}` : ""
-        }, which exercises the catalog's credentials.`,
+        // The credentials clause belongs to the SUCCESS path only. On a failure
+        // the statement may not have reached authentication at all — this
+        // file's own `Catalog 'sales' does not exist` fixture is such a case —
+        // so claiming it exercised them is a claim about an outcome that did
+        // not happen (SP3c review F7).
+        what: r.ok
+          ? `Query check — ${ran}, which exercises the catalog's credentials.`
+          : `Query check — ${ran}. It did not succeed, so nothing was shown about the catalog's credentials either.`,
       };
-    case "tcp":
+    }
+    case "tcp": {
+      const where = r.target ?? "the host and port in the stored configuration";
       return {
         tone: r.ok ? "ok" : "bad",
-        what: `Reachability check — egret opened and closed a TCP connection to ${
-          r.target ?? "the host and port in the stored configuration"
-        }. It does not verify credentials, TLS or permissions, so it cannot tell this catalog from any other process listening on that port.`,
+        // Both halves of the ternary, not just the caveat. An unconditional
+        // "egret opened and closed a TCP connection" sat directly above the
+        // server's "Could not reach …: Connection refused" — two sentences in
+        // one box, contradicting, on the tab whose whole job is phrasing
+        // outcomes accurately (SP3c review F1). Both name the target, and both
+        // carry the caveat, because the limitation is a property of the CHECK
+        // and not of its outcome.
+        what: r.ok
+          ? `Reachability check — egret opened and closed a TCP connection to ${where}. It does not verify credentials, TLS or permissions, so it cannot tell this catalog from any other process listening on that port.`
+          : `Reachability check — egret could not open a TCP connection to ${where}. Even a connection that had succeeded would not verify credentials, TLS or permissions.`,
       };
+    }
     case "unsupported":
       return {
         tone: "neutral",
@@ -228,9 +277,8 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
   const test = useControlPlaneCatalogRegistryTestRegistryCatalog<ApiError>();
 
   const attached = new Set(catalog.engines.map((a) => a.engineId));
-  const candidates = (enginesQ.data?.status === 200 ? enginesQ.data.data : []).filter(
-    (e) => !attached.has(e.id),
-  );
+  const visibleEngines = enginesQ.data?.status === 200 ? enginesQ.data.data : [];
+  const candidates = visibleEngines.filter((e) => !attached.has(e.id));
   const failures = catalog.engines.filter((a) => a.applyStatus === "failed" && a.applyError);
 
   const result = test.data?.status === 200 ? test.data.data : null;
@@ -323,9 +371,7 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
                     <StatusBadge a={a} />
                   </TableCell>
                   <TableCell className="text-sm text-muted-foreground">
-                    {a.appliedAt
-                      ? new Date(a.appliedAt).toLocaleString()
-                      : `waiting since ${new Date(a.createdAt).toLocaleString()}`}
+                    {appliedCell(a)}
                   </TableCell>
                   <TableCell className="text-right">
                     {canUpdate && (
@@ -391,37 +437,60 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
 
       {canUpdate && (
         <div className="space-y-2 border-t pt-4">
-          <Label htmlFor="catalog-attach-engine">Engine to attach</Label>
-          <div className="flex flex-wrap items-center gap-2">
-            <Select value={pick} onValueChange={setPick}>
-              <SelectTrigger id="catalog-attach-engine" className="w-72">
-                <SelectValue placeholder="Select an engine" />
-              </SelectTrigger>
-              <SelectContent>
-                {candidates.map((e) => (
-                  <SelectItem key={e.id} value={e.id}>
-                    {e.name} ({e.type})
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Button
-              onClick={() => attach.mutate({ id: catalog.id, engineId: pick })}
-              disabled={!pick || attach.isPending}
-            >
-              {attach.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-              Attach
-            </Button>
-          </div>
           {enginesQ.isError ? (
-            <p className="text-xs text-muted-foreground">
-              {enginesQ.error?.message ?? "Couldn't list the engines to attach to."}
-            </p>
-          ) : !enginesQ.isLoading && candidates.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              Every engine egret can show you already has this catalog.
-            </p>
-          ) : null}
+            // NOT a picker with an empty list and the word `forbidden` under
+            // it. `ApiError.message` for a 403 is `Error::Forbidden`'s Display,
+            // the bare word "forbidden" — it names no permission, offers no
+            // route forward, and sat below a Select and an Attach button that
+            // could never do anything (SP3c review F3). The controls are gone
+            // and the sentence says which permission is missing, because the
+            // operator this tab is built for may hold every `catalog_registry`
+            // key and still not hold `engine:read`.
+            <Alert data-testid="catalog-attach-blocked">
+              <AlertDescription>
+                {enginesQ.error?.status === 403
+                  ? "Attaching needs the list of this platform's engines, which requires the engine:read permission. Your account does not have it, so egret cannot offer you a picker here. A platform administrator can grant engine:read; until then this catalog can only be attached by someone who holds it."
+                  : `Couldn't list the engines to attach to: ${
+                      enginesQ.error?.message ?? "the request failed"
+                    }. Detach and Retry above are unaffected.`}
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <>
+              <Label htmlFor="catalog-attach-engine">Engine to attach</Label>
+              <div className="flex flex-wrap items-center gap-2">
+                <Select value={pick} onValueChange={setPick}>
+                  <SelectTrigger id="catalog-attach-engine" className="w-72">
+                    <SelectValue placeholder="Select an engine" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {candidates.map((e) => (
+                      <SelectItem key={e.id} value={e.id}>
+                        {e.name} ({e.type})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  onClick={() => attach.mutate({ id: catalog.id, engineId: pick })}
+                  disabled={!pick || attach.isPending}
+                >
+                  {attach.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+                  Attach
+                </Button>
+              </div>
+              {!enginesQ.isLoading && candidates.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {/* "Every engine … already has it" is vacuously true of an
+                      empty list and reads as "all of them do" to an operator
+                      who has none (SP3c review F6). */}
+                  {visibleEngines.length === 0
+                    ? "There are no engines to attach this catalog to."
+                    : "Every engine egret can show you already has this catalog."}
+                </p>
+              )}
+            </>
+          )}
         </div>
       )}
 

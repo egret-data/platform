@@ -282,6 +282,64 @@ describe("EnginesTab — the attachment table", () => {
     ).not.toBeInTheDocument();
   });
 
+  test("an applyStatus egret does not recognise is never badged as applied", () => {
+    // `CatalogAttachmentDto.applyStatus` is generated as `string`, not an
+    // enum, so this row is representable. The badge must show what arrived,
+    // not fall through to the green one — a false green asserting a property
+    // nothing measured.
+    renderTab(
+      catalog({
+        engines: [
+          attachment({ engineId: "e1", engineName: "trino-prod", applyStatus: "applied" }),
+          attachment({ engineId: "e2", engineName: "sr-eu", applyStatus: "applying" }),
+        ],
+      }),
+    );
+    const unknown = within(rowFor("sr-eu")).getByText("applying");
+    expect(unknown).toBeInTheDocument();
+    expect(within(rowFor("sr-eu")).queryByText("applied")).not.toBeInTheDocument();
+    expect(unknown.className).not.toBe(
+      within(rowFor("trino-prod")).getByText("applied").className,
+    );
+  });
+
+  test("the Applied cell never says a failed row is waiting, and qualifies a stale timestamp", () => {
+    renderTab(
+      catalog({
+        engines: [
+          // `set_apply_failed` does not clear `applied_at`, so this row is
+          // real: it applied once and later failed.
+          attachment({
+            engineId: "e1",
+            engineName: "was-applied",
+            applyStatus: "failed",
+            applyError: "FE refused",
+            appliedAt: "2026-09-01T00:00:00Z",
+          }),
+          attachment({
+            engineId: "e2",
+            engineName: "never-applied",
+            applyStatus: "failed",
+            applyError: "FE refused",
+            appliedAt: null,
+          }),
+          attachment({
+            engineId: "e3",
+            engineName: "sr-pending",
+            applyStatus: "pending",
+            appliedAt: null,
+          }),
+        ],
+      }),
+    );
+
+    expect(within(rowFor("was-applied")).getByText(/^last applied /)).toBeInTheDocument();
+    expect(within(rowFor("never-applied")).getByText("never applied")).toBeInTheDocument();
+    // A failed row saying "waiting since" contradicts its own badge.
+    expect(screen.queryAllByText(/waiting since/)).toHaveLength(1);
+    expect(within(rowFor("sr-pending")).getByText(/^waiting since /)).toBeInTheDocument();
+  });
+
   test("a catalog attached to nothing says so, rather than rendering an empty table", () => {
     renderTab(catalog({ engines: [] }));
     expect(screen.getByText(/not attached to any engine/i)).toBeInTheDocument();
@@ -396,6 +454,40 @@ describe("EnginesTab — attach, detach, retry", () => {
     await waitFor(() => expect(invalidated).toContainEqual(catalogKey("c-1")));
   });
 
+  test("an operator who may not list engines gets the missing permission, not the word forbidden", () => {
+    mockEngines([], { isError: true, error: new ApiError(403, "forbidden"), data: undefined });
+    renderTab();
+
+    const blocked = screen.getByTestId("catalog-attach-blocked");
+    expect(blocked).toHaveTextContent("engine:read");
+    // `ApiError.message` for a 403 is `Error::Forbidden`'s Display — the bare
+    // word, naming no permission and offering no way forward.
+    expect(blocked.textContent).not.toMatch(/^forbidden\.?$/);
+    // And no picker: a Select with nothing in it and an Attach button that can
+    // never fire is a control that lies about what the operator can do.
+    expect(screen.queryByRole("combobox", { name: /Engine to attach/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Attach$/ })).not.toBeInTheDocument();
+  });
+
+  test("a non-403 failure to list engines shows the server's own sentence", () => {
+    mockEngines([], {
+      isError: true,
+      error: new ApiError(500, "the engine service is unavailable"),
+      data: undefined,
+    });
+    renderTab();
+
+    const blocked = screen.getByTestId("catalog-attach-blocked");
+    expect(blocked).toHaveTextContent("the engine service is unavailable");
+    expect(blocked).not.toHaveTextContent("engine:read");
+  });
+
+  test("a platform with no engines at all does not claim they all have this catalog", () => {
+    mockEngines([]);
+    renderTab(catalog({ engines: [] }));
+    expect(screen.getByText("There are no engines to attach this catalog to.")).toBeInTheDocument();
+  });
+
   test("a successful change drops the Test verdict it has just invalidated", async () => {
     const user = setup();
     testFn.mockResolvedValue({
@@ -496,14 +588,39 @@ describe("EnginesTab — Test names the check that ran (D4)", () => {
       check: "tcp",
       engineName: null,
       target: "db.internal:5432",
-      message: "db.internal:5432 accepted a TCP connection.",
+      // Names neither the host nor the port — the server's real sentence does,
+      // and while it did, `toHaveTextContent("db.internal:5432")` was satisfied
+      // by the SERVER half whatever the renderer printed. Same shape as the
+      // `query` fixture one describe block up; the fix was applied there and
+      // not carried here (SP3c review F2).
+      message: "the port answered.",
     });
     expect(box).toHaveTextContent("db.internal:5432");
     expect(box).toHaveTextContent(/does not verify credentials/i);
+    expect(box).toHaveTextContent("the port answered");
     // The caveat is text, not a tooltip: a `title` a screenshot loses.
     expect(box.querySelector("[title]")).toBeNull();
     // …and it is NOT the same line `query` prints.
     expect(box).not.toHaveTextContent("SHOW SCHEMAS FROM");
+  });
+
+  test("a refused `tcp` check does not claim egret opened the connection", async () => {
+    const box = await runTest({
+      ok: false,
+      check: "tcp",
+      engineName: null,
+      target: "db.internal:5432",
+      message: "the connection was refused.",
+    });
+    expect(box).toHaveAttribute("data-tone", "bad");
+    // The failure said "Could not reach …" while the line above it said egret
+    // "opened and closed a TCP connection" to the same address.
+    expect(box).not.toHaveTextContent(/opened and closed/i);
+    expect(box).toHaveTextContent(/could not open a TCP connection/i);
+    // Still names what it dialled, and still carries the caveat: the
+    // limitation is a property of the check, not of its outcome.
+    expect(box).toHaveTextContent("db.internal:5432");
+    expect(box).toHaveTextContent(/verify credentials/i);
   });
 
   test("`unsupported` renders neutral rather than red, although ok is false", async () => {
@@ -536,6 +653,10 @@ describe("EnginesTab — Test names the check that ran (D4)", () => {
     expect(box).toHaveAttribute("data-tone", "bad");
     expect(box).toHaveTextContent("SHOW SCHEMAS FROM");
     expect(box).toHaveTextContent("Catalog 'sales' does not exist");
+    // …and does NOT carry the success path's credentials claim: this very
+    // fixture is a statement that failed before any credential was used.
+    expect(box).not.toHaveTextContent(/which exercises the catalog's credentials/i);
+    expect(box).toHaveTextContent(/nothing was shown about the catalog's credentials/i);
   });
 
   test("the 400 a stored row the validator now refuses returns is rendered, not swallowed", async () => {
