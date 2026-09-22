@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useMutation } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -9,14 +9,47 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import * as api from "@/api/controlPlane";
 import * as engineApi from "@/api/generated/control-plane-engines/control-plane-engines";
 import * as wsApi from "@/api/generated/admin-workspaces/admin-workspaces";
+import * as registryApi from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
+import { toast } from "sonner";
 import { ApiError } from "@/api/client";
+import { catalogKey } from "@/routes/control-plane/queryKeys";
+import { AuthContext } from "@/auth/useAuth";
+import type { Me } from "@/api/hooks";
 import type { EngineDependentDto } from "@/api/generated/model/engineDependentDto";
 import type { EngineWorkspaceDto } from "@/api/generated/model/engineWorkspaceDto";
 import type { WorkspaceDto } from "@/api/generated/model/workspaceDto";
+import type {
+  CatalogAttachmentDto,
+  EngineCatalogDto,
+  RegistryCatalogDto,
+} from "@/api/generated/model";
 
 vi.mock("@/api/controlPlane");
 vi.mock("@/api/generated/control-plane-engines/control-plane-engines");
 vi.mock("@/api/generated/admin-workspaces/admin-workspaces");
+
+/**
+ * The registry module is mocked **partially** (`importOriginal`, then the four
+ * hooks the Catalogs tab reaches), so the query-key BUILDERS stay real:
+ * `queryKeys.ts` delegates `catalogKey` to one of them, and an automock would
+ * make it `undefined` — which `invalidateQueries` reads as "everything",
+ * passing every assertion here while invalidating the wrong thing in the app.
+ */
+type RegistryModule =
+  typeof import("@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry");
+vi.mock(
+  "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry",
+  async (importOriginal) => ({
+    ...(await importOriginal<RegistryModule>()),
+    useControlPlaneCatalogRegistryListRegistryCatalogs: vi.fn(),
+    useControlPlaneCatalogRegistryRegistryAttachCatalog: vi.fn(),
+    useControlPlaneCatalogRegistryDetachCatalog: vi.fn(),
+    useControlPlaneCatalogRegistryRetryCatalogApply: vi.fn(),
+  }),
+);
+vi.mock("sonner", () => ({
+  toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }),
+}));
 
 // JWT-enabled by default → the engine is assignable.
 const ENGINE: api.Engine = {
@@ -87,18 +120,29 @@ function mockGetEngine(spec: api.Engine["spec"]) {
   } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
 }
 
-function renderDetail(entry = `/control-plane/engines/${ENGINE.id}`) {
+/** Keys passed to `invalidateQueries` by the render most recently started. */
+let invalidated: unknown[][];
+
+function renderDetail(entry = `/control-plane/engines/${ENGINE.id}`, me: Me | null = null) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  invalidated = [];
+  const original = qc.invalidateQueries.bind(qc);
+  vi.spyOn(qc, "invalidateQueries").mockImplementation((filters) => {
+    invalidated.push((filters as { queryKey?: unknown[] })?.queryKey ?? []);
+    return original(filters);
+  });
   return render(
-    <QueryClientProvider client={qc}>
-      <TooltipProvider>
-        <MemoryRouter initialEntries={[entry]}>
-          <Routes>
-            <Route path="/control-plane/engines/:id" element={<EngineDetail />} />
-          </Routes>
-        </MemoryRouter>
-      </TooltipProvider>
-    </QueryClientProvider>,
+    <AuthContext.Provider value={{ me, isLoading: false }}>
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={[entry]}>
+            <Routes>
+              <Route path="/control-plane/engines/:id" element={<EngineDetail />} />
+            </Routes>
+          </MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>
+    </AuthContext.Provider>,
   );
 }
 
@@ -950,5 +994,447 @@ describe("EngineDetail — delete", () => {
     expect(await screen.findByText("Deleting — retry")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /retry delete/i }));
     await waitFor(() => expect(vi.mocked(api.deleteEngine).mock.calls[0]?.[0]).toBe("e1"));
+  });
+});
+
+// ── Catalogs tab ─────────────────────────────────────────────────────────────
+//
+// SP3c-1 Task 9. The inline `CatalogForm` master/detail is gone: this tab is
+// now the mirror of Control Plane → Catalogs → detail → Engines, over the same
+// registry routes, and it is the ONE screen that renders
+// `EngineCatalogDto.configError` — the field `GET /engines/{id}/catalogs` sets
+// for a stored row the tightened validator now refuses.
+
+const ADMIN: Me = {
+  user_id: "u1",
+  email: "admin@example.com",
+  platform_roles: ["platform_admin"],
+  permissions: [],
+};
+const READER: Me = {
+  user_id: "u2",
+  email: "reader@example.com",
+  platform_roles: [],
+  permissions: ["engine:read", "catalog_registry:read"],
+};
+
+function attachment(over: Partial<CatalogAttachmentDto> = {}): CatalogAttachmentDto {
+  return {
+    engineId: ENGINE.id,
+    engineName: ENGINE.name,
+    engineType: "trino",
+    applyStatus: "applied",
+    applyError: null,
+    appliedAt: "2026-09-01T00:00:00Z",
+    isPrimary: false,
+    createdAt: "2026-09-01T00:00:00Z",
+    ...over,
+  };
+}
+
+function registryCatalog(over: Partial<RegistryCatalogDto> = {}): RegistryCatalogDto {
+  return {
+    id: "c-1",
+    name: "sales",
+    kind: "jdbc",
+    config: {},
+    advanced: {},
+    description: null,
+    warehouseId: null,
+    engines: [attachment()],
+    workspaceIds: [],
+    createdAt: "2026-08-01T10:00:00Z",
+    updatedAt: "2026-09-01T10:00:00Z",
+    ...over,
+  };
+}
+
+/** `sales` (applied) and `events` (failed) on this engine; `remote` on another. */
+const SALES = registryCatalog();
+const EVENTS = registryCatalog({
+  id: "c-2",
+  name: "events",
+  kind: "iceberg",
+  engines: [
+    attachment({ applyStatus: "failed", applyError: "FE refused: catalog already exists" }),
+  ],
+});
+/** Attached to a DIFFERENT engine — never a row here, always a candidate. */
+const REMOTE = registryCatalog({
+  id: "c-3",
+  name: "remote",
+  kind: "hive",
+  engines: [attachment({ engineId: "e2", engineName: "sr-eu", engineType: "starrocks" })],
+});
+/** Attached to nothing at all. */
+const SPARE = registryCatalog({ id: "c-4", name: "spare", kind: "tpch", engines: [] });
+
+/** The same three rows as `GET /engines/{id}/catalogs` sees them. */
+function legacyRow(over: Partial<EngineCatalogDto> = {}): EngineCatalogDto {
+  return { id: "c-1", name: "sales", kind: "postgresql", isPrimary: false, secretRef: null, ...over };
+}
+
+let registryAttachFn: ReturnType<typeof vi.fn>;
+let registryDetachFn: ReturnType<typeof vi.fn>;
+let registryRetryFn: ReturnType<typeof vi.fn>;
+
+type MutationHook = (options?: { mutation?: Record<string, unknown> }) => unknown;
+
+/**
+ * Wire one generated mutation hook to a REAL `useMutation` over `fn`, keeping
+ * the caller's own `mutation` options — that is where `onSuccess`/`onError`
+ * live, and a hook mocked to a bare object would swallow both.
+ */
+function wire(hook: unknown, fn: ReturnType<typeof vi.fn>) {
+  vi.mocked(hook as MutationHook).mockImplementation((options) =>
+    useMutation({ mutationFn: fn as never, ...options?.mutation }),
+  );
+}
+
+function mockRegistryList(rows: RegistryCatalogDto[], over: Record<string, unknown> = {}) {
+  vi.mocked(registryApi.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
+    data: { status: 200, data: rows },
+    isLoading: false,
+    isError: false,
+    error: null,
+    ...over,
+  } as unknown as ReturnType<
+    typeof registryApi.useControlPlaneCatalogRegistryListRegistryCatalogs
+  >);
+}
+
+/** Open the Catalogs tab and hand back the user-event session that did it. */
+async function openCatalogs(me: Me | null = ADMIN, entry?: string) {
+  const user = userEvent.setup({ pointerEventsCheck: 0 });
+  renderDetail(entry ?? `/control-plane/engines/${ENGINE.id}`, me);
+  await screen.findByRole("heading", { name: ENGINE.name });
+  await user.click(screen.getByRole("tab", { name: "Catalogs" }));
+  return user;
+}
+
+/** The table row whose Catalog cell names `name`. */
+function catalogRow(name: string) {
+  return screen.getByRole("row", { name: new RegExp(name) });
+}
+
+describe("EngineDetail — Catalogs tab", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetEngine(ENGINE.spec);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([
+      legacyRow(),
+      legacyRow({ id: "c-2", name: "events", kind: "egret-warehouse" }),
+    ]);
+    mockRegistryList([SALES, EVENTS, REMOTE, SPARE]);
+
+    registryAttachFn = vi
+      .fn()
+      .mockResolvedValue({ status: 201, data: attachment({ applyStatus: "applied" }) });
+    registryDetachFn = vi.fn().mockResolvedValue({ status: 204, data: undefined });
+    registryRetryFn = vi.fn().mockResolvedValue({
+      status: 200,
+      data: { engineId: ENGINE.id, engineName: ENGINE.name, status: "applied", error: null },
+    });
+    wire(registryApi.useControlPlaneCatalogRegistryRegistryAttachCatalog, registryAttachFn);
+    wire(registryApi.useControlPlaneCatalogRegistryDetachCatalog, registryDetachFn);
+    wire(registryApi.useControlPlaneCatalogRegistryRetryCatalogApply, registryRetryFn);
+  });
+
+  test("lists this engine's attachments with their apply status, and omits catalogs attached elsewhere", async () => {
+    await openCatalogs();
+
+    expect(await screen.findByRole("table")).toBeInTheDocument();
+    expect(within(catalogRow("sales")).getByText("applied")).toBeInTheDocument();
+    expect(within(catalogRow("events")).getByText("failed")).toBeInTheDocument();
+    // The two badges must not be one badge with two captions.
+    expect(within(catalogRow("sales")).getByText("applied").className).not.toBe(
+      within(catalogRow("events")).getByText("failed").className,
+    );
+    // `remote` is attached to sr-eu, not to this engine.
+    expect(screen.queryByRole("row", { name: /remote/ })).not.toBeInTheDocument();
+    // `applyError` in full, as text — a `title` is not something an operator
+    // can copy or capture in a screenshot.
+    expect(screen.getByText(/FE refused: catalog already exists/)).toBeInTheDocument();
+  });
+
+  test("the Apply column is not called Status, and the table says what it is not", async () => {
+    await openCatalogs();
+
+    const table = await screen.findByRole("table");
+    const heads = within(table).getAllByRole("columnheader").map((h) => h.textContent);
+    expect(heads).toContain("Apply");
+    expect(heads).not.toContain("Status");
+    // `applyStatus` answers "did this catalog reach this engine", and keeps
+    // answering `applied` after the engine breaks.
+    expect(screen.getByTestId("engine-apply-footnote")).toHaveTextContent(
+      /not a check that it still works/,
+    );
+  });
+
+  test("the picker offers only catalogs this engine does not already have", async () => {
+    const user = await openCatalogs();
+
+    await user.click(await screen.findByRole("combobox", { name: /Catalog to attach/ }));
+    const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
+    expect(options.some((o) => o?.includes("remote"))).toBe(true);
+    expect(options.some((o) => o?.includes("spare"))).toBe(true);
+    expect(options.some((o) => o?.includes("sales"))).toBe(false);
+    expect(options.some((o) => o?.includes("events"))).toBe(false);
+  });
+
+  test("attach calls the REGISTRY route with { id: catalogId, engineId } — not the legacy engine-mounted one", async () => {
+    const user = await openCatalogs();
+
+    await user.click(await screen.findByRole("combobox", { name: /Catalog to attach/ }));
+    await user.click(await screen.findByRole("option", { name: /spare/ }));
+    await user.click(screen.getByRole("button", { name: /^Attach$/ }));
+
+    await waitFor(() => expect(registryAttachFn).toHaveBeenCalledTimes(1));
+    expect(registryAttachFn.mock.calls[0][0]).toEqual({ id: "c-4", engineId: ENGINE.id });
+    await waitFor(() => expect(invalidated).toContainEqual(catalogKey("c-4")));
+  });
+
+  test("Detach calls the registry route with { id: catalogId, engineId }", async () => {
+    const user = await openCatalogs();
+
+    await user.click(within(catalogRow("sales")).getByRole("button", { name: /Detach/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.type(await within(dialog).findByPlaceholderText("sales"), "sales");
+    await user.click(within(dialog).getByRole("button", { name: /^Detach$/ }));
+
+    await waitFor(() => expect(registryDetachFn).toHaveBeenCalledTimes(1));
+    expect(registryDetachFn.mock.calls[0][0]).toEqual({ id: "c-1", engineId: ENGINE.id });
+  });
+
+  test("Retry calls the per-attachment route with { id: engineId, cid: catalogId }", async () => {
+    const user = await openCatalogs();
+
+    await user.click(within(catalogRow("events")).getByRole("button", { name: /Retry/ }));
+
+    await waitFor(() => expect(registryRetryFn).toHaveBeenCalledTimes(1));
+    expect(registryRetryFn.mock.calls[0][0]).toEqual({ id: ENGINE.id, cid: "c-2" });
+  });
+
+  test("a 400 from a primary-catalog detach surfaces the server's own sentence, not a generic one", async () => {
+    registryDetachFn.mockRejectedValue(
+      new ApiError(400, "sales leads analytics-trino; delete the engine instead"),
+    );
+    const user = await openCatalogs();
+
+    await user.click(within(catalogRow("sales")).getByRole("button", { name: /Detach/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.type(await within(dialog).findByPlaceholderText("sales"), "sales");
+    await user.click(within(dialog).getByRole("button", { name: /^Detach$/ }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(vi.mocked(toast.error).mock.calls[0][0]).toBe(
+      "sales leads analytics-trino; delete the engine instead",
+    );
+  });
+
+  test("a primary attachment cannot be detached here and says where it can", async () => {
+    mockRegistryList([
+      registryCatalog({ engines: [attachment({ isPrimary: true })] }),
+      EVENTS,
+    ]);
+    await openCatalogs();
+
+    expect(within(catalogRow("sales")).getByRole("button", { name: /Detach/ })).toBeDisabled();
+    expect(within(catalogRow("sales")).getByText(/primary catalog/)).toBeInTheDocument();
+    // …and a non-primary row in the same table still can, so the assertion
+    // above is about `isPrimary` and not about the table being inert.
+    expect(within(catalogRow("events")).getByRole("button", { name: /Detach/ })).toBeEnabled();
+  });
+
+  test("an engine with no catalogs says so instead of showing an empty table", async () => {
+    mockRegistryList([REMOTE, SPARE]);
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    await openCatalogs();
+
+    expect(await screen.findByText(/no catalogs, so it can query nothing/)).toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  test("the header says what attaching does to THIS engine kind — Trino rolls the coordinator", async () => {
+    await openCatalogs();
+
+    expect(await screen.findByTestId("engine-catalogs-apply-prose")).toHaveTextContent(
+      /restarts the Trino coordinator/,
+    );
+  });
+
+  test("a StarRocks engine is not promised a pod roll", async () => {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      status: { phase: "running", message: null, pods: [] },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+    await openCatalogs();
+
+    const prose = await screen.findByTestId("engine-catalogs-apply-prose");
+    expect(prose).toHaveTextContent(/on the StarRocks FE in place/);
+    expect(prose).not.toHaveTextContent(/restart/i);
+  });
+});
+
+describe("EngineDetail — Catalogs tab: a stored configuration that no longer parses", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetEngine(ENGINE.spec);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+    mockRegistryList([SALES, EVENTS, REMOTE, SPARE]);
+    registryRetryFn = vi.fn().mockResolvedValue({ status: 200, data: {} });
+    registryDetachFn = vi.fn().mockResolvedValue({ status: 204, data: undefined });
+    registryAttachFn = vi.fn().mockResolvedValue({ status: 201, data: attachment() });
+    wire(registryApi.useControlPlaneCatalogRegistryRegistryAttachCatalog, registryAttachFn);
+    wire(registryApi.useControlPlaneCatalogRegistryDetachCatalog, registryDetachFn);
+    wire(registryApi.useControlPlaneCatalogRegistryRetryCatalogApply, registryRetryFn);
+  });
+
+  test("the broken row is marked, its reason is on screen, and it links to where it is repaired", async () => {
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([
+      legacyRow(),
+      legacyRow({
+        id: "c-2",
+        name: "events",
+        // Deliberately naming neither the catalog nor any word this screen
+        // prints: a fixture that contains the string its own assertion
+        // searches for is satisfied by the SERVER half whatever the client
+        // renders (SP3c Task 7 review F2).
+        configError: "missing field `warehouse` at line 1 column 34",
+      }),
+    ]);
+    await openCatalogs();
+
+    // Marked in the row, so scanning the table finds it…
+    expect(within(await screen.findByRole("row", { name: /events/ })).getByText(
+      /config invalid/i,
+    )).toBeInTheDocument();
+    // …and the reason is quoted in full, verbatim, below the table.
+    const box = screen.getByTestId("engine-catalog-config-errors");
+    expect(box).toHaveTextContent("missing field `warehouse` at line 1 column 34");
+    // The repair path: the catalog's own page, named and linked.
+    expect(within(box).getByRole("link", { name: /events/ })).toHaveAttribute(
+      "href",
+      "/control-plane/catalogs/c-2",
+    );
+  });
+
+  test("Retry is offered but cannot work on a broken row, and says why", async () => {
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([
+      legacyRow(),
+      legacyRow({ id: "c-2", name: "events", configError: "missing field `warehouse`" }),
+    ]);
+    await openCatalogs();
+
+    const row = await screen.findByRole("row", { name: /events/ });
+    expect(within(row).getByRole("button", { name: /Retry/ })).toBeDisabled();
+    expect(within(row).getByText(/cannot render it for this engine/)).toBeInTheDocument();
+    // The other row is untouched — the guard is per row, not a dead table.
+    expect(within(catalogRow("sales")).getByRole("button", { name: /Detach/ })).toBeEnabled();
+  });
+
+  test("a row that parses is never marked broken", async () => {
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([
+      legacyRow(),
+      legacyRow({ id: "c-2", name: "events" }),
+    ]);
+    await openCatalogs();
+
+    await screen.findByRole("table");
+    expect(screen.queryByText(/config invalid/i)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("engine-catalog-config-errors")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("engine-catalog-config-unchecked")).not.toBeInTheDocument();
+  });
+
+  test("egret says when it could NOT check, rather than letting silence read as fine", async () => {
+    vi.mocked(api.listEngineCatalogs).mockRejectedValue(new ApiError(500, "store unavailable"));
+    await openCatalogs();
+
+    await screen.findByRole("table");
+    const note = await screen.findByTestId("engine-catalog-config-unchecked");
+    expect(note).toHaveTextContent(/could not check/i);
+    expect(note).toHaveTextContent("store unavailable");
+    // Not-checked is not the same as checked-and-clean, and must not be
+    // painted as a defect either.
+    expect(screen.queryByTestId("engine-catalog-config-errors")).not.toBeInTheDocument();
+  });
+});
+
+describe("EngineDetail — Catalogs tab: permissions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetEngine(ENGINE.spec);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([
+      legacyRow(),
+      legacyRow({ id: "c-2", name: "events" }),
+    ]);
+    mockRegistryList([SALES, EVENTS, REMOTE, SPARE]);
+    registryAttachFn = vi.fn();
+    registryDetachFn = vi.fn();
+    registryRetryFn = vi.fn();
+    wire(registryApi.useControlPlaneCatalogRegistryRegistryAttachCatalog, registryAttachFn);
+    wire(registryApi.useControlPlaneCatalogRegistryDetachCatalog, registryDetachFn);
+    wire(registryApi.useControlPlaneCatalogRegistryRetryCatalogApply, registryRetryFn);
+  });
+
+  test("an operator who may only read gets the reason and no control that could not work", async () => {
+    await openCatalogs(READER);
+
+    await screen.findByRole("table");
+    expect(screen.queryByRole("button", { name: /Detach/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Attach$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /Catalog to attach/ })).not.toBeInTheDocument();
+    const note = screen.getByTestId("engine-catalogs-readonly");
+    expect(note).toHaveTextContent("catalog_registry:update");
+    expect(note).toHaveTextContent(/administrator/i);
+  });
+
+  test("without catalog_registry:read the rows still list, the Apply column is not invented, and the key is named", async () => {
+    mockRegistryList([], {
+      data: undefined,
+      isError: true,
+      error: new ApiError(403, "forbidden"),
+    });
+    await openCatalogs();
+
+    // The engine's own catalog list is `engine:read`, which this page already
+    // needs — so the names do not disappear with the registry.
+    expect(within(await screen.findByRole("row", { name: /sales/ })).getByText("sales"))
+      .toBeInTheDocument();
+    // …but nothing pretends to know the apply state.
+    expect(screen.queryByText("applied")).not.toBeInTheDocument();
+    const note = screen.getByTestId("engine-catalogs-registry-blocked");
+    expect(note).toHaveTextContent("catalog_registry:read");
+    // Not the bare word `Error::Forbidden` renders: who can grant it, too.
+    expect(note).toHaveTextContent(/administrator/i);
+    expect(screen.queryByRole("combobox", { name: /Catalog to attach/ })).not.toBeInTheDocument();
+  });
+
+  test("a non-403 registry failure shows the server's own sentence, not a permission story", async () => {
+    mockRegistryList([], {
+      data: undefined,
+      isError: true,
+      error: new ApiError(500, "registry store unavailable"),
+    });
+    await openCatalogs();
+
+    const note = await screen.findByTestId("engine-catalogs-registry-blocked");
+    expect(note).toHaveTextContent("registry store unavailable");
+    expect(note).not.toHaveTextContent("catalog_registry:read");
   });
 });

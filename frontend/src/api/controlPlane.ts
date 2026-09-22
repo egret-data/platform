@@ -88,7 +88,7 @@ import {
   controlPlaneStorageRemove,
   controlPlaneStorageUpdate,
 } from "./generated/control-plane-storage/control-plane-storage";
-import type { CreateEngineBody } from "./generated/model";
+import type { CreateEngineBody, EngineCatalogDto } from "./generated/model";
 
 // ── Storage (global / control-plane) ─────────────────────────────────────────
 
@@ -977,13 +977,17 @@ export async function getCluster(engineId: string): Promise<ClusterInfo> {
 // ── Engine catalogs (multi-catalog / control-plane) ──────────────────────────
 
 /** A catalog attached to an engine. */
-export interface EngineCatalog {
-  id: string;
-  name: string;
-  kind: string;
-  isPrimary: boolean;
-  secretRef?: string | null;
-}
+/**
+ * `GET /engines/{id}/catalogs`, as the generated client already describes it.
+ *
+ * It is an ALIAS rather than a hand-written copy because the copy had drifted
+ * in the way that matters: the route grew `configError` — set when a stored
+ * catalog configuration no longer parses, so the one row to repair is findable
+ * instead of 400-ing the whole list — and the hand-written interface silently
+ * dropped it. `.data as EngineCatalog[]` below cannot catch that; only not
+ * having a second declaration can (SP3c review N1).
+ */
+export type EngineCatalog = EngineCatalogDto;
 
 export interface EngineCatalogDetail extends EngineCatalog {
   config: Record<string, unknown>;

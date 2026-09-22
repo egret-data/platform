@@ -12,9 +12,9 @@ import {
 /**
  * shadcn's `Select` cannot render a `SelectItem` whose value is `""` (Radix
  * uses the empty string internally to mean "nothing selected"), so an empty
- * list still needs a non-empty value for its disabled placeholder row. The
- * same constraint `CatalogForm.tsx` documents for its own default-client
- * sentinel.
+ * list still needs a non-empty value for its disabled placeholder row.
+ * (`CatalogForm.tsx` documented the same constraint for its own default-client
+ * sentinel; SP3c-1 Task 9 deleted that file with the inline catalog editor.)
  */
 export const NONE = "__none__";
 
