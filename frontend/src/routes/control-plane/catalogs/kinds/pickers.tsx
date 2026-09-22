@@ -1,0 +1,190 @@
+import { useQuery } from "@tanstack/react-query";
+
+import { listSecrets, listStorage } from "@/api/controlPlane";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+/**
+ * shadcn's `Select` cannot render a `SelectItem` whose value is `""` (Radix
+ * uses the empty string internally to mean "nothing selected"), so an empty
+ * list still needs a non-empty value for its disabled placeholder row. The
+ * same constraint `CatalogForm.tsx` documents for its own default-client
+ * sentinel.
+ */
+const NONE = "__none__";
+
+/**
+ * The kind whose catalog egret creates together with its warehouse.
+ *
+ * It is NOT a `registry.catalogs.kind`: it is `iceberg` with an `egret`
+ * metastore, and `create_registry_catalog` refuses to create one
+ * ("an egret warehouse catalog is created with its warehouse",
+ * `catalogs.rs:318-322`). The create page offers it as a kind anyway, because
+ * to an operator it is one of the things they can make here — and routes that
+ * one branch to the warehouse endpoint instead.
+ */
+export const EGRET_WAREHOUSE_KIND = "egret_warehouse";
+
+/**
+ * The kinds the create page offers, egret's own warehouse first.
+ *
+ * Everything below `egret_warehouse` is a real `registry.catalogs.kind`; the
+ * set is checked against the generated client's own list of kinds by
+ * `CatalogCreate.test.tsx`, so a kind added (or renamed) in
+ * `CatalogKind::parse` and carried into the OpenAPI description cannot leave
+ * this form silently behind. There is no machine-readable enum to derive from:
+ * `CreateRegistryCatalogBody.kind` is a plain `string` whose permitted values
+ * live only in its description.
+ */
+export const KIND_OPTIONS: { kind: string; label: string; blurb: string }[] = [
+  {
+    kind: EGRET_WAREHOUSE_KIND,
+    label: "egret warehouse",
+    blurb:
+      "An Iceberg warehouse egret manages itself, over a storage connection. Creates the warehouse as well as the catalog.",
+  },
+  {
+    kind: "iceberg",
+    label: "Iceberg",
+    blurb: "An existing Iceberg catalog — REST, Hive Metastore or AWS Glue.",
+  },
+  { kind: "hive", label: "Hive", blurb: "Hive tables through a Hive Metastore or Glue." },
+  {
+    kind: "delta_lake",
+    label: "Delta Lake",
+    blurb: "Delta tables through a Hive Metastore or Glue.",
+  },
+  { kind: "hudi", label: "Hudi", blurb: "Hudi tables through a Hive Metastore." },
+  {
+    kind: "jdbc",
+    label: "JDBC",
+    blurb:
+      "A relational database: PostgreSQL, MySQL, MariaDB, Oracle, SQL Server or ClickHouse.",
+  },
+  { kind: "elasticsearch", label: "Elasticsearch", blurb: "Elasticsearch indices as tables." },
+  { kind: "tpch", label: "TPC-H", blurb: "Generated benchmark data. No external system." },
+  { kind: "tpcds", label: "TPC-DS", blurb: "Generated benchmark data. No external system." },
+  {
+    kind: "generic",
+    label: "Generic",
+    blurb: "Engine properties written by hand, for a connector egret has no typed form for.",
+  },
+];
+
+/** The kinds `create_registry_catalog` accepts — every option but egret's own. */
+export const REGISTRY_KINDS: string[] = KIND_OPTIONS.filter(
+  (o) => o.kind !== EGRET_WAREHOUSE_KIND,
+).map((o) => o.kind);
+
+/**
+ * What a catalog's Kind reads as: the warehouse it is, or its raw kind.
+ *
+ * Deliberately the same two-branch rule as `Catalogs.tsx`'s private
+ * `kindLabel`, and deliberately the RAW kind rather than `KIND_OPTIONS.label`
+ * — `delta_lake` is the value the engines, the API and the operator's own
+ * `SHOW CATALOGS` all use, and the list column is pinned to it. (The two
+ * copies exist because `Catalogs.tsx` was under review in another session
+ * while this file was written; folding `Catalogs.tsx` onto this export is a
+ * one-line follow-up for the detail-page task.)
+ */
+export function kindLabel(c: { kind: string; warehouseId?: string | null }): string {
+  return c.warehouseId != null ? "egret warehouse" : c.kind;
+}
+
+/**
+ * A platform storage-connection chooser.
+ *
+ * NOT `components/SecretPicker.tsx`: that one is workspace-scoped (`ws: string`)
+ * and offers inline secret creation, both wrong for a platform catalog, and six
+ * other screens depend on its current shape. These are plain controlled
+ * `<Select>`s over the platform lists, the same pattern `Warehouses.tsx`,
+ * `EngineCreate.tsx` and `WarehouseDetail.tsx` each already inline.
+ */
+export function StorageSelect({
+  id,
+  value,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const q = useQuery({
+    // The literal `ControlPlaneStorage.tsx` exports as `storageQueryKey`, so
+    // this page reads the storage list the Storage page has already cached
+    // (30s staleTime). Pinned by `CatalogCreate.test.tsx`.
+    queryKey: ["control-plane", "storage"],
+    queryFn: listStorage,
+    retry: false,
+  });
+  const items = q.data ?? [];
+  return (
+    <Select value={value} onValueChange={onChange}>
+      <SelectTrigger id={id} className="w-full">
+        <SelectValue placeholder="Select a storage connection" />
+      </SelectTrigger>
+      <SelectContent>
+        {items.length === 0 ? (
+          <SelectItem value={NONE} disabled>
+            No storage connections
+          </SelectItem>
+        ) : (
+          items.map((s) => (
+            <SelectItem key={s.id} value={s.id}>
+              {s.name}
+            </SelectItem>
+          ))
+        )}
+      </SelectContent>
+    </Select>
+  );
+}
+
+/**
+ * A platform secret chooser. Every credential a catalog references is a secret
+ * id — `config.rs` has no plaintext-password field anywhere — so this is the
+ * only control that may stand next to the word "password" on this page.
+ */
+export function SecretSelect({
+  id,
+  value,
+  onChange,
+  placeholder,
+}: {
+  id: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  const q = useQuery({
+    queryKey: ["control-plane", "secrets"],
+    queryFn: listSecrets,
+    retry: false,
+  });
+  const items = q.data ?? [];
+  return (
+    <Select value={value} onValueChange={onChange}>
+      <SelectTrigger id={id} className="w-full">
+        <SelectValue placeholder={placeholder ?? "Select a secret"} />
+      </SelectTrigger>
+      <SelectContent>
+        {items.length === 0 ? (
+          <SelectItem value={NONE} disabled>
+            No secrets
+          </SelectItem>
+        ) : (
+          items.map((s) => (
+            <SelectItem key={s.id} value={s.id}>
+              {s.name}
+            </SelectItem>
+          ))
+        )}
+      </SelectContent>
+    </Select>
+  );
+}
