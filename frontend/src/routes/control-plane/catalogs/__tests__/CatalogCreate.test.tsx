@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
@@ -69,10 +69,13 @@ async function choose(user: User, label: string, option: string) {
   await user.click(await screen.findByRole("option", { name: option }));
 }
 
-async function typeIn(user: User, label: string, value: string) {
-  const el = screen.getByLabelText(label);
-  await user.clear(el);
-  await user.type(el, value);
+/**
+ * `fireEvent.change`, not `user.type`: these forms re-render the whole page on
+ * every keystroke, and a 20-character URI typed a key at a time took a single
+ * test past the 5s timeout. One change event exercises the same `onChange`.
+ */
+function typeIn(_user: User, label: string, value: string) {
+  fireEvent.change(screen.getByLabelText(label), { target: { value } });
 }
 
 const create = () => screen.getByRole("button", { name: /Create catalog/ });
@@ -165,9 +168,9 @@ describe("the posted body", () => {
     renderPage();
     await choose(user, "Kind", "JDBC");
     await choose(user, "Dialect", "postgresql");
-    await typeIn(user, "Host", "db.example");
+    typeIn(user, "Host", "db.example");
     await choose(user, "Kind", "TPC-H");
-    await typeIn(user, "Name", "good_name");
+    typeIn(user, "Name", "good_name");
     await user.click(create());
 
     expect(postedBody()).toEqual({ name: "good_name", kind: "tpch", config: {} });
@@ -178,15 +181,15 @@ describe("the posted body", () => {
     const user = setup();
     renderPage();
     await choose(user, "Kind", "Iceberg");
-    await typeIn(user, "REST URI", "https://rest.example");
-    await typeIn(user, "Warehouse", "wh");
+    typeIn(user, "REST URI", "https://rest.example");
+    typeIn(user, "Warehouse", "wh");
     await choose(user, "Authentication", "OAuth 2");
     await choose(user, "Credential secret", "db-pass");
 
     await choose(user, "Metastore", "Hive Metastore");
-    await typeIn(user, "Metastore URI", "thrift://hms.example:9083");
+    typeIn(user, "Metastore URI", "thrift://hms.example:9083");
     await choose(user, "Storage connection", "lake");
-    await typeIn(user, "Name", "lake_iceberg");
+    typeIn(user, "Name", "lake_iceberg");
     await user.click(create());
 
     expect(postedBody()).toEqual({
@@ -203,13 +206,13 @@ describe("the posted body", () => {
     const user = setup();
     renderPage();
     await choose(user, "Kind", "Iceberg");
-    await typeIn(user, "REST URI", "https://rest.example");
-    await typeIn(user, "Warehouse", "wh");
+    typeIn(user, "REST URI", "https://rest.example");
+    typeIn(user, "Warehouse", "wh");
     await choose(user, "Authentication", "OAuth 2");
     await choose(user, "Credential secret", "db-pass");
     await choose(user, "Authentication", "None");
     await choose(user, "Storage connection", "lake");
-    await typeIn(user, "Name", "rest_cat");
+    typeIn(user, "Name", "rest_cat");
     await user.click(create());
 
     // `RestAuth` is `deny_unknown_fields`: a `credential_secret_id` surviving
@@ -242,9 +245,9 @@ describe("the posted body", () => {
     renderPage();
     await choose(user, "Kind", "JDBC");
     await choose(user, "Dialect", "postgresql");
-    await typeIn(user, "Host", "db.example");
-    await typeIn(user, "Database", "sales");
-    await typeIn(user, "User", "egret");
+    typeIn(user, "Host", "db.example");
+    typeIn(user, "Database", "sales");
+    typeIn(user, "User", "egret");
     await choose(user, "Password secret", "db-pass");
     await choose(user, "TLS", "verify_full");
     await choose(user, "TLS", "disable");
@@ -253,7 +256,7 @@ describe("the posted body", () => {
     await choose(user, "Dialect", "mysql");
     expect(screen.queryByLabelText("Database")).not.toBeInTheDocument();
 
-    await typeIn(user, "Name", "crm");
+    typeIn(user, "Name", "crm");
     await user.click(create());
 
     expect(postedBody().config).toEqual({
@@ -270,11 +273,11 @@ describe("the posted body", () => {
     const user = setup();
     renderPage();
     await choose(user, "Kind", "TPC-H");
-    await typeIn(user, "Name", "bench");
+    typeIn(user, "Name", "bench");
     await user.click(screen.getByRole("button", { name: /Advanced properties/ }));
-    await typeIn(user, "trino property name", "tpch.splits-per-node");
+    typeIn(user, "trino property name", "tpch.splits-per-node");
     await user.click(screen.getByRole("button", { name: "Add trino property" }));
-    await typeIn(user, "tpch.splits-per-node", "8");
+    typeIn(user, "tpch.splits-per-node", "8");
     await user.click(create());
 
     expect(postedBody()).toEqual({
@@ -291,12 +294,12 @@ describe("the name rule", () => {
     const user = setup();
     renderPage();
     await choose(user, "Kind", "TPC-H");
-    await typeIn(user, "Name", "1bad");
+    typeIn(user, "Name", "1bad");
 
     expect(screen.getByText(/\^\[a-z\]\[a-z0-9_\]\{0,62\}\$/)).toBeInTheDocument();
     expect(create()).toBeDisabled();
 
-    await typeIn(user, "Name", "good_name");
+    typeIn(user, "Name", "good_name");
     expect(screen.queryByText(/\^\[a-z\]\[a-z0-9_\]\{0,62\}\$/)).not.toBeInTheDocument();
     expect(create()).toBeEnabled();
   });
@@ -307,7 +310,7 @@ describe("the egret-warehouse branch", () => {
     const user = setup();
     renderPage();
     await choose(user, "Kind", "egret warehouse");
-    await typeIn(user, "Name", "analytics");
+    typeIn(user, "Name", "analytics");
     await choose(user, "Workspace", "Engineering");
     await choose(user, "Storage connection", "lake");
     await user.click(create());
@@ -330,7 +333,7 @@ describe("the egret-warehouse branch", () => {
     const user = setup();
     renderPage();
     await choose(user, "Kind", "TPC-H");
-    await typeIn(user, "Name", "bench");
+    typeIn(user, "Name", "bench");
     await user.click(create());
 
     expect(createFn).toHaveBeenCalledTimes(1);
@@ -356,7 +359,7 @@ describe("when the server refuses", () => {
     const user = setup();
     renderPage();
     await choose(user, "Kind", "TPC-H");
-    await typeIn(user, "Name", "bench");
+    typeIn(user, "Name", "bench");
     await user.click(create());
 
     expect(
@@ -374,9 +377,9 @@ describe("when the server refuses", () => {
     const user = setup();
     renderPage();
     await choose(user, "Kind", "TPC-H");
-    await typeIn(user, "Name", "bench");
+    typeIn(user, "Name", "bench");
     await user.click(screen.getByRole("button", { name: /Advanced properties/ }));
-    await typeIn(user, "trino property name", "connector.name");
+    typeIn(user, "trino property name", "connector.name");
     await user.click(screen.getByRole("button", { name: "Add trino property" }));
     await user.click(create());
 
@@ -392,7 +395,7 @@ describe("cache keys", () => {
     renderPage();
     const spy = vi.spyOn(qc, "invalidateQueries");
     await choose(user, "Kind", "TPC-H");
-    await typeIn(user, "Name", "bench");
+    typeIn(user, "Name", "bench");
     await user.click(create());
 
     expect(spy).toHaveBeenCalledWith({ queryKey: catalogsQueryKey });
