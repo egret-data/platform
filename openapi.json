@@ -3466,6 +3466,88 @@
         }
       }
     },
+    "/api/control-plane/catalogs/{id}/test": {
+      "post": {
+        "tags": [
+          "control-plane-catalog-registry"
+        ],
+        "operationId": "test_registry_catalog",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The verdict, and `check` names which of the three checks produced it. The target of a `tcp` check comes from the STORED configuration and never from the request, which carries no body at all",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogTestResultDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing catalog_registry:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`query` only: the Trino coordinator could not be reached at all. A coordinator that answers with a failure is a 200 with `ok:false`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/catalogs/{id}/workspaces": {
       "get": {
         "tags": [
@@ -30353,6 +30435,42 @@
         "properties": {
           "ok": {
             "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "CatalogTestResultDto": {
+        "type": "object",
+        "description": "`POST /catalogs/{id}/test` payload.\n\nEvery field a UI author must read is a schema property, so its doc comment\nreaches the generated client as JSDoc — a response description does not.",
+        "required": [
+          "ok",
+          "check",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "description": "Whether the check that ran succeeded — and it means only as much as\n`check` says it does. Read `check` FIRST: `unsupported` is always\n`ok:false` because nothing was measured, and that is not a broken\ncatalog, so it renders neutral rather than red."
+          },
+          "check": {
+            "type": "string",
+            "description": "Which check ran, so a green tick can never be read as the other one:\n`query` — `SHOW SCHEMAS FROM <name>` ran on an attached Trino engine and\nthe catalog answered, credentials included.\n`tcp` — a connect-only reachability check of the host and port in the\nstored configuration. It proves the port answers. It proves NOTHING\nabout credentials, TLS or permissions.\n`unsupported` — no Trino engine is attached and this kind has no network\nendpoint egret can probe. Render it neutral, not red: a `tpch` catalog\nwith nothing attached is not broken."
+          },
+          "engineName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The engine the query ran on; null for `tcp` and `unsupported`."
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `tcp`, the `host:port` that was dialled, so the result names what it\nmeasured; null otherwise."
           },
           "message": {
             "type": "string"

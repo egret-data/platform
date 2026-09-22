@@ -14,6 +14,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 regex.workspace = true
+# `CatalogDef::probe_target` parses the stored metastore URI into the host and
+# port a reachability probe dials (SP3c D4). Pinned by the workspace.
+url.workspace = true
 egret-config.workspace = true
 egret-metastore.workspace = true
 egret-secrets.workspace = true

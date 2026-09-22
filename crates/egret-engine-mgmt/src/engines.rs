@@ -5895,76 +5895,71 @@ async fn test_catalog(
         .await?
         .ok_or(CpError::NotFound)?;
     let cat = find_attached(&st, &engine, cid).await?.catalog;
+    let (ok, message) = show_schemas_verdict(&st, &engine, &cat.name).await?;
+    Ok(Json(CatalogTestDto { ok, message }))
+}
 
-    let sql = format!("SHOW SCHEMAS FROM {}", quote_ident(&cat.name));
+/// Run `SHOW SCHEMAS FROM "<catalog>"` on `engine`'s Trino coordinator and
+/// return the verdict as `(ok, message)`. Shared by the per-engine
+/// `POST /engines/{id}/catalogs/{cid}/test` above and by the registry's
+/// `POST /catalogs/{id}/test` (SP3c D4), so the two cannot drift into two
+/// readings of the same coordinator reply. Errors of the query are verdicts,
+/// not HTTP failures; only an unreachable coordinator (or unconfigured
+/// Kubernetes) propagates as a `CpError`.
+pub(crate) async fn show_schemas_verdict(
+    st: &CpState,
+    engine: &Engine,
+    catalog_name: &str,
+) -> Result<(bool, String), CpError> {
+    let sql = format!("SHOW SCHEMAS FROM {}", quote_ident(catalog_name));
     let (code, body) = crate::monitor::coordinator_call(
-        &st,
-        &engine,
+        st,
+        engine,
         "POST",
         "/v1/statement",
         Some(sql.into_bytes()),
     )
     .await?;
     if !(200..300).contains(&code) {
-        return Ok(Json(CatalogTestDto {
-            ok: false,
-            message: coordinator_error_message(code, &body),
-        }));
+        return Ok((false, coordinator_error_message(code, &body)));
     }
     let mut v: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(_) => {
-            return Ok(Json(CatalogTestDto {
-                ok: false,
-                message: "coordinator returned a non-JSON response".into(),
-            }))
-        }
+        Err(_) => return Ok((false, "coordinator returned a non-JSON response".into())),
     };
 
     for _ in 0..=CATALOG_TEST_MAX_POLLS {
         if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
-            return Ok(Json(CatalogTestDto {
-                ok: false,
-                message: err["message"]
+            return Ok((
+                false,
+                err["message"]
                     .as_str()
                     .unwrap_or("query failed")
                     .to_string(),
-            }));
+            ));
         }
         let state = v["stats"]["state"].as_str().unwrap_or("");
         let Some(next_uri) = v["nextUri"].as_str() else {
-            return Ok(Json(CatalogTestDto {
-                ok: state == "FINISHED",
-                message: if state == "FINISHED" {
+            return Ok((
+                state == "FINISHED",
+                if state == "FINISHED" {
                     "ok".into()
                 } else {
                     format!("query ended in state {state}")
                 },
-            }));
+            ));
         };
         let path = next_uri_path(next_uri);
-        let (code, body) =
-            crate::monitor::coordinator_call(&st, &engine, "GET", &path, None).await?;
+        let (code, body) = crate::monitor::coordinator_call(st, engine, "GET", &path, None).await?;
         if !(200..300).contains(&code) {
-            return Ok(Json(CatalogTestDto {
-                ok: false,
-                message: coordinator_error_message(code, &body),
-            }));
+            return Ok((false, coordinator_error_message(code, &body)));
         }
         v = match serde_json::from_slice(&body) {
             Ok(v) => v,
-            Err(_) => {
-                return Ok(Json(CatalogTestDto {
-                    ok: false,
-                    message: "coordinator returned a non-JSON response".into(),
-                }))
-            }
+            Err(_) => return Ok((false, "coordinator returned a non-JSON response".into())),
         };
     }
-    Ok(Json(CatalogTestDto {
-        ok: false,
-        message: "timed out".into(),
-    }))
+    Ok((false, "timed out".into()))
 }
 
 #[utoipa::path(

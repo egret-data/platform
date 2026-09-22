@@ -9461,3 +9461,300 @@ async fn update_engine_refuses_catalogs_and_changes_nothing() {
         "the refused update never reached the provisioner"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SP3c-1 Task 3 — `POST /catalogs/{id}/test` (design D4)
+// ---------------------------------------------------------------------------
+
+/// A local port the OS just handed out and we handed straight back, so nothing
+/// is listening on it — and, unlike a hard-coded number, never a port some
+/// unrelated service on the machine happens to hold.
+async fn a_closed_local_port() -> u16 {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    drop(l);
+    port
+}
+
+/// D4's whole point: egret must not become a port scanner with a login page.
+/// The probe's target comes from the STORED catalog row and from nowhere else,
+/// so the request is replayed carrying every field an attacker would reach for
+/// — `host`, `port`, `uri`, `hosts`, `target` — all naming a socket that IS
+/// listening, while the stored configuration names one that is not.
+///
+/// Three independent witnesses, because one alone could be satisfied by the
+/// wrong mechanism: the response's `target` names the stored socket, the
+/// verdict is `ok:false` (it would be `true` had the request's open port been
+/// dialled), and the decoy listener never sees a connection at all.
+#[tokio::test]
+async fn the_test_route_takes_its_target_from_the_row_not_the_request() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_test_target", true).await;
+
+    let decoy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let decoy_port = decoy.local_addr().unwrap().port();
+    let closed_port = a_closed_local_port().await;
+
+    // Stored: a port nothing listens on. Attached to no engine, so the route
+    // takes the probe branch.
+    let name = unique_catalog_name("es_row");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "kind": "elasticsearch",
+            "config": { "hosts": ["127.0.0.1"], "port": closed_port, "tls": false }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = j["id"].as_str().unwrap().to_string();
+
+    let redirect = serde_json::json!({
+        "host": "127.0.0.1",
+        "port": decoy_port,
+        "uri": format!("thrift://127.0.0.1:{decoy_port}"),
+        "hosts": ["127.0.0.1"],
+        "target": format!("127.0.0.1:{decoy_port}"),
+    });
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{cid}/test"),
+        &token,
+        Some(redirect),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j["check"], "tcp",
+        "no engine is attached, so the probe ran; {j}"
+    );
+    assert_eq!(
+        j["target"],
+        serde_json::json!(format!("127.0.0.1:{closed_port}")),
+        "the result names the STORED socket, not the one the request asked for; {j}"
+    );
+    assert_eq!(
+        j["ok"], false,
+        "the request's listening port must not have been dialled; {j}"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), decoy.accept())
+            .await
+            .is_err(),
+        "the socket named ONLY by the request was never connected to"
+    );
+
+    // The mirror, so the assertion above cannot pass by the route simply
+    // refusing to dial anything: a stored socket that IS listening reports
+    // `ok:true`, while the request names the closed one.
+    let open_name = unique_catalog_name("es_open");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": open_name, "kind": "elasticsearch",
+            "config": { "hosts": ["127.0.0.1"], "port": decoy_port, "tls": false }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let open_cid = j["id"].as_str().unwrap().to_string();
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{open_cid}/test"),
+        &token,
+        Some(serde_json::json!({ "host": "127.0.0.1", "port": closed_port })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["ok"], true, "the stored, listening socket answered; {j}");
+    assert_eq!(
+        j["target"],
+        serde_json::json!(format!("127.0.0.1:{decoy_port}")),
+        "{j}"
+    );
+    // The sentence itself must say what a green tick here does and does not
+    // mean — D4 puts that in the message, not in a tooltip.
+    let msg = j["message"].as_str().unwrap();
+    assert!(
+        msg.contains("reachability check only") && msg.contains("no credentials"),
+        "a `tcp` green must disclaim credentials in the sentence; got {msg:?}"
+    );
+    assert!(j["engineName"].is_null(), "no engine ran this check; {j}");
+}
+
+/// Today's per-engine test route reaches only Trino
+/// (`monitor::coordinator_call`, fallback service `{name}-trino`), so a
+/// catalog attached ONLY to StarRocks falls back to the probe until SP4. That
+/// is a narrower answer, not a wrong one — and `check` is what keeps it
+/// honest, so the response must say `tcp` and name the socket it dialled.
+#[tokio::test]
+async fn a_starrocks_only_catalog_falls_back_to_the_probe_and_says_so() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_test_sr", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    let closed_port = a_closed_local_port().await;
+    let name = unique_catalog_name("es_sr");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "kind": "elasticsearch",
+            "config": { "hosts": ["127.0.0.1"], "port": closed_port, "tls": false }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = j["id"].as_str().unwrap().to_string();
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "attach to starrocks; {j}");
+
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j["check"], "tcp",
+        "a StarRocks attachment cannot run the query, so the probe ran; {j}"
+    );
+    assert_eq!(
+        j["target"],
+        serde_json::json!(format!("127.0.0.1:{closed_port}")),
+        "the probe names what it dialled; {j}"
+    );
+    assert_eq!(j["ok"], false, "nothing listens there; {j}");
+    assert!(
+        j["engineName"].is_null(),
+        "no engine answered, so none is claimed; {j}"
+    );
+}
+
+/// A `tpch` catalog generates its own data: it has no network endpoint at all.
+/// With nothing attached, the honest answer is `unsupported` — the third
+/// discriminant, which a later renderer shows neutral. It is NOT a failed
+/// check, and the assertion that matters is `check`, not `ok`.
+#[tokio::test]
+async fn a_tpch_catalog_with_no_engine_is_unsupported_not_failed() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_test_tpch", true).await;
+    let name = unique_catalog_name("tpch");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = j["id"].as_str().unwrap().to_string();
+
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j["check"], "unsupported",
+        "nothing was dialled and nothing was queried, and the response says exactly that; {j}"
+    );
+    assert!(
+        j["target"].is_null(),
+        "`unsupported` must not invent a target; {j}"
+    );
+    assert!(j["engineName"].is_null(), "{j}");
+    assert!(
+        j["message"].as_str().unwrap().contains("tpch"),
+        "the sentence names the kind it cannot probe; {j}"
+    );
+}
+
+/// With a Trino engine attached the route asks the better question:
+/// `SHOW SCHEMAS FROM <name>` on that engine, credentials included. The
+/// catalog here is the engine's own egret-warehouse primary, whose
+/// `probe_target` is `None` — so a route that skipped the engine would answer
+/// `unsupported`, and the two branches cannot be confused.
+#[tokio::test]
+async fn an_attached_trino_engine_answers_with_the_query_and_names_itself() {
+    let fake = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(fake.clone()),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_test_query", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = warehouse_catalog(&f, wh_id).await.id;
+
+    fake.set_coordinator_response(200, br#"{"id":"q1","stats":{"state":"FINISHED"}}"#.to_vec());
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["check"], "query", "{j}");
+    assert_eq!(j["ok"], true, "{j}");
+    assert_eq!(
+        j["engineName"],
+        serde_json::json!(engine_name),
+        "the result names the engine that answered; {j}"
+    );
+    assert!(
+        j["target"].is_null(),
+        "a query check dialled no socket of its own; {j}"
+    );
+
+    // The engine's verdict is the route's verdict: a coordinator that fails
+    // the query is `ok:false` on the SAME `query` discriminant, never a
+    // silent fall-through to the weaker probe.
+    fake.set_coordinator_response(
+        200,
+        br#"{"id":"q2","stats":{"state":"FAILED"},"error":{"message":"catalog not found"}}"#
+            .to_vec(),
+    );
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["check"], "query", "{j}");
+    assert_eq!(j["ok"], false, "{j}");
+    assert_eq!(j["message"], "catalog not found", "{j}");
+}

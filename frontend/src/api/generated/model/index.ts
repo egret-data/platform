@@ -49,6 +49,7 @@ export * from './catalogImpactDto';
 export * from './catalogImpactEngineDto';
 export * from './catalogRoleDto';
 export * from './catalogTestDto';
+export * from './catalogTestResultDto';
 export * from './catalogUpdateResultDto';
 export * from './catalogWorkspaceDto';
 export * from './cell';

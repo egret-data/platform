@@ -35,6 +35,7 @@ pub(crate) fn routes() -> Router<CpState> {
         )
         .route("/catalogs/{id}/impact", get(catalog_impact))
         .route("/catalogs/{id}/reapply", post(reapply_registry_catalog))
+        .route("/catalogs/{id}/test", post(test_registry_catalog))
         .route("/catalogs/migration-report", get(get_migration_report))
         .route(
             "/catalogs/migration-report/acknowledge",
@@ -564,6 +565,136 @@ pub(crate) struct MigrationReportQuery {
     all: bool,
 }
 
+/// `POST /catalogs/{id}/test` payload.
+///
+/// Every field a UI author must read is a schema property, so its doc comment
+/// reaches the generated client as JSDoc — a response description does not.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogTestResultDto {
+    /// Whether the check that ran succeeded — and it means only as much as
+    /// `check` says it does. Read `check` FIRST: `unsupported` is always
+    /// `ok:false` because nothing was measured, and that is not a broken
+    /// catalog, so it renders neutral rather than red.
+    ok: bool,
+    /// Which check ran, so a green tick can never be read as the other one:
+    /// `query` — `SHOW SCHEMAS FROM <name>` ran on an attached Trino engine and
+    /// the catalog answered, credentials included.
+    /// `tcp` — a connect-only reachability check of the host and port in the
+    /// stored configuration. It proves the port answers. It proves NOTHING
+    /// about credentials, TLS or permissions.
+    /// `unsupported` — no Trino engine is attached and this kind has no network
+    /// endpoint egret can probe. Render it neutral, not red: a `tpch` catalog
+    /// with nothing attached is not broken.
+    check: String,
+    /// The engine the query ran on; null for `tcp` and `unsupported`.
+    engine_name: Option<String>,
+    /// For `tcp`, the `host:port` that was dialled, so the result names what it
+    /// measured; null otherwise.
+    target: Option<String>,
+    message: String,
+}
+
+/// The three values `check` can take. Named here so the route, the tests and a
+/// later renderer all spell them the same way.
+const CHECK_QUERY: &str = "query";
+const CHECK_TCP: &str = "tcp";
+const CHECK_UNSUPPORTED: &str = "unsupported";
+
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/catalogs/{id}/test",
+    tag = "control-plane-catalog-registry",
+    params(("id" = Uuid, Path, description = "Registry catalog id")),
+    responses(
+        (status = 200, description = "The verdict, and `check` names which of the three checks produced it. The target of a `tcp` check comes from the STORED configuration and never from the request, which carries no body at all", body = CatalogTestResultDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
+        (status = 404, description = "No such catalog", body = ErrorBody),
+        (status = 502, description = "`query` only: the Trino coordinator could not be reached at all. A coordinator that answers with a failure is a 200 with `ok:false`", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn test_registry_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<CatalogTestResultDto>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
+    let row = load(&st, id).await?;
+    // D4: a Trino attachment answers the better question, so prefer it. Today's
+    // per-engine test route reaches only Trino (`monitor::coordinator_call`,
+    // fallback service `{name}-trino`), so a StarRocks-only catalog falls back
+    // to the probe until SP4 — which is a narrower answer, not a wrong one, and
+    // `check` is what keeps it honest.
+    let trino = st
+        .engine_mgmt
+        .registry()
+        .list_catalog_attachments(id)
+        .await?
+        .into_iter()
+        .find(|a| a.engine_type == "trino");
+    if let Some(a) = trino {
+        if let Some(engine) = st.engine_mgmt.get_engine(a.engine_id).await? {
+            let (ok, message) =
+                crate::engines::show_schemas_verdict(&st, &engine, &row.name).await?;
+            return Ok(Json(CatalogTestResultDto {
+                ok,
+                check: CHECK_QUERY.into(),
+                engine_name: Some(engine.name),
+                target: None,
+                message,
+            }));
+        }
+    }
+
+    // No engine to ask. The probe's target comes from the stored row and
+    // nowhere else — see `probe.rs` and `CatalogDef::probe_target`.
+    let def = CatalogDef::parse(&row.kind, &row.config, &row.advanced)
+        .map_err(|e| CpError::BadRequest(e.to_string()))?;
+    let Some((host, port)) = def.probe_target() else {
+        return Ok(Json(CatalogTestResultDto {
+            ok: false,
+            check: CHECK_UNSUPPORTED.into(),
+            engine_name: None,
+            target: None,
+            message: format!(
+                "No Trino engine is attached, and a {} catalog has no network endpoint egret can \
+                 reach on its own. Attach it to an engine to test it.",
+                row.kind
+            ),
+        }));
+    };
+    let target = format!("{host}:{port}");
+    let (ok, message) = match crate::probe::tcp_probe(&host, port).await {
+        crate::probe::ProbeOutcome::Open => (
+            true,
+            format!(
+                "{target} accepted a TCP connection. This is a reachability check only — no \
+                 protocol was spoken and no credentials were used, so it does not show that this \
+                 catalog works."
+            ),
+        ),
+        crate::probe::ProbeOutcome::Refused(e) => {
+            (false, format!("Could not reach {target}: {e}."))
+        }
+        crate::probe::ProbeOutcome::TimedOut => (
+            false,
+            format!(
+                "{target} did not answer within {}s.",
+                crate::probe::PROBE_TIMEOUT.as_secs()
+            ),
+        ),
+    };
+    Ok(Json(CatalogTestResultDto {
+        ok,
+        check: CHECK_TCP.into(),
+        engine_name: None,
+        target: Some(target),
+        message,
+    }))
+}
+
 async fn engine_or_404(st: &CpState, id: Uuid) -> Result<crate::Engine, CpError> {
     st.engine_mgmt
         .get_engine(id)
@@ -876,6 +1007,7 @@ async fn acknowledge_migration_report(
         delete_registry_catalog,
         catalog_impact,
         reapply_registry_catalog,
+        test_registry_catalog,
         attach_catalog,
         registry_attach_catalog,
         detach_catalog,
@@ -891,6 +1023,7 @@ async fn acknowledge_migration_report(
         CreateRegistryCatalogBody,
         UpdateRegistryCatalogBody,
         ApplyOutcomeDto,
+        CatalogTestResultDto,
         CatalogUpdateResultDto,
         CatalogImpactDto,
         CatalogImpactEngineDto,

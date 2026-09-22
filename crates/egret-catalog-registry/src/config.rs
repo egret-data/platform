@@ -875,6 +875,83 @@ impl CatalogDef {
             _ => None,
         }
     }
+
+    /// The host and port a connect-only reachability probe should dial, read
+    /// from the STORED configuration — the probe never takes a target from
+    /// request input (D4), so this is the only function that decides one.
+    ///
+    /// `None` means this kind has no network endpoint egret can probe, and the
+    /// route says so rather than inventing one: an egret warehouse IS egret,
+    /// Glue is an AWS region and not a host, `tpch`/`tpcds` generate their data,
+    /// and `generic`'s properties are strings egret does not interpret.
+    ///
+    /// The match is exhaustive with no wildcard on purpose: a kind added later
+    /// must decide, rather than inherit "probe nothing" by omission.
+    pub fn probe_target(&self) -> Option<(String, u16)> {
+        match &self.config {
+            CatalogConfig::Iceberg(IcebergConfig { metastore, .. }) => match metastore {
+                IcebergMetastore::Egret { .. } => None,
+                IcebergMetastore::Rest { uri, .. } => host_port_from_uri(uri),
+                IcebergMetastore::Hive { uri } => host_port_from_uri(uri),
+                IcebergMetastore::Glue { .. } => None,
+            },
+            CatalogConfig::Hive(h) | CatalogConfig::DeltaLake(h) | CatalogConfig::Hudi(h) => {
+                match &h.metastore {
+                    HiveMetastore::Hive { uri } => host_port_from_uri(uri),
+                    HiveMetastore::Glue { .. } => None,
+                }
+            }
+            CatalogConfig::Jdbc(j) => Some((j.host.clone(), j.port)),
+            CatalogConfig::Elasticsearch(e) => e.hosts.first().map(|h| (strip_scheme(h), e.port)),
+            CatalogConfig::Tpch(_) | CatalogConfig::Tpcds(_) | CatalogConfig::Generic(_) => None,
+        }
+    }
+}
+
+/// The port a scheme implies when the stored URI carries none. `thrift` is not
+/// a scheme `url` knows a default for, so the Hive metastore's 9083 is named
+/// here; `http`/`https` are named too rather than leaning on
+/// `Url::port_or_known_default`, so the whole rule reads in one place.
+fn default_port_for_scheme(scheme: &str) -> Option<u16> {
+    match scheme {
+        "https" => Some(443),
+        "http" => Some(80),
+        "thrift" => Some(9083),
+        _ => None,
+    }
+}
+
+/// `thrift://hms:9083` or `https://cat.example/api` → the host and port to
+/// dial. A Hive metastore URI may list several, comma-separated
+/// (`thrift_uri`'s own rule), and a probe dials one: the first, which is the
+/// one the engines try first too.
+fn host_port_from_uri(uri: &str) -> Option<(String, u16)> {
+    let first = uri.split(',').next()?.trim();
+    let parsed = url::Url::parse(first).ok()?;
+    let host = parsed.host_str()?;
+    if host.is_empty() {
+        return None;
+    }
+    let port = parsed
+        .port()
+        .or_else(|| default_port_for_scheme(parsed.scheme()))?;
+    Some((host.to_string(), port))
+}
+
+/// The host out of an Elasticsearch `hosts[]` entry. Validation (`host()`)
+/// already refuses anything but a bare host name or address, so the scheme and
+/// port stripping here is a belt on top of that brace: it keeps a row written
+/// before that rule — or by a future looser one — from turning `http://es-1`
+/// into a DNS lookup for the literal string `http://es-1`.
+fn strip_scheme(h: &str) -> String {
+    let rest = h.split_once("://").map_or(h, |(_, r)| r);
+    let rest = rest.split('/').next().unwrap_or(rest);
+    match rest.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+            host.to_string()
+        }
+        _ => rest.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -1230,5 +1307,181 @@ mod tests {
         let again =
             CatalogDef::parse(g.kind().as_str(), &g.config_json(), &g.advanced_json()).unwrap();
         assert_eq!(again, g);
+    }
+
+    /// SP3c D4. One assertion per kind, both the `Some` and the `None` arms,
+    /// because `probe_target` is the ONLY function that decides what the
+    /// connect-only probe dials. A kind that silently fell through to "probe
+    /// nothing" would make the Test button quietly useless for it, and a kind
+    /// that guessed a target would point egret's own socket at something the
+    /// operator never configured.
+    #[test]
+    fn probe_target_reads_every_kind_and_refuses_to_guess() {
+        // iceberg/egret: the catalog IS egret. Nothing to dial.
+        assert_eq!(
+            CatalogDef::egret_warehouse(Uuid::nil()).probe_target(),
+            None
+        );
+
+        // iceberg/rest: the port in the URI, then the scheme's default.
+        let rest = |uri: &str| {
+            parse(
+                "iceberg",
+                json!({
+                    "metastore": { "type": "rest", "uri": uri, "warehouse": "lake",
+                                   "auth": { "type": "none" } },
+                    "storage_connection_id": SC,
+                }),
+            )
+            .unwrap()
+            .probe_target()
+        };
+        assert_eq!(
+            rest("https://cat.example:8181/api"),
+            Some(("cat.example".into(), 8181))
+        );
+        assert_eq!(
+            rest("https://cat.example/api"),
+            Some(("cat.example".into(), 443))
+        );
+        assert_eq!(
+            rest("http://cat.example/api"),
+            Some(("cat.example".into(), 80))
+        );
+
+        // iceberg/hive: thrift has no port `url` knows, so 9083 is named here.
+        let ice_hive = |uri: &str| {
+            parse(
+                "iceberg",
+                json!({
+                    "metastore": { "type": "hive", "uri": uri },
+                    "storage_connection_id": SC,
+                }),
+            )
+            .unwrap()
+            .probe_target()
+        };
+        assert_eq!(ice_hive("thrift://hms:9083"), Some(("hms".into(), 9083)));
+        assert_eq!(ice_hive("thrift://hms"), Some(("hms".into(), 9083)));
+        // A comma-separated list dials the first, the one the engines try first.
+        assert_eq!(
+            ice_hive("thrift://hms-a:9083,thrift://hms-b:9084"),
+            Some(("hms-a".into(), 9083))
+        );
+
+        // iceberg/glue: an AWS region is not a host.
+        assert_eq!(
+            parse(
+                "iceberg",
+                json!({
+                    "metastore": { "type": "glue", "region": "ap-southeast-1" },
+                    "storage_connection_id": SC,
+                }),
+            )
+            .unwrap()
+            .probe_target(),
+            None
+        );
+
+        // hive / delta_lake / hudi share `HiveFamilyConfig`, and all three must
+        // answer — a `match` that named only `Hive(_)` would leave two kinds
+        // unprobed.
+        for kind in ["hive", "delta_lake", "hudi"] {
+            assert_eq!(
+                parse(
+                    kind,
+                    json!({
+                        "metastore": { "type": "hive", "uri": "thrift://hms:9083" },
+                        "storage_connection_id": SC,
+                    }),
+                )
+                .unwrap()
+                .probe_target(),
+                Some(("hms".into(), 9083)),
+                "{kind} metastore"
+            );
+        }
+        // Glue, for the two of the three that may use it — validation refuses
+        // `hudi` on Glue ("Hudi reads a Hive metastore only"), so there is no
+        // stored row of that shape to probe.
+        for kind in ["hive", "delta_lake"] {
+            assert_eq!(
+                parse(
+                    kind,
+                    json!({
+                        "metastore": { "type": "glue", "region": "eu-west-1" },
+                        "storage_connection_id": SC,
+                    }),
+                )
+                .unwrap()
+                .probe_target(),
+                None,
+                "{kind} on glue"
+            );
+        }
+
+        // jdbc: the typed host and port, verbatim.
+        assert_eq!(
+            parse(
+                "jdbc",
+                json!({ "dialect": "postgresql", "host": "pg.internal", "port": 5432,
+                        "database": "analytics", "user": "ro",
+                        "password_secret_id": PW, "ssl": { "mode": "disable" } }),
+            )
+            .unwrap()
+            .probe_target(),
+            Some(("pg.internal".into(), 5432))
+        );
+
+        // elasticsearch: the first host plus the one shared port.
+        assert_eq!(
+            parse(
+                "elasticsearch",
+                json!({ "hosts": ["es1", "es2"], "port": 9200, "tls": false }),
+            )
+            .unwrap()
+            .probe_target(),
+            Some(("es1".into(), 9200))
+        );
+
+        // tpch / tpcds generate their own data; generic is strings egret does
+        // not interpret. All three: nothing to dial.
+        assert_eq!(parse("tpch", json!({})).unwrap().probe_target(), None);
+        assert_eq!(parse("tpcds", json!({})).unwrap().probe_target(), None);
+        assert_eq!(
+            CatalogDef::parse(
+                "generic",
+                &json!({ "engines": ["trino"] }),
+                &json!({ "trino": { "connector.name": "bigquery" } }),
+            )
+            .unwrap()
+            .probe_target(),
+            None
+        );
+    }
+
+    /// The two private parsers, on the shapes the validated forms actually
+    /// produce plus the ones they used to.
+    #[test]
+    fn uri_and_host_parsing_names_the_real_shapes() {
+        assert_eq!(
+            host_port_from_uri("thrift://hms.svc.cluster.local:9083"),
+            Some(("hms.svc.cluster.local".into(), 9083))
+        );
+        assert_eq!(
+            host_port_from_uri(" thrift://a:1 , thrift://b:2 "),
+            Some(("a".into(), 1))
+        );
+        // Not a URL at all, and a scheme with no default: no target, no guess.
+        assert_eq!(host_port_from_uri("hms:9083"), None);
+        assert_eq!(host_port_from_uri("ftp://hms"), None);
+        assert_eq!(host_port_from_uri(""), None);
+
+        assert_eq!(strip_scheme("es-1"), "es-1");
+        assert_eq!(strip_scheme("http://es-1:9200"), "es-1");
+        assert_eq!(strip_scheme("https://es-1"), "es-1");
+        assert_eq!(strip_scheme("http://es-1:9200/prefix"), "es-1");
+        // A trailing colon-and-not-a-number is part of the host, not a port.
+        assert_eq!(strip_scheme("es-1:abc"), "es-1:abc");
     }
 }
