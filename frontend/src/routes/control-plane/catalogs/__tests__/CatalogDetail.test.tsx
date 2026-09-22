@@ -242,6 +242,64 @@ describe("CatalogDetail shell", () => {
     renderDetail();
     expect(await screen.findByText("no such catalog")).toBeInTheDocument();
   });
+
+  /**
+   * D1's whole claim, in two halves that have to disagree with each other.
+   *
+   * The five extra tabs are the ones that were `WarehouseDetail`'s. They are
+   * asserted by NAME and by `value`, because the `value`s are what a
+   * bookmarked `?tab=` and the `/control-plane/warehouses/:id` redirect both
+   * carry; a tab renamed in the strip would still be found by role otherwise.
+   */
+  const WAREHOUSE_TABS = [
+    ["roles", /Roles & grants/],
+    ["clients", /Catalog Clients/],
+    ["browse", /Browse/],
+    ["connect", /Connect/],
+    ["settings", /Settings/],
+  ] as const;
+
+  test("an egret warehouse catalog shows the five warehouse tabs", async () => {
+    vi.mocked(api.listNamespaces).mockResolvedValue([]);
+    mockCatalog(warehouseCatalog());
+    renderDetail("/control-plane/catalogs/c-wh");
+
+    expect(await screen.findByRole("tab", { name: /Configuration/ })).toBeInTheDocument();
+    for (const [value, name] of WAREHOUSE_TABS) {
+      const tab = screen.getByRole("tab", { name });
+      expect(tab).toBeInTheDocument();
+      // Radix puts the trigger's `value` in the panel id it controls.
+      expect(tab.getAttribute("aria-controls")).toContain(value);
+    }
+
+    // `ConnectTab` and `SettingsTab` need the Warehouse ROW, which the registry
+    // DTO does not carry; it is fetched only for this kind, by the id the DTO
+    // does carry.
+    await waitFor(() => expect(vi.mocked(api.getWarehouse)).toHaveBeenCalledWith("wh-1"));
+  });
+
+  test("a jdbc catalog shows only Configuration, Engines and Workspaces", async () => {
+    renderDetail();
+    expect(await screen.findByRole("tab", { name: /Configuration/ })).toBeInTheDocument();
+    expect(screen.getAllByRole("tab")).toHaveLength(3);
+    for (const [, name] of WAREHOUSE_TABS) {
+      expect(screen.queryByRole("tab", { name })).toBeNull();
+    }
+    // And nothing is fetched for a warehouse that does not exist.
+    expect(vi.mocked(api.getWarehouse)).not.toHaveBeenCalled();
+  });
+
+  test("?tab=browse on a warehouse catalog opens Browse, as the redirect promises", async () => {
+    vi.mocked(api.listNamespaces).mockResolvedValue([]);
+    mockCatalog(warehouseCatalog());
+    renderDetail("/control-plane/catalogs/c-wh?tab=browse");
+    const tab = await screen.findByRole("tab", { name: /Browse/ });
+    expect(tab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: /Configuration/ })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+  });
 });
 
 describe("Configuration tab", () => {

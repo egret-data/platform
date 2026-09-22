@@ -1,5 +1,12 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router-dom";
+import {
+  BrowserRouter,
+  Navigate,
+  Route,
+  Routes,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider } from "@/auth/AuthProvider";
@@ -75,11 +82,11 @@ import SecretDetail from "@/routes/control-plane/SecretDetail";
 import Policies from "@/routes/governance/Policies";
 import ProfileDetailPage from "@/routes/governance/ProfileDetailPage";
 import PolicyEditorPage from "@/routes/governance/PolicyEditorPage";
+import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import Catalogs from "@/routes/control-plane/catalogs/Catalogs";
 import CatalogCreate from "@/routes/control-plane/catalogs/CatalogCreate";
 import CatalogDetail from "@/routes/control-plane/catalogs/CatalogDetail";
 import Warehouses from "@/routes/control-plane/Warehouses";
-import WarehouseDetail from "@/routes/control-plane/WarehouseDetail";
 import AuditLog from "@/routes/control-plane/AuditLog";
 import UsersPage from "@/routes/control-plane/access/UsersPage";
 import UserDetail from "@/routes/control-plane/access/UserDetail";
@@ -271,6 +278,46 @@ function ExploreRoutes() {
   );
 }
 
+/**
+ * SP3c §3, narrowed by D5: `/control-plane/warehouses/:id` redirects to the
+ * matching catalog. ONLY the detail path. The Warehouses LIST and its sidebar
+ * entry stay live through SP3c-1 and SP3c-2 retires them; this redirect is
+ * additive, and exists because the warehouse detail PAGE is the one thing that
+ * genuinely could not stay — its five tabs now render on `CatalogDetail`
+ * (D1), so a row in the Warehouses list opens them there.
+ *
+ * The id in the old URL is a WAREHOUSE id. `RegistryCatalogDto.warehouseId` is
+ * the only field that maps it to a catalog id, and it is only on the list, so
+ * the redirect has to wait for that list rather than resolve the id locally.
+ *
+ * A warehouse with no registry row is impossible after SP3a's backfill, but a
+ * 404 is not a crash: it lands on the Catalogs list, which is where the
+ * operator would have gone next anyway. `?tab=` is carried across because the
+ * five tabs this page now redirects INTO kept their original `value`s, so a
+ * bookmarked `?tab=browse` still opens Browse.
+ */
+function WarehouseRedirect() {
+  const { id = "" } = useParams();
+  const q = useControlPlaneCatalogRegistryListRegistryCatalogs(undefined, {
+    query: { retry: false },
+  });
+  const [sp] = useSearchParams();
+  if (q.isLoading) return <div className="p-10">Loading…</div>;
+  const rows = q.data?.status === 200 ? q.data.data : [];
+  const match = rows.find((c) => c.warehouseId === id);
+  const tab = sp.get("tab");
+  return (
+    <Navigate
+      replace
+      to={
+        match
+          ? `/control-plane/catalogs/${match.id}${tab ? `?tab=${encodeURIComponent(tab)}` : ""}`
+          : "/control-plane/catalogs"
+      }
+    />
+  );
+}
+
 // First section (in preference order) each control-plane read permission
 // unlocks. Used to redirect a scoped (non platform_admin) user landing on
 // `/control-plane` to a section they can actually see, instead of the
@@ -278,8 +325,8 @@ function ExploreRoutes() {
 const FIRST_SECTION_BY_PERM: { path: string; perm: string }[] = [
   { path: "engines", perm: "engine:read" },
   // Ahead of `warehouses` so a user holding both lands on the new section.
-  // Both remain reachable through SP3c-1 (D5); Task 8 turns the warehouse
-  // routes into redirects and this entry outlives them.
+  // Both remain reachable through SP3c-1 (D5): the Warehouses LIST is still a
+  // page, and only `warehouses/:id` became a redirect.
   { path: "catalogs", perm: "catalog_registry:read" },
   { path: "warehouses", perm: "warehouse:read" },
   { path: "storage", perm: "storage:read" },
@@ -319,10 +366,21 @@ function ControlPlaneRoutes() {
           <Route path="catalogs" element={<RequirePermission perm="catalog_registry:read"><Catalogs /></RequirePermission>} />
           <Route path="catalogs/new" element={<RequirePermission perm="catalog_registry:create"><CatalogCreate /></RequirePermission>} />
           <Route path="catalogs/:id" element={<RequirePermission perm="catalog_registry:read"><CatalogDetail /></RequirePermission>} />
-          {/* D5: the warehouse routes stay live beside the catalog ones for the
-              whole of SP3c-1. Task 8 turns them into redirects. */}
+          {/* D5: the warehouse LIST stays a page for the whole of SP3c-1,
+              beside the catalog one, and SP3c-2 retires it.
+
+              The warehouse DETAIL page is the one that could not: its five
+              tabs moved onto `CatalogDetail` (D1), so this path resolves the
+              warehouse id to its catalog and sends the operator to the same
+              tabs there. The guard is `catalog_registry:read`, not
+              `warehouse:read`, because that is what the DESTINATION needs —
+              sending a user to a page they will 403 on is a worse landing than
+              a clean 403 here, and migration 0148 already granted
+              `catalog_registry:read` to every platform role holding
+              `warehouse:read`. Both keys are in `CONTROL_PLANE_PERMS` for the
+              whole of SP3c-1, so neither loses the app. */}
           <Route path="warehouses" element={<RequirePermission perm="warehouse:read"><Warehouses /></RequirePermission>} />
-          <Route path="warehouses/:id" element={<RequirePermission perm="warehouse:read"><WarehouseDetail /></RequirePermission>} />
+          <Route path="warehouses/:id" element={<RequirePermission perm="catalog_registry:read"><WarehouseRedirect /></RequirePermission>} />
           <Route path="storage" element={<RequirePermission perm="storage:read"><ControlPlaneStorage /></RequirePermission>} />
           <Route path="storage/:id" element={<RequirePermission perm="storage:read"><StorageDetail /></RequirePermission>} />
           <Route path="storage/:id/browse" element={<RequirePermission perm="storage:read"><StorageBrowser /></RequirePermission>} />

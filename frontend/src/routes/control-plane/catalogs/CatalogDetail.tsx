@@ -1,11 +1,24 @@
 import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { ArrowLeft, Boxes, Building2, Clock, Cpu, Library, Settings2 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import {
+  ArrowLeft,
+  Boxes,
+  Building2,
+  Cable,
+  Clock,
+  Cpu,
+  Database,
+  KeyRound,
+  Library,
+  Settings2,
+  ShieldCheck,
+} from "lucide-react";
 
 import { useControlPlaneCatalogRegistryGetRegistryCatalog } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import type { controlPlaneCatalogRegistryGetRegistryCatalogResponse } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
+import { type Warehouse, getWarehouse } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
-import { useAuth } from "@/auth/useAuth";
 import { DetailFact } from "@/components/layout/DetailFact";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -15,6 +28,12 @@ import { attachmentWarning, isEgretWarehouse, kindLabel } from "./Catalogs";
 import { ConfigurationTab } from "./ConfigurationTab";
 import { EnginesTab } from "./EnginesTab";
 import { WorkspacesTab } from "./WorkspacesTab";
+import { warehousesQueryKey } from "../queryKeys";
+import { BrowseTab } from "../warehouse-tabs/BrowseTab";
+import { ClientsTab } from "../warehouse-tabs/ClientsTab";
+import { ConnectTab } from "../warehouse-tabs/ConnectTab";
+import { RolesTab } from "../warehouse-tabs/RolesTab";
+import { SettingsTab } from "../warehouse-tabs/SettingsTab";
 
 // Re-exported so this page stays the obvious home of its own key, as
 // `Catalogs.tsx` does for the list's. It is DEFINED in `../queryKeys` because
@@ -25,13 +44,23 @@ export { catalogKey } from "../queryKeys";
 /**
  * Control Plane → Catalogs → one catalog (SP3c D1).
  *
- * Configuration, Engines and Workspaces for every catalog. Task 7 fills in
- * Engines; Task 8 adds the six warehouse tabs an iceberg-egret catalog also
- * gets, which is why the tab set is a list and not a fixed three.
+ * Configuration, Engines and Workspaces for EVERY catalog. An egret warehouse
+ * catalog additionally shows the tabs that were `WarehouseDetail`'s, REUSING
+ * those components — they keep their `warehouseId: string` prop, and the
+ * registry DTO carries `warehouseId` for exactly this kind of catalog and no
+ * other (0147's CHECK constraint). A jdbc catalog simply has fewer tabs.
+ *
+ * FIVE tabs move, not the six the design's §3 counts. `WarehouseDetail`'s own
+ * Engines tab is superseded by the one next door: it drew
+ * `engines.filter(e => e.warehouseId === id)` — the engines whose PRIMARY
+ * catalog this warehouse is — and every such engine is an `is_primary`
+ * attachment in `catalog.engines` since migration 0150 backfilled it from that
+ * same column. Two tabs both called "Engines", the second a subset of the
+ * first, is worse than one. See `task-8-report.md` for the two columns that
+ * are genuinely lost with it.
  */
 export default function CatalogDetail() {
   const { id = "" } = useParams();
-  const { me } = useAuth();
 
   // The active tab lives in the URL so the view is deep-linkable and survives
   // a refresh. The default is `configuration` — the one tab every catalog has,
@@ -66,6 +95,30 @@ export default function CatalogDetail() {
     return () => clearInterval(t);
   }, []);
 
+  const catalog = catalogQ.data?.status === 200 ? catalogQ.data.data : null;
+
+  // D1. `null` for every catalog that is not an egret warehouse, which is what
+  // switches the five extra tabs off — and what keeps `getWarehouse` from
+  // being called for a jdbc catalog that has no warehouse to fetch.
+  const wh = catalog && isEgretWarehouse(catalog) ? catalog.warehouseId! : null;
+
+  // `ConnectTab` and `SettingsTab` need the Warehouse ROW — its name, its
+  // `lakekeeperWarehouseId`, its `storageConnId` — none of which the registry
+  // DTO carries: an egret catalog's `config` is
+  // `{ metastore: { type: "egret", warehouse_id } }` and nothing more. Fetched
+  // only for this kind, and keyed UNDER `warehousesQueryKey` (not a
+  // hand-written triple) so the list invalidations that already exist reach it.
+  //
+  // It sits ABOVE the early returns, as every hook on this page must: an
+  // `isError` render that skipped it would change the hook count between
+  // renders of the same component.
+  const warehouseQ = useQuery<Warehouse, ApiError>({
+    queryKey: [...warehousesQueryKey, wh],
+    queryFn: () => getWarehouse(wh!),
+    enabled: wh !== null,
+    retry: false,
+  });
+
   const backLink = (
     <Link
       to="/control-plane/catalogs"
@@ -89,7 +142,6 @@ export default function CatalogDetail() {
     );
   }
 
-  const catalog = catalogQ.data?.status === 200 ? catalogQ.data.data : null;
   if (!catalog) {
     return (
       <div className="space-y-5">
@@ -100,9 +152,6 @@ export default function CatalogDetail() {
   }
 
   const warning = attachmentWarning(catalog, now);
-  const canSeeWarehouse =
-    !!me &&
-    (me.platform_roles.includes("platform_admin") || me.permissions.includes("warehouse:read"));
 
   return (
     <div className="space-y-5" data-testid="catalog-detail-frame">
@@ -151,24 +200,13 @@ export default function CatalogDetail() {
             value={new Date(catalog.updatedAt).toLocaleString()}
           />
           {catalog.warehouseId && (
-            // The catalog IS this warehouse; its storage is the warehouse's,
-            // and the catalog row does not carry the storage connection id —
-            // an egret catalog's `config` is `{ metastore: { type: "egret",
-            // warehouse_id } }` and nothing more. The warehouse page is one
-            // hop from the storage connection, and it is linked only for an
-            // operator who may read warehouses: `catalog_registry:read` does
-            // not imply `warehouse:read`, and a link that 403s is worse than
-            // an id.
-            <DetailFact
-              icon={Boxes}
-              label="Warehouse"
-              value={catalog.warehouseId}
-              to={
-                canSeeWarehouse
-                  ? `/control-plane/warehouses/${catalog.warehouseId}`
-                  : undefined
-              }
-            />
+            // The catalog IS this warehouse. It used to link to
+            // `/control-plane/warehouses/{id}`; that path now redirects to
+            // THIS page, so the link would have pointed at itself. The
+            // identifier stays because it is what `catalog.warehouseId` is
+            // called everywhere else — in the legacy API paths the tabs below
+            // still call, and in `engines.warehouse_id`.
+            <DetailFact icon={Boxes} label="Warehouse" value={catalog.warehouseId} />
           )}
         </div>
       </div>
@@ -199,6 +237,34 @@ export default function CatalogDetail() {
             <Building2 className="h-4 w-4" />
             Workspaces
           </TabsTrigger>
+          {/* D1. Same labels, same icons and — critically — the same `value`s
+              as `WarehouseDetail`'s tab strip carried, in its original order
+              minus Engines, so a bookmarked `?tab=browse` still lands where it
+              did before the redirect sent it here. */}
+          {wh !== null && (
+            <>
+              <TabsTrigger value="roles">
+                <ShieldCheck className="h-4 w-4" />
+                Roles &amp; grants
+              </TabsTrigger>
+              <TabsTrigger value="clients">
+                <KeyRound className="h-4 w-4" />
+                Catalog Clients
+              </TabsTrigger>
+              <TabsTrigger value="browse">
+                <Database className="h-4 w-4" />
+                Browse
+              </TabsTrigger>
+              <TabsTrigger value="connect">
+                <Cable className="h-4 w-4" />
+                Connect
+              </TabsTrigger>
+              <TabsTrigger value="settings">
+                <Settings2 className="h-4 w-4" />
+                Settings
+              </TabsTrigger>
+            </>
+          )}
         </TabsList>
         <TabsContent value="configuration" className="mt-4">
           <ConfigurationTab catalog={catalog} />
@@ -209,6 +275,25 @@ export default function CatalogDetail() {
         <TabsContent value="workspaces" className="mt-4">
           <WorkspacesTab catalogId={catalog.id} />
         </TabsContent>
+        {wh !== null && (
+          <>
+            <TabsContent value="roles" className="mt-4">
+              <RolesTab warehouseId={wh} />
+            </TabsContent>
+            <TabsContent value="clients" className="mt-4">
+              <ClientsTab warehouseId={wh} />
+            </TabsContent>
+            <TabsContent value="browse" className="mt-4">
+              <BrowseTab warehouseId={wh} />
+            </TabsContent>
+            <TabsContent value="connect" className="mt-4">
+              <ConnectTab warehouse={warehouseQ.data} />
+            </TabsContent>
+            <TabsContent value="settings" className="mt-4">
+              <SettingsTab warehouseId={wh} storageConnId={warehouseQ.data?.storageConnId} />
+            </TabsContent>
+          </>
+        )}
       </Tabs>
     </div>
   );
