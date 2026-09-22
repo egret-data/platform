@@ -9743,6 +9743,13 @@ async fn an_attached_trino_engine_answers_with_the_query_and_names_itself() {
         j["target"].is_null(),
         "a query check dialled no socket of its own; {j}"
     );
+    // The strongest of the three checks must also SAY what it did — it was the
+    // one branch whose whole message was the word "ok" (review F5).
+    let msg = j["message"].as_str().unwrap();
+    assert!(
+        msg.contains("SHOW SCHEMAS") && msg.contains(&engine_name) && msg.contains("credentials"),
+        "the query sentence names the check, the engine and what it proved; got {msg:?}"
+    );
 
     // The engine's verdict is the route's verdict: a coordinator that fails
     // the query is `ok:false` on the SAME `query` discriminant, never a
@@ -9757,4 +9764,193 @@ async fn an_attached_trino_engine_answers_with_the_query_and_names_itself() {
     assert_eq!(j["check"], "query", "{j}");
     assert_eq!(j["ok"], false, "{j}");
     assert_eq!(j["message"], "catalog not found", "{j}");
+}
+
+/// SP3c task-3 review F3. `list_catalog_attachments` is `ORDER BY e.name`, so
+/// "the first Trino attachment" is the alphabetically first engine — which may
+/// be one the catalog was never applied to. Querying that one answers
+/// "catalog not found": a failure that says nothing about the catalog and
+/// everything about the attachment. The route must prefer an APPLIED
+/// attachment, and when none is applied it must say so rather than report a
+/// meaningless red.
+#[tokio::test]
+async fn the_query_runs_on_an_applied_attachment_not_the_alphabetically_first() {
+    let fake = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(fake.clone()),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_test_applied", true).await;
+
+    // Two Trino engines whose names fix the ORDER BY: `aaa` sorts first.
+    let first_name = format!("trino-aaa{}", Uuid::new_v4().simple());
+    let last_name = format!("trino-zzz{}", Uuid::new_v4().simple());
+    let mut ids = Vec::new();
+    for name in [&first_name, &last_name] {
+        let wh = seed_provisioned_warehouse(&f).await;
+        let (status, j) = create_engine_via_api(&f, &token, name, wh, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::CREATED, "{j}");
+        ids.push(j["id"].as_str().unwrap().to_string());
+    }
+
+    let closed_port = a_closed_local_port().await;
+    let name = unique_catalog_name("es_applied");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "kind": "elasticsearch",
+            "config": { "hosts": ["127.0.0.1"], "port": closed_port, "tls": false }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = j["id"].as_str().unwrap().to_string();
+    for eid in &ids {
+        let (status, j) = call(
+            &f,
+            "POST",
+            &format!("/engines/{eid}/catalogs/{cid}"),
+            &token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "attach to {eid}; {j}");
+    }
+
+    // The alphabetically first engine never applied it. This is the state
+    // SP3c's own list page exists to warn about, not an exotic one.
+    let set_status = |eid: String, st: &'static str| {
+        let pool = f.db.pool.clone();
+        let cid = cid.clone();
+        async move {
+            sqlx::query(
+                "UPDATE registry.engine_catalog_attachments SET apply_status = $3 \
+                   WHERE engine_id = $1 AND catalog_id = $2",
+            )
+            .bind(Uuid::parse_str(&eid).unwrap())
+            .bind(Uuid::parse_str(&cid).unwrap())
+            .bind(st)
+            .execute(&pool)
+            .await
+            .expect("set apply_status");
+        }
+    };
+    set_status(ids[0].clone(), "pending").await;
+    set_status(ids[1].clone(), "applied").await;
+
+    fake.set_coordinator_response(200, br#"{"id":"q1","stats":{"state":"FINISHED"}}"#.to_vec());
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["check"], "query", "{j}");
+    assert_eq!(
+        j["engineName"],
+        serde_json::json!(last_name),
+        "the APPLIED engine answered, not the alphabetically first one; {j}"
+    );
+
+    // With nothing applied anywhere, a query would test the attachment rather
+    // than the catalog — so the route drops to the weaker check and says why,
+    // naming the engine and its status instead of reporting a red that means
+    // nothing about the catalog.
+    set_status(ids[1].clone(), "failed").await;
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j["check"], "tcp",
+        "no applied attachment, so no query was run; {j}"
+    );
+    assert!(j["engineName"].is_null(), "no engine answered; {j}");
+    let msg = j["message"].as_str().unwrap();
+    assert!(
+        msg.contains("has this catalog applied") && msg.contains(&first_name),
+        "the sentence says why no query ran and names an engine; got {msg:?}"
+    );
+    assert!(
+        !msg.contains("No Trino engine is attached"),
+        "two ARE attached — the sentence must not deny it; got {msg:?}"
+    );
+}
+
+/// SP3c task-3 review F2. `thrift://` used to pass validation, store, and then
+/// make the route tell the operator that the KIND `hive` "has no network
+/// endpoint" — false, and it points at the wrong remedy. Validation now refuses
+/// it at the source; a row written before that rule is answered by naming the
+/// URI, never by blaming the kind.
+#[tokio::test]
+async fn a_stored_uri_naming_no_host_is_never_reported_as_the_kind_having_none() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_test_nohost", true).await;
+    let sc = seed_exchange_storage_conn(&f).await;
+    let name = unique_catalog_name("hive_nohost");
+
+    // Refused at the source: this can no longer be created at all.
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "kind": "hive",
+            "config": { "metastore": { "type": "hive", "uri": "thrift://" },
+                        "storage_connection_id": sc }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("must name a host"),
+        "the refusal names the real problem; {j}"
+    );
+
+    // A row written before that rule: create a good one, then break it the only
+    // way a pre-existing row could be broken — straight in the column.
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "kind": "hive",
+            "config": { "metastore": { "type": "hive", "uri": "thrift://hms:9083" },
+                        "storage_connection_id": sc }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = j["id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE registry.catalogs SET config = jsonb_set(config, '{metastore,uri}', '\"thrift://\"') WHERE id = $1")
+        .bind(Uuid::parse_str(&cid).unwrap())
+        .execute(&f.db.pool)
+        .await
+        .expect("break the stored uri");
+
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    let body = j.to_string();
+    assert!(
+        !body.contains("has no network endpoint"),
+        "the kind is fine — only the URI is broken; {j}"
+    );
+    assert!(
+        body.contains("must name a host"),
+        "the answer names the URI as the problem; status={status}, {j}"
+    );
 }

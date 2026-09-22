@@ -30296,6 +30296,15 @@
           }
         }
       },
+      "CatalogCheck": {
+        "type": "string",
+        "description": "Which of the three checks produced a [`CatalogTestResultDto`]. An enum, not\na string, so Task 7's renderer gets a union it must switch on exhaustively:\nthe whole point of the discriminant is that the three cannot be blurred, and\na doc comment saying \"read this first\" is a comment doing a type's job (SP3c\nreview F4). The wire values are unchanged.",
+        "enum": [
+          "query",
+          "tcp",
+          "unsupported"
+        ]
+      },
       "CatalogConflictBody": {
         "type": "object",
         "description": "409 body of a refused catalog delete. Two shapes share this struct (same\npattern as `EngineConflictBody`): `code = \"catalog_in_use\"` carries the\nnon-empty `engines`/`workspaces` that still use the catalog; `code =\n\"warehouse_catalog\"` (an egret warehouse catalog, refused unconditionally —\ndelete the warehouse instead) carries neither, so they're omitted.",
@@ -30455,8 +30464,8 @@
             "description": "Whether the check that ran succeeded — and it means only as much as\n`check` says it does. Read `check` FIRST: `unsupported` is always\n`ok:false` because nothing was measured, and that is not a broken\ncatalog, so it renders neutral rather than red."
           },
           "check": {
-            "type": "string",
-            "description": "Which check ran, so a green tick can never be read as the other one:\n`query` — `SHOW SCHEMAS FROM <name>` ran on an attached Trino engine and\nthe catalog answered, credentials included.\n`tcp` — a connect-only reachability check of the host and port in the\nstored configuration. It proves the port answers. It proves NOTHING\nabout credentials, TLS or permissions.\n`unsupported` — no Trino engine is attached and this kind has no network\nendpoint egret can probe. Render it neutral, not red: a `tpch` catalog\nwith nothing attached is not broken."
+            "$ref": "#/components/schemas/CatalogCheck",
+            "description": "Which check ran, so a green tick can never be read as the other one."
           },
           "engineName": {
             "type": [
@@ -30473,7 +30482,8 @@
             "description": "For `tcp`, the `host:port` that was dialled, so the result names what it\nmeasured; null otherwise."
           },
           "message": {
-            "type": "string"
+            "type": "string",
+            "description": "One sentence an operator can act on. For `tcp` it always says, in the\nsentence itself, that reachability is all that was measured."
           }
         }
       },

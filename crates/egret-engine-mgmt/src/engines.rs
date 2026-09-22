@@ -5917,7 +5917,7 @@ pub(crate) async fn show_schemas_verdict(
         engine,
         "POST",
         "/v1/statement",
-        Some(sql.into_bytes()),
+        Some(sql.clone().into_bytes()),
     )
     .await?;
     if !(200..300).contains(&code) {
@@ -5943,7 +5943,14 @@ pub(crate) async fn show_schemas_verdict(
             return Ok((
                 state == "FINISHED",
                 if state == "FINISHED" {
-                    "ok".into()
+                    // Name the check and the engine. `tcp` puts its disclaimer
+                    // in the sentence and `unsupported` names the kind; the bare
+                    // word "ok" left the strongest of the three the only one
+                    // that did not say what it had done (SP3c review F5).
+                    format!(
+                        "{sql} succeeded on `{}`, so the catalog answered — credentials included.",
+                        engine.name
+                    )
                 } else {
                     format!("query ended in state {state}")
                 },

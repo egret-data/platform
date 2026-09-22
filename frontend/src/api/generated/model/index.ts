@@ -42,6 +42,7 @@ export * from './cardRunBody';
 export * from './cardRunBodyTemporalUnits';
 export * from './catalogAttachErrorDto';
 export * from './catalogAttachmentDto';
+export * from './catalogCheck';
 export * from './catalogConflictBody';
 export * from './catalogConflictEngine';
 export * from './catalogConflictWorkspace';

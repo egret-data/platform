@@ -565,6 +565,29 @@ pub(crate) struct MigrationReportQuery {
     all: bool,
 }
 
+/// Which of the three checks produced a [`CatalogTestResultDto`]. An enum, not
+/// a string, so Task 7's renderer gets a union it must switch on exhaustively:
+/// the whole point of the discriminant is that the three cannot be blurred, and
+/// a doc comment saying "read this first" is a comment doing a type's job (SP3c
+/// review F4). The wire values are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CatalogCheck {
+    /// `SHOW SCHEMAS FROM <name>` ran on an attached Trino engine that has this
+    /// catalog applied, and the catalog answered — credentials included.
+    Query,
+    /// A connect-only reachability check of the host and port in the STORED
+    /// configuration. It proves the port answers. It proves NOTHING about
+    /// credentials, TLS or permissions.
+    Tcp,
+    /// Nothing was measured: no Trino engine could run the query, and there was
+    /// no host to dial either. Render it neutral, not red — a `tpch` catalog
+    /// with nothing attached is not broken. `message` says which of the two
+    /// reasons applies, because "this kind has no endpoint" and "this
+    /// catalog's URI names no host" call for different fixes.
+    Unsupported,
+}
+
 /// `POST /catalogs/{id}/test` payload.
 ///
 /// Every field a UI author must read is a schema property, so its doc comment
@@ -577,29 +600,26 @@ pub(crate) struct CatalogTestResultDto {
     /// `ok:false` because nothing was measured, and that is not a broken
     /// catalog, so it renders neutral rather than red.
     ok: bool,
-    /// Which check ran, so a green tick can never be read as the other one:
-    /// `query` — `SHOW SCHEMAS FROM <name>` ran on an attached Trino engine and
-    /// the catalog answered, credentials included.
-    /// `tcp` — a connect-only reachability check of the host and port in the
-    /// stored configuration. It proves the port answers. It proves NOTHING
-    /// about credentials, TLS or permissions.
-    /// `unsupported` — no Trino engine is attached and this kind has no network
-    /// endpoint egret can probe. Render it neutral, not red: a `tpch` catalog
-    /// with nothing attached is not broken.
-    check: String,
+    /// Which check ran, so a green tick can never be read as the other one.
+    check: CatalogCheck,
     /// The engine the query ran on; null for `tcp` and `unsupported`.
     engine_name: Option<String>,
     /// For `tcp`, the `host:port` that was dialled, so the result names what it
     /// measured; null otherwise.
     target: Option<String>,
+    /// One sentence an operator can act on. For `tcp` it always says, in the
+    /// sentence itself, that reachability is all that was measured.
     message: String,
 }
 
-/// The three values `check` can take. Named here so the route, the tests and a
-/// later renderer all spell them the same way.
-const CHECK_QUERY: &str = "query";
-const CHECK_TCP: &str = "tcp";
-const CHECK_UNSUPPORTED: &str = "unsupported";
+/// Why no query ran, in words that fit in front of a weaker check's sentence.
+/// Empty when the catalog is attached to no Trino engine at all, which needs no
+/// explaining; otherwise it names the engine and what is wrong with it, because
+/// "no Trino engine is attached" would be false in those cases (SP3c review
+/// F3, F7).
+fn why_no_query(reason: Option<String>) -> String {
+    reason.map(|r| format!("{r} ")).unwrap_or_default()
+}
 
 #[utoipa::path(
     post,
@@ -627,42 +647,82 @@ async fn test_registry_catalog(
     // fallback service `{name}-trino`), so a StarRocks-only catalog falls back
     // to the probe until SP4 — which is a narrower answer, not a wrong one, and
     // `check` is what keeps it honest.
-    let trino = st
+    let trino: Vec<_> = st
         .engine_mgmt
         .registry()
         .list_catalog_attachments(id)
         .await?
         .into_iter()
-        .find(|a| a.engine_type == "trino");
-    if let Some(a) = trino {
+        .filter(|a| a.engine_type == "trino")
+        .collect();
+    // An APPLIED attachment, not merely the alphabetically first one
+    // (`list_catalog_attachments` is `ORDER BY e.name`). Querying an engine the
+    // catalog was never applied to answers "catalog not found" — a failure that
+    // says nothing about the catalog and everything about the attachment, and
+    // SP3c's own list page exists because `pending`/`failed` attachments are
+    // expected (SP3c review F3).
+    let applied = trino.iter().find(|a| a.apply_status == "applied");
+    let mut no_query: Option<String> = None;
+    if let Some(a) = applied {
         if let Some(engine) = st.engine_mgmt.get_engine(a.engine_id).await? {
             let (ok, message) =
                 crate::engines::show_schemas_verdict(&st, &engine, &row.name).await?;
             return Ok(Json(CatalogTestResultDto {
                 ok,
-                check: CHECK_QUERY.into(),
+                check: CatalogCheck::Query,
                 engine_name: Some(engine.name),
                 target: None,
                 message,
             }));
         }
+        // The attachment row outlived its engine row. Fall through to the
+        // weaker check rather than 500ing, and do not claim nothing is
+        // attached.
+        no_query = Some(format!(
+            "The engine `{}` this catalog is applied to no longer exists, so egret could not run a query.",
+            a.engine_name
+        ));
+    } else if let Some(a) = trino.first() {
+        no_query = Some(format!(
+            "No Trino engine has this catalog applied yet (`{}` is `{}`), so a query would have \
+             tested the attachment rather than the catalog.",
+            a.engine_name, a.apply_status
+        ));
     }
 
-    // No engine to ask. The probe's target comes from the stored row and
-    // nowhere else — see `probe.rs` and `CatalogDef::probe_target`.
+    // Nothing to ask. The probe's target comes from the stored row and nowhere
+    // else — see `probe.rs` and `CatalogDef::probe_target`.
     let def = CatalogDef::parse(&row.kind, &row.config, &row.advanced)
         .map_err(|e| CpError::BadRequest(e.to_string()))?;
+    let why = why_no_query(no_query);
     let Some((host, port)) = def.probe_target() else {
+        // Two different facts that call for different fixes: a kind with
+        // nothing to dial is fine, a stored URI naming no host is broken.
+        // `thrift_uri`/`http_uri` now require a host, so no VALID row reaches
+        // the first arm any more — a row written before that rule fails
+        // `CatalogDef::parse` above and is answered with the URI's own error,
+        // which names the right problem. The arm stays as a standing guard: if
+        // those validators are ever loosened, or a kind is added whose endpoint
+        // can be unreadable, the false sentence must not come back silently
+        // (SP3c review F2).
+        let message = if def.names_an_endpoint() {
+            format!(
+                "{why}The endpoint stored for this catalog names no host egret can read, so there \
+                 was nothing to dial. Fix the catalog's configuration."
+            )
+        } else {
+            format!(
+                "{why}A catalog of kind `{}` has no network endpoint egret can reach on its own, \
+                 so there was nothing to check. Attach it to a Trino engine to test it.",
+                row.kind
+            )
+        };
         return Ok(Json(CatalogTestResultDto {
             ok: false,
-            check: CHECK_UNSUPPORTED.into(),
+            check: CatalogCheck::Unsupported,
             engine_name: None,
             target: None,
-            message: format!(
-                "No Trino engine is attached, and a catalog of kind `{}` has no network endpoint \
-                 egret can reach on its own. Attach it to an engine to test it.",
-                row.kind
-            ),
+            message,
         }));
     };
     let target = format!("{host}:{port}");
@@ -670,25 +730,25 @@ async fn test_registry_catalog(
         crate::probe::ProbeOutcome::Open => (
             true,
             format!(
-                "{target} accepted a TCP connection. This is a reachability check only — no \
+                "{why}{target} accepted a TCP connection. This is a reachability check only — no \
                  protocol was spoken and no credentials were used, so it does not show that this \
                  catalog works."
             ),
         ),
         crate::probe::ProbeOutcome::Refused(e) => {
-            (false, format!("Could not reach {target}: {e}."))
+            (false, format!("{why}Could not reach {target}: {e}."))
         }
         crate::probe::ProbeOutcome::TimedOut => (
             false,
             format!(
-                "{target} did not answer within {}s.",
+                "{why}{target} did not answer within {}s.",
                 crate::probe::PROBE_TIMEOUT.as_secs()
             ),
         ),
     };
     Ok(Json(CatalogTestResultDto {
         ok,
-        check: CHECK_TCP.into(),
+        check: CatalogCheck::Tcp,
         engine_name: None,
         target: Some(target),
         message,
@@ -1024,6 +1084,7 @@ async fn acknowledge_migration_report(
         UpdateRegistryCatalogBody,
         ApplyOutcomeDto,
         CatalogTestResultDto,
+        CatalogCheck,
         CatalogUpdateResultDto,
         CatalogImpactDto,
         CatalogImpactEngineDto,

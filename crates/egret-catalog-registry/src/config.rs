@@ -366,10 +366,26 @@ fn text(field: &str, v: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Note for anyone reading `probe_target`: these two validators check the
+/// scheme and that a host is present — nothing more. In particular a URI may
+/// carry userinfo, and `thrift://hms:9083@evil.example:1234` names the host
+/// `evil.example`, not `hms`. That is what the string means under WHATWG and
+/// under Java's `URI`, so egret, Trino and StarRocks all dial the same host
+/// and there is no divergence to exploit — but the error text below says
+/// "thrift://host:port", which promises more than is enforced. Anything that
+/// reads a host out of these fields must not assume the shape in the message
+/// (SP3c review F8).
 fn http_uri(field: &str, v: &str) -> Result<(), String> {
     text(field, v)?;
     if !(v.starts_with("http://") || v.starts_with("https://")) || v.contains(char::is_whitespace) {
         return Err(format!("{field} must be an http(s) URL"));
+    }
+    // A host is required. `https://` alone passes the prefix check, stores, and
+    // then names no endpoint at all — which left the test route telling the
+    // operator that the KIND has no endpoint, a different and false statement
+    // (SP3c review F2). Refused at the source instead.
+    if !has_host(v) {
+        return Err(format!("{field} must name a host"));
     }
     Ok(())
 }
@@ -381,7 +397,15 @@ fn thrift_uri(field: &str, v: &str) -> Result<(), String> {
             "{field} must be thrift://host:port (comma-separated)"
         ));
     }
+    if v.split(',').any(|u| !has_host(u.trim())) {
+        return Err(format!("{field} must name a host"));
+    }
     Ok(())
+}
+
+/// Whether `url` parses and carries a non-empty host.
+fn has_host(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|u| u.host().is_some())
 }
 
 fn host(field: &str, v: &str) -> Result<(), String> {
@@ -880,10 +904,16 @@ impl CatalogDef {
     /// from the STORED configuration — the probe never takes a target from
     /// request input (D4), so this is the only function that decides one.
     ///
-    /// `None` means this kind has no network endpoint egret can probe, and the
-    /// route says so rather than inventing one: an egret warehouse IS egret,
-    /// Glue is an AWS region and not a host, `tpch`/`tpcds` generate their data,
-    /// and `generic`'s properties are strings egret does not interpret.
+    /// `None` means there is nothing to dial. It does NOT on its own mean the
+    /// kind has no endpoint: a stored URI that names no host answers `None`
+    /// too. Ask [`CatalogDef::names_an_endpoint`] which of the two it is before
+    /// telling an operator anything — reporting a broken URI as "this kind has
+    /// no endpoint" is false and points at the wrong remedy (SP3c review F2).
+    ///
+    /// The kinds that genuinely have nothing to dial: an egret warehouse IS
+    /// egret, Glue is an AWS region and not a host, `tpch`/`tpcds` generate
+    /// their data, and `generic`'s properties are strings egret does not
+    /// interpret.
     ///
     /// The match is exhaustive with no wildcard on purpose: a kind added later
     /// must decide, rather than inherit "probe nothing" by omission.
@@ -906,6 +936,35 @@ impl CatalogDef {
             CatalogConfig::Tpch(_) | CatalogConfig::Tpcds(_) | CatalogConfig::Generic(_) => None,
         }
     }
+
+    /// Whether this configuration NAMES a network endpoint at all, regardless
+    /// of whether one could be read out of it.
+    ///
+    /// `probe_target()` returning `None` while this is `true` means the stored
+    /// URI is unusable — not that the kind has nothing to dial. The two are
+    /// different facts with different remedies ("fix the URI" against "attach
+    /// it to an engine"), and blurring them under one sentence is the same
+    /// failure the `check` discriminant exists to stop (SP3c review F2).
+    ///
+    /// Exhaustive with no wildcard, for the same reason `probe_target` is: it
+    /// is the other half of the same decision, and the two must be added to
+    /// together.
+    pub fn names_an_endpoint(&self) -> bool {
+        match &self.config {
+            CatalogConfig::Iceberg(IcebergConfig { metastore, .. }) => match metastore {
+                IcebergMetastore::Egret { .. } | IcebergMetastore::Glue { .. } => false,
+                IcebergMetastore::Rest { .. } | IcebergMetastore::Hive { .. } => true,
+            },
+            CatalogConfig::Hive(h) | CatalogConfig::DeltaLake(h) | CatalogConfig::Hudi(h) => {
+                match &h.metastore {
+                    HiveMetastore::Hive { .. } => true,
+                    HiveMetastore::Glue { .. } => false,
+                }
+            }
+            CatalogConfig::Jdbc(_) | CatalogConfig::Elasticsearch(_) => true,
+            CatalogConfig::Tpch(_) | CatalogConfig::Tpcds(_) | CatalogConfig::Generic(_) => false,
+        }
+    }
 }
 
 /// The port a scheme implies when the stored URI carries none. `thrift` is not
@@ -925,17 +984,26 @@ fn default_port_for_scheme(scheme: &str) -> Option<u16> {
 /// dial. A Hive metastore URI may list several, comma-separated
 /// (`thrift_uri`'s own rule), and a probe dials one: the first, which is the
 /// one the engines try first too.
+///
+/// The host comes back in the form a socket wants, which for IPv6 means
+/// WITHOUT the URI's brackets: `Url::host_str` keeps them, and
+/// `TcpStream::connect(("[::1]", p))` neither parses `[::1]` as an address nor
+/// resolves it as a name, so a perfectly healthy `thrift://[::1]:9083` read
+/// red for ever (SP3c review F1). `Host::Ipv6` is therefore formatted from the
+/// parsed address, not from the source text.
 fn host_port_from_uri(uri: &str) -> Option<(String, u16)> {
     let first = uri.split(',').next()?.trim();
     let parsed = url::Url::parse(first).ok()?;
-    let host = parsed.host_str()?;
-    if host.is_empty() {
-        return None;
-    }
+    let host = match parsed.host()? {
+        url::Host::Domain("") => return None,
+        url::Host::Domain(d) => d.to_string(),
+        url::Host::Ipv4(a) => a.to_string(),
+        url::Host::Ipv6(a) => a.to_string(),
+    };
     let port = parsed
         .port()
         .or_else(|| default_port_for_scheme(parsed.scheme()))?;
-    Some((host.to_string(), port))
+    Some((host, port))
 }
 
 /// The host out of an Elasticsearch `hosts[]` entry. Validation (`host()`)
@@ -946,11 +1014,21 @@ fn host_port_from_uri(uri: &str) -> Option<(String, u16)> {
 fn strip_scheme(h: &str) -> String {
     let rest = h.split_once("://").map_or(h, |(_, r)| r);
     let rest = rest.split('/').next().unwrap_or(rest);
-    match rest.rsplit_once(':') {
-        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
-            host.to_string()
+    let host = match rest.rsplit_once(':') {
+        // An unbracketed IPv6 literal is all colons and hex digits, so only a
+        // BRACKETED host can be carrying a port here (F1's sibling case).
+        Some((host, port))
+            if !port.is_empty()
+                && port.bytes().all(|b| b.is_ascii_digit())
+                && (!host.contains(':') || host.ends_with(']')) =>
+        {
+            host
         }
-        _ => rest.to_string(),
+        _ => rest,
+    };
+    match host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        Some(v6) => v6.to_string(),
+        None => host.to_string(),
     }
 }
 
@@ -1387,18 +1465,30 @@ mod tests {
         // answer — a `match` that named only `Hive(_)` would leave two kinds
         // unprobed.
         for kind in ["hive", "delta_lake", "hudi"] {
+            let def = parse(
+                kind,
+                json!({
+                    "metastore": { "type": "hive", "uri": "thrift://hms:9083" },
+                    "storage_connection_id": SC,
+                }),
+            )
+            .unwrap();
             assert_eq!(
-                parse(
-                    kind,
-                    json!({
-                        "metastore": { "type": "hive", "uri": "thrift://hms:9083" },
-                        "storage_connection_id": SC,
-                    }),
-                )
-                .unwrap()
-                .probe_target(),
+                def.probe_target(),
                 Some(("hms".into(), 9083)),
                 "{kind} metastore"
+            );
+            // Not about probing, and deliberately here anyway: this loop is the
+            // only place in either crate that parses all three hive-family
+            // kinds, and `storage_connection_id`'s SAME three-variant arm was
+            // unpinned — flipping `delta_lake`/`hudi` to `None` there left the
+            // whole two-crate suite green, while `validate_references`, the
+            // Trino/StarRocks render and the stored column all read it (SP3c
+            // task-3 review §5). Three lines here, no new fixture.
+            assert_eq!(
+                def.storage_connection_id(),
+                Some(Uuid::parse_str(SC).unwrap()),
+                "{kind} storage connection"
             );
         }
         // Glue, for the two of the three that may use it — validation refuses
@@ -1472,10 +1562,15 @@ mod tests {
             host_port_from_uri(" thrift://a:1 , thrift://b:2 "),
             Some(("a".into(), 1))
         );
+        assert_eq!(
+            host_port_from_uri("thrift://10.1.2.3:9083"),
+            Some(("10.1.2.3".into(), 9083))
+        );
         // Not a URL at all, and a scheme with no default: no target, no guess.
         assert_eq!(host_port_from_uri("hms:9083"), None);
         assert_eq!(host_port_from_uri("ftp://hms"), None);
         assert_eq!(host_port_from_uri(""), None);
+        assert_eq!(host_port_from_uri("thrift://"), None);
 
         assert_eq!(strip_scheme("es-1"), "es-1");
         assert_eq!(strip_scheme("http://es-1:9200"), "es-1");
@@ -1483,5 +1578,126 @@ mod tests {
         assert_eq!(strip_scheme("http://es-1:9200/prefix"), "es-1");
         // A trailing colon-and-not-a-number is part of the host, not a port.
         assert_eq!(strip_scheme("es-1:abc"), "es-1:abc");
+    }
+
+    /// SP3c review F1: an IPv6 metastore is a storable value, and the host must
+    /// come back in the form a socket wants. `Url::host_str` keeps the URI's
+    /// brackets, and `TcpStream::connect(("[::1]", p))` neither parses `[::1]`
+    /// as an address nor resolves it as a name — so the bracketed form read red
+    /// for ever against a listener that was up.
+    #[test]
+    fn an_ipv6_metastore_is_dialled_unbracketed() {
+        assert_eq!(
+            host_port_from_uri("thrift://[::1]:9083"),
+            Some(("::1".into(), 9083))
+        );
+        // No port: the scheme's default still applies, and the brackets still go.
+        assert_eq!(
+            host_port_from_uri("thrift://[::1]"),
+            Some(("::1".into(), 9083))
+        );
+        assert_eq!(
+            host_port_from_uri("https://[2001:db8::1]:8181/api"),
+            Some(("2001:db8::1".into(), 8181))
+        );
+        // Through the stored configuration, not just the private helper.
+        assert_eq!(
+            parse(
+                "hive",
+                json!({
+                    "metastore": { "type": "hive", "uri": "thrift://[::1]:9083" },
+                    "storage_connection_id": SC,
+                }),
+            )
+            .unwrap()
+            .probe_target(),
+            Some(("::1".into(), 9083))
+        );
+        // The Elasticsearch path has its own stripper, and its colons must not
+        // be read as a port either.
+        assert_eq!(strip_scheme("[::1]"), "::1");
+        assert_eq!(strip_scheme("http://[::1]:9200"), "::1");
+        assert_eq!(strip_scheme("::1"), "::1");
+    }
+
+    /// SP3c review F2: `thrift://` and `https://` used to pass validation, so a
+    /// row could store a URI naming no host — and the test route then told the
+    /// operator the KIND had no endpoint, which is false and points at the
+    /// wrong fix. Refused at the source now, and `names_an_endpoint` keeps the
+    /// two facts apart for every row written before this rule.
+    #[test]
+    fn a_uri_naming_no_host_is_refused_and_the_two_facts_stay_apart() {
+        for uri in ["thrift://", "thrift://a:1,thrift://"] {
+            let e = parse(
+                "hive",
+                json!({
+                    "metastore": { "type": "hive", "uri": uri },
+                    "storage_connection_id": SC,
+                }),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&e, ValidationError::Config { msg, .. } if msg.contains("must name a host")),
+                "{uri:?} must be refused, got {e:?}"
+            );
+        }
+        let e = parse(
+            "iceberg",
+            json!({
+                "metastore": { "type": "rest", "uri": "https://", "warehouse": "lake",
+                               "auth": { "type": "none" } },
+                "storage_connection_id": SC,
+            }),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&e, ValidationError::Config { msg, .. } if msg.contains("must name a host")),
+            "got {e:?}"
+        );
+
+        // The kinds that name an endpoint, against the kinds that do not. A
+        // `hive` catalog ALWAYS names one; that is what makes "the stored URI
+        // could not be read" the honest sentence when `probe_target` is `None`.
+        let hive = parse(
+            "hive",
+            json!({
+                "metastore": { "type": "hive", "uri": "thrift://hms:9083" },
+                "storage_connection_id": SC,
+            }),
+        )
+        .unwrap();
+        assert!(hive.names_an_endpoint() && hive.probe_target().is_some());
+        let glue = parse(
+            "hive",
+            json!({
+                "metastore": { "type": "glue", "region": "eu-west-1" },
+                "storage_connection_id": SC,
+            }),
+        )
+        .unwrap();
+        assert!(!glue.names_an_endpoint() && glue.probe_target().is_none());
+        assert!(!parse("tpch", json!({})).unwrap().names_an_endpoint());
+        assert!(!parse("tpcds", json!({})).unwrap().names_an_endpoint());
+        assert!(!CatalogDef::egret_warehouse(Uuid::nil()).names_an_endpoint());
+        assert!(!CatalogDef::parse(
+            "generic",
+            &json!({ "engines": ["trino"] }),
+            &json!({ "trino": { "connector.name": "bigquery" } }),
+        )
+        .unwrap()
+        .names_an_endpoint());
+        assert!(parse(
+            "elasticsearch",
+            json!({ "hosts": ["es1"], "port": 9200, "tls": false }),
+        )
+        .unwrap()
+        .names_an_endpoint());
+        assert!(parse(
+            "jdbc",
+            json!({ "dialect": "postgresql", "host": "h", "port": 5432, "database": "d",
+                    "user": "u", "password_secret_id": PW, "ssl": { "mode": "disable" } }),
+        )
+        .unwrap()
+        .names_an_endpoint());
     }
 }

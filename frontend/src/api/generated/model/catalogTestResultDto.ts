@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { CatalogCheck } from './catalogCheck';
 
 /**
  * `POST /catalogs/{id}/test` payload.
@@ -20,18 +21,8 @@ export interface CatalogTestResultDto {
      * catalog, so it renders neutral rather than red.
      */
   ok: boolean;
-  /**
-     * Which check ran, so a green tick can never be read as the other one:
-     * `query` — `SHOW SCHEMAS FROM <name>` ran on an attached Trino engine and
-     * the catalog answered, credentials included.
-     * `tcp` — a connect-only reachability check of the host and port in the
-     * stored configuration. It proves the port answers. It proves NOTHING
-     * about credentials, TLS or permissions.
-     * `unsupported` — no Trino engine is attached and this kind has no network
-     * endpoint egret can probe. Render it neutral, not red: a `tpch` catalog
-     * with nothing attached is not broken.
-     */
-  check: string;
+  /** Which check ran, so a green tick can never be read as the other one. */
+  check: CatalogCheck;
   /**
      * The engine the query ran on; null for `tcp` and `unsupported`.
      * @nullable
@@ -43,5 +34,9 @@ export interface CatalogTestResultDto {
      * @nullable
      */
   target?: string | null;
+  /**
+     * One sentence an operator can act on. For `tcp` it always says, in the
+     * sentence itself, that reachability is all that was measured.
+     */
   message: string;
 }
