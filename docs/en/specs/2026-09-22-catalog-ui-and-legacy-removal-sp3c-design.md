@@ -77,6 +77,12 @@ two ways to reach catalogs; a user who upgrades to both has one.
   storage-connection picker).
 - **Detail**: Configuration, Engines (attach, detach, apply status, Retry), Workspaces (assign), plus
   the six existing warehouse tabs when the catalog is iceberg-egret (D1).
+- **The assignment rule the UI must state.** An egret-warehouse catalog with **no** assignments is
+  still visible to the workspace that owns its warehouse, and the **first** assignment revokes that
+  (`egret-query/src/registry/repo.rs:529-537`). So assigning such a catalog elsewhere silently
+  removes it from the owner's engine view, and unassigning everything does not hide it. Nobody wrote
+  this down before SP3c-1's review found it; both halves surprise people, so the Workspaces tab says
+  them where the operator is deciding.
 - **`/control-plane/warehouses/*` redirects** to the matching catalog. Three places link to that path
   by literal string — `WorkspaceDetail.tsx`, `StorageDetail.tsx`, `Sidebar.tsx` — and move with it.
 - **Engine detail → Catalogs** replaces the inline `CatalogForm` with a picker over the registry,
