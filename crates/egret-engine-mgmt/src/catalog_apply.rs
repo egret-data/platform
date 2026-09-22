@@ -1227,6 +1227,11 @@ pub(crate) async fn detach_from_engine(
 /// writes nothing — a refused apply must leave the DB unchanged, and the
 /// attachment's `apply_status` says nothing true about a cluster the apply
 /// never reached.
+///
+/// `apply_status` answers exactly one question: *did this catalog reach that
+/// engine?* Only a failure the ENGINE produced may be written onto the row;
+/// everything that fails on either side of the engine leaves the row saying
+/// what it said before, which is still true (see the carve-out below).
 pub(crate) async fn retry_apply(
     st: &CpState,
     engine: &Engine,
@@ -1236,14 +1241,35 @@ pub(crate) async fn retry_apply(
         return Err(CatalogOpError::Apply(ApplyError::Conflict));
     }
     if let Err(e) = apply_catalog_change(st, engine, CatalogChange::ReapplyOne(catalog_id)).await {
-        // `Unrecorded` is the one failure that must NOT be flagged on the row
-        // (fix round 1 review, F5): it means the engine took the change and
-        // the `apply_status` WRITE is what failed. Writing a second status to
-        // the same row through the same database would either hit the same
-        // failure or — worse — succeed, recording `failed` for an engine that
-        // is actually converged. It is the caller's error, not the
-        // attachment's state.
-        if !matches!(e, ApplyError::Unrecorded(_)) {
+        // TWO failures must not be flagged on the row, and for one reason: the
+        // row's `apply_status` is a statement about the ENGINE, and neither of
+        // them is.
+        //
+        // `Unrecorded` (fix round 1 review, F5) is the far side: the engine
+        // took the change and the `apply_status` WRITE is what failed. Writing
+        // a second status to the same row through the same database would
+        // either hit the same failure or — worse — succeed, recording `failed`
+        // for an engine that is actually converged. It is the caller's error,
+        // not the attachment's state.
+        //
+        // `Build` is the near side: the change never reached the engine at
+        // all — no warehouse, no secret, no Kubernetes, or a definition that
+        // would not render. And on Trino it is not even necessarily ABOUT this
+        // catalog: `CatalogChange::ReapplyOne` maps to `BuildOpts::default()`
+        // because a Trino apply is the whole ConfigMap, so
+        // `build_provision_req_with` renders EVERY attachment of the engine
+        // with a `?` per row and one unparseable SIBLING ends the build. Before
+        // this carve-out that wrote `failed` — with the sibling's parse error —
+        // onto the healthy row the operator had asked about, and `propagate`
+        // reaches this function too, so saving a healthy catalog's
+        // Configuration flagged it from the repair page itself. SP3c-1 renders
+        // `apply_status` on five surfaces; the datum has to be true
+        // (whole-branch review, F2).
+        //
+        // What is NOT lost: the refusal still reaches the caller as a 400/502
+        // with the same message, and the reason a row cannot render is reported
+        // independently as `configError` on `GET /engines/{id}/catalogs`.
+        if !matches!(e, ApplyError::Unrecorded(_) | ApplyError::Build(_)) {
             st.engine_mgmt
                 .registry()
                 .set_apply_failed(engine.id, catalog_id, &e.message())

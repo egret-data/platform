@@ -10187,13 +10187,21 @@ async fn attach_row_directly(f: &Fixture, engine_id: &str, catalog_id: &str) {
 ///     in the path and sends one statement about it. A broken sibling is not
 ///     read, so it cannot refuse anything.
 ///
-/// A SECOND FACT THIS RECORDS, AND DOES NOT ENDORSE: `retry_apply` flags the
-/// attachment it was called for on any error that is not `Unrecorded`, so the
-/// refused Trino Retry writes `failed` onto the HEALTHY row, with the broken
-/// sibling's message. The UI then shows a catalog as failed for a reason that
-/// is about a different catalog. It is asserted here because it is what the
-/// code does and a silent change to it should be deliberate — not because it
-/// is right.
+/// A SECOND FACT THIS PINS: the refused Trino Retry leaves the HEALTHY row
+/// exactly as it was. `retry_apply` carves `ApplyError::Build` out of
+/// `set_apply_failed` alongside `Unrecorded`, because `apply_status` answers
+/// "did this catalog reach that engine" and a build that never left egret is
+/// not an answer to it — least of all when the build was ended by a SIBLING's
+/// parse error, which is what happens here.
+///
+/// When this test was first written it asserted the opposite, recorded and
+/// explicitly not endorsed: the healthy row went `failed` carrying the broken
+/// catalog's message, and SP3c-1 renders that on five surfaces (the row badge,
+/// the per-engine error Alert, the list's Status column, the "needing
+/// attention" counter and the detail page's warning). `propagate` funnels a
+/// Configuration SAVE through the same function, so the repair page
+/// manufactured the false state too. Fixed in the whole-branch review's F2;
+/// this half of the test is now what proves it stays fixed.
 #[tokio::test]
 async fn a_broken_sibling_blocks_retry_on_trino_and_not_on_starrocks() {
     let Some(f) = setup_full(
@@ -10220,6 +10228,18 @@ async fn a_broken_sibling_blocks_retry_on_trino_and_not_on_starrocks() {
     let healthy = warehouse_catalog(&f, wh).await.id;
     attach_row_directly(&f, &trino_id, &broken).await;
 
+    // Read BEFORE the refused Retry, so "unchanged" below is a comparison and
+    // not a guess about what engine create seeds.
+    let before = registry(&f)
+        .get_attachment(Uuid::parse_str(&trino_id).unwrap(), healthy)
+        .await
+        .unwrap()
+        .expect("the healthy attachment exists before the Retry");
+    assert_eq!(
+        before.apply_status, "applied",
+        "the primary catalog of a freshly created Trino engine really did reach it"
+    );
+
     let (status, j) = call(
         &f,
         "POST",
@@ -10239,25 +10259,25 @@ async fn a_broken_sibling_blocks_retry_on_trino_and_not_on_starrocks() {
          name the scope rather than the row; {j}"
     );
 
-    // The healthy row now reads `failed`, carrying the other catalog's error.
-    // Recorded, not endorsed — see the doc comment.
-    let flagged = registry(&f)
+    // A REFUSED APPLY WRITES NOTHING. The build ended inside egret, so nothing
+    // new is known about this catalog's state on this engine and the row's
+    // last true state stands. Before the whole-branch review's F2 fix this read
+    // `failed`, carrying the BROKEN catalog's message — a verdict about a
+    // different catalog, rendered on five SP3c-1 surfaces.
+    let after = registry(&f)
         .get_attachment(Uuid::parse_str(&trino_id).unwrap(), healthy)
         .await
         .unwrap()
         .expect("the healthy attachment still exists");
     assert_eq!(
-        flagged.apply_status, "failed",
-        "`retry_apply` flags the row it was called for on a Build error"
+        after.apply_status, before.apply_status,
+        "a Trino Retry refused by a SIBLING's parse error must leave the row it was called \
+         for exactly as it was"
     );
-    assert!(
-        flagged
-            .apply_error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("must name a host"),
-        "…with the SIBLING's message: {:?}",
-        flagged.apply_error
+    assert_eq!(
+        after.apply_error, None,
+        "and above all it must not carry the sibling's message: {:?}",
+        after.apply_error
     );
 
     // ── StarRocks: the same shape, the opposite outcome ─────────────────────
@@ -10301,5 +10321,124 @@ async fn a_broken_sibling_blocks_retry_on_trino_and_not_on_starrocks() {
     assert_eq!(
         sr_broken.apply_status, "applied",
         "the row written by `attach_row_directly`, unchanged"
+    );
+}
+
+/// THE REPAIR PAGE MUST NOT MANUFACTURE THE STATE IT REPAIRS.
+///
+/// `propagate` (a `PUT /catalogs/{id}`, i.e. Save on the catalog's
+/// Configuration tab) funnels every attached engine through `retry_apply`. On
+/// Trino the apply is the whole ConfigMap, so ONE unparseable sibling on that
+/// engine ends the build — and before the whole-branch review's F2 fix that
+/// wrote `failed`, with the sibling's parse error, onto the attachment of the
+/// catalog that had just been saved. A healthy catalog was flagged broken by
+/// the act of editing it, and SP3c-1's list, detail page and Engines tab all
+/// showed it.
+///
+/// The companion `registry_update_propagates_and_flags_the_failed_engine` is
+/// the control for the other direction: an engine that genuinely REJECTS the
+/// update still flags the row, which is what `apply_status` is for.
+#[tokio::test]
+async fn saving_a_healthy_catalog_is_not_a_verdict_about_it() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "propagate_sibling_admin", true).await;
+    let sc = seed_exchange_storage_conn(&f).await;
+    let reg = registry(&f);
+
+    let broken = seed_catalog_then_break_its_uri(
+        &f,
+        &token,
+        &unique_catalog_name("hive_propagate_scope"),
+        sc,
+    )
+    .await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    // The catalog under edit: healthy, applied, and NOT the engine's primary,
+    // so what happens to it cannot be confused with the warehouse mirror's own
+    // lifecycle.
+    let cat_name = unique_catalog_name("bench_propagate");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let healthy = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    reg.insert_attachment(&egret_catalog_registry::NewAttachment {
+        engine_id,
+        catalog_id: healthy,
+        catalog_client_id: None,
+        credential_secret_id: None,
+        minted_client: false,
+        applied_now: true,
+        is_primary: false,
+        created_at: None,
+        apply_status: egret_catalog_registry::store::apply_status::APPLIED,
+    })
+    .await
+    .unwrap();
+    attach_row_directly(&f, &engine_id.to_string(), &broken).await;
+
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{healthy}"),
+        &token,
+        Some(serde_json::json!({
+            "config": {}, "advanced": { "trino": { "tpch.column-naming": "STANDARD" } }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the save itself succeeds; {j}");
+    let outcome = j["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["engineName"] == engine_name.as_str())
+        .cloned()
+        .expect("an outcome for the engine");
+    assert_eq!(
+        outcome["status"], "failed",
+        "the engine did not get the new configuration, and the response says so; {j}"
+    );
+    assert!(
+        outcome["error"].as_str().unwrap().contains("must name a host"),
+        "…naming the SIBLING's parse error, because that is what refused the build; {j}"
+    );
+
+    // AND THE ROW IS UNTOUCHED. The response above is the honest report; the
+    // attachment's `apply_status` is a claim about the engine, and nothing
+    // reached the engine to make one.
+    let row = reg
+        .get_attachment(engine_id, healthy)
+        .await
+        .unwrap()
+        .expect("the saved catalog's attachment");
+    assert_eq!(
+        row.apply_status, "applied",
+        "saving a healthy catalog must not flag it `failed` because a DIFFERENT catalog on \
+         the same engine cannot be rendered"
+    );
+    assert_eq!(
+        row.apply_error, None,
+        "and it must not carry the other catalog's message: {:?}",
+        row.apply_error
     );
 }
