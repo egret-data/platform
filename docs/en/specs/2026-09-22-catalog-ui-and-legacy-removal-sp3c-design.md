@@ -48,8 +48,10 @@ always was — storing it on the engine is what forced one warehouse per engine.
 **D3 — One permission family.** `warehouse_admin` and the resource-tag endpoints move onto
 `catalog_registry:*`, and a migration grants `catalog_registry:{read,create,update,delete}` to every
 role that holds the matching `warehouse:*` before the old keys are dropped. Nobody gains access,
-nobody loses it. `catalog_registry:read` joins `CONTROL_PLANE_PERMS` in the same change that removes
-`warehouse:read` from it, so no user can be locked out between the two.
+nobody loses it. `catalog_registry:read` joins `CONTROL_PLANE_PERMS` in SP3c-1, alongside the section it gates, and
+`warehouse:read` is removed from it only in SP3c-2, with the permission itself. Both keys sit in the
+list in between, which is the safe order: a user holding either can always enter Control Plane, and
+no window exists in which neither key admits them.
 
 **D4 — Test says what it tested.** With an attached engine, `SHOW SCHEMAS FROM <name>` through that
 engine. Without one, a TCP reachability check of the configured host and port — labelled as exactly
