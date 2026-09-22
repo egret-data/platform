@@ -246,10 +246,12 @@ describe("CatalogDetail shell", () => {
   /**
    * D1's whole claim, in two halves that have to disagree with each other.
    *
-   * The five extra tabs are the ones that were `WarehouseDetail`'s. They are
-   * asserted by NAME and by `value`, because the `value`s are what a
-   * bookmarked `?tab=` and the `/control-plane/warehouses/:id` redirect both
-   * carry; a tab renamed in the strip would still be found by role otherwise.
+   * The five extra tabs are the ones that were `WarehouseDetail`'s. Each is
+   * asserted by NAME and, separately, by driving `?tab=<value>` — because the
+   * `value`s are what a bookmarked tab and the `/control-plane/warehouses/:id`
+   * redirect both carry, and a `value` typo is invisible to a by-name lookup.
+   * Reading the id Radix derives from the value was tried and rejected: it
+   * matched loosely enough that `value="browse-x"` still passed.
    */
   const WAREHOUSE_TABS = [
     ["roles", /Roles & grants/],
@@ -259,17 +261,32 @@ describe("CatalogDetail shell", () => {
     ["settings", /Settings/],
   ] as const;
 
-  test("an egret warehouse catalog shows the five warehouse tabs", async () => {
+  /** What the warehouse tabs call once they mount. */
+  function mockWarehouseTabApis() {
     vi.mocked(api.listNamespaces).mockResolvedValue([]);
+    vi.mocked(api.listRoles).mockResolvedValue([]);
+    vi.mocked(api.listClients).mockResolvedValue([]);
+    vi.mocked(api.listWarehouseTasks).mockResolvedValue([]);
+    vi.mocked(api.getWarehouse).mockResolvedValue({
+      id: "wh-1",
+      name: "analytics",
+      workspaceId: "ws1",
+      storageConnId: "st-1",
+      lakekeeperWarehouseId: "lk-1",
+    });
+    vi.mocked(api.getWarehouseConfig).mockResolvedValue({} as unknown as Awaited<
+      ReturnType<typeof api.getWarehouseConfig>
+    >);
+  }
+
+  test("an egret warehouse catalog shows the five warehouse tabs", async () => {
+    mockWarehouseTabApis();
     mockCatalog(warehouseCatalog());
     renderDetail("/control-plane/catalogs/c-wh");
 
     expect(await screen.findByRole("tab", { name: /Configuration/ })).toBeInTheDocument();
-    for (const [value, name] of WAREHOUSE_TABS) {
-      const tab = screen.getByRole("tab", { name });
-      expect(tab).toBeInTheDocument();
-      // Radix puts the trigger's `value` in the panel id it controls.
-      expect(tab.getAttribute("aria-controls")).toContain(value);
+    for (const [, name] of WAREHOUSE_TABS) {
+      expect(screen.getByRole("tab", { name })).toBeInTheDocument();
     }
 
     // `ConnectTab` and `SettingsTab` need the Warehouse ROW, which the registry
@@ -277,6 +294,23 @@ describe("CatalogDetail shell", () => {
     // does carry.
     await waitFor(() => expect(vi.mocked(api.getWarehouse)).toHaveBeenCalledWith("wh-1"));
   });
+
+  test.each(WAREHOUSE_TABS)(
+    "?tab=%s selects that warehouse tab, which is what the redirect carries",
+    async (value, name) => {
+      mockWarehouseTabApis();
+      mockCatalog(warehouseCatalog());
+      renderDetail(`/control-plane/catalogs/c-wh?tab=${value}`);
+      const tab = await screen.findByRole("tab", { name });
+      expect(tab).toHaveAttribute("aria-selected", "true");
+      // Proving Configuration is NOT the one showing is what separates "the
+      // URL was read" from "the default happens to match".
+      expect(screen.getByRole("tab", { name: /Configuration/ })).toHaveAttribute(
+        "aria-selected",
+        "false",
+      );
+    },
+  );
 
   test("a jdbc catalog shows only Configuration, Engines and Workspaces", async () => {
     renderDetail();
@@ -289,17 +323,6 @@ describe("CatalogDetail shell", () => {
     expect(vi.mocked(api.getWarehouse)).not.toHaveBeenCalled();
   });
 
-  test("?tab=browse on a warehouse catalog opens Browse, as the redirect promises", async () => {
-    vi.mocked(api.listNamespaces).mockResolvedValue([]);
-    mockCatalog(warehouseCatalog());
-    renderDetail("/control-plane/catalogs/c-wh?tab=browse");
-    const tab = await screen.findByRole("tab", { name: /Browse/ });
-    expect(tab).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: /Configuration/ })).toHaveAttribute(
-      "aria-selected",
-      "false",
-    );
-  });
 });
 
 describe("Configuration tab", () => {
