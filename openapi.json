@@ -3495,6 +3495,16 @@
               }
             }
           },
+          "400": {
+            "description": "The catalog's STORED configuration does not parse, so there was no target to decide and nothing to test. Reachable for a row written before a validation rule that has since tightened — the message names the field, and this is the one thing the operator can act on, so render it rather than the generic error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Not authenticated",
             "content": {
@@ -4187,7 +4197,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Catalogs attached to the engine",
+            "description": "Catalogs attached to the engine. A catalog whose stored configuration no longer parses is listed with `configError` set rather than omitted, and never fails the whole list",
             "content": {
               "application/json": {
                 "schema": {
@@ -33522,6 +33532,13 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "configError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set only when this catalog's STORED configuration no longer parses, and\nthen it carries the validation error. The entry is degraded, not\ncomplete: `kind` falls back to the stored column and `secretRef` is\nnull, because neither can be derived without a parse. Render the row as\nbroken and let the operator open it — do not hide it, and do not treat\nthe absence of `secretRef` as \"no secret\".\n\nThis exists because tightening a validator is a migration: rows that\nwent through the old gate are still stored, and a list that refuses to\nshow them leaves the operator unable to find the one row to repair\n(SP3c review N1)."
           }
         }
       },

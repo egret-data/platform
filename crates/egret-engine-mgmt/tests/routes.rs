@@ -9923,11 +9923,32 @@ async fn a_stored_uri_naming_no_host_is_never_reported_as_the_kind_having_none()
 
     // A row written before that rule: create a good one, then break it the only
     // way a pre-existing row could be broken — straight in the column.
+    let cid = seed_catalog_then_break_its_uri(&f, &token, &name, sc).await;
+
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    // The status is the point, not only the words: a row egret cannot parse is
+    // a 400, and that is the one status Task 7 has to render for this route.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    let body = j.to_string();
+    assert!(
+        !body.contains("has no network endpoint"),
+        "the kind is fine — only the URI is broken; {j}"
+    );
+    assert!(
+        body.contains("must name a host"),
+        "the answer names the URI as the problem; {j}"
+    );
+}
+
+/// Create a valid `hive` catalog, then break its stored `uri` in the column —
+/// the only way a row can hold a shape validation now refuses, and exactly what
+/// a database that predates the tightened rule looks like.
+async fn seed_catalog_then_break_its_uri(f: &Fixture, token: &str, name: &str, sc: Uuid) -> String {
     let (status, j) = call(
-        &f,
+        f,
         "POST",
         "/catalogs",
-        &token,
+        token,
         Some(serde_json::json!({
             "name": name, "kind": "hive",
             "config": { "metastore": { "type": "hive", "uri": "thrift://hms:9083" },
@@ -9942,15 +9963,103 @@ async fn a_stored_uri_naming_no_host_is_never_reported_as_the_kind_having_none()
         .execute(&f.db.pool)
         .await
         .expect("break the stored uri");
+    cid
+}
 
-    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
-    let body = j.to_string();
-    assert!(
-        !body.contains("has no network endpoint"),
-        "the kind is fine — only the URI is broken; {j}"
+/// SP3c task-3 review N1. Tightening a validator is a migration: the rows that
+/// went through the old gate are still there, and every read path that now
+/// parses them is a place they can fail. `GET /engines/{id}/catalogs` used to
+/// `collect::<Result<_, _>>()?`, so ONE un-parseable row 400'd the whole
+/// engine's list and named nothing — leaving the operator unable to find the
+/// row they needed to repair, with every other catalog innocent and invisible.
+#[tokio::test]
+async fn one_unparseable_catalog_does_not_take_an_engines_whole_list_with_it() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_list_degrade", true).await;
+    let sc = seed_exchange_storage_conn(&f).await;
+    let name = unique_catalog_name("hive_degrade");
+
+    // Attached WHILE IT STILL PARSES, which is the only way the state arises.
+    let cid = seed_catalog_then_break_its_uri(&f, &token, &name, sc).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    // `POST /engines/{id}/catalogs/{cid}` parses the row too, so it would
+    // refuse this one — the attachment predates the break in reality, and is
+    // written directly here to reproduce that without a time machine.
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id, apply_status) \
+         VALUES ($1, $2, 'applied')",
+    )
+    .bind(Uuid::parse_str(&engine_id).unwrap())
+    .bind(Uuid::parse_str(&cid).unwrap())
+    .execute(&f.db.pool)
+    .await
+    .expect("attach the pre-existing row");
+
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{engine_id}/catalogs"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "one bad row must not 400 the list; {j}"
+    );
+    let rows = j.as_array().expect("a list");
+    assert_eq!(
+        rows.len(),
+        2,
+        "the engine's own warehouse catalog AND the broken one; {j}"
+    );
+    let broken = rows
+        .iter()
+        .find(|r| r["id"] == serde_json::json!(cid))
+        .expect("the broken catalog is listed, not dropped");
+    assert_eq!(
+        broken["name"],
+        serde_json::json!(name),
+        "the degraded entry still identifies the row to repair; {j}"
+    );
+    assert_eq!(
+        broken["kind"], "hive",
+        "the stored kind needs no parse; {j}"
     );
     assert!(
-        body.contains("must name a host"),
-        "the answer names the URI as the problem; status={status}, {j}"
+        broken["configError"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("must name a host"),
+        "the degraded entry says WHY it is degraded; {j}"
     );
+    assert!(
+        broken["secretRef"].is_null(),
+        "nothing was derived from a config that does not parse; {j}"
+    );
+    // The innocent one is complete, so a degraded entry is distinguishable from
+    // a healthy one rather than everything being marked broken.
+    let healthy = rows
+        .iter()
+        .find(|r| r["id"] != serde_json::json!(cid))
+        .expect("the warehouse catalog");
+    assert!(
+        healthy["configError"].is_null(),
+        "the other catalogs on the engine are untouched; {j}"
+    );
+    assert_eq!(healthy["kind"], "egret-warehouse", "{j}");
 }

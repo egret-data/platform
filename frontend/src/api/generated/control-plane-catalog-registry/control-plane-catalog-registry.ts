@@ -1316,6 +1316,11 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   status: 200
 }
 
+export type controlPlaneCatalogRegistryTestRegistryCatalogResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type controlPlaneCatalogRegistryTestRegistryCatalogResponse401 = {
   data: ErrorBody
   status: 401
@@ -1344,7 +1349,7 @@ export type controlPlaneCatalogRegistryTestRegistryCatalogResponse502 = {
 export type controlPlaneCatalogRegistryTestRegistryCatalogResponseSuccess = (controlPlaneCatalogRegistryTestRegistryCatalogResponse200) & {
   headers: Headers;
 };
-export type controlPlaneCatalogRegistryTestRegistryCatalogResponseError = (controlPlaneCatalogRegistryTestRegistryCatalogResponse401 | controlPlaneCatalogRegistryTestRegistryCatalogResponse403 | controlPlaneCatalogRegistryTestRegistryCatalogResponse404 | controlPlaneCatalogRegistryTestRegistryCatalogResponse500 | controlPlaneCatalogRegistryTestRegistryCatalogResponse502) & {
+export type controlPlaneCatalogRegistryTestRegistryCatalogResponseError = (controlPlaneCatalogRegistryTestRegistryCatalogResponse400 | controlPlaneCatalogRegistryTestRegistryCatalogResponse401 | controlPlaneCatalogRegistryTestRegistryCatalogResponse403 | controlPlaneCatalogRegistryTestRegistryCatalogResponse404 | controlPlaneCatalogRegistryTestRegistryCatalogResponse500 | controlPlaneCatalogRegistryTestRegistryCatalogResponse502) & {
   headers: Headers;
 };
 

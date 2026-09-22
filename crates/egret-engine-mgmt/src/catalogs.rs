@@ -628,6 +628,7 @@ fn why_no_query(reason: Option<String>) -> String {
     params(("id" = Uuid, Path, description = "Registry catalog id")),
     responses(
         (status = 200, description = "The verdict, and `check` names which of the three checks produced it. The target of a `tcp` check comes from the STORED configuration and never from the request, which carries no body at all", body = CatalogTestResultDto),
+        (status = 400, description = "The catalog's STORED configuration does not parse, so there was no target to decide and nothing to test. Reachable for a row written before a validation rule that has since tightened — the message names the field, and this is the one thing the operator can act on, so render it rather than the generic error", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 404, description = "No such catalog", body = ErrorBody),

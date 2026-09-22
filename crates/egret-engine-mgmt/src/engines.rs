@@ -353,6 +353,19 @@ pub(crate) struct EngineCatalogDto {
     pub(crate) kind: String,
     pub(crate) is_primary: bool,
     pub(crate) secret_ref: Option<Uuid>,
+    /// Set only when this catalog's STORED configuration no longer parses, and
+    /// then it carries the validation error. The entry is degraded, not
+    /// complete: `kind` falls back to the stored column and `secretRef` is
+    /// null, because neither can be derived without a parse. Render the row as
+    /// broken and let the operator open it — do not hide it, and do not treat
+    /// the absence of `secretRef` as "no secret".
+    ///
+    /// This exists because tightening a validator is a migration: rows that
+    /// went through the old gate are still stored, and a list that refuses to
+    /// show them leaves the operator unable to find the one row to repair
+    /// (SP3c review N1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) config_error: Option<String>,
 }
 
 /// The legacy `kind` of a registry catalog: `egret-warehouse` for a warehouse,
@@ -365,6 +378,10 @@ pub(crate) fn legacy_kind(def: &CatalogDef) -> String {
     }
 }
 
+/// One attachment, for a route that is ABOUT that one catalog. A row whose
+/// stored configuration no longer parses is a 400 naming the row: the caller
+/// asked for this catalog specifically, so the failure is confined and the
+/// message points straight at what to fix.
 fn legacy_catalog_dto(a: &AttachedCatalog) -> Result<EngineCatalogDto, CpError> {
     let def = a
         .catalog
@@ -376,7 +393,41 @@ fn legacy_catalog_dto(a: &AttachedCatalog) -> Result<EngineCatalogDto, CpError> 
         kind: legacy_kind(&def),
         is_primary: a.is_primary(),
         secret_ref: def.secret_ids().into_iter().next(),
+        config_error: None,
     })
+}
+
+/// The same DTO for a LIST, where one bad row must not take the others with it.
+/// `collect::<Result<_, _>>()?` turned a single un-parseable catalog into a 400
+/// for the whole engine, naming nothing — so the operator saw no catalogs and
+/// no way to find the broken one. Every field that needs no parse is still
+/// filled in; `configError` carries the reason (SP3c review N1).
+fn legacy_catalog_dto_degrading(a: &AttachedCatalog) -> EngineCatalogDto {
+    match a.catalog.def() {
+        Ok(def) => EngineCatalogDto {
+            id: a.catalog.id,
+            name: a.catalog.name.clone(),
+            kind: legacy_kind(&def),
+            is_primary: a.is_primary(),
+            secret_ref: def.secret_ids().into_iter().next(),
+            config_error: None,
+        },
+        Err(e) => EngineCatalogDto {
+            id: a.catalog.id,
+            name: a.catalog.name.clone(),
+            // The stored column, which needs no parse. `legacy_kind`'s
+            // warehouse special case still holds: `warehouse_id` is its own
+            // column too.
+            kind: if a.catalog.warehouse_id.is_some() {
+                "egret-warehouse".into()
+            } else {
+                a.catalog.kind.clone()
+            },
+            is_primary: a.is_primary(),
+            secret_ref: None,
+            config_error: Some(e.to_string()),
+        },
+    }
 }
 
 /// The registry catalog `cid` as attached to `engine` (404 when not attached).
@@ -5592,7 +5643,7 @@ async fn unassign_workspace_engine(
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 200, description = "Catalogs attached to the engine", body = Vec<EngineCatalogDto>),
+        (status = 200, description = "Catalogs attached to the engine. A catalog whose stored configuration no longer parses is listed with `configError` set rather than omitted, and never fails the whole list", body = Vec<EngineCatalogDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
@@ -5616,10 +5667,7 @@ async fn list_catalogs(
         .list_engine_attachments(engine.id)
         .await?;
     Ok(Json(
-        attached
-            .iter()
-            .map(legacy_catalog_dto)
-            .collect::<Result<_, _>>()?,
+        attached.iter().map(legacy_catalog_dto_degrading).collect(),
     ))
 }
 
