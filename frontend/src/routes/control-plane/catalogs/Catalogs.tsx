@@ -12,6 +12,7 @@ import type { RegistryCatalogDto } from "@/api/generated/model";
 import { deleteWarehouse } from "@/api/controlPlane";
 import { useMyWorkspaces } from "@/api/hooks";
 import { ApiError } from "@/api/client";
+import { useAuth } from "@/auth/useAuth";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -126,6 +127,7 @@ function catalogColumns(
   wsName: (id: string) => string | null,
   now: number,
   onDelete: (c: RegistryCatalogDto) => void,
+  canDelete: (c: RegistryCatalogDto) => boolean,
 ): Column<RegistryCatalogDto>[] {
   return [
     {
@@ -206,18 +208,24 @@ function catalogColumns(
       key: "actions",
       label: "",
       className: "text-right w-10",
-      cell: (c) => (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="text-muted-foreground hover:text-destructive"
-          onClick={() => onDelete(c)}
-          aria-label={`Delete ${c.name}`}
-        >
-          <Trash2 className="h-4 w-4" />
-          Delete
-        </Button>
-      ),
+      // PER ROW, because the two kinds of row are deleted through two
+      // differently-gated endpoints: an egret warehouse catalog goes to
+      // `DELETE /warehouses/{id}` (`warehouse:delete`) and everything else to
+      // `DELETE /catalogs/{id}` (`catalog_registry:delete`). One flat gate
+      // would either hide a button that works or offer one that cannot.
+      cell: (c) =>
+        canDelete(c) ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground hover:text-destructive"
+            onClick={() => onDelete(c)}
+            aria-label={`Delete ${c.name}`}
+          >
+            <Trash2 className="h-4 w-4" />
+            Delete
+          </Button>
+        ) : null,
     },
   ];
 }
@@ -231,6 +239,29 @@ function catalogColumns(
  * Task 8 turns those routes into redirects here.
  */
 export default function Catalogs() {
+  /**
+   * THE LANDING PAGE GATES ITS CONTROLS, like every other catalog screen
+   * (whole-branch review, F3).
+   *
+   * `App.tsx` gates `catalogs/new` on `catalog_registry:create`, so an ungated
+   * `New catalog` sent a `:read`-only operator to a full-page Forbidden; the
+   * per-row Delete produced a toast reading the bare word `forbidden`, which is
+   * `Error::Forbidden`'s Display and names no permission. Task 11 proved this is
+   * the page a `catalog_registry:read`-only account LANDS on, so it is the first
+   * thing that persona meets.
+   *
+   * `platform_admin` short-circuits every check, as it does on the four sibling
+   * screens — the PDP grants it everything and `me.permissions` does not
+   * enumerate that.
+   */
+  const { me } = useAuth();
+  const isAdmin = !!me && me.platform_roles.includes("platform_admin");
+  const canCreate = isAdmin || !!me?.permissions.includes("catalog_registry:create");
+  const canDeleteCatalog = isAdmin || !!me?.permissions.includes("catalog_registry:delete");
+  const canDeleteWarehouse = isAdmin || !!me?.permissions.includes("warehouse:delete");
+  const canDelete = (c: RegistryCatalogDto) =>
+    isEgretWarehouse(c) ? canDeleteWarehouse : canDeleteCatalog;
+
   // `?workspace=<id>` is the ROUTE's filter here, not a client-side one as on
   // the warehouse list: the list endpoint takes `workspaceId`, and a catalog
   // can be assigned to several workspaces, so filtering the returned rows
@@ -312,14 +343,38 @@ export default function Catalogs() {
   const attached = rows.filter((c) => c.engines.length > 0).length;
   const needingAttention = rows.filter((c) => attachmentWarning(c, now) !== null).length;
 
-  const newCatalogButton = (
+  const newCatalogButton = canCreate ? (
     <Button asChild className="shrink-0">
       <Link to="/control-plane/catalogs/new">
         <Plus className="h-4 w-4" />
         New catalog
       </Link>
     </Button>
-  );
+  ) : null;
+
+  /**
+   * Why a control is missing, said ONCE and only about what is actually
+   * missing here.
+   *
+   * Hiding a control without a word is the shape Task 7's F3, Task 8's F1 and
+   * Task 9's F-4 each removed from another screen; the delete clauses are
+   * further conditioned on there being a row of that kind, because naming
+   * `warehouse:delete` on a list with no egret warehouse in it explains a
+   * button that was never going to be drawn.
+   */
+  const hiddenControls: string[] = [];
+  // Not when the empty state is on screen: it already says this, in a fuller
+  // sentence, and two near-identical "a platform administrator can grant it"
+  // blocks one above the other is what Task 9's F-4 removed from the engine's
+  // Catalogs tab.
+  if (!canCreate && rows.length > 0)
+    hiddenControls.push("creating one needs catalog_registry:create");
+  if (!canDeleteCatalog && rows.some((c) => !isEgretWarehouse(c)))
+    hiddenControls.push("deleting a registered catalog needs catalog_registry:delete");
+  if (!canDeleteWarehouse && rows.some(isEgretWarehouse))
+    hiddenControls.push(
+      "deleting an egret warehouse needs warehouse:delete, because it is removed with its warehouse",
+    );
 
   return (
     <div className="space-y-4" data-testid="catalogs-frame">
@@ -376,7 +431,7 @@ export default function Catalogs() {
       ) : (
         <FilterableTable
           rows={rows}
-          columns={catalogColumns(wsName, now, setDeleteTarget)}
+          columns={catalogColumns(wsName, now, setDeleteTarget, canDelete)}
           getId={(c) => c.id}
           searchPlaceholder="Search catalogs…"
           initialSort={{ key: "name", dir: "asc" }}
@@ -389,12 +444,23 @@ export default function Catalogs() {
               <EmptyState
                 icon={Library}
                 title="No catalogs yet"
-                description="Register an external metastore, or create an egret warehouse over a storage connection."
-                action={newCatalogButton}
+                description={
+                  canCreate
+                    ? "Register an external metastore, or create an egret warehouse over a storage connection."
+                    : "Catalogs are registered external metastores and egret warehouses. Creating one needs the catalog_registry:create permission, which this account does not have — a platform administrator can grant it."
+                }
+                action={newCatalogButton ?? undefined}
               />
             )
           }
         />
+      )}
+
+      {hiddenControls.length > 0 && (
+        <p className="text-xs text-muted-foreground" data-testid="catalogs-readonly">
+          Some controls are not shown on this page: {hiddenControls.join("; ")}. A platform
+          administrator can grant what is missing.
+        </p>
       )}
 
       <ConfirmDeleteDialog

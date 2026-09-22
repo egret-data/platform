@@ -19,7 +19,9 @@ vi.mock("@/api/hooks");
 import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import * as api from "@/api/controlPlane";
 import * as hooks from "@/api/hooks";
+import type { Me } from "@/api/hooks";
 import type { RegistryCatalogDto } from "@/api/generated/model";
+import { AuthContext } from "@/auth/useAuth";
 import Catalogs, {
   attachmentWarning,
   catalogsQueryKey,
@@ -81,15 +83,36 @@ let registryDeleteOptions:
   | Parameters<typeof registry.useControlPlaneCatalogRegistryDeleteRegistryCatalog>[0]
   | undefined;
 
-function renderPage(entry = "/control-plane/catalogs") {
+/**
+ * `platform_admin` by default, so every test written before the page gated its
+ * controls still measures what it was written to measure. The gating tests pass
+ * their own persona.
+ */
+const ADMIN: Me = {
+  user_id: "u1",
+  email: "admin@example.com",
+  platform_roles: ["platform_admin"],
+  permissions: [],
+};
+/** The persona D3 invented and Task 11 proved lands here first. */
+const READER: Me = {
+  user_id: "u2",
+  email: "reader@example.com",
+  platform_roles: [],
+  permissions: ["catalog_registry:read"],
+};
+
+function renderPage(entry = "/control-plane/catalogs", me: Me | null = ADMIN) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const invalidate = vi.spyOn(qc, "invalidateQueries");
   const utils = render(
-    <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={[entry]}>
-        <Catalogs />
-      </MemoryRouter>
-    </QueryClientProvider>,
+    <AuthContext.Provider value={{ me, isLoading: false }}>
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={[entry]}>
+          <Catalogs />
+        </MemoryRouter>
+      </QueryClientProvider>
+    </AuthContext.Provider>,
   );
   return { ...utils, qc, invalidate };
 }
@@ -482,5 +505,116 @@ describe("catalogsQueryKey", () => {
     expect(
       actual.getControlPlaneCatalogRegistryListRegistryCatalogsQueryKey({ workspaceId: "ws1" })[0],
     ).toBe(catalogsQueryKey[0]);
+  });
+});
+
+/**
+ * Whole-branch review, F3. This is the page a `catalog_registry:read`-only
+ * account LANDS on (Task 11 §5.8), and it was the only catalog screen with no
+ * permission gate: `New catalog` linked to a route `App.tsx` gates on
+ * `catalog_registry:create`, so it could only produce a full-page Forbidden,
+ * and the per-row Delete toasted the bare word `forbidden`.
+ *
+ * The four sibling screens all hide-with-a-reason, so this one does too.
+ */
+describe("the list gates its own controls", () => {
+  test("a catalog_registry:read-only operator is offered neither New catalog nor Delete", async () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([catalog(), JDBC]),
+    );
+    renderPage("/control-plane/catalogs", READER);
+
+    // The rows themselves are still there — this is a gate on the actions, not
+    // on the list.
+    expect(await screen.findByRole("link", { name: "analytics" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /New catalog/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete analytics" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete crm" })).not.toBeInTheDocument();
+
+    // …and it says why, naming each key. A hidden control with no explanation
+    // is the shape Task 7's F3, Task 8's F1 and Task 9's F-4 each removed.
+    const note = screen.getByTestId("catalogs-readonly");
+    expect(note).toHaveTextContent("catalog_registry:create");
+    expect(note).toHaveTextContent("catalog_registry:delete");
+    expect(note).toHaveTextContent("warehouse:delete");
+  });
+
+  test("the two Delete endpoints are gated separately, because they are two endpoints", async () => {
+    // A registry catalog goes to `DELETE /catalogs/{id}`; an egret warehouse
+    // one goes to `DELETE /warehouses/{id}`. Holding one key must offer exactly
+    // the rows it can act on.
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([catalog(), JDBC]),
+    );
+    renderPage("/control-plane/catalogs", {
+      ...READER,
+      permissions: ["catalog_registry:read", "catalog_registry:delete"],
+    });
+
+    expect(await screen.findByRole("button", { name: "Delete crm" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete analytics" })).not.toBeInTheDocument();
+    const note = screen.getByTestId("catalogs-readonly");
+    expect(note).toHaveTextContent("warehouse:delete");
+    expect(note).not.toHaveTextContent("catalog_registry:delete");
+  });
+
+  test("names only the permissions that would have drawn something on THIS list", async () => {
+    // No egret warehouse row, so `warehouse:delete` explains a button that was
+    // never going to exist — saying it would be noise about a permission the
+    // operator does not need.
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([JDBC]),
+    );
+    renderPage("/control-plane/catalogs", READER);
+
+    const note = await screen.findByTestId("catalogs-readonly");
+    expect(note).toHaveTextContent("catalog_registry:delete");
+    expect(note).not.toHaveTextContent("warehouse:delete");
+  });
+
+  test("the empty state explains the missing create key instead of offering a dead button", async () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([]),
+    );
+    renderPage("/control-plane/catalogs", READER);
+
+    expect(await screen.findByText("No catalogs yet")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /New catalog/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/catalog_registry:create/)).toBeInTheDocument();
+  });
+
+  test("a platform_admin keeps every control and is told nothing is hidden", async () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([catalog(), JDBC]),
+    );
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: "Delete analytics" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete crm" })).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: /New catalog/i })[0]).toBeInTheDocument();
+    // `me.permissions` does not enumerate what platform_admin implies, so a
+    // gate that read only that list would hide everything from the one account
+    // that can do it all.
+    expect(screen.queryByTestId("catalogs-readonly")).not.toBeInTheDocument();
+  });
+
+  test("an operator holding the keys explicitly, without platform_admin, keeps them too", async () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([catalog(), JDBC]),
+    );
+    renderPage("/control-plane/catalogs", {
+      ...READER,
+      permissions: [
+        "catalog_registry:read",
+        "catalog_registry:create",
+        "catalog_registry:delete",
+        "warehouse:delete",
+      ],
+    });
+
+    expect(await screen.findByRole("button", { name: "Delete analytics" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete crm" })).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: /New catalog/i })[0]).toBeInTheDocument();
+    expect(screen.queryByTestId("catalogs-readonly")).not.toBeInTheDocument();
   });
 });
