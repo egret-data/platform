@@ -103,8 +103,16 @@ function namedWorkspaces(
   return { named, hidden };
 }
 
-/** What the Kind column shows: the warehouse it is, or the raw kind. */
-function kindLabel(c: RegistryCatalogDto): string {
+/**
+ * What the Kind column shows: the warehouse it is, or the raw kind.
+ *
+ * Exported for `CatalogDetail`'s summary band, which has to label the same row
+ * the same way. `kinds/pickers.tsx` deliberately does not own this: its
+ * `KIND_OPTIONS` labels are the CREATE page's vocabulary, pinned to the
+ * generated client's documented kind list, and `egret warehouse` is not a
+ * `registry.catalogs.kind` at all.
+ */
+export function kindLabel(c: RegistryCatalogDto): string {
   return isEgretWarehouse(c) ? "egret warehouse" : c.kind;
 }
 
