@@ -2,10 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Boxes, Building2, Clock, Cpu, Library, Settings2 } from "lucide-react";
 
-import {
-  getControlPlaneCatalogRegistryGetRegistryCatalogQueryKey,
-  useControlPlaneCatalogRegistryGetRegistryCatalog,
-} from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
+import { useControlPlaneCatalogRegistryGetRegistryCatalog } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import type { controlPlaneCatalogRegistryGetRegistryCatalogResponse } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
@@ -19,19 +16,11 @@ import { ConfigurationTab } from "./ConfigurationTab";
 import { EnginesTab } from "./EnginesTab";
 import { WorkspacesTab } from "./WorkspacesTab";
 
-/**
- * The detail query's cache key, for everything on this page that changes the
- * catalog.
- *
- * It DELEGATES to the generated builder rather than restating its value. The
- * key is the request URL — `["/api/control-plane/catalogs/<id>"]` — and a
- * hand-written `["control-plane","catalogs",id]` triple, which is what the
- * repo's older hand-rolled queries look like, matches no cache entry at all:
- * a save would leave the old configuration on screen with every test green.
- * Task 4's review caught exactly that on the list page.
- */
-export const catalogKey = (id: string) =>
-  getControlPlaneCatalogRegistryGetRegistryCatalogQueryKey(id);
+// Re-exported so this page stays the obvious home of its own key, as
+// `Catalogs.tsx` does for the list's. It is DEFINED in `../queryKeys` because
+// both tab files need it and importing it from here would make each of them
+// and this page a module cycle — see there.
+export { catalogKey } from "../queryKeys";
 
 /**
  * Control Plane → Catalogs → one catalog (SP3c D1).

@@ -18,8 +18,10 @@
  * their own key, so every existing import path still resolves.
  *
  * Task 8 deletes the warehouse half of this when the section becomes a
- * redirect, and this module goes with it.
+ * redirect; the catalog keys below outlive it, for the same reason — the
+ * detail page's tabs each need the key its own page owns.
  */
+import { getControlPlaneCatalogRegistryGetRegistryCatalogQueryKey } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 
 /** The hand-written `listWarehouses` query (`api/controlPlane.ts`). */
 export const warehousesQueryKey = ["control-plane", "warehouses"] as const;
@@ -37,3 +39,24 @@ export const warehousesQueryKey = ["control-plane", "warehouses"] as const;
  * deleted row on screen with every other test still green.
  */
 export const catalogsQueryKey = ["/api/control-plane/catalogs"] as const;
+
+/**
+ * One catalog's detail query, for everything on `CatalogDetail` that changes
+ * it — the Configuration save and the Workspaces save, each in its own file.
+ *
+ * It DELEGATES to the generated builder instead of restating its value, so no
+ * drift is representable. The key is the request URL,
+ * `["/api/control-plane/catalogs/<id>"]`; a hand-written
+ * `["control-plane","catalogs",id]` triple — which is what this repo's older
+ * hand-rolled queries look like — matches no cache entry at all, so a saved
+ * catalog would stay on screen exactly as it was with every test still green.
+ * That is the defect Task 4's review found on the list page.
+ *
+ * It lives HERE rather than in `CatalogDetail.tsx` for the same reason the two
+ * list keys do: `ConfigurationTab` and `WorkspacesTab` both need it, and
+ * importing it from the page that renders them is a module cycle that happens
+ * to work only because every read sits inside a function body.
+ * `CatalogDetail.tsx` re-exports it.
+ */
+export const catalogKey = (id: string) =>
+  getControlPlaneCatalogRegistryGetRegistryCatalogQueryKey(id);

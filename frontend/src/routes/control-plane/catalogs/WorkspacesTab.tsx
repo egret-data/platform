@@ -17,8 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { catalogsQueryKey } from "../queryKeys";
-import { catalogKey } from "./CatalogDetail";
+import { catalogKey, catalogsQueryKey } from "../queryKeys";
 
 /** One row of the checkbox list: a workspace this catalog could be assigned to. */
 type Row = {

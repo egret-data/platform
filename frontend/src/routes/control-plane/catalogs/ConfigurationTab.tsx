@@ -21,8 +21,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { FieldLabel } from "../config/FieldLabel";
-import { catalogsQueryKey } from "../queryKeys";
-import { catalogKey } from "./CatalogDetail";
+import { catalogKey, catalogsQueryKey } from "../queryKeys";
 import { isEgretWarehouse } from "./Catalogs";
 import {
   AdvancedEditor,
