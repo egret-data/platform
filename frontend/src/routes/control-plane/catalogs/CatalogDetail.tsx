@@ -204,7 +204,7 @@ export default function CatalogDetail() {
           <ConfigurationTab catalog={catalog} />
         </TabsContent>
         <TabsContent value="engines" className="mt-4">
-          <EnginesTab catalogId={catalog.id} />
+          <EnginesTab catalog={catalog} />
         </TabsContent>
         <TabsContent value="workspaces" className="mt-4">
           <WorkspacesTab catalogId={catalog.id} />
