@@ -530,6 +530,31 @@ describe("submitProblem", () => {
     expect(submitProblem("iceberg", { ...base, storage_connection_id: "st-1" }, {})).toBeNull();
   });
 
+  test("a metastore URI must carry the scheme its arm requires", () => {
+    // Found by a mutation that survived in fix round 2: both scheme checks
+    // were reachable only through forms that always supplied a valid URI.
+    const rest = (uri: string) =>
+      submitProblem(
+        "iceberg",
+        {
+          metastore: { type: "rest", uri, warehouse: "w", auth: { type: "none" } },
+          storage_connection_id: "st",
+        },
+        {},
+      );
+    expect(rest("thrift://hms.example:9083")).toMatch(/http\(s\) URL/);
+    expect(rest("")).toMatch(/http\(s\) URL/);
+    expect(rest("https://r.example")).toBeNull();
+
+    const hive = (uri: string) =>
+      submitProblem("hive", { metastore: { type: "hive", uri }, storage_connection_id: "st" }, {});
+    expect(hive("https://hms.example")).toMatch(/thrift:\/\/host:port/);
+    expect(hive("")).toMatch(/thrift:\/\/host:port/);
+    expect(hive("thrift://a:9083,thrift://b:9083")).toBeNull();
+    // One bad entry in a comma-separated list is still a bad list.
+    expect(hive("thrift://a:9083,b:9083")).toMatch(/thrift:\/\/host:port/);
+  });
+
   test("a glue access key and its secret go together", () => {
     const glue = (m: Record<string, unknown>) =>
       submitProblem("hive", { metastore: { type: "glue", ...m }, storage_connection_id: "s" }, {});
