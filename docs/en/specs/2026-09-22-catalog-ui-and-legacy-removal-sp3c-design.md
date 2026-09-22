@@ -83,8 +83,13 @@ two ways to reach catalogs; a user who upgrades to both has one.
   removes it from the owner's engine view, and unassigning everything does not hide it. Nobody wrote
   this down before SP3c-1's review found it; both halves surprise people, so the Workspaces tab says
   them where the operator is deciding.
-- **`/control-plane/warehouses/*` redirects** to the matching catalog. Three places link to that path
-  by literal string — `WorkspaceDetail.tsx`, `StorageDetail.tsx`, `Sidebar.tsx` — and move with it.
+- **`/control-plane/warehouses/:id` redirects** to the matching catalog, which is where its five tabs
+  now live. The **list** route, `Warehouses.tsx` and the sidebar entry stay in SP3c-1 and retire in
+  SP3c-2 with the rest of the section — D5 forbids removals here, and an earlier draft of this line
+  (a glob over `warehouses/*`, with `Sidebar.tsx` named outright) contradicted it. Links by literal
+  string move with the redirect; enumerate them by grep rather than from a list, because every
+  written list of them so far has been wrong, including one that would have pointed the catalog page
+  at itself.
 - **Engine detail → Catalogs** replaces the inline `CatalogForm` with a picker over the registry,
   showing each attachment's status and offering Retry.
 - **Create-engine wizard** attaches catalogs instead of choosing one warehouse.
