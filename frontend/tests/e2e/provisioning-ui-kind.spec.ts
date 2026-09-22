@@ -37,6 +37,30 @@ const S3_BUCKET = process.env.EGRET_E2E_BUCKET ?? "warehouse";
 
 test.describe.configure({ mode: "serial" });
 
+/**
+ * Confirm a `ConfirmDeleteDialog` by typing WHATEVER IT ASKS FOR.
+ *
+ * `confirmText` is per call site and has already drifted once: the engine
+ * delete dialog asks for the ENGINE NAME (`EngineDetail.tsx:370`), while the
+ * catalogs list asks for the literal word `delete`. The spec this file
+ * replaces hard-coded `getByPlaceholder("delete").fill("delete")`, which on
+ * the engine dialog matches no element at all — so `fill` waits out the whole
+ * 600 s test timeout and the failure says "timeout", not "wrong word". The
+ * dialog states its own word in the input's placeholder; reading it there is
+ * the one form that cannot rot.
+ */
+async function confirmDeleteDialog(page: Page, confirmLabel = "Delete"): Promise<void> {
+  const dialog = page.getByRole("alertdialog");
+  const input = dialog.getByRole("textbox");
+  await expect(input).toBeVisible({ timeout: 15_000 });
+  const word = await input.getAttribute("placeholder");
+  expect(word, "the dialog names the word it wants in the placeholder").toBeTruthy();
+  await input.fill(word!);
+  const confirm = dialog.getByRole("button", { name: confirmLabel, exact: true });
+  await expect(confirm).toBeEnabled();
+  await confirm.click();
+}
+
 test.describe("catalog + engine provisioning via the UI", () => {
   test.skip(!ENABLED, "opt-in: set EGRET_E2E_KIND=1 against the in-cluster kind deploy");
   test.setTimeout(600_000);
@@ -186,8 +210,17 @@ test.describe("catalog + engine provisioning via the UI", () => {
       await page.goto(`/control-plane/engines/${engineId}`);
       await page.getByRole("button", { name: "More engine actions" }).click();
       await page.getByRole("menuitem", { name: "Delete engine" }).click();
-      await page.getByPlaceholder("delete").fill("delete");
-      await page.getByRole("button", { name: "Delete", exact: true }).click();
+      // This dialog asks for the ENGINE NAME, not the word "delete".
+      await confirmDeleteDialog(page);
+      // WAIT FOR THE LIST FIRST. `EngineDetail` navigates here only on a
+      // successful delete, so this is the falsifiable half. Asserting the
+      // absence of a link named `engineName` while still on the DETAIL page
+      // proves nothing — that page renders the name as a heading and never as
+      // a link, so the assertion passes whether or not anything was deleted.
+      // It did exactly that on the first run of this spec: the engine was
+      // still `running` in Kubernetes and the step went green (SP3c-1 Task 11;
+      // the same "absence read on the wrong page" shape Task 10's M13 found).
+      await page.waitForURL(/\/control-plane\/engines$/, { timeout: 60_000 });
       await expect(page.getByRole("link", { name: engineName, exact: true })).toHaveCount(0, {
         timeout: 60_000,
       });
@@ -200,32 +233,34 @@ test.describe("catalog + engine provisioning via the UI", () => {
       // the right endpoint.
       await page.goto("/control-plane/catalogs");
       await page.getByRole("button", { name: `Delete ${catalogName}` }).click();
-      await page.getByPlaceholder("delete").fill("delete");
-      await page.getByRole("button", { name: "Delete", exact: true }).click();
+      await confirmDeleteDialog(page);
       await expect(page.getByRole("link", { name: catalogName, exact: true })).toHaveCount(0, {
         timeout: 60_000,
       });
       catalogId = undefined;
     } finally {
-      // Best effort, in the order the server's referential rules allow.
-      if (engineId) await deleteEngine(request, h, engineId);
-      if (catalogId) {
-        const res = await request.get(`/api/control-plane/catalogs/${catalogId}`);
-        if (res.ok()) warehouseId = (await res.json()).warehouseId ?? undefined;
-        if (warehouseId) {
-          await request
-            .delete(`/api/control-plane/warehouses/${warehouseId}`, { headers: h })
-            .catch(() => {});
-        } else {
-          await request
-            .delete(`/api/control-plane/catalogs/${catalogId}`, { headers: h })
-            .catch(() => {});
+      // Best effort, in the order the server's referential rules allow — and
+      // wrapped whole, because on a TIMEOUT Playwright has already torn the
+      // context down, so every call in here throws "Target page, context or
+      // browser has been closed" and that error REPLACES the real failure in
+      // the report. Losing the cleanup is cheap; losing the diagnosis is not.
+      try {
+        if (engineId) await deleteEngine(request, h, engineId);
+        if (catalogId) {
+          const res = await request.get(`/api/control-plane/catalogs/${catalogId}`);
+          if (res.ok()) warehouseId = (await res.json()).warehouseId ?? undefined;
+          if (warehouseId) {
+            await request.delete(`/api/control-plane/warehouses/${warehouseId}`, { headers: h });
+          } else {
+            await request.delete(`/api/control-plane/catalogs/${catalogId}`, { headers: h });
+          }
         }
-      }
-      if (storageId) {
-        await request
-          .delete(`/api/control-plane/storage/${storageId}`, { headers: h })
-          .catch(() => {});
+        if (storageId) {
+          await request.delete(`/api/control-plane/storage/${storageId}`, { headers: h });
+        }
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn(`cleanup skipped: ${(e as Error).message}`);
       }
     }
   });
