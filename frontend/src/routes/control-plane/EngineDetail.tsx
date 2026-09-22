@@ -111,6 +111,15 @@ import EngineMonitor from "./EngineMonitor";
 import PodLogsDialog from "./PodLogsDialog";
 import PodTerminalDialog from "./PodTerminalDialog";
 
+/**
+ * `GET /engines/{id}/catalogs`, the hand-written query two places on this page
+ * read: the Overview strip's catalog count and the Catalogs tab, which needs
+ * the `configError` only this route reports. ONE definition, because two
+ * literals that drift split the cache silently — both reads keep working and
+ * neither sees the other's invalidation.
+ */
+const engineCatalogsKey = (id: string) => ["cp", "engine-catalogs", id] as const;
+
 type EngineWithStatus = Omit<Engine, "status"> & { status: EngineStatus };
 
 type BadgeVariant = "success" | "warning" | "destructive" | "secondary";
@@ -664,7 +673,7 @@ export function SaveBar({
 function EngineSummaryStrip({ engine }: { engine: EngineWithStatus }) {
   // Same query key as CatalogsCard → shares the cache; we read the count only.
   const catalogsQ = useQuery<EngineCatalog[], ApiError>({
-    queryKey: ["cp", "engine-catalogs", engine.id],
+    queryKey: engineCatalogsKey(engine.id),
     queryFn: () => listEngineCatalogs(engine.id),
     retry: false,
   });
@@ -1271,9 +1280,6 @@ type AttachedRow = {
   /** The stored configuration does not parse, and this is why. */
   configError: string | null;
 };
-
-/** The hand-written per-engine catalog query, shared with the Overview strip. */
-const engineCatalogsKey = (id: string) => ["cp", "engine-catalogs", id] as const;
 
 function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
   const { me } = useAuth();
