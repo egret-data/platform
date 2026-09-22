@@ -289,6 +289,45 @@ describe("the posted body", () => {
   });
 });
 
+describe("the advanced section opens when it has to", () => {
+  test("a generic catalog shows its required key, even after another kind was chosen", async () => {
+    const user = setup();
+    renderPage();
+    await choose(user, "Kind", "JDBC");
+    await choose(user, "Kind", "Generic");
+
+    // The footer names `advanced.trino.connector.name`; the row it names has
+    // to be on screen. `defaultOpen` is read once by `useState`, so a section
+    // that opens only on mount is still closed here.
+    await user.click(screen.getByLabelText("trino"));
+    expect(screen.getByLabelText("connector.name")).toBeInTheDocument();
+  });
+
+  test("a refused advanced key reopens a section the user collapsed", async () => {
+    createFn.mockRejectedValue(
+      new ApiError(
+        400,
+        "advanced.trino.connector.name collides with a property the tpch form sets",
+      ),
+    );
+    const user = setup();
+    renderPage();
+    await choose(user, "Kind", "TPC-H");
+    typeIn(user, "Name", "bench");
+    const toggle = () => screen.getByRole("button", { name: /Advanced properties/ });
+    await user.click(toggle());
+    typeIn(user, "trino property name", "connector.name");
+    await user.click(screen.getByRole("button", { name: "Add trino property" }));
+    await user.click(toggle()); // collapse it again, then submit
+    await user.click(create());
+
+    expect(await screen.findByLabelText("connector.name")).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+  });
+});
+
 describe("the name rule", () => {
   test("`1bad` blocks Create and shows the rule; `good_name` does not", async () => {
     const user = setup();
@@ -302,6 +341,14 @@ describe("the name rule", () => {
     typeIn(user, "Name", "good_name");
     expect(screen.queryByText(/\^\[a-z\]\[a-z0-9_\]\{0,62\}\$/)).not.toBeInTheDocument();
     expect(create()).toBeEnabled();
+  });
+});
+
+describe("the disabled Create button", () => {
+  test("says why before a kind is chosen, not only after", () => {
+    renderPage();
+    expect(create()).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Choose a kind.");
   });
 });
 
@@ -481,6 +528,13 @@ describe("submitProblem", () => {
     expect(submitProblem("generic", cfg, { trino: { "connector.name": "hive" } })).toBeNull();
   });
 
+  test("a sample scale must be a whole number, which serde would refuse anonymously", () => {
+    expect(submitProblem("tpch", {}, {})).toBeNull();
+    expect(submitProblem("tpch", { scale: 10 }, {})).toBeNull();
+    expect(submitProblem("tpch", { scale: 2.5 }, {})).toMatch(/whole number/);
+    expect(submitProblem("tpcds", { scale: 0 }, {})).toMatch(/whole number/);
+  });
+
   test("a secret property may not collide with an advanced key", () => {
     const cfg = { engines: ["trino"], secret_properties: { trino: { password: "sec-1" } } };
     expect(
@@ -522,6 +576,41 @@ describe("cleanConfig", () => {
     expect(cleanConfig("hive", { metastore: { type: "glue", region: "r", access_key: "" } })).toEqual(
       { metastore: { type: "glue", region: "r" } },
     );
+  });
+
+  test("posts what submitProblem validated: the trimmed value, not the typed one", () => {
+    // `host` at least fails readably at the backend's `host()` regex. `user`,
+    // `warehouse` and `region` with a trailing space are accepted and stored,
+    // and fail later at engine authentication with no message anywhere.
+    expect(
+      cleanConfig("jdbc", {
+        dialect: "postgresql",
+        host: "db.example ",
+        port: 5432,
+        database: " sales",
+        user: "egret ",
+        password_secret_id: "sec-1",
+        ssl: { mode: "require" },
+      }),
+    ).toEqual({
+      dialect: "postgresql",
+      host: "db.example",
+      port: 5432,
+      database: "sales",
+      user: "egret",
+      password_secret_id: "sec-1",
+      ssl: { mode: "require" },
+    });
+    expect(
+      cleanConfig("hive", {
+        metastore: { type: "glue", region: " eu-west-1 " },
+        storage_connection_id: "st-1",
+      }),
+    ).toEqual({ metastore: { type: "glue", region: "eu-west-1" }, storage_connection_id: "st-1" });
+    // A field holding only spaces is a blank optional, not a value.
+    expect(
+      cleanConfig("elasticsearch", { hosts: [" a "], port: 9200, tls: true, user: "  " }),
+    ).toEqual({ hosts: ["a"], port: 9200, tls: true });
   });
 
   test("a generic catalog keeps secret properties only for the engines it names", () => {

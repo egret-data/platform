@@ -16,7 +16,7 @@ import {
  * same constraint `CatalogForm.tsx` documents for its own default-client
  * sentinel.
  */
-const NONE = "__none__";
+export const NONE = "__none__";
 
 /**
  * The kind whose catalog egret creates together with its warehouse.
@@ -80,21 +80,6 @@ export const KIND_OPTIONS: { kind: string; label: string; blurb: string }[] = [
 export const REGISTRY_KINDS: string[] = KIND_OPTIONS.filter(
   (o) => o.kind !== EGRET_WAREHOUSE_KIND,
 ).map((o) => o.kind);
-
-/**
- * What a catalog's Kind reads as: the warehouse it is, or its raw kind.
- *
- * Deliberately the same two-branch rule as `Catalogs.tsx`'s private
- * `kindLabel`, and deliberately the RAW kind rather than `KIND_OPTIONS.label`
- * — `delta_lake` is the value the engines, the API and the operator's own
- * `SHOW CATALOGS` all use, and the list column is pinned to it. (The two
- * copies exist because `Catalogs.tsx` was under review in another session
- * while this file was written; folding `Catalogs.tsx` onto this export is a
- * one-line follow-up for the detail-page task.)
- */
-export function kindLabel(c: { kind: string; warehouseId?: string | null }): string {
-  return c.warehouseId != null ? "egret warehouse" : c.kind;
-}
 
 /**
  * A platform storage-connection chooser.

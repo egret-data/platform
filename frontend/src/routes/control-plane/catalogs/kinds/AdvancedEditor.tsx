@@ -50,18 +50,27 @@ export function AdvancedEditor({
   onChange,
   requiredKeys,
   issues = [],
-  defaultOpen = false,
+  open,
+  onOpenChange,
 }: {
   value: AdvancedValue;
   onChange: (v: AdvancedValue) => void;
   /** Keys this kind cannot be saved without, per engine (the generic kind). */
   requiredKeys?: Record<string, string>;
   issues?: AdvancedIssue[];
-  defaultOpen?: boolean;
+  /**
+   * CONTROLLED, not a `defaultOpen`. Two things open this section without the
+   * user touching it — choosing the `generic` kind, whose required key lives
+   * in here, and a server refusal that names one of these keys — and both
+   * happen while the component is already mounted. A `useState(defaultOpen)`
+   * reads its argument once and would leave the page naming a field that is
+   * not in the DOM (SP3c review I1).
+   */
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="rounded-lg border">
+    <Collapsible open={open} onOpenChange={onOpenChange} className="rounded-lg border">
       <CollapsibleTrigger className="group flex w-full items-center justify-between p-4 text-sm font-medium">
         Advanced properties
         <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />

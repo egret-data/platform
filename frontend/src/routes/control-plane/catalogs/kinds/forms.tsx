@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { FieldLabel } from "../../config/FieldLabel";
-import { SecretSelect, StorageSelect } from "./pickers";
+import { NONE, SecretSelect, StorageSelect } from "./pickers";
 
 /**
  * The typed create forms, one per `CatalogKind` family.
@@ -100,7 +100,7 @@ export function emptyConfigFor(kind: string): Record<string, unknown> {
 }
 
 /** The dialects `JdbcDialect` accepts, in `config.rs`'s own order. */
-export const JDBC_DIALECTS = [
+const JDBC_DIALECTS = [
   "postgresql",
   "mysql",
   "mariadb",
@@ -840,7 +840,7 @@ export function EgretWarehouseForm({
             </SelectTrigger>
             <SelectContent>
               {workspaces.length === 0 ? (
-                <SelectItem value="__none__" disabled>
+                <SelectItem value={NONE} disabled>
                   No workspaces
                 </SelectItem>
               ) : (
@@ -888,6 +888,30 @@ export function KindForm({
 
 // ── submit-time shaping ──────────────────────────────────────────────────────
 
+/**
+ * Trim every string in the configuration, in place of trimming nowhere.
+ *
+ * `submitProblem` validates `host.trim()`, `user.trim()`, `warehouse.trim()`
+ * and `region.trim()`; posting the untrimmed value means validating one string
+ * and storing another. `host` at least fails readably at the backend's own
+ * `host()` regex — `user`, `warehouse` and `region` with a trailing space are
+ * ACCEPTED, stored, and then fail at engine authentication with no message
+ * anywhere (SP3c review, fix round 1). Secret and storage ids come from
+ * `<Select>`s and cannot carry spaces, so a blanket trim cannot lose anything.
+ * `advanced` is deliberately NOT trimmed: those values are engine property
+ * values, where a space may be what the operator means.
+ */
+function trimDeep<T>(v: T): T {
+  if (typeof v === "string") return v.trim() as T;
+  if (Array.isArray(v)) return v.map(trimDeep) as T;
+  if (v && typeof v === "object") {
+    return Object.fromEntries(
+      Object.entries(v as Rec).map(([k, x]) => [k, trimDeep(x)]),
+    ) as T;
+  }
+  return v;
+}
+
 /** Drop `k` when its value is an empty string (an absent optional, not `""`). */
 function withoutBlanks(o: Rec, keys: string[]): Rec {
   const next = { ...o };
@@ -905,7 +929,7 @@ function withoutBlanks(o: Rec, keys: string[]): Rec {
  * naming a field the user never filled in.
  */
 export function cleanConfig(kind: string, config: Record<string, unknown>): Record<string, unknown> {
-  const c = { ...config };
+  const c = trimDeep({ ...config });
   switch (kind) {
     case "iceberg":
     case "hive":
@@ -985,10 +1009,9 @@ export function submitProblem(
   advanced: Record<string, Record<string, string>>,
 ): string | null {
   const c = config;
-  const port = (v: unknown) =>
-    typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 65535
-      ? null
-      : "port must be 1-65535";
+  const whole = (v: unknown, max: number) =>
+    typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= max;
+  const port = (v: unknown) => (whole(v, 65535) ? null : "port must be 1-65535");
 
   switch (kind) {
     case "iceberg":
@@ -1050,8 +1073,10 @@ export function submitProblem(
     }
     case "tpch":
     case "tpcds":
-      if (c.scale !== undefined && !(typeof c.scale === "number" && c.scale >= 1)) {
-        return "scale must be positive";
+      // `scale` is `Option<u32>`: `2.5` reaches serde as "invalid type:
+      // floating point `2.5`", which names no field at all.
+      if (c.scale !== undefined && !whole(c.scale, 4294967295)) {
+        return "scale must be a positive whole number";
       }
       return null;
     case "generic": {

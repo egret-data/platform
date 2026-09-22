@@ -71,6 +71,10 @@ export default function CatalogCreate() {
   const [storageId, setStorageId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [issues, setIssues] = useState<AdvancedIssue[]>([]);
+  // Owned here because the page, not the section, knows when it must be open:
+  // on the `generic` kind (its required key lives in there) and on a refusal
+  // that names one of its keys.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const isWarehouse = kind === EGRET_WAREHOUSE_KIND;
   const workspaces = useMyWorkspaces(isWarehouse);
@@ -90,6 +94,7 @@ export default function CatalogCreate() {
     setError(null);
     setIssues([]);
     setAdvanced({});
+    setAdvancedOpen(next === "generic");
     // Replaced, never merged: the previous kind's keys are unknown fields to
     // the next kind's parser, and `deny_unknown_fields` refuses the body.
     setConfig(next === "" || next === EGRET_WAREHOUSE_KIND ? {} : emptyConfigFor(next));
@@ -165,6 +170,7 @@ export default function CatalogCreate() {
       setError(message);
       const issue = parseAdvancedIssue(message);
       setIssues(issue ? [issue] : []);
+      if (issue) setAdvancedOpen(true);
     }
   }
 
@@ -286,7 +292,8 @@ export default function CatalogCreate() {
                 onChange={setAdvanced}
                 issues={issues}
                 requiredKeys={kind === "generic" ? GENERIC_REQUIRED_KEY : undefined}
-                defaultOpen={kind === "generic" || issues.length > 0}
+                open={advancedOpen}
+                onOpenChange={setAdvancedOpen}
               />
             </>
           )}
@@ -294,7 +301,7 @@ export default function CatalogCreate() {
       )}
 
       <div className="flex flex-wrap items-center justify-end gap-3 border-t pt-4">
-        {(nameProblem || configProblem) && kind !== "" && (
+        {(nameProblem || configProblem) && (
           <p role="status" className="mr-auto text-xs text-muted-foreground">
             {/* The rule itself is printed once, under the field it is about;
                 repeating it here would put the same 30 words on screen twice. */}
