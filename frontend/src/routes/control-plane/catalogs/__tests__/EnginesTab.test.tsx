@@ -360,9 +360,13 @@ describe("EnginesTab — the attachment table", () => {
     const broken = rowFor("trino-prod");
     expect(within(broken).getByText("applied")).toBeInTheDocument();
     expect(within(broken).getByText("failed")).toBeInTheDocument();
-    // …and the healthy engine is not painted the same way.
-    expect(within(rowFor("sr-eu")).getByText("running")).toBeInTheDocument();
+    // …and the healthy engine is not painted the same way. The colour is the
+    // part an operator scans; two words in one variant is the same defect in a
+    // smaller costume.
+    const healthy = within(rowFor("sr-eu")).getByText("running");
+    expect(healthy).toBeInTheDocument();
     expect(within(rowFor("sr-eu")).queryByText("failed")).not.toBeInTheDocument();
+    expect(within(broken).getByText("failed").className).not.toBe(healthy.className);
   });
 
   test("the apply column is not named Status, and the table says what it is not", () => {
