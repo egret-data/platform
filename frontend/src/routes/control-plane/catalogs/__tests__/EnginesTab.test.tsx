@@ -545,6 +545,42 @@ describe("EnginesTab — attach, detach, retry", () => {
     expect(screen.getByText("There are no engines to attach this catalog to.")).toBeInTheDocument();
   });
 
+  /**
+   * SP3c-1 Task 11, found in a browser on kind — the arm the 403 test above
+   * cannot reach.
+   *
+   * `useControlPlaneEnginesListEngines` is `enabled: canReadEngines`, so for an
+   * operator who may attach but may NOT list engines the request is never sent:
+   * `isError` stays false and the blocked alert never renders. The picker then
+   * fell through to "There are no engines to attach this catalog to." — a claim
+   * about the platform, made from an answer about permissions, beside a Select
+   * that could never fill. It is the distinction `engineHealth` already draws:
+   * "egret cannot know" is not "there are none".
+   *
+   * The persona is the point: `catalog_registry:update` WITHOUT `engine:read`,
+   * which is what puts the attach block on screen at all.
+   */
+  test("an operator who may attach but may not list engines is told why, not that there are none", () => {
+    const ATTACHER: Me = {
+      user_id: "u3",
+      email: "attacher@example.com",
+      platform_roles: [],
+      permissions: ["catalog_registry:read", "catalog_registry:update"],
+    };
+    // The query is DISABLED for this persona, so react-query reports neither
+    // data nor an error — the state the 403 test never enters.
+    mockEngines([], { isError: false, error: null, data: undefined });
+    renderTab(catalog({ engines: [] }), ATTACHER);
+
+    const blocked = screen.getByTestId("catalog-attach-blocked");
+    expect(blocked).toHaveTextContent("engine:read");
+    expect(
+      screen.queryByText("There are no engines to attach this catalog to."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /Engine to attach/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Attach$/ })).not.toBeInTheDocument();
+  });
+
   test("a successful change drops the Test verdict it has just invalidated", async () => {
     const user = setup();
     testFn.mockResolvedValue({

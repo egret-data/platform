@@ -371,7 +371,7 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
 
       {canUpdate && (
         <div className="space-y-2 border-t pt-4">
-          {enginesQ.isError ? (
+          {!canReadEngines || enginesQ.isError ? (
             // NOT a picker with an empty list and the word `forbidden` under
             // it. `ApiError.message` for a 403 is `Error::Forbidden`'s Display,
             // the bare word "forbidden" — it names no permission, offers no
@@ -380,9 +380,22 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
             // and the sentence says which permission is missing, because the
             // operator this tab is built for may hold every `catalog_registry`
             // key and still not hold `engine:read`.
+            //
+            // `!canReadEngines` IS THE ARM THAT ACTUALLY FIRES, and it was
+            // missing (SP3c-1 Task 11, found in a browser on kind). The query
+            // is `enabled: canReadEngines`, so for exactly the persona F3 was
+            // written for the request is never SENT — `isError` stays false,
+            // `visibleEngines` stays empty, and the branch below announced
+            // "There are no engines to attach this catalog to." That is a
+            // claim about the PLATFORM (there were two engines) made from an
+            // answer about permissions, beside a picker that could never fill.
+            // It is the same distinction `engineHealth` already draws above:
+            // "egret cannot know" is not "there are none". The 403 arm stays
+            // because the permission can also be lost between the `me` payload
+            // and the request.
             <Alert data-testid="catalog-attach-blocked">
               <AlertDescription>
-                {enginesQ.error?.status === 403
+                {!canReadEngines || enginesQ.error?.status === 403
                   ? "Attaching needs the list of this platform's engines, which requires the engine:read permission. Your account does not have it, so egret cannot offer you a picker here. A platform administrator can grant engine:read; until then this catalog can only be attached by someone who holds it."
                   : `Couldn't list the engines to attach to: ${
                       enginesQ.error?.message ?? "the request failed"
