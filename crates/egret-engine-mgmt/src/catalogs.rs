@@ -659,8 +659,8 @@ async fn test_registry_catalog(
             engine_name: None,
             target: None,
             message: format!(
-                "No Trino engine is attached, and a {} catalog has no network endpoint egret can \
-                 reach on its own. Attach it to an engine to test it.",
+                "No Trino engine is attached, and a catalog of kind `{}` has no network endpoint \
+                 egret can reach on its own. Attach it to an engine to test it.",
                 row.kind
             ),
         }));
