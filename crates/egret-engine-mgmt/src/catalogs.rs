@@ -68,6 +68,10 @@ pub(crate) struct CatalogAttachmentDto {
     apply_status: String,
     apply_error: Option<String>,
     applied_at: Option<DateTime<Utc>>,
+    /// This catalog is that engine's PRIMARY: it leads the engine's render
+    /// order and cannot be detached or edited. At most one of an engine's
+    /// catalogs carries it (SP3c D2, migration 0150).
+    is_primary: bool,
 }
 
 impl From<CatalogEngineRow> for CatalogAttachmentDto {
@@ -79,6 +83,7 @@ impl From<CatalogEngineRow> for CatalogAttachmentDto {
             apply_status: r.apply_status,
             apply_error: r.apply_error,
             applied_at: r.applied_at,
+            is_primary: r.is_primary,
         }
     }
 }

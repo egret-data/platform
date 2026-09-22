@@ -22,7 +22,7 @@ macro_rules! catalog_cols {
 }
 macro_rules! attachment_cols {
     () => {
-        "engine_id, catalog_id, catalog_client_id, credential_secret_id, minted_client, apply_status, apply_error, applied_at, created_at"
+        "engine_id, catalog_id, catalog_client_id, credential_secret_id, minted_client, apply_status, apply_error, applied_at, is_primary, created_at"
     };
 }
 
@@ -65,11 +65,21 @@ pub struct AttachmentRow {
     pub apply_status: String,
     pub apply_error: Option<String>,
     pub applied_at: Option<DateTime<Utc>>,
+    /// The engine's PRIMARY catalog (SP3c D2). At most one attachment per
+    /// engine carries it — `engine_catalog_attachments_primary_key`, migration
+    /// 0150 — and it is what `list_engine_attachments` orders first, so Trino's
+    /// catalog env-var numbering depends on it.
+    pub is_primary: bool,
     pub created_at: DateTime<Utc>,
 }
 
 impl AttachmentRow {
     /// An attachment not yet written (attach renders it before committing it).
+    ///
+    /// Never primary: the row an attach renders is an ADDITIONAL catalog on an
+    /// engine that already has its primary, and a pending row claiming primacy
+    /// would put itself first in the render order — renumbering the live
+    /// cluster's catalog env vars for the duration of the apply.
     pub fn pending(
         engine_id: Uuid,
         catalog_id: Uuid,
@@ -85,6 +95,7 @@ impl AttachmentRow {
             apply_status: apply_status::APPLIED.into(),
             apply_error: None,
             applied_at: None,
+            is_primary: false,
             created_at: Utc::now(),
         }
     }
@@ -96,6 +107,17 @@ pub struct AttachedCatalog {
     pub attachment: AttachmentRow,
 }
 
+impl AttachedCatalog {
+    /// Whether this is the engine's primary catalog (SP3c D2). Read from the
+    /// attachment rather than stored a second time here: primacy is one fact,
+    /// and a copy on the pair could disagree with the row it was built from.
+    /// Until SP3c-1 this was recomputed at four call sites as
+    /// `catalog.warehouse_id == Some(engine.warehouse_id)`.
+    pub fn is_primary(&self) -> bool {
+        self.attachment.is_primary
+    }
+}
+
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct CatalogEngineRow {
     pub engine_id: Uuid,
@@ -104,6 +126,8 @@ pub struct CatalogEngineRow {
     pub apply_status: String,
     pub apply_error: Option<String>,
     pub applied_at: Option<DateTime<Utc>>,
+    /// This catalog is that engine's primary (SP3c D2).
+    pub is_primary: bool,
 }
 
 #[derive(Clone, Debug, sqlx::FromRow)]
@@ -123,6 +147,10 @@ pub struct NewAttachment {
     pub minted_client: bool,
     /// Set `applied_at = now()` (the engine already accepted this attachment).
     pub applied_now: bool,
+    /// The engine's PRIMARY catalog (SP3c D2). A second `true` for the same
+    /// engine is refused by `engine_catalog_attachments_primary_key` as an
+    /// `AlreadyExists` — see [`RegistryStore::insert_attachment`].
+    pub is_primary: bool,
     /// Keep a legacy row's creation time, so attachment order — and with it the
     /// rendered env-var names — is unchanged after the migration.
     pub created_at: Option<DateTime<Utc>>,
@@ -235,8 +263,8 @@ pub(crate) async fn insert_attachment_row(
 ) -> Result<AttachmentRow, sqlx::Error> {
     sqlx::query_as::<_, AttachmentRow>(concat!(
         "INSERT INTO registry.engine_catalog_attachments \
-           (engine_id, catalog_id, catalog_client_id, credential_secret_id, minted_client, apply_status, applied_at, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN now() END, COALESCE($8, now())) RETURNING ",
+           (engine_id, catalog_id, catalog_client_id, credential_secret_id, minted_client, apply_status, applied_at, is_primary, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN now() END, $9, COALESCE($8, now())) RETURNING ",
         attachment_cols!()
     ))
     .bind(a.engine_id)
@@ -247,6 +275,7 @@ pub(crate) async fn insert_attachment_row(
     .bind(a.apply_status)
     .bind(a.applied_now)
     .bind(a.created_at)
+    .bind(a.is_primary)
     .fetch_one(&mut *conn)
     .await
 }
@@ -582,9 +611,38 @@ impl RegistryStore {
                 Some("engine_catalog_attachments_pkey") => RegistryError::AlreadyExists(
                     "the catalog is already attached to this engine".into(),
                 ),
+                // Migration 0150's partial unique index. An engine has ONE
+                // primary catalog, so a second `is_primary` insert is a
+                // conflict and not a silent overwrite (SP3c D2).
+                Some("engine_catalog_attachments_primary_key") => RegistryError::AlreadyExists(
+                    "this engine already has a primary catalog".into(),
+                ),
                 _ => RegistryError::Db(e),
             }
         })
+    }
+
+    /// Move primacy to `catalog_id`: exactly one UPDATE, so the partial unique
+    /// index `engine_catalog_attachments_primary_key` is never transiently
+    /// violated by a clear-then-set pair. A `catalog_id` not attached to this
+    /// engine clears the engine's primary and sets none — the caller checks
+    /// the attachment exists first (SP3c D2); this is why the ledger's
+    /// "exactly one" lower bound is the code's, not the schema's.
+    pub async fn set_primary_attachment(
+        &self,
+        engine_id: Uuid,
+        catalog_id: Uuid,
+    ) -> Result<(), RegistryError> {
+        sqlx::query(
+            "UPDATE registry.engine_catalog_attachments \
+                SET is_primary = (catalog_id = $2) \
+              WHERE engine_id = $1",
+        )
+        .bind(engine_id)
+        .bind(catalog_id)
+        .execute(self.pool())
+        .await?;
+        Ok(())
     }
 
     pub async fn get_attachment(
@@ -646,25 +704,47 @@ impl RegistryStore {
         .await?)
     }
 
-    /// An engine's catalogs in render order: its primary (the catalog of
-    /// `primary_warehouse`) first, then by attachment time, then name — the
-    /// order `engine_catalogs` rendered in, so env-var names stay put.
+    /// An engine's catalogs in render order: its primary first, then by
+    /// attachment time, then name — the order `engine_catalogs` rendered in, so
+    /// env-var names stay put. Until SP3c-1 "primary" was the caller's
+    /// `engine.warehouse_id` compared against each catalog's; migration 0150
+    /// backfilled `is_primary` from exactly that predicate, so this ORDER BY
+    /// returns existing rows in exactly the order the old one did
+    /// (`attachments_still_come_back_primary_first_then_created_then_name`).
+    ///
+    /// WHERE "EXACTLY ONE PRIMARY" LIVES. The database gives *at most* one
+    /// (`engine_catalog_attachments_primary_key`, a partial unique index —
+    /// there is no anchor row to hang a CHECK on, so zero is representable).
+    /// The code owns the lower bound: `create_engine` refuses a body without a
+    /// primary and `detach_from_engine` refuses to remove one. An engine that
+    /// nevertheless has attachments and no primary — SP3a's backfill skipped
+    /// it, or someone wrote the table by hand — is a real state with a real
+    /// consequence (whichever catalog happens to sort first becomes Trino's
+    /// `C0`), so it is WARNED here rather than passed on silently. This is the
+    /// one place every render path goes through.
     pub async fn list_engine_attachments(
         &self,
         engine_id: Uuid,
-        primary_warehouse: Option<Uuid>,
     ) -> Result<Vec<AttachedCatalog>, RegistryError> {
         let attachments = sqlx::query_as::<_, AttachmentRow>(
             "SELECT a.engine_id, a.catalog_id, a.catalog_client_id, a.credential_secret_id, a.minted_client, \
-                    a.apply_status, a.apply_error, a.applied_at, a.created_at \
+                    a.apply_status, a.apply_error, a.applied_at, a.is_primary, a.created_at \
                FROM registry.engine_catalog_attachments a JOIN registry.catalogs c ON c.id = a.catalog_id \
               WHERE a.engine_id = $1 \
-              ORDER BY (c.warehouse_id IS NOT DISTINCT FROM $2) DESC, a.created_at, c.name",
+              ORDER BY a.is_primary DESC, a.created_at, c.name",
         )
         .bind(engine_id)
-        .bind(primary_warehouse)
         .fetch_all(self.pool())
         .await?;
+        if !attachments.is_empty() && !attachments.iter().any(|a| a.is_primary) {
+            tracing::warn!(
+                %engine_id,
+                attachments = attachments.len(),
+                "engine has catalogs but no primary attachment; the first catalog by \
+                 attachment time is being rendered as the engine's leading catalog. \
+                 Mark one primary (SP3c D2, migration 0150)"
+            );
+        }
         let ids: Vec<Uuid> = attachments.iter().map(|a| a.catalog_id).collect();
         let catalogs = sqlx::query_as::<_, CatalogRow>(concat!(
             "SELECT ",
@@ -698,7 +778,7 @@ impl RegistryStore {
         catalog_id: Uuid,
     ) -> Result<Vec<CatalogEngineRow>, RegistryError> {
         Ok(sqlx::query_as::<_, CatalogEngineRow>(
-            "SELECT a.engine_id, e.name AS engine_name, e.type AS engine_type, a.apply_status, a.apply_error, a.applied_at \
+            "SELECT a.engine_id, e.name AS engine_name, e.type AS engine_type, a.apply_status, a.apply_error, a.applied_at, a.is_primary \
                FROM registry.engine_catalog_attachments a JOIN engine_mgmt.engines e ON e.id = a.engine_id \
               WHERE a.catalog_id = $1 ORDER BY e.name",
         )
@@ -968,6 +1048,10 @@ impl RegistryStore {
                 credential_secret_id: None,
                 minted_client: false,
                 applied_now: false,
+                // Connector rows only (`migrate_connector_row`): the catalog
+                // this creates carries no warehouse, so it never satisfied the
+                // pre-SP3c-1 primary predicate.
+                is_primary: false,
                 created_at: Some(created_at),
                 apply_status: apply_status::APPLIED,
             },

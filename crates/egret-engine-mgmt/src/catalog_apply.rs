@@ -320,7 +320,7 @@ pub(crate) async fn converge_starrocks_catalogs(
 ) {
     let registry = st.engine_mgmt.registry();
     let mut attachments = match registry
-        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .list_engine_attachments(engine.id)
         .await
     {
         Ok(a) => a,
@@ -840,8 +840,13 @@ pub(crate) async fn validate_references(st: &CpState, def: &CatalogDef) -> Resul
     Ok(())
 }
 
-fn is_primary(engine: &Engine, catalog: &CatalogRow) -> bool {
-    catalog.warehouse_id == Some(engine.warehouse_id)
+/// Whether this is the engine's primary catalog. Since SP3c-1 it is a column
+/// on the attachment (`is_primary`, migration 0150), not a guess from
+/// `engines.warehouse_id` — the column is what lets an engine lead with a
+/// catalog that is not an egret warehouse once SP3c-2 rewrites the ten sites
+/// that still read `engines.warehouse_id`.
+fn is_primary(attachment: &egret_catalog_registry::AttachmentRow) -> bool {
+    attachment.is_primary
 }
 
 /// Retire what egret minted for an attachment the engine no longer uses: the
@@ -1057,6 +1062,10 @@ pub(crate) async fn attach_to_engine(
                 credential_secret_id: pending.credential_secret_id,
                 minted_client: minted.is_some(),
                 applied_now: false,
+                // An attach is always an ADDITIONAL catalog: the engine's
+                // primary is written by create (SP3c D2), and the partial
+                // unique index would refuse a second one anyway.
+                is_primary: false,
                 created_at: None,
                 // Recorded, not yet converged — the state migration 0149 exists
                 // for. It becomes `applied` or `failed` a few lines below;
@@ -1144,6 +1153,8 @@ pub(crate) async fn attach_to_engine(
                 credential_secret_id: pending.credential_secret_id,
                 minted_client: minted.is_some(),
                 applied_now: true,
+                // See the StarRocks branch above: an attach never leads.
+                is_primary: false,
                 created_at: None,
                 apply_status: egret_catalog_registry::store::apply_status::APPLIED,
             })
@@ -1197,7 +1208,7 @@ pub(crate) async fn detach_from_engine(
         .get_attachment(engine.id, catalog.id)
         .await?
         .ok_or(CatalogOpError::Http(CpError::NotFound))?;
-    if is_primary(engine, catalog) {
+    if is_primary(&attachment) {
         return Err(CatalogOpError::Http(CpError::BadRequest(
             "cannot delete the primary catalog".into(),
         )));

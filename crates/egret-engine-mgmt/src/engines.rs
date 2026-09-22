@@ -306,7 +306,7 @@ pub(crate) fn legacy_kind(def: &CatalogDef) -> String {
     }
 }
 
-fn legacy_catalog_dto(engine: &Engine, a: &AttachedCatalog) -> Result<EngineCatalogDto, CpError> {
+fn legacy_catalog_dto(a: &AttachedCatalog) -> Result<EngineCatalogDto, CpError> {
     let def = a
         .catalog
         .def()
@@ -315,7 +315,7 @@ fn legacy_catalog_dto(engine: &Engine, a: &AttachedCatalog) -> Result<EngineCata
         id: a.catalog.id,
         name: a.catalog.name.clone(),
         kind: legacy_kind(&def),
-        is_primary: a.catalog.warehouse_id == Some(engine.warehouse_id),
+        is_primary: a.is_primary(),
         secret_ref: def.secret_ids().into_iter().next(),
     })
 }
@@ -328,7 +328,7 @@ async fn find_attached(
 ) -> Result<AttachedCatalog, CpError> {
     st.engine_mgmt
         .registry()
-        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .list_engine_attachments(engine.id)
         .await?
         .into_iter()
         .find(|a| a.catalog.id == cid)
@@ -544,7 +544,7 @@ pub(crate) async fn build_provision_req_with(
     }
     let catalogs_read_at = registry.db_now().await?;
     let mut attached = registry
-        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .list_engine_attachments(engine.id)
         .await?;
     attached.retain(|a| Some(a.catalog.id) != opts.exclude_catalog);
     if let Some(p) = opts.pending_attachment {
@@ -2888,6 +2888,10 @@ async fn create_engine(
             credential_secret_id: undo.credential_secret_id,
             minted_client: true,
             applied_now: false,
+            // The engine's PRIMARY catalog (SP3c D2). `resolve_primary_catalog`
+            // has already established which catalog that is, and the partial
+            // unique index from migration 0150 refuses a second.
+            is_primary: true,
             created_at: None,
             apply_status: egret_catalog_registry::store::apply_status::APPLIED,
         })
@@ -3617,6 +3621,8 @@ async fn create_starrocks_engine(
             credential_secret_id: undo.credential_secret_id,
             minted_client: true,
             applied_now: false,
+            // The engine's PRIMARY catalog (SP3c D2), same as the Trino path.
+            is_primary: true,
             created_at: None,
             // `pending`, not `applied` (D1, migration 0149): the FE is
             // unreachable for the five to ten minutes after `provision`, so a
@@ -4866,7 +4872,7 @@ async fn delete_engine(
     let attachments = st
         .engine_mgmt
         .registry()
-        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .list_engine_attachments(engine.id)
         .await?;
 
     // 3. Visible, retryable state for everything below that can fail.
@@ -5379,12 +5385,12 @@ async fn list_catalogs(
     let attached = st
         .engine_mgmt
         .registry()
-        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .list_engine_attachments(engine.id)
         .await?;
     Ok(Json(
         attached
             .iter()
-            .map(|a| legacy_catalog_dto(&engine, a))
+            .map(|a| legacy_catalog_dto(a))
             .collect::<Result<_, _>>()?,
     ))
 }
@@ -5540,7 +5546,7 @@ async fn add_catalog(
     let attached = find_attached(&st, &engine, catalog.id).await?;
     Ok((
         StatusCode::CREATED,
-        Json(legacy_catalog_dto(&engine, &attached)?),
+        Json(legacy_catalog_dto(&attached)?),
     ))
 }
 
@@ -5572,7 +5578,7 @@ async fn get_catalog(
         .await?
         .ok_or(CpError::NotFound)?;
     let attached = find_attached(&st, &engine, cid).await?;
-    let dto = legacy_catalog_dto(&engine, &attached)?;
+    let dto = legacy_catalog_dto(&attached)?;
     let config = crate::catalog_apply::legacy_config_view(&st, &attached).await?;
     Ok(Json(EngineCatalogDetailDto {
         id: dto.id,
@@ -5808,7 +5814,7 @@ async fn update_catalog(
         .catalog
         .def()
         .map_err(|e| CpError::BadRequest(format!("catalog {}: {e}", attached.catalog.name)))?;
-    if attached.catalog.warehouse_id == Some(engine.warehouse_id) {
+    if attached.is_primary() {
         return Err(CpError::BadRequest(
             "cannot edit the primary catalog".into(),
         ));
@@ -5891,7 +5897,7 @@ async fn update_catalog(
         )));
     }
     let attached = find_attached(&st, &engine, cid).await?;
-    Ok(Json(legacy_catalog_dto(&engine, &attached)?))
+    Ok(Json(legacy_catalog_dto(&attached)?))
 }
 
 // ── pod logs ─────────────────────────────────────────────────────────────────
@@ -8854,6 +8860,7 @@ mod tests {
                 credential_secret_id,
                 minted_client: false,
                 applied_now: false,
+                is_primary: false,
                 created_at: None,
                 apply_status: egret_catalog_registry::store::apply_status::PENDING,
             })

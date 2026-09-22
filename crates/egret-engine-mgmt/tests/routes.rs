@@ -3702,6 +3702,7 @@ async fn delete_engine_removes_cluster_row_secrets_and_minted_clients_only() {
         credential_secret_id: Some(foreign_cred),
         minted_client: false,
         applied_now: true,
+        is_primary: false,
         created_at: None,
         apply_status: egret_catalog_registry::store::apply_status::APPLIED,
     })
@@ -6334,6 +6335,7 @@ async fn registry_catalog_crud_validation_and_delete_refusal() {
         credential_secret_id: None,
         minted_client: false,
         applied_now: true,
+        is_primary: false,
         created_at: None,
         apply_status: egret_catalog_registry::store::apply_status::APPLIED,
     })
@@ -6424,6 +6426,7 @@ async fn registry_update_propagates_and_flags_the_failed_engine() {
             credential_secret_id: None,
             minted_client: false,
             applied_now: true,
+            is_primary: false,
             created_at: None,
             apply_status: egret_catalog_registry::store::apply_status::APPLIED,
         })
