@@ -199,6 +199,44 @@ describe("the posted body", () => {
     });
   });
 
+  test("switching REST auth back to none leaves no credential behind", async () => {
+    const user = setup();
+    renderPage();
+    await choose(user, "Kind", "Iceberg");
+    await typeIn(user, "REST URI", "https://rest.example");
+    await typeIn(user, "Warehouse", "wh");
+    await choose(user, "Authentication", "OAuth 2");
+    await choose(user, "Credential secret", "db-pass");
+    await choose(user, "Authentication", "None");
+    await choose(user, "Storage connection", "lake");
+    await typeIn(user, "Name", "rest_cat");
+    await user.click(create());
+
+    // `RestAuth` is `deny_unknown_fields`: a `credential_secret_id` surviving
+    // the switch to `none` is a 400 about a field with no control on screen.
+    expect((postedBody().config as Record<string, unknown>)).toEqual({
+      metastore: {
+        type: "rest",
+        uri: "https://rest.example",
+        warehouse: "wh",
+        auth: { type: "none" },
+      },
+      storage_connection_id: "st-1",
+    });
+  });
+
+  test("verify_full offers no CA field, which validation refuses outright", async () => {
+    const user = setup();
+    renderPage();
+    await choose(user, "Kind", "JDBC");
+    await choose(user, "TLS", "verify_full");
+
+    // `config.rs:524-531`: "a custom CA certificate is not supported yet".
+    // The field must not exist — a `ca_secret_id` is the one key that could
+    // otherwise survive an `ssl` spread.
+    expect(screen.queryByLabelText(/CA/)).not.toBeInTheDocument();
+  });
+
   test("a TLS mode change posts only `mode`, and a mysql dialect drops `database`", async () => {
     const user = setup();
     renderPage();
