@@ -29,7 +29,7 @@ Three things were found by reading the tree, and each changes the plan:
 ## 2. Decisions
 
 **D1 — One catalog detail page, with kind-conditional tabs.** Configuration, Engines and Workspaces
-for every catalog; an iceberg-egret catalog additionally shows today's warehouse tabs, reusing those
+for every catalog; an iceberg-egret catalog additionally shows today's five warehouse tabs — the sixth, Engines, is superseded by the registry's own and is deleted, reusing those
 components rather than reimplementing them. A jdbc catalog simply has fewer tabs.
 
 **D2 — Primary becomes a flag on the attachment, in SP3c-1.** `registry.engine_catalog_attachments`
@@ -76,7 +76,7 @@ two ways to reach catalogs; a user who upgrades to both has one.
   the existing config primitives (`ConfigSection`, `FieldLabel`, the secret picker, the
   storage-connection picker).
 - **Detail**: Configuration, Engines (attach, detach, apply status, Retry), Workspaces (assign), plus
-  the six existing warehouse tabs when the catalog is iceberg-egret (D1).
+  the five existing warehouse tabs when the catalog is iceberg-egret (D1).
 - **The assignment rule the UI must state.** An egret-warehouse catalog with **no** assignments is
   still visible to the workspace that owns its warehouse, and the **first** assignment revokes that
   (`egret-query/src/registry/repo.rs:529-537`). So assigning such a catalog elsewhere silently
