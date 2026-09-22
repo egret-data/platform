@@ -259,7 +259,6 @@ test.describe("catalog + engine provisioning via the UI", () => {
           await request.delete(`/api/control-plane/storage/${storageId}`, { headers: h });
         }
       } catch (e) {
-        // eslint-disable-next-line no-console
         console.warn(`cleanup skipped: ${(e as Error).message}`);
       }
     }
