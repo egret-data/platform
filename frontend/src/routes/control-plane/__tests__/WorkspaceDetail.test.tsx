@@ -200,7 +200,13 @@ describe("WorkspaceDetail cockpit", () => {
     await screen.findByRole("heading", { name: "Engineering" });
 
     await user.click(screen.getByRole("tab", { name: "Resources" }));
-    // This workspace's warehouse links to its detail; another workspace's is excluded.
+    // This workspace's warehouse links by WAREHOUSE id; another workspace's is
+    // excluded. There is no warehouse detail page any more — SP3c-1 Task 8 moved
+    // its tabs onto `CatalogDetail` — and `/control-plane/warehouses/:id` now
+    // redirects to the matching catalog. The href is asserted unchanged on
+    // purpose: the redirect is what keeps every remaining warehouse-id link
+    // working without rewiring this card's query onto the registry list, and
+    // `__tests__/warehouseRedirect.test.tsx` is what pins the other end of it.
     expect(await screen.findByRole("link", { name: "wh-eng" })).toHaveAttribute(
       "href",
       "/control-plane/warehouses/wh1",

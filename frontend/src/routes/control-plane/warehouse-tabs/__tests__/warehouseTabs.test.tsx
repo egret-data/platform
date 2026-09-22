@@ -6,8 +6,10 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import { BrowseTab } from "@/routes/control-plane/warehouse-tabs/BrowseTab";
 import { ClientsTab } from "@/routes/control-plane/warehouse-tabs/ClientsTab";
 import { RolesTab } from "@/routes/control-plane/warehouse-tabs/RolesTab";
+import { SettingsTab } from "@/routes/control-plane/warehouse-tabs/SettingsTab";
 import * as api from "@/api/controlPlane";
 import * as hooks from "@/api/hooks";
+import { ApiError } from "@/api/client";
 vi.mock("@/api/controlPlane");
 vi.mock("@/api/hooks");
 
@@ -158,4 +160,37 @@ describe("warehouse tabs", () => {
     expect(vi.mocked(api.listRoles)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(api.listRoles)).toHaveBeenCalledWith("shared-wh");
   });
+
+  /**
+   * Review F1's rule, carried to the second place that broke it.
+   *
+   * `SettingsTab` read `config.isError` and said *"This warehouse isn't
+   * provisioned yet"* — true of the 404 it was written for, and a fabrication
+   * on any other failure, which is the same mistake `ConnectTab` made with the
+   * warehouse row. The pair below is what makes the narrowing mean something:
+   * if the check went back to bare `isError`, the 403 case fails; if the 404
+   * branch were dropped, the 404 case fails.
+   */
+  test.each([
+    [404, "not found", /isn't provisioned yet/, null],
+    [403, "forbidden", null, /Couldn't read this warehouse's settings/],
+  ] as const)(
+    "a %i on the warehouse config says the right thing",
+    async (status, message, present, instead) => {
+      vi.mocked(api.getWarehouseConfig).mockRejectedValue(new ApiError(status, message));
+      vi.mocked(api.listWarehouseTasks).mockResolvedValue([]);
+      renderTab(<SettingsTab warehouseId="w1" storageConnId="st-1" />);
+
+      if (present) {
+        expect(await screen.findByText(present)).toBeInTheDocument();
+        expect(screen.queryByTestId("warehouse-config-error")).toBeNull();
+      } else {
+        const err = await screen.findByTestId("warehouse-config-error");
+        expect(err).toHaveTextContent(instead!);
+        // The server's own words, and NOT a claim about the warehouse.
+        expect(err).toHaveTextContent(message);
+        expect(screen.queryByText(/isn't provisioned yet/)).toBeNull();
+      }
+    },
+  );
 });

@@ -114,13 +114,27 @@ export function SettingsTab({
     <div className="space-y-4">
       {/* An unprovisioned warehouse 404s on config, so status/retention/format
           writes fail until its catalog is live — say so instead of letting the
-          saves silently error. */}
-      {config.isError && (
-        <p className="rounded-md border bg-muted/40 px-4 py-2.5 text-sm text-muted-foreground">
-          This warehouse isn&apos;t provisioned yet — status and table policies take effect once its
-          catalog is live.
-        </p>
-      )}
+          saves silently error.
+
+          Only on a 404. "Isn't provisioned yet" is a claim about the WAREHOUSE,
+          and a 403 or a 500 is not evidence for it (SP3c-1 Task 8 review F1,
+          which found the same sentence on the Connect tab making the same
+          mistake). Any other failure gets the server's own words. */}
+      {config.isError &&
+        (config.error?.status === 404 ? (
+          <p className="rounded-md border bg-muted/40 px-4 py-2.5 text-sm text-muted-foreground">
+            This warehouse isn&apos;t provisioned yet — status and table policies take effect once
+            its catalog is live.
+          </p>
+        ) : (
+          <Alert variant="destructive" data-testid="warehouse-config-error">
+            <AlertDescription>
+              Couldn&apos;t read this warehouse&apos;s settings:{" "}
+              {config.error?.message ?? "the request failed"}. The values below may be stale, and
+              saving may fail for the same reason.
+            </AlertDescription>
+          </Alert>
+        ))}
       <div className="flex items-center justify-end gap-2">
         {editing ? (
           <>

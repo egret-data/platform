@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider, useMutation } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -244,22 +244,88 @@ describe("CatalogDetail shell", () => {
   });
 
   /**
-   * D1's whole claim, in two halves that have to disagree with each other.
+   * D1's whole claim. Three things have to be true of each of the five tabs,
+   * and the third is the one the first version of this block got wrong.
    *
-   * The five extra tabs are the ones that were `WarehouseDetail`'s. Each is
-   * asserted by NAME and, separately, by driving `?tab=<value>` — because the
-   * `value`s are what a bookmarked tab and the `/control-plane/warehouses/:id`
-   * redirect both carry, and a `value` typo is invisible to a by-name lookup.
-   * Reading the id Radix derives from the value was tried and rejected: it
-   * matched loosely enough that `value="browse-x"` still passed.
+   *  1. the trigger exists, by NAME;
+   *  2. `?tab=<value>` selects it — the `value`s are what a bookmarked tab and
+   *     the `/control-plane/warehouses/:id` redirect carry, and a `value` typo
+   *     is invisible to a by-name lookup. (Reading the id Radix derives from
+   *     the value was tried and rejected: it matched loosely enough that
+   *     `value="browse-x"` still passed.)
+   *  3. **the PANEL renders that tab's own component.** Review F2: asserting
+   *     only 1 and 2 leaves the whole suite green when the Roles and Clients
+   *     panel BODIES are swapped, and green again when `warehouseQ` is severed
+   *     from both of its consumers (`warehouse={undefined}`) — because the
+   *     strip is identical in every one of those trees. So each row below
+   *     carries a probe that no OTHER panel can satisfy.
+   *
+   * `connect` and `settings` probe something derived from the **Warehouse
+   * row**, not from the catalog: the warehouse's own `name` (deliberately
+   * different from the catalog's in the fixture, so the page heading cannot
+   * satisfy it) and the `storageConnId` the Settings tab links out with.
+   * Those two are the severed-prop probe.
    */
   const WAREHOUSE_TABS = [
-    ["roles", /Roles & grants/],
-    ["clients", /Catalog Clients/],
-    ["browse", /Browse/],
-    ["connect", /Connect/],
-    ["settings", /Settings/],
+    [
+      "roles",
+      /Roles & grants/,
+      () => {
+        expect(screen.getByRole("heading", { name: /Catalog roles/ })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: /Add role/ })).toBeInTheDocument();
+      },
+    ],
+    [
+      "clients",
+      /Catalog Clients/,
+      () => {
+        expect(screen.getByRole("heading", { name: /Catalog Clients/ })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: /Add client/ })).toBeInTheDocument();
+      },
+    ],
+    [
+      "browse",
+      /Browse/,
+      () => {
+        expect(screen.getByText("Namespaces")).toBeInTheDocument();
+        expect(screen.getByText(/Select a table or view to see its details/)).toBeInTheDocument();
+      },
+    ],
+    [
+      "connect",
+      /Connect/,
+      () => {
+        // The warehouse row's own `name`, which only `ConnectTab` renders and
+        // only if `warehouse` actually reached it.
+        expect(screen.getByText(WAREHOUSE_ROW.name)).toBeInTheDocument();
+        expect(screen.queryByText(/isn't provisioned yet/)).toBeNull();
+      },
+    ],
+    [
+      "settings",
+      /Settings/,
+      () => {
+        // `storageConnId` came off the warehouse row and reached the link.
+        const links = screen.getAllByRole("link");
+        expect(
+          links.some((l) => l.getAttribute("href") === `/control-plane/storage/${WAREHOUSE_ROW.storageConnId}`),
+        ).toBe(true);
+        expect(screen.getByRole("button", { name: /Edit/ })).toBeInTheDocument();
+      },
+    ],
   ] as const;
+
+  /**
+   * The Warehouse ROW, which the registry DTO does not carry. Its `name`
+   * differs from the catalog's on purpose — see WAREHOUSE_TABS.
+   */
+  const WAREHOUSE_ROW = {
+    id: "wh-1",
+    name: "analytics-warehouse",
+    workspaceId: "ws1",
+    storageConnId: "st-1",
+    lakekeeperWarehouseId: "lk-1",
+  };
 
   /** What the warehouse tabs call once they mount. */
   function mockWarehouseTabApis() {
@@ -267,13 +333,7 @@ describe("CatalogDetail shell", () => {
     vi.mocked(api.listRoles).mockResolvedValue([]);
     vi.mocked(api.listClients).mockResolvedValue([]);
     vi.mocked(api.listWarehouseTasks).mockResolvedValue([]);
-    vi.mocked(api.getWarehouse).mockResolvedValue({
-      id: "wh-1",
-      name: "analytics",
-      workspaceId: "ws1",
-      storageConnId: "st-1",
-      lakekeeperWarehouseId: "lk-1",
-    });
+    vi.mocked(api.getWarehouse).mockResolvedValue(WAREHOUSE_ROW);
     vi.mocked(api.getWarehouseConfig).mockResolvedValue({} as unknown as Awaited<
       ReturnType<typeof api.getWarehouseConfig>
     >);
@@ -288,16 +348,11 @@ describe("CatalogDetail shell", () => {
     for (const [, name] of WAREHOUSE_TABS) {
       expect(screen.getByRole("tab", { name })).toBeInTheDocument();
     }
-
-    // `ConnectTab` and `SettingsTab` need the Warehouse ROW, which the registry
-    // DTO does not carry; it is fetched only for this kind, by the id the DTO
-    // does carry.
-    await waitFor(() => expect(vi.mocked(api.getWarehouse)).toHaveBeenCalledWith("wh-1"));
   });
 
   test.each(WAREHOUSE_TABS)(
-    "?tab=%s selects that warehouse tab, which is what the redirect carries",
-    async (value, name) => {
+    "?tab=%s opens that warehouse tab AND renders its own panel",
+    async (value, name, probe) => {
       mockWarehouseTabApis();
       mockCatalog(warehouseCatalog());
       renderDetail(`/control-plane/catalogs/c-wh?tab=${value}`);
@@ -309,6 +364,7 @@ describe("CatalogDetail shell", () => {
         "aria-selected",
         "false",
       );
+      await waitFor(probe);
     },
   );
 
@@ -323,6 +379,72 @@ describe("CatalogDetail shell", () => {
     expect(vi.mocked(api.getWarehouse)).not.toHaveBeenCalled();
   });
 
+  /**
+   * Review F1. `catalog_registry:read` with no `warehouse:read` is the natural
+   * role for this section and the one migration 0148 does NOT create: it grants
+   * `warehouse:* → catalog_registry:*`, never the reverse. Every one of the
+   * five moved tabs is served by `warehouse_admin`, gated `warehouse:read`, so
+   * rendering them for this persona produced five panels of the bare word
+   * "forbidden".
+   */
+  test("a reader without warehouse:read gets the reason, not five forbidden panels", async () => {
+    mockWarehouseTabApis();
+    mockCatalog(warehouseCatalog());
+    renderDetail("/control-plane/catalogs/c-wh", READER);
+
+    expect(await screen.findByRole("tab", { name: /Configuration/ })).toBeInTheDocument();
+    // The tabs that cannot work are not offered…
+    for (const [, name] of WAREHOUSE_TABS) {
+      expect(screen.queryByRole("tab", { name })).toBeNull();
+    }
+    // …the missing permission is NAMED, and so is the one that does not imply it…
+    const blocked = await screen.findByTestId("warehouse-tabs-blocked");
+    expect(blocked).toHaveTextContent("warehouse:read");
+    expect(blocked).toHaveTextContent("catalog_registry:read");
+    // …and nothing was requested that could only have been refused.
+    expect(vi.mocked(api.getWarehouse)).not.toHaveBeenCalled();
+    expect(vi.mocked(api.listRoles)).not.toHaveBeenCalled();
+    expect(vi.mocked(api.listClients)).not.toHaveBeenCalled();
+    expect(vi.mocked(api.listNamespaces)).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Review F1, second half. A 403 on the warehouse row used to reach
+   * `ConnectTab` as `warehouse === undefined`, where the only branch that
+   * handles it says "This warehouse isn't provisioned yet" — a claim about the
+   * warehouse made from an answer about permissions.
+   */
+  test.each(["connect", "settings"] as const)(
+    "a refused warehouse row makes ?tab=%s say so, and never call it unprovisioned",
+    async (value) => {
+      mockWarehouseTabApis();
+      vi.mocked(api.getWarehouse).mockRejectedValue(new ApiError(403, "forbidden"));
+      mockCatalog(warehouseCatalog());
+      renderDetail(`/control-plane/catalogs/c-wh?tab=${value}`);
+
+      const err = await screen.findByTestId("warehouse-row-error");
+      expect(err).toHaveTextContent("warehouse:read");
+      expect(err).toHaveTextContent(/not about the warehouse/);
+      expect(screen.queryByText(/isn't provisioned yet/)).toBeNull();
+    },
+  );
+
+  /**
+   * The minor from the same review: the row was fetched on every view of an
+   * egret catalog, including the four tabs that never read it. Radix unmounts
+   * the inactive panels, so the request bought nothing.
+   */
+  test("the warehouse row is fetched only for the two tabs that read it", async () => {
+    mockWarehouseTabApis();
+    mockCatalog(warehouseCatalog());
+    renderDetail("/control-plane/catalogs/c-wh?tab=roles");
+    expect(await screen.findByRole("heading", { name: /Catalog roles/ })).toBeInTheDocument();
+    expect(vi.mocked(api.getWarehouse)).not.toHaveBeenCalled();
+
+    cleanup();
+    renderDetail("/control-plane/catalogs/c-wh?tab=connect");
+    await waitFor(() => expect(vi.mocked(api.getWarehouse)).toHaveBeenCalledWith("wh-1"));
+  });
 });
 
 describe("Configuration tab", () => {
