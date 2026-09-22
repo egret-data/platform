@@ -994,27 +994,44 @@ export function cleanAdvanced(
 }
 
 /**
- * Why this form cannot be submitted yet, in the backend's own words where it
- * has them — so the sentence the user reads before they press Create is the
+ * Why egret would refuse this configuration, in the backend's own words where
+ * it has them — so the sentence the user reads before they save is the
  * sentence they would have read after.
  *
  * Returns `null` when the configuration is complete. This is a completeness
  * check, not a re-implementation of `validate_config`: the server is still the
  * authority, and anything it refuses that is not listed here surfaces as its
  * own message on the page.
+ *
+ * **`config` has two callers, and they guarantee different things.**
+ *
+ *  1. `CatalogCreate.tsx` passes a **form draft** — an object this page built
+ *     from `emptyConfigFor` and then only ever patched. Its top level is an
+ *     object by construction, and each field holds whatever its own control
+ *     can produce.
+ *  2. `ConfigurationTab.tsx` (`storedConfigProblem`) passes **stored bytes** —
+ *     `registry.catalogs.config` exactly as `GET /catalogs/{id}` returns it,
+ *     unparsed, which is deliberately the repair path for a row written before
+ *     a validator tightened. That value is `{ [key: string]: unknown }` to
+ *     TypeScript and *anything the old validator once admitted* at runtime,
+ *     JSON `null` included.
+ *
+ * So **every** read in here is guarded — the top-level `rec(config)` below as
+ * much as the nested `rec`/`str` calls — and a new one must be too. This is
+ * not defensive habit: there is no error boundary above the detail page, so an
+ * unguarded read here throws inside the render body and takes the back link,
+ * the header and the tabs with it, on the one screen whose job is to show a
+ * row nothing can parse (SP3c review F4). Widening the input domain again
+ * means checking that claim, not assuming it.
  */
 export function submitProblem(
   kind: string,
   config: Record<string, unknown>,
   advanced: Record<string, Record<string, string>>,
 ): string | null {
-  // `rec`, not a bare read. Every NESTED read here is already guarded, because
-  // until SP3c-1 this only ever saw a draft the create form had built. The
-  // detail page widened the input domain to arbitrary STORED bytes — a row the
-  // registry wrote before a rule tightened — and a `config` column holding
-  // JSON `null` threw inside the render body, blanking the whole detail page
-  // (no error boundary: the back link, header and tabs went with it) on the
-  // one screen whose job is to show a row nothing can parse.
+  // `rec`, not a bare read — caller 2 above. Until SP3c-1 this only ever saw a
+  // draft the create form had built, so the top level was the one read here
+  // that was not guarded.
   const c = rec(config);
   const whole = (v: unknown, max: number) =>
     typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= max;
