@@ -618,3 +618,37 @@ describe("the list gates its own controls", () => {
     expect(screen.queryByTestId("catalogs-readonly")).not.toBeInTheDocument();
   });
 });
+
+/**
+ * Re-review, N2. `?workspace=` with no matching rows falls back to a bare
+ * string — "No catalogs assigned to this workspace." — rather than the
+ * `EmptyState` that carries the create explanation. Suppressing the sentence on
+ * `rows.length > 0` therefore left a `catalog_registry:read`-only operator,
+ * arriving from a workspace's Resources tab, on a screen with no control and
+ * no word about why.
+ */
+describe("an empty workspace-filtered list", () => {
+  test("still explains the missing create key", async () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([]),
+    );
+    renderPage("/control-plane/catalogs?workspace=ws1", READER);
+
+    expect(await screen.findByText("No catalogs assigned to this workspace.")).toBeInTheDocument();
+    // The EmptyState is NOT what rendered, so its explanation is not on screen…
+    expect(screen.queryByText("No catalogs yet")).not.toBeInTheDocument();
+    // …and the page says it anyway.
+    expect(screen.getByTestId("catalogs-readonly")).toHaveTextContent(
+      "catalog_registry:create",
+    );
+  });
+
+  test("says nothing extra to an operator who holds the key", async () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
+      listResult([]),
+    );
+    renderPage("/control-plane/catalogs?workspace=ws1");
+    expect(await screen.findByText("No catalogs assigned to this workspace.")).toBeInTheDocument();
+    expect(screen.queryByTestId("catalogs-readonly")).not.toBeInTheDocument();
+  });
+});

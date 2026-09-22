@@ -368,11 +368,21 @@ export default function Catalogs() {
    * button that was never going to be drawn.
    */
   const hiddenControls: string[] = [];
-  // Not when the empty state is on screen: it already says this, in a fuller
-  // sentence, and two near-identical "a platform administrator can grant it"
-  // blocks one above the other is what Task 9's F-4 removed from the engine's
-  // Catalogs tab.
-  if (!canCreate && rows.length > 0)
+  /**
+   * Suppressed ONLY while the `EmptyState` is the thing on screen, because that
+   * component already says this in a fuller sentence, and two near-identical
+   * "a platform administrator can grant it" blocks one above the other is what
+   * Task 9's F-4 removed from the engine's Catalogs tab.
+   *
+   * The condition is the EmptyState's own, not `rows.length > 0`: the table
+   * falls back to a bare string — "No catalogs assigned to this workspace." —
+   * when `?workspace=` is set, and `rows.length > 0` suppressed this sentence
+   * there too. A `catalog_registry:read`-only operator arriving from a
+   * workspace's Resources tab then saw an empty screen with no control and no
+   * word about either (re-review, N2).
+   */
+  const emptyStateShowing = rows.length === 0 && !wsFilter;
+  if (!canCreate && !emptyStateShowing)
     hiddenControls.push("creating one needs catalog_registry:create");
   if (!canDeleteCatalog && rows.some((c) => !isEgretWarehouse(c)))
     hiddenControls.push("deleting a registered catalog needs catalog_registry:delete");

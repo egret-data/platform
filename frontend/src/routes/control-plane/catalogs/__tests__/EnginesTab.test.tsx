@@ -816,3 +816,28 @@ describe("EnginesTab — the refusal scope this page cannot predict", () => {
     expect(screen.queryByTestId("catalog-retry-scope-note")).not.toBeInTheDocument();
   });
 });
+
+/**
+ * Re-review, N1. The scope note's closing sentence used to read "A refused
+ * Retry changes nothing", unconditionally. That is true only of the refusal the
+ * paragraph is about — a Build refusal, which never reaches the engine and
+ * which F2 stopped flagging. A Retry the ENGINE rejects is `ApplyError::Rejected`
+ * and still writes `failed` onto this row, deliberately. Understating the risk
+ * in the reassuring direction is the direction this branch spent eleven tasks
+ * correcting.
+ */
+test("the scope note's reassurance is scoped to the refusal it is about", () => {
+  renderTab(
+    catalog({
+      engines: [attachment({ engineId: "e1", engineName: "trino-prod", applyStatus: "pending" })],
+    }),
+  );
+  const note = screen.getByTestId("catalog-retry-scope-note");
+  // The reassurance is qualified…
+  expect(note).toHaveTextContent(/refused for that reason changes nothing/i);
+  // …and the other outcome is named rather than left to be inferred.
+  expect(note).toHaveTextContent(/engine itself rejects/i);
+  expect(note).toHaveTextContent(/failed/);
+  // The unqualified claim must not be recoverable from the text.
+  expect(note).not.toHaveTextContent(/A refused Retry changes nothing/i);
+});

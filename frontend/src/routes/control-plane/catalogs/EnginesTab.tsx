@@ -408,8 +408,10 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
           {canReadEngines
             ? "the engine's own Catalogs tab lists them and says which."
             : "an operator holding engine:read can see that on the engine's own Catalogs tab."}{" "}
-          A refused Retry changes nothing: it never reaches the engine, and it leaves this
-          catalog&apos;s apply status exactly as it is.
+          A Retry refused <em>for that reason</em> changes nothing: it never reaches the engine,
+          so it leaves this catalog&apos;s apply status exactly as it is. A Retry the engine
+          itself rejects is a different answer, and that one is recorded here as{" "}
+          <code className="font-mono">failed</code>.
         </p>
       )}
 
