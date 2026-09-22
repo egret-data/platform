@@ -10419,7 +10419,10 @@ async fn saving_a_healthy_catalog_is_not_a_verdict_about_it() {
         "the engine did not get the new configuration, and the response says so; {j}"
     );
     assert!(
-        outcome["error"].as_str().unwrap().contains("must name a host"),
+        outcome["error"]
+            .as_str()
+            .unwrap()
+            .contains("must name a host"),
         "…naming the SIBLING's parse error, because that is what refused the build; {j}"
     );
 
