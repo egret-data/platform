@@ -265,7 +265,16 @@ function AddWarehouseDialog({
   const workspaces = useMyWorkspaces(open);
   const createMutation = useMutation<Warehouse, ApiError, CreateWarehouseInput>({
     mutationFn: createWarehouse,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: warehousesQueryKey }),
+    // Both keys, for the same reason the delete above invalidates both and
+    // with the sign flipped: creating a warehouse creates its mirror registry
+    // catalog, so a create that refreshed only this key would leave the
+    // Catalogs list a row SHORT for the 30 seconds of `staleTime`. Task 5's
+    // `CatalogCreate.tsx` is the other door into this pair of caches and does
+    // the same. Task 8 removes this half.
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: warehousesQueryKey });
+      void queryClient.invalidateQueries({ queryKey: catalogsQueryKey });
+    },
   });
 
   const [name, setName] = useState("");
