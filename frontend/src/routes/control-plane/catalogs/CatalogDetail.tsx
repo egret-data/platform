@@ -42,6 +42,15 @@ import { SettingsTab } from "../warehouse-tabs/SettingsTab";
 // and this page a module cycle — see there.
 export { catalogKey } from "../queryKeys";
 
+/** The three tabs every catalog has, whatever its kind. */
+const ALWAYS_TABS = ["configuration", "engines", "workspaces"];
+/**
+ * The five an egret warehouse catalog adds (D1) — but only for an account that
+ * may read the warehouse endpoints behind them. Same `value`s `WarehouseDetail`
+ * carried, which is what keeps a bookmarked `?tab=browse` working.
+ */
+const WAREHOUSE_TABS = ["roles", "clients", "browse", "connect", "settings"];
+
 /**
  * Control Plane → Catalogs → one catalog (SP3c D1).
  *
@@ -67,8 +76,11 @@ export default function CatalogDetail() {
   // The active tab lives in the URL so the view is deep-linkable and survives
   // a refresh. The default is `configuration` — the one tab every catalog has,
   // whatever its kind and whether or not anything is attached to it.
+  //
+  // RAW, because which tabs EXIST depends on the catalog and on this account
+  // (see `tab` below `warehouseTabs`).
   const [sp, setSp] = useSearchParams();
-  const tab = sp.get("tab") ?? "configuration";
+  const rawTab = sp.get("tab") ?? "configuration";
   const setTab = (v: string) =>
     setSp(
       (prev) => {
@@ -127,6 +139,29 @@ export default function CatalogDetail() {
     !!me &&
     (me.platform_roles.includes("platform_admin") || me.permissions.includes("warehouse:read"));
   const warehouseTabs = wh !== null && canReadWarehouse;
+
+  /**
+   * `?tab=` NARROWED TO A TAB THAT EXISTS (SP3c-1 Task 11, found in a browser).
+   *
+   * Radix renders no panel for a `value` no trigger carries, so a `?tab=` the
+   * strip does not offer produced a page with the header, the tab strip, NO
+   * selected tab and an empty body. It is reachable from the redirect this
+   * branch ships: `/control-plane/warehouses/{id}?tab=browse` is a URL an
+   * operator may have bookmarked when the warehouse page owned those five
+   * tabs, and it now lands here — where, for an account without
+   * `warehouse:read`, `browse` is not among the triggers. `?tab=nonsense`
+   * does the same for everyone.
+   *
+   * Falling back to `configuration` is the same rule `TrinoConfigEditor`
+   * applies to its own `?section=` ("normalize unknown/stale values … so a bad
+   * deep-link can't render a blank pane"); it was simply not applied here.
+   * The URL is left as it is — rewriting it would destroy the operator's
+   * bookmark for the account that CAN see the tab.
+   */
+  const tab =
+    ALWAYS_TABS.includes(rawTab) || (warehouseTabs && WAREHOUSE_TABS.includes(rawTab))
+      ? rawTab
+      : "configuration";
 
   // `ConnectTab` and `SettingsTab` need the Warehouse ROW — its name, its
   // `lakekeeperWarehouseId`, its `storageConnId` — none of which the registry

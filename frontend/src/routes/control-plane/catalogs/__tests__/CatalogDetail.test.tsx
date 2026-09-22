@@ -430,6 +430,44 @@ describe("CatalogDetail shell", () => {
   );
 
   /**
+   * SP3c-1 Task 11, found in a browser on kind.
+   *
+   * Radix renders no panel for a `value` no trigger carries, so a `?tab=` the
+   * strip does not offer left the page with a header, a tab strip, NO selected
+   * tab and an empty body. Both cases below are reachable:
+   *
+   *  - `browse` for an account without `warehouse:read` — and the redirect
+   *    this branch ships turns a bookmarked
+   *    `/control-plane/warehouses/{id}?tab=browse` into exactly that URL;
+   *  - any stale or mistyped value, for anyone.
+   *
+   * The admin row is the control: the SAME `?tab=browse` must still open
+   * Browse for an account that may read the warehouse, or "fall back to
+   * configuration" would just be "ignore the URL".
+   */
+  test.each([
+    ["browse", READER, "configuration"],
+    ["nonsense", ADMIN, "configuration"],
+    ["browse", ADMIN, "browse"],
+  ] as const)(
+    "?tab=%s for %#: an unavailable tab falls back to Configuration",
+    async (value, me, expected) => {
+      mockWarehouseTabApis();
+      mockCatalog(warehouseCatalog());
+      renderDetail(`/control-plane/catalogs/c-wh?tab=${value}`, me);
+
+      const config = await screen.findByRole("tab", { name: /Configuration/ });
+      expect(config).toHaveAttribute("aria-selected", String(expected === "configuration"));
+      // Whichever tab wins, exactly one is selected and a panel is on screen —
+      // the defect was that NONE was.
+      expect(
+        screen.getAllByRole("tab").filter((t) => t.getAttribute("aria-selected") === "true"),
+      ).toHaveLength(1);
+      expect(screen.getByRole("tabpanel")).toBeInTheDocument();
+    },
+  );
+
+  /**
    * The minor from the same review: the row was fetched on every view of an
    * egret catalog, including the four tabs that never read it. Radix unmounts
    * the inactive panels, so the request bought nothing.
@@ -469,6 +507,37 @@ describe("Configuration tab", () => {
     expect(
       screen.getByText(/egret manages this catalog's configuration with its warehouse/),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * SP3c-1 Task 11, found in a browser on kind.
+   *
+   * An egret warehouse catalog's `kind` is `iceberg`, so `hasTypedForm` says
+   * yes and the read-mode `<KindForm>` rendered `IcebergForm` over a stored
+   * config of `{ metastore: { type: "egret", warehouse_id } }` — a shape that
+   * form has no fields for. What appeared was an EMPTY Metastore `<Select>`
+   * and a "Select a storage connection" placeholder, immediately under the
+   * sentence asserted by the test above. Two unset-looking controls say the
+   * warehouse has neither; it has both.
+   *
+   * The jdbc arm is in the same test on purpose: without it, deleting the
+   * whole `<KindForm>` block would satisfy the warehouse assertions and this
+   * test would pass against a page that shows no configuration to anyone.
+   */
+  test("the warehouse branch renders NO typed form, and the jdbc branch still does", async () => {
+    mockCatalog(warehouseCatalog());
+    renderDetail("/control-plane/catalogs/c-wh");
+    expect(await screen.findByRole("heading", { level: 1, name: "analytics" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Metastore")).toBeNull();
+    expect(screen.queryByText("Select a storage connection")).toBeNull();
+    // The configuration is still legible — as the stored JSON, which is the
+    // only renderer that can show a system-managed shape.
+    expect(screen.getByText("Stored configuration (JSON)")).toBeInTheDocument();
+
+    cleanup();
+    mockCatalog(jdbcCatalog());
+    renderDetail();
+    expect(await screen.findByLabelText("Host")).toHaveValue("db.internal");
   });
 
   test("editing with two engines names what saving does to each of them", async () => {

@@ -410,9 +410,25 @@ export function ConfigurationTab({ catalog }: { catalog: RegistryCatalogDto }) {
           )}
         </div>
 
-        {typedForm ? (
+        {!systemManaged && typedForm ? (
           // The kind's own form, disabled. One renderer, so a read pass and an
           // edit pass cannot say different things about the same stored row.
+          //
+          // `!systemManaged` IS LOAD-BEARING, and was missing (SP3c-1 Task 11,
+          // found in a browser). An egret warehouse catalog's `kind` is
+          // `iceberg`, so `hasTypedForm` says yes and `IcebergForm` rendered —
+          // over a stored config of `{ metastore: { type: "egret",
+          // warehouse_id } }`, which that form has no fields for. The result
+          // was an EMPTY Metastore `<Select>` and a "Select a storage
+          // connection" placeholder, directly under the sentence "egret
+          // manages this catalog's configuration with its warehouse — the
+          // catalog is the warehouse, and its storage is the warehouse's". Two
+          // unset-looking controls are a claim that nothing is set; the
+          // warehouse has both a metastore and a storage connection. The two
+          // blocks below were already gated on `systemManaged` and the Edit
+          // button above it too, so this was the one site that escaped.
+          // `storedJson` still renders, which is where a warehouse catalog's
+          // configuration is legible.
           <fieldset disabled className="space-y-4">
             <KindForm
               kind={catalog.kind}
