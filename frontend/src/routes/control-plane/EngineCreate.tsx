@@ -350,6 +350,22 @@ export default function EngineCreate() {
         (`engines.rs:2858-2866`), so this panel is the sole record and the
         "← Engines" link directly above it destroys it. The copy says so
         instead of letting the operator find out.
+
+        THE BACKEND PIN, AND WHAT IT DOES NOT COVER (Task 10 review, carried
+        to Task 11). The only test that ever enters this state is
+        `crates/egret-engine-mgmt/tests/routes.rs:9323`
+        (`a_catalog_that_cannot_attach_is_reported_on_the_created_engine`), and
+        its vehicle is `check_engine_supports` — a PRE-APPLY refusal, the one
+        arm where no row can exist because nothing had been recorded yet. The
+        sentence above it, "an attach that fails this way normally leaves no row
+        behind", is therefore asserted for exactly one of the two Trino arms:
+        the other, a failed APPLY, is true today only because
+        `catalog_apply.rs` writes after it applies. If SP3c-2 converges Trino
+        onto the StarRocks record-first order, 9323 still passes — it never
+        reaches an apply — while this paragraph becomes false and the operator
+        is told to re-attach a catalog whose row is sitting on the Catalogs tab
+        with a Retry. That PR owns the test that would notice; there is none
+        here to change, which is why this note exists instead.
       */}
       {created && (
         <Alert data-testid="ec-attach-errors">
