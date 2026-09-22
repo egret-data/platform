@@ -4,7 +4,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use egret_auth::principal::Auth;
@@ -15,7 +15,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::catalog_apply::{
-    attach_to_engine, propagate, retry_apply, validate_references, ApplyOutcome, CatalogOpError,
+    attach_to_engine, detach_from_engine, propagate, retry_apply, validate_references,
+    ApplyOutcome, CatalogOpError,
 };
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
@@ -43,6 +44,7 @@ pub(crate) fn routes() -> Router<CpState> {
             "/catalogs/{id}/workspaces",
             get(list_catalog_workspaces).put(set_catalog_workspaces),
         )
+        .route("/catalogs/{id}/engines/{engine_id}", delete(detach_catalog))
         .route(
             "/engines/{id}/catalogs/{cid}/apply",
             post(retry_catalog_apply),
@@ -613,6 +615,39 @@ pub(crate) async fn attach_catalog(
 }
 
 #[utoipa::path(
+    delete,
+    path = "/api/control-plane/catalogs/{id}/engines/{engine_id}",
+    tag = "control-plane-catalog-registry",
+    params(
+        ("id" = Uuid, Path, description = "Registry catalog id"),
+        ("engine_id" = Uuid, Path, description = "Engine id"),
+    ),
+    responses(
+        (status = 204, description = "Removed from the engine, then detached. The registry catalog itself is kept, and the credential egret minted for this attachment is revoked"),
+        (status = 400, description = "This is the engine's primary catalog (detach it by deleting the engine), or Kubernetes is not configured", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
+        (status = 404, description = "No such catalog or engine, or the catalog is not attached to it", body = ErrorBody),
+        (status = 409, description = "The engine is being deleted; retry", body = ErrorBody),
+        (status = 502, description = "The engine rejected the removal; nothing was detached", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn detach_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, engine_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
+    let engine = engine_or_404(&st, engine_id).await?;
+    let catalog = load(&st, id).await?;
+    detach_from_engine(&st, &engine, &catalog)
+        .await
+        .map_err(CatalogOpError::into_registry)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
     post,
     path = "/api/control-plane/engines/{id}/catalogs/{cid}/apply",
     tag = "control-plane-catalog-registry",
@@ -798,6 +833,7 @@ async fn acknowledge_migration_report(
         catalog_impact,
         reapply_registry_catalog,
         attach_catalog,
+        detach_catalog,
         retry_catalog_apply,
         list_catalog_workspaces,
         set_catalog_workspaces,

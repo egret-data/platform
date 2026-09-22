@@ -854,6 +854,121 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getControlPlaneCatalogRegistryDeleteRegistryCatalogMutationOptions(options), queryClient);
     }
+    export type controlPlaneCatalogRegistryDetachCatalogResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneCatalogRegistryDetachCatalogResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneCatalogRegistryDetachCatalogResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogRegistryDetachCatalogResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogRegistryDetachCatalogResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneCatalogRegistryDetachCatalogResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneCatalogRegistryDetachCatalogResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogRegistryDetachCatalogResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type controlPlaneCatalogRegistryDetachCatalogResponseSuccess = (controlPlaneCatalogRegistryDetachCatalogResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogRegistryDetachCatalogResponseError = (controlPlaneCatalogRegistryDetachCatalogResponse400 | controlPlaneCatalogRegistryDetachCatalogResponse401 | controlPlaneCatalogRegistryDetachCatalogResponse403 | controlPlaneCatalogRegistryDetachCatalogResponse404 | controlPlaneCatalogRegistryDetachCatalogResponse409 | controlPlaneCatalogRegistryDetachCatalogResponse500 | controlPlaneCatalogRegistryDetachCatalogResponse502) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogRegistryDetachCatalogResponse = (controlPlaneCatalogRegistryDetachCatalogResponseSuccess | controlPlaneCatalogRegistryDetachCatalogResponseError)
+
+export const getControlPlaneCatalogRegistryDetachCatalogUrl = (id: string,
+    engineId: string,) => {
+
+
+
+
+  return `/api/control-plane/catalogs/${encodeURIComponent(id)}/engines/${encodeURIComponent(engineId)}`
+}
+
+export const controlPlaneCatalogRegistryDetachCatalog = async (id: string,
+    engineId: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogRegistryDetachCatalogResponse> => {
+
+  return customInstance<controlPlaneCatalogRegistryDetachCatalogResponse>(getControlPlaneCatalogRegistryDetachCatalogUrl(id,engineId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogRegistryDetachCatalogMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryDetachCatalog>>, TError,{id: string;engineId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryDetachCatalog>>, TError,{id: string;engineId: string}, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogRegistryDetachCatalog'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogRegistryDetachCatalog>>, {id: string;engineId: string}> = (props) => {
+          const {id,engineId} = props ?? {};
+
+          return  controlPlaneCatalogRegistryDetachCatalog(id,engineId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogRegistryDetachCatalogMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogRegistryDetachCatalog>>>
+
+    export type ControlPlaneCatalogRegistryDetachCatalogMutationError = ErrorBody
+
+    export const useControlPlaneCatalogRegistryDetachCatalog = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogRegistryDetachCatalog>>, TError,{id: string;engineId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogRegistryDetachCatalog>>,
+        TError,
+        {id: string;engineId: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogRegistryDetachCatalogMutationOptions(options), queryClient);
+    }
     export type controlPlaneCatalogRegistryCatalogImpactResponse200 = {
   data: CatalogImpactDto
   status: 200

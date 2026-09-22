@@ -7418,6 +7418,310 @@ async fn a_detach_whose_drop_fails_keeps_the_attachment_row() {
     assert_eq!(row.apply_status, "applied", "the attachment is untouched");
 }
 
+/// SP3c-1 task 1: `DELETE /catalogs/{id}/engines/{engine_id}` is a second door
+/// onto the SAME `detach_from_engine`, symmetric with `/catalogs/{id}/workspaces`.
+/// The registry route detaches the catalog from the engine but keeps the
+/// registry catalog itself, so it can be attached elsewhere later.
+#[tokio::test]
+async fn registry_detach_removes_the_attachment_and_keeps_the_catalog() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "reg_detach_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("regdetach");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let reg = registry(&f);
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{cid}/engines/{engine_id}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{j}");
+    assert!(
+        reg.get_attachment(e, c).await.unwrap().is_none(),
+        "the attachment is gone"
+    );
+    assert!(
+        port.last_updated()
+            .catalogs
+            .iter()
+            .all(|c| c.name != cat_name),
+        "the engine no longer carries the catalog"
+    );
+
+    // The registry catalog itself survives: it can be attached elsewhere.
+    let (status, j) = call(&f, "GET", &format!("/catalogs/{cid}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "catalog is kept: {j}");
+    assert_eq!(j["id"], serde_json::json!(cid));
+}
+
+/// The engine's primary catalog cannot be detached through the registry route
+/// either — the refusal lives entirely in `detach_from_engine` (D5), which
+/// this route reaches too, and nothing is sent to the engine or written.
+#[tokio::test]
+async fn registry_detach_refuses_the_primary_catalog_with_400() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "reg_detach_primary_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let primary = warehouse_catalog(&f, wh_id).await;
+    let updates_before = port.updated.lock().unwrap().len();
+
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{}/engines/{engine_id}", primary.id),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "a refused detach must not reach the engine"
+    );
+    assert!(
+        registry(&f)
+            .get_attachment(Uuid::parse_str(&engine_id).unwrap(), primary.id)
+            .await
+            .unwrap()
+            .is_some(),
+        "the primary attachment is untouched"
+    );
+}
+
+/// A catalog id/engine id pair with no attachment is a 404 (either the catalog
+/// or the engine can be real; what's missing is the attachment row), and
+/// nothing is written.
+#[tokio::test]
+async fn registry_detach_is_404_when_the_catalog_is_not_attached() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "reg_detach_404_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("regdetach404");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let updates_before = port.updated.lock().unwrap().len();
+
+    // Never attached.
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{cid}/engines/{engine_id}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "a 404 must not reach the engine"
+    );
+}
+
+/// The whole reason the registry route exists: `catalog_registry:update`
+/// reaches it and `engine:delete` does not, and the split holds symmetrically
+/// on the legacy route too.
+#[tokio::test]
+async fn registry_detach_requires_catalog_registry_update_not_engine_delete() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // Ad-hoc single-permission roles must exist before the real PDP snapshots
+    // roles/permissions at build time (see `attach_real_pdp`).
+    let registry_updater =
+        session_for_with_permission(&f, "reg_detach_gate_reg_upd", "catalog_registry:update").await;
+    let engine_deleter =
+        session_for_with_permission(&f, "reg_detach_gate_eng_del", "engine:delete").await;
+    attach_real_pdp(&mut f).await;
+    let admin = session_for(&f, "reg_detach_gate_admin", true).await;
+
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &admin, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("reggate");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &admin,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let reg = registry(&f);
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &admin,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+
+    // `catalog_registry:update` alone gets a 204 on the registry route.
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{cid}/engines/{engine_id}"),
+        &registry_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{j}");
+    assert!(reg.get_attachment(e, c).await.unwrap().is_none());
+
+    // Re-attach, then prove `engine:delete` alone is refused on the registry
+    // route and writes nothing.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &admin,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{cid}/engines/{engine_id}"),
+        &engine_deleter,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
+    assert!(
+        reg.get_attachment(e, c).await.unwrap().is_some(),
+        "forbidden registry detach wrote nothing"
+    );
+
+    // The legacy route is the mirror image: `engine:delete` gets through,
+    // `catalog_registry:update` alone is refused.
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &engine_deleter,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert!(reg.get_attachment(e, c).await.unwrap().is_none());
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &admin,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &registry_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
+    assert!(
+        reg.get_attachment(e, c).await.unwrap().is_some(),
+        "forbidden legacy detach wrote nothing"
+    );
+}
+
 /// D3's third present-state, which D3's letter does not name and which nothing
 /// drove through `converge_attachment` before (fix round 1 review, F4):
 /// `Drift::Unverifiable` — every comparable plain key agrees, but a key the FE
