@@ -1066,10 +1066,28 @@ mod tests {
 
     /// The position of each variant in [`CatalogKind::ALL`].
     ///
-    /// This match is what makes `ALL` un-forgettable: adding a variant to
-    /// `CatalogKind` makes it non-exhaustive, so it does not compile until the
-    /// new kind is given an index — and the test below then fails until the
-    /// array carries it at that index. Neither half can be satisfied alone.
+    /// Exactly what this catches, since the first version of this comment
+    /// claimed more than the code does (SP3c review, fix round 2, N2):
+    ///
+    /// - a kind **dropped from `ALL` in favour of a repeat** of another, or
+    ///   **reordered**, or **inserted** anywhere before the last entry — the
+    ///   per-element assertion below, since every later index then disagrees;
+    /// - a kind simply **deleted** from `ALL` — that one does not even compile,
+    ///   because the array's length is part of its type;
+    /// - a variant added to `CatalogKind` and given **no** index — this match
+    ///   stops compiling.
+    ///
+    /// What it does NOT catch: a variant **appended after `Generic`** and given
+    /// index 9. This match compiles, `ALL.len()` is still 8 + 1, and the loop
+    /// simply never sees the new kind — so the description test one crate up
+    /// stays green while the UI cannot offer it. The length assertion below is
+    /// a guard against a kind that has an index and no array entry, not a
+    /// count of the enum's variants, which safe stable Rust cannot take.
+    ///
+    /// The durable answer is to generate the enum, `ALL`, `as_str` and `parse`
+    /// from one `macro_rules!`, so all four are one list. That is a bigger
+    /// change than this round; it is noted for SP3c-2, which touches this enum
+    /// anyway.
     fn index_in_all(k: CatalogKind) -> usize {
         match k {
             CatalogKind::Iceberg => 0,
@@ -1098,7 +1116,8 @@ mod tests {
         assert_eq!(
             CatalogKind::ALL.len(),
             index_in_all(CatalogKind::Generic) + 1,
-            "a kind has an index but is not in ALL"
+            "a kind has an index but is not in ALL (this does NOT catch a \
+             variant appended after Generic — see index_in_all's comment)"
         );
     }
 

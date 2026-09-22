@@ -112,6 +112,21 @@ export default function CatalogCreate() {
           !isWarehouse && !NAME_RE.test(trimmed)
           ? NAME_RULE
           : null;
+  /**
+   * The configuration as it will be POSTed — and, because it is the same
+   * value, as it is validated.
+   *
+   * These were two different values for one round: `submitProblem` read the
+   * raw form state while `cleanConfig` posted the trimmed, blank-stripped one.
+   * That disagrees in both directions — a URI with a leading space was refused
+   * for a character the page was about to remove, and a `user` of `"  "`
+   * satisfied the "user and password go together" check and then had the user
+   * dropped, so the backend refused the body instead. Validating the value
+   * that is sent is the only shape in which neither can recur (SP3c review,
+   * fix round 2, N1).
+   */
+  const posted =
+    kind === "" || isWarehouse ? {} : cleanConfig(kind, config);
   const configProblem = isWarehouse
     ? workspaceId === ""
       ? "Select a workspace."
@@ -120,7 +135,7 @@ export default function CatalogCreate() {
         : null
     : kind === ""
       ? "Choose a kind."
-      : submitProblem(kind, config, asMaps(advanced));
+      : submitProblem(kind, posted, asMaps(advanced));
   const canCreate = kind !== "" && !nameProblem && !configProblem && !pending;
 
   async function handleCreate() {
@@ -156,8 +171,10 @@ export default function CatalogCreate() {
         data: {
           name: trimmed,
           kind,
-          config: cleanConfig(kind, config),
-          ...withAdvanced(kind, config, advanced),
+          // `posted`, not a second `cleanConfig(...)` call: the value the
+          // button's own enabled state was computed from is the value sent.
+          config: posted,
+          ...withAdvanced(kind, posted, advanced),
           ...(description.trim() ? { description: description.trim() } : {}),
         },
       });

@@ -328,6 +328,45 @@ describe("the advanced section opens when it has to", () => {
   });
 });
 
+describe("what is validated is what is posted", () => {
+  test("a leading space in a URI is trimmed, not refused", async () => {
+    const user = setup();
+    renderPage();
+    await choose(user, "Kind", "Iceberg");
+    // `submitProblem` used to test `/^https?:\/\//` against the RAW value while
+    // `cleanConfig` posted the trimmed one, so this was refused for a space the
+    // user could not see and the page could have removed.
+    typeIn(user, "REST URI", " https://rest.example ");
+    typeIn(user, "Warehouse", "wh");
+    await choose(user, "Storage connection", "lake");
+    typeIn(user, "Name", "rest_cat");
+
+    expect(create()).toBeEnabled();
+    await user.click(create());
+    expect(
+      (postedBody().config as { metastore: { uri: string } }).metastore.uri,
+    ).toBe("https://rest.example");
+  });
+
+  test("a whitespace-only user is blocked here, not by the backend", async () => {
+    const user = setup();
+    renderPage();
+    await choose(user, "Kind", "Elasticsearch");
+    typeIn(user, "Hosts", "es-1.example");
+    // `"  "` is not `""`, so the raw pair check saw a user AND a password and
+    // passed — then `cleanConfig` dropped the blank user and the backend
+    // refused the body with "user and password_secret_id go together".
+    typeIn(user, "User", "  ");
+    await choose(user, "Password secret", "db-pass");
+    typeIn(user, "Name", "logs");
+
+    expect(create()).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "user and password_secret_id go together",
+    );
+  });
+});
+
 describe("the name rule", () => {
   test("`1bad` blocks Create and shows the rule; `good_name` does not", async () => {
     const user = setup();
