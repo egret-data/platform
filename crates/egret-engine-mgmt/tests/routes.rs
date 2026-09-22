@@ -10150,3 +10150,156 @@ async fn one_unparseable_catalog_does_not_take_an_engines_whole_list_with_it() {
     );
     assert_eq!(healthy["kind"], "egret-warehouse", "{j}");
 }
+
+/// Attach a catalog to an engine by writing the row, bypassing
+/// `POST /engines/{id}/catalogs/{cid}` — which parses the config and would
+/// refuse a broken one. The state under test is a row that was attached WHILE
+/// it still parsed and broke afterwards, and this is how it is reproduced
+/// without a time machine (the same device
+/// `one_unparseable_catalog_does_not_take_an_engines_whole_list_with_it` uses).
+async fn attach_row_directly(f: &Fixture, engine_id: &str, catalog_id: &str) {
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id, apply_status) \
+         VALUES ($1, $2, 'applied')",
+    )
+    .bind(Uuid::parse_str(engine_id).unwrap())
+    .bind(Uuid::parse_str(catalog_id).unwrap())
+    .execute(&f.db.pool)
+    .await
+    .expect("attach the pre-existing row");
+}
+
+/// THE TRINO/STARROCKS RETRY ASYMMETRY, EXECUTED.
+///
+/// SP3c-1 Task 9 carried this as the programme's one traced-but-unexecuted
+/// invariant: the engine Catalogs tab disables Retry and Detach on EVERY row of
+/// a Trino engine while any OTHER row is broken, and does not on StarRocks, and
+/// the sentence that explains why is the deliverable. Two people read the
+/// source and agreed on the table; nobody ran it. This is the instrument.
+///
+/// The mechanism, at source:
+///   * `apply_trino` maps `CatalogChange::ReapplyOne` to `BuildOpts::default()`
+///     because a Trino apply is the whole ConfigMap either way, and
+///     `build_provision_req_with` then renders EVERY attachment with a `?` per
+///     row (`engines.rs:673-676`). One unrenderable sibling ends the build, so
+///     the Retry on an innocent row never reaches Kubernetes.
+///   * `apply_starrocks`'s `ReapplyOne` arm loads exactly the one catalog named
+///     in the path and sends one statement about it. A broken sibling is not
+///     read, so it cannot refuse anything.
+///
+/// A SECOND FACT THIS RECORDS, AND DOES NOT ENDORSE: `retry_apply` flags the
+/// attachment it was called for on any error that is not `Unrecorded`, so the
+/// refused Trino Retry writes `failed` onto the HEALTHY row, with the broken
+/// sibling's message. The UI then shows a catalog as failed for a reason that
+/// is about a different catalog. It is asserted here because it is what the
+/// code does and a silent change to it should be deliberate — not because it
+/// is right.
+#[tokio::test]
+async fn a_broken_sibling_blocks_retry_on_trino_and_not_on_starrocks() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "retry_scope_admin", true).await;
+    let sc = seed_exchange_storage_conn(&f).await;
+
+    // ── Trino ───────────────────────────────────────────────────────────────
+    let broken_name = unique_catalog_name("hive_retry_scope");
+    let broken = seed_catalog_then_break_its_uri(&f, &token, &broken_name, sc).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let trino_id = j["id"].as_str().unwrap().to_string();
+    let healthy = warehouse_catalog(&f, wh).await.id;
+    attach_row_directly(&f, &trino_id, &broken).await;
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{trino_id}/catalogs/{healthy}/apply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a Trino Retry re-renders the whole engine, so the broken sibling refuses it; {j}"
+    );
+    assert!(
+        j.to_string().contains("must name a host"),
+        "and the refusal is the SIBLING's parse error, which is why the tab's copy has to \
+         name the scope rather than the row; {j}"
+    );
+
+    // The healthy row now reads `failed`, carrying the other catalog's error.
+    // Recorded, not endorsed — see the doc comment.
+    let flagged = registry(&f)
+        .get_attachment(Uuid::parse_str(&trino_id).unwrap(), healthy)
+        .await
+        .unwrap()
+        .expect("the healthy attachment still exists");
+    assert_eq!(
+        flagged.apply_status, "failed",
+        "`retry_apply` flags the row it was called for on a Build error"
+    );
+    assert!(
+        flagged
+            .apply_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("must name a host"),
+        "…with the SIBLING's message: {:?}",
+        flagged.apply_error
+    );
+
+    // ── StarRocks: the same shape, the opposite outcome ─────────────────────
+    let (sr_id, sr_wh) = create_starrocks_via_api(&f, &token).await;
+    let sr_healthy = warehouse_catalog(&f, sr_wh).await.id;
+    attach_row_directly(&f, &sr_id, &broken).await;
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{sr_id}/catalogs/{sr_healthy}/apply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a StarRocks Retry reads only the catalog in the path, so a broken sibling is \
+         invisible to it; {j}"
+    );
+    let sr_row = registry(&f)
+        .get_attachment(Uuid::parse_str(&sr_id).unwrap(), sr_healthy)
+        .await
+        .unwrap()
+        .expect("the StarRocks primary attachment");
+    assert_eq!(
+        sr_row.apply_status, "applied",
+        "and it really converged rather than merely not-failing"
+    );
+    // The broken sibling is untouched by either engine's Retry: nothing read
+    // it, so nothing may have judged it.
+    let sr_broken = registry(&f)
+        .get_attachment(
+            Uuid::parse_str(&sr_id).unwrap(),
+            Uuid::parse_str(&broken).unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("the broken attachment");
+    assert_eq!(
+        sr_broken.apply_status, "applied",
+        "the row written by `attach_row_directly`, unchanged"
+    );
+}
