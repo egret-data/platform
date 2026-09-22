@@ -212,8 +212,9 @@ export default function CatalogDetail() {
       </div>
 
       {/* The alarm an operator clicked on the list, restated where they land.
-          Until Task 7's Engines tab exists this is the only place the detail
-          page says anything about a failed or stuck attachment. */}
+          The Engines tab now says the same thing per attachment, and in more
+          detail; this stays because it is visible from whichever tab is open,
+          including the five a warehouse catalog adds. */}
       {warning && (
         <Alert
           variant={warning.level === "failed" ? "destructive" : "default"}
