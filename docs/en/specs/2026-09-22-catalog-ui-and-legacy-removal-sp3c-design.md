@@ -32,9 +32,12 @@ Three things were found by reading the tree, and each changes the plan:
 for every catalog; an iceberg-egret catalog additionally shows today's warehouse tabs, reusing those
 components rather than reimplementing them. A jdbc catalog simply has fewer tabs.
 
-**D2 — Primary becomes a flag on the attachment.** `registry.engine_catalog_attachments` gains
-`is_primary boolean`, unique per engine, backfilled from `engines.warehouse_id`; then the column
-goes. Primary is a property of the *relationship* between an engine and a catalog, which is what it
+**D2 — Primary becomes a flag on the attachment, in SP3c-1.** `registry.engine_catalog_attachments`
+gains `is_primary boolean`, unique per engine, backfilled from `engines.warehouse_id`, and
+`CreateEngineBody.warehouse_id` becomes optional so the wizard can attach several catalogs and mark
+one primary. The column itself is dropped in SP3c-2, once nothing reads it. (An earlier draft put
+all of this in SP3c-2; the wizard cannot honestly "attach catalogs" while the API demands exactly
+one warehouse, so the schema half moves up — user decision, 2026-09-22.) Primary is a property of the *relationship* between an engine and a catalog, which is what it
 always was — storing it on the engine is what forced one warehouse per engine.
 
 **D3 — One permission family.** `warehouse_admin` and the resource-tag endpoints move onto
@@ -47,6 +50,12 @@ nobody loses it. `catalog_registry:read` joins `CONTROL_PLANE_PERMS` in the same
 engine. Without one, a TCP reachability check of the configured host and port — labelled as exactly
 that in the UI, because a green tick that means "the port answers" must not read as "the credentials
 work". Driver-level checks arrive with SP5.
+
+The probe does not exist yet and SP3c-1 builds it (user decision, 2026-09-22). It is a connect-only
+check with a short timeout, and it takes its host and port **from the stored catalog configuration**,
+never from request input — egret must not become a port scanner with a login page. Today's test
+route reaches only Trino (it goes through `monitor::coordinator_call`, whose fallback service is
+`{name}-trino`), so a StarRocks attachment falls back to the probe until SP4.
 
 **D5 — The UI ships before anything is removed.** SP3c-1 leaves every old endpoint in place; SP3c-2
 deletes them once nothing calls them. A user who upgrades to 3c-1 alone has a working system with
@@ -68,15 +77,17 @@ two ways to reach catalogs; a user who upgrades to both has one.
 - **Create-engine wizard** attaches catalogs instead of choosing one warehouse.
 - **Permissions**: `catalog_registry:read` gates the new section, in the route guard, the sidebar and
   `appAccess.ts`.
-- **Backend, only what is missing**: a detach endpoint for the registry (the generated client has no
-  detach hook today; removal still goes through the legacy engine route).
+- **Backend, four pieces**: a registry-tagged detach route — `DELETE /catalogs/{id}/engines/{engine_id}`,
+  symmetric with `/catalogs/{id}/workspaces`, because re-tagging the existing engine route would
+  rename a generated function and D5 forbids removals here; `is_primary` with its backfill (D2);
+  `CreateEngineBody.warehouse_id` made optional; and the TCP probe (D4).
 
 ## 4. SP3c-2 — the removal
 
 1. `engine_mgmt.engine_catalogs`: no production writer remains. Move `egret-policy`'s legacy read
    onto the registry, then drop the table and the five dead store methods.
 2. The legacy `/engines/{id}/catalogs*` endpoints, once the new UI is the only caller.
-3. `engines.warehouse_id`, after D2's `is_primary` backfill.
+3. `engines.warehouse_id`, whose `is_primary` replacement landed in SP3c-1.
 4. `warehouse:*`, after D3's grant migration and the `warehouse_admin` re-gating.
 
 Each step is independently revertible, and each lands with its own tests.
