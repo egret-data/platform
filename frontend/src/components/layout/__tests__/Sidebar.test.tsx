@@ -209,7 +209,7 @@ describe("Sidebar – workspace zones", () => {
 });
 
 describe("Sidebar – Infrastructure group", () => {
-  test("renders the Infrastructure items (Workspaces, Engines, Warehouses, Storage, Secrets)", () => {
+  test("renders the Infrastructure items (Workspaces, Engines, Catalogs, Warehouses, Storage, Secrets)", () => {
     renderSidebar("/control-plane/workspaces");
     expect(screen.getByText("Infrastructure")).toBeInTheDocument();
 
@@ -220,6 +220,13 @@ describe("Sidebar – Infrastructure group", () => {
     expect(screen.getByRole("link", { name: "Engines" })).toHaveAttribute(
       "href",
       "/control-plane/engines",
+    );
+    // SP3c-1 D5: Catalogs and Warehouses BOTH render until Task 8 turns the
+    // warehouse routes into redirects. Catalogs sits between Engines and
+    // Warehouses and takes its path from `slug("Catalogs")`, no explicit `to`.
+    expect(screen.getByRole("link", { name: "Catalogs" })).toHaveAttribute(
+      "href",
+      "/control-plane/catalogs",
     );
     expect(screen.getByRole("link", { name: "Warehouses" })).toHaveAttribute(
       "href",
@@ -235,6 +242,35 @@ describe("Sidebar – Infrastructure group", () => {
     );
     // Dropped from the Control Plane.
     for (const gone of ["Resources", "Monitoring", "Platform Policies"]) {
+      expect(screen.queryByRole("link", { name: gone })).not.toBeInTheDocument();
+    }
+  });
+
+  test("Catalogs sits between Engines and Warehouses", () => {
+    renderSidebar("/control-plane/workspaces");
+    const engines = screen.getByRole("link", { name: "Engines" });
+    const catalogs = screen.getByRole("link", { name: "Catalogs" });
+    const warehouses = screen.getByRole("link", { name: "Warehouses" });
+    expect(engines.compareDocumentPosition(catalogs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(catalogs.compareDocumentPosition(warehouses) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  // The other half of SP3c D3's lock-out guard: `catalog_registry:read` must
+  // both admit the user to Control Plane (see appAccess.test.ts) and unlock a
+  // section once they are in — a user admitted to an app with an empty sidebar
+  // is locked out just as effectively.
+  test("a catalog_registry:read-only user sees Catalogs and no other Infrastructure item", () => {
+    renderSidebar("/control-plane/catalogs", {
+      user_id: "9",
+      email: "catalogs@example.com",
+      platform_roles: [],
+      permissions: ["catalog_registry:read"],
+    });
+    expect(screen.getByRole("link", { name: "Catalogs" })).toHaveAttribute(
+      "href",
+      "/control-plane/catalogs",
+    );
+    for (const gone of ["Warehouses", "Engines", "Storage", "Secrets", "Workspaces"]) {
       expect(screen.queryByRole("link", { name: gone })).not.toBeInTheDocument();
     }
   });

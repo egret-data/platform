@@ -2,7 +2,7 @@ import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
   Activity, Boxes, ChevronDown, ChevronRight, Compass,
-  FolderKanban, Gauge, HardDrive, KeyRound, ListChecks, type LucideIcon,
+  FolderKanban, Gauge, HardDrive, KeyRound, Library, ListChecks, type LucideIcon,
   PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Settings, Share2, ShieldCheck,
   Tags, UserCog, Users, UsersRound,
 } from "lucide-react";
@@ -104,6 +104,9 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
     items: [
       { label: "Workspaces", icon: FolderKanban },
       { label: "Engines", icon: Server, perm: "engine:read" },
+      // SP3c-1 D5: both entries render through this release. Task 8 removes
+      // Warehouses once `/control-plane/warehouses/*` is a redirect.
+      { label: "Catalogs", icon: Library, perm: "catalog_registry:read" },
       { label: "Warehouses", icon: Boxes, perm: "warehouse:read" },
       { label: "Storage", icon: HardDrive, perm: "storage:read" },
       { label: "Secrets", icon: KeyRound, perm: "secret:read" },

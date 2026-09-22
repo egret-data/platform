@@ -14,6 +14,11 @@ import type { Me } from "@/api/hooks";
 export const CONTROL_PLANE_PERMS: readonly string[] = [
   "engine:read",
   "warehouse:read",
+  // D3: `catalog_registry:read` gates the Catalogs section. It joins this list
+  // in the SAME change that adds the section, and `warehouse:read` only LEAVES
+  // it in SP3c-2, once `warehouse_admin` has been re-gated. Between the two
+  // releases a user may hold either key and is locked out of nothing.
+  "catalog_registry:read",
   "storage:read",
   "secret:read",
   "user:read",

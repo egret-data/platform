@@ -75,6 +75,9 @@ import SecretDetail from "@/routes/control-plane/SecretDetail";
 import Policies from "@/routes/governance/Policies";
 import ProfileDetailPage from "@/routes/governance/ProfileDetailPage";
 import PolicyEditorPage from "@/routes/governance/PolicyEditorPage";
+import Catalogs from "@/routes/control-plane/catalogs/Catalogs";
+import CatalogCreate from "@/routes/control-plane/catalogs/CatalogCreate";
+import CatalogDetail from "@/routes/control-plane/catalogs/CatalogDetail";
 import Warehouses from "@/routes/control-plane/Warehouses";
 import WarehouseDetail from "@/routes/control-plane/WarehouseDetail";
 import AuditLog from "@/routes/control-plane/AuditLog";
@@ -274,6 +277,10 @@ function ExploreRoutes() {
 // platform_admin-only "workspaces" default.
 const FIRST_SECTION_BY_PERM: { path: string; perm: string }[] = [
   { path: "engines", perm: "engine:read" },
+  // Ahead of `warehouses` so a user holding both lands on the new section.
+  // Both remain reachable through SP3c-1 (D5); Task 8 turns the warehouse
+  // routes into redirects and this entry outlives them.
+  { path: "catalogs", perm: "catalog_registry:read" },
   { path: "warehouses", perm: "warehouse:read" },
   { path: "storage", perm: "storage:read" },
   { path: "secrets", perm: "secret:read" },
@@ -309,6 +316,11 @@ function ControlPlaneRoutes() {
           <Route path="engines" element={<RequirePermission perm="engine:read"><ControlPlaneEngines /></RequirePermission>} />
           <Route path="engines/new" element={<RequirePermission perm="engine:create"><EngineCreate /></RequirePermission>} />
           <Route path="engines/:id" element={<RequirePermission perm="engine:read"><EngineDetail /></RequirePermission>} />
+          <Route path="catalogs" element={<RequirePermission perm="catalog_registry:read"><Catalogs /></RequirePermission>} />
+          <Route path="catalogs/new" element={<RequirePermission perm="catalog_registry:create"><CatalogCreate /></RequirePermission>} />
+          <Route path="catalogs/:id" element={<RequirePermission perm="catalog_registry:read"><CatalogDetail /></RequirePermission>} />
+          {/* D5: the warehouse routes stay live beside the catalog ones for the
+              whole of SP3c-1. Task 8 turns them into redirects. */}
           <Route path="warehouses" element={<RequirePermission perm="warehouse:read"><Warehouses /></RequirePermission>} />
           <Route path="warehouses/:id" element={<RequirePermission perm="warehouse:read"><WarehouseDetail /></RequirePermission>} />
           <Route path="storage" element={<RequirePermission perm="storage:read"><ControlPlaneStorage /></RequirePermission>} />
