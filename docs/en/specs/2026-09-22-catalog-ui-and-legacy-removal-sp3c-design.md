@@ -35,7 +35,12 @@ components rather than reimplementing them. A jdbc catalog simply has fewer tabs
 **D2 — Primary becomes a flag on the attachment, in SP3c-1.** `registry.engine_catalog_attachments`
 gains `is_primary boolean`, unique per engine, backfilled from `engines.warehouse_id`, and
 `CreateEngineBody.warehouse_id` becomes optional so the wizard can attach several catalogs and mark
-one primary. The column itself is dropped in SP3c-2, once nothing reads it. (An earlier draft put
+one primary. The column itself is dropped in SP3c-2, once nothing reads it — and **SP3c-2 also owns letting a
+non-warehouse catalog lead**. In SP3c-1 the primary must still be an egret warehouse, because
+`engines.warehouse_id` is `NOT NULL` and ten production sites read it, including `ensure_engine_role`
+seeding the engine's Ranger role from the warehouse and the StarRocks path deriving its storage.
+Rewriting those ten belongs in the PR that deletes the column, not in the one that rebuilds the UI
+(user decision, 2026-09-22). The wizard disables that choice inline and names the reason. (An earlier draft put
 all of this in SP3c-2; the wizard cannot honestly "attach catalogs" while the API demands exactly
 one warehouse, so the schema half moves up — user decision, 2026-09-22.) Primary is a property of the *relationship* between an engine and a catalog, which is what it
 always was — storing it on the engine is what forced one warehouse per engine.
