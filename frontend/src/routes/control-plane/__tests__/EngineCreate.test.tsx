@@ -8,6 +8,7 @@ import EngineCreate from "@/routes/control-plane/EngineCreate";
 import * as api from "@/api/controlPlane";
 import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import { ApiError } from "@/api/client";
+import { warehousesQueryKey } from "@/routes/control-plane/queryKeys";
 import type { CreateEngineResponse, RegistryCatalogDto } from "@/api/generated/model";
 
 vi.mock("@/api/controlPlane");
@@ -82,6 +83,10 @@ function Where() {
 
 function renderCreate(type: "trino" | "starrocks") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return renderWith(qc, type);
+}
+
+function renderWith(qc: QueryClient, type: "trino" | "starrocks") {
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[`/control-plane/engines/new?type=${type}`]}>
@@ -398,11 +403,18 @@ describe("EngineCreate", () => {
 
   test("a failed registry read never claims a warehouse is unregistered", async () => {
     mockCatalogsError(403, "forbidden");
-    renderCreate("trino");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderWith(qc, "trino");
 
-    // `listWarehouses` still answers; the registry did not. Saying "no registry
+    // WAIT FOR THE WAREHOUSE ROWS TO ACTUALLY BE THERE. `listWarehouses` is
+    // async, and nothing else on this screen renders a warehouse — so a bare
+    // "the note is absent" assertion passes while the query is still in flight,
+    // which is to say it passes against the defect too. (Measured: with the
+    // `status === 200` guard removed this test stayed green until this wait was
+    // added.) The cache key is the shared one, imported rather than restated.
+    await waitFor(() => expect(qc.getQueryData(warehousesQueryKey)).toHaveLength(1));
+    // `listWarehouses` answered; the registry did not. Saying "no registry
     // catalog" here would be a statement about a read that never happened.
-    await waitFor(() => expect(api.listWarehouses).toHaveBeenCalled());
     expect(screen.queryByTestId("ec-unregistered-warehouses")).not.toBeInTheDocument();
   });
 });
