@@ -11,14 +11,6 @@
 //! `PolicyStore::tag_assignments_for_service` serves under. There is no
 //! `engines.warehouse_id` column any more (SP3c-2 Task 6) for a second,
 //! attachment-free path.
-//!
-//! KNOWN PRE-EXISTING FAILURE (unrelated to SP3c-2 Task 6, found while
-//! updating this file's fixtures for the column drop):
-//! `assign_and_unassign_bump_bound_service_tag_version` seeds its engine via
-//! `seed_bound_warehouse`, which never attaches a registry catalog to it —
-//! so `bump_bound_tag_versions`'s attachment join matches nothing and the
-//! assertion fails. Reproduced on HEAD before this column drop by temporarily
-//! removing migration 0152 and rerunning; out of scope for this task.
 
 use egret_bi::catalog_tags::CatalogTagRepo;
 use egret_bi::TagRepo;
@@ -26,7 +18,17 @@ use egret_metastore::Db;
 use uuid::Uuid;
 
 /// Seed a workspace + storage connection + warehouse + a Trino engine bound to
-/// `service_id`. Returns the warehouse id.
+/// `service_id`, with the warehouse's registry catalog attached to that engine.
+/// Returns the warehouse id.
+///
+/// The attachment is the binding. Until SP3c-2 Task 6 this function bound the
+/// two through `engines.warehouse_id` instead, and when that column went the
+/// INSERT simply dropped it — leaving an engine joined to the warehouse by
+/// nothing, so `bump_bound_tag_versions` matched no service and the assertion
+/// below failed. That failure was briefly labelled pre-existing; it was not.
+/// A fixture that no longer expresses the binding it is named for makes its
+/// test measure nothing, and this test guards the bump path that has already
+/// failed open once in this programme.
 async fn seed_bound_warehouse(pool: &sqlx::PgPool, service_id: i64) -> Uuid {
     let (ws_id,): (Uuid,) =
         sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
@@ -55,15 +57,17 @@ async fn seed_bound_warehouse(pool: &sqlx::PgPool, service_id: i64) -> Uuid {
     .fetch_one(pool)
     .await
     .expect("insert warehouse");
-    sqlx::query(
+    let (eng_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'trino','egret','{}'::jsonb,$2)",
+         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
     )
     .bind(format!("tveng-{}", Uuid::new_v4().simple()))
     .bind(service_id)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .expect("insert engine");
+    let catalog_id = seed_registry_catalog(pool, wh_id).await;
+    attach_catalog(pool, eng_id, catalog_id).await;
     wh_id
 }
 
