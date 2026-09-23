@@ -568,17 +568,28 @@ describe("the list gates its own controls", () => {
   });
 
   test("names only the permissions that would have drawn something on THIS list", async () => {
-    // No egret warehouse row, so `warehouse:delete` explains a button that was
-    // never going to exist — saying it would be noise about a permission the
-    // operator does not need.
+    // No egret warehouse row, so the warehouse-specific delete sentence
+    // explains a button that was never going to exist — saying it would be
+    // noise about a case the operator does not have on screen.
+    //
+    // Both hidden-delete branches now name the SAME key
+    // (`catalog_registry:delete`, since SP3c-2 re-gated the warehouse endpoint
+    // onto it too), so a bare `toHaveTextContent("catalog_registry:delete")` /
+    // `not.toHaveTextContent("warehouse:delete")` pair can no longer tell the
+    // two branches apart — the second assertion would pass even if the
+    // warehouse-only branch fired, because it never contained that retired
+    // string either way. Discriminate on the phrase that IS still unique to
+    // the warehouse branch instead: "egret warehouse" appears only in
+    // `"deleting an egret warehouse needs catalog_registry:delete, because it
+    // is removed with its warehouse"`, never in the plain-catalog sentence.
     vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
       listResult([JDBC]),
     );
     renderPage("/control-plane/catalogs", READER);
 
     const note = await screen.findByTestId("catalogs-readonly");
-    expect(note).toHaveTextContent("catalog_registry:delete");
-    expect(note).not.toHaveTextContent("warehouse:delete");
+    expect(note).toHaveTextContent("deleting a registered catalog needs catalog_registry:delete");
+    expect(note).not.toHaveTextContent(/egret warehouse/);
   });
 
   test("the empty state explains the missing create key instead of offering a dead button", async () => {
@@ -613,12 +624,7 @@ describe("the list gates its own controls", () => {
     );
     renderPage("/control-plane/catalogs", {
       ...READER,
-      permissions: [
-        "catalog_registry:read",
-        "catalog_registry:create",
-        "catalog_registry:delete",
-        "warehouse:delete",
-      ],
+      permissions: ["catalog_registry:read", "catalog_registry:create", "catalog_registry:delete"],
     });
 
     expect(await screen.findByRole("button", { name: "Delete analytics" })).toBeInTheDocument();

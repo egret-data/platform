@@ -11,7 +11,7 @@ use axum::Json;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogHttpError {
-    /// Authenticated but lacks the required `warehouse:*` permission.
+    /// Authenticated but lacks the required `catalog_registry:*` permission.
     #[error("forbidden")]
     Forbidden,
     #[error("not found")]

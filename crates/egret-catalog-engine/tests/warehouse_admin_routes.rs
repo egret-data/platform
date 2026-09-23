@@ -524,7 +524,7 @@ async fn browse_non_admin_forbidden() {
     };
     let token = session_for(&f, "browse_nonadmin", false).await;
     // A real Cedar PDP (not the allow-all stub) must back this 403 — the principal
-    // holds no platform role/permission, so the PDP denies `warehouse:read`.
+    // holds no platform role/permission, so the PDP denies `catalog_registry:read`.
     attach_real_pdp(&mut f).await;
     // 403 fires before any DB lookup — use a random UUID.
     let wh_id = Uuid::new_v4();

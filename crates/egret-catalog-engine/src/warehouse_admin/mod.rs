@@ -4,13 +4,13 @@
 //! is still nested at `/api/control-plane` in `egret-server` (FE URLs
 //! unchanged). Every route is gated on `egret_core::authz::require(&*st.pdp, &p,
 //! "catalog_registry:*")` (platform_admin bypasses inside the PDP) and operates
-//! over the egret RBAC store. SP3c-2 retired the router's original
-//! `warehouse:*` gate: migration 0153 re-ran 0148's grant and deleted the old
-//! keys, so `catalog_registry:*` alone now admits anyone who could reach these
-//! routes before
-//! (`CatalogStore`). NOTE: warehouse creation here records the egret-side row;
-//! provisioning the lakekeeper warehouse itself is done through the
-//! [`WarehouseProvisioner`] seam, wired in the composition root (egret-bin).
+//! over the egret RBAC store (`CatalogStore`). SP3c-2 retired the router's
+//! original `warehouse:*` gate: migration 0153 re-ran 0148's grant and deleted
+//! the old keys, so `catalog_registry:*` alone now admits anyone who could
+//! reach these routes before. NOTE: warehouse creation here records the
+//! egret-side row; provisioning the lakekeeper warehouse itself is done
+//! through the [`WarehouseProvisioner`] seam, wired in the composition root
+//! (egret-bin).
 //!
 //! OpenAPI (E0·P4b-4): every handler carries a `#[utoipa::path]` with the FULL
 //! mounted path (`/api/control-plane` + the internal route), since utoipa does

@@ -264,7 +264,15 @@ export default function Catalogs() {
   const isAdmin = !!me && me.platform_roles.includes("platform_admin");
   const canCreate = isAdmin || !!me?.permissions.includes("catalog_registry:create");
   const canDeleteCatalog = isAdmin || !!me?.permissions.includes("catalog_registry:delete");
-  const canDeleteWarehouse = isAdmin || !!me?.permissions.includes("catalog_registry:delete");
+  // Textually identical to `canDeleteCatalog` since SP3c-2 (Task 7) re-gated the
+  // warehouse endpoint onto the SAME `catalog_registry:delete` key — kept as its
+  // own binding (rather than reusing `canDeleteCatalog` at both call sites)
+  // because `confirmDelete()` below still branches on `isEgretWarehouse(c)` to
+  // call a genuinely different endpoint (`DELETE /warehouses/{id}` vs
+  // `DELETE /catalogs/{id}`), and `hiddenControls` still explains the two cases
+  // in different words. A future task could re-diverge the permission; this
+  // binding is where that would land without touching `canDelete`'s shape.
+  const canDeleteWarehouse = canDeleteCatalog;
   const canDelete = (c: RegistryCatalogDto) =>
     isEgretWarehouse(c) ? canDeleteWarehouse : canDeleteCatalog;
 

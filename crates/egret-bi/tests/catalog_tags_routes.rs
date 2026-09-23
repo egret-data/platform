@@ -1,10 +1,10 @@
 //! Catalog resource-tag control-plane endpoints (Access P3.2). DB-gated;
 //! self-skips without DATABASE_URL ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS. Builds a REAL `CedarPdp` after `migrate()`.
 //!
-//! Proves: a platform_admin (holds `warehouse:update`/`warehouse:read` via the
-//! PDP bypass) PUTs a table-level and a column-level tag → 200; GET
+//! Proves: a platform_admin (holds `catalog_registry:update`/`catalog_registry:read`
+//! via the PDP bypass) PUTs a table-level and a column-level tag → 200; GET
 //! `?schema=&table=` lists BOTH (distinguishing table vs column); DELETE removes
-//! one → 200 (GET then omits it). A plain user (no warehouse perm) PUT → 403.
+//! one → 200 (GET then omits it). A plain user (no catalog_registry perm) PUT → 403.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -267,7 +267,7 @@ async fn resource_tag_assign_list_unassign_and_gating() {
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
-        "a user without warehouse:update must NOT tag a catalog resource"
+        "a user without catalog_registry:update must NOT tag a catalog resource"
     );
 
     // 5. DELETE the column tag → 200, then GET no longer lists it (table tag stays).
