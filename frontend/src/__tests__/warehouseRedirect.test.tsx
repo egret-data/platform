@@ -13,10 +13,11 @@ import type { RegistryCatalogDto } from "@/api/generated/model";
  * `<Routes>`, or a guard that 403s before the redirect ever renders, if the
  * table were hand-rebuilt in the test.
  *
- * D5 is asserted too, in the last case: the Warehouses LIST is still a page in
- * SP3c-1, and only the detail path redirects. That is the whole scope of the
- * change — a future commit that redirects the list as well turns that case red
- * rather than passing quietly.
+ * SP3c-2 (Task 8) deleted the Warehouses LIST page and its route outright —
+ * D5 only ever promised the DETAIL path would keep working, unlisted, and
+ * this file is what pins that promise. `Warehouses.test.tsx` (which tested
+ * the list) went with the page; there is no "list still renders" case here
+ * any more to keep green.
  */
 const TIMEOUT = { timeout: 4000 };
 
@@ -118,18 +119,16 @@ describe("/control-plane/warehouses/:id redirects onto the catalog", () => {
     expect(await screen.findByRole("heading", { name: "Catalogs" }, TIMEOUT)).toBeInTheDocument();
   }, 15_000);
 
-  it("leaves the Warehouses LIST a page — D5 removes nothing in SP3c-1", async () => {
+  it("no longer has a Warehouses LIST route — the bare path lands elsewhere, not on a list", async () => {
+    // No `<Route path="warehouses">` remains (Task 8); react-router falls
+    // through to the `*` catch-all inside `ControlPlaneRoutes`, which sends a
+    // `catalog_registry:read` holder to the first section that permission
+    // unlocks — `catalogs` — not to a "Warehouses" heading.
     openApp("/control-plane/warehouses", [catalog()]);
-    await screen.findByTestId("app-sidebar", {}, TIMEOUT);
-    // It did not redirect…
-    expect(currentUrl()).toBe("/control-plane/warehouses");
-    // …and it is the list, not a 403 and not an empty shell.
-    expect(
-      await screen.findByRole("heading", { name: "Warehouses" }, TIMEOUT),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("403 — Forbidden")).not.toBeInTheDocument();
-    // The sidebar entry that reaches it is still there (D5).
-    expect(screen.getByRole("link", { name: /Warehouses/ })).toBeInTheDocument();
+    await waitFor(() => expect(currentUrl()).toBe("/control-plane/catalogs"), TIMEOUT);
+    expect(await screen.findByRole("heading", { name: "Catalogs" }, TIMEOUT)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Warehouses" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Warehouses/ })).not.toBeInTheDocument();
   }, 15_000);
 });
 
@@ -145,13 +144,16 @@ describe("/control-plane/warehouses/:id redirects onto the catalog", () => {
  *
  * SP3c-2 (Task 7) retires `warehouse:read` outright (migration 0153 re-runs
  * 0148's grant first, so no LIVE role loses anything in the move) and
- * re-gates both routes on `catalog_registry:read`. The population this block
- * used to describe — a role holding `warehouse:read` and nothing else —
- * cannot exist going forward: 0153 guarantees every role that ever held
- * `warehouse:read` also holds `catalog_registry:read`, and the permission can
- * no longer be granted at all (it left `egret_core::rbac::PERMISSIONS`). So a
- * session carrying `warehouse:read` alone is now indistinguishable from one
- * carrying no relevant permission at all, and both routes correctly 403 it —
+ * re-gates the redirect route, and `CONTROL_PLANE_PERMS` itself
+ * (`auth/appAccess.ts`), on `catalog_registry:read`. The population this
+ * block used to describe — a role holding `warehouse:read` and nothing
+ * else — cannot exist going forward: 0153 guarantees every role that ever
+ * held `warehouse:read` also holds `catalog_registry:read`, and the
+ * permission can no longer be granted at all (it left
+ * `egret_core::rbac::PERMISSIONS`). So a session carrying `warehouse:read`
+ * alone is now indistinguishable from one carrying no relevant permission at
+ * all — `RequireControlPlaneAccess`, the outer gate for all of
+ * `/control-plane/*`, refuses it before either case below reaches a route —
  * the friendly `WarehouseRedirect` explanation is defense-in-depth for a
  * stale `me.permissions` snapshot, not something this population reaches (see
  * its doc comment in `App.tsx`).
@@ -171,7 +173,7 @@ describe("a session holding only the retired warehouse:read (SP3c-2)", () => {
     expect(currentUrl()).toBe("/control-plane/warehouses/wh-1");
   }, 15_000);
 
-  it("403s the list route too — the row and the list agree by sharing one key", async () => {
+  it("403s the bare warehouses path too — the outer Control Plane gate refuses it before any route (list or catch-all) is even matched", async () => {
     openApp("/control-plane/warehouses", [catalog()], RETIRED_KEY_ONLY);
     expect(await screen.findByText("403 — Forbidden", {}, TIMEOUT)).toBeInTheDocument();
   }, 15_000);

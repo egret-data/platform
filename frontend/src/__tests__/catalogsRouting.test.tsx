@@ -70,15 +70,6 @@ describe("Catalogs routing in App", () => {
     expect(await screen.findByRole("heading", { name: "Catalogs" }, TIMEOUT)).toBeInTheDocument();
   }, 15_000);
 
-  it("prefers Catalogs over Warehouses for a user holding both", async () => {
-    // Catalogs sits immediately after `engines` and BEFORE `warehouses` in
-    // `FIRST_SECTION_BY_PERM`, so the release that introduces the section also
-    // makes it the landing for everyone who can see both (D5 keeps Warehouses
-    // reachable, just not first).
-    openApp("/control-plane", me(["warehouse:read", "catalog_registry:read"]));
-    await waitFor(() => expect(currentUrl()).toBe("/control-plane/catalogs"), TIMEOUT);
-  }, 15_000);
-
   it("still lands an engine-holder on Engines, which stays ahead of Catalogs", async () => {
     openApp("/control-plane", me(["engine:read", "catalog_registry:read"]));
     await waitFor(() => expect(currentUrl()).toBe("/control-plane/engines"), TIMEOUT);

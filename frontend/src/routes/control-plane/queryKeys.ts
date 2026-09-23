@@ -1,28 +1,28 @@
 /**
- * The two list caches that describe the same rows, while D5 keeps both sections
- * live.
+ * Two keys for one underlying row, invalidated together by both places that
+ * create or delete an egret-warehouse catalog.
  *
- * Through SP3c-1 a user can reach an egret warehouse from Control Plane →
- * Catalogs **and** from Control Plane → Warehouses, and either page can delete
- * it: the Catalogs list routes an egret-warehouse row to `deleteWarehouse`,
- * which is the very endpoint the Warehouses list calls. A page that invalidates
- * only its own key therefore leaves the OTHER page showing a row that no longer
- * exists — for the 30 seconds of `queryClient`'s `staleTime`, which is long
- * enough to click the sidebar. Both pages invalidate both keys.
+ * SP3c-2 (Task 8) deleted the Warehouses LIST page, so the original reason for
+ * this pair — two separate full-list pages of the same rows, either of which
+ * could delete one and leave the other stale — no longer applies. The pair
+ * stays because each key still has its own live reader that is NOT the other
+ * key's writer: `catalogsQueryKey` is `catalogs/Catalogs.tsx`'s own list, and
+ * `warehousesQueryKey` is read by `EngineCreate.tsx` (the attach-a-warehouse
+ * list, and the "provisioned but not registered" check built from it) and by
+ * `CatalogDetail.tsx`'s single-warehouse fetch, keyed UNDER it
+ * (`[...warehousesQueryKey, id]`) so this invalidation reaches that row too.
+ * Dropping either half would leave one of those readers stale for the 30
+ * seconds of `queryClient`'s `staleTime` after a create or delete elsewhere —
+ * the same bug this pair always existed to prevent, just with a narrower cast
+ * of readers now that `Warehouses.tsx` is gone.
  *
- * The keys live here rather than in the two pages because each page needs the
- * other's: exporting them from the pages themselves would make
- * `Warehouses.tsx` and `catalogs/Catalogs.tsx` import each other, and a
- * module cycle that happens to work only because both reads sit inside function
- * bodies is not a thing to leave for the next reader. Both pages re-export
- * their own key, so every existing import path still resolves.
- *
- * D5 keeps the warehouse half alive through SP3c-1: only the warehouse
- * DETAIL route became a redirect, so the Warehouses list is still a writer of
- * both keys and SP3c-2 is what retires it. `warehousesQueryKey` gained a third
- * reader in Task 8 — `CatalogDetail` keys its single-warehouse fetch UNDER it
- * (`[...warehousesQueryKey, id]`), so the invalidations that already exist
- * reach that row too.
+ * The keys live here, not in the two writers (`catalogs/CatalogCreate.tsx`'s
+ * warehouse branch and `catalogs/Catalogs.tsx`'s delete), because
+ * `catalogs/Catalogs.tsx` needs `warehousesQueryKey` and `CatalogCreate.tsx`
+ * needs both — importing across those files would risk a module cycle that
+ * happens to work only because every read sits inside a function body.
+ * `catalogs/Catalogs.tsx` re-exports `catalogsQueryKey` so existing import
+ * paths still resolve.
  */
 import { getControlPlaneCatalogRegistryGetRegistryCatalogQueryKey } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 

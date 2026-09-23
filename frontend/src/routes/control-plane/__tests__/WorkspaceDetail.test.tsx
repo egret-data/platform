@@ -199,8 +199,8 @@ describe("WorkspaceDetail cockpit", () => {
 
     await user.click(screen.getByRole("tab", { name: "Resources" }));
     // This workspace's warehouse links by WAREHOUSE id; another workspace's is
-    // excluded. There is no warehouse detail page any more — SP3c-1 Task 8 moved
-    // its tabs onto `CatalogDetail` — and `/control-plane/warehouses/:id` now
+    // excluded. There is no warehouse detail page any more — SP3c-1 moved its
+    // tabs onto `CatalogDetail` — and `/control-plane/warehouses/:id` now
     // redirects to the matching catalog. The href is asserted unchanged on
     // purpose: the redirect is what keeps every remaining warehouse-id link
     // working without rewiring this card's query onto the registry list, and
@@ -210,10 +210,12 @@ describe("WorkspaceDetail cockpit", () => {
       "/control-plane/warehouses/wh1",
     );
     expect(screen.queryByText("wh-other")).not.toBeInTheDocument();
-    // "Manage" opens the Warehouses page scoped to this workspace.
+    // "Manage" opens the Catalogs page scoped to this workspace — SP3c-2
+    // Task 8 deleted the Warehouses list, and Catalogs supports the same
+    // `?workspace=` filter server-side.
     expect(screen.getByRole("link", { name: "Manage" })).toHaveAttribute(
       "href",
-      `/control-plane/warehouses?workspace=${WS.id}`,
+      `/control-plane/catalogs?workspace=${WS.id}`,
     );
   });
 

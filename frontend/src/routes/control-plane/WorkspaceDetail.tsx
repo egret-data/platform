@@ -374,7 +374,10 @@ function WarehousesSection({ workspaceId }: { workspaceId: string }) {
           <p className="text-sm text-muted-foreground">Iceberg catalogs owned by this workspace.</p>
         </div>
         <Button asChild size="sm" variant="outline">
-          <Link to={`/control-plane/warehouses?workspace=${workspaceId}`}>Manage</Link>
+          {/* The Warehouses LIST is gone (SP3c-2 Task 8); Catalogs supports
+              the same `?workspace=` filter server-side (`Catalogs.tsx`'s own
+              `searchParams.get("workspace")`). */}
+          <Link to={`/control-plane/catalogs?workspace=${workspaceId}`}>Manage</Link>
         </Button>
       </div>
       {whQ.isLoading ? (
