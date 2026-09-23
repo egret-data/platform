@@ -768,9 +768,9 @@ pub(crate) async fn validate_references(st: &CpState, def: &CatalogDef) -> Resul
 
 /// Whether this is the engine's primary catalog. Since SP3c-1 it is a column
 /// on the attachment (`is_primary`, migration 0150), not a guess from
-/// `engines.warehouse_id` — the column is what lets an engine lead with a
-/// catalog that is not an egret warehouse once SP3c-2 rewrites the ten sites
-/// that still read `engines.warehouse_id`.
+/// `engines.warehouse_id`. SP3c-2 Task 5 made that attachment the SOURCE of
+/// the engine's warehouse rather than a second opinion about it
+/// (`engines::primary_warehouse`), so nothing compares the two any more.
 fn is_primary(attachment: &egret_catalog_registry::AttachmentRow) -> bool {
     attachment.is_primary
 }

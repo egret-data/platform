@@ -700,7 +700,7 @@ async fn list_profiles_shows_bound_engines_from_reader() {
             name: "trino-prod".into(),
             status: "Running".into(),
             authz_service_id: Some(svc_id),
-            warehouse_id: None,
+            warehouse_ids: Vec::new(),
         }],
         ..Default::default()
     });
@@ -810,7 +810,7 @@ async fn delete_profile_refused_while_engine_bound() {
             name: "trino-prod".into(),
             status: "Running".into(),
             authz_service_id: Some(svc_id),
-            warehouse_id: None,
+            warehouse_ids: Vec::new(),
         }],
         ..Default::default()
     });
@@ -863,7 +863,7 @@ async fn resource_lookup_suggests_live_catalog_metadata() {
             name: "trino-prod".into(),
             status: "Running".into(),
             authz_service_id: Some(svc_id),
-            warehouse_id: Some(wh),
+            warehouse_ids: vec![wh],
         }],
         schemas,
         tables,
@@ -908,6 +908,66 @@ async fn resource_lookup_suggests_live_catalog_metadata() {
     assert!(
         vals.contains(&"orders".to_string()) && vals.contains(&"customers".to_string()),
         "live tables surfaced; body={body}"
+    );
+
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// The picker offers the schemas of EVERY warehouse a bound engine reads, not
+/// only the one it leads with (SP3c-2 Task 5). An engine has attached several
+/// egret catalogs — each with its own warehouse — since SP3a; `EngineBinding`
+/// carried a single `warehouse_id` off the `engines` column and was the last
+/// place still pretending otherwise, so a policy author writing a rule for the
+/// engine's SECOND catalog got no suggestions at all.
+///
+/// The assertion that can fail either way: `second` must be offered (the
+/// widening) AND `first` must still be (the old behaviour, not replaced).
+#[tokio::test]
+async fn resource_lookup_suggests_every_warehouse_the_engine_reads() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "reslookup_multi", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let primary_wh = Uuid::new_v4();
+    let second_wh = Uuid::new_v4();
+    let mut schemas = HashMap::new();
+    schemas.insert(primary_wh, vec!["from_primary".to_string()]);
+    schemas.insert(second_wh, vec!["from_second".to_string()]);
+    let reader = Arc::new(MockEngineReader {
+        bindings: vec![EngineBinding {
+            id: Uuid::new_v4(),
+            name: "trino-prod".into(),
+            status: "Running".into(),
+            authz_service_id: Some(svc_id),
+            warehouse_ids: vec![primary_wh, second_wh],
+        }],
+        schemas,
+        ..Default::default()
+    });
+
+    let (status, body) = into_json(
+        f.app(reader)
+            .oneshot(req(
+                "GET",
+                &format!("/policies/resource-lookup?service={svc_name}&level=schema"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "schema lookup; body={body}");
+    let vals: Vec<String> = serde_json::from_value(body.clone()).unwrap_or_default();
+    assert!(
+        vals.contains(&"from_primary".to_string()),
+        "the primary's schemas are still offered; body={body}"
+    );
+    assert!(
+        vals.contains(&"from_second".to_string()),
+        "a non-primary attachment's schemas are offered too; body={body}"
     );
 
     f.store.delete_service(svc_id).await.expect("cleanup");

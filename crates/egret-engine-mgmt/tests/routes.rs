@@ -7795,11 +7795,18 @@ async fn create_engine_refuses_two_primaries_and_refuses_none() {
     );
 }
 
-/// SP3c-1 does NOT let a non-warehouse catalog lead: `engines.warehouse_id` is
-/// still `NOT NULL` and ten sites read it, `ensure_engine_role` and the
-/// StarRocks storage derivation among them. The refusal must SAY so, because
-/// the wizard repeats the reason next to the disabled choice (D2, user decision
-/// 2026-09-22) — a bare "bad request" would leave it inventing one.
+/// A non-warehouse catalog cannot lead: the engine's Ranger role
+/// (`ensure_engine_role`) and a StarRocks engine's builtin storage volume are
+/// both derived from the PRIMARY attachment's warehouse (SP3c-2 Task 5 moved
+/// those two reads off `engines.warehouse_id` and onto the attachment, which
+/// is why the constraint outlives the column). Letting one lead is a feature
+/// deferred past SP4 (user decision 2026-09-23). The refusal must SAY so,
+/// because the wizard repeats the reason next to the disabled choice (D2, user
+/// decision 2026-09-22) — a bare "bad request" would leave it inventing one.
+///
+/// The refusal is decided from the catalog row BEFORE any registry row is
+/// written, so a refused create has nothing to roll back (SP3a F-2); the
+/// `engine_rows_named == 0` assertion at the end is the observable half of it.
 #[tokio::test]
 async fn create_engine_refuses_a_non_warehouse_primary_with_the_reason() {
     let Some(f) = engines_fixture().await else {

@@ -148,10 +148,12 @@ pub fn workspace_engines_router() -> Router<CpState> {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NewEngineCatalog {
     catalog_id: Uuid,
-    /// Exactly one catalog in the list carries this. Until SP3c-2 drops
-    /// `engines.warehouse_id`, the primary must be an egret warehouse catalog —
-    /// the engine's Ranger role and (for StarRocks) its storage are still
-    /// derived from that warehouse.
+    /// Exactly one catalog in the list carries this, and it must be an egret
+    /// warehouse catalog: the engine's Ranger role and (for StarRocks) its
+    /// builtin storage are derived from that warehouse, and since SP3c-2 they
+    /// are read back through this attachment rather than off the engine row.
+    /// A primary naming a catalog with no warehouse is refused, with the
+    /// reason, before anything is created.
     #[serde(default)]
     primary: bool,
 }
@@ -404,6 +406,47 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<BuiltReq, 
     build_provision_req_with(st, engine, BuildOpts::default()).await
 }
 
+/// The warehouse an already-created engine leads with — the warehouse of its
+/// PRIMARY attachment's catalog, NOT `engines.warehouse_id` (SP3c-2 Task 5,
+/// which left that column unread so Task 6 can drop it).
+///
+/// Two facts come off it and both are cluster state rather than a display
+/// value: the StarRocks builtin storage volume's S3 coordinates, and (via
+/// `ensure_engine_role`) the Ranger role an engine's Catalog Clients are bound
+/// to. So a missing primary REFUSES here. Defaulting to "the first attached
+/// catalog that happens to have a warehouse" would point a StarRocks FE's
+/// storage volume at a bucket the engine was never provisioned against, and
+/// the failure would surface as data written to the wrong place rather than as
+/// an error — the one outcome an operator cannot undo.
+///
+/// `POST /engines` refuses a body whose primary names a catalog with no
+/// warehouse ([`resolve_primary_catalog`]) and `detach_from_engine` refuses to
+/// remove a primary, so an engine created by egret always has one. Migration
+/// 0150's partial unique index bounds it from ABOVE only (at most one), which
+/// is why the lower bound is checked here and not assumed.
+async fn primary_warehouse(
+    st: &CpState,
+    engine: &Engine,
+) -> Result<egret_catalog_api::Warehouse, CpError> {
+    let wh_id = st
+        .engine_mgmt
+        .registry()
+        .primary_warehouse_id(engine.id)
+        .await?
+        .ok_or_else(|| {
+            CpError::BadRequest(format!(
+                "engine {} has no primary catalog with a warehouse: an engine's storage and \
+                 Ranger role are derived from the warehouse of its primary attachment. Attach \
+                 an egret warehouse catalog to it and mark that attachment primary",
+                engine.name
+            ))
+        })?;
+    st.catalog
+        .get_warehouse(wh_id)
+        .await?
+        .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))
+}
+
 /// [`build_provision_req`] with explicit [`BuildOpts`].
 pub(crate) async fn build_provision_req_with(
     st: &CpState,
@@ -417,11 +460,7 @@ pub(crate) async fn build_provision_req_with(
     // `build_starrocks_provision_req` directly instead, so it can also capture
     // the delegation bootstrap a later task will consume.)
     if engine.r#type == "starrocks" {
-        let wh = st
-            .catalog
-            .get_warehouse(engine.warehouse_id)
-            .await?
-            .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
+        let wh = primary_warehouse(st, engine).await?;
         let (req, _bootstrap) = build_starrocks_provision_req(st, engine, &wh).await?;
         return Ok(BuiltReq {
             req,
@@ -2523,17 +2562,24 @@ async fn bind_trino_profile(
     Ok(())
 }
 
-/// Resolve the warehouse the engine row still needs, from whichever shape the
+/// Resolve the warehouse the engine leads with, from whichever shape the
 /// caller sent, and load the OTHER catalogs to attach afterwards. Every refusal
 /// lives here so the Trino and StarRocks create paths cannot disagree about what
 /// a valid body is.
 ///
-/// WHY A WAREHOUSE AT ALL. `engines.warehouse_id` is `NOT NULL` and ten
-/// production sites still read it — `ensure_engine_role` seeds the engine's
-/// Ranger role from the warehouse, and the StarRocks path derives its storage
-/// from the same. SP3c-2 rewrites those and drops the column; until then a
-/// non-warehouse catalog cannot lead, and the refusal below NAMES that reason
-/// so the wizard can repeat it rather than just greying a radio button.
+/// WHY A WAREHOUSE AT ALL. Two pieces of CLUSTER state are derived from the
+/// primary attachment's warehouse: `ensure_engine_role` seeds the engine's
+/// Ranger role from it, and a StarRocks engine's builtin storage volume gets
+/// its S3 coordinates from it ([`primary_warehouse`], which reads the
+/// attachment — not the `engines.warehouse_id` column SP3c-2 leaves unread).
+/// So a catalog with no warehouse cannot lead, the refusal below NAMES that
+/// reason so the wizard can repeat it rather than just greying a radio button,
+/// and it is decided HERE — before any registry row is written, so a refused
+/// create has nothing to roll back (SP3a F-2).
+///
+/// Letting a non-warehouse catalog lead is a FEATURE, deferred past SP4 (user
+/// decision 2026-09-23): it needs somewhere else for those two facts to come
+/// from, not merely a relaxed check here.
 ///
 /// EVERY id IS RESOLVED HERE, BEFORE ANYTHING IS PROVISIONED OR MINTED (review
 /// F1). This runs at the top of `create_engine`, ahead of the warehouse lookup,
@@ -2611,7 +2657,7 @@ async fn resolve_primary_catalog(
     let wh = primary.warehouse_id.ok_or_else(|| {
         CpError::BadRequest(
             "the primary catalog must be an egret warehouse catalog: the engine's Ranger \
-             role and storage are still derived from its warehouse"
+             role and storage are derived from its warehouse"
                 .into(),
         )
     })?;
@@ -4750,14 +4796,13 @@ async fn update_starrocks_engine(
     let Some(prov) = st.engine_provisioner.clone() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
-    // Re-resolve the warehouse (same resolver create uses) so the FE/CN builtin
-    // storage volume is fed the SAME S3 coords. It does not depend on the new
-    // spec, so resolve it before persisting too.
-    let wh = st
-        .catalog
-        .get_warehouse(engine.warehouse_id)
-        .await?
-        .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
+    // Re-resolve the warehouse the engine leads with — its primary attachment's
+    // (`primary_warehouse`, the same resolution `build_provision_req_with`'s
+    // StarRocks arm uses) — so the FE/CN builtin storage volume is fed the SAME
+    // S3 coords it was provisioned with. It does not depend on the new spec, so
+    // resolve it before persisting too: an engine with no primary is refused
+    // here, with its spec untouched and nothing to restore.
+    let wh = primary_warehouse(&st, &engine).await?;
 
     // Snapshot for restore on a failed build or apply (see `update_engine`).
     let snapshot_spec = engine.spec.clone();
@@ -6954,6 +6999,108 @@ mod tests {
         assert!(boot2.is_none());
     }
 
+    /// SP3c-2 Task 5. A StarRocks engine's builtin storage volume is derived
+    /// from the warehouse of its PRIMARY ATTACHMENT, not from
+    /// `engines.warehouse_id`; an engine with NO primary is refused rather
+    /// than silently given some other warehouse's bucket.
+    ///
+    /// The engine row's column names warehouse A while the primary attachment
+    /// names warehouse B, and the two have DIFFERENT S3 secrets — so the
+    /// built request's `storage_secret_key` says which one was read. Without
+    /// that divergence the assertion would pass for either implementation.
+    #[tokio::test]
+    async fn starrocks_storage_comes_from_the_primary_attachment() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping starrocks_storage_comes_from_the_primary_attachment: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        // `column_wh` is what the (soon-to-be-dropped) column names; `led_wh`
+        // is what the engine actually leads with.
+        let (column_wh, column_secret) = seed_sr_warehouse(&st, &db).await;
+        let (led_wh, led_secret) = seed_sr_warehouse(&st, &db).await;
+        assert_ne!(column_secret, led_secret, "the two warehouses must differ");
+
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("sr-{}", Uuid::new_v4().simple()),
+                "starrocks",
+                "egret-engines",
+                column_wh.id,
+                &serde_json::json!({ "starrocksConfig": { "feReplicas": 1 } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+
+        // (a) No attachment at all. The column still resolves to a perfectly
+        //     good warehouse, so an implementation that read it would build a
+        //     request here.
+        let Err(err) = build_provision_req_with(&st, &engine, BuildOpts::default()).await else {
+            panic!("an engine with no primary attachment must be refused");
+        };
+        let msg = err.to_string();
+        assert!(
+            matches!(err, CpError::BadRequest(_)),
+            "a refusal an operator can act on, not a 500; err={msg}"
+        );
+        assert!(
+            msg.contains("no primary catalog with a warehouse"),
+            "the refusal names what is missing; err={msg}"
+        );
+        assert!(
+            msg.contains(&engine.name),
+            "the refusal names the engine; err={msg}"
+        );
+
+        // (b) Attach `led_wh`'s catalog as the primary.
+        let registry = st.engine_mgmt.registry();
+        let (led_catalog, _) = registry
+            .ensure_warehouse_catalog(
+                &WarehouseIdentity {
+                    id: led_wh.id,
+                    name: &led_wh.name,
+                    workspace_id: led_wh.workspace_id,
+                },
+                None,
+            )
+            .await
+            .expect("warehouse catalog");
+        registry
+            .insert_attachment(&egret_catalog_registry::NewAttachment {
+                engine_id: engine.id,
+                catalog_id: led_catalog.id,
+                catalog_client_id: None,
+                credential_secret_id: None,
+                minted_client: false,
+                applied_now: true,
+                is_primary: true,
+                created_at: None,
+                apply_status: egret_catalog_registry::store::apply_status::APPLIED,
+            })
+            .await
+            .expect("attach primary");
+
+        let built = build_provision_req_with(&st, &engine, BuildOpts::default())
+            .await
+            .expect("build with a primary attachment");
+        let sr = built.req.starrocks.as_ref().expect("starrocks config");
+        assert_eq!(
+            sr.storage_secret_key, led_secret,
+            "storage follows the primary attachment's warehouse"
+        );
+        assert_ne!(
+            sr.storage_secret_key, column_secret,
+            "and NOT `engines.warehouse_id`"
+        );
+    }
+
     /// A no-op `EngineProvisioningPort` so the full `create_starrocks_engine`
     /// handler runs to completion in tests (which otherwise short-circuit with
     /// "kubernetes not configured" and roll the engine row back). Every method
@@ -8030,8 +8177,14 @@ mod tests {
         }
     }
 
-    /// Seed a stored StarRocks engine (1 FE / 1 CN, no delegation) for the
-    /// update-path tests.
+    /// Seed a stored StarRocks engine ROW (1 FE / 1 CN, no delegation) for the
+    /// update-path tests. The row alone: tests that reach a path deriving the
+    /// engine's warehouse (anything building a provisioning request) must also
+    /// call [`attach_primary_warehouse_catalog`], because since SP3c-2 Task 5
+    /// the primary attachment — not `engines.warehouse_id` — is where that
+    /// warehouse comes from. Tests that arrange their own attachments
+    /// (`the_bootstrap_converges_every_attachment_in_name_order`) need the
+    /// bare row.
     async fn seed_sr_engine(st: &CpState, wh_id: Uuid) -> Engine {
         let spec = serde_json::json!({
             "imageVersion": DEFAULT_SR_FE_IMAGE,
@@ -8045,7 +8198,8 @@ mod tests {
                 "delegation": null,
             },
         });
-        st.engine_mgmt
+        let engine = st
+            .engine_mgmt
             .create_engine(
                 &format!("sr-{}", Uuid::new_v4().simple()),
                 "starrocks",
@@ -8055,7 +8209,47 @@ mod tests {
                 None,
             )
             .await
-            .expect("create engine row")
+            .expect("create engine row");
+        engine
+    }
+
+    /// Attach a warehouse's registry catalog to an engine as its PRIMARY, the
+    /// way both create paths do. Test fixtures that write an engine row
+    /// directly need it: since SP3c-2 Task 5 the primary attachment is where
+    /// the engine's warehouse comes from.
+    async fn attach_primary_warehouse_catalog(st: &CpState, engine: &Engine, wh_id: Uuid) {
+        let wh = st
+            .catalog
+            .get_warehouse(wh_id)
+            .await
+            .expect("get_warehouse")
+            .expect("warehouse present");
+        let registry = st.engine_mgmt.registry();
+        let (catalog, _) = registry
+            .ensure_warehouse_catalog(
+                &WarehouseIdentity {
+                    id: wh.id,
+                    name: &wh.name,
+                    workspace_id: wh.workspace_id,
+                },
+                None,
+            )
+            .await
+            .expect("warehouse catalog");
+        registry
+            .insert_attachment(&egret_catalog_registry::NewAttachment {
+                engine_id: engine.id,
+                catalog_id: catalog.id,
+                catalog_client_id: None,
+                credential_secret_id: None,
+                minted_client: false,
+                applied_now: true,
+                is_primary: true,
+                created_at: None,
+                apply_status: egret_catalog_registry::store::apply_status::APPLIED,
+            })
+            .await
+            .expect("attach primary");
     }
 
     #[test]
@@ -9505,6 +9699,10 @@ mod tests {
             .expect("connect");
         let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = seed_sr_engine(&st, wh.id).await;
+        // The warehouse this engine leads with comes from its PRIMARY
+        // attachment (SP3c-2 Task 5), which `create_starrocks_engine` writes
+        // and the bare row fixture does not.
+        attach_primary_warehouse_catalog(&st, &engine, wh.id).await;
         let body = sr_update_body(Some(StarRocksConfigBody {
             fe_replicas: Some(3),
             ..Default::default()
@@ -9622,6 +9820,10 @@ mod tests {
             .expect("connect");
         let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = seed_sr_engine(&st, wh.id).await;
+        // The warehouse this engine leads with comes from its PRIMARY
+        // attachment (SP3c-2 Task 5), which `create_starrocks_engine` writes
+        // and the bare row fixture does not.
+        attach_primary_warehouse_catalog(&st, &engine, wh.id).await;
 
         // Simulate a concurrent change (e.g. a delete) that landed after this
         // handler call's `Engine` was already read.
@@ -10051,6 +10253,10 @@ mod tests {
             .expect("connect");
         let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = seed_sr_engine(&st, wh.id).await;
+        // The warehouse this engine leads with comes from its PRIMARY
+        // attachment (SP3c-2 Task 5), which `create_starrocks_engine` writes
+        // and the bare row fixture does not.
+        attach_primary_warehouse_catalog(&st, &engine, wh.id).await;
 
         let body = sr_update_body(Some(StarRocksConfigBody {
             fe_replicas: Some(2),
@@ -10091,6 +10297,10 @@ mod tests {
             .expect("connect");
         let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = seed_sr_engine(&st, wh.id).await;
+        // The warehouse this engine leads with comes from its PRIMARY
+        // attachment (SP3c-2 Task 5), which `create_starrocks_engine` writes
+        // and the bare row fixture does not.
+        attach_primary_warehouse_catalog(&st, &engine, wh.id).await;
 
         let body = sr_update_body(Some(StarRocksConfigBody {
             cn_replicas: Some(4),
@@ -10140,6 +10350,10 @@ mod tests {
             .expect("connect");
         let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = seed_sr_engine(&st, wh.id).await;
+        // The warehouse this engine leads with comes from its PRIMARY
+        // attachment (SP3c-2 Task 5), which `create_starrocks_engine` writes
+        // and the bare row fixture does not.
+        attach_primary_warehouse_catalog(&st, &engine, wh.id).await;
 
         let req = build_provision_req(&st, &engine)
             .await

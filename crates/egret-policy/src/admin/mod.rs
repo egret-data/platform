@@ -352,9 +352,10 @@ async fn resource_lookup(
     };
 
     // Suggestions from the profile's bound engines: catalog names at the catalog
-    // level, and LIVE catalog metadata (real schemas/tables/columns from the
-    // engine's warehouse) at the deeper levels — so a fresh policy can pick from
-    // what actually exists, not only values already used in other policies.
+    // level, and LIVE catalog metadata (real schemas/tables/columns from every
+    // warehouse the engine reads) at the deeper levels — so a fresh policy can
+    // pick from what actually exists, not only values already used in other
+    // policies.
     let bindings = st.engines.list_engine_bindings().await.unwrap_or_default();
     let bound = || {
         bindings
@@ -370,11 +371,13 @@ async fn resource_lookup(
             }
         }
     } else {
+        // Every warehouse each bound engine reads, deduped across engines — an
+        // engine has one per attached egret catalog since SP3a (SP3c-2 Task 5).
         let mut warehouses: Vec<uuid::Uuid> = Vec::new();
         for e in bound() {
-            if let Some(w) = e.warehouse_id {
-                if !warehouses.contains(&w) {
-                    warehouses.push(w);
+            for w in &e.warehouse_ids {
+                if !warehouses.contains(w) {
+                    warehouses.push(*w);
                 }
             }
         }

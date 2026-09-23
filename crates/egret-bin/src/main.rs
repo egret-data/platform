@@ -276,14 +276,24 @@ impl egret_policy::EngineBindingReader for EngineBindingReaderImpl {
             .list_engines()
             .await
             .map_err(|e| egret_policy::EngineReadError(e.to_string()))?;
+        // Warehouses come from the ATTACHMENTS, not from `engines.warehouse_id`
+        // (SP3c-2 Task 5 left that column unread; Task 6 drops it). One query
+        // for all engines, so an autocomplete keystroke is not N+1.
+        let ids: Vec<uuid::Uuid> = engines.iter().map(|e| e.id).collect();
+        let mut warehouses = self
+            .store
+            .registry()
+            .warehouse_ids_by_engine(&ids)
+            .await
+            .map_err(|e| egret_policy::EngineReadError(e.to_string()))?;
         Ok(engines
             .into_iter()
             .map(|e| egret_policy::EngineBinding {
+                warehouse_ids: warehouses.remove(&e.id).unwrap_or_default(),
                 id: e.id,
                 name: e.name,
                 status: e.status,
                 authz_service_id: e.authz_service_id,
-                warehouse_id: Some(e.warehouse_id),
             })
             .collect())
     }

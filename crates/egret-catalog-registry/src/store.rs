@@ -2,7 +2,7 @@
 //! Reads `engine_mgmt.engines`, `catalog.warehouses` and `workspaces` by name
 //! for joins; writes only `registry.*`.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use egret_metastore::Db;
@@ -739,6 +739,70 @@ impl RegistryStore {
         .bind(engine_id)
         .fetch_all(self.pool())
         .await?)
+    }
+
+    /// The warehouse an engine leads with: the `warehouse_id` of its PRIMARY
+    /// attachment's catalog. SP3c-2 Task 5 made this the source for the two
+    /// facts that used to come off `engines.warehouse_id` — a StarRocks
+    /// engine's builtin storage volume and (through `ensure_engine_role`) the
+    /// engine's Ranger role.
+    ///
+    /// `None` covers BOTH ways an engine can fail to name one: no primary
+    /// attachment at all (migration 0150's partial unique index gives *at
+    /// most* one, never at least one), and a primary on a catalog with no
+    /// warehouse. The callers treat them alike — they need a warehouse and
+    /// there is none — and refuse rather than pick a catalog to stand in.
+    /// `create_engine` refuses a warehouse-less primary before it writes any
+    /// row, so the second case needs the table to have been written by
+    /// something other than egret.
+    pub async fn primary_warehouse_id(
+        &self,
+        engine_id: Uuid,
+    ) -> Result<Option<Uuid>, RegistryError> {
+        Ok(sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT c.warehouse_id \
+               FROM registry.catalogs c \
+               JOIN registry.engine_catalog_attachments a ON a.catalog_id = c.id \
+              WHERE a.engine_id = $1 AND a.is_primary",
+        )
+        .bind(engine_id)
+        .fetch_optional(self.pool())
+        .await?
+        .flatten())
+    }
+
+    /// Every warehouse each of `engine_ids` reaches — one per attached egret
+    /// warehouse catalog, primary first, then by attachment time. Engines with
+    /// no warehouse-backed attachment are absent from the map rather than
+    /// present with an empty vec.
+    ///
+    /// One query, not one per engine: the policy resource picker builds this
+    /// for every provisioned engine on every autocomplete keystroke.
+    pub async fn warehouse_ids_by_engine(
+        &self,
+        engine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<Uuid>>, RegistryError> {
+        let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT a.engine_id, c.warehouse_id \
+               FROM registry.engine_catalog_attachments a \
+               JOIN registry.catalogs c ON c.id = a.catalog_id \
+              WHERE a.engine_id = ANY($1) AND c.warehouse_id IS NOT NULL \
+              ORDER BY a.is_primary DESC, a.created_at, c.name",
+        )
+        .bind(engine_ids)
+        .fetch_all(self.pool())
+        .await?;
+        let mut out: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        for (engine_id, warehouse_id) in rows {
+            let ws = out.entry(engine_id).or_default();
+            // Two catalogs of the same warehouse on one engine is legal
+            // (different names, different configs); the picker wants the
+            // warehouse once.
+            if !ws.contains(&warehouse_id) {
+                ws.push(warehouse_id);
+            }
+        }
+        Ok(out)
     }
 
     /// After a successful full apply: every attachment whose catalog the apply

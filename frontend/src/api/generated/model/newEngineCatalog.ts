@@ -12,10 +12,12 @@
 export interface NewEngineCatalog {
   catalogId: string;
   /**
-     * Exactly one catalog in the list carries this. Until SP3c-2 drops
-     * `engines.warehouse_id`, the primary must be an egret warehouse catalog —
-     * the engine's Ranger role and (for StarRocks) its storage are still
-     * derived from that warehouse.
+     * Exactly one catalog in the list carries this, and it must be an egret
+     * warehouse catalog: the engine's Ranger role and (for StarRocks) its
+     * builtin storage are derived from that warehouse, and since SP3c-2 they
+     * are read back through this attachment rather than off the engine row.
+     * A primary naming a catalog with no warehouse is refused, with the
+     * reason, before anything is created.
      */
   primary?: boolean;
 }

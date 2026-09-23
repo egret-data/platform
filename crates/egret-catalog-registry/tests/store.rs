@@ -743,3 +743,99 @@ async fn create_replacing_orphan_serialises_with_a_racing_assignment() {
         }
     }
 }
+
+/// The two reads SP3c-2 Task 5 moved off `engines.warehouse_id`: the warehouse
+/// an engine LEADS with (its primary attachment's), and every warehouse it
+/// READS (one per attached egret warehouse catalog).
+///
+/// The engine row's own `warehouse_id` deliberately names a DIFFERENT warehouse
+/// from the primary attachment's, which the column still permits (nothing
+/// keeps the two in step once `create_engine` has run, and Task 6 removes the
+/// column). A reader that fell back to the column would answer `other` and
+/// fail here — without that divergence the assertion would pass for either
+/// implementation.
+#[tokio::test]
+async fn warehouse_reads_come_from_the_attachments_not_the_engine_column() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let ws = workspace(&db).await;
+    let led = warehouse(&db, &unique("wh_led"), ws).await;
+    let other = warehouse(&db, &unique("wh_other"), ws).await;
+    // `engines.warehouse_id` = `other`; the PRIMARY attachment is `led`'s.
+    let eng = engine(&db, other).await;
+    let bare = engine(&db, other).await;
+
+    let (led_catalog, _) = store
+        .ensure_warehouse_catalog(
+            &WarehouseIdentity {
+                id: led,
+                name: &unique("led"),
+                workspace_id: ws,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let (other_catalog, _) = store
+        .ensure_warehouse_catalog(
+            &WarehouseIdentity {
+                id: other,
+                name: &unique("other"),
+                workspace_id: ws,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    // No warehouse at all: must not appear in either answer.
+    let tpch = store
+        .create_catalog(
+            &unique("bench"),
+            &CatalogDef::parse("tpch", &json!({}), &json!(null)).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    for (catalog_id, is_primary) in [
+        (led_catalog.id, true),
+        (other_catalog.id, false),
+        (tpch.id, false),
+    ] {
+        store
+            .insert_attachment(&NewAttachment {
+                engine_id: eng,
+                catalog_id,
+                catalog_client_id: None,
+                credential_secret_id: None,
+                minted_client: false,
+                applied_now: true,
+                is_primary,
+                created_at: None,
+                apply_status: apply_status::APPLIED,
+            })
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        store.primary_warehouse_id(eng).await.unwrap(),
+        Some(led),
+        "the primary attachment's warehouse, not the engine row's ({other})"
+    );
+    let by_engine = store.warehouse_ids_by_engine(&[eng, bare]).await.unwrap();
+    assert_eq!(
+        by_engine.get(&eng),
+        Some(&vec![led, other]),
+        "every attached warehouse, primary first; the tpch catalog has none"
+    );
+
+    // An engine with no attachments at all: `engines.warehouse_id` still names
+    // `other`, and both reads must nevertheless say "nothing".
+    assert_eq!(
+        store.primary_warehouse_id(bare).await.unwrap(),
+        None,
+        "no primary attachment"
+    );
+    assert_eq!(by_engine.get(&bare), None, "absent, not an empty vec");
+}

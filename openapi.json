@@ -34265,7 +34265,7 @@
           },
           "primary": {
             "type": "boolean",
-            "description": "Exactly one catalog in the list carries this. Until SP3c-2 drops\n`engines.warehouse_id`, the primary must be an egret warehouse catalog —\nthe engine's Ranger role and (for StarRocks) its storage are still\nderived from that warehouse."
+            "description": "Exactly one catalog in the list carries this, and it must be an egret\nwarehouse catalog: the engine's Ranger role and (for StarRocks) its\nbuiltin storage are derived from that warehouse, and since SP3c-2 they\nare read back through this attachment rather than off the engine row.\nA primary naming a catalog with no warehouse is refused, with the\nreason, before anything is created."
           }
         }
       },
