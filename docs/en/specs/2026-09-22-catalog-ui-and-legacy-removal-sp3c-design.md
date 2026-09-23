@@ -35,8 +35,10 @@ components rather than reimplementing them. A jdbc catalog simply has fewer tabs
 **D2 — Primary becomes a flag on the attachment, in SP3c-1.** `registry.engine_catalog_attachments`
 gains `is_primary boolean`, unique per engine, backfilled from `engines.warehouse_id`, and
 `CreateEngineBody.warehouse_id` becomes optional so the wizard can attach several catalogs and mark
-one primary. The column itself is dropped in SP3c-2, once nothing reads it — and **SP3c-2 also owns letting a
-non-warehouse catalog lead**. In SP3c-1 the primary must still be an egret warehouse, because
+one primary. The column itself is dropped in SP3c-2, once nothing reads it. ~~SP3c-2 also owns letting a
+non-warehouse catalog lead.~~ **Withdrawn 2026-09-23 (user decision): the primary attachment must name a
+catalog that has a warehouse, in SP3c-2 as today** — see §4 step 3 for why that is a feature and not a
+rewrite. In SP3c-1 the primary must still be an egret warehouse, because
 `engines.warehouse_id` is `NOT NULL` and ten production sites read it, including `ensure_engine_role`
 seeding the engine's Ranger role from the warehouse and the StarRocks path deriving its storage.
 Rewriting those ten belongs in the PR that deletes the column, not in the one that rebuilds the UI
@@ -48,7 +50,13 @@ always was — storing it on the engine is what forced one warehouse per engine.
 **D3 — One permission family.** `warehouse_admin` and the resource-tag endpoints move onto
 `catalog_registry:*`, and a migration grants `catalog_registry:{read,create,update,delete}` to every
 role that holds the matching `warehouse:*` before the old keys are dropped. Nobody gains access,
-nobody loses it. `catalog_registry:read` joins `CONTROL_PLANE_PERMS` in SP3c-1, alongside the section it gates, and
+nobody loses it. **That grant must be re-run by SP3c-2's own migration, not assumed done** (amended
+2026-09-23): migration `0148` performed it once, in the past, so every role created since holds
+`warehouse:*` with no `catalog_registry:*` counterpart — `warehouseRedirect.test.tsx:140-173` is an
+entire describe block about exactly that population. Grant then delete, in one transaction, in that
+order. **Re-gate without re-tagging**: the routes keep their paths and their OpenAPI tag; only the
+`require()` string and the 403 descriptions change (§4 step 4).
+`catalog_registry:read` joins `CONTROL_PLANE_PERMS` in SP3c-1, alongside the section it gates, and
 `warehouse:read` is removed from it only in SP3c-2, with the permission itself. Both keys sit in the
 list in between, which is the safe order: a user holding either can always enter Control Plane, and
 no window exists in which neither key admits them.
@@ -102,18 +110,109 @@ two ways to reach catalogs; a user who upgrades to both has one.
 
 ## 4. SP3c-2 — the removal
 
-1. `engine_mgmt.engine_catalogs`: no production writer remains. Move `egret-policy`'s legacy read
-   onto the registry, then drop the table and the five dead store methods.
-2. The legacy `/engines/{id}/catalogs*` endpoints, once the new UI is the only caller — **but first
-   move `configError` onto the registry list.** That field is what makes a stored row the tightened
-   validator now refuses visible and repairable instead of invisible, and `GET /engines/{id}/catalogs`
-   is the only route that reports it: `GET /catalogs` returns the raw column and never parses. Delete
-   the route before moving the field and a broken catalog silently disappears again, which is the
-   defect SP3c-1 built the degraded entry to prevent.
-3. `engines.warehouse_id`, whose `is_primary` replacement landed in SP3c-1.
-4. `warehouse:*`, after D3's grant migration and the `warehouse_admin` re-gating.
+Amended 2026-09-23, after a survey of the tree at `14de835a` (SP3a, SP3b and SP3c-1 all merged).
+The survey corrected the premise of step 1, added a precondition to step 2, and turned step 3 into a
+decision rather than a rewrite. It ships as **one PR** with the URLs unchanged (user decision,
+2026-09-23); the steps below are its commit boundaries, not its release boundaries.
 
-Each step is independently revertible, and each lands with its own tests.
+**1. `engine_mgmt.engine_catalogs` — and the boot backfill, together.** The table has **four**
+production readers, not one: `egret-policy/src/store.rs:266-284`, the backfill's two scan queries
+(`backfill.rs:122-127`, `:193-200`), and `unmigrated_legacy_catalog_count`
+(`catalog-registry/src/store.rs:951-962`), whose non-zero count 409s every Trino apply
+(`engines.rs:641-653`). `run_backfill` runs unconditionally at every boot
+(`egret-bin/src/main.rs:1263`), so the table cannot be dropped while the backfill lives.
+
+Ruling (user decision, 2026-09-23): **remove both, and make SP3a/3b/3c-1 a required upgrade hop.**
+After SP3c-2 no code migrates a pre-SP3a database, so the migration must **fail loudly rather than
+drop data** — it raises if `engine_mgmt.engine_catalogs` still holds a row
+`registry.legacy_engine_catalogs` has not mapped, naming the hop. An operator who meets that error
+upgrades through SP3c-1 and boots once.
+
+This also settles the policy reader without adding anything to the registry. Its legacy `UNION` arm
+exists for two populations (`egret-policy/src/store.rs:220-232`): engines whose backfill failed, and
+the rename window. The first ceases to exist when the backfill does. The second is **already stale** —
+`registry.catalogs.name` is `UNIQUE` and immutable (`0147:11-12`; `CreateRegistryCatalogBody.name`
+documented "immutable"; `UpdateRegistryCatalogBody` carries no name; `RegistryStore::update_catalog`
+says "kind and name never change"), and the only renamer left is the backfill's own suffix pass. So
+both legacy arms — `tag_assignments_for_service` and `bump_bound_tag_versions`
+(`tag_version.rs:61-64`) — delete outright. Dead with them: `legacy.rs` (664 lines, whose last
+consumer is the backfill), `map_legacy_row_on`, `registry.legacy_engine_catalogs`, the apply guard,
+the five dead store methods, and eleven DB test files.
+
+**2. The legacy `/engines/{id}/catalogs*` endpoints — after `configError` moves.** Five of the six
+routes already have no caller anywhere; only `GET` has one, and only as the `configError` carrier, so
+the stated order is right. Two corrections:
+
+- **The move must degrade, never propagate.** `to_dto` (`catalogs.rs:237-269`) sets `config` from the
+  raw column and parses nothing. Adding a `row.def()` call per row makes one stored row the tightened
+  validator refuses able to fail the **whole list** — precisely the defect SP3c-1's review N1 fixed.
+  Record the `Err` in a new `config_error` field; never `?`.
+- **A carve-out loses its channel.** `catalog_apply.rs:1265-1272` deliberately does *not* write
+  `apply_status = failed` for `ApplyError::Build`, on the written ground that the reason "is reported
+  independently as `configError` on `GET /engines/{id}/catalogs`" — one of the routes being deleted.
+  Move the field first and the channel survives; delete first and a Trino build failure is invisible
+  on **both** surfaces. This was not in the design and is now part of the precondition.
+
+Deleting the routes also retires `CatalogTestDto`'s undiscriminated `{ ok, message }`, which is what
+makes D4 true everywhere rather than on one route. Note that `POST /engines/{id}/catalogs/{cid}` and
+`…/apply` live under the same URL prefix but are **registry-era and stay**.
+
+**3. `engines.warehouse_id` — and what "primary" may now mean.** One writer (`store.rs:203-227`),
+eleven production readers; four of them die with step 1. `EngineDto.warehouse_id` leaves the wire,
+which deletes two frontend echo lines (`useEngineConfigForm.ts:1291`,
+`useStarRocksConfigForm.ts:506`) the server already ignores on `PUT`.
+
+Two readers need an answer rather than a rewrite. StarRocks derives its builtin storage volume from
+the warehouse (`engines.rs:626-635`, `:4977-4983`), and `ensure_engine_role` / `create_client` seed
+the engine's Ranger role and Catalog Client from it (`engines.rs:2899-2905`, `:3073`, `:3800`). A
+`jdbc` primary has `warehouse_id IS NULL` and answers neither.
+
+Ruling (user decision, 2026-09-23): **the primary attachment must name a catalog that has a
+warehouse.** The backend refuses `is_primary` on a catalog without one, and says why. That is today's
+behaviour preserved, which keeps SP3c-2 a removal; letting a non-warehouse catalog lead is a feature,
+and a PR that deletes some 2 500 lines is the worst place to introduce the one thing that breaks a
+live provision. It becomes its own item after SP4.
+
+Two consequences to write down, because nobody had:
+
+- `EngineBinding.warehouse_id` (`egret-bin/src/main.rs:286`) feeds the Ranger policy-editor
+  autocomplete (`egret-policy/src/admin/mod.rs:372-396`). An engine now has *N* warehouses — one per
+  attached egret catalog — so it becomes `warehouse_ids: Vec<Uuid>`, and the consumer already dedupes
+  into a `Vec`. This **widens** the picker: an engine attaching three egret catalogs will
+  autocomplete all three warehouses' schemas. That is the right answer, and it is a behaviour change.
+- Migration `0150`'s partial unique index enforces **at most one** primary, not exactly one. Dropping
+  `engines.warehouse_id` removes the last `NOT NULL` anchor for "an engine has a primary", leaving
+  `resolve_primary_catalog` as the sole enforcement point.
+
+**4. `warehouse:*` — re-gate without re-tagging.** Thirty `require()` sites: 27 in
+`catalog-engine/src/warehouse_admin/mod.rs`, 3 in `egret-bi/src/catalog_tags.rs`. The migration
+re-runs D3's grant and then deletes the four keys in one transaction, and the four `perm!` entries
+leave `egret-core/src/rbac.rs:82-104`.
+
+The URLs do not move (user decision, 2026-09-23): `/control-plane/warehouses/{id}/…` keeps its paths
+**and its OpenAPI tag**. Only the `require()` string and the 403 descriptions change. Re-tagging would
+rename some forty generated functions across `api/controlPlane.ts:209-480` and break three e2e specs
+plus the hand-written URLs in `api/catalogTags.ts`, for nothing a user can see. The path parameter
+stays a warehouse id, which the frontend still holds as `RegistryCatalogDto.warehouseId`.
+
+**5. The Warehouses UI section.** Two traps a grep for `/control-plane/warehouses` does not find:
+
+- `CatalogCreate.tsx:28` imports `warehousesQueryKey` **from `"../Warehouses"`**, not from
+  `"../queryKeys"` where it is defined. Deleting the page is a compile break until that import moves.
+- `AddWarehouseDialog` (`Warehouses.tsx:258-401`) is the **only** create-warehouse UI in the tree.
+  The section may not be deleted until `CatalogCreate` can create an egret-warehouse catalog end to
+  end — verified in a browser, not inferred.
+
+`WarehouseRedirect` **stays**, re-gated, as an unlisted compatibility route: it already answers the
+warehouse-id → catalog-id lookup that `WorkspaceDetail.tsx:409` and `StorageDetail.tsx:546` would
+otherwise each have to grow, and it keeps a bookmarked URL working. `WorkspaceDetail.tsx:377`'s
+`?workspace=` link re-points at `Catalogs.tsx`, which already supports that filter server-side. The
+list route, the sidebar entry, `Warehouses.tsx` and its two tests go.
+
+**Ordering and risk.** Steps 1, 2, 4 and 5 are mechanical once their preconditions hold. Step 3 is
+not: it travels as its own commit with its own live check, and the PR's final gate **provisions both
+a Trino and a StarRocks engine on kind**, because the storage derivation and the Ranger role seeding
+are where a mistake becomes a broken cluster rather than a failing test.
 
 ## 5. Testing
 
@@ -122,7 +221,19 @@ Each step is independently revertible, and each lands with its own tests.
 - A permission test that a user holding only `catalog_registry:read` can enter Control Plane and see
   Catalogs — the lock-out this design exists to avoid.
 - A migration test that every role holding `warehouse:*` ends with the matching `catalog_registry:*`
-  and no more.
+  and no more — seeded with a role created **after** `0148`, since that is the population the re-run
+  exists for (§4 step 4). No such test exists today.
+- A migration test that SP3c-2 **refuses** a database with an unmapped `engine_mgmt.engine_catalogs`
+  row, rather than dropping it (§4 step 1). A migration that silently succeeds on data it cannot
+  carry forward is the failure mode this guard exists to make impossible.
+- A test that `GET /catalogs` still lists every row when one row's stored config no longer parses,
+  and reports that row's `configError` — the rewritten home of
+  `one_unparseable_catalog_does_not_take_an_engines_whole_list_with_it`, which moves rather than dies.
+- A backend test that attaching `is_primary` to a catalog with no warehouse is refused, and says why.
+- Live on kind, reported as manual and **provisioning both engine types**: a Trino engine and a
+  StarRocks engine, each provisioned after the column is gone, each reaching `HEALTHY`, with the
+  StarRocks storage volume and the engine's Ranger role both verified against the primary
+  attachment's catalog rather than against the dropped column.
 - `provisioning-ui-kind.spec.ts` is **already stale** — it expects a dialog that became a full-page
   wizard — so SP3c-1 rewrites it rather than inheriting a broken baseline.
 - Live on kind, reported as manual: create a catalog in the UI, attach it to an engine, watch the
