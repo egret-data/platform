@@ -10064,7 +10064,7 @@
             }
           },
           "409": {
-            "description": "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or the warehouse is still an engine's primary warehouse, or the boot backfill has just created and assigned its catalog (retry)",
+            "description": "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or the warehouse is still an engine's primary warehouse, or a concurrent engine create has just created and assigned its catalog (retry)",
             "content": {
               "application/json": {
                 "schema": {

@@ -856,14 +856,14 @@ fn is_primary(attachment: &egret_catalog_registry::AttachmentRow) -> bool {
 /// engine may still hold), stated once here for the detach and engine-delete
 /// paths:
 ///   - another attachment still naming this client keeps BOTH (review F-5):
-///     the backfill can point two engines at one legacy client and one shared
-///     secret, and revoking on behalf of one would break the other's live
-///     Trino properties;
+///     the (now-gone) boot backfill pointed two engines at one legacy client
+///     and one shared secret, and revoking on behalf of one would break the
+///     other's live Trino properties;
 ///   - the secret goes only once the client that holds it is actually revoked
 ///     — the same order, and the same reason, as the attach rollback
 ///     (review F-6). A live, unrevoked client whose egret copy is gone is a
 ///     credential nobody can clean up, so it is kept and logged loudly
-///     instead. `catalog_client_id IS NULL` (a backfilled row that named no
+///     instead. `catalog_client_id IS NULL` (a row the backfill left with no
 ///     client) has nothing to revoke, so its secret can go.
 pub(crate) async fn retire_minted_credential(
     st: &CpState,

@@ -180,9 +180,9 @@ impl CatalogStore {
     /// catalog row before the attachment check, so a racing attach either
     /// commits first (and is then seen and 409s here) or blocks until this
     /// transaction ends (and then finds the catalog gone). A warehouse with no
-    /// registry catalog yet (the boot backfill has not reached it) falls
-    /// straight through to the plain delete; a warehouse that is still an
-    /// un-migrated engine's `engines.warehouse_id` primary hits that FK
+    /// registry catalog yet (`ensure_warehouse_catalog` has not run for it, or
+    /// a past attempt failed) falls straight through to the plain delete; a
+    /// warehouse that is still an engine's `engines.warehouse_id` primary hits that FK
     /// (`engines_warehouse_id_fkey`, migration 0056) and is mapped to a 409
     /// naming the engine(s) too, instead of a raw 500.
     pub async fn delete_warehouse_releasing_catalog(&self, id: Uuid) -> Result<(), CatalogError> {
@@ -244,16 +244,21 @@ impl CatalogStore {
             // SP3 catalog-registry review N4: our own `SELECT … FOR UPDATE`
             // above only locks a registry catalog that already exists when we
             // read it — it cannot lock the ABSENCE of one. If the warehouse had
-            // no registry catalog yet (the boot backfill has not reached it),
-            // the SELECT returns nothing and we fall straight through to this
-            // DELETE; a backfill that creates the catalog (+ its
-            // `catalog_workspaces` assignment, atomically, in its own
-            // transaction) between our SELECT and this DELETE commits fine,
-            // and this DELETE then cascades into deleting that brand-new
-            // catalog row — which its `catalog_workspaces` row (NO ACTION)
-            // blocks, same shape as the engines FK above. Racing the boot
-            // backfill this way is rare but the failure mode without this arm
-            // is a raw 500, not a 409, so it is mapped the same way.
+            // no registry catalog yet, the SELECT returns nothing and we fall
+            // straight through to this DELETE; a concurrent
+            // `ensure_warehouse_catalog` — engine create, or an attach to this
+            // warehouse — that creates the catalog (+ its `catalog_workspaces`
+            // assignment, atomically, in its own transaction) between our
+            // SELECT and this DELETE commits fine, and this DELETE then
+            // cascades into deleting that brand-new catalog row — which its
+            // `catalog_workspaces` row (NO ACTION) blocks, same shape as the
+            // engines FK above. Losing that race is rare but the failure mode
+            // without this arm is a raw 500, not a 409, so it is mapped the
+            // same way.
+            //
+            // The boot backfill was this arm's original racer (review N4) and
+            // is gone as of SP3c-2; the engine-create path races identically,
+            // so the arm stays.
             Err(sqlx::Error::Database(d))
                 if d.constraint() == Some("catalog_workspaces_catalog_id_fkey") =>
             {

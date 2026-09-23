@@ -10,7 +10,6 @@ pub mod legacy;
 pub mod name;
 pub mod render;
 pub mod report;
-pub mod scan;
 pub mod sensitive;
 pub mod store;
 pub mod tag_version;

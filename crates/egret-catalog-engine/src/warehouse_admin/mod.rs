@@ -410,7 +410,8 @@ async fn create_warehouse(
         .ok_or(CatalogHttpError::NotFound)?;
 
     // SP3: the warehouse is a registry catalog, assigned to this workspace. A
-    // failure is not fatal — engine create and the boot backfill ensure it too.
+    // failure is not fatal — `ensure_warehouse_catalog` is idempotent, and
+    // engine create calls it again on every attach to this warehouse.
     if let Err(e) = st
         .store
         .registry()
@@ -502,7 +503,7 @@ async fn get_warehouse(
         (status = 204, description = "Warehouse deleted"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing warehouse:delete permission", body = ErrorBody),
-        (status = 409, description = "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or the warehouse is still an engine's primary warehouse, or the boot backfill has just created and assigned its catalog (retry)", body = ErrorBody),
+        (status = 409, description = "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or the warehouse is still an engine's primary warehouse, or a concurrent engine create has just created and assigned its catalog (retry)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

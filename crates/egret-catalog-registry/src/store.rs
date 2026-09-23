@@ -518,7 +518,8 @@ impl RegistryStore {
     /// The catalog of a warehouse, created (normalised name, assigned to the
     /// warehouse's workspace) the first time. The assignment is written only with
     /// the catalog, so an admin's later un-assignment is never undone here.
-    /// `preferred_name` is used verbatim when free (the backfill's `egret`).
+    /// `preferred_name` is used verbatim when free (only a `#[cfg(test)]`
+    /// helper passes one today).
     ///
     /// `report_for` is called at most once, only when a catalog is actually
     /// created, right before the transaction commits: whatever it returns is
@@ -649,9 +650,9 @@ impl RegistryStore {
     /// Whether an attachment OTHER than (`engine_id`, `catalog_id`) still names
     /// `client_id` as its Catalog Client.
     ///
-    /// Two attachments can share one client: the backfill takes it verbatim
-    /// from the legacy row and derives the credential secret's name from it
-    /// (`catalog-client-{id}`), so `create_or_reuse_secret` deliberately
+    /// Two attachments can share one client: the (now-gone) boot backfill took
+    /// it verbatim from the legacy row and derived the credential secret's
+    /// name from it (`catalog-client-{id}`), so `create_or_reuse_secret` deliberately
     /// collapses them onto one secret. Revoking on behalf of one of them would
     /// destroy a credential the OTHER engine's rendered Trino properties still
     /// present — the standing "never destroy a credential an engine may still
@@ -884,9 +885,9 @@ impl RegistryStore {
 
     /// The §4.6 "assigned OR owned-and-not-yet-assigned" visibility rule, as
     /// one executable predicate: a workspace sees a warehouse when its registry
-    /// catalog is assigned there — or, for a warehouse the backfill has not
-    /// reached yet (no registry catalog at all), when the warehouse is that
-    /// workspace's own.
+    /// catalog is assigned there — or, for a warehouse with no registry catalog
+    /// yet (`ensure_warehouse_catalog` has not run for it, or a past attempt
+    /// failed), when the warehouse is that workspace's own.
     ///
     /// NO PRODUCTION CALLER TODAY, deliberately (review F-10). It is kept for
     /// two reasons, and a third that is NOT one of them:
