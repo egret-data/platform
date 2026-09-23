@@ -6,7 +6,6 @@
 
 pub mod config;
 pub mod error;
-pub mod legacy;
 pub mod name;
 pub mod render;
 pub mod sensitive;
@@ -19,10 +18,6 @@ pub use config::{
     JdbcDialect, JdbcSsl, RestAuth, SampleConfig, SecretProperties, ValidationError,
 };
 pub use error::RegistryError;
-pub use legacy::{
-    classify, classify_generic, legacy_props_and_secrets, plaintext_secrets, Classified,
-    ClassifyOutcome, LegacyCatalog,
-};
 pub use name::{
     first_free_name, is_valid_catalog_name, join_truncated, normalize_catalog_name, with_suffix,
     MAX_NAME_LEN,

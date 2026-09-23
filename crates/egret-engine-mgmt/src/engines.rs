@@ -35,14 +35,13 @@ use uuid::Uuid;
 
 use egret_core::http::ErrorBody;
 
-use crate::catalog_apply::CatalogOpError;
 use crate::dependents::{
     DeleteEngineOutcome, EngineConflictBody, EngineDependentDto, EngineDependentKind,
 };
 use crate::Engine;
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
-use egret_catalog_registry::{AttachedCatalog, CatalogDef, LegacyCatalog, WarehouseIdentity};
+use egret_catalog_registry::{AttachedCatalog, WarehouseIdentity};
 
 /// Default Trino image (official `trinodb/trino` tag) when the body omits it.
 const DEFAULT_IMAGE_VERSION: &str = "470";
@@ -99,16 +98,15 @@ pub fn router() -> Router<CpState> {
             "/engines/{id}",
             get(get_engine).put(update_engine).delete(delete_engine),
         )
-        .route(
-            "/engines/{id}/catalogs",
-            get(list_catalogs).post(add_catalog),
-        )
+        // `POST` here is the registry's attach (`crate::catalogs::attach_catalog`);
+        // the legacy `GET`/`PUT`/`DELETE` siblings and the sibling `/catalogs`
+        // (list+add) route were removed (SP3c-2 Task 4). `/catalogs/{cid}/test`
+        // (below) was ALSO one of the six but was kept — see `test_catalog`'s
+        // doc comment: `EngineDetail.tsx`'s per-row Test button is a live
+        // caller with no registry-route equivalent.
         .route(
             "/engines/{id}/catalogs/{cid}",
-            get(get_catalog)
-                .put(update_catalog)
-                .post(crate::catalogs::attach_catalog)
-                .delete(remove_catalog),
+            post(crate::catalogs::attach_catalog),
         )
         .route("/engines/{id}/catalogs/{cid}/test", post(test_catalog))
         .route("/engines/{id}/pods/{pod}/logs", get(pod_logs))
@@ -343,212 +341,6 @@ pub(crate) struct CatalogAttachErrorDto {
     catalog_id: Uuid,
     /// Why the attach failed, in the words the attach route would have used.
     message: String,
-}
-
-#[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct EngineCatalogDto {
-    pub(crate) id: Uuid,
-    pub(crate) name: String,
-    pub(crate) kind: String,
-    pub(crate) is_primary: bool,
-    pub(crate) secret_ref: Option<Uuid>,
-    /// Set only when this catalog's STORED configuration no longer parses, and
-    /// then it carries the validation error. The entry is degraded, not
-    /// complete: `kind` falls back to the stored column and `secretRef` is
-    /// null, because neither can be derived without a parse. Render the row as
-    /// broken and let the operator open it — do not hide it, and do not treat
-    /// the absence of `secretRef` as "no secret".
-    ///
-    /// This exists because tightening a validator is a migration: rows that
-    /// went through the old gate are still stored, and a list that refuses to
-    /// show them leaves the operator unable to find the one row to repair
-    /// (SP3c review N1).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) config_error: Option<String>,
-}
-
-/// The legacy `kind` of a registry catalog: `egret-warehouse` for a warehouse,
-/// otherwise the Trino connector name (what `engine_catalogs.kind` held).
-pub(crate) fn legacy_kind(def: &CatalogDef) -> String {
-    if def.warehouse_id().is_some() {
-        "egret-warehouse".into()
-    } else {
-        def.trino_connector_name()
-    }
-}
-
-/// One attachment, for a route that is ABOUT that one catalog. A row whose
-/// stored configuration no longer parses is a 400 naming the row: the caller
-/// asked for this catalog specifically, so the failure is confined and the
-/// message points straight at what to fix.
-fn legacy_catalog_dto(a: &AttachedCatalog) -> Result<EngineCatalogDto, CpError> {
-    let def = a
-        .catalog
-        .def()
-        .map_err(|e| CpError::BadRequest(format!("catalog {}: {e}", a.catalog.name)))?;
-    Ok(EngineCatalogDto {
-        id: a.catalog.id,
-        name: a.catalog.name.clone(),
-        kind: legacy_kind(&def),
-        is_primary: a.is_primary(),
-        secret_ref: def.secret_ids().into_iter().next(),
-        config_error: None,
-    })
-}
-
-/// The same DTO for a LIST, where one bad row must not take the others with it.
-/// `collect::<Result<_, _>>()?` turned a single un-parseable catalog into a 400
-/// for the whole engine, naming nothing — so the operator saw no catalogs and
-/// no way to find the broken one. Every field that needs no parse is still
-/// filled in; `configError` carries the reason (SP3c review N1).
-fn legacy_catalog_dto_degrading(a: &AttachedCatalog) -> EngineCatalogDto {
-    match a.catalog.def() {
-        Ok(def) => EngineCatalogDto {
-            id: a.catalog.id,
-            name: a.catalog.name.clone(),
-            kind: legacy_kind(&def),
-            is_primary: a.is_primary(),
-            secret_ref: def.secret_ids().into_iter().next(),
-            config_error: None,
-        },
-        Err(e) => EngineCatalogDto {
-            id: a.catalog.id,
-            name: a.catalog.name.clone(),
-            // The stored column, which needs no parse. `legacy_kind`'s
-            // warehouse special case still holds: `warehouse_id` is its own
-            // column too.
-            kind: if a.catalog.warehouse_id.is_some() {
-                "egret-warehouse".into()
-            } else {
-                a.catalog.kind.clone()
-            },
-            is_primary: a.is_primary(),
-            secret_ref: None,
-            config_error: Some(e.to_string()),
-        },
-    }
-}
-
-/// The registry catalog `cid` as attached to `engine` (404 when not attached).
-async fn find_attached(
-    st: &CpState,
-    engine: &Engine,
-    cid: Uuid,
-) -> Result<AttachedCatalog, CpError> {
-    st.engine_mgmt
-        .registry()
-        .list_engine_attachments(engine.id)
-        .await?
-        .into_iter()
-        .find(|a| a.catalog.id == cid)
-        .ok_or(CpError::NotFound)
-}
-
-/// `GET /engines/{id}/catalogs/{cid}` payload: full stored config + secretRef,
-/// with secret material removed or masked (see [`redact_catalog_config`]).
-#[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-struct EngineCatalogDetailDto {
-    id: Uuid,
-    name: String,
-    kind: String,
-    is_primary: bool,
-    secret_ref: Option<Uuid>,
-    #[schema(value_type = Object)]
-    config: serde_json::Value,
-}
-
-/// What `GET /engines/{id}/catalogs/{cid}` returns in place of a sensitive
-/// value. The edit form PUTs the config back verbatim, so `update_catalog`
-/// treats this exact string as "unchanged" (see [`restore_redacted_properties`]).
-const REDACTED_VALUE: &str = "********";
-
-/// Whether a catalog config key names secret material (spec SP1 §4.9).
-fn is_sensitive_config_key(key: &str) -> bool {
-    egret_catalog_registry::is_sensitive_key(key)
-}
-
-/// Strip or mask secret material before a catalog config leaves the server.
-/// For every kind: the minted client's `credential` and `clientRowId` are
-/// removed, and every top-level or `properties` value whose key matches
-/// [`is_sensitive_config_key`] becomes [`REDACTED_VALUE`]. `secretProperties`
-/// is left intact: its values are secret IDs, and its own key contains
-/// "secret".
-fn redact_catalog_config(mut config: serde_json::Value) -> serde_json::Value {
-    let Some(obj) = config.as_object_mut() else {
-        return config;
-    };
-    obj.remove("credential");
-    obj.remove("clientRowId");
-    for (k, v) in obj.iter_mut() {
-        if k != "properties" && k != "secretProperties" && is_sensitive_config_key(k) {
-            *v = serde_json::Value::String(REDACTED_VALUE.into());
-        }
-    }
-    if let Some(props) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
-        for (k, v) in props.iter_mut() {
-            if is_sensitive_config_key(k) {
-                *v = serde_json::Value::String(REDACTED_VALUE.into());
-            }
-        }
-    }
-    config
-}
-
-/// Undo [`redact_catalog_config`] on a PUT body: a sensitive key whose value is
-/// still exactly [`REDACTED_VALUE`] gets the stored value back, so re-saving
-/// the edit form never overwrites a password with the mask.
-fn restore_redacted_properties(config: &mut serde_json::Value, stored: &serde_json::Value) {
-    fn restore_level(
-        new: &mut serde_json::Map<String, serde_json::Value>,
-        old: Option<&serde_json::Map<String, serde_json::Value>>,
-    ) {
-        for (k, v) in new.iter_mut() {
-            if v.as_str() == Some(REDACTED_VALUE) && is_sensitive_config_key(k) {
-                if let Some(prev) = old.and_then(|o| o.get(k)) {
-                    *v = prev.clone();
-                }
-            }
-        }
-    }
-    let Some(new_obj) = config.as_object_mut() else {
-        return;
-    };
-    restore_level(new_obj, stored.as_object());
-    if let Some(new_props) = new_obj
-        .get_mut("properties")
-        .and_then(|p| p.as_object_mut())
-    {
-        restore_level(
-            new_props,
-            stored.get("properties").and_then(|p| p.as_object()),
-        );
-    }
-}
-
-#[derive(Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-struct AddCatalogBody {
-    name: String,
-    kind: String,
-    #[serde(default)]
-    #[schema(value_type = Object)]
-    config: serde_json::Value,
-    #[serde(default)]
-    secret_ref: Option<Uuid>,
-}
-
-/// `PUT /engines/{id}/catalogs/{cid}` body: replaces the stored `config` +
-/// `secret_ref` in full (not a partial patch).
-#[derive(Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-struct UpdateCatalogBody {
-    #[serde(default)]
-    #[schema(value_type = Object)]
-    config: serde_json::Value,
-    #[serde(default)]
-    secret_ref: Option<Uuid>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -5620,240 +5412,6 @@ async fn unassign_workspace_engine(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── catalog sub-routes ───────────────────────────────────────────────────────────
-
-#[utoipa::path(
-    get,
-    path = "/api/control-plane/engines/{id}/catalogs",
-    tag = "control-plane-engines",
-    params(("id" = Uuid, Path, description = "Engine id")),
-    responses(
-        (status = 200, description = "Catalogs attached to the engine. A catalog whose stored configuration no longer parses is listed with `configError` set rather than omitted, and never fails the whole list", body = Vec<EngineCatalogDto>),
-        (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
-        (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 500, description = "Internal error", body = ErrorBody),
-    ),
-)]
-async fn list_catalogs(
-    State(st): State<CpState>,
-    Auth(p): Auth,
-    Path(id): Path<Uuid>,
-) -> Result<Json<Vec<EngineCatalogDto>>, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
-    let engine = st
-        .engine_mgmt
-        .get_engine(id)
-        .await?
-        .ok_or(CpError::NotFound)?;
-    let attached = st
-        .engine_mgmt
-        .registry()
-        .list_engine_attachments(engine.id)
-        .await?;
-    Ok(Json(
-        attached.iter().map(legacy_catalog_dto_degrading).collect(),
-    ))
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/control-plane/engines/{id}/catalogs",
-    tag = "control-plane-engines",
-    params(("id" = Uuid, Path, description = "Engine id")),
-    request_body = AddCatalogBody,
-    responses(
-        (status = 201, description = "Catalog added to the registry (or the warehouse's registry catalog reused), applied to the engine, then attached", body = EngineCatalogDto),
-        (status = 400, description = "Missing/invalid catalog kind, name, warehouse or properties, or engine update failed", body = ErrorBody),
-        (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing engine:create permission", body = ErrorBody),
-        (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The catalog is already attached to this engine, a registry catalog with this name is in use, or the engine changed concurrently (e.g. a delete in progress; retry)", body = ErrorBody),
-        (status = 500, description = "Internal error", body = ErrorBody),
-    ),
-)]
-async fn add_catalog(
-    State(st): State<CpState>,
-    Auth(p): Auth,
-    Path(id): Path<Uuid>,
-    Json(b): Json<AddCatalogBody>,
-) -> Result<(StatusCode, Json<EngineCatalogDto>), CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "engine:create").await?;
-    let engine = st
-        .engine_mgmt
-        .get_engine(id)
-        .await?
-        .ok_or(CpError::NotFound)?;
-    // A concurrent DELETE already marked the row and may have torn the cluster
-    // down; 409 the common case here, before minting a client or a Ranger
-    // profile, rather than only catching it in `apply_built`'s re-read.
-    if engine.status == crate::engine_status::DELETING {
-        return Err(apply_conflict());
-    }
-    // The stored `kind` IS the Trino connector name (or `egret-warehouse`); the
-    // control-plane no longer gates on a fixed enum — any non-blank kind is a
-    // valid connector. The frontend's own catalog-kind list (a UX hint, not a
-    // gate) lives separately in `frontend/src/routes/control-plane/config/catalogKinds.ts`.
-    if b.kind.trim().is_empty() {
-        return Err(CpError::BadRequest("catalog kind is required".into()));
-    }
-
-    // Registry semantics (SP3): an egret warehouse attaches its warehouse's
-    // catalog (under that catalog's name — D5); any other kind becomes a registry
-    // catalog of its own, classified typed when that renders the same properties.
-    let registry = st.engine_mgmt.registry();
-    let catalog = if b.kind == "egret-warehouse" {
-        let wh_id = b.config["warehouseId"]
-            .as_str()
-            .and_then(|s| Uuid::parse_str(s).ok())
-            .ok_or_else(|| {
-                CpError::BadRequest("egret-warehouse catalog requires config.warehouseId".into())
-            })?;
-        let wh = st
-            .catalog
-            .get_warehouse(wh_id)
-            .await?
-            .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
-        if wh.lakekeeper_warehouse_id.is_none() {
-            return Err(CpError::BadRequest(
-                "warehouse is not provisioned yet".into(),
-            ));
-        }
-        // `config.clientId` (optional): mint this engine's client under the role
-        // of an EXISTING client of this warehouse instead of the engine role.
-        // `CatalogClient` never exposes a retrievable secret, so the referenced
-        // client cannot be reused verbatim; the fresh client is still ours
-        // (`minted_client`), so detach and engine delete revoke it.
-        let client_id_param = match b.config.get("clientId") {
-            Some(serde_json::Value::Null) | None => None,
-            Some(v) => Some(
-                v.as_str()
-                    .and_then(|s| Uuid::parse_str(s).ok())
-                    .ok_or_else(|| {
-                        CpError::BadRequest("config.clientId must be a UUID string".into())
-                    })?,
-            ),
-        };
-        let (catalog, _) = registry
-            .ensure_warehouse_catalog(
-                &WarehouseIdentity {
-                    id: wh.id,
-                    name: &wh.name,
-                    workspace_id: wh.workspace_id,
-                },
-                None,
-            )
-            .await?;
-        crate::catalog_apply::attach_to_engine(&st, &engine, &catalog, client_id_param)
-            .await
-            .map_err(CatalogOpError::into_legacy)?;
-        catalog
-    } else {
-        if !egret_catalog_registry::is_valid_catalog_name(&b.name) {
-            return Err(CpError::BadRequest(format!(
-                "catalog name {:?} must match ^[a-z][a-z0-9_]{{0,62}}$",
-                b.name
-            )));
-        }
-        let legacy = LegacyCatalog {
-            name: &b.name,
-            kind: &b.kind,
-            config: &b.config,
-            secret_ref: b.secret_ref,
-        };
-        let extracted =
-            crate::catalog_apply::extract_plaintext_secrets(&st, &b.name, &legacy).await?;
-        // Unattached and unassigned — what an earlier remove through this form
-        // leaves behind — is replaced by the new body, atomically, as it was
-        // before the registry (plan decision #27); an in-use name is 409.
-        let created = async {
-            let classified = egret_catalog_registry::classify(&legacy, &extracted)
-                .map_err(|e| CpError::BadRequest(e.to_string()))?;
-            crate::catalog_apply::validate_references(&st, &classified.def).await?;
-            // BEFORE the replace, never after: `create_catalog_replacing_orphan`
-            // DESTROYS a same-named orphan, and this request's rollback can only
-            // delete what it created — so a refusal decided later (a kind this
-            // engine cannot read, a name the engine reserves) would 400 having
-            // silently destroyed the operator's existing catalog definition
-            // (review F-2). The same function decides it for the registry
-            // attach route.
-            crate::catalog_apply::check_engine_supports(&engine, &b.name, &classified.def)
-                .map_err(CatalogOpError::into_legacy)?;
-            registry
-                .create_catalog_replacing_orphan(&b.name, &classified.def, None)
-                .await
-                .map_err(CpError::from)
-        }
-        .await;
-        let catalog = match created {
-            Ok((catalog, _replaced)) => catalog,
-            Err(e) => {
-                // Nothing references the secrets this request just made.
-                crate::catalog_apply::discard_extracted_secrets(&st, &extracted).await;
-                return Err(e);
-            }
-        };
-        if let Err(e) = crate::catalog_apply::attach_to_engine(&st, &engine, &catalog, None).await {
-            // Nothing attached it; the extracted secrets stay (plan table #19):
-            // the failed apply may have handed their values to the engine.
-            if let Err(del) = registry.delete_catalog(catalog.id).await {
-                tracing::warn!(catalog = %catalog.name, error = %del, "add rollback: catalog delete failed");
-            }
-            return Err(e.into_legacy());
-        }
-        catalog
-    };
-    let attached = find_attached(&st, &engine, catalog.id).await?;
-    Ok((StatusCode::CREATED, Json(legacy_catalog_dto(&attached)?)))
-}
-
-#[utoipa::path(
-    get,
-    path = "/api/control-plane/engines/{id}/catalogs/{cid}",
-    tag = "control-plane-engines",
-    params(
-        ("id" = Uuid, Path, description = "Engine id"),
-        ("cid" = Uuid, Path, description = "Registry catalog id"),
-    ),
-    responses(
-        (status = 200, description = "Full catalog config (system-minted secret material redacted)", body = EngineCatalogDetailDto),
-        (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
-        (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
-        (status = 500, description = "Internal error", body = ErrorBody),
-    ),
-)]
-async fn get_catalog(
-    State(st): State<CpState>,
-    Auth(p): Auth,
-    Path((id, cid)): Path<(Uuid, Uuid)>,
-) -> Result<Json<EngineCatalogDetailDto>, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
-    let engine = st
-        .engine_mgmt
-        .get_engine(id)
-        .await?
-        .ok_or(CpError::NotFound)?;
-    let attached = find_attached(&st, &engine, cid).await?;
-    let dto = legacy_catalog_dto(&attached)?;
-    let config = crate::catalog_apply::legacy_config_view(&st, &attached).await?;
-    Ok(Json(EngineCatalogDetailDto {
-        id: dto.id,
-        name: dto.name,
-        kind: dto.kind,
-        is_primary: dto.is_primary,
-        secret_ref: dto.secret_ref,
-        config: redact_catalog_config(config),
-    }))
-}
-
-/// `POST /engines/{id}/catalogs/{cid}/test` payload.
-#[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-struct CatalogTestDto {
-    ok: bool,
-    message: String,
-}
 
 /// Bound on the `/v1/statement` submit-then-poll loop: a hung/misbehaving
 /// coordinator must not block the request forever.
@@ -5886,50 +5444,6 @@ fn coordinator_error_message(code: u16, body: &[u8]) -> String {
     )
 }
 
-/// `POST /engines/{id}/catalogs/{cid}/test` — "test connection": runs
-/// `SHOW SCHEMAS FROM "<catalog>"` against the engine's Trino coordinator via
-/// the native-monitor coordinator proxy ([`crate::monitor::coordinator_call`],
-/// same service name + auth headers as query monitoring) and reports whether
-/// the query reaches `FINISHED`. Submits `POST /v1/statement`, then follows
-/// `nextUri` (GET) until a terminal state, an `error` object, or
-/// [`CATALOG_TEST_MAX_POLLS`] iterations are exhausted (→ `ok:false`,
-/// "timed out"). Never returns a transport/coordinator-shape failure as an
-/// HTTP error status — those map to `ok:false` with an explanatory message —
-/// EXCEPT when the coordinator itself is unreachable or kubernetes isn't
-/// configured, which surface as the usual `CpError` (mirrors the other
-/// coordinator-proxied routes in this file and in `monitor.rs`).
-#[utoipa::path(
-    post,
-    path = "/api/control-plane/engines/{id}/catalogs/{cid}/test",
-    tag = "control-plane-engines",
-    params(
-        ("id" = Uuid, Path, description = "Engine id"),
-        ("cid" = Uuid, Path, description = "Registry catalog id"),
-    ),
-    responses(
-        (status = 200, description = "Test-connection result (ok=false with a message on a coordinator/query failure)", body = CatalogTestDto),
-        (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
-        (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
-        (status = 502, description = "Trino coordinator unreachable", body = ErrorBody),
-        (status = 500, description = "Internal error", body = ErrorBody),
-    ),
-)]
-async fn test_catalog(
-    State(st): State<CpState>,
-    Auth(p): Auth,
-    Path((id, cid)): Path<(Uuid, Uuid)>,
-) -> Result<Json<CatalogTestDto>, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
-    let engine = st
-        .engine_mgmt
-        .get_engine(id)
-        .await?
-        .ok_or(CpError::NotFound)?;
-    let cat = find_attached(&st, &engine, cid).await?.catalog;
-    let (ok, message) = show_schemas_verdict(&st, &engine, &cat.name).await?;
-    Ok(Json(CatalogTestDto { ok, message }))
-}
 
 /// Run `SHOW SCHEMAS FROM "<catalog>"` on `engine`'s Trino coordinator and
 /// return the verdict as `(ok, message)`. Shared by the per-engine
@@ -6001,162 +5515,85 @@ pub(crate) async fn show_schemas_verdict(
     Ok((false, "timed out".into()))
 }
 
-#[utoipa::path(
-    delete,
-    path = "/api/control-plane/engines/{id}/catalogs/{cid}",
-    tag = "control-plane-engines",
-    params(
-        ("id" = Uuid, Path, description = "Engine id"),
-        ("cid" = Uuid, Path, description = "Registry catalog id"),
-    ),
-    responses(
-        (status = 200, description = "Catalog removed from the cluster, then detached (the registry catalog is kept) and its minted client revoked"),
-        (status = 400, description = "Cannot delete the primary catalog, Kubernetes not configured, or the engine update failed (the catalog is kept)", body = ErrorBody),
-        (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing engine:delete permission", body = ErrorBody),
-        (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
-        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
-        (status = 500, description = "Internal error", body = ErrorBody),
-    ),
-)]
-async fn remove_catalog(
-    State(st): State<CpState>,
-    Auth(p): Auth,
-    Path((id, cid)): Path<(Uuid, Uuid)>,
-) -> Result<StatusCode, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "engine:delete").await?;
-    let engine = st
-        .engine_mgmt
-        .get_engine(id)
+/// The registry catalog `cid` as attached to `engine` (404 when not attached).
+/// [`test_catalog`]'s only remaining caller (SP3c-2 Task 4 deleted the other
+/// five legacy `/engines/{id}/catalogs*` handlers this once served too).
+async fn find_attached(
+    st: &CpState,
+    engine: &Engine,
+    cid: Uuid,
+) -> Result<AttachedCatalog, CpError> {
+    st.engine_mgmt
+        .registry()
+        .list_engine_attachments(engine.id)
         .await?
-        .ok_or(CpError::NotFound)?;
-    let attached = find_attached(&st, &engine, cid).await?;
-    crate::catalog_apply::detach_from_engine(&st, &engine, &attached.catalog)
-        .await
-        .map_err(CatalogOpError::into_legacy)?;
-    Ok(StatusCode::OK)
+        .into_iter()
+        .find(|a| a.catalog.id == cid)
+        .ok_or(CpError::NotFound)
 }
 
+/// `POST /engines/{id}/catalogs/{cid}/test` payload.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct CatalogTestDto {
+    ok: bool,
+    message: String,
+}
+
+/// `POST /engines/{id}/catalogs/{cid}/test` — "test connection": runs
+/// `SHOW SCHEMAS FROM "<catalog>"` against the engine's Trino coordinator via
+/// the native-monitor coordinator proxy ([`crate::monitor::coordinator_call`],
+/// same service name + auth headers as query monitoring) and reports whether
+/// the query reaches `FINISHED`. Submits `POST /v1/statement`, then follows
+/// `nextUri` (GET) until a terminal state, an `error` object, or
+/// [`CATALOG_TEST_MAX_POLLS`] iterations are exhausted (→ `ok:false`,
+/// "timed out"). Never returns a transport/coordinator-shape failure as an
+/// HTTP error status — those map to `ok:false` with an explanatory message —
+/// EXCEPT when the coordinator itself is unreachable or kubernetes isn't
+/// configured, which surface as the usual `CpError` (mirrors the other
+/// coordinator-proxied routes in this file and in `monitor.rs`).
+///
+/// SP3c-2 Task 4 deleted this route's five siblings but KEPT this one: it is
+/// the only route in the product that tests a *named engine's* view of a
+/// catalog. The registry's `POST /catalogs/{id}/test` (`test_registry_catalog`
+/// in `catalogs.rs`) picks an applied Trino attachment across ALL of a
+/// catalog's engines and cannot be pointed at one, and it gates on
+/// `catalog_registry:read` — which an `engine:read`-only operator (this
+/// route's persona) does not hold. `EngineDetail.tsx`'s per-row Test button
+/// calls this route for exactly that reason (SP3c review F-3, restoring the
+/// capability D-6 had dropped); deleting it here would have deleted that
+/// button's endpoint out from under it (see `frontend/src/routes/control-plane/EngineDetail.tsx`).
 #[utoipa::path(
-    put,
-    path = "/api/control-plane/engines/{id}/catalogs/{cid}",
+    post,
+    path = "/api/control-plane/engines/{id}/catalogs/{cid}/test",
     tag = "control-plane-engines",
     params(
         ("id" = Uuid, Path, description = "Engine id"),
         ("cid" = Uuid, Path, description = "Registry catalog id"),
     ),
-    request_body = UpdateCatalogBody,
     responses(
-        (status = 200, description = "Catalog config replaced in the registry and applied to every engine that attaches it", body = EngineCatalogDto),
-        (status = 400, description = "Primary or managed egret-warehouse catalogs are not editable, the properties do not fit the catalog's kind, or this engine's update failed (the catalog is not reverted)", body = ErrorBody),
+        (status = 200, description = "Test-connection result (ok=false with a message on a coordinator/query failure)", body = CatalogTestDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
-        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
+        (status = 502, description = "Trino coordinator unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
-async fn update_catalog(
+async fn test_catalog(
     State(st): State<CpState>,
     Auth(p): Auth,
     Path((id, cid)): Path<(Uuid, Uuid)>,
-    Json(b): Json<UpdateCatalogBody>,
-) -> Result<Json<EngineCatalogDto>, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+) -> Result<Json<CatalogTestDto>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-    let attached = find_attached(&st, &engine, cid).await?;
-    let def = attached
-        .catalog
-        .def()
-        .map_err(|e| CpError::BadRequest(format!("catalog {}: {e}", attached.catalog.name)))?;
-    if attached.is_primary() {
-        return Err(CpError::BadRequest(
-            "cannot edit the primary catalog".into(),
-        ));
-    }
-    if def.warehouse_id().is_some() {
-        return Err(CpError::BadRequest(
-            "egret-warehouse catalogs are managed and not editable".into(),
-        ));
-    }
-    // A concurrent DELETE already marked the row and may have torn the cluster
-    // down; 409 the common case here, before writing the new config.
-    if engine.status == crate::engine_status::DELETING {
-        return Err(apply_conflict());
-    }
-    // The form echoes what GET returned; keep stored values the admin left masked.
-    let stored = crate::catalog_apply::legacy_config_view(&st, &attached).await?;
-    let mut config = b.config.clone();
-    restore_redacted_properties(&mut config, &stored);
-    let kind = legacy_kind(&def);
-    let legacy = LegacyCatalog {
-        name: &attached.catalog.name,
-        kind: &kind,
-        config: &config,
-        secret_ref: b.secret_ref,
-    };
-    let extracted =
-        crate::catalog_apply::extract_plaintext_secrets(&st, &attached.catalog.name, &legacy)
-            .await?;
-    // A generic catalog stays generic; a typed one must still be expressible as
-    // its kind (the kind of a catalog never changes).
-    let new_def = if def.kind() == egret_catalog_registry::CatalogKind::Generic {
-        egret_catalog_registry::classify_generic(&legacy, &extracted)
-            .map_err(|e| CpError::BadRequest(e.to_string()))
-    } else {
-        egret_catalog_registry::classify(&legacy, &extracted)
-            .map_err(|e| CpError::BadRequest(e.to_string()))
-            .and_then(|classified| {
-                if classified.def.kind() == def.kind() {
-                    Ok(classified.def)
-                } else {
-                    Err(CpError::BadRequest(format!(
-                        "these properties cannot be expressed as a {} catalog; \
-                         edit catalog {} through PUT /api/control-plane/catalogs/{{id}} instead",
-                        def.kind().as_str(),
-                        attached.catalog.name
-                    )))
-                }
-            })
-    };
-    let new_def = match new_def {
-        Ok(d) => match crate::catalog_apply::validate_references(&st, &d).await {
-            Ok(()) => d,
-            Err(e) => {
-                crate::catalog_apply::discard_extracted_secrets(&st, &extracted).await;
-                return Err(e);
-            }
-        },
-        Err(e) => {
-            crate::catalog_apply::discard_extracted_secrets(&st, &extracted).await;
-            return Err(e);
-        }
-    };
-    // Registry semantics (spec §4.5): store, then apply to every engine that
-    // attaches it. Nothing reverts; a failed engine is flagged. This route
-    // answers for its own engine.
-    let updated = st
-        .engine_mgmt
-        .registry()
-        .update_catalog(cid, &new_def, attached.catalog.description.as_deref())
-        .await?
-        .ok_or(CpError::NotFound)?;
-    let outcomes = crate::catalog_apply::propagate(&st, &updated).await?;
-    if let Some(failed) = outcomes
-        .iter()
-        .find(|o| o.engine_id == engine.id && !o.applied)
-    {
-        return Err(CpError::BadRequest(format!(
-            "engine update failed: {}",
-            failed.error.clone().unwrap_or_default()
-        )));
-    }
-    let attached = find_attached(&st, &engine, cid).await?;
-    Ok(Json(legacy_catalog_dto(&attached)?))
+    let cat = find_attached(&st, &engine, cid).await?.catalog;
+    let (ok, message) = show_schemas_verdict(&st, &engine, &cat.name).await?;
+    Ok(Json(CatalogTestDto { ok, message }))
 }
 
 // ── pod logs ─────────────────────────────────────────────────────────────────
@@ -6565,12 +6002,7 @@ async fn bridge_exec(
         list_workspace_engines,
         assign_workspace_engine,
         unassign_workspace_engine,
-        list_catalogs,
-        add_catalog,
-        get_catalog,
         test_catalog,
-        remove_catalog,
-        update_catalog,
         pod_logs,
         pod_logs_follow,
         pod_exec,
@@ -6585,10 +6017,6 @@ async fn bridge_exec(
         EngineDetailDto,
         EngineStatusDto,
         EnginePodDto,
-        EngineCatalogDto,
-        EngineCatalogDetailDto,
-        AddCatalogBody,
-        UpdateCatalogBody,
         CatalogTestDto,
         PodLogsDto,
         EngineWorkspaceDto,
@@ -6852,141 +6280,6 @@ mod tests {
         assert!(!cert.contains("PRIVATE KEY"));
         // No cert block ⇒ None.
         assert!(extract_leading_cert("-----BEGIN PRIVATE KEY-----\nx\n").is_none());
-    }
-
-    #[test]
-    fn redact_strips_warehouse_credential() {
-        let cfg = serde_json::json!({
-            "warehouse": "wh1", "s3_endpoint": "http://minio:9000",
-            "credential": "id:secret", "clientRowId": "abc"
-        });
-        let out = redact_catalog_config(cfg);
-        assert!(out.get("credential").is_none());
-        assert!(out.get("clientRowId").is_none());
-        assert_eq!(out["warehouse"], "wh1");
-    }
-
-    #[test]
-    fn redact_masks_inline_secrets_for_every_kind() {
-        let cfg = serde_json::json!({
-            "host": "db", "user": "u", "password": "legacy-top-level",
-            "properties": {
-                "connection-url": "jdbc:postgresql://db:5432/x",
-                "connection-user": "u",
-                "connection-password": "hunter2",
-                "iceberg.rest-catalog.oauth2.token": "t0k",
-                "s3.aws-access-key": "AKIA",
-                "s3.aws-secret-key": "shh",
-                "bigquery.credentials-key": "json",
-                "gcs.json-private.key": "pem",
-                "hive.s3.accesskey": "AKIA2",
-                "tokenless-setting": "kept? no — contains token"
-            },
-            "secretProperties": { "connection-password": "0b3f5c0e-1111-4222-8333-944455556666" }
-        });
-        let out = redact_catalog_config(cfg);
-        assert_eq!(out["password"], REDACTED_VALUE);
-        assert_eq!(out["host"], "db");
-        assert_eq!(out["user"], "u");
-        let p = &out["properties"];
-        assert_eq!(p["connection-url"], "jdbc:postgresql://db:5432/x");
-        assert_eq!(p["connection-user"], "u");
-        for k in [
-            "connection-password",
-            "iceberg.rest-catalog.oauth2.token",
-            "s3.aws-access-key",
-            "s3.aws-secret-key",
-            "bigquery.credentials-key",
-            "gcs.json-private.key",
-            "hive.s3.accesskey",
-            "tokenless-setting",
-        ] {
-            assert_eq!(p[k], REDACTED_VALUE, "{k} must be masked");
-        }
-        // secretProperties maps a property to a secret ID, not to secret
-        // material; masking it would unbind the secret on the next save.
-        assert_eq!(
-            out["secretProperties"]["connection-password"],
-            "0b3f5c0e-1111-4222-8333-944455556666"
-        );
-    }
-
-    #[test]
-    fn sensitive_key_matcher_follows_the_spec_pattern() {
-        for k in [
-            "PASSWORD",
-            "x.Secret",
-            "oauth-token",
-            "credentials",
-            "private_key",
-            "privatekey",
-            "private.key",
-            "private-key",
-            "access_key",
-            "accesskey",
-        ] {
-            assert!(is_sensitive_config_key(k), "{k} should match");
-        }
-        for k in [
-            "connection-url",
-            "user",
-            "host",
-            "private--key",
-            "keyaccess",
-            "properties",
-        ] {
-            assert!(!is_sensitive_config_key(k), "{k} should not match");
-        }
-    }
-
-    #[test]
-    fn restore_redacted_properties_puts_back_only_masked_sensitive_values() {
-        let stored = serde_json::json!({
-            "password": "old-top",
-            // Non-sensitive key that could ALSO happen to hold the literal
-            // mask string (e.g. an admin genuinely typed asterisks as a
-            // placeholder host). M2: every masked key in the old fixture was
-            // sensitive, so dropping `&& is_sensitive_config_key(k)` from
-            // `restore_level` still passed — this key pins that a
-            // non-sensitive key is never "restored" no matter what its
-            // incoming value looks like.
-            "connection-url": "jdbc:postgresql://old-host/db",
-            // `secretProperties` holds secret IDs, not sensitive-config text
-            // (`redact_catalog_config` explicitly excludes it, see its `k !=
-            // "secretProperties"` guard) — pin that restore leaves it exactly
-            // as submitted too, even though the key name itself contains
-            // "secret" and would match `is_sensitive_config_key`.
-            "secretProperties": { "connection-password": "old-secret-id" },
-            "properties": { "connection-password": "hunter2", "connection-user": "u" }
-        });
-        let mut incoming = serde_json::json!({
-            "password": REDACTED_VALUE,
-            "connection-url": REDACTED_VALUE,
-            "secretProperties": { "connection-password": REDACTED_VALUE },
-            "properties": {
-                "connection-password": REDACTED_VALUE,
-                "connection-user": "u2",
-                "api-token": REDACTED_VALUE
-            }
-        });
-        restore_redacted_properties(&mut incoming, &stored);
-        assert_eq!(incoming["password"], "old-top");
-        assert_eq!(
-            incoming["connection-url"], REDACTED_VALUE,
-            "a non-sensitive key must never be treated as a mask to restore"
-        );
-        assert_eq!(
-            incoming["secretProperties"]["connection-password"], REDACTED_VALUE,
-            "secretProperties is excluded from restore; it holds secret ids, not text"
-        );
-        assert_eq!(incoming["properties"]["connection-password"], "hunter2");
-        assert_eq!(incoming["properties"]["connection-user"], "u2");
-        // Nothing stored to restore from: the mask stays as typed.
-        assert_eq!(incoming["properties"]["api-token"], REDACTED_VALUE);
-        // A NEW value replaces the stored one.
-        let mut changed = serde_json::json!({ "properties": { "connection-password": "new" } });
-        restore_redacted_properties(&mut changed, &stored);
-        assert_eq!(changed["properties"]["connection-password"], "new");
     }
 
     // ── build_starrocks_spec: omitted-field-preserves + delegation rule ─────
@@ -10646,15 +9939,18 @@ mod tests {
     /// Critical (SP1 Part B final review, C1) — handler level, the review's
     /// suggested regression: seed an engine, mark it `deleting` directly (as a
     /// concurrent DELETE would just before these land), then call
-    /// `rotate_engine_secrets` and `add_catalog` (one representative of the two
-    /// remaining apply routes, `remove_catalog`/`update_catalog`, which share the
-    /// same early reject). Both must 409 and the fake port must record no
-    /// update.
+    /// `rotate_engine_secrets` and `catalog_apply::attach_to_engine` (SP3c-2
+    /// Task 4 deleted `add_catalog`; `attach_to_engine` is the shared function
+    /// behind the kept `POST /engines/{id}/catalogs/{cid}` AND the deleted
+    /// route both used, and carries the identical `DELETING` guard as its
+    /// first check — before the catalog argument is even examined, so a
+    /// syntactically-valid-but-never-persisted `CatalogRow` reaches it here).
+    /// Both must reject and the fake port must record no update.
     #[tokio::test]
-    async fn rotate_and_add_catalog_reject_a_deleting_engine() {
+    async fn rotate_and_attach_catalog_reject_a_deleting_engine() {
         let Some(mut st) = test_state().await else {
             eprintln!(
-                "skipping rotate_and_add_catalog_reject_a_deleting_engine: DATABASE_URL not set"
+                "skipping rotate_and_attach_catalog_reject_a_deleting_engine: DATABASE_URL not set"
             );
             return;
         };
@@ -10693,28 +9989,43 @@ mod tests {
             impersonator: None,
         };
 
-        let err =
-            rotate_engine_secrets(State(st.clone()), Auth(principal.clone()), Path(engine.id))
-                .await
-                .expect_err("rotate on a deleting engine must fail");
+        let err = rotate_engine_secrets(State(st.clone()), Auth(principal), Path(engine.id))
+            .await
+            .expect_err("rotate on a deleting engine must fail");
         assert!(matches!(err, CpError::Conflict(_)), "got {err:?}");
 
-        let cat_body = AddCatalogBody {
+        // Unlike the handlers, `attach_to_engine` takes an already-loaded
+        // `&Engine` rather than re-fetching by id — re-read it after the
+        // status update, or its `DELETING` check sees the stale in-memory
+        // snapshot from before this test moved the row.
+        let deleting_engine = st
+            .engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .expect("reload engine")
+            .expect("engine still exists");
+        // A `CatalogRow` that was never inserted — irrelevant, since the
+        // `DELETING` check fires before `attach_to_engine` looks at it.
+        let dummy_catalog = egret_catalog_registry::CatalogRow {
+            id: Uuid::new_v4(),
             name: "extra".into(),
             kind: "postgresql".into(),
             config: serde_json::json!({}),
-            secret_ref: None,
+            advanced: serde_json::json!({}),
+            description: None,
+            warehouse_id: None,
+            storage_connection_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
         };
-        let err = add_catalog(
-            State(st.clone()),
-            Auth(principal),
-            Path(engine.id),
-            Json(cat_body),
-        )
-        .await
-        .err()
-        .expect("add_catalog on a deleting engine must fail");
-        assert!(matches!(err, CpError::Conflict(_)), "got {err:?}");
+        let err =
+            crate::catalog_apply::attach_to_engine(&st, &deleting_engine, &dummy_catalog, None)
+                .await
+                .expect_err("attach_to_engine on a deleting engine must fail");
+        assert!(
+            matches!(err, crate::catalog_apply::CatalogOpError::Http(CpError::Conflict(_))),
+            "got {err:?}"
+        );
 
         assert_eq!(
             counting.updates.load(std::sync::atomic::Ordering::SeqCst),

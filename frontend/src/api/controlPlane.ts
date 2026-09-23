@@ -61,7 +61,6 @@ import {
   controlPlaneEnginesGetEngine,
   controlPlaneEnginesGetQuery,
   controlPlaneEnginesKillQuery,
-  controlPlaneEnginesListCatalogs,
   controlPlaneEnginesListEngines,
   controlPlaneEnginesListQueries,
   controlPlaneEnginesPodLogs,
@@ -86,7 +85,6 @@ import {
 import type {
   CreateEngineBody,
   CreateEngineResponse,
-  EngineCatalogDto,
   NewEngineCatalog,
 } from "./generated/model";
 import { ApiError } from "./client";
@@ -1018,34 +1016,6 @@ export async function killQuery(engineId: string, qid: string): Promise<void> {
 export async function getCluster(engineId: string): Promise<ClusterInfo> {
   return (await controlPlaneEnginesGetCluster(engineId)).data as ClusterInfo;
 }
-
-// ── Engine catalogs (multi-catalog / control-plane) ──────────────────────────
-
-/** A catalog attached to an engine. */
-/**
- * `GET /engines/{id}/catalogs`, as the generated client already describes it.
- *
- * It is an ALIAS rather than a hand-written copy because the copy had drifted
- * in the way that matters: the route grew `configError` — set when a stored
- * catalog configuration no longer parses, so the one row to repair is findable
- * instead of 400-ing the whole list — and the hand-written interface silently
- * dropped it. `.data as EngineCatalog[]` below cannot catch that; only not
- * having a second declaration can (SP3c review N1).
- */
-export type EngineCatalog = EngineCatalogDto;
-
-export async function listEngineCatalogs(id: string): Promise<EngineCatalog[]> {
-  return (await controlPlaneEnginesListCatalogs(id)).data as EngineCatalog[];
-}
-
-/**
- * The rest of the legacy `/engines/{id}/catalogs*` family — add, remove, get,
- * update and the two-state "test connection" — had no caller left once the
- * Catalogs tab stopped editing catalogs in place (SP3c-1 Task 9), so the
- * wrappers are gone with `CatalogForm`. The ROUTES stay, which is what D5
- * requires; SP3c-2 deletes them, and "nothing in the client calls them" is now
- * literally true rather than an intention.
- */
 
 // ── Engine pod logs (control-plane) ──────────────────────────────────────────
 //

@@ -14,10 +14,9 @@ use std::collections::BTreeMap;
 
 use egret_catalog_api::{CreatedClient, NewClient};
 use egret_catalog_registry::{
-    plaintext_secrets, render_starrocks, render_trino, AttachedCatalog, AttachmentRow, CatalogDef,
-    CatalogRow, EngineType, LegacyCatalog, NewAttachment, RenderError, StarRocksCatalogDdl,
-    StarRocksRenderInput, StatementForm, StorageRender, TrinoCatalogFile, TrinoRenderInput,
-    WarehouseRender,
+    render_starrocks, render_trino, AttachedCatalog, AttachmentRow, CatalogDef, CatalogRow,
+    EngineType, NewAttachment, RenderError, StarRocksCatalogDdl, StarRocksRenderInput,
+    StatementForm, StorageRender, TrinoCatalogFile, TrinoRenderInput, WarehouseRender,
 };
 use egret_storage::StorageConn;
 use uuid::Uuid;
@@ -724,42 +723,6 @@ pub(crate) async fn trino_catalog_req(
     })
 }
 
-/// What `GET /engines/{id}/catalogs/{cid}` has always returned: an egret
-/// warehouse's summary, or `{properties, secretProperties}` for the edit form.
-pub(crate) async fn legacy_config_view(
-    st: &CpState,
-    a: &AttachedCatalog,
-) -> Result<serde_json::Value, CpError> {
-    let def = catalog_def(&a.catalog)?;
-    if let Some(wh_id) = def.warehouse_id() {
-        let wh = st
-            .catalog
-            .get_warehouse(wh_id)
-            .await?
-            .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
-        let endpoint = st
-            .storage_registry
-            .get_storage_conn(wh.storage_conn_id)
-            .await?
-            .and_then(|s| s.endpoint)
-            .unwrap_or_default();
-        return Ok(serde_json::json!({
-            "warehouseId": wh.id,
-            "warehouse": wh.name,
-            "s3_endpoint": endpoint,
-            "mintedClient": a.attachment.minted_client,
-        }));
-    }
-    let file = render_attached(st, a, "L").await?;
-    let (mut plain, secret) = file.split_secret_properties();
-    plain.remove("connector.name");
-    let secret: serde_json::Map<String, serde_json::Value> = secret
-        .into_iter()
-        .map(|(k, id)| (k, serde_json::Value::String(id.to_string())))
-        .collect();
-    Ok(serde_json::json!({ "properties": plain, "secretProperties": secret }))
-}
-
 /// Store a freshly minted client's credential as a named global secret.
 pub(crate) async fn store_client_credential(
     st: &CpState,
@@ -774,40 +737,6 @@ pub(crate) async fn store_client_credential(
             &format!("{}:{}", client.client_id, client.client_secret),
         )
         .await?)
-}
-
-/// Move plaintext secrets out of a legacy body into named global secrets.
-pub(crate) async fn extract_plaintext_secrets(
-    st: &CpState,
-    catalog_name: &str,
-    legacy: &LegacyCatalog<'_>,
-) -> Result<BTreeMap<String, Uuid>, CpError> {
-    let mut out = BTreeMap::new();
-    for (property, value) in plaintext_secrets(legacy) {
-        let short = Uuid::new_v4().simple().to_string();
-        let id = st
-            .secrets
-            .create(
-                None,
-                &format!("catalog-{catalog_name}-{property}-{}", &short[..8]),
-                Some("Inline property of an engine catalog, moved into a secret"),
-                &value,
-            )
-            .await?;
-        out.insert(property, id);
-    }
-    Ok(out)
-}
-
-/// Delete secrets [`extract_plaintext_secrets`] just made for a request that
-/// then failed before any catalog referenced them. Failures are logged.
-pub(crate) async fn discard_extracted_secrets(st: &CpState, extracted: &BTreeMap<String, Uuid>) {
-    for (property, id) in extracted {
-        if let Err(e) = st.secrets.delete(None, *id).await {
-            tracing::warn!(%property, secret_id = %id, error = %e,
-                "could not delete a secret extracted for a rejected catalog request");
-        }
-    }
 }
 
 /// Every id a definition references must exist (global secrets, storage,
