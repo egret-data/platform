@@ -153,9 +153,27 @@ the stated order is right. Two corrections:
   Move the field first and the channel survives; delete first and a Trino build failure is invisible
   on **both** surfaces. This was not in the design and is now part of the precondition.
 
-Deleting the routes also retires `CatalogTestDto`'s undiscriminated `{ ok, message }`, which is what
-makes D4 true everywhere rather than on one route. Note that `POST /engines/{id}/catalogs/{cid}` and
+**Five routes, not six — amended 2026-09-23 during implementation.**
+`POST /engines/{id}/catalogs/{cid}/test` **stays**. `EngineDetail.tsx`'s per-row Test button is a
+live caller, and the registry's own test route is not a replacement: it tests an applied attachment
+across *all* of a catalog's engines rather than one named engine, and it requires
+`catalog_registry:read` where this one requires `engine:read` — the persona SP3c review F-3 added the
+per-engine route for. So `CatalogTestDto`'s undiscriminated `{ ok, message }` survives too, and D4
+remains true only on the registry route. Retiring it needs a per-engine registry test route first;
+that is a follow-on, not a deletion. Note that `POST /engines/{id}/catalogs/{cid}` and
 `…/apply` live under the same URL prefix but are **registry-era and stay**.
+
+**Two capabilities leave with `add_catalog`, and neither is replaced.** Written down here because
+both were found by the implementer, not by this design. (a) `config.clientId` — attaching under an
+*existing* Catalog Client's role. The registry mints a client per attachment and offers no way to
+name one; the legacy option mainly expressed what the backfill produced from a shared legacy row, and
+the backfill is gone. (b) Inline plaintext secrets, which `add_catalog` extracted into secret rows
+automatically. The registry takes a secret id, which is the stricter and intended shape (SP3c-1's UI
+is a secret picker). Both are accepted; neither should be rediscovered as a bug.
+
+A third was checked and is **not** a loss: the registry's `CatalogKind` is a closed nine-variant
+enum where the legacy route accepted any non-blank Trino connector name, but `generic` plus
+`advanced.trino["connector.name"]` expresses exactly that.
 
 **A consequence to state, because it is a capability loss.** Before SP3c-2, an operator holding
 `engine:read` and nothing else could see an engine's catalog names on its Catalogs tab, because
