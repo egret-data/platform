@@ -3691,7 +3691,6 @@ async fn delete_engine_removes_cluster_row_secrets_and_minted_clients_only() {
                 workspace_id: wh.workspace_id,
             },
             None,
-            |_| Vec::new(),
         )
         .await
         .unwrap();
@@ -6284,7 +6283,6 @@ async fn registry_catalog_crud_validation_and_delete_refusal() {
                 workspace_id: wh.workspace_id,
             },
             None,
-            |_| Vec::new(),
         )
         .await
         .unwrap();
@@ -8219,7 +8217,7 @@ async fn an_fe_error_stored_on_the_attachment_carries_no_ddl_and_no_secret() {
 }
 
 #[tokio::test]
-async fn workspace_assignment_and_the_migration_report() {
+async fn workspace_assignment() {
     let Some(f) = setup_full(None, None).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
@@ -8282,54 +8280,6 @@ async fn workspace_assignment_and_the_migration_report() {
     let (status, j) = call(&f, "DELETE", &format!("/catalogs/{cid}"), &token, None).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(j["workspaces"][0]["id"], serde_json::json!(ws2));
-
-    let run = Uuid::new_v4();
-    registry(&f)
-        .insert_report(&[egret_catalog_registry::ReportEntry::info(
-            run,
-            "warehouse_catalog_created",
-            "warehouse w",
-            "w is catalog w",
-        )])
-        .await
-        .unwrap();
-    let (status, j) = call(&f, "GET", "/catalogs/migration-report", &token, None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        j.as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["runId"] == serde_json::json!(run)),
-        "{j}"
-    );
-    let (status, _) = call(
-        &f,
-        "POST",
-        "/catalogs/migration-report/acknowledge",
-        &token,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let (_, j) = call(&f, "GET", "/catalogs/migration-report", &token, None).await;
-    assert!(j
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|r| r["runId"] != serde_json::json!(run)));
-    let (_, j) = call(
-        &f,
-        "GET",
-        "/catalogs/migration-report?all=true",
-        &token,
-        None,
-    )
-    .await;
-    assert!(j
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|r| r["runId"] == serde_json::json!(run)));
 }
 
 #[tokio::test]
@@ -8441,17 +8391,8 @@ async fn new_catalog_routes_enforce_their_permission_gates() {
         "forbidden assignment wrote nothing"
     );
 
-    // The migration-report GETs require `catalog_registry:read`; `engine:update`
+    // GET catalog workspaces requires `catalog_registry:read`; `engine:update`
     // is not enough.
-    let (status, _) = call(
-        &f,
-        "GET",
-        "/catalogs/migration-report",
-        &engine_updater,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _) = call(
         &f,
         "GET",
@@ -8461,35 +8402,6 @@ async fn new_catalog_routes_enforce_their_permission_gates() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-
-    // Acknowledge requires `catalog_registry:update`; `catalog_registry:read`
-    // alone is not enough.
-    let run = Uuid::new_v4();
-    reg.insert_report(&[egret_catalog_registry::ReportEntry::info(
-        run,
-        "warehouse_catalog_created",
-        "warehouse w",
-        "w is catalog w",
-    )])
-    .await
-    .unwrap();
-    let (status, _) = call(
-        &f,
-        "POST",
-        "/catalogs/migration-report/acknowledge",
-        &registry_reader,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let (_, j) = call(&f, "GET", "/catalogs/migration-report", &admin, None).await;
-    assert!(
-        j.as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["runId"] == serde_json::json!(run)),
-        "forbidden acknowledge left the row open; {j}"
-    );
 }
 
 #[tokio::test]

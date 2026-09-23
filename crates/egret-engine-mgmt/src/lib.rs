@@ -33,7 +33,7 @@ pub use starrocks_ddl::{
     FE_MASKED_KEYS, FE_UNCOMPARABLE_KEYS,
 };
 pub use state::EngineMgmtState;
-pub use store::{engine_status, Engine, EngineCatalog, EngineMgmtStore};
+pub use store::{engine_status, Engine, EngineMgmtStore};
 
 /// Aggregated OpenAPI fragment for the engine-provisioning seam (E0·P4b-9):
 /// the engines CRUD/lifecycle/catalog/pod-logs-exec router

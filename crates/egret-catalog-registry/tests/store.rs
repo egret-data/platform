@@ -3,7 +3,6 @@
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
 //!   env -u EGRET_ALLOW_DB_SKIP cargo test -p egret-catalog-registry --test store
 
-use egret_catalog_registry::report::ReportEntry;
 use egret_catalog_registry::store::{
     apply_status, CatalogFilter, NewAttachment, WarehouseIdentity,
 };
@@ -171,7 +170,6 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -200,7 +198,6 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -215,7 +212,6 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -235,7 +231,6 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -264,7 +259,6 @@ async fn attachments_order_status_and_block_deletes() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -406,7 +400,6 @@ async fn attachments_still_come_back_primary_first_then_created_then_name() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -564,7 +557,6 @@ async fn an_attachments_credential_secret_cannot_be_deleted() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -611,45 +603,6 @@ async fn an_attachments_credential_secret_cannot_be_deleted() {
         .delete(None, credential)
         .await
         .expect("once nothing attaches it, the credential can go");
-}
-
-#[tokio::test]
-async fn report_rows_are_listed_until_acknowledged() {
-    let Some(db) = db().await else { return };
-    let store = RegistryStore::new(db.clone());
-    let run = Uuid::new_v4();
-    store
-        .insert_report(&[
-            ReportEntry::info(
-                run,
-                "warehouse_catalog_created",
-                "warehouse a",
-                "a is now catalog a",
-            ),
-            ReportEntry::warning(run, "backfill_failed", "engine x catalog y", "not migrated")
-                .detail(json!({ "why": "test" })),
-        ])
-        .await
-        .unwrap();
-    let open = store.list_report(false).await.unwrap();
-    assert!(open.iter().filter(|r| r.run_id == run).count() == 2);
-    assert!(store.acknowledge_report().await.unwrap() >= 2);
-    assert!(store
-        .list_report(false)
-        .await
-        .unwrap()
-        .iter()
-        .all(|r| r.run_id != run));
-    assert_eq!(
-        store
-            .list_report(true)
-            .await
-            .unwrap()
-            .iter()
-            .filter(|r| r.run_id == run)
-            .count(),
-        2
-    );
 }
 
 fn sample_def() -> CatalogDef {
@@ -701,7 +654,6 @@ async fn create_replacing_orphan_replaces_only_an_unused_catalog() {
                 workspace_id: ws,
             },
             None,
-            |_| Vec::new(),
         )
         .await
         .unwrap();

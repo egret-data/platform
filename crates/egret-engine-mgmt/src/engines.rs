@@ -3054,7 +3054,6 @@ async fn create_engine(
                 workspace_id: wh.workspace_id,
             },
             None,
-            |_| Vec::new(),
         )
         .await?;
     let role_id = ensure_engine_role(&st, wh.id).await?;
@@ -3781,7 +3780,6 @@ async fn create_starrocks_engine(
                 workspace_id: wh.workspace_id,
             },
             None,
-            |_| Vec::new(),
         )
         .await?;
     let role_id = ensure_engine_role(&st, wh.id).await?;
@@ -5744,7 +5742,6 @@ async fn add_catalog(
                     workspace_id: wh.workspace_id,
                 },
                 None,
-                |_| Vec::new(),
             )
             .await?;
         crate::catalog_apply::attach_to_engine(&st, &engine, &catalog, client_id_param)
@@ -9097,7 +9094,6 @@ mod tests {
                     workspace_id: wh.workspace_id,
                 },
                 Some(name),
-                |_| Vec::new(),
             )
             .await
             .expect("ensure warehouse catalog");

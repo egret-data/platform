@@ -99,19 +99,27 @@ async fn seed_warehouse_and_engine(pool: &sqlx::PgPool, trino_profile_id: i64) -
     .fetch_one(pool)
     .await
     .expect("insert engine");
-    // `tag_assignments_for_service` (egret-policy) needs SOMETHING to resolve
-    // the warehouse through — either a registry catalog + attachment, or (as
-    // here, the simpler legacy shape) the engine's primary `engine_catalogs`
-    // row. Without either, it exports nothing regardless of the bump fix
-    // under test.
+    // `tag_assignments_for_service` (egret-policy) needs a registry catalog
+    // attached to the engine to resolve the warehouse through — without one it
+    // exports nothing regardless of the bump fix under test.
+    let (catalog_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) RETURNING id",
+    )
+    .bind(format!("tagbumpcat_{}", Uuid::new_v4().simple()))
+    .bind(wh_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert registry catalog");
     sqlx::query(
-        "INSERT INTO engine_mgmt.engine_catalogs (engine_id, name, kind, config, is_primary) \
-         VALUES ($1, 'egret', 'egret-warehouse', '{}'::jsonb, true)",
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
     )
     .bind(eng_id)
+    .bind(catalog_id)
     .execute(pool)
     .await
-    .expect("insert legacy primary catalog");
+    .expect("attach catalog");
     wh_id
 }
 

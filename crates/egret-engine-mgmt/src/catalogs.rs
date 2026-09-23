@@ -1,6 +1,6 @@
 //! Catalog registry routes (SP3 §4.4–4.7): platform catalogs, the engines they
-//! are attached to, their workspace assignment and the migration report. Merged
-//! into the engines router, so mounted under `/api/control-plane`.
+//! are attached to, and their workspace assignment. Merged into the engines
+//! router, so mounted under `/api/control-plane`.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -36,11 +36,6 @@ pub(crate) fn routes() -> Router<CpState> {
         .route("/catalogs/{id}/impact", get(catalog_impact))
         .route("/catalogs/{id}/reapply", post(reapply_registry_catalog))
         .route("/catalogs/{id}/test", post(test_registry_catalog))
-        .route("/catalogs/migration-report", get(get_migration_report))
-        .route(
-            "/catalogs/migration-report/acknowledge",
-            post(acknowledge_migration_report),
-        )
         .route(
             "/catalogs/{id}/workspaces",
             get(list_catalog_workspaces).put(set_catalog_workspaces),
@@ -549,33 +544,6 @@ pub(crate) struct CatalogWorkspaceDto {
     assigned_at: DateTime<Utc>,
 }
 
-#[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct MigrationReportRowDto {
-    id: i64,
-    run_id: Uuid,
-    created_at: DateTime<Utc>,
-    /// `info` | `warning`.
-    severity: String,
-    code: String,
-    catalog_id: Option<Uuid>,
-    engine_id: Option<Uuid>,
-    warehouse_id: Option<Uuid>,
-    subject: String,
-    message: String,
-    #[schema(value_type = Object)]
-    detail: serde_json::Value,
-    acknowledged_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Deserialize, utoipa::IntoParams)]
-#[into_params(parameter_in = Query)]
-pub(crate) struct MigrationReportQuery {
-    /// Include rows already acknowledged.
-    #[serde(default)]
-    all: bool,
-}
-
 /// Which of the three checks produced a [`CatalogTestResultDto`]. An enum, not
 /// a string, so Task 7's renderer gets a union it must switch on exhaustively:
 /// the whole point of the discriminant is that the three cannot be blurred, and
@@ -1010,65 +978,6 @@ async fn set_catalog_workspaces(
     Ok(Json(workspace_dtos(&st, id).await?))
 }
 
-#[utoipa::path(
-    get,
-    path = "/api/control-plane/catalogs/migration-report",
-    tag = "control-plane-catalog-registry",
-    params(MigrationReportQuery),
-    responses(
-        (status = 200, description = "What the registry migration did, oldest first (unacknowledged rows unless `all`)", body = Vec<MigrationReportRowDto>),
-        (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
-        (status = 500, description = "Internal error", body = ErrorBody),
-    ),
-)]
-async fn get_migration_report(
-    State(st): State<CpState>,
-    Auth(p): Auth,
-    Query(q): Query<MigrationReportQuery>,
-) -> Result<Json<Vec<MigrationReportRowDto>>, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
-    let rows = st.engine_mgmt.registry().list_report(q.all).await?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| MigrationReportRowDto {
-                id: r.id,
-                run_id: r.run_id,
-                created_at: r.created_at,
-                severity: r.severity,
-                code: r.code,
-                catalog_id: r.catalog_id,
-                engine_id: r.engine_id,
-                warehouse_id: r.warehouse_id,
-                subject: r.subject,
-                message: r.message,
-                detail: r.detail,
-                acknowledged_at: r.acknowledged_at,
-            })
-            .collect(),
-    ))
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/control-plane/catalogs/migration-report/acknowledge",
-    tag = "control-plane-catalog-registry",
-    responses(
-        (status = 204, description = "Every open report row acknowledged"),
-        (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
-        (status = 500, description = "Internal error", body = ErrorBody),
-    ),
-)]
-async fn acknowledge_migration_report(
-    State(st): State<CpState>,
-    Auth(p): Auth,
-) -> Result<StatusCode, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
-    st.engine_mgmt.registry().acknowledge_report().await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 #[derive(utoipa::OpenApi)]
 #[openapi(
     paths(
@@ -1086,8 +995,6 @@ async fn acknowledge_migration_report(
         retry_catalog_apply,
         list_catalog_workspaces,
         set_catalog_workspaces,
-        get_migration_report,
-        acknowledge_migration_report,
     ),
     components(schemas(
         RegistryCatalogDto,
@@ -1105,7 +1012,6 @@ async fn acknowledge_migration_report(
         CatalogConflictWorkspace,
         SetCatalogWorkspacesBody,
         CatalogWorkspaceDto,
-        MigrationReportRowDto,
         ErrorBody,
     )),
     tags((name = "control-plane-catalog-registry", description = "Catalog registry: platform catalogs, their engine attachments and workspace assignment")),

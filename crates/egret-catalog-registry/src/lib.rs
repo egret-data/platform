@@ -9,7 +9,6 @@ pub mod error;
 pub mod legacy;
 pub mod name;
 pub mod render;
-pub mod report;
 pub mod sensitive;
 pub mod store;
 pub mod tag_version;
@@ -35,7 +34,6 @@ pub use render::starrocks::{
 };
 pub use render::trino::{jdbc_url, render_trino, TrinoCatalogFile, TrinoRenderInput};
 pub use render::{RenderError, StorageRender, WarehouseRender};
-pub use report::{ReportEntry, ReportRow, Severity};
 pub use sensitive::{is_plaintext_secret, is_sensitive_key};
 pub use store::{
     AttachedCatalog, AttachmentRow, CatalogEngineRow, CatalogFilter, CatalogRow,

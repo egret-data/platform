@@ -422,7 +422,6 @@ async fn create_warehouse(
                 workspace_id: w.workspace_id,
             },
             None,
-            |_| Vec::new(),
         )
         .await
     {

@@ -73,7 +73,7 @@ async fn seed_warehouse(pool: &sqlx::PgPool) -> Uuid {
 }
 
 /// A Trino engine bound to `service_id`, whose PRIMARY warehouse is
-/// `warehouse_id` (`engines.warehouse_id` — the legacy join's key).
+/// `warehouse_id` (`engines.warehouse_id`).
 async fn seed_engine(pool: &sqlx::PgPool, service_id: i64, warehouse_id: Uuid) -> Uuid {
     let (eng_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, authz_service_id) \
@@ -120,21 +120,6 @@ async fn attach_catalog(pool: &sqlx::PgPool, engine_id: Uuid, catalog_id: Uuid) 
     .execute(pool)
     .await
     .expect("attach catalog");
-}
-
-/// The engine's legacy `engine_mgmt.engine_catalogs` PRIMARY row, named
-/// `name` — the pre-SP3 shape the backfill has not (or not yet) migrated away
-/// from, and the legacy branch's key.
-async fn seed_legacy_primary(pool: &sqlx::PgPool, engine_id: Uuid, name: &str) {
-    sqlx::query(
-        "INSERT INTO engine_mgmt.engine_catalogs (engine_id, name, kind, config, is_primary) \
-         VALUES ($1, $2, 'egret-warehouse', '{}'::jsonb, true)",
-    )
-    .bind(engine_id)
-    .bind(name)
-    .execute(pool)
-    .await
-    .expect("insert legacy primary catalog");
 }
 
 /// One PII tag, assigned to `sales.orders.email` on `warehouse_id`.
@@ -342,113 +327,6 @@ async fn download_tags_via_tag_service_resolves_owning_trino_profile() {
     assert_eq!(srs[0]["resourceElements"]["column"]["values"][0], "email");
 }
 
-/// C1: an engine the backfill has not migrated (no attachment at all, only its
-/// legacy `engine_catalogs` primary row) must still export tags — under the
-/// LEGACY name, since that's the only name it actually serves.
-#[tokio::test]
-async fn download_tags_legacy_only_engine_exports_legacy_name() {
-    let Some(db) = db().await else {
-        eprintln!("skip");
-        return;
-    };
-    let pool = db.pool.clone();
-    let store = PolicyStore::new(db);
-    seed_trino(&store).await.expect("seed");
-    let svc = format!("trino_{}", Uuid::new_v4().simple());
-    let svc_row = store
-        .create_service(&svc, "trino", &json!({}))
-        .await
-        .expect("create service");
-
-    let wh_id = seed_warehouse(&pool).await;
-    let eng_id = seed_engine(&pool, svc_row.id, wh_id).await;
-    let legacy_name = format!("legacy_{}", Uuid::new_v4().simple());
-    seed_legacy_primary(&pool, eng_id, &legacy_name).await;
-    // No registry catalog, no attachment: this engine is exactly what the
-    // backfill leaves behind on a `backfill_failed` row or a run that errored
-    // out entirely (SP3 catalog-registry review, C1).
-    seed_tag_assignment(&pool, wh_id).await;
-
-    let r = app(store)
-        .oneshot(get(&format!("/tags/download/{svc}")))
-        .await
-        .unwrap();
-    assert_eq!(r.status(), StatusCode::OK);
-    let bytes = r.into_body().collect().await.unwrap().to_bytes();
-    let st: Value = serde_json::from_slice(&bytes).unwrap();
-    let srs = st["serviceResources"].as_array().unwrap();
-    assert_eq!(
-        srs.len(),
-        1,
-        "un-migrated engine must still export under its legacy name, got {srs:?}"
-    );
-    assert_eq!(
-        srs[0]["resourceElements"]["catalog"]["values"][0],
-        json!(legacy_name)
-    );
-}
-
-/// C1: an engine mid rename-window — its registry catalog was renamed by the
-/// backfill (or an edit) but the engine has not been re-applied yet — must
-/// export tags under BOTH names: the OLD one it is still actually serving,
-/// and the NEW one it will serve after its next apply. Dropping either one is
-/// the fail-open this union closes; emitting an extra name that matches
-/// nothing live costs nothing.
-#[tokio::test]
-async fn download_tags_rename_window_exports_both_names() {
-    let Some(db) = db().await else {
-        eprintln!("skip");
-        return;
-    };
-    let pool = db.pool.clone();
-    let store = PolicyStore::new(db);
-    seed_trino(&store).await.expect("seed");
-    let svc = format!("trino_{}", Uuid::new_v4().simple());
-    let svc_row = store
-        .create_service(&svc, "trino", &json!({}))
-        .await
-        .expect("create service");
-
-    let wh_id = seed_warehouse(&pool).await;
-    let eng_id = seed_engine(&pool, svc_row.id, wh_id).await;
-    let old_name = format!("old_{}", Uuid::new_v4().simple());
-    seed_legacy_primary(&pool, eng_id, &old_name).await;
-    let (catalog_id, new_name) = seed_registry_catalog(&pool, wh_id, "new").await;
-    attach_catalog(&pool, eng_id, catalog_id).await;
-    assert_ne!(old_name, new_name);
-    seed_tag_assignment(&pool, wh_id).await;
-
-    let r = app(store)
-        .oneshot(get(&format!("/tags/download/{svc}")))
-        .await
-        .unwrap();
-    assert_eq!(r.status(), StatusCode::OK);
-    let bytes = r.into_body().collect().await.unwrap().to_bytes();
-    let st: Value = serde_json::from_slice(&bytes).unwrap();
-    let srs = st["serviceResources"].as_array().unwrap();
-    assert_eq!(
-        srs.len(),
-        2,
-        "rename window must export under BOTH the old and the new name, got {srs:?}"
-    );
-    let catalogs: std::collections::BTreeSet<String> = srs
-        .iter()
-        .map(|r| {
-            r["resourceElements"]["catalog"]["values"][0]
-                .as_str()
-                .unwrap()
-                .to_string()
-        })
-        .collect();
-    assert_eq!(
-        catalogs,
-        std::collections::BTreeSet::from([old_name, new_name])
-    );
-    // Both resources link to the SAME tag (one tag row, one warehouse_id).
-    let tags = st["tags"].as_object().unwrap();
-    assert_eq!(tags.len(), 1, "one underlying tag, got {tags:?}");
-}
-
 /// I3: a SECONDARY attachment — a warehouse that is NOT the attaching engine's
 /// own `engines.warehouse_id` primary — is exported under its registry
 /// catalog name; an engine bound to the SAME service that does NOT attach
@@ -552,16 +430,15 @@ async fn download_tags_unrelated_service_exports_nothing() {
 }
 
 /// I3 leftover (SP3 catalog-registry review re-review): an engine whose own
-/// PRIMARY warehouse (`engines.warehouse_id`) IS the tagged one, but which
-/// has neither an attachment (registry branch) nor a legacy primary row
-/// (legacy branch) — the fail-closed direction, e.g. right after a detach
-/// with nothing re-attached — exports nothing for it. This needs the
+/// PRIMARY warehouse (`engines.warehouse_id`) IS the tagged one, but which has
+/// no attachment — the fail-closed direction, e.g. right after a detach with
+/// nothing re-attached — exports nothing for it. This needs the
 /// exporting-nothing engine and the engine that DOES export it on TWO
 /// DIFFERENT services: sharing one service (as the secondary-attachment test
 /// above does) cannot isolate "this specific engine's own export" from "the
 /// service's export via some other bound engine".
 #[tokio::test]
-async fn download_tags_owning_engine_with_neither_attachment_nor_legacy_row_exports_nothing() {
+async fn download_tags_owning_engine_with_no_attachment_exports_nothing() {
     let Some(db) = db().await else {
         eprintln!("skip");
         return;
@@ -571,8 +448,8 @@ async fn download_tags_owning_engine_with_neither_attachment_nor_legacy_row_expo
     seed_trino(&store).await.expect("seed");
 
     // Engine C: its OWN primary warehouse is W (tagged below), bound to
-    // service S1. No attachment, no legacy primary row for C at all — the
-    // state right after a detach with nothing re-attached.
+    // service S1. No attachment for C at all — the state right after a
+    // detach with nothing re-attached.
     let svc_c = format!("trino_{}", Uuid::new_v4().simple());
     let svc_c_row = store
         .create_service(&svc_c, "trino", &json!({}))
@@ -605,8 +482,8 @@ async fn download_tags_owning_engine_with_neither_attachment_nor_legacy_row_expo
     let srs = st["serviceResources"].as_array().unwrap();
     assert!(
         srs.is_empty(),
-        "an engine whose primary IS the tagged warehouse, with no attachment \
-         and no legacy row, must export nothing for it, got {srs:?}"
+        "an engine whose primary IS the tagged warehouse, with no attachment, \
+         must export nothing for it, got {srs:?}"
     );
 
     // S2 (engine D, the actual attaching engine) exports it correctly.

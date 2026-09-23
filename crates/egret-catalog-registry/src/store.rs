@@ -1,7 +1,6 @@
 //! `registry` schema store (SP3). Runtime sqlx queries, schema-qualified.
-//! Reads `engine_mgmt.engines` / `engine_mgmt.engine_catalogs`,
-//! `catalog.warehouses` and `workspaces` by name for joins; writes only
-//! `registry.*`.
+//! Reads `engine_mgmt.engines`, `catalog.warehouses` and `workspaces` by name
+//! for joins; writes only `registry.*`.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -13,7 +12,6 @@ use uuid::Uuid;
 use crate::config::{CatalogDef, ValidationError};
 use crate::error::RegistryError;
 use crate::name::{first_free_name, is_valid_catalog_name, normalize_catalog_name};
-use crate::report::{ReportEntry, ReportRow};
 
 macro_rules! catalog_cols {
     () => {
@@ -237,28 +235,6 @@ async fn replace_secret_refs(
         .bind(ids)
         .execute(&mut *conn)
         .await?;
-    Ok(())
-}
-
-/// Writes one report row on `conn` — the low-level primitive every atomic
-/// mutation+report transaction shares (see [`RegistryStore::insert_report`]).
-async fn insert_report_row(conn: &mut PgConnection, e: &ReportEntry) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO registry.migration_report \
-           (run_id, severity, code, catalog_id, engine_id, warehouse_id, subject, message, detail) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-    )
-    .bind(e.run_id)
-    .bind(e.severity.as_str())
-    .bind(e.code)
-    .bind(e.catalog_id)
-    .bind(e.engine_id)
-    .bind(e.warehouse_id)
-    .bind(&e.subject)
-    .bind(&e.message)
-    .bind(&e.detail)
-    .execute(&mut *conn)
-    .await?;
     Ok(())
 }
 
@@ -520,16 +496,10 @@ impl RegistryStore {
     /// the catalog, so an admin's later un-assignment is never undone here.
     /// `preferred_name` is used verbatim when free (only a `#[cfg(test)]`
     /// helper passes one today).
-    ///
-    /// `report_for` is called at most once, only when a catalog is actually
-    /// created, right before the transaction commits: whatever it returns is
-    /// written in the SAME transaction, so the mutation and its report rows are
-    /// never observed apart (a crash before commit loses neither or both).
     pub async fn ensure_warehouse_catalog(
         &self,
         wh: &WarehouseIdentity<'_>,
         preferred_name: Option<&str>,
-        report_for: impl FnOnce(&CatalogRow) -> Vec<ReportEntry> + Send,
     ) -> Result<(CatalogRow, bool), RegistryError> {
         if let Some(c) = self.get_catalog_for_warehouse(wh.id).await? {
             return Ok((c, false));
@@ -552,9 +522,6 @@ impl RegistryStore {
                     .bind(wh.workspace_id)
                     .execute(&mut *tx)
                     .await?;
-                    for e in report_for(&row) {
-                        insert_report_row(&mut tx, &e).await?;
-                    }
                     tx.commit().await?;
                     return Ok((row, true));
                 }
@@ -921,36 +888,5 @@ impl RegistryStore {
         .bind(workspace_id)
         .fetch_one(self.pool())
         .await?)
-    }
-
-    pub async fn insert_report(&self, entries: &[ReportEntry]) -> Result<(), RegistryError> {
-        let mut tx = self.pool().begin().await?;
-        for e in entries {
-            insert_report_row(&mut tx, e).await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn list_report(
-        &self,
-        include_acknowledged: bool,
-    ) -> Result<Vec<ReportRow>, RegistryError> {
-        Ok(sqlx::query_as::<_, ReportRow>(
-            "SELECT id, run_id, created_at, severity, code, catalog_id, engine_id, warehouse_id, subject, message, \
-                    detail, acknowledged_at \
-               FROM registry.migration_report \
-              WHERE $1 OR acknowledged_at IS NULL ORDER BY id",
-        )
-        .bind(include_acknowledged)
-        .fetch_all(self.pool())
-        .await?)
-    }
-
-    pub async fn acknowledge_report(&self) -> Result<u64, RegistryError> {
-        Ok(sqlx::query("UPDATE registry.migration_report SET acknowledged_at = now() WHERE acknowledged_at IS NULL")
-            .execute(self.pool())
-            .await?
-            .rows_affected())
     }
 }

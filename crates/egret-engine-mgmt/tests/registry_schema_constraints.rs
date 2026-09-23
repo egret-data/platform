@@ -8,7 +8,6 @@
 use egret_catalog_engine::CatalogStore;
 use egret_engine_mgmt::EngineMgmtStore;
 use egret_metastore::Db;
-use sqlx::Row;
 use uuid::Uuid;
 
 async fn harness() -> Option<Db> {
@@ -479,35 +478,4 @@ async fn catalog_secret_refs_cascade_with_the_catalog() {
     .await
     .unwrap();
     assert_eq!(left, 0);
-}
-
-// -- migration_report basic shape --------------------------------------------
-
-/// `migration_report` accepts a row shaped like the backfill will write, and
-/// rejects an unknown `severity`.
-#[tokio::test]
-async fn migration_report_severity_is_checked() {
-    let db = harness_or_skip!();
-    let run_id = Uuid::new_v4();
-
-    let bad = sqlx::query(
-        "INSERT INTO registry.migration_report (run_id, severity, code, subject, message) \
-         VALUES ($1, 'critical', 'primary_named_egret', 'engine:demo', 'test')",
-    )
-    .bind(run_id)
-    .execute(&db.pool)
-    .await;
-    assert!(bad.is_err(), "an unknown severity must be rejected");
-
-    let row = sqlx::query(
-        "INSERT INTO registry.migration_report (run_id, severity, code, subject, message) \
-         VALUES ($1, 'info', 'primary_named_egret', 'engine:demo', 'test') \
-         RETURNING acknowledged_at",
-    )
-    .bind(run_id)
-    .fetch_one(&db.pool)
-    .await
-    .expect("a valid severity is accepted");
-    let acked: Option<chrono::DateTime<chrono::Utc>> = row.get("acknowledged_at");
-    assert!(acked.is_none(), "unacknowledged by default");
 }
