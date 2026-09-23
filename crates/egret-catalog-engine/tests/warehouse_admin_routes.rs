@@ -7,7 +7,9 @@
 //!   - warehouse browse (namespaces/tables/schema) over a `FakeBrowser`,
 //!   - a non-admin session is Forbidden (403),
 //!   - an unprovisioned warehouse browses empty,
-//!   - the fine-grained `warehouse:read` / `warehouse:create` gates.
+//!   - the fine-grained `catalog_registry:read` / `catalog_registry:create`
+//!     gates (SP3c-2 retired the router's original `warehouse:read` /
+//!     `warehouse:create` keys onto these).
 //!
 //! Run with:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
@@ -574,10 +576,12 @@ async fn browse_unprovisioned_warehouse_empty() {
     assert_eq!(j, serde_json::json!([]), "should be empty array; body={j}");
 }
 
-/// Warehouses: `warehouse:read` gates `GET /warehouses`, `warehouse:create`
-/// gates `POST /warehouses`. Proves the NEW `resource:action` gate: a scoped,
-/// non-admin principal holding the wrong (or no) permission is Forbidden, and one
-/// holding exactly the right permission succeeds — without the superuser bypass.
+/// Warehouses: `catalog_registry:read` gates `GET /warehouses`,
+/// `catalog_registry:create` gates `POST /warehouses` (SP3c-2 retired the
+/// router's own `warehouse:read` / `warehouse:create` onto these). Proves the
+/// `resource:action` gate: a scoped, non-admin principal holding the wrong (or
+/// no) permission is Forbidden, and one holding exactly the right permission
+/// succeeds — without the superuser bypass.
 #[tokio::test]
 async fn scoped_permission_warehouses_read_and_create() {
     let Some(mut f) = setup().await else {
@@ -588,11 +592,12 @@ async fn scoped_permission_warehouses_read_and_create() {
     // Seed all three ad-hoc platform roles BEFORE the real Cedar PDP snapshots the
     // roles catalog (raw-SQL seeding emits no RolesChanged event, so the PDP never
     // reloads). This is the required real-PDP authz assertion: a non-platform_admin
-    // `warehouse:read` principal lists warehouses (200) but is denied create (403),
-    // resolved by a real `CedarPdp` — not the allow-all stub.
+    // `catalog_registry:read` principal lists warehouses (200) but is denied create
+    // (403), resolved by a real `CedarPdp` — not the allow-all stub.
     let wrong = session_for_with_permission(&f, "wh_scoped_wrong", "engine:read").await;
-    let reader = session_for_with_permission(&f, "wh_scoped_reader", "warehouse:read").await;
-    let creator = session_for_with_permission(&f, "wh_scoped_creator", "warehouse:create").await;
+    let reader = session_for_with_permission(&f, "wh_scoped_reader", "catalog_registry:read").await;
+    let creator =
+        session_for_with_permission(&f, "wh_scoped_creator", "catalog_registry:create").await;
     attach_real_pdp(&mut f).await;
 
     let resp = f
@@ -604,7 +609,7 @@ async fn scoped_permission_warehouses_read_and_create() {
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
-        "a principal without warehouse:read must not list warehouses"
+        "a principal without catalog_registry:read must not list warehouses"
     );
 
     let resp = f
@@ -617,7 +622,7 @@ async fn scoped_permission_warehouses_read_and_create() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "a scoped warehouse:read principal must list warehouses; body={body}"
+        "a scoped catalog_registry:read principal must list warehouses; body={body}"
     );
 
     let (ws_id,): (Uuid,) =
@@ -644,7 +649,7 @@ async fn scoped_permission_warehouses_read_and_create() {
         "storageConnectionId": storage_id,
     });
 
-    // warehouse:read alone must not create.
+    // catalog_registry:read alone must not create.
     let resp = f
         .app
         .clone()
@@ -654,7 +659,7 @@ async fn scoped_permission_warehouses_read_and_create() {
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
-        "warehouse:read alone must not create a warehouse"
+        "catalog_registry:read alone must not create a warehouse"
     );
 
     let resp = f
@@ -667,7 +672,7 @@ async fn scoped_permission_warehouses_read_and_create() {
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "a scoped warehouse:create principal must create; body={body}"
+        "a scoped catalog_registry:create principal must create; body={body}"
     );
 }
 

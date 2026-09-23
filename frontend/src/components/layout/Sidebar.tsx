@@ -105,11 +105,14 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
       { label: "Workspaces", icon: FolderKanban },
       { label: "Engines", icon: Server, perm: "engine:read" },
       // SP3c-1 D5: both entries render through this release, and SP3c-2
-      // retires Warehouses. Its LIST is still a page; only
-      // `/control-plane/warehouses/:id` became a redirect, onto the catalog
-      // that carries the five tabs the warehouse detail page used to.
+      // retires Warehouses (Task 8 removes this entry). Its LIST is still a
+      // page; only `/control-plane/warehouses/:id` became a redirect, onto
+      // the catalog that carries the five tabs the warehouse detail page used
+      // to. Task 7 re-gated the entry's OWN permission: `warehouse:read` is
+      // retired (migration 0153), so it is `catalog_registry:read` now, same
+      // as Catalogs.
       { label: "Catalogs", icon: Library, perm: "catalog_registry:read" },
-      { label: "Warehouses", icon: Boxes, perm: "warehouse:read" },
+      { label: "Warehouses", icon: Boxes, perm: "catalog_registry:read" },
       { label: "Storage", icon: HardDrive, perm: "storage:read" },
       { label: "Secrets", icon: KeyRound, perm: "secret:read" },
     ],

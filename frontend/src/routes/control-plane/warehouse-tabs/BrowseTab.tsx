@@ -164,7 +164,12 @@ export function BrowseTab({ warehouseId }: { warehouseId: string }) {
           ) : namespaces.isError ? (
             <BrowseEmpty icon={Database}>
               <span className="text-destructive">
-                {namespaces.error?.message ?? "Couldn't load namespaces."}
+                {/* `ApiError.message` for a 403 is `Error::Forbidden`'s Display, the
+                    bare word "forbidden". This route is gated `catalog_registry:read`
+                    (SP3c-2, Task 7 retired `warehouse:read`), named here instead. */}
+                {namespaces.error?.status === 403
+                  ? "Couldn't load namespaces: this needs the catalog_registry:read permission. A platform administrator can grant it."
+                  : (namespaces.error?.message ?? "Couldn't load namespaces.")}
               </span>
             </BrowseEmpty>
           ) : namespaces.isLoading ? (

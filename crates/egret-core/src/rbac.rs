@@ -79,30 +79,6 @@ pub static PERMISSIONS: &[Permission] = &[
         "Kill running queries",
         Scope::Platform
     ),
-    perm!(
-        "warehouse:read",
-        "Warehouses",
-        "View catalog warehouses",
-        Scope::Platform
-    ),
-    perm!(
-        "warehouse:create",
-        "Warehouses",
-        "Create warehouses",
-        Scope::Platform
-    ),
-    perm!(
-        "warehouse:update",
-        "Warehouses",
-        "Update warehouses",
-        Scope::Platform
-    ),
-    perm!(
-        "warehouse:delete",
-        "Warehouses",
-        "Delete warehouses",
-        Scope::Platform
-    ),
     // Registry catalogs (SP3). Deliberately NOT `catalog:*`: `catalog:read` is
     // the workspace-scope key every workspace role holds (0024) for
     // egret-query's workspace engine view. Cedar itself cannot confuse the two
@@ -572,6 +548,30 @@ mod tests {
         assert!(PERMISSIONS
             .iter()
             .any(|p| p.key == "tag:manage" && p.scope == Scope::Platform));
+    }
+    #[test]
+    fn warehouse_permissions_are_retired_sp3c2() {
+        // SP3c-2 Task 7: `warehouse_admin` re-gated onto `catalog_registry:*`
+        // (migration 0153 re-ran 0148's grant, then deleted the old keys), so
+        // none of the four `warehouse:*` keys are known any more, and the
+        // "Warehouses" group they were the only members of disappears with
+        // them rather than surviving as an empty group.
+        for k in [
+            "warehouse:read",
+            "warehouse:create",
+            "warehouse:update",
+            "warehouse:delete",
+        ] {
+            assert!(!is_known(k), "{k} must be retired");
+            assert!(
+                !PERMISSIONS.iter().any(|p| p.key == k),
+                "{k} must not appear in the catalog"
+            );
+        }
+        assert!(
+            !groups().contains(&"Warehouses"),
+            "the Warehouses group must disappear with its only members"
+        );
     }
     #[test]
     fn catalog_registry_perms_are_platform_scoped_and_distinct() {

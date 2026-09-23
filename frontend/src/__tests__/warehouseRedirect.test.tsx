@@ -24,10 +24,10 @@ const ME: Me = {
   user_id: "u1",
   email: "u1@example.com",
   platform_roles: [],
-  // Both keys, which is what every platform role holding `warehouse:read` has
-  // had since migration 0148. `catalog_registry:read` is what the redirect's
-  // own guard asks for; `warehouse:read` is what the list it came from asks.
-  permissions: ["warehouse:read", "catalog_registry:read"],
+  // `catalog_registry:read` alone: SP3c-2 (Task 7) retired `warehouse:read`
+  // and re-gated both the Warehouses list route and this redirect onto the
+  // one key, so it is the only permission either needs.
+  permissions: ["catalog_registry:read"],
 };
 
 function catalog(over: Partial<RegistryCatalogDto> = {}): RegistryCatalogDto {
@@ -134,40 +134,45 @@ describe("/control-plane/warehouses/:id redirects onto the catalog", () => {
 });
 
 /**
- * Whole-branch review, F5. Migration 0148 granted `catalog_registry:read` to
- * every platform role that held `warehouse:read` — ONCE. A role created after
- * the upgrade holds `warehouse:read` alone: it sees the Warehouses section in
- * the sidebar, the list renders, and before this fix every row 403'd, taking
- * roles/grants, Clients, Browse, Connect and Settings with it. That is the
- * capability removal D5 exists to prevent, so the path is gated on the key the
- * LIST uses and the missing destination key is explained rather than refused.
+ * Whole-branch review, F5 — through SP3c-1. Migration 0148 granted
+ * `catalog_registry:read` to every platform role that held `warehouse:read`
+ * — ONCE. A role created after the upgrade held `warehouse:read` alone: it
+ * saw the Warehouses section in the sidebar, the list rendered, and before
+ * that fix every row 403'd, taking roles/grants, Clients, Browse, Connect and
+ * Settings with it. That was the capability removal D5 existed to prevent, so
+ * (through SP3c-1) the path was gated on the key the LIST used and the
+ * missing destination key was explained rather than refused.
+ *
+ * SP3c-2 (Task 7) retires `warehouse:read` outright (migration 0153 re-runs
+ * 0148's grant first, so no LIVE role loses anything in the move) and
+ * re-gates both routes on `catalog_registry:read`. The population this block
+ * used to describe — a role holding `warehouse:read` and nothing else —
+ * cannot exist going forward: 0153 guarantees every role that ever held
+ * `warehouse:read` also holds `catalog_registry:read`, and the permission can
+ * no longer be granted at all (it left `egret_core::rbac::PERMISSIONS`). So a
+ * session carrying `warehouse:read` alone is now indistinguishable from one
+ * carrying no relevant permission at all, and both routes correctly 403 it —
+ * the friendly `WarehouseRedirect` explanation is defense-in-depth for a
+ * stale `me.permissions` snapshot, not something this population reaches (see
+ * its doc comment in `App.tsx`).
  */
-describe("a role created after migration 0148, holding warehouse:read alone", () => {
-  const POST_0148: Me = {
+describe("a session holding only the retired warehouse:read (SP3c-2)", () => {
+  const RETIRED_KEY_ONLY: Me = {
     user_id: "u2",
     email: "wh@example.com",
     platform_roles: [],
     permissions: ["warehouse:read"],
   };
 
-  it("reaches the moved page and is told which permission is missing, not 403'd", async () => {
-    openApp("/control-plane/warehouses/wh-1", [catalog()], POST_0148);
-    const blocked = await screen.findByTestId("warehouse-redirect-blocked", {}, TIMEOUT);
-    // The key by name, not the bare word "forbidden".
-    expect(blocked).toHaveTextContent("catalog_registry:read");
-    expect(screen.queryByText("403 — Forbidden")).not.toBeInTheDocument();
-    // It did not silently bounce somewhere else either.
+  it("403s the redirect route — warehouse:read no longer admits anyone", async () => {
+    openApp("/control-plane/warehouses/wh-1", [catalog()], RETIRED_KEY_ONLY);
+    expect(await screen.findByText("403 — Forbidden", {}, TIMEOUT)).toBeInTheDocument();
+    expect(screen.queryByTestId("warehouse-redirect-blocked")).not.toBeInTheDocument();
     expect(currentUrl()).toBe("/control-plane/warehouses/wh-1");
-    // And there is a way back to the list this row came from.
-    expect(screen.getByRole("link", { name: /Back to Warehouses/ })).toHaveAttribute(
-      "href",
-      "/control-plane/warehouses",
-    );
   }, 15_000);
 
-  it("still sees the list whose rows link here — the row and the list agree", async () => {
-    openApp("/control-plane/warehouses", [catalog()], POST_0148);
-    await screen.findByTestId("app-sidebar", {}, TIMEOUT);
-    expect(screen.queryByText("403 — Forbidden")).not.toBeInTheDocument();
+  it("403s the list route too — the row and the list agree by sharing one key", async () => {
+    openApp("/control-plane/warehouses", [catalog()], RETIRED_KEY_ONLY);
+    expect(await screen.findByText("403 — Forbidden", {}, TIMEOUT)).toBeInTheDocument();
   }, 15_000);
 });

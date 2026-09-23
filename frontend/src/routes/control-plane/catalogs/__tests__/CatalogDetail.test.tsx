@@ -380,32 +380,38 @@ describe("CatalogDetail shell", () => {
   });
 
   /**
-   * Review F1. `catalog_registry:read` with no `warehouse:read` is the natural
-   * role for this section and the one migration 0148 does NOT create: it grants
-   * `warehouse:* → catalog_registry:*`, never the reverse. Every one of the
-   * five moved tabs is served by `warehouse_admin`, gated `warehouse:read`, so
-   * rendering them for this persona produced five panels of the bare word
-   * "forbidden".
+   * SP3c-2 (Task 7). Through SP3c-1, `catalog_registry:read` with no
+   * `warehouse:read` was the natural role for this section and the one
+   * migration 0148 did NOT create — it granted `warehouse:* →
+   * catalog_registry:*`, never the reverse — so every one of the five moved
+   * tabs, gated `warehouse:read`, produced a bare "forbidden" panel for this
+   * persona (review F1). Task 7 retired `warehouse:read` and re-gated
+   * `warehouse_admin` onto `catalog_registry:*` (migration 0153 re-ran 0148's
+   * grant first, so nobody lost anything in the move), so this SAME persona —
+   * `catalog_registry:read` and nothing else — is now the one the tabs are
+   * built for: it already cleared the route guard that requires
+   * `catalog_registry:read` to reach this page at all, and that is now the
+   * only permission the tabs' own endpoints ask for too.
    */
-  test("a reader without warehouse:read gets the reason, not five forbidden panels", async () => {
+  test("a catalog_registry:read-only reader sees all five warehouse tabs and can open one", async () => {
     mockWarehouseTabApis();
     mockCatalog(warehouseCatalog());
-    renderDetail("/control-plane/catalogs/c-wh", READER);
+    renderDetail("/control-plane/catalogs/c-wh?tab=roles", READER);
 
     expect(await screen.findByRole("tab", { name: /Configuration/ })).toBeInTheDocument();
-    // The tabs that cannot work are not offered…
+    // Every warehouse tab is offered…
     for (const [, name] of WAREHOUSE_TABS) {
-      expect(screen.queryByRole("tab", { name })).toBeNull();
+      expect(screen.getByRole("tab", { name })).toBeInTheDocument();
     }
-    // …the missing permission is NAMED, and so is the one that does not imply it…
-    const blocked = await screen.findByTestId("warehouse-tabs-blocked");
-    expect(blocked).toHaveTextContent("warehouse:read");
-    expect(blocked).toHaveTextContent("catalog_registry:read");
-    // …and nothing was requested that could only have been refused.
-    expect(vi.mocked(api.getWarehouse)).not.toHaveBeenCalled();
-    expect(vi.mocked(api.listRoles)).not.toHaveBeenCalled();
-    expect(vi.mocked(api.listClients)).not.toHaveBeenCalled();
-    expect(vi.mocked(api.listNamespaces)).not.toHaveBeenCalled();
+    // …the old blocked-banner is gone entirely, there being nothing left it
+    // could say…
+    expect(screen.queryByTestId("warehouse-tabs-blocked")).toBeNull();
+    // …and opening one is not just a trigger that renders nothing: the Roles
+    // panel's own query actually ran and its content is on screen — the
+    // persona can REACH the tab, not just see its label (the SP3c-1 Task 11
+    // inert-fix shape this task's brief calls out by name).
+    expect(await screen.findByRole("heading", { name: /Catalog roles/ })).toBeInTheDocument();
+    expect(vi.mocked(api.listRoles)).toHaveBeenCalledWith("wh-1");
   });
 
   /**
@@ -423,7 +429,7 @@ describe("CatalogDetail shell", () => {
       renderDetail(`/control-plane/catalogs/c-wh?tab=${value}`);
 
       const err = await screen.findByTestId("warehouse-row-error");
-      expect(err).toHaveTextContent("warehouse:read");
+      expect(err).toHaveTextContent("catalog_registry:read");
       expect(err).toHaveTextContent(/not about the warehouse/);
       expect(screen.queryByText(/isn't provisioned yet/)).toBeNull();
     },
@@ -434,19 +440,19 @@ describe("CatalogDetail shell", () => {
    *
    * Radix renders no panel for a `value` no trigger carries, so a `?tab=` the
    * strip does not offer left the page with a header, a tab strip, NO selected
-   * tab and an empty body. Both cases below are reachable:
+   * tab and an empty body. Reachable for any stale or mistyped `?tab=` value,
+   * for anyone — the case this block now proves.
    *
-   *  - `browse` for an account without `warehouse:read` — and the redirect
-   *    this branch ships turns a bookmarked
-   *    `/control-plane/warehouses/{id}?tab=browse` into exactly that URL;
-   *  - any stale or mistyped value, for anyone.
-   *
-   * The admin row is the control: the SAME `?tab=browse` must still open
-   * Browse for an account that may read the warehouse, or "fall back to
-   * configuration" would just be "ignore the URL".
+   * The READER row used to be the OTHER reachable case: `browse` for an
+   * account without `warehouse:read` fell back, because through SP3c-1 the
+   * tabs were withheld from that persona entirely. SP3c-2 (Task 7) retired
+   * that gate, so `browse` now opens for READER exactly as it does for ADMIN
+   * — proven here by giving both rows the SAME expected tab, rather than by
+   * deleting the READER case and losing the coverage that it still works for
+   * a non-admin.
    */
   test.each([
-    ["browse", READER, "configuration"],
+    ["browse", READER, "browse"],
     ["nonsense", ADMIN, "configuration"],
     ["browse", ADMIN, "browse"],
   ] as const)(

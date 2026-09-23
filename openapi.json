@@ -3642,7 +3642,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:delete permission",
+            "description": "Missing catalog_registry:delete permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -5411,7 +5411,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:delete permission",
+            "description": "Missing catalog_registry:delete permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -7273,7 +7273,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:delete permission",
+            "description": "Missing catalog_registry:delete permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -7338,7 +7338,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -7411,7 +7411,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:create permission",
+            "description": "Missing catalog_registry:create permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9277,7 +9277,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9345,7 +9345,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:create permission",
+            "description": "Missing catalog_registry:create permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9427,7 +9427,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9490,7 +9490,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:delete permission",
+            "description": "Missing catalog_registry:delete permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9565,7 +9565,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9635,7 +9635,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:create permission",
+            "description": "Missing catalog_registry:create permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9707,7 +9707,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9792,7 +9792,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9877,7 +9877,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9962,7 +9962,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10047,7 +10047,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10131,7 +10131,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10221,7 +10221,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10324,7 +10324,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10416,7 +10416,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10501,7 +10501,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10571,7 +10571,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:create permission",
+            "description": "Missing catalog_registry:create permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10655,7 +10655,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10730,7 +10730,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10815,7 +10815,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10900,7 +10900,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10975,7 +10975,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -11078,7 +11078,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -11148,7 +11148,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -11218,7 +11218,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {

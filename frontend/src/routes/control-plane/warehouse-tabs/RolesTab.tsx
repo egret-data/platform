@@ -123,7 +123,15 @@ export function RolesTab({ warehouseId }: { warehouseId: string }) {
                 <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
                   {roles.isError ? (
                     <span className="text-destructive">
-                      {roles.error?.message ?? "Couldn't load roles."}
+                      {/* `ApiError.message` for a 403 is `Error::Forbidden`'s Display, the
+                          bare word "forbidden" — it names no permission and offers no way
+                          forward. This route is now gated `catalog_registry:read` (SP3c-2,
+                          Task 7 retired `warehouse:read`), and this tab renders unconditionally
+                          on the persona holding only `catalog_registry:read` on the catalog
+                          section, so this branch is the one that persona actually reaches. */}
+                      {roles.error?.status === 403
+                        ? "Couldn't load catalog roles: this needs the catalog_registry:read permission. A platform administrator can grant it."
+                        : (roles.error?.message ?? "Couldn't load roles.")}
                     </span>
                   ) : roles.isLoading ? (
                     <ListSkeleton rows={3} cols={4} />

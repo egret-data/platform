@@ -58,7 +58,8 @@ describe("canEnterControlPlane / canEnterGovernance", () => {
   // Control Plane app — not just one page. A user re-gated onto the new key
   // before it joined this list would lose Engines, Storage, Secrets and the
   // rest along with Catalogs, so the key enters the list in the same change
-  // that adds the section. (`warehouse:read` only LEAVES it in SP3c-2.)
+  // that adds the section. (`warehouse:read` left the list in SP3c-2, once
+  // `warehouse_admin` was re-gated onto `catalog_registry:*`, Task 7.)
   it("admits a user holding only catalog_registry:read to Control Plane", () => {
     const catalogOnly = user([], ["catalog_registry:read"]);
     expect(canEnterControlPlane(catalogOnly)).toBe(true);

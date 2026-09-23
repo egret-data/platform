@@ -2426,7 +2426,7 @@ async fn scoped_permission_engines_read_and_create() {
     // These 403/200 assertions gate on `state.pdp`; seed all ad-hoc scoped roles
     // BEFORE building the Cedar PDP (it snapshots the roles catalog at build),
     // then swap in a real PDP so the allow-all stub can't mask the scoped grants.
-    let wrong = session_for_with_permission(&f, "engine_scoped_wrong", "warehouse:read").await;
+    let wrong = session_for_with_permission(&f, "engine_scoped_wrong", "storage:read").await;
     let reader = session_for_with_permission(&f, "engine_scoped_reader", "engine:read").await;
     let creator = session_for_with_permission(&f, "engine_scoped_creator", "engine:create").await;
     attach_real_pdp(&mut f).await;
@@ -2511,7 +2511,7 @@ async fn scoped_permission_monitor_queries_and_cluster() {
     // building the Cedar PDP (it snapshots the roles catalog at build), then swap
     // in a real PDP so the under-privileged 403s are genuine (not allow-all).
     let admin_token = session_for(&f, "monitor_scoped_setup", true).await;
-    let wrong = session_for_with_permission(&f, "monitor_scoped_wrong", "warehouse:read").await;
+    let wrong = session_for_with_permission(&f, "monitor_scoped_wrong", "storage:read").await;
     let reader = session_for_with_permission(&f, "monitor_scoped_reader", "engine:read").await;
     attach_real_pdp(&mut f).await;
 

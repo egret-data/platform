@@ -19,7 +19,6 @@ import { useControlPlaneCatalogRegistryGetRegistryCatalog } from "@/api/generate
 import type { controlPlaneCatalogRegistryGetRegistryCatalogResponse } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import { type Warehouse, getWarehouse } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
-import { useAuth } from "@/auth/useAuth";
 import { DetailFact } from "@/components/layout/DetailFact";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -71,7 +70,6 @@ const WAREHOUSE_TABS = ["roles", "clients", "browse", "connect", "settings"];
  */
 export default function CatalogDetail() {
   const { id = "" } = useParams();
-  const { me } = useAuth();
 
   // The active tab lives in the URL so the view is deep-linkable and survives
   // a refresh. The default is `configuration` — the one tab every catalog has,
@@ -117,28 +115,17 @@ export default function CatalogDetail() {
   const wh = catalog && isEgretWarehouse(catalog) ? catalog.warehouseId! : null;
 
   /**
-   * All five moved tabs are served by the LEGACY warehouse endpoints, and every
-   * one of them is gated `warehouse:read`
+   * All five moved tabs are served by the warehouse endpoints
    * (`egret-catalog-engine/src/warehouse_admin/mod.rs` — roles, clients,
-   * namespaces, tabulars, config, tasks, and the warehouse row itself).
-   *
-   * `catalog_registry:read` does NOT imply it. Migration 0148 grants one way
-   * only: a role holding `warehouse:read` gained `catalog_registry:read`, not
-   * the reverse — so the persona this whole section was built for, a role
-   * created with `catalog_registry:read` alone, holds neither the new key's
-   * implication nor the old key. Rendering the tabs for them produces five
-   * panels of `Error::Forbidden`'s Display, the bare word "forbidden", which
-   * names no permission and offers no way forward.
-   *
-   * This is the rule the header's warehouse link carried before it became a
-   * self-link — a link that 403s is worse than an id — applied to five panels
-   * instead of one anchor. The server is still the authority; this is the
-   * courtesy that keeps a refusal from arriving as a broken page.
+   * namespaces, tabulars, config, tasks, and the warehouse row itself), gated
+   * `catalog_registry:read` since SP3c-2 (Task 7) retired the router's own
+   * `warehouse:read` (migration 0153 re-ran 0148's grant and deleted the old
+   * keys). So `wh !== null` is the only other condition these tabs need —
+   * `catalog_registry:read` already gates the route this whole page sits
+   * behind (`App.tsx`'s `catalogs/:id`), which is why `warehouseTabs` below
+   * reduces to the presence of a warehouse id.
    */
-  const canReadWarehouse =
-    !!me &&
-    (me.platform_roles.includes("platform_admin") || me.permissions.includes("warehouse:read"));
-  const warehouseTabs = wh !== null && canReadWarehouse;
+  const warehouseTabs = wh !== null;
 
   /**
    * `?tab=` NARROWED TO A TAB THAT EXISTS (SP3c-1 Task 11, found in a browser).
@@ -148,8 +135,8 @@ export default function CatalogDetail() {
    * selected tab and an empty body. It is reachable from the redirect this
    * branch ships: `/control-plane/warehouses/{id}?tab=browse` is a URL an
    * operator may have bookmarked when the warehouse page owned those five
-   * tabs, and it now lands here — where, for an account without
-   * `warehouse:read`, `browse` is not among the triggers. `?tab=nonsense`
+   * tabs, and it now lands here — where, for a catalog with no warehouse
+   * (`wh === null`), `browse` is not among the triggers. `?tab=nonsense`
    * does the same for everyone.
    *
    * Falling back to `configuration` is the same rule `TrinoConfigEditor`
@@ -172,8 +159,9 @@ export default function CatalogDetail() {
   //
   // Fetched only when a tab that CONSUMES it is the one open. Radix unmounts
   // the inactive panels, so firing this on every view of an egret catalog
-  // spent a request nothing was reading — and, for a user without
-  // `warehouse:read`, spent a request that could only 403.
+  // spent a request nothing was reading — and, for a user whose
+  // `catalog_registry:read` has not yet reached every PDP replica, spent a
+  // request that could only 403.
   //
   // It sits ABOVE the early returns, as every hook on this page must: an
   // `isError` render that skipped it would change the hook count between
@@ -203,7 +191,7 @@ export default function CatalogDetail() {
       <Alert variant="destructive" data-testid="warehouse-row-error">
         <AlertDescription>
           {warehouseQ.error?.status === 403
-            ? "egret refused to read this warehouse's record: that read needs the warehouse:read permission. Connect and Settings are both built from that record, so neither can be shown. This is an answer about your permissions and not about the warehouse — nothing here says it is unprovisioned, empty or broken."
+            ? "egret refused to read this warehouse's record: that read needs the catalog_registry:read permission. Connect and Settings are both built from that record, so neither can be shown. This is an answer about your permissions and not about the warehouse — nothing here says it is unprovisioned, empty or broken."
             : `Couldn't read this warehouse's record: ${
                 warehouseQ.error?.message ?? "the request failed"
               }. Connect and Settings are both built from it, so neither can be shown.`}
@@ -328,21 +316,14 @@ export default function CatalogDetail() {
         </Alert>
       )}
 
-      {/* The five tabs an egret warehouse catalog would have, and why this
-          account is not being offered them. Said ONCE, above the strip, rather
-          than five times inside panels that cannot load. */}
-      {wh !== null && !canReadWarehouse && (
-        <Alert data-testid="warehouse-tabs-blocked">
-          <AlertDescription>
-            This catalog is an egret warehouse. Its roles and grants, Catalog Clients,
-            namespace browser, connection details and settings are served by the warehouse
-            endpoints, which require the <code className="font-mono">warehouse:read</code>{" "}
-            permission — <code className="font-mono">catalog_registry:read</code> does not
-            imply it. Your account does not hold it, so those five tabs are not shown. A
-            platform administrator can grant it.
-          </AlertDescription>
-        </Alert>
-      )}
+      {/* SP3c-1 through this task used to say ONCE, above the strip, why the
+          five warehouse tabs were withheld: `warehouse:read` did not follow
+          from `catalog_registry:read`, the permission that gates this whole
+          page. SP3c-2 (Task 7) retired `warehouse:read` and re-gated those
+          five tabs' endpoints onto `catalog_registry:read` too, so holding
+          the permission this page already required is now sufficient — the
+          five tabs render whenever `wh !== null` (see `warehouseTabs` above),
+          and there is nothing left for a banner here to explain. */}
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>

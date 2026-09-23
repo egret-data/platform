@@ -259,7 +259,13 @@ describe("Sidebar – Infrastructure group", () => {
   // both admit the user to Control Plane (see appAccess.test.ts) and unlock a
   // section once they are in — a user admitted to an app with an empty sidebar
   // is locked out just as effectively.
-  test("a catalog_registry:read-only user sees Catalogs and no other Infrastructure item", () => {
+  //
+  // Warehouses is now IN the positive list, not the "gone" one: SP3c-2
+  // (Task 7) retired `warehouse:read` and re-gated the entry onto
+  // `catalog_registry:read`, the same key Catalogs uses, so a
+  // catalog_registry:read-only user sees both (Task 8 removes the entry
+  // outright).
+  test("a catalog_registry:read-only user sees Catalogs and Warehouses, no other Infrastructure item", () => {
     renderSidebar("/control-plane/catalogs", {
       user_id: "9",
       email: "catalogs@example.com",
@@ -270,7 +276,11 @@ describe("Sidebar – Infrastructure group", () => {
       "href",
       "/control-plane/catalogs",
     );
-    for (const gone of ["Warehouses", "Engines", "Storage", "Secrets", "Workspaces"]) {
+    expect(screen.getByRole("link", { name: "Warehouses" })).toHaveAttribute(
+      "href",
+      "/control-plane/warehouses",
+    );
+    for (const gone of ["Engines", "Storage", "Secrets", "Workspaces"]) {
       expect(screen.queryByRole("link", { name: gone })).not.toBeInTheDocument();
     }
   });

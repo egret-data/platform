@@ -209,10 +209,11 @@ function catalogColumns(
       label: "",
       className: "text-right w-10",
       // PER ROW, because the two kinds of row are deleted through two
-      // differently-gated endpoints: an egret warehouse catalog goes to
-      // `DELETE /warehouses/{id}` (`warehouse:delete`) and everything else to
-      // `DELETE /catalogs/{id}` (`catalog_registry:delete`). One flat gate
-      // would either hide a button that works or offer one that cannot.
+      // different endpoints, both gated `catalog_registry:delete` since
+      // SP3c-2: an egret warehouse catalog goes to `DELETE /warehouses/{id}`
+      // and everything else to `DELETE /catalogs/{id}`. Kept as two branches
+      // rather than folded into one check because the endpoints — and the
+      // 409 conflict shapes each can return — still differ.
       cell: (c) =>
         canDelete(c) ? (
           <Button
@@ -263,7 +264,7 @@ export default function Catalogs() {
   const isAdmin = !!me && me.platform_roles.includes("platform_admin");
   const canCreate = isAdmin || !!me?.permissions.includes("catalog_registry:create");
   const canDeleteCatalog = isAdmin || !!me?.permissions.includes("catalog_registry:delete");
-  const canDeleteWarehouse = isAdmin || !!me?.permissions.includes("warehouse:delete");
+  const canDeleteWarehouse = isAdmin || !!me?.permissions.includes("catalog_registry:delete");
   const canDelete = (c: RegistryCatalogDto) =>
     isEgretWarehouse(c) ? canDeleteWarehouse : canDeleteCatalog;
 
@@ -364,8 +365,8 @@ export default function Catalogs() {
    * Hiding a control without a word is the shape Task 7's F3, Task 8's F1 and
    * Task 9's F-4 each removed from another screen; the delete clauses are
    * further conditioned on there being a row of that kind, because naming
-   * `warehouse:delete` on a list with no egret warehouse in it explains a
-   * button that was never going to be drawn.
+   * `catalog_registry:delete` on a list with no egret warehouse in it explains
+   * a button that was never going to be drawn.
    */
   const hiddenControls: string[] = [];
   /**
@@ -388,7 +389,7 @@ export default function Catalogs() {
     hiddenControls.push("deleting a registered catalog needs catalog_registry:delete");
   if (!canDeleteWarehouse && rows.some(isEgretWarehouse))
     hiddenControls.push(
-      "deleting an egret warehouse needs warehouse:delete, because it is removed with its warehouse",
+      "deleting an egret warehouse needs catalog_registry:delete, because it is removed with its warehouse",
     );
 
   return (
