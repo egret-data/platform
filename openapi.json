@@ -2639,7 +2639,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Registry catalogs with their engines and workspaces",
+            "description": "Registry catalogs with their engines and workspaces. A catalog whose stored configuration no longer parses is listed with `configError` set rather than omitted, and never fails the whole list",
             "content": {
               "application/json": {
                 "schema": {
@@ -2782,7 +2782,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The catalog",
+            "description": "The catalog. If its stored configuration no longer parses, `configError` is set rather than the request failing",
             "content": {
               "application/json": {
                 "schema": {

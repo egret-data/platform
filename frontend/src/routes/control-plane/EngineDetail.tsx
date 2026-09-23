@@ -1416,7 +1416,16 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
       .map((b) => b.name)
       .join(", ");
 
+  // The row's own reasons apply on top of a table that may itself be stale
+  // (fix round 1, Important): `registryQ.isError` with `rows.length > 0` is
+  // react-query keeping the last successful `data` through a failed refetch,
+  // so the table below is showing what it read BEFORE this failure — Retry
+  // and Detach must not offer to act on that as if it were current.
+  const staleRegistry =
+    "egret could not refresh the catalog registry, so this row may be showing stale information. This control is unavailable until the read succeeds again.";
+
   const retryBlockedReason = (r: AttachedRow) => {
+    if (registryQ.isError) return staleRegistry;
     if (r.configError)
       return "egret cannot parse this catalog's stored configuration, so it cannot render it for this engine. Repair it on the catalog's own page first.";
     if (isTrino && broken.length > 0)
@@ -1431,6 +1440,7 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
   );
 
   const detachBlockedReason = (r: AttachedRow) => {
+    if (registryQ.isError) return staleRegistry;
     if (r.isPrimary)
       return `${r.name} is this engine's primary catalog. Detach it by deleting the engine.`;
     // A detach that removes the ONLY broken row escapes, because that row is
@@ -1553,6 +1563,29 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
             </TableBody>
           </Table>
         </div>
+      )}
+
+      {/* Fix round 1, Important. `rows.length > 0` here means the table above
+          is NOT this render's own read — react-query keeps the last
+          successful `data` through a failed refetch (the shared registry
+          list has `retry: 1` / `staleTime: 30000`, and every attach/detach/
+          retry invalidates it, so a refetch racing one of those is a normal
+          occurrence, not an edge case). Silence in this state is exactly the
+          "reads as an all-clear" shape a failed read must never take: the
+          table looks complete and current when it is neither. This is a
+          SEPARATE sentence from the `rows.length === 0` alert above — that
+          one is honest about having nothing to show; this one is honest
+          about what it is showing being stale — so the two are never both
+          true at once and this is not the same alert said twice. */}
+      {registryQ.isError && rows.length > 0 && (
+        <Alert variant="destructive" data-testid="engine-catalogs-stale">
+          <AlertDescription>
+            egret could not refresh this engine&apos;s catalogs, so the table above is from an
+            earlier read and may be out of date:{" "}
+            {registryQ.error?.message ?? "the request failed"}. Apply status may be stale, and
+            Retry, Detach and the attach picker are unavailable until the read succeeds again.
+          </AlertDescription>
+        </Alert>
       )}
 
       {testTarget && (test.data || test.isError) && (

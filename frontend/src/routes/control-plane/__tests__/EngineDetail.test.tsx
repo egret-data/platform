@@ -1,6 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClient, QueryClientProvider, useMutation } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useMutation, useQuery } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -12,7 +12,7 @@ import * as wsApi from "@/api/generated/admin-workspaces/admin-workspaces";
 import * as registryApi from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import { toast } from "sonner";
 import { ApiError } from "@/api/client";
-import { catalogKey } from "@/routes/control-plane/queryKeys";
+import { catalogKey, catalogsQueryKey } from "@/routes/control-plane/queryKeys";
 import { AuthContext } from "@/auth/useAuth";
 import type { Me } from "@/api/hooks";
 import type { EngineDependentDto } from "@/api/generated/model/engineDependentDto";
@@ -1113,6 +1113,36 @@ function mockRegistryList(rows: RegistryCatalogDto[], over: Record<string, unkno
   >);
 }
 
+/**
+ * Wire the registry list hook to a REAL `useQuery` over `queryFn`, keyed
+ * exactly like the generated hook (`catalogsQueryKey`) — unlike
+ * `mockRegistryList`, this lets `useAttachmentActions`' post-mutation
+ * `invalidateQueries({ queryKey: catalogsQueryKey })` trigger a REAL refetch
+ * through react-query's own cache mechanics, so a test can reach "a
+ * successful load, then a failing refetch" the way the page does, rather
+ * than hand-constructing that combined state as a single mocked return value
+ * (fix round 1, Important).
+ */
+function wireRegistryQuery(queryFn: () => Promise<{ status: 200; data: RegistryCatalogDto[] }>) {
+  vi.mocked(registryApi.useControlPlaneCatalogRegistryListRegistryCatalogs).mockImplementation(
+    ((_params?: unknown, options?: { query?: Record<string, unknown> }) =>
+      useQuery({
+        queryKey: catalogsQueryKey,
+        queryFn,
+        retry: false,
+        // The production `queryClient` (`api/queryClient.ts`) sets
+        // `staleTime: 30000`; this test's own `QueryClient` (`renderDetail`)
+        // does not, so without this a SECOND observer mounting on the same
+        // key (`EngineSummaryStrip` and `CatalogsCard` both call this hook)
+        // would itself trigger a background refetch-on-mount — consuming the
+        // "second call fails" this test means to reserve for the Detach's
+        // invalidation.
+        staleTime: 30000,
+        ...(options?.query ?? {}),
+      })) as typeof registryApi.useControlPlaneCatalogRegistryListRegistryCatalogs,
+  );
+}
+
 /** Open the Catalogs tab and hand back the user-event session that did it. */
 async function openCatalogs(me: Me | null = ADMIN, entry?: string) {
   const user = userEvent.setup({ pointerEventsCheck: 0 });
@@ -1497,6 +1527,75 @@ describe("EngineDetail — Catalogs tab: an unreadable list is not an empty one"
 
     expect(await screen.findByText(/no catalogs, so it can query nothing/)).toBeInTheDocument();
     expect(screen.queryByTestId("engine-catalogs-unreadable")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Fix round 1, Important. `data !== undefined && isError` — react-query
+ * keeping the last successful list through a failed refetch — was reachable
+ * (the shared query has `retry: 1` / `staleTime: 30000`, and every
+ * attach/detach/retry invalidates it) and rendered as a plain, current-looking
+ * table: `rows.length === 0` was false, so the empty-state alert never
+ * mounted, `registryRead` was false so nothing else said the read had failed,
+ * and the attach picker quietly disappeared. That is "silence reads as an
+ * all-clear" — worse than showing nothing, because a stale table LOOKS like a
+ * fact about the engine.
+ *
+ * Driven the way the page actually reaches it: a real `useQuery` loads once
+ * successfully, then a Detach succeeds and its `onSuccess` invalidates the
+ * SAME query key, triggering a real refetch that fails — not a single mocked
+ * return value asserting both `data` and `isError` at once.
+ */
+describe("EngineDetail — Catalogs tab: a refetch that fails after a good load", () => {
+  beforeEach(catalogsTabBeforeEach);
+
+  test("keeps the stale rows on screen, says they may be out of date, and blocks Retry/Detach with a reason", async () => {
+    let calls = 0;
+    wireRegistryQuery(async () => {
+      calls += 1;
+      if (calls === 1) return { status: 200, data: [SALES, EVENTS] };
+      throw new ApiError(500, "registry store unavailable");
+    });
+    registryDetachFn.mockResolvedValue({ status: 204, data: undefined });
+
+    const user = await openCatalogs();
+
+    // First load succeeded: the ordinary table, no stale banner yet.
+    await screen.findByRole("row", { name: /^sales/ });
+    expect(screen.queryByTestId("engine-catalogs-stale")).not.toBeInTheDocument();
+
+    // Detach `events` — it succeeds, and `useAttachmentActions` invalidates
+    // `catalogsQueryKey`, which is THIS query: a real refetch fires and its
+    // second call (mocked above) fails.
+    await user.click(within(catalogRow("events")).getByRole("button", { name: /Detach/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.type(await within(dialog).findByPlaceholderText("events"), "events");
+    await user.click(within(dialog).getByRole("button", { name: /^Detach$/ }));
+    await waitFor(() => expect(registryDetachFn).toHaveBeenCalledTimes(1));
+
+    // The failed refetch does not blank the table: `sales` is still the
+    // STALE row from the first successful read (react-query never clears
+    // `data` on a failed refetch).
+    const note = await screen.findByTestId("engine-catalogs-stale");
+    expect(within(await screen.findByRole("row", { name: /^sales/ })).getByText("sales")).toBeInTheDocument();
+    expect(note).toHaveTextContent(/out of date/i);
+    expect(note).toHaveTextContent("registry store unavailable");
+    expect(note).toHaveTextContent(/apply status/i);
+    expect(note).toHaveTextContent(/Retry/);
+    expect(note).toHaveTextContent(/Detach/);
+    expect(note).toHaveTextContent(/attach picker/i);
+    // Not an empty-table claim — that alert is for when there is nothing to
+    // show, which is not this state.
+    expect(screen.queryByTestId("engine-catalogs-unreadable")).not.toBeInTheDocument();
+
+    // Retry/Detach on the stale row are disabled with a reason, not silently
+    // still-clickable against data that might not be current any more.
+    const sales = catalogRow("sales");
+    expect(within(sales).getByRole("button", { name: /Detach/ })).toBeDisabled();
+    expect(within(sales).getByText(/may be showing stale information/i)).toBeInTheDocument();
+    // …and the attach picker is the control that used to vanish silently —
+    // it is still gone, but now the banner above says why.
+    expect(screen.queryByRole("combobox", { name: /Catalog to attach/ })).not.toBeInTheDocument();
   });
 });
 

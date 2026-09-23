@@ -282,7 +282,7 @@ async fn load(st: &CpState, id: Uuid) -> Result<CatalogRow, CpError> {
     tag = "control-plane-catalog-registry",
     params(ListCatalogsQuery),
     responses(
-        (status = 200, description = "Registry catalogs with their engines and workspaces", body = Vec<RegistryCatalogDto>),
+        (status = 200, description = "Registry catalogs with their engines and workspaces. A catalog whose stored configuration no longer parses is listed with `configError` set rather than omitted, and never fails the whole list", body = Vec<RegistryCatalogDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -351,7 +351,7 @@ async fn create_registry_catalog(
     tag = "control-plane-catalog-registry",
     params(("id" = Uuid, Path, description = "Registry catalog id")),
     responses(
-        (status = 200, description = "The catalog", body = RegistryCatalogDto),
+        (status = 200, description = "The catalog. If its stored configuration no longer parses, `configError` is set rather than the request failing", body = RegistryCatalogDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 404, description = "No such catalog", body = ErrorBody),

@@ -251,7 +251,7 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
    * `catalog-retry-scope-note`).
    */
   const retryBlockedReason = catalog.configError
-    ? "egret cannot parse this catalog's stored configuration, so it cannot render it for any engine. Repair the configuration above first."
+    ? "egret cannot parse this catalog's stored configuration, so it cannot render it for any engine. Repair it on this catalog's Configuration tab first."
     : null;
   /**
    * The engines whose Retry and Detach have a scope wider than the row.
