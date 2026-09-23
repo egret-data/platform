@@ -157,6 +157,14 @@ Deleting the routes also retires `CatalogTestDto`'s undiscriminated `{ ok, messa
 makes D4 true everywhere rather than on one route. Note that `POST /engines/{id}/catalogs/{cid}` and
 `…/apply` live under the same URL prefix but are **registry-era and stay**.
 
+**A consequence to state, because it is a capability loss.** Before SP3c-2, an operator holding
+`engine:read` and nothing else could see an engine's catalog names on its Catalogs tab, because
+`GET /engines/{id}/catalogs` was gated on `engine:read`. The registry list is gated on
+`catalog_registry:read`, so after this step that operator sees the tab, an explicit alert naming the
+missing permission, and no catalog names. That is the price of one permission family (D3) and it is
+accepted — but the tab must never simply look empty, because an empty table reads as "this engine has
+no catalogs". The alert says so in as many words.
+
 **3. `engines.warehouse_id` — and what "primary" may now mean.** One writer (`store.rs:203-227`),
 eleven production readers; four of them die with step 1. `EngineDto.warehouse_id` leaves the wire,
 which deletes two frontend echo lines (`useEngineConfigForm.ts:1291`,
