@@ -606,6 +606,15 @@ async fn migrate_warehouse_row(
                 minted_client: row.config.get("mintedClient").and_then(|v| v.as_bool())
                     != Some(false),
                 applied_now: false,
+                // EXACTLY migration 0150's rule (`catalogs.warehouse_id =
+                // engines.warehouse_id`), not the legacy `is_primary` flag, so a
+                // row this boot migrates lands where 0150 would have put it had
+                // it already been in the registry — `list_engine_attachments`
+                // must order the two populations identically. It is also why
+                // this can never collide with 0150's partial unique index:
+                // `catalogs_warehouse_id_key` allows one catalog per warehouse,
+                // so at most one of an engine's attachments can match.
+                is_primary: wh.id == row.engine_warehouse_id,
                 created_at: Some(row.created_at),
                 apply_status: apply_status::APPLIED,
             },
@@ -689,6 +698,9 @@ async fn migrate_connector_row(
                             credential_secret_id: None,
                             minted_client: false,
                             applied_now: false,
+                            // A connector catalog carries no warehouse, so it
+                            // never satisfied the old primary predicate.
+                            is_primary: false,
                             created_at: Some(row.created_at),
                             apply_status: apply_status::APPLIED,
                         },

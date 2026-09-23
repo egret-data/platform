@@ -41,8 +41,12 @@ import {
   type Column,
 } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { catalogsQueryKey, warehousesQueryKey } from "./queryKeys";
 
-export const warehousesQueryKey = ["control-plane", "warehouses"] as const;
+// Re-exported so this page stays the obvious home of its own key. It is
+// DEFINED in `./queryKeys` because `catalogs/Catalogs.tsx` needs it too, and
+// this page needs that page's — see there.
+export { warehousesQueryKey } from "./queryKeys";
 
 /**
  * Column set for the warehouses table. `value` (used for search + sort) resolves
@@ -134,7 +138,22 @@ export default function Warehouses() {
   const queryClient = useQueryClient();
   const deleteMutation = useMutation<void, ApiError, string>({
     mutationFn: deleteWarehouse,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: warehousesQueryKey }),
+    // Also the catalogs list: every egret warehouse mirrors a registry catalog
+    // (migration 0147's CHECK), the delete cascades to it, and through SP3c-1
+    // both sections are live — so refreshing only this key leaves the deleted
+    // warehouse listed as a catalog for the 30 seconds of `staleTime`.
+    // `catalogs/Catalogs.tsx` does the mirror of this.
+    //
+    // THE PAIR OUTLIVES SP3c-1 (whole-branch review, F7). This line used to
+    // say "Task 8 removes both"; Task 8 shipped and removed neither, because
+    // D5 deliberately keeps the Warehouses list through SP3c-1. Nothing
+    // enforces the mirroring across its five writers, so a reader who believes
+    // it is temporary is exactly the reader who drops one half. Whichever PR
+    // finally retires this section owns removing it.
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: warehousesQueryKey });
+      void queryClient.invalidateQueries({ queryKey: catalogsQueryKey });
+    },
   });
 
   const [addOpen, setAddOpen] = useState(false);
@@ -253,7 +272,18 @@ function AddWarehouseDialog({
   const workspaces = useMyWorkspaces(open);
   const createMutation = useMutation<Warehouse, ApiError, CreateWarehouseInput>({
     mutationFn: createWarehouse,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: warehousesQueryKey }),
+    // Both keys, for the same reason the delete above invalidates both and
+    // with the sign flipped: creating a warehouse creates its mirror registry
+    // catalog, so a create that refreshed only this key would leave the
+    // Catalogs list a row SHORT for the 30 seconds of `staleTime`. Task 5's
+    // `CatalogCreate.tsx` is the other door into this pair of caches and does
+    // the same. Like the delete above, this half is NOT temporary: Task 8 left
+    // the Warehouses section in place (D5) and nothing enforces the pairing —
+    // see the longer note there (whole-branch review, F7).
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: warehousesQueryKey });
+      void queryClient.invalidateQueries({ queryKey: catalogsQueryKey });
+    },
   });
 
   const [name, setName] = useState("");

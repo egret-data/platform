@@ -3702,6 +3702,7 @@ async fn delete_engine_removes_cluster_row_secrets_and_minted_clients_only() {
         credential_secret_id: Some(foreign_cred),
         minted_client: false,
         applied_now: true,
+        is_primary: false,
         created_at: None,
         apply_status: egret_catalog_registry::store::apply_status::APPLIED,
     })
@@ -6334,6 +6335,7 @@ async fn registry_catalog_crud_validation_and_delete_refusal() {
         credential_secret_id: None,
         minted_client: false,
         applied_now: true,
+        is_primary: false,
         created_at: None,
         apply_status: egret_catalog_registry::store::apply_status::APPLIED,
     })
@@ -6424,6 +6426,7 @@ async fn registry_update_propagates_and_flags_the_failed_engine() {
             credential_secret_id: None,
             minted_client: false,
             applied_now: true,
+            is_primary: false,
             created_at: None,
             apply_status: egret_catalog_registry::store::apply_status::APPLIED,
         })
@@ -7418,6 +7421,618 @@ async fn a_detach_whose_drop_fails_keeps_the_attachment_row() {
     assert_eq!(row.apply_status, "applied", "the attachment is untouched");
 }
 
+/// SP3c-1 task 1: `DELETE /catalogs/{id}/engines/{engine_id}` is a second door
+/// onto the SAME `detach_from_engine`, symmetric with `/catalogs/{id}/workspaces`.
+/// The registry route detaches the catalog from the engine but keeps the
+/// registry catalog itself, so it can be attached elsewhere later.
+#[tokio::test]
+async fn registry_detach_removes_the_attachment_and_keeps_the_catalog() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "reg_detach_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("regdetach");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let reg = registry(&f);
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{cid}/engines/{engine_id}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{j}");
+    assert!(
+        reg.get_attachment(e, c).await.unwrap().is_none(),
+        "the attachment is gone"
+    );
+    assert!(
+        port.last_updated()
+            .catalogs
+            .iter()
+            .all(|c| c.name != cat_name),
+        "the engine no longer carries the catalog"
+    );
+
+    // The registry catalog itself survives: it can be attached elsewhere.
+    let (status, j) = call(&f, "GET", &format!("/catalogs/{cid}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "catalog is kept: {j}");
+    assert_eq!(j["id"], serde_json::json!(cid));
+}
+
+/// The engine's primary catalog cannot be detached through the registry route
+/// either — the refusal lives entirely in `detach_from_engine` (D5), which
+/// this route reaches too, and nothing is sent to the engine or written.
+#[tokio::test]
+async fn registry_detach_refuses_the_primary_catalog_with_400() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "reg_detach_primary_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let primary = warehouse_catalog(&f, wh_id).await;
+    let updates_before = port.updated.lock().unwrap().len();
+
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{}/engines/{engine_id}", primary.id),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "a refused detach must not reach the engine"
+    );
+    assert!(
+        registry(&f)
+            .get_attachment(Uuid::parse_str(&engine_id).unwrap(), primary.id)
+            .await
+            .unwrap()
+            .is_some(),
+        "the primary attachment is untouched"
+    );
+}
+
+/// A catalog id/engine id pair with no attachment is a 404 (either the catalog
+/// or the engine can be real; what's missing is the attachment row), and
+/// nothing is written.
+#[tokio::test]
+async fn registry_detach_is_404_when_the_catalog_is_not_attached() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "reg_detach_404_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("regdetach404");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let updates_before = port.updated.lock().unwrap().len();
+
+    // Never attached.
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{cid}/engines/{engine_id}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "a 404 must not reach the engine"
+    );
+}
+
+/// The whole reason the registry route exists: `catalog_registry:update`
+/// reaches it and `engine:delete` does not, and the split holds symmetrically
+/// on the legacy route too.
+#[tokio::test]
+async fn registry_detach_requires_catalog_registry_update_not_engine_delete() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // Ad-hoc single-permission roles must exist before the real PDP snapshots
+    // roles/permissions at build time (see `attach_real_pdp`).
+    let registry_updater =
+        session_for_with_permission(&f, "reg_detach_gate_reg_upd", "catalog_registry:update").await;
+    let engine_deleter =
+        session_for_with_permission(&f, "reg_detach_gate_eng_del", "engine:delete").await;
+    attach_real_pdp(&mut f).await;
+    let admin = session_for(&f, "reg_detach_gate_admin", true).await;
+
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &admin, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("reggate");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &admin,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let reg = registry(&f);
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &admin,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+
+    // `catalog_registry:update` alone gets a 204 on the registry route.
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{cid}/engines/{engine_id}"),
+        &registry_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{j}");
+    assert!(reg.get_attachment(e, c).await.unwrap().is_none());
+
+    // Re-attach, then prove `engine:delete` alone is refused on the registry
+    // route and writes nothing.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &admin,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/catalogs/{cid}/engines/{engine_id}"),
+        &engine_deleter,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
+    assert!(
+        reg.get_attachment(e, c).await.unwrap().is_some(),
+        "forbidden registry detach wrote nothing"
+    );
+
+    // The legacy route is the mirror image: `engine:delete` gets through,
+    // `catalog_registry:update` alone is refused.
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &engine_deleter,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert!(reg.get_attachment(e, c).await.unwrap().is_none());
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &admin,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &registry_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
+    assert!(
+        reg.get_attachment(e, c).await.unwrap().is_some(),
+        "forbidden legacy detach wrote nothing"
+    );
+}
+
+/// SP3c-1 task 1b: `POST /catalogs/{id}/engines/{engine_id}` is a second door
+/// onto the SAME `attach_to_engine`, symmetric with the registry detach route
+/// and with `/catalogs/{id}/workspaces`. Task 7 puts both attach and detach
+/// buttons on one screen for one persona, so the two must be gated alike.
+#[tokio::test]
+async fn registry_attach_attaches_and_the_attachment_appears() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "reg_attach_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("regattach");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let reg = registry(&f);
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{cid}/engines/{engine_id}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert_eq!(j["applyStatus"], "applied");
+    assert_eq!(j["engineId"], serde_json::json!(engine_id));
+    assert!(
+        reg.get_attachment(e, c).await.unwrap().is_some(),
+        "the attachment is recorded"
+    );
+    assert!(
+        port.last_updated()
+            .catalogs
+            .iter()
+            .any(|cat| cat.name == cat_name),
+        "the engine carries the catalog"
+    );
+}
+
+/// The registry attach route reaches the same `check_engine_supports` refusal
+/// as the legacy route (D4/F-2): a StarRocks-only generic catalog cannot be
+/// attached to a Trino engine, decided before anything is minted or written.
+#[tokio::test]
+async fn registry_attach_refuses_a_catalog_the_engine_cannot_read() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "reg_attach_unreadable_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let sr_only_name = unique_catalog_name("regattachpaimon");
+    let (_, j) = call(&f, "POST", "/catalogs", &token, Some(serde_json::json!({
+        "name": sr_only_name, "kind": "generic",
+        "config": { "engines": ["starrocks"] }, "advanced": { "starrocks": { "type": "paimon" } }
+    }))).await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let updates_before = port.updated.lock().unwrap().len();
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{cid}/engines/{engine_id}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    let msg = j["error"].as_str().unwrap();
+    assert!(msg.contains("trino"), "{msg} should name the engine type");
+    assert!(msg.contains(&sr_only_name), "{msg} should name the catalog");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "a refused attach must not reach the engine"
+    );
+    assert!(
+        registry(&f)
+            .get_attachment(
+                Uuid::parse_str(&engine_id).unwrap(),
+                Uuid::parse_str(&cid).unwrap()
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "nothing was written"
+    );
+}
+
+/// An unknown catalog id, or an unknown engine id, is a 404 either way, and
+/// nothing is written.
+#[tokio::test]
+async fn registry_attach_is_404_for_an_unknown_catalog_or_engine() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "reg_attach_404_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("regattach404");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let updates_before = port.updated.lock().unwrap().len();
+
+    // Unknown catalog, real engine.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{}/engines/{engine_id}", Uuid::new_v4()),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
+
+    // Real catalog, unknown engine.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{cid}/engines/{}", Uuid::new_v4()),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{j}");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "a 404 must not reach the engine"
+    );
+}
+
+/// The whole reason the registry route exists: `catalog_registry:update`
+/// reaches it and `engine:update` does not, and the legacy route keeps
+/// accepting `engine:update` as before — the split holds symmetrically on
+/// both attach routes exactly as it already does for detach.
+#[tokio::test]
+async fn registry_attach_requires_catalog_registry_update_not_engine_update() {
+    let port = FakeEnginePort::default();
+    let Some(mut f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // Ad-hoc single-permission roles must exist before the real PDP snapshots
+    // roles/permissions at build time (see `attach_real_pdp`).
+    let registry_updater =
+        session_for_with_permission(&f, "reg_attach_gate_reg_upd", "catalog_registry:update").await;
+    let engine_updater =
+        session_for_with_permission(&f, "reg_attach_gate_eng_upd", "engine:update").await;
+    attach_real_pdp(&mut f).await;
+    let admin = session_for(&f, "reg_attach_gate_admin", true).await;
+
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &admin, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let cat_name = unique_catalog_name("reggateattach");
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &admin,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    let cid = j["id"].as_str().unwrap().to_string();
+    let reg = registry(&f);
+    let (e, c) = (
+        Uuid::parse_str(&engine_id).unwrap(),
+        Uuid::parse_str(&cid).unwrap(),
+    );
+
+    // `engine:update` alone is refused on the registry route and writes
+    // nothing.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{cid}/engines/{engine_id}"),
+        &engine_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
+    assert!(
+        reg.get_attachment(e, c).await.unwrap().is_none(),
+        "forbidden registry attach wrote nothing"
+    );
+
+    // `catalog_registry:update` alone gets a 201 on the registry route.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{cid}/engines/{engine_id}"),
+        &registry_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert!(reg.get_attachment(e, c).await.unwrap().is_some());
+
+    // Detach (as admin) so the legacy route can attach it again.
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &admin,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+
+    // The legacy route is the mirror image: `engine:update` gets through,
+    // `catalog_registry:update` alone is refused.
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &engine_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    assert!(reg.get_attachment(e, c).await.unwrap().is_some());
+
+    let (status, j) = call(
+        &f,
+        "DELETE",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &admin,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &registry_updater,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{j}");
+    assert!(
+        reg.get_attachment(e, c).await.unwrap().is_none(),
+        "forbidden legacy attach wrote nothing"
+    );
+}
+
 /// D3's third present-state, which D3's letter does not name and which nothing
 /// drove through `converge_attachment` before (fix round 1 review, F4):
 /// `Drift::Unverifiable` — every comparable plain key agrees, but a key the FE
@@ -8035,5 +8650,1798 @@ async fn retry_on_a_deleting_engine_is_409_and_writes_nothing() {
         (before.apply_status, before.apply_error),
         (after.apply_status, after.apply_error),
         "a refused apply on a deleting engine must leave the attachment unchanged"
+    );
+}
+
+// ── SP3c-1 Task 2: `is_primary` on the attachment, `catalogs` on engine create ──
+
+/// `POST /engines` for a Trino engine, with whatever catalog shape the caller
+/// wants (`warehouseId`, `catalogs`, or both).
+async fn create_engine_body(
+    f: &Fixture,
+    token: &str,
+    name: &str,
+    catalog_shape: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let mut body = serde_json::json!({
+        "name": name,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+    });
+    for (k, v) in catalog_shape.as_object().expect("object") {
+        body[k] = v.clone();
+    }
+    call(f, "POST", "/engines", token, Some(body)).await
+}
+
+async fn engine_rows_named(f: &Fixture, name: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM engine_mgmt.engines WHERE name = $1")
+        .bind(name)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count engines")
+}
+
+async fn engines_fixture() -> Option<Fixture> {
+    engines_fixture_with(FakeEnginePort::default()).await
+}
+
+/// `engines_fixture` for a test that needs to look at what the provisioner was
+/// asked to do — "nothing was provisioned" is only checkable from this handle.
+async fn engines_fixture_with(port: FakeEnginePort) -> Option<Fixture> {
+    setup_full(
+        Some(Arc::new(port)),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+}
+
+/// THE BACK-COMPAT FLOOR. `frontend/tests/e2e/helpers.ts` and
+/// `embedded-catalog.spec.ts` both still POST a bare `warehouseId`, and so does
+/// every other engine test in this file. Making `warehouseId` optional is a
+/// widening; a widening that breaks the old shape is not a widening.
+#[tokio::test]
+async fn create_engine_still_accepts_a_bare_warehouse_id() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_bare_wh", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "bare warehouseId; body={j}");
+    assert_eq!(j["warehouseId"], serde_json::json!(wh_id), "body={j}");
+    assert_eq!(
+        j["catalogAttachErrors"],
+        serde_json::json!([]),
+        "nothing was asked to attach; body={j}"
+    );
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{engine_id}/catalogs"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j.as_array().map(|a| a.len()), Some(1), "body={j}");
+    assert_eq!(
+        j[0]["isPrimary"],
+        serde_json::json!(true),
+        "the auto-wired warehouse catalog still leads; body={j}"
+    );
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+    let row = registry(&f)
+        .get_attachment(Uuid::parse_str(&engine_id).unwrap(), wh_cat.id)
+        .await
+        .expect("read attachment")
+        .expect("attached");
+    assert!(row.is_primary, "the COLUMN, not a derived guess");
+}
+
+/// `catalogs` attaches several and marks exactly one primary. The primary is
+/// attached by the create path itself; the rest go through the same
+/// `attach_to_engine` the attach route uses.
+#[tokio::test]
+async fn create_engine_with_catalogs_marks_exactly_one_primary() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_catalogs", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    // A first engine is what puts the warehouse's catalog in the registry.
+    let first = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &first,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+
+    let bench = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": bench, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let bench_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "catalogs": [
+            { "catalogId": bench_id, "primary": false },
+            { "catalogId": wh_cat.id, "primary": true },
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body={j}");
+    assert_eq!(
+        j["catalogAttachErrors"],
+        serde_json::json!([]),
+        "both catalogs attached; body={j}"
+    );
+    assert_eq!(
+        j["warehouseId"],
+        serde_json::json!(wh_id),
+        "the engine row's warehouse comes from the PRIMARY catalog; body={j}"
+    );
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{engine_id}/catalogs"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j.as_array().map(|a| a.len()),
+        Some(2),
+        "both catalogs on the engine; body={j}"
+    );
+    assert_eq!(
+        j.as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["isPrimary"].clone())
+            .collect::<Vec<_>>(),
+        vec![serde_json::json!(true), serde_json::json!(false)],
+        "exactly one primary, and it leads the render order; body={j}"
+    );
+    assert_eq!(
+        j[0]["id"],
+        serde_json::json!(wh_cat.id),
+        "the catalog the body marked primary is the one that leads; body={j}"
+    );
+}
+
+/// Two primaries and no primary are both refused, by the SAME resolution
+/// function, before anything is written.
+#[tokio::test]
+async fn create_engine_refuses_two_primaries_and_refuses_none() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_primaries", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let first = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &first,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+    let bench = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": bench, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let bench_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let two = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &two,
+        serde_json::json!({ "catalogs": [
+            { "catalogId": wh_cat.id, "primary": true },
+            { "catalogId": bench_id, "primary": true },
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "two primaries; body={j}");
+    assert_eq!(
+        j["error"],
+        serde_json::json!("bad request: only one attached catalog may be primary"),
+        "body={j}"
+    );
+    assert_eq!(engine_rows_named(&f, &two).await, 0, "nothing was created");
+
+    let none = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &none,
+        serde_json::json!({ "catalogs": [{ "catalogId": wh_cat.id, "primary": false }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "no primary; body={j}");
+    assert_eq!(
+        j["error"],
+        serde_json::json!("bad request: one attached catalog must be primary"),
+        "body={j}"
+    );
+    assert_eq!(engine_rows_named(&f, &none).await, 0, "nothing was created");
+
+    // Neither shape at all.
+    let empty = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(&f, &token, &empty, serde_json::json!({})).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "no catalogs at all; body={j}"
+    );
+    assert_eq!(
+        j["error"],
+        serde_json::json!(
+            "bad request: an engine needs a primary catalog: send `catalogs` with one marked primary"
+        ),
+        "body={j}"
+    );
+    assert_eq!(
+        engine_rows_named(&f, &empty).await,
+        0,
+        "nothing was created"
+    );
+}
+
+/// SP3c-1 does NOT let a non-warehouse catalog lead: `engines.warehouse_id` is
+/// still `NOT NULL` and ten sites read it, `ensure_engine_role` and the
+/// StarRocks storage derivation among them. The refusal must SAY so, because
+/// the wizard repeats the reason next to the disabled choice (D2, user decision
+/// 2026-09-22) — a bare "bad request" would leave it inventing one.
+#[tokio::test]
+async fn create_engine_refuses_a_non_warehouse_primary_with_the_reason() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_nonwh", true).await;
+    let bench = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": bench, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let bench_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "catalogs": [{ "catalogId": bench_id, "primary": true }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    let msg = j["error"].as_str().expect("error message");
+    assert!(
+        msg.contains("must be an egret warehouse catalog"),
+        "says what is wrong; msg={msg}"
+    );
+    assert!(msg.contains("Ranger"), "names Ranger; msg={msg}");
+    assert!(msg.contains("storage"), "names storage; msg={msg}");
+    assert_eq!(engine_rows_named(&f, &name).await, 0, "nothing was created");
+}
+
+/// The lower half of "exactly one primary per engine". There is no anchor row
+/// for a CHECK, so migration 0150's PARTIAL UNIQUE INDEX is what turns a second
+/// primary into a refusal instead of two rows that both sort first — which for
+/// Trino means two catalogs fighting over `C0`.
+#[tokio::test]
+async fn a_second_primary_attachment_is_refused_by_the_index() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_second_primary", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let reg = registry(&f);
+    let bench = reg
+        .create_catalog(
+            &unique_catalog_name("bench"),
+            &egret_catalog_registry::CatalogDef::parse(
+                "tpch",
+                &serde_json::json!({}),
+                &serde_json::json!(null),
+            )
+            .unwrap(),
+            None,
+        )
+        .await
+        .expect("create catalog");
+
+    let err = reg
+        .insert_attachment(&egret_catalog_registry::NewAttachment {
+            engine_id,
+            catalog_id: bench.id,
+            catalog_client_id: None,
+            credential_secret_id: None,
+            minted_client: false,
+            applied_now: true,
+            is_primary: true,
+            created_at: None,
+            apply_status: egret_catalog_registry::store::apply_status::APPLIED,
+        })
+        .await
+        .expect_err("a second primary must be refused");
+    assert!(
+        matches!(err, egret_catalog_registry::RegistryError::AlreadyExists(ref m)
+            if m.contains("already has a primary catalog")),
+        "{err:?}"
+    );
+
+    // And the refusal wrote nothing: the engine still has exactly one catalog,
+    // the warehouse's, and it is still the primary.
+    let listed = reg
+        .list_engine_attachments(engine_id)
+        .await
+        .expect("list attachments");
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+    assert_eq!(
+        listed
+            .iter()
+            .map(|a| (a.catalog.id, a.is_primary()))
+            .collect::<Vec<_>>(),
+        vec![(wh_cat.id, true)],
+    );
+}
+
+/// `CatalogAttachmentDto` — what `GET /catalogs/{id}` lists under `engines`,
+/// and what Task 7's primary badge reads — reports the column.
+#[tokio::test]
+async fn attachment_dto_reports_is_primary() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_dto", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+
+    let (status, j) = call(&f, "GET", &format!("/catalogs/{}", wh_cat.id), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j["engines"][0]["engineId"],
+        serde_json::json!(engine_id),
+        "body={j}"
+    );
+    assert_eq!(
+        j["engines"][0]["isPrimary"],
+        serde_json::json!(true),
+        "the warehouse catalog leads its engine; body={j}"
+    );
+
+    // A catalog attached afterwards is NOT primary, through the same DTO.
+    let bench = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": bench, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let bench_id = j["id"].as_str().unwrap().to_string();
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{bench_id}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "attach; body={j}");
+    assert_eq!(
+        j["isPrimary"],
+        serde_json::json!(false),
+        "an attach never leads; body={j}"
+    );
+}
+
+/// `CatalogAttachmentDto.createdAt` — the clock the Catalogs list measures a
+/// `pending` attachment against (SP3c-1 Task 4, fix round 1 F2).
+///
+/// The point is not that the field is present; it is that it belongs to the
+/// ATTACHMENT and not to the catalog. Attaching an existing catalog inserts an
+/// `engine_catalog_attachments` row and never writes `registry.catalogs
+/// .updated_at`, so a UI that judged "has this been pending too long?" from the
+/// catalog's clock would read an arbitrarily old timestamp at the exact moment
+/// the wait began — and cry "still pending" throughout the StarRocks bootstrap
+/// the grace window exists to cover. This asserts the ordering that makes the
+/// catalog clock unusable and the attachment clock correct: the attachment is
+/// created STRICTLY after the catalog it attaches, and the catalog's own
+/// `updatedAt` does not move when it is attached.
+#[tokio::test]
+async fn attachment_dto_reports_its_own_created_at() {
+    let Some(f) = engines_fixture().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_att_created", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let bench = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": bench, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let bench_id = j["id"].as_str().unwrap().to_string();
+    let catalog_updated_at = j["updatedAt"].as_str().unwrap().to_string();
+
+    // A real gap, so "strictly after" cannot be satisfied by two readings of
+    // the same clock tick. `now()` is transaction time and these are separate
+    // transactions, but a coincidence is exactly the failure this ordering
+    // assertion would hide.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{bench_id}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "attach; body={j}");
+    let attach_created_at = j["createdAt"]
+        .as_str()
+        .expect("the attach response carries the attachment's createdAt")
+        .to_string();
+
+    // Re-read the catalog: the attach must not have touched its clock…
+    let (status, j) = call(&f, "GET", &format!("/catalogs/{bench_id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j["updatedAt"].as_str().unwrap(),
+        catalog_updated_at,
+        "attaching a catalog must not bump the catalog's own updatedAt — the whole \
+         reason its clock cannot stand in for the attachment's; body={j}"
+    );
+
+    // …and the listed attachment reports the same, strictly later, timestamp.
+    let listed = j["engines"][0]["createdAt"]
+        .as_str()
+        .expect("the listed attachment carries createdAt");
+    assert_eq!(listed, attach_created_at, "body={j}");
+    assert!(
+        listed > catalog_updated_at.as_str(),
+        "the attachment was created after the catalog it attaches: attachment={listed} \
+         catalog={catalog_updated_at}",
+    );
+}
+
+// ── SP3c-1 Task 2, fix round 1 ────────────────────────────────────────────────
+
+/// F1: a mistyped catalog id must not buy you a running cluster.
+///
+/// Before the fix the primary's id was resolved up front (a clean refusal) and
+/// every OTHER id was resolved at attach time, AFTER the catalog client was
+/// minted, the engine row written and the cluster provisioned — so the same typo
+/// was a 400 on one entry and a 201-with-a-message on the next three. The
+/// provisioner handle is the point of this test: "nothing was created" is not
+/// the same claim as "nothing was provisioned", and it was the second one that
+/// was false.
+#[tokio::test]
+async fn an_unknown_catalog_id_refuses_the_create_before_anything_is_provisioned() {
+    let port = FakeEnginePort::default();
+    let Some(f) = engines_fixture_with(port.clone()).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_unknown_cat", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    // A first engine puts the warehouse's catalog in the registry.
+    let first = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &first,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+    let provisions_before = port.provisioned.lock().unwrap().len();
+    let ghost = Uuid::new_v4();
+
+    // The typo is on a NON-primary entry: the arm that used to get through.
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "catalogs": [
+            { "catalogId": wh_cat.id, "primary": true },
+            { "catalogId": ghost, "primary": false },
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert_eq!(
+        j["error"],
+        serde_json::json!(format!("bad request: no such catalog {ghost}")),
+        "names WHICH id is unknown; body={j}"
+    );
+    assert_eq!(engine_rows_named(&f, &name).await, 0, "no engine row");
+    assert_eq!(
+        port.provisioned.lock().unwrap().len(),
+        provisions_before,
+        "a refused create must not have provisioned a cluster"
+    );
+
+    // Same refusal when the typo is on the PRIMARY entry (F9: named, not a bare
+    // 404 — with four ids in a body the caller has to be told which one).
+    let name2 = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name2,
+        serde_json::json!({ "catalogs": [{ "catalogId": ghost, "primary": true }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert_eq!(
+        j["error"],
+        serde_json::json!(format!("bad request: no such catalog {ghost}")),
+        "body={j}"
+    );
+    assert_eq!(engine_rows_named(&f, &name2).await, 0, "no engine row");
+    assert_eq!(
+        port.provisioned.lock().unwrap().len(),
+        provisions_before,
+        "still nothing provisioned"
+    );
+
+    // A repeated id is the same outcome by a different route: it would attach
+    // once and 409 the second time, after the cluster was up.
+    let name3 = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name3,
+        serde_json::json!({ "catalogs": [
+            { "catalogId": wh_cat.id, "primary": true },
+            { "catalogId": wh_cat.id, "primary": false },
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert_eq!(
+        j["error"],
+        serde_json::json!(format!(
+            "bad request: catalog {} is listed twice",
+            wh_cat.id
+        )),
+        "body={j}"
+    );
+    assert_eq!(engine_rows_named(&f, &name3).await, 0, "no engine row");
+    assert_eq!(
+        port.provisioned.lock().unwrap().len(),
+        provisions_before,
+        "still nothing provisioned"
+    );
+}
+
+/// F2: the field nothing populated. A create whose engine comes up fine but
+/// whose extra catalog genuinely cannot be attached returns 201 AND says which
+/// catalog it is and why — this is the only state `catalogAttachErrors` exists
+/// for, and until now no test entered it, so an implementation that never
+/// populated the field passed every one.
+///
+/// The vehicle is `can_read`: a `generic` catalog declaring only `starrocks`
+/// cannot be attached to a Trino engine, and `check_engine_supports` refuses it
+/// before anything is minted — a failure that belongs to the catalog, with the
+/// engine already provisioned.
+#[tokio::test]
+async fn a_catalog_that_cannot_attach_is_reported_on_the_created_engine() {
+    let port = FakeEnginePort::default();
+    let Some(f) = engines_fixture_with(port.clone()).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_attach_err", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let first = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &first,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+
+    let sr_only_name = unique_catalog_name("paimon");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": sr_only_name, "kind": "generic",
+            "config": { "engines": ["starrocks"] },
+            "advanced": { "starrocks": { "type": "paimon" } }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let sr_only = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let provisions_before = port.provisioned.lock().unwrap().len();
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "catalogs": [
+            { "catalogId": wh_cat.id, "primary": true },
+            { "catalogId": sr_only, "primary": false },
+        ]}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the engine itself came up; body={j}"
+    );
+    assert_eq!(
+        port.provisioned.lock().unwrap().len(),
+        provisions_before + 1,
+        "the cluster WAS provisioned — this is not a refusal"
+    );
+    let errs = j["catalogAttachErrors"]
+        .as_array()
+        .expect("catalogAttachErrors is always an array");
+    assert_eq!(errs.len(), 1, "exactly the one that could not attach; {j}");
+    assert_eq!(errs[0]["catalogId"], serde_json::json!(sr_only), "{j}");
+    let msg = errs[0]["message"].as_str().expect("message");
+    assert!(msg.contains("trino"), "names the engine type; msg={msg}");
+    assert!(msg.contains(&sr_only_name), "names the catalog; msg={msg}");
+
+    // And the engine really is missing it: the primary attached, the other did
+    // not, and the reported catalog can be retried through the attach route.
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let listed = registry(&f)
+        .list_engine_attachments(engine_id)
+        .await
+        .expect("list");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|a| (a.catalog.id, a.is_primary()))
+            .collect::<Vec<_>>(),
+        vec![(wh_cat.id, true)],
+        "only the primary is on the engine"
+    );
+}
+
+/// F7: `warehouseId` and `catalogs` together. `catalogs` supersedes
+/// `warehouseId`, so honouring one and dropping the other without a word is how
+/// an integrator spends an afternoon working out which warehouse the engine got.
+#[tokio::test]
+async fn create_engine_refuses_both_warehouse_id_and_catalogs() {
+    let port = FakeEnginePort::default();
+    let Some(f) = engines_fixture_with(port.clone()).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_both_shapes", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let first = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &first,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+    let provisions_before = port.provisioned.lock().unwrap().len();
+
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({
+            "warehouseId": wh_id,
+            "catalogs": [{ "catalogId": wh_cat.id, "primary": true }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    let msg = j["error"].as_str().expect("error");
+    assert!(
+        msg.contains("not both"),
+        "says the two shapes are exclusive; msg={msg}"
+    );
+    assert!(
+        msg.contains("supersedes"),
+        "says which one wins so the caller knows what to drop; msg={msg}"
+    );
+    assert_eq!(engine_rows_named(&f, &name).await, 0, "no engine row");
+    assert_eq!(
+        port.provisioned.lock().unwrap().len(),
+        provisions_before,
+        "nothing provisioned"
+    );
+}
+
+/// F8: `PUT /engines/{id}` shares `CreateEngineBody` but has never attached
+/// anything. Accepting `catalogs` and dropping it would tell the caller their
+/// catalogs were attached.
+#[tokio::test]
+async fn update_engine_refuses_catalogs_and_changes_nothing() {
+    let port = FakeEnginePort::default();
+    let Some(f) = engines_fixture_with(port.clone()).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "sp3c_update_cats", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_body(
+        &f,
+        &token,
+        &name,
+        serde_json::json!({ "warehouseId": wh_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let wh_cat = warehouse_catalog(&f, wh_id).await;
+
+    let bench = unique_catalog_name("bench");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": bench, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let bench_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT spec FROM engine_mgmt.engines WHERE id = $1")
+            .bind(engine_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("engine spec");
+    let updates_before = port.updated.lock().unwrap().len();
+
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/engines/{engine_id}"),
+        &token,
+        Some(serde_json::json!({
+            "name": name,
+            "warehouseId": wh_id,
+            "coordinatorReplicas": 3, "workerReplicas": 3,
+            "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            "catalogs": [{ "catalogId": bench_id, "primary": false }],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    let msg = j["error"].as_str().expect("error");
+    assert!(
+        msg.contains("not accepted on update"),
+        "says the field is create-only; msg={msg}"
+    );
+    assert!(
+        msg.contains("/catalogs/"),
+        "points at the route that does attach; msg={msg}"
+    );
+
+    // Nothing changed: not the attachments, not the spec, not the cluster.
+    let listed = registry(&f)
+        .list_engine_attachments(engine_id)
+        .await
+        .expect("list");
+    assert_eq!(
+        listed.iter().map(|a| a.catalog.id).collect::<Vec<_>>(),
+        vec![wh_cat.id],
+        "the refused update attached nothing"
+    );
+    let after: serde_json::Value =
+        sqlx::query_scalar("SELECT spec FROM engine_mgmt.engines WHERE id = $1")
+            .bind(engine_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("engine spec");
+    assert_eq!(after, before, "the refused update wrote no spec");
+    assert_eq!(
+        port.updated.lock().unwrap().len(),
+        updates_before,
+        "the refused update never reached the provisioner"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SP3c-1 Task 3 — `POST /catalogs/{id}/test` (design D4)
+// ---------------------------------------------------------------------------
+
+/// A local port the OS just handed out and we handed straight back, so nothing
+/// is listening on it — and, unlike a hard-coded number, never a port some
+/// unrelated service on the machine happens to hold.
+async fn a_closed_local_port() -> u16 {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    drop(l);
+    port
+}
+
+/// D4's whole point: egret must not become a port scanner with a login page.
+/// The probe's target comes from the STORED catalog row and from nowhere else,
+/// so the request is replayed carrying every field an attacker would reach for
+/// — `host`, `port`, `uri`, `hosts`, `target` — all naming a socket that IS
+/// listening, while the stored configuration names one that is not.
+///
+/// Three independent witnesses, because one alone could be satisfied by the
+/// wrong mechanism: the response's `target` names the stored socket, the
+/// verdict is `ok:false` (it would be `true` had the request's open port been
+/// dialled), and the decoy listener never sees a connection at all.
+#[tokio::test]
+async fn the_test_route_takes_its_target_from_the_row_not_the_request() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_test_target", true).await;
+
+    let decoy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let decoy_port = decoy.local_addr().unwrap().port();
+    let closed_port = a_closed_local_port().await;
+
+    // Stored: a port nothing listens on. Attached to no engine, so the route
+    // takes the probe branch.
+    let name = unique_catalog_name("es_row");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "kind": "elasticsearch",
+            "config": { "hosts": ["127.0.0.1"], "port": closed_port, "tls": false }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = j["id"].as_str().unwrap().to_string();
+
+    let redirect = serde_json::json!({
+        "host": "127.0.0.1",
+        "port": decoy_port,
+        "uri": format!("thrift://127.0.0.1:{decoy_port}"),
+        "hosts": ["127.0.0.1"],
+        "target": format!("127.0.0.1:{decoy_port}"),
+    });
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{cid}/test"),
+        &token,
+        Some(redirect),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j["check"], "tcp",
+        "no engine is attached, so the probe ran; {j}"
+    );
+    assert_eq!(
+        j["target"],
+        serde_json::json!(format!("127.0.0.1:{closed_port}")),
+        "the result names the STORED socket, not the one the request asked for; {j}"
+    );
+    assert_eq!(
+        j["ok"], false,
+        "the request's listening port must not have been dialled; {j}"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), decoy.accept())
+            .await
+            .is_err(),
+        "the socket named ONLY by the request was never connected to"
+    );
+
+    // The mirror, so the assertion above cannot pass by the route simply
+    // refusing to dial anything: a stored socket that IS listening reports
+    // `ok:true`, while the request names the closed one.
+    let open_name = unique_catalog_name("es_open");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": open_name, "kind": "elasticsearch",
+            "config": { "hosts": ["127.0.0.1"], "port": decoy_port, "tls": false }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let open_cid = j["id"].as_str().unwrap().to_string();
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/catalogs/{open_cid}/test"),
+        &token,
+        Some(serde_json::json!({ "host": "127.0.0.1", "port": closed_port })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["ok"], true, "the stored, listening socket answered; {j}");
+    assert_eq!(
+        j["target"],
+        serde_json::json!(format!("127.0.0.1:{decoy_port}")),
+        "{j}"
+    );
+    // The sentence itself must say what a green tick here does and does not
+    // mean — D4 puts that in the message, not in a tooltip.
+    let msg = j["message"].as_str().unwrap();
+    assert!(
+        msg.contains("reachability check only") && msg.contains("no credentials"),
+        "a `tcp` green must disclaim credentials in the sentence; got {msg:?}"
+    );
+    assert!(j["engineName"].is_null(), "no engine ran this check; {j}");
+}
+
+/// Today's per-engine test route reaches only Trino
+/// (`monitor::coordinator_call`, fallback service `{name}-trino`), so a
+/// catalog attached ONLY to StarRocks falls back to the probe until SP4. That
+/// is a narrower answer, not a wrong one — and `check` is what keeps it
+/// honest, so the response must say `tcp` and name the socket it dialled.
+#[tokio::test]
+async fn a_starrocks_only_catalog_falls_back_to_the_probe_and_says_so() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_test_sr", true).await;
+    let (engine_id, _) = create_starrocks_via_api(&f, &token).await;
+    let closed_port = a_closed_local_port().await;
+    let name = unique_catalog_name("es_sr");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "kind": "elasticsearch",
+            "config": { "hosts": ["127.0.0.1"], "port": closed_port, "tls": false }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = j["id"].as_str().unwrap().to_string();
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{engine_id}/catalogs/{cid}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "attach to starrocks; {j}");
+
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j["check"], "tcp",
+        "a StarRocks attachment cannot run the query, so the probe ran; {j}"
+    );
+    assert_eq!(
+        j["target"],
+        serde_json::json!(format!("127.0.0.1:{closed_port}")),
+        "the probe names what it dialled; {j}"
+    );
+    assert_eq!(j["ok"], false, "nothing listens there; {j}");
+    assert!(
+        j["engineName"].is_null(),
+        "no engine answered, so none is claimed; {j}"
+    );
+}
+
+/// A `tpch` catalog generates its own data: it has no network endpoint at all.
+/// With nothing attached, the honest answer is `unsupported` — the third
+/// discriminant, which a later renderer shows neutral. It is NOT a failed
+/// check, and the assertion that matters is `check`, not `ok`.
+#[tokio::test]
+async fn a_tpch_catalog_with_no_engine_is_unsupported_not_failed() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_test_tpch", true).await;
+    let name = unique_catalog_name("tpch");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = j["id"].as_str().unwrap().to_string();
+
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j["check"], "unsupported",
+        "nothing was dialled and nothing was queried, and the response says exactly that; {j}"
+    );
+    assert!(
+        j["target"].is_null(),
+        "`unsupported` must not invent a target; {j}"
+    );
+    assert!(j["engineName"].is_null(), "{j}");
+    assert!(
+        j["message"].as_str().unwrap().contains("tpch"),
+        "the sentence names the kind it cannot probe; {j}"
+    );
+}
+
+/// With a Trino engine attached the route asks the better question:
+/// `SHOW SCHEMAS FROM <name>` on that engine, credentials included. The
+/// catalog here is the engine's own egret-warehouse primary, whose
+/// `probe_target` is `None` — so a route that skipped the engine would answer
+/// `unsupported`, and the two branches cannot be confused.
+#[tokio::test]
+async fn an_attached_trino_engine_answers_with_the_query_and_names_itself() {
+    let fake = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(fake.clone()),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_test_query", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = warehouse_catalog(&f, wh_id).await.id;
+
+    fake.set_coordinator_response(200, br#"{"id":"q1","stats":{"state":"FINISHED"}}"#.to_vec());
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["check"], "query", "{j}");
+    assert_eq!(j["ok"], true, "{j}");
+    assert_eq!(
+        j["engineName"],
+        serde_json::json!(engine_name),
+        "the result names the engine that answered; {j}"
+    );
+    assert!(
+        j["target"].is_null(),
+        "a query check dialled no socket of its own; {j}"
+    );
+    // The strongest of the three checks must also SAY what it did — it was the
+    // one branch whose whole message was the word "ok" (review F5).
+    let msg = j["message"].as_str().unwrap();
+    assert!(
+        msg.contains("SHOW SCHEMAS") && msg.contains(&engine_name) && msg.contains("credentials"),
+        "the query sentence names the check, the engine and what it proved; got {msg:?}"
+    );
+
+    // The engine's verdict is the route's verdict: a coordinator that fails
+    // the query is `ok:false` on the SAME `query` discriminant, never a
+    // silent fall-through to the weaker probe.
+    fake.set_coordinator_response(
+        200,
+        br#"{"id":"q2","stats":{"state":"FAILED"},"error":{"message":"catalog not found"}}"#
+            .to_vec(),
+    );
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["check"], "query", "{j}");
+    assert_eq!(j["ok"], false, "{j}");
+    assert_eq!(j["message"], "catalog not found", "{j}");
+}
+
+/// SP3c task-3 review F3. `list_catalog_attachments` is `ORDER BY e.name`, so
+/// "the first Trino attachment" is the alphabetically first engine — which may
+/// be one the catalog was never applied to. Querying that one answers
+/// "catalog not found": a failure that says nothing about the catalog and
+/// everything about the attachment. The route must prefer an APPLIED
+/// attachment, and when none is applied it must say so rather than report a
+/// meaningless red.
+#[tokio::test]
+async fn the_query_runs_on_an_applied_attachment_not_the_alphabetically_first() {
+    let fake = Arc::new(egret_provisioner::kube_client::FakeKube::default());
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(fake.clone()),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_test_applied", true).await;
+
+    // Two Trino engines whose names fix the ORDER BY: `aaa` sorts first.
+    let first_name = format!("trino-aaa{}", Uuid::new_v4().simple());
+    let last_name = format!("trino-zzz{}", Uuid::new_v4().simple());
+    let mut ids = Vec::new();
+    for name in [&first_name, &last_name] {
+        let wh = seed_provisioned_warehouse(&f).await;
+        let (status, j) = create_engine_via_api(&f, &token, name, wh, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::CREATED, "{j}");
+        ids.push(j["id"].as_str().unwrap().to_string());
+    }
+
+    let closed_port = a_closed_local_port().await;
+    let name = unique_catalog_name("es_applied");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "kind": "elasticsearch",
+            "config": { "hosts": ["127.0.0.1"], "port": closed_port, "tls": false }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = j["id"].as_str().unwrap().to_string();
+    for eid in &ids {
+        let (status, j) = call(
+            &f,
+            "POST",
+            &format!("/engines/{eid}/catalogs/{cid}"),
+            &token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "attach to {eid}; {j}");
+    }
+
+    // The alphabetically first engine never applied it. This is the state
+    // SP3c's own list page exists to warn about, not an exotic one.
+    let set_status = |eid: String, st: &'static str| {
+        let pool = f.db.pool.clone();
+        let cid = cid.clone();
+        async move {
+            sqlx::query(
+                "UPDATE registry.engine_catalog_attachments SET apply_status = $3 \
+                   WHERE engine_id = $1 AND catalog_id = $2",
+            )
+            .bind(Uuid::parse_str(&eid).unwrap())
+            .bind(Uuid::parse_str(&cid).unwrap())
+            .bind(st)
+            .execute(&pool)
+            .await
+            .expect("set apply_status");
+        }
+    };
+    set_status(ids[0].clone(), "pending").await;
+    set_status(ids[1].clone(), "applied").await;
+
+    fake.set_coordinator_response(200, br#"{"id":"q1","stats":{"state":"FINISHED"}}"#.to_vec());
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(j["check"], "query", "{j}");
+    assert_eq!(
+        j["engineName"],
+        serde_json::json!(last_name),
+        "the APPLIED engine answered, not the alphabetically first one; {j}"
+    );
+
+    // With nothing applied anywhere, a query would test the attachment rather
+    // than the catalog — so the route drops to the weaker check and says why,
+    // naming the engine and its status instead of reporting a red that means
+    // nothing about the catalog.
+    set_status(ids[1].clone(), "failed").await;
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{j}");
+    assert_eq!(
+        j["check"], "tcp",
+        "no applied attachment, so no query was run; {j}"
+    );
+    assert!(j["engineName"].is_null(), "no engine answered; {j}");
+    let msg = j["message"].as_str().unwrap();
+    assert!(
+        msg.contains("has this catalog applied") && msg.contains(&first_name),
+        "the sentence says why no query ran and names an engine; got {msg:?}"
+    );
+    assert!(
+        !msg.contains("No Trino engine is attached"),
+        "two ARE attached — the sentence must not deny it; got {msg:?}"
+    );
+}
+
+/// SP3c task-3 review F2. `thrift://` used to pass validation, store, and then
+/// make the route tell the operator that the KIND `hive` "has no network
+/// endpoint" — false, and it points at the wrong remedy. Validation now refuses
+/// it at the source; a row written before that rule is answered by naming the
+/// URI, never by blaming the kind.
+#[tokio::test]
+async fn a_stored_uri_naming_no_host_is_never_reported_as_the_kind_having_none() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_test_nohost", true).await;
+    let sc = seed_exchange_storage_conn(&f).await;
+    let name = unique_catalog_name("hive_nohost");
+
+    // Refused at the source: this can no longer be created at all.
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({
+            "name": name, "kind": "hive",
+            "config": { "metastore": { "type": "hive", "uri": "thrift://" },
+                        "storage_connection_id": sc }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("must name a host"),
+        "the refusal names the real problem; {j}"
+    );
+
+    // A row written before that rule: create a good one, then break it the only
+    // way a pre-existing row could be broken — straight in the column.
+    let cid = seed_catalog_then_break_its_uri(&f, &token, &name, sc).await;
+
+    let (status, j) = call(&f, "POST", &format!("/catalogs/{cid}/test"), &token, None).await;
+    // The status is the point, not only the words: a row egret cannot parse is
+    // a 400, and that is the one status Task 7 has to render for this route.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{j}");
+    let body = j.to_string();
+    assert!(
+        !body.contains("has no network endpoint"),
+        "the kind is fine — only the URI is broken; {j}"
+    );
+    assert!(
+        body.contains("must name a host"),
+        "the answer names the URI as the problem; {j}"
+    );
+}
+
+/// Create a valid `hive` catalog, then break its stored `uri` in the column —
+/// the only way a row can hold a shape validation now refuses, and exactly what
+/// a database that predates the tightened rule looks like.
+async fn seed_catalog_then_break_its_uri(f: &Fixture, token: &str, name: &str, sc: Uuid) -> String {
+    let (status, j) = call(
+        f,
+        "POST",
+        "/catalogs",
+        token,
+        Some(serde_json::json!({
+            "name": name, "kind": "hive",
+            "config": { "metastore": { "type": "hive", "uri": "thrift://hms:9083" },
+                        "storage_connection_id": sc }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let cid = j["id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE registry.catalogs SET config = jsonb_set(config, '{metastore,uri}', '\"thrift://\"') WHERE id = $1")
+        .bind(Uuid::parse_str(&cid).unwrap())
+        .execute(&f.db.pool)
+        .await
+        .expect("break the stored uri");
+    cid
+}
+
+/// SP3c task-3 review N1. Tightening a validator is a migration: the rows that
+/// went through the old gate are still there, and every read path that now
+/// parses them is a place they can fail. `GET /engines/{id}/catalogs` used to
+/// `collect::<Result<_, _>>()?`, so ONE un-parseable row 400'd the whole
+/// engine's list and named nothing — leaving the operator unable to find the
+/// row they needed to repair, with every other catalog innocent and invisible.
+#[tokio::test]
+async fn one_unparseable_catalog_does_not_take_an_engines_whole_list_with_it() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_list_degrade", true).await;
+    let sc = seed_exchange_storage_conn(&f).await;
+    let name = unique_catalog_name("hive_degrade");
+
+    // Attached WHILE IT STILL PARSES, which is the only way the state arises.
+    let cid = seed_catalog_then_break_its_uri(&f, &token, &name, sc).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    // `POST /engines/{id}/catalogs/{cid}` parses the row too, so it would
+    // refuse this one — the attachment predates the break in reality, and is
+    // written directly here to reproduce that without a time machine.
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id, apply_status) \
+         VALUES ($1, $2, 'applied')",
+    )
+    .bind(Uuid::parse_str(&engine_id).unwrap())
+    .bind(Uuid::parse_str(&cid).unwrap())
+    .execute(&f.db.pool)
+    .await
+    .expect("attach the pre-existing row");
+
+    let (status, j) = call(
+        &f,
+        "GET",
+        &format!("/engines/{engine_id}/catalogs"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "one bad row must not 400 the list; {j}"
+    );
+    let rows = j.as_array().expect("a list");
+    assert_eq!(
+        rows.len(),
+        2,
+        "the engine's own warehouse catalog AND the broken one; {j}"
+    );
+    let broken = rows
+        .iter()
+        .find(|r| r["id"] == serde_json::json!(cid))
+        .expect("the broken catalog is listed, not dropped");
+    assert_eq!(
+        broken["name"],
+        serde_json::json!(name),
+        "the degraded entry still identifies the row to repair; {j}"
+    );
+    assert_eq!(
+        broken["kind"], "hive",
+        "the stored kind needs no parse; {j}"
+    );
+    assert!(
+        broken["configError"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("must name a host"),
+        "the degraded entry says WHY it is degraded; {j}"
+    );
+    assert!(
+        broken["secretRef"].is_null(),
+        "nothing was derived from a config that does not parse; {j}"
+    );
+    // The innocent one is complete, so a degraded entry is distinguishable from
+    // a healthy one rather than everything being marked broken.
+    let healthy = rows
+        .iter()
+        .find(|r| r["id"] != serde_json::json!(cid))
+        .expect("the warehouse catalog");
+    assert!(
+        healthy["configError"].is_null(),
+        "the other catalogs on the engine are untouched; {j}"
+    );
+    assert_eq!(healthy["kind"], "egret-warehouse", "{j}");
+}
+
+/// Attach a catalog to an engine by writing the row, bypassing
+/// `POST /engines/{id}/catalogs/{cid}` — which parses the config and would
+/// refuse a broken one. The state under test is a row that was attached WHILE
+/// it still parsed and broke afterwards, and this is how it is reproduced
+/// without a time machine (the same device
+/// `one_unparseable_catalog_does_not_take_an_engines_whole_list_with_it` uses).
+async fn attach_row_directly(f: &Fixture, engine_id: &str, catalog_id: &str) {
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id, apply_status) \
+         VALUES ($1, $2, 'applied')",
+    )
+    .bind(Uuid::parse_str(engine_id).unwrap())
+    .bind(Uuid::parse_str(catalog_id).unwrap())
+    .execute(&f.db.pool)
+    .await
+    .expect("attach the pre-existing row");
+}
+
+/// THE TRINO/STARROCKS RETRY ASYMMETRY, EXECUTED.
+///
+/// SP3c-1 Task 9 carried this as the programme's one traced-but-unexecuted
+/// invariant: the engine Catalogs tab disables Retry and Detach on EVERY row of
+/// a Trino engine while any OTHER row is broken, and does not on StarRocks, and
+/// the sentence that explains why is the deliverable. Two people read the
+/// source and agreed on the table; nobody ran it. This is the instrument.
+///
+/// The mechanism, at source:
+///   * `apply_trino` maps `CatalogChange::ReapplyOne` to `BuildOpts::default()`
+///     because a Trino apply is the whole ConfigMap either way, and
+///     `build_provision_req_with` then renders EVERY attachment with a `?` per
+///     row (`engines.rs:673-676`). One unrenderable sibling ends the build, so
+///     the Retry on an innocent row never reaches Kubernetes.
+///   * `apply_starrocks`'s `ReapplyOne` arm loads exactly the one catalog named
+///     in the path and sends one statement about it. A broken sibling is not
+///     read, so it cannot refuse anything.
+///
+/// A SECOND FACT THIS PINS: the refused Trino Retry leaves the HEALTHY row
+/// exactly as it was. `retry_apply` carves `ApplyError::Build` out of
+/// `set_apply_failed` alongside `Unrecorded`, because `apply_status` answers
+/// "did this catalog reach that engine" and a build that never left egret is
+/// not an answer to it — least of all when the build was ended by a SIBLING's
+/// parse error, which is what happens here.
+///
+/// When this test was first written it asserted the opposite, recorded and
+/// explicitly not endorsed: the healthy row went `failed` carrying the broken
+/// catalog's message, and SP3c-1 renders that on five surfaces (the row badge,
+/// the per-engine error Alert, the list's Status column, the "needing
+/// attention" counter and the detail page's warning). `propagate` funnels a
+/// Configuration SAVE through the same function, so the repair page
+/// manufactured the false state too. Fixed in the whole-branch review's F2;
+/// this half of the test is now what proves it stays fixed.
+#[tokio::test]
+async fn a_broken_sibling_blocks_retry_on_trino_and_not_on_starrocks() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "retry_scope_admin", true).await;
+    let sc = seed_exchange_storage_conn(&f).await;
+
+    // ── Trino ───────────────────────────────────────────────────────────────
+    let broken_name = unique_catalog_name("hive_retry_scope");
+    let broken = seed_catalog_then_break_its_uri(&f, &token, &broken_name, sc).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let trino_id = j["id"].as_str().unwrap().to_string();
+    let healthy = warehouse_catalog(&f, wh).await.id;
+    attach_row_directly(&f, &trino_id, &broken).await;
+
+    // Read BEFORE the refused Retry, so "unchanged" below is a comparison and
+    // not a guess about what engine create seeds.
+    let before = registry(&f)
+        .get_attachment(Uuid::parse_str(&trino_id).unwrap(), healthy)
+        .await
+        .unwrap()
+        .expect("the healthy attachment exists before the Retry");
+    assert_eq!(
+        before.apply_status, "applied",
+        "the primary catalog of a freshly created Trino engine really did reach it"
+    );
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{trino_id}/catalogs/{healthy}/apply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a Trino Retry re-renders the whole engine, so the broken sibling refuses it; {j}"
+    );
+    assert!(
+        j.to_string().contains("must name a host"),
+        "and the refusal is the SIBLING's parse error, which is why the tab's copy has to \
+         name the scope rather than the row; {j}"
+    );
+
+    // A REFUSED APPLY WRITES NOTHING. The build ended inside egret, so nothing
+    // new is known about this catalog's state on this engine and the row's
+    // last true state stands. Before the whole-branch review's F2 fix this read
+    // `failed`, carrying the BROKEN catalog's message — a verdict about a
+    // different catalog, rendered on five SP3c-1 surfaces.
+    let after = registry(&f)
+        .get_attachment(Uuid::parse_str(&trino_id).unwrap(), healthy)
+        .await
+        .unwrap()
+        .expect("the healthy attachment still exists");
+    assert_eq!(
+        after.apply_status, before.apply_status,
+        "a Trino Retry refused by a SIBLING's parse error must leave the row it was called \
+         for exactly as it was"
+    );
+    assert_eq!(
+        after.apply_error, None,
+        "and above all it must not carry the sibling's message: {:?}",
+        after.apply_error
+    );
+
+    // ── StarRocks: the same shape, the opposite outcome ─────────────────────
+    let (sr_id, sr_wh) = create_starrocks_via_api(&f, &token).await;
+    let sr_healthy = warehouse_catalog(&f, sr_wh).await.id;
+    attach_row_directly(&f, &sr_id, &broken).await;
+
+    let (status, j) = call(
+        &f,
+        "POST",
+        &format!("/engines/{sr_id}/catalogs/{sr_healthy}/apply"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a StarRocks Retry reads only the catalog in the path, so a broken sibling is \
+         invisible to it; {j}"
+    );
+    let sr_row = registry(&f)
+        .get_attachment(Uuid::parse_str(&sr_id).unwrap(), sr_healthy)
+        .await
+        .unwrap()
+        .expect("the StarRocks primary attachment");
+    assert_eq!(
+        sr_row.apply_status, "applied",
+        "and it really converged rather than merely not-failing"
+    );
+    // The broken sibling is untouched by either engine's Retry: nothing read
+    // it, so nothing may have judged it.
+    let sr_broken = registry(&f)
+        .get_attachment(
+            Uuid::parse_str(&sr_id).unwrap(),
+            Uuid::parse_str(&broken).unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("the broken attachment");
+    assert_eq!(
+        sr_broken.apply_status, "applied",
+        "the row written by `attach_row_directly`, unchanged"
+    );
+}
+
+/// THE REPAIR PAGE MUST NOT MANUFACTURE THE STATE IT REPAIRS.
+///
+/// `propagate` (a `PUT /catalogs/{id}`, i.e. Save on the catalog's
+/// Configuration tab) funnels every attached engine through `retry_apply`. On
+/// Trino the apply is the whole ConfigMap, so ONE unparseable sibling on that
+/// engine ends the build — and before the whole-branch review's F2 fix that
+/// wrote `failed`, with the sibling's parse error, onto the attachment of the
+/// catalog that had just been saved. A healthy catalog was flagged broken by
+/// the act of editing it, and SP3c-1's list, detail page and Engines tab all
+/// showed it.
+///
+/// The companion `registry_update_propagates_and_flags_the_failed_engine` is
+/// the control for the other direction: an engine that genuinely REJECTS the
+/// update still flags the row, which is what `apply_status` is for.
+#[tokio::test]
+async fn saving_a_healthy_catalog_is_not_a_verdict_about_it() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "propagate_sibling_admin", true).await;
+    let sc = seed_exchange_storage_conn(&f).await;
+    let reg = registry(&f);
+
+    let broken = seed_catalog_then_break_its_uri(
+        &f,
+        &token,
+        &unique_catalog_name("hive_propagate_scope"),
+        sc,
+    )
+    .await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) =
+        create_engine_via_api(&f, &token, &engine_name, wh, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    // The catalog under edit: healthy, applied, and NOT the engine's primary,
+    // so what happens to it cannot be confused with the warehouse mirror's own
+    // lifecycle.
+    let cat_name = unique_catalog_name("bench_propagate");
+    let (status, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(serde_json::json!({ "name": cat_name, "kind": "tpch", "config": {} })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{j}");
+    let healthy = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    reg.insert_attachment(&egret_catalog_registry::NewAttachment {
+        engine_id,
+        catalog_id: healthy,
+        catalog_client_id: None,
+        credential_secret_id: None,
+        minted_client: false,
+        applied_now: true,
+        is_primary: false,
+        created_at: None,
+        apply_status: egret_catalog_registry::store::apply_status::APPLIED,
+    })
+    .await
+    .unwrap();
+    attach_row_directly(&f, &engine_id.to_string(), &broken).await;
+
+    let (status, j) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{healthy}"),
+        &token,
+        Some(serde_json::json!({
+            "config": {}, "advanced": { "trino": { "tpch.column-naming": "STANDARD" } }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the save itself succeeds; {j}");
+    let outcome = j["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["engineName"] == engine_name.as_str())
+        .cloned()
+        .expect("an outcome for the engine");
+    assert_eq!(
+        outcome["status"], "failed",
+        "the engine did not get the new configuration, and the response says so; {j}"
+    );
+    assert!(
+        outcome["error"]
+            .as_str()
+            .unwrap()
+            .contains("must name a host"),
+        "…naming the SIBLING's parse error, because that is what refused the build; {j}"
+    );
+
+    // AND THE ROW IS UNTOUCHED. The response above is the honest report; the
+    // attachment's `apply_status` is a claim about the engine, and nothing
+    // reached the engine to make one.
+    let row = reg
+        .get_attachment(engine_id, healthy)
+        .await
+        .unwrap()
+        .expect("the saved catalog's attachment");
+    assert_eq!(
+        row.apply_status, "applied",
+        "saving a healthy catalog must not flag it `failed` because a DIFFERENT catalog on \
+         the same engine cannot be rendered"
+    );
+    assert_eq!(
+        row.apply_error, None,
+        "and it must not carry the other catalog's message: {:?}",
+        row.apply_error
     );
 }

@@ -32,6 +32,7 @@ import type {
   ControlPlaneEnginesPodLogsFollowParams,
   ControlPlaneEnginesPodLogsParams,
   CreateEngineBody,
+  CreateEngineResponse,
   EngineCatalogDetailDto,
   EngineCatalogDto,
   EngineConflictBody,
@@ -525,7 +526,7 @@ export function useControlPlaneEnginesListEngines<TData = Awaited<ReturnType<typ
 
 
 export type controlPlaneEnginesCreateEngineResponse201 = {
-  data: EngineDto
+  data: CreateEngineResponse
   status: 201
 }
 

@@ -14,6 +14,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 regex.workspace = true
+# `CatalogDef::probe_target` parses the stored metastore URI into the host and
+# port a reachability probe dials (SP3c D4). Pinned by the workspace.
+url.workspace = true
 egret-config.workspace = true
 egret-metastore.workspace = true
 egret-secrets.workspace = true
@@ -24,3 +27,8 @@ tracing.workspace = true
 [dev-dependencies]
 egret-test-db.workspace = true
 tokio.workspace = true
+# `no_primary_is_warned.rs` reads back the WARN `list_engine_attachments` emits
+# for an engine with catalogs and no primary. That promise is the only thing
+# standing between a zero-primary engine and Trino silently renumbering its
+# catalogs, and without a subscriber to capture the event it is prose.
+tracing-subscriber.workspace = true

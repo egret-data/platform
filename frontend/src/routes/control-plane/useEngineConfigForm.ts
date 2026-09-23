@@ -4,7 +4,6 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import {
   type Affinity,
-  type CreateEngineInput,
   type DeploymentStrategy,
   type Engine,
   type EnvFromSource,
@@ -18,6 +17,7 @@ import {
   type Toleration,
   type TopologySpread,
   type TrinoConfig,
+  type UpdateEngineInput,
   updateEngine,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
@@ -1059,7 +1059,7 @@ export function useEngineConfigForm(
     if (specChanged) editBaselineRef.current = undefined;
   }, [engine.spec]);
 
-  const saveMutation = useMutation<Engine, ApiError, CreateEngineInput>({
+  const saveMutation = useMutation<Engine, ApiError, UpdateEngineInput>({
     mutationFn: (input) => updateEngine(engine.id, input),
     onSuccess: () => {
       // `dirty` recomputes to false once the refetched spec matches the payload.
@@ -1286,7 +1286,7 @@ export function useEngineConfigForm(
 
     // The wizard-era required fields still ride along; replicas now come from
     // the per-role editor, resources fall back to the stored flat values.
-    const input: CreateEngineInput = {
+    const input: UpdateEngineInput = {
       name: engine.name,
       warehouseId: engine.warehouseId,
       coordinatorReplicas:

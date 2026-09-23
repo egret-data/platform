@@ -399,6 +399,12 @@ function WarehousesSection({ workspaceId }: { workspaceId: string }) {
                   <TableCell>
                     <div className="flex min-w-0 items-center gap-2.5">
                       <Boxes className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      {/* Still a warehouse id, deliberately: this card's rows
+                          are `Warehouse`s, and `/control-plane/warehouses/:id`
+                          now redirects to the matching catalog (SP3c §3). The
+                          redirect exists precisely so every remaining
+                          warehouse-id link keeps working without rewiring the
+                          card's query onto the registry list. */}
                       <Link
                         to={`/control-plane/warehouses/${w.id}`}
                         className="truncate font-mono font-medium text-primary hover:underline"

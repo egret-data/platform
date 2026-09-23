@@ -55,10 +55,8 @@ import {
   controlPlaneCatalogWarehouseConfig,
 } from "./generated/control-plane-catalog/control-plane-catalog";
 import {
-  controlPlaneEnginesAddCatalog,
   controlPlaneEnginesCreateEngine,
   controlPlaneEnginesDeleteEngine,
-  controlPlaneEnginesGetCatalog,
   controlPlaneEnginesGetCluster,
   controlPlaneEnginesGetEngine,
   controlPlaneEnginesGetQuery,
@@ -67,11 +65,8 @@ import {
   controlPlaneEnginesListEngines,
   controlPlaneEnginesListQueries,
   controlPlaneEnginesPodLogs,
-  controlPlaneEnginesRemoveCatalog,
   controlPlaneEnginesRestartEngine,
   controlPlaneEnginesRotateEngineSecrets,
-  controlPlaneEnginesTestCatalog,
-  controlPlaneEnginesUpdateCatalog,
   controlPlaneEnginesUpdateEngine,
 } from "./generated/control-plane-engines/control-plane-engines";
 import {
@@ -88,7 +83,13 @@ import {
   controlPlaneStorageRemove,
   controlPlaneStorageUpdate,
 } from "./generated/control-plane-storage/control-plane-storage";
-import type { CreateEngineBody } from "./generated/model";
+import type {
+  CreateEngineBody,
+  CreateEngineResponse,
+  EngineCatalogDto,
+  NewEngineCatalog,
+} from "./generated/model";
+import { ApiError } from "./client";
 
 // ── Storage (global / control-plane) ─────────────────────────────────────────
 
@@ -867,7 +868,26 @@ export interface StarRocksCreateConfig {
 
 export interface CreateEngineInput {
   name: string;
-  warehouseId: string;
+  /**
+   * The legacy single-warehouse shape. Optional since SP3c-1 (Task 2), and
+   * **mutually exclusive with `catalogs`** — the server refuses a body that
+   * sends both rather than quietly dropping one of them. Update still sends it
+   * (see {@link UpdateEngineInput}); the create wizard sends `catalogs`.
+   */
+  warehouseId?: string;
+  /**
+   * Registry catalogs to attach as part of the create, exactly one of them
+   * `primary`. The server resolves EVERY id before it provisions anything, so
+   * an unknown or repeated id refuses the whole create — a typo cannot leave a
+   * cluster running. The still-`NOT NULL` `engines.warehouse_id` is derived
+   * from the primary catalog's own warehouse, which is why the primary must be
+   * an egret warehouse catalog until SP3c-2 drops that column.
+   *
+   * CREATE ONLY: `PUT /engines/{id}` refuses a body carrying it, which is why
+   * {@link UpdateEngineInput} omits the field instead of relying on callers to
+   * remember.
+   */
+  catalogs?: NewEngineCatalog[];
   imageVersion?: string;
   // Required by the body regardless of `kind` (a known backend wart) — the
   // StarRocks create path sends the same harmless defaults the Trino wizard
@@ -898,14 +918,39 @@ export async function getEngine(
   };
 }
 
-export async function createEngine(input: CreateEngineInput): Promise<Engine> {
+/**
+ * Create body minus the one field `PUT /engines/{id}` refuses. The refusal is
+ * real (`update_engine` 400s on a non-empty `catalogs`), so the type makes the
+ * refused body unrepresentable rather than trusting every future caller to
+ * remember it.
+ */
+export type UpdateEngineInput = Omit<CreateEngineInput, "catalogs">;
+
+/**
+ * `POST /engines` returns {@link CreateEngineResponse} — the engine, **plus**
+ * `catalogAttachErrors` naming whichever of the body's `catalogs` the engine
+ * came up without.
+ *
+ * THE RETURN TYPE IS NOT `Engine`, AND `.data` IS NOT CAST. It used to be
+ * `(…).data as Engine`, which type-checks (a `CreateEngineResponse` is an
+ * `EngineDto & {…}`, so it is assignable to `EngineDto`) and silently erases
+ * the only field that can report a half-attached engine. TypeScript cannot
+ * catch that, which is exactly why the field is worth a response type of its
+ * own — and why this function narrows on the status instead of asserting a
+ * shape. `customInstance` only ever returns the success envelope (`apiFetch`
+ * throws an `ApiError` on any non-2xx), so the non-201 arm is unreachable at
+ * runtime; it exists so the 201 arm narrows and `res.data` needs no `as`.
+ */
+export async function createEngine(input: CreateEngineInput): Promise<CreateEngineResponse> {
   // FE `CreateEngineInput.trinoConfig` is a structured `TrinoConfig`; the spec
   // types the body's `trinoConfig` as an open `{ [k]: unknown }` (serde Value),
-  // so cast at the boundary rather than widen the FE type.
-  return (await controlPlaneEnginesCreateEngine(input as unknown as CreateEngineBody)).data as Engine;
+  // so cast the REQUEST at the boundary rather than widen the FE type.
+  const res = await controlPlaneEnginesCreateEngine(input as unknown as CreateEngineBody);
+  if (res.status !== 201) throw new ApiError(res.status, res.data.error);
+  return res.data;
 }
 
-export async function updateEngine(id: string, input: CreateEngineInput): Promise<Engine> {
+export async function updateEngine(id: string, input: UpdateEngineInput): Promise<Engine> {
   return (await controlPlaneEnginesUpdateEngine(id, input as unknown as CreateEngineBody)).data as Engine;
 }
 
@@ -977,59 +1022,30 @@ export async function getCluster(engineId: string): Promise<ClusterInfo> {
 // ── Engine catalogs (multi-catalog / control-plane) ──────────────────────────
 
 /** A catalog attached to an engine. */
-export interface EngineCatalog {
-  id: string;
-  name: string;
-  kind: string;
-  isPrimary: boolean;
-  secretRef?: string | null;
-}
-
-export interface EngineCatalogDetail extends EngineCatalog {
-  config: Record<string, unknown>;
-}
-
-export interface AddCatalogInput {
-  name: string;
-  kind: string;
-  config: Record<string, unknown>;
-  secretRef?: string | null;
-}
+/**
+ * `GET /engines/{id}/catalogs`, as the generated client already describes it.
+ *
+ * It is an ALIAS rather than a hand-written copy because the copy had drifted
+ * in the way that matters: the route grew `configError` — set when a stored
+ * catalog configuration no longer parses, so the one row to repair is findable
+ * instead of 400-ing the whole list — and the hand-written interface silently
+ * dropped it. `.data as EngineCatalog[]` below cannot catch that; only not
+ * having a second declaration can (SP3c review N1).
+ */
+export type EngineCatalog = EngineCatalogDto;
 
 export async function listEngineCatalogs(id: string): Promise<EngineCatalog[]> {
   return (await controlPlaneEnginesListCatalogs(id)).data as EngineCatalog[];
 }
 
-export async function addEngineCatalog(id: string, input: AddCatalogInput): Promise<EngineCatalog> {
-  return (await controlPlaneEnginesAddCatalog(id, input)).data as EngineCatalog;
-}
-
-export async function deleteEngineCatalog(id: string, cid: string): Promise<void> {
-  await controlPlaneEnginesRemoveCatalog(id, cid);
-}
-
-export async function getEngineCatalog(id: string, cid: string): Promise<EngineCatalogDetail> {
-  return (await controlPlaneEnginesGetCatalog(id, cid)).data as EngineCatalogDetail;
-}
-
-export async function updateEngineCatalog(
-  id: string,
-  cid: string,
-  input: { config: Record<string, unknown>; secretRef?: string | null },
-): Promise<EngineCatalog> {
-  return (await controlPlaneEnginesUpdateCatalog(id, cid, input)).data as EngineCatalog;
-}
-
-/** Result of a "test connection" run — always 200; `ok` reflects whether the
- * catalog actually answered a query on the engine's coordinator. */
-export interface CatalogTestResult {
-  ok: boolean;
-  message: string;
-}
-
-export async function testEngineCatalog(id: string, cid: string): Promise<CatalogTestResult> {
-  return (await controlPlaneEnginesTestCatalog(id, cid)).data as CatalogTestResult;
-}
+/**
+ * The rest of the legacy `/engines/{id}/catalogs*` family — add, remove, get,
+ * update and the two-state "test connection" — had no caller left once the
+ * Catalogs tab stopped editing catalogs in place (SP3c-1 Task 9), so the
+ * wrappers are gone with `CatalogForm`. The ROUTES stay, which is what D5
+ * requires; SP3c-2 deletes them, and "nothing in the client calls them" is now
+ * literally true rather than an intention.
+ */
 
 // ── Engine pod logs (control-plane) ──────────────────────────────────────────
 //

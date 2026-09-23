@@ -145,11 +145,34 @@ pub fn workspace_engines_router() -> Router<CpState> {
 
 // ── DTOs (camelCase on the wire) ───────────────────────────────────────────────
 
+/// One catalog to attach when the engine is created.
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NewEngineCatalog {
+    catalog_id: Uuid,
+    /// Exactly one catalog in the list carries this. Until SP3c-2 drops
+    /// `engines.warehouse_id`, the primary must be an egret warehouse catalog —
+    /// the engine's Ranger role and (for StarRocks) its storage are still
+    /// derived from that warehouse.
+    #[serde(default)]
+    primary: bool,
+}
+
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CreateEngineBody {
     name: String,
-    warehouse_id: Uuid,
+    /// Superseded by `catalogs` and dropped in SP3c-2. A body that sends this
+    /// and no `catalogs` behaves exactly as it did before; a body that sends
+    /// BOTH is refused rather than having one of them quietly ignored.
+    #[serde(default)]
+    warehouse_id: Option<Uuid>,
+    /// Registry catalogs to attach at create. Exactly one must be `primary`,
+    /// and every id must exist — an unknown or repeated id refuses the create
+    /// before anything is provisioned. Mutually exclusive with `warehouseId`.
+    /// CREATE ONLY: `PUT /engines/{id}` refuses a body that carries it.
+    #[serde(default)]
+    catalogs: Vec<NewEngineCatalog>,
     #[serde(default)]
     image_version: Option<String>,
     coordinator_replicas: u32,
@@ -271,6 +294,7 @@ struct EngineDto {
     status: String,
     spec: EngineSpecDto,
 }
+
 impl From<Engine> for EngineDto {
     fn from(e: Engine) -> Self {
         let spec = serde_json::from_value(e.spec).unwrap_or_default();
@@ -286,6 +310,41 @@ impl From<Engine> for EngineDto {
     }
 }
 
+/// What `POST /engines` returns: the engine, plus whichever of the body's
+/// `catalogs` the engine came up WITHOUT.
+///
+/// Its own type rather than a field on [`EngineDto`] (review F2): `GET`, the
+/// list and `PUT` all return `EngineDto` and can never have anything to say
+/// here, and a schema that advertises a field an endpoint cannot send is a
+/// promise to its consumers that only create keeps. The engine's own fields are
+/// flattened, so the create response is byte-identical to `EngineDto` whenever
+/// `catalogAttachErrors` is empty — which is every create that does what it was
+/// asked.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateEngineResponse {
+    #[serde(flatten)]
+    engine: EngineDto,
+    /// Catalogs from the body's `catalogs` that could not be attached. Empty on
+    /// success. The engine EXISTS and is provisioned; these catalogs simply are
+    /// not on it, and each can be retried with
+    /// `POST /api/control-plane/engines/{id}/catalogs/{cid}`. The create is not
+    /// rolled back for them — the cluster is already up by the time they are
+    /// attached, and the alternative (the wizard's own attach loop) reports a
+    /// per-catalog failure exactly the same way. Every id in the body was
+    /// resolved BEFORE provisioning, so nothing here is a mistyped id.
+    catalog_attach_errors: Vec<CatalogAttachErrorDto>,
+}
+
+/// One catalog from a create body's `catalogs` that the engine came up without.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogAttachErrorDto {
+    catalog_id: Uuid,
+    /// Why the attach failed, in the words the attach route would have used.
+    message: String,
+}
+
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EngineCatalogDto {
@@ -294,6 +353,19 @@ pub(crate) struct EngineCatalogDto {
     pub(crate) kind: String,
     pub(crate) is_primary: bool,
     pub(crate) secret_ref: Option<Uuid>,
+    /// Set only when this catalog's STORED configuration no longer parses, and
+    /// then it carries the validation error. The entry is degraded, not
+    /// complete: `kind` falls back to the stored column and `secretRef` is
+    /// null, because neither can be derived without a parse. Render the row as
+    /// broken and let the operator open it — do not hide it, and do not treat
+    /// the absence of `secretRef` as "no secret".
+    ///
+    /// This exists because tightening a validator is a migration: rows that
+    /// went through the old gate are still stored, and a list that refuses to
+    /// show them leaves the operator unable to find the one row to repair
+    /// (SP3c review N1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) config_error: Option<String>,
 }
 
 /// The legacy `kind` of a registry catalog: `egret-warehouse` for a warehouse,
@@ -306,7 +378,11 @@ pub(crate) fn legacy_kind(def: &CatalogDef) -> String {
     }
 }
 
-fn legacy_catalog_dto(engine: &Engine, a: &AttachedCatalog) -> Result<EngineCatalogDto, CpError> {
+/// One attachment, for a route that is ABOUT that one catalog. A row whose
+/// stored configuration no longer parses is a 400 naming the row: the caller
+/// asked for this catalog specifically, so the failure is confined and the
+/// message points straight at what to fix.
+fn legacy_catalog_dto(a: &AttachedCatalog) -> Result<EngineCatalogDto, CpError> {
     let def = a
         .catalog
         .def()
@@ -315,9 +391,43 @@ fn legacy_catalog_dto(engine: &Engine, a: &AttachedCatalog) -> Result<EngineCata
         id: a.catalog.id,
         name: a.catalog.name.clone(),
         kind: legacy_kind(&def),
-        is_primary: a.catalog.warehouse_id == Some(engine.warehouse_id),
+        is_primary: a.is_primary(),
         secret_ref: def.secret_ids().into_iter().next(),
+        config_error: None,
     })
+}
+
+/// The same DTO for a LIST, where one bad row must not take the others with it.
+/// `collect::<Result<_, _>>()?` turned a single un-parseable catalog into a 400
+/// for the whole engine, naming nothing — so the operator saw no catalogs and
+/// no way to find the broken one. Every field that needs no parse is still
+/// filled in; `configError` carries the reason (SP3c review N1).
+fn legacy_catalog_dto_degrading(a: &AttachedCatalog) -> EngineCatalogDto {
+    match a.catalog.def() {
+        Ok(def) => EngineCatalogDto {
+            id: a.catalog.id,
+            name: a.catalog.name.clone(),
+            kind: legacy_kind(&def),
+            is_primary: a.is_primary(),
+            secret_ref: def.secret_ids().into_iter().next(),
+            config_error: None,
+        },
+        Err(e) => EngineCatalogDto {
+            id: a.catalog.id,
+            name: a.catalog.name.clone(),
+            // The stored column, which needs no parse. `legacy_kind`'s
+            // warehouse special case still holds: `warehouse_id` is its own
+            // column too.
+            kind: if a.catalog.warehouse_id.is_some() {
+                "egret-warehouse".into()
+            } else {
+                a.catalog.kind.clone()
+            },
+            is_primary: a.is_primary(),
+            secret_ref: None,
+            config_error: Some(e.to_string()),
+        },
+    }
 }
 
 /// The registry catalog `cid` as attached to `engine` (404 when not attached).
@@ -328,7 +438,7 @@ async fn find_attached(
 ) -> Result<AttachedCatalog, CpError> {
     st.engine_mgmt
         .registry()
-        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .list_engine_attachments(engine.id)
         .await?
         .into_iter()
         .find(|a| a.catalog.id == cid)
@@ -543,9 +653,7 @@ pub(crate) async fn build_provision_req_with(
         )));
     }
     let catalogs_read_at = registry.db_now().await?;
-    let mut attached = registry
-        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
-        .await?;
+    let mut attached = registry.list_engine_attachments(engine.id).await?;
     attached.retain(|a| Some(a.catalog.id) != opts.exclude_catalog);
     if let Some(p) = opts.pending_attachment {
         let catalog = registry
@@ -2636,13 +2744,138 @@ async fn bind_trino_profile(
     Ok(())
 }
 
+/// Resolve the warehouse the engine row still needs, from whichever shape the
+/// caller sent, and load the OTHER catalogs to attach afterwards. Every refusal
+/// lives here so the Trino and StarRocks create paths cannot disagree about what
+/// a valid body is.
+///
+/// WHY A WAREHOUSE AT ALL. `engines.warehouse_id` is `NOT NULL` and ten
+/// production sites still read it — `ensure_engine_role` seeds the engine's
+/// Ranger role from the warehouse, and the StarRocks path derives its storage
+/// from the same. SP3c-2 rewrites those and drops the column; until then a
+/// non-warehouse catalog cannot lead, and the refusal below NAMES that reason
+/// so the wizard can repeat it rather than just greying a radio button.
+///
+/// EVERY id IS RESOLVED HERE, BEFORE ANYTHING IS PROVISIONED OR MINTED (review
+/// F1). This runs at the top of `create_engine`, ahead of the warehouse lookup,
+/// the catalog client, the engine row and the cluster. A typo in the fourth of
+/// four catalog names must not leave the caller with a running cluster and a
+/// message in an optional field they may never read — it is a refusal, and the
+/// same refusal whichever entry carries it. The loaded rows are RETURNED so the
+/// attach step afterwards cannot re-resolve them and reach a different answer.
+async fn resolve_primary_catalog(
+    st: &CpState,
+    b: &CreateEngineBody,
+) -> Result<(Uuid, Vec<egret_catalog_registry::CatalogRow>), CpError> {
+    if b.catalogs.is_empty() {
+        return match b.warehouse_id {
+            Some(id) => Ok((id, Vec::new())),
+            None => Err(CpError::BadRequest(
+                "an engine needs a primary catalog: send `catalogs` with one marked primary".into(),
+            )),
+        };
+    }
+    // Both shapes at once (review F7). `catalogs` supersedes `warehouseId`, so
+    // honouring it and dropping the other silently is how an integrator spends
+    // an afternoon wondering which warehouse the engine actually got.
+    if b.warehouse_id.is_some() {
+        return Err(CpError::BadRequest(
+            "send either `warehouseId` or `catalogs`, not both: `catalogs` supersedes \
+             `warehouseId` and names the primary itself"
+                .into(),
+        ));
+    }
+    let primaries: Vec<&NewEngineCatalog> = b.catalogs.iter().filter(|c| c.primary).collect();
+    let primary_id = match primaries.as_slice() {
+        [one] => one.catalog_id,
+        [] => {
+            return Err(CpError::BadRequest(
+                "one attached catalog must be primary".into(),
+            ))
+        }
+        _ => {
+            return Err(CpError::BadRequest(
+                "only one attached catalog may be primary".into(),
+            ))
+        }
+    };
+    let registry = st.engine_mgmt.registry();
+    let mut seen = std::collections::HashSet::new();
+    let mut primary_row = None;
+    let mut others = Vec::with_capacity(b.catalogs.len());
+    for c in &b.catalogs {
+        // A repeated id would attach once and 409 the second time — the same
+        // "cluster is up, here is a message" outcome F1 is about.
+        if !seen.insert(c.catalog_id) {
+            return Err(CpError::BadRequest(format!(
+                "catalog {} is listed twice",
+                c.catalog_id
+            )));
+        }
+        let row = registry
+            .get_catalog(c.catalog_id)
+            .await?
+            // Named, not a bare 404 (review F9): with four ids in the body, the
+            // caller has to be told WHICH one does not exist. Same 400 an
+            // unknown `warehouseId` gets, for the same reason — it is the
+            // body that is wrong, not the route.
+            .ok_or_else(|| CpError::BadRequest(format!("no such catalog {}", c.catalog_id)))?;
+        if c.catalog_id == primary_id {
+            primary_row = Some(row);
+        } else {
+            others.push(row);
+        }
+    }
+    // Unreachable: exactly one entry carries `primary`, and every entry was
+    // loaded above.
+    let primary = primary_row.ok_or(CpError::Internal)?;
+    let wh = primary.warehouse_id.ok_or_else(|| {
+        CpError::BadRequest(
+            "the primary catalog must be an egret warehouse catalog: the engine's Ranger \
+             role and storage are still derived from its warehouse"
+                .into(),
+        )
+    })?;
+    Ok((wh, others))
+}
+
+/// Attach the body's non-primary `catalogs` to an engine that now exists,
+/// through the SAME [`crate::catalog_apply::attach_to_engine`] the attach route
+/// uses — one at a time, exactly as the wizard's own loop would, and never a
+/// second attach implementation. Returns what did not attach; the engine is NOT
+/// rolled back for it (its cluster is already up).
+///
+/// The rows come from [`resolve_primary_catalog`], which already refused every
+/// id that does not exist, so nothing reachable here is a typo: what remains is
+/// an engine that cannot read the catalog, a name StarRocks reserves, or a
+/// cluster that refused the apply.
+async fn attach_extra_catalogs(
+    st: &CpState,
+    engine: &Engine,
+    catalogs: &[egret_catalog_registry::CatalogRow],
+) -> Vec<CatalogAttachErrorDto> {
+    let mut failures = Vec::new();
+    for catalog in catalogs {
+        if let Err(e) = crate::catalog_apply::attach_to_engine(st, engine, catalog, None).await {
+            let message = e.into_registry().to_string();
+            tracing::warn!(engine = %engine.name, catalog = %catalog.name, %message,
+                "engine created, but a catalog from the create body did not attach");
+            failures.push(CatalogAttachErrorDto {
+                catalog_id: catalog.id,
+                message,
+            });
+        }
+    }
+    failures
+}
+
 #[utoipa::path(
     post,
     path = "/api/control-plane/engines",
     tag = "control-plane-engines",
     request_body = CreateEngineBody,
     responses(
-        (status = 201, description = "Engine created and provisioned; primary catalog auto-wired to the warehouse", body = EngineDto),
+        (status = 201, description = "Engine created and provisioned; the primary catalog is attached, and `catalogAttachErrors` lists any of the request's other `catalogs` the engine came up without", body = CreateEngineResponse),
         (status = 400, description = "Unknown/unprovisioned warehouse, invalid input, or provisioning failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:create permission", body = ErrorBody),
@@ -2654,14 +2887,19 @@ async fn create_engine(
     State(st): State<CpState>,
     Auth(p): Auth,
     Json(b): Json<CreateEngineBody>,
-) -> Result<(StatusCode, Json<EngineDto>), CpError> {
+) -> Result<(StatusCode, Json<CreateEngineResponse>), CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:create").await?;
 
-    // 1. Resolve the warehouse; it must exist and be provisioned (has a
-    //    lakekeeper counterpart) — engines connect by warehouse NAME.
+    // 1. Resolve the warehouse the engine row still needs — from `catalogs`'
+    //    primary, or from a legacy bare `warehouseId` — and with it the other
+    //    catalogs to attach once the engine is up. ONE refusal point for both
+    //    create paths (see `resolve_primary_catalog`). It must exist and be
+    //    provisioned (has a lakekeeper counterpart) — engines connect by
+    //    warehouse NAME.
+    let (primary_warehouse_id, extra_catalogs) = resolve_primary_catalog(&st, &b).await?;
     let wh = st
         .catalog
-        .get_warehouse(b.warehouse_id)
+        .get_warehouse(primary_warehouse_id)
         .await?
         .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
     if wh.lakekeeper_warehouse_id.is_none() {
@@ -2703,7 +2941,7 @@ async fn create_engine(
 
     match egret_engine_mgmt_api::EngineKind::parse(&b.kind) {
         Some(egret_engine_mgmt_api::EngineKind::StarRocks) => {
-            return create_starrocks_engine(st, b, wh).await;
+            return create_starrocks_engine(st, b, wh, extra_catalogs).await;
         }
         Some(egret_engine_mgmt_api::EngineKind::Trino) => {}
         None => {
@@ -2888,6 +3126,10 @@ async fn create_engine(
             credential_secret_id: undo.credential_secret_id,
             minted_client: true,
             applied_now: false,
+            // The engine's PRIMARY catalog (SP3c D2). `resolve_primary_catalog`
+            // has already established which catalog that is, and the partial
+            // unique index from migration 0150 refuses a second.
+            is_primary: true,
             created_at: None,
             apply_status: egret_catalog_registry::store::apply_status::APPLIED,
         })
@@ -2938,7 +3180,18 @@ async fn create_engine(
         });
     }
 
-    Ok((StatusCode::CREATED, Json(engine.into())))
+    // 10. The body's non-primary catalogs, now that the engine exists and its
+    //     cluster is up. Past the rollback: a failure here is that catalog's,
+    //     not the engine's.
+    let catalog_attach_errors = attach_extra_catalogs(&st, &engine, &extra_catalogs).await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateEngineResponse {
+            engine: engine.into(),
+            catalog_attach_errors,
+        }),
+    ))
 }
 
 /// Assemble the StarRocks provisioning request from a STORED engine row (its
@@ -3454,7 +3707,8 @@ async fn create_starrocks_engine(
     st: CpState,
     b: CreateEngineBody,
     wh: egret_catalog_api::Warehouse,
-) -> Result<(StatusCode, Json<EngineDto>), CpError> {
+    extra_catalogs: Vec<egret_catalog_registry::CatalogRow>,
+) -> Result<(StatusCode, Json<CreateEngineResponse>), CpError> {
     // Storage backing for the FE/CN builtin storage volume: same storage
     // connection the Trino S3 connector would use for this warehouse. The
     // stored `endpoint` is assumed pod-reachable already (that's how the Trino
@@ -3617,6 +3871,8 @@ async fn create_starrocks_engine(
             credential_secret_id: undo.credential_secret_id,
             minted_client: true,
             applied_now: false,
+            // The engine's PRIMARY catalog (SP3c D2), same as the Trino path.
+            is_primary: true,
             created_at: None,
             // `pending`, not `applied` (D1, migration 0149): the FE is
             // unreachable for the five to ten minutes after `provision`, so a
@@ -3727,7 +3983,25 @@ async fn create_starrocks_engine(
         delegation_bootstrap,
     );
 
-    Ok((StatusCode::CREATED, Json(engine.into())))
+    // The body's non-primary catalogs. Same helper, same order as Trino: the
+    // engine exists, so a failure here belongs to the catalog. A StarRocks FE is
+    // unreachable for five to ten minutes after `provision`, which is exactly
+    // when this runs, so `attach_to_engine` writes the row `pending`, fails to
+    // reach the FE, and settles it to `failed` with the reason — an ATTACHMENT
+    // that exists and is retryable, not an error, so it does NOT appear in
+    // `catalogAttachErrors`. (Only a `CatalogOpError` does: a catalog this
+    // engine cannot read, a name StarRocks reserves, or a database write that
+    // failed.) The wire step above, or `POST …/catalogs/{cid}/apply`, converges
+    // it once the FE answers.
+    let catalog_attach_errors = attach_extra_catalogs(&st, &engine, &extra_catalogs).await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateEngineResponse {
+            engine: engine.into(),
+            catalog_attach_errors,
+        }),
+    ))
 }
 
 /// Build the `mysql_async` connection options for egret's own FE `root`
@@ -4473,7 +4747,7 @@ async fn rematerialize_or_400(st: &CpState, engine_id: Uuid) -> Result<(), CpErr
     request_body = CreateEngineBody,
     responses(
         (status = 200, description = "Engine spec updated and pods rolled", body = EngineDto),
-        (status = 400, description = "Invalid config, Kubernetes not configured, or re-materializing workspace connections failed", body = ErrorBody),
+        (status = 400, description = "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), or re-materializing workspace connections failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
@@ -4489,6 +4763,17 @@ async fn update_engine(
     Json(b): Json<CreateEngineBody>,
 ) -> Result<Json<EngineDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    // `CreateEngineBody` is shared with create, but update has never attached
+    // anything and does not start here. Accepting the field and dropping it
+    // would tell the caller their catalogs were attached (review F8); refusing
+    // sends them to the route that actually does it.
+    if !b.catalogs.is_empty() {
+        return Err(CpError::BadRequest(
+            "`catalogs` is not accepted on update: attach with \
+             POST /api/control-plane/engines/{id}/catalogs/{cid}"
+                .into(),
+        ));
+    }
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -4866,7 +5151,7 @@ async fn delete_engine(
     let attachments = st
         .engine_mgmt
         .registry()
-        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .list_engine_attachments(engine.id)
         .await?;
 
     // 3. Visible, retryable state for everything below that can fail.
@@ -5358,7 +5643,7 @@ async fn unassign_workspace_engine(
     tag = "control-plane-engines",
     params(("id" = Uuid, Path, description = "Engine id")),
     responses(
-        (status = 200, description = "Catalogs attached to the engine", body = Vec<EngineCatalogDto>),
+        (status = 200, description = "Catalogs attached to the engine. A catalog whose stored configuration no longer parses is listed with `configError` set rather than omitted, and never fails the whole list", body = Vec<EngineCatalogDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:read permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
@@ -5379,13 +5664,10 @@ async fn list_catalogs(
     let attached = st
         .engine_mgmt
         .registry()
-        .list_engine_attachments(engine.id, Some(engine.warehouse_id))
+        .list_engine_attachments(engine.id)
         .await?;
     Ok(Json(
-        attached
-            .iter()
-            .map(|a| legacy_catalog_dto(&engine, a))
-            .collect::<Result<_, _>>()?,
+        attached.iter().map(legacy_catalog_dto_degrading).collect(),
     ))
 }
 
@@ -5538,10 +5820,7 @@ async fn add_catalog(
         catalog
     };
     let attached = find_attached(&st, &engine, catalog.id).await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(legacy_catalog_dto(&engine, &attached)?),
-    ))
+    Ok((StatusCode::CREATED, Json(legacy_catalog_dto(&attached)?)))
 }
 
 #[utoipa::path(
@@ -5572,7 +5851,7 @@ async fn get_catalog(
         .await?
         .ok_or(CpError::NotFound)?;
     let attached = find_attached(&st, &engine, cid).await?;
-    let dto = legacy_catalog_dto(&engine, &attached)?;
+    let dto = legacy_catalog_dto(&attached)?;
     let config = crate::catalog_apply::legacy_config_view(&st, &attached).await?;
     Ok(Json(EngineCatalogDetailDto {
         id: dto.id,
@@ -5664,76 +5943,78 @@ async fn test_catalog(
         .await?
         .ok_or(CpError::NotFound)?;
     let cat = find_attached(&st, &engine, cid).await?.catalog;
+    let (ok, message) = show_schemas_verdict(&st, &engine, &cat.name).await?;
+    Ok(Json(CatalogTestDto { ok, message }))
+}
 
-    let sql = format!("SHOW SCHEMAS FROM {}", quote_ident(&cat.name));
+/// Run `SHOW SCHEMAS FROM "<catalog>"` on `engine`'s Trino coordinator and
+/// return the verdict as `(ok, message)`. Shared by the per-engine
+/// `POST /engines/{id}/catalogs/{cid}/test` above and by the registry's
+/// `POST /catalogs/{id}/test` (SP3c D4), so the two cannot drift into two
+/// readings of the same coordinator reply. Errors of the query are verdicts,
+/// not HTTP failures; only an unreachable coordinator (or unconfigured
+/// Kubernetes) propagates as a `CpError`.
+pub(crate) async fn show_schemas_verdict(
+    st: &CpState,
+    engine: &Engine,
+    catalog_name: &str,
+) -> Result<(bool, String), CpError> {
+    let sql = format!("SHOW SCHEMAS FROM {}", quote_ident(catalog_name));
     let (code, body) = crate::monitor::coordinator_call(
-        &st,
-        &engine,
+        st,
+        engine,
         "POST",
         "/v1/statement",
-        Some(sql.into_bytes()),
+        Some(sql.clone().into_bytes()),
     )
     .await?;
     if !(200..300).contains(&code) {
-        return Ok(Json(CatalogTestDto {
-            ok: false,
-            message: coordinator_error_message(code, &body),
-        }));
+        return Ok((false, coordinator_error_message(code, &body)));
     }
     let mut v: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(_) => {
-            return Ok(Json(CatalogTestDto {
-                ok: false,
-                message: "coordinator returned a non-JSON response".into(),
-            }))
-        }
+        Err(_) => return Ok((false, "coordinator returned a non-JSON response".into())),
     };
 
     for _ in 0..=CATALOG_TEST_MAX_POLLS {
         if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
-            return Ok(Json(CatalogTestDto {
-                ok: false,
-                message: err["message"]
+            return Ok((
+                false,
+                err["message"]
                     .as_str()
                     .unwrap_or("query failed")
                     .to_string(),
-            }));
+            ));
         }
         let state = v["stats"]["state"].as_str().unwrap_or("");
         let Some(next_uri) = v["nextUri"].as_str() else {
-            return Ok(Json(CatalogTestDto {
-                ok: state == "FINISHED",
-                message: if state == "FINISHED" {
-                    "ok".into()
+            return Ok((
+                state == "FINISHED",
+                if state == "FINISHED" {
+                    // Name the check and the engine. `tcp` puts its disclaimer
+                    // in the sentence and `unsupported` names the kind; the bare
+                    // word "ok" left the strongest of the three the only one
+                    // that did not say what it had done (SP3c review F5).
+                    format!(
+                        "{sql} succeeded on `{}`, so the catalog answered — credentials included.",
+                        engine.name
+                    )
                 } else {
                     format!("query ended in state {state}")
                 },
-            }));
+            ));
         };
         let path = next_uri_path(next_uri);
-        let (code, body) =
-            crate::monitor::coordinator_call(&st, &engine, "GET", &path, None).await?;
+        let (code, body) = crate::monitor::coordinator_call(st, engine, "GET", &path, None).await?;
         if !(200..300).contains(&code) {
-            return Ok(Json(CatalogTestDto {
-                ok: false,
-                message: coordinator_error_message(code, &body),
-            }));
+            return Ok((false, coordinator_error_message(code, &body)));
         }
         v = match serde_json::from_slice(&body) {
             Ok(v) => v,
-            Err(_) => {
-                return Ok(Json(CatalogTestDto {
-                    ok: false,
-                    message: "coordinator returned a non-JSON response".into(),
-                }))
-            }
+            Err(_) => return Ok((false, "coordinator returned a non-JSON response".into())),
         };
     }
-    Ok(Json(CatalogTestDto {
-        ok: false,
-        message: "timed out".into(),
-    }))
+    Ok((false, "timed out".into()))
 }
 
 #[utoipa::path(
@@ -5808,7 +6089,7 @@ async fn update_catalog(
         .catalog
         .def()
         .map_err(|e| CpError::BadRequest(format!("catalog {}: {e}", attached.catalog.name)))?;
-    if attached.catalog.warehouse_id == Some(engine.warehouse_id) {
+    if attached.is_primary() {
         return Err(CpError::BadRequest(
             "cannot edit the primary catalog".into(),
         ));
@@ -5891,7 +6172,7 @@ async fn update_catalog(
         )));
     }
     let attached = find_attached(&st, &engine, cid).await?;
-    Ok(Json(legacy_catalog_dto(&engine, &attached)?))
+    Ok(Json(legacy_catalog_dto(&attached)?))
 }
 
 // ── pod logs ─────────────────────────────────────────────────────────────────
@@ -6312,8 +6593,11 @@ async fn bridge_exec(
     ),
     components(schemas(
         CreateEngineBody,
+        NewEngineCatalog,
         EngineSpecDto,
         EngineDto,
+        CreateEngineResponse,
+        CatalogAttachErrorDto,
         EngineDetailDto,
         EngineStatusDto,
         EnginePodDto,
@@ -7232,7 +7516,8 @@ mod tests {
         let name = format!("trino-{}", Uuid::new_v4().simple());
         let body = CreateEngineBody {
             name: name.clone(),
-            warehouse_id: wh.id,
+            warehouse_id: Some(wh.id),
+            catalogs: Vec::new(),
             image_version: None,
             coordinator_replicas: 1,
             worker_replicas: 1,
@@ -7759,7 +8044,8 @@ mod tests {
 
         let body = CreateEngineBody {
             name: format!("trino-{}", Uuid::new_v4().simple()),
-            warehouse_id: wh.id,
+            warehouse_id: Some(wh.id),
+            catalogs: Vec::new(),
             image_version: None,
             coordinator_replicas: 1,
             worker_replicas: 1,
@@ -7811,7 +8097,7 @@ mod tests {
         body.name = format!("sr-{}", Uuid::new_v4().simple());
         let name = body.name.clone();
 
-        let (code, _dto) = create_starrocks_engine(st.clone(), body, wh)
+        let (code, _dto) = create_starrocks_engine(st.clone(), body, wh, Vec::new())
             .await
             .expect("create_starrocks_engine");
         assert_eq!(code, StatusCode::CREATED);
@@ -7848,7 +8134,7 @@ mod tests {
         }));
         body.name = format!("sr-{}", Uuid::new_v4().simple());
         let name = body.name.clone();
-        let _created = create_starrocks_engine(st.clone(), body, wh).await?;
+        let _created = create_starrocks_engine(st.clone(), body, wh, Vec::new()).await?;
         Ok(st
             .engine_mgmt
             .list_engines()
@@ -8048,7 +8334,8 @@ mod tests {
         let name = format!("trino-{}", Uuid::new_v4().simple());
         let body = CreateEngineBody {
             name: name.clone(),
-            warehouse_id: wh.id,
+            warehouse_id: Some(wh.id),
+            catalogs: Vec::new(),
             image_version: None,
             coordinator_replicas: 1,
             worker_replicas: 1,
@@ -8246,7 +8533,8 @@ mod tests {
         let name = format!("trino-{}", Uuid::new_v4().simple());
         let body = CreateEngineBody {
             name: name.clone(),
-            warehouse_id: wh.id,
+            warehouse_id: Some(wh.id),
+            catalogs: Vec::new(),
             image_version: None,
             coordinator_replicas: 1,
             worker_replicas: 1,
@@ -8451,7 +8739,8 @@ mod tests {
     fn sr_update_body(starrocks: Option<StarRocksConfigBody>) -> CreateEngineBody {
         CreateEngineBody {
             name: "ignored".into(),
-            warehouse_id: Uuid::nil(),
+            warehouse_id: Some(Uuid::nil()),
+            catalogs: Vec::new(),
             image_version: None,
             coordinator_replicas: 0,
             worker_replicas: 0,
@@ -8854,6 +9143,7 @@ mod tests {
                 credential_secret_id,
                 minted_client: false,
                 applied_now: false,
+                is_primary: false,
                 created_at: None,
                 apply_status: egret_catalog_registry::store::apply_status::PENDING,
             })
@@ -10132,7 +10422,8 @@ mod tests {
 
         let body = CreateEngineBody {
             name: engine.name.clone(),
-            warehouse_id: wh.id,
+            warehouse_id: Some(wh.id),
+            catalogs: Vec::new(),
             image_version: None,
             coordinator_replicas: 2,
             worker_replicas: 5,

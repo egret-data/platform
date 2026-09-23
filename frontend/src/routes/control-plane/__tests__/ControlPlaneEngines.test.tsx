@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
@@ -71,6 +71,33 @@ describe("ControlPlaneEngines", () => {
     // "running" also appears as a SummaryStrip label, so scope to the engine row.
     const row = (await screen.findByText("analytics-trino")).closest("tr")!;
     expect(within(row).getByText("running")).toBeInTheDocument();
+  });
+
+  /**
+   * Whole-branch review, F6. `EnginesTab`'s `EngineHealthBadge` claims to keep
+   * this page's variant mapping in step so the two never paint the same word
+   * two colours; `phaseVariant` had no `deleting` arm and fell through to
+   * `secondary` while the other page painted it `warning`. `deleting` is one of
+   * the four `engine_status` values, and this badge falls back to that stored
+   * column whenever the live poll has not answered.
+   */
+  test("a deleting engine is painted like the other in-flight phases, not neutral", async () => {
+    vi.mocked(api.listEngines).mockResolvedValue([{ ...ENGINE, status: "deleting" }]);
+    // The live poll never answers, so the badge shows the stored value — the
+    // exact path the mapping had to cover.
+    vi.mocked(api.getEngine).mockRejectedValue(new Error("no live status in this test"));
+    renderPage();
+
+    const row = (await screen.findByText("analytics-trino")).closest("tr")!;
+    const deleting = within(row).getByText("deleting");
+    // Compared against `provisioning`, the arm it shares, rather than against a
+    // literal class string: the point is that the two agree, not what the
+    // palette happens to be.
+    vi.mocked(api.listEngines).mockResolvedValue([{ ...ENGINE, status: "provisioning" }]);
+    cleanup();
+    renderPage();
+    const row2 = (await screen.findByText("analytics-trino")).closest("tr")!;
+    expect(deleting.className).toBe(within(row2).getByText("provisioning").className);
   });
 
   test("Add engine navigates to the create page with the active engine type", async () => {

@@ -1,5 +1,13 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router-dom";
+import {
+  BrowserRouter,
+  Link,
+  Navigate,
+  Route,
+  Routes,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider } from "@/auth/AuthProvider";
@@ -75,8 +83,11 @@ import SecretDetail from "@/routes/control-plane/SecretDetail";
 import Policies from "@/routes/governance/Policies";
 import ProfileDetailPage from "@/routes/governance/ProfileDetailPage";
 import PolicyEditorPage from "@/routes/governance/PolicyEditorPage";
+import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
+import Catalogs from "@/routes/control-plane/catalogs/Catalogs";
+import CatalogCreate from "@/routes/control-plane/catalogs/CatalogCreate";
+import CatalogDetail from "@/routes/control-plane/catalogs/CatalogDetail";
 import Warehouses from "@/routes/control-plane/Warehouses";
-import WarehouseDetail from "@/routes/control-plane/WarehouseDetail";
 import AuditLog from "@/routes/control-plane/AuditLog";
 import UsersPage from "@/routes/control-plane/access/UsersPage";
 import UserDetail from "@/routes/control-plane/access/UserDetail";
@@ -268,12 +279,95 @@ function ExploreRoutes() {
   );
 }
 
+/**
+ * SP3c §3, narrowed by D5: `/control-plane/warehouses/:id` redirects to the
+ * matching catalog. ONLY the detail path. The Warehouses LIST and its sidebar
+ * entry stay live through SP3c-1 and SP3c-2 retires them; this redirect is
+ * additive, and exists because the warehouse detail PAGE is the one thing that
+ * genuinely could not stay — its five tabs now render on `CatalogDetail`
+ * (D1), so a row in the Warehouses list opens them there.
+ *
+ * The id in the old URL is a WAREHOUSE id. `RegistryCatalogDto.warehouseId` is
+ * the only field that maps it to a catalog id, and it is only on the list, so
+ * the redirect has to wait for that list rather than resolve the id locally.
+ *
+ * A warehouse with no registry row is impossible after SP3a's backfill, but a
+ * 404 is not a crash: it lands on the Catalogs list, which is where the
+ * operator would have gone next anyway. `?tab=` is carried across because the
+ * five tabs this page now redirects INTO kept their original `value`s, so a
+ * bookmarked `?tab=browse` still opens Browse.
+ *
+ * THE MISSING DESTINATION KEY IS EXPLAINED HERE, NOT 403'D (whole-branch
+ * review, F5). This route is gated `warehouse:read` — the same key as the list
+ * that links to it, because a row and the list that renders it must agree — so
+ * an account can reach it without holding `catalog_registry:read`. Migration
+ * 0148 granted the new key to every platform role that held `warehouse:read`,
+ * but it is a one-time `INSERT … SELECT`: a role created AFTER the upgrade
+ * never receives it. Gating this path on the destination's key instead would
+ * make every row of a list that renders fine 403 — the capability removal D5
+ * exists to prevent. So the redirect resolves when it can and names the
+ * missing permission when it cannot, which is what the five blocked tabs on
+ * `CatalogDetail` already do.
+ */
+function WarehouseRedirect() {
+  const { id = "" } = useParams();
+  const { me } = useAuth();
+  const canReadRegistry =
+    !!me &&
+    (me.platform_roles.includes("platform_admin") ||
+      me.permissions.includes("catalog_registry:read"));
+  const q = useControlPlaneCatalogRegistryListRegistryCatalogs(undefined, {
+    // The registry list is `catalog_registry:read`. Not sent without it: the
+    // 403 would tell this page nothing it does not already know, and an
+    // `isError` arm behind an `enabled` that is false never fires — the exact
+    // inert-fix shape Task 11 found on the Engines tab.
+    query: { retry: false, enabled: canReadRegistry },
+  });
+  const [sp] = useSearchParams();
+  if (!canReadRegistry)
+    return (
+      <div className="space-y-3 p-10" data-testid="warehouse-redirect-blocked">
+        <h1 className="text-xl font-semibold">This page moved into Catalogs</h1>
+        <p className="max-w-2xl text-sm text-muted-foreground">
+          A warehouse&apos;s roles and grants, Catalog Clients, namespace browser, connection
+          details and settings are now tabs on its catalog. Finding that catalog needs the{" "}
+          <code className="font-mono">catalog_registry:read</code> permission, which this account
+          does not have — <code className="font-mono">warehouse:read</code> does not imply it for
+          a role created after the catalog section shipped. A platform administrator can grant it.
+        </p>
+        <p className="text-sm">
+          <Link to="/control-plane/warehouses" className="text-primary hover:underline">
+            Back to Warehouses
+          </Link>
+        </p>
+      </div>
+    );
+  if (q.isLoading) return <div className="p-10">Loading…</div>;
+  const rows = q.data?.status === 200 ? q.data.data : [];
+  const match = rows.find((c) => c.warehouseId === id);
+  const tab = sp.get("tab");
+  return (
+    <Navigate
+      replace
+      to={
+        match
+          ? `/control-plane/catalogs/${match.id}${tab ? `?tab=${encodeURIComponent(tab)}` : ""}`
+          : "/control-plane/catalogs"
+      }
+    />
+  );
+}
+
 // First section (in preference order) each control-plane read permission
 // unlocks. Used to redirect a scoped (non platform_admin) user landing on
 // `/control-plane` to a section they can actually see, instead of the
 // platform_admin-only "workspaces" default.
 const FIRST_SECTION_BY_PERM: { path: string; perm: string }[] = [
   { path: "engines", perm: "engine:read" },
+  // Ahead of `warehouses` so a user holding both lands on the new section.
+  // Both remain reachable through SP3c-1 (D5): the Warehouses LIST is still a
+  // page, and only `warehouses/:id` became a redirect.
+  { path: "catalogs", perm: "catalog_registry:read" },
   { path: "warehouses", perm: "warehouse:read" },
   { path: "storage", perm: "storage:read" },
   { path: "secrets", perm: "secret:read" },
@@ -309,8 +403,33 @@ function ControlPlaneRoutes() {
           <Route path="engines" element={<RequirePermission perm="engine:read"><ControlPlaneEngines /></RequirePermission>} />
           <Route path="engines/new" element={<RequirePermission perm="engine:create"><EngineCreate /></RequirePermission>} />
           <Route path="engines/:id" element={<RequirePermission perm="engine:read"><EngineDetail /></RequirePermission>} />
+          <Route path="catalogs" element={<RequirePermission perm="catalog_registry:read"><Catalogs /></RequirePermission>} />
+          <Route path="catalogs/new" element={<RequirePermission perm="catalog_registry:create"><CatalogCreate /></RequirePermission>} />
+          <Route path="catalogs/:id" element={<RequirePermission perm="catalog_registry:read"><CatalogDetail /></RequirePermission>} />
+          {/* D5: the warehouse LIST stays a page for the whole of SP3c-1,
+              beside the catalog one, and SP3c-2 retires it.
+
+              The warehouse DETAIL page is the one that could not: its five
+              tabs moved onto `CatalogDetail` (D1), so this path resolves the
+              warehouse id to its catalog and sends the operator to the same
+              tabs there.
+
+              The guard is `warehouse:read` — THE SAME KEY AS THE LIST THAT
+              LINKS HERE. It was `catalog_registry:read`, the destination's key,
+              reasoning that migration 0148 had granted that to every platform
+              role holding `warehouse:read`; but 0148 is a one-time
+              `INSERT … SELECT`, so a role created after the upgrade with
+              `warehouse:read` alone sees the Warehouses section, renders the
+              list, and 403s on every row — losing roles/grants, Clients,
+              Browse, Connect and Settings, the capability removal D5 exists to
+              prevent (whole-branch review, F5). A row and the list that renders
+              it must agree. `WarehouseRedirect` itself explains a missing
+              `catalog_registry:read` and names the key, which is what the rest
+              of this branch does and beats a bare 403. Both keys are in
+              `CONTROL_PLANE_PERMS` for the whole of SP3c-1, so neither loses
+              the app. */}
           <Route path="warehouses" element={<RequirePermission perm="warehouse:read"><Warehouses /></RequirePermission>} />
-          <Route path="warehouses/:id" element={<RequirePermission perm="warehouse:read"><WarehouseDetail /></RequirePermission>} />
+          <Route path="warehouses/:id" element={<RequirePermission perm="warehouse:read"><WarehouseRedirect /></RequirePermission>} />
           <Route path="storage" element={<RequirePermission perm="storage:read"><ControlPlaneStorage /></RequirePermission>} />
           <Route path="storage/:id" element={<RequirePermission perm="storage:read"><StorageDetail /></RequirePermission>} />
           <Route path="storage/:id/browse" element={<RequirePermission perm="storage:read"><StorageBrowser /></RequirePermission>} />

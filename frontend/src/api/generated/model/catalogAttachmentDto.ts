@@ -24,4 +24,22 @@ export interface CatalogAttachmentDto {
   applyError?: string | null;
   /** @nullable */
   appliedAt?: string | null;
+  /**
+     * This catalog is that engine's PRIMARY: it leads the engine's render
+     * order and cannot be detached or edited. At most one of an engine's
+     * catalogs carries it (SP3c D2, migration 0150).
+     */
+  isPrimary: boolean;
+  /**
+     * When this attachment was recorded — `engine_catalog_attachments.created_at`.
+     *
+     * The clock a `pending` attachment has been waiting on. `pending` is
+     * written only by the INSERT that creates the row (engine create and
+     * attach; nothing flips a settled attachment back), so this is the moment
+     * the wait began. A UI deciding whether a `pending` has outlived the
+     * StarRocks bootstrap must measure against THIS and not against the
+     * catalog's `updatedAt`: attaching an existing catalog never touches the
+     * catalog row, so its `updatedAt` is already arbitrarily old.
+     */
+  createdAt: string;
 }

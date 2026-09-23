@@ -3,11 +3,11 @@ import type { Dispatch, SetStateAction } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import {
-  type CreateEngineInput,
   type Engine,
   type RoleResources,
   type StarRocksAutoscaling,
   type StarRocksSpecConfig,
+  type UpdateEngineInput,
   updateEngine,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
@@ -491,7 +491,7 @@ export function useStarRocksConfigForm(
   // so Save always settles instead of stranding a phantom diff.
   const dirty = resolveConfig(body, sc) !== seed;
 
-  const saveMutation = useMutation<Engine, ApiError, CreateEngineInput>({
+  const saveMutation = useMutation<Engine, ApiError, UpdateEngineInput>({
     mutationFn: (input) => updateEngine(engine.id, input),
     onSuccess: () => {
       // `dirty` recomputes to false once the refetched spec matches the payload.
@@ -501,7 +501,7 @@ export function useStarRocksConfigForm(
 
   async function save() {
     setError(null);
-    const input: CreateEngineInput = {
+    const input: UpdateEngineInput = {
       name: engine.name,
       warehouseId: engine.warehouseId ?? "",
       kind: "starrocks",

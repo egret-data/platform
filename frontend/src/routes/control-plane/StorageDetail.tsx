@@ -539,6 +539,9 @@ function WarehousesTab({ storageId }: { storageId: string }) {
                   <TableCell>
                     <div className="flex min-w-0 items-center gap-2.5">
                       <Boxes className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      {/* Still a warehouse id, deliberately — see the same
+                          card on `WorkspaceDetail`. `/control-plane/warehouses/:id`
+                          redirects to the matching catalog (SP3c §3). */}
                       <Link
                         to={`/control-plane/warehouses/${w.id}`}
                         className="truncate font-mono font-medium text-primary hover:underline"

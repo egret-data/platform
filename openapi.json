@@ -3104,6 +3104,221 @@
         }
       }
     },
+    "/api/control-plane/catalogs/{id}/engines/{engine_id}": {
+      "post": {
+        "tags": [
+          "control-plane-catalog-registry"
+        ],
+        "operationId": "registry_attach_catalog",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "engine_id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Attached. Trino: the catalog was applied to the cluster first, so `applyStatus` is `applied`. StarRocks: the attachment is recorded first and the catalog is created on the FE immediately afterwards, so `applyStatus` is `applied` on success and `failed` (with `applyError`) when the FE could not be reached or refused — the attachment still exists and is converged by `POST …/engines/{id}/catalogs/{cid}/apply` or by the engine's next bootstrap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogAttachmentDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The engine cannot read this catalog, the name is one StarRocks reserves, or Kubernetes is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing catalog_registry:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog or engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already attached, or the engine is being deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Trino only: Kubernetes rejected the apply (`code` = `engine_cluster_apply_failed`); nothing was attached. A StarRocks FE that rejects the DDL is reported as a `failed` attachment in the 201 body, not as a 502",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "control-plane-catalog-registry"
+        ],
+        "operationId": "detach_catalog",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "engine_id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed from the engine, then detached. The registry catalog itself is kept, and the credential egret minted for this attachment is revoked"
+          },
+          "400": {
+            "description": "This is the engine's primary catalog (detach it by deleting the engine), or Kubernetes is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing catalog_registry:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog or engine, or the catalog is not attached to it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The engine is being deleted; retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The engine rejected the removal; nothing was detached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/catalogs/{id}/impact": {
       "get": {
         "tags": [
@@ -3240,6 +3455,98 @@
           },
           "500": {
             "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/catalogs/{id}/test": {
+      "post": {
+        "tags": [
+          "control-plane-catalog-registry"
+        ],
+        "operationId": "test_registry_catalog",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The verdict, and `check` names which of the three checks produced it. The target of a `tcp` check comes from the STORED configuration and never from the request, which carries no body at all",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogTestResultDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The catalog's STORED configuration does not parse, so there was no target to decide and nothing to test. Reachable for a row written before a validation rule that has since tightened — the message names the field, and this is the one thing the operator can act on, so render it rather than the generic error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing catalog_registry:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`query` only: the Trino coordinator could not be reached at all. A coordinator that answers with a failure is a 200 with `ok:false`",
             "content": {
               "application/json": {
                 "schema": {
@@ -3533,11 +3840,11 @@
         },
         "responses": {
           "201": {
-            "description": "Engine created and provisioned; primary catalog auto-wired to the warehouse",
+            "description": "Engine created and provisioned; the primary catalog is attached, and `catalogAttachErrors` lists any of the request's other `catalogs` the engine came up without",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/EngineDto"
+                  "$ref": "#/components/schemas/CreateEngineResponse"
                 }
               }
             }
@@ -3705,7 +4012,7 @@
             }
           },
           "400": {
-            "description": "Invalid config, Kubernetes not configured, or re-materializing workspace connections failed",
+            "description": "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), or re-materializing workspace connections failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -3890,7 +4197,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Catalogs attached to the engine",
+            "description": "Catalogs attached to the engine. A catalog whose stored configuration no longer parses is listed with `configError` set rather than omitted, and never fails the whole list",
             "content": {
               "application/json": {
                 "schema": {
@@ -29937,6 +30244,24 @@
           }
         }
       },
+      "CatalogAttachErrorDto": {
+        "type": "object",
+        "description": "One catalog from a create body's `catalogs` that the engine came up without.",
+        "required": [
+          "catalogId",
+          "message"
+        ],
+        "properties": {
+          "catalogId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "message": {
+            "type": "string",
+            "description": "Why the attach failed, in the words the attach route would have used."
+          }
+        }
+      },
       "CatalogAttachmentDto": {
         "type": "object",
         "description": "One engine a catalog is attached to.",
@@ -29944,7 +30269,9 @@
           "engineId",
           "engineName",
           "engineType",
-          "applyStatus"
+          "applyStatus",
+          "isPrimary",
+          "createdAt"
         ],
         "properties": {
           "engineId": {
@@ -29973,8 +30300,26 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "isPrimary": {
+            "type": "boolean",
+            "description": "This catalog is that engine's PRIMARY: it leads the engine's render\norder and cannot be detached or edited. At most one of an engine's\ncatalogs carries it (SP3c D2, migration 0150)."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When this attachment was recorded — `engine_catalog_attachments.created_at`.\n\nThe clock a `pending` attachment has been waiting on. `pending` is\nwritten only by the INSERT that creates the row (engine create and\nattach; nothing flips a settled attachment back), so this is the moment\nthe wait began. A UI deciding whether a `pending` has outlived the\nStarRocks bootstrap must measure against THIS and not against the\ncatalog's `updatedAt`: attaching an existing catalog never touches the\ncatalog row, so its `updatedAt` is already arbitrarily old."
           }
         }
+      },
+      "CatalogCheck": {
+        "type": "string",
+        "description": "Which of the three checks produced a [`CatalogTestResultDto`]. An enum, not\na string, so Task 7's renderer gets a union it must switch on exhaustively:\nthe whole point of the discriminant is that the three cannot be blurred, and\na doc comment saying \"read this first\" is a comment doing a type's job (SP3c\nreview F4). The wire values are unchanged.",
+        "enum": [
+          "query",
+          "tcp",
+          "unsupported"
+        ]
       },
       "CatalogConflictBody": {
         "type": "object",
@@ -30118,6 +30463,43 @@
           },
           "message": {
             "type": "string"
+          }
+        }
+      },
+      "CatalogTestResultDto": {
+        "type": "object",
+        "description": "`POST /catalogs/{id}/test` payload.\n\nEvery field a UI author must read is a schema property, so its doc comment\nreaches the generated client as JSDoc — a response description does not.",
+        "required": [
+          "ok",
+          "check",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "description": "Whether the check that ran succeeded — and it means only as much as\n`check` says it does. Read `check` FIRST: `unsupported` is always\n`ok:false` because nothing was measured, and that is not a broken\ncatalog, so it renders neutral rather than red."
+          },
+          "check": {
+            "$ref": "#/components/schemas/CatalogCheck",
+            "description": "Which check ran, so a green tick can never be read as the other one."
+          },
+          "engineName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The engine the query ran on; null for `tcp` and `unsupported`."
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `tcp`, the `host:port` that was dialled, so the result names what it\nmeasured; null otherwise."
+          },
+          "message": {
+            "type": "string",
+            "description": "One sentence an operator can act on. For `tcp` it always says, in the\nsentence itself, that reachability is all that was measured."
           }
         }
       },
@@ -30900,7 +31282,6 @@
         "type": "object",
         "required": [
           "name",
-          "warehouseId",
           "coordinatorReplicas",
           "workerReplicas",
           "cpuMin",
@@ -30912,8 +31293,19 @@
             "type": "string"
           },
           "warehouseId": {
-            "type": "string",
-            "format": "uuid"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Superseded by `catalogs` and dropped in SP3c-2. A body that sends this\nand no `catalogs` behaves exactly as it did before; a body that sends\nBOTH is refused rather than having one of them quietly ignored."
+          },
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NewEngineCatalog"
+            },
+            "description": "Registry catalogs to attach at create. Exactly one must be `primary`,\nand every id must exist — an unknown or repeated id refuses the create\nbefore anything is provisioned. Mutually exclusive with `warehouseId`.\nCREATE ONLY: `PUT /engines/{id}` refuses a body that carries it."
           },
           "imageVersion": {
             "type": [
@@ -30976,6 +31368,29 @@
             "description": "Optional: a kubernetes.io/tls named secret to back the coordinator TLS."
           }
         }
+      },
+      "CreateEngineResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EngineDto"
+          },
+          {
+            "type": "object",
+            "required": [
+              "catalogAttachErrors"
+            ],
+            "properties": {
+              "catalogAttachErrors": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CatalogAttachErrorDto"
+                },
+                "description": "Catalogs from the body's `catalogs` that could not be attached. Empty on\nsuccess. The engine EXISTS and is provisioned; these catalogs simply are\nnot on it, and each can be retried with\n`POST /api/control-plane/engines/{id}/catalogs/{cid}`. The create is not\nrolled back for them — the cluster is already up by the time they are\nattached, and the alternative (the wizard's own attach loop) reports a\nper-catalog failure exactly the same way. Every id in the body was\nresolved BEFORE provisioning, so nothing here is a mistyped id."
+              }
+            }
+          }
+        ],
+        "description": "What `POST /engines` returns: the engine, plus whichever of the body's\n`catalogs` the engine came up WITHOUT.\n\nIts own type rather than a field on [`EngineDto`] (review F2): `GET`, the\nlist and `PUT` all return `EngineDto` and can never have anything to say\nhere, and a schema that advertises a field an endpoint cannot send is a\npromise to its consumers that only create keeps. The engine's own fields are\nflattened, so the create response is byte-identical to `EngineDto` whenever\n`catalogAttachErrors` is empty — which is every create that does what it was\nasked."
       },
       "CreateFlowRequest": {
         "type": "object",
@@ -33123,6 +33538,13 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "configError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set only when this catalog's STORED configuration no longer parses, and\nthen it carries the validation error. The entry is degraded, not\ncomplete: `kind` falls back to the stored column and `secretRef` is\nnull, because neither can be derived without a parse. Render the row as\nbroken and let the operator open it — do not hide it, and do not treat\nthe absence of `secretRef` as \"no secret\".\n\nThis exists because tightening a validator is a migration: rows that\nwent through the old gate are still stored, and a list that refuses to\nshow them leaves the operator unable to find the one row to repair\n(SP3c review N1)."
           }
         }
       },
@@ -34561,6 +34983,23 @@
           },
           "protected": {
             "type": "boolean"
+          }
+        }
+      },
+      "NewEngineCatalog": {
+        "type": "object",
+        "description": "One catalog to attach when the engine is created.",
+        "required": [
+          "catalogId"
+        ],
+        "properties": {
+          "catalogId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "primary": {
+            "type": "boolean",
+            "description": "Exactly one catalog in the list carries this. Until SP3c-2 drops\n`engines.warehouse_id`, the primary must be an egret warehouse catalog —\nthe engine's Ranger role and (for StarRocks) its storage are still\nderived from that warehouse."
           }
         }
       },

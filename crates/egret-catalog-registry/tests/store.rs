@@ -285,6 +285,7 @@ async fn attachments_order_status_and_block_deletes() {
             credential_secret_id: None,
             minted_client: false,
             applied_now: true,
+            is_primary: false,
             created_at: None,
             apply_status: apply_status::APPLIED,
         })
@@ -298,6 +299,7 @@ async fn attachments_order_status_and_block_deletes() {
             credential_secret_id: None,
             minted_client: false,
             applied_now: false,
+            is_primary: true,
             created_at: None,
             apply_status: apply_status::APPLIED,
         })
@@ -312,6 +314,7 @@ async fn attachments_order_status_and_block_deletes() {
                 credential_secret_id: None,
                 minted_client: false,
                 applied_now: true,
+                is_primary: false,
                 created_at: None,
                 apply_status: apply_status::APPLIED,
             })
@@ -319,7 +322,7 @@ async fn attachments_order_status_and_block_deletes() {
         Err(RegistryError::AlreadyExists(_))
     ));
 
-    let listed = store.list_engine_attachments(eng, Some(wh)).await.unwrap();
+    let listed = store.list_engine_attachments(eng).await.unwrap();
     assert_eq!(
         listed.iter().map(|a| a.catalog.id).collect::<Vec<_>>(),
         vec![primary.id, tpch.id],
@@ -375,6 +378,96 @@ async fn attachments_order_status_and_block_deletes() {
     assert_eq!(store.unmigrated_legacy_catalog_count(eng).await.unwrap(), 0);
 }
 
+/// Trino numbers its catalog env vars by this order (SP3b plan row 9), so a
+/// change here silently renumbers a live cluster's catalogs. SP3c-1's backfill
+/// makes `is_primary` row-for-row identical to the old
+/// `warehouse_id IS NOT DISTINCT FROM` predicate, and this test is what says so:
+/// it builds three attachments whose creation order differs from their name
+/// order, with the primary created LAST, and expects primary-first-then-created.
+///
+/// The fixture discriminates all three plausible orderings — each of
+/// `name`-only (`aa, mm, zz`), `created_at`-only (`zz, aa, mm`) and
+/// `is_primary DESC, name` (`mm, aa, zz`) differs from the expected
+/// `mm, zz, aa`. `created_at` is passed explicitly so the row order cannot
+/// depend on how fast three INSERTs run.
+#[tokio::test]
+async fn attachments_still_come_back_primary_first_then_created_then_name() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let ws = workspace(&db).await;
+    // The warehouse catalog's NAME comes from the warehouse's; `mm` sorts
+    // between the two others, so "primary first" cannot be an accident of it.
+    let wh = warehouse(&db, &unique("mm"), ws).await;
+    let eng = engine(&db, wh).await;
+    let (primary, _) = store
+        .ensure_warehouse_catalog(
+            &WarehouseIdentity {
+                id: wh,
+                name: &unique("mm"),
+                workspace_id: ws,
+            },
+            None,
+            |_| vec![],
+        )
+        .await
+        .unwrap();
+    let zz = store
+        .create_catalog(
+            &unique("zz"),
+            &CatalogDef::parse("tpch", &json!({}), &json!(null)).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    let aa = store
+        .create_catalog(
+            &unique("aa"),
+            &CatalogDef::parse("tpch", &json!({}), &json!(null)).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let at = |secs: i64| {
+        Some(
+            chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+                + chrono::Duration::seconds(secs),
+        )
+    };
+    // Creation order zz, aa, primary — the reverse of neither name order nor
+    // the expected render order.
+    for (catalog_id, created_at) in [(zz.id, at(0)), (aa.id, at(1)), (primary.id, at(2))] {
+        store
+            .insert_attachment(&NewAttachment {
+                engine_id: eng,
+                catalog_id,
+                catalog_client_id: None,
+                credential_secret_id: None,
+                minted_client: false,
+                applied_now: false,
+                is_primary: catalog_id == primary.id,
+                created_at,
+                apply_status: apply_status::APPLIED,
+            })
+            .await
+            .unwrap();
+    }
+
+    let listed = store.list_engine_attachments(eng).await.unwrap();
+    assert_eq!(
+        listed.iter().map(|a| a.catalog.id).collect::<Vec<_>>(),
+        vec![primary.id, zz.id, aa.id],
+        "primary first, then attachment time, then name — Trino's env-var numbering rides on this"
+    );
+    assert_eq!(
+        listed.iter().map(|a| a.is_primary()).collect::<Vec<_>>(),
+        vec![true, false, false],
+        "exactly the warehouse catalog is primary"
+    );
+}
+
 /// SP3b D1/migration 0149: an attachment can be written before its DDL runs
 /// (`pending`), then `set_apply_applied` marks it converged — the same
 /// transition `spawn_starrocks_catalog_wire`'s bootstrap (Task 5) drives.
@@ -402,6 +495,7 @@ async fn a_pending_attachment_converges_to_applied() {
             credential_secret_id: None,
             minted_client: false,
             applied_now: false,
+            is_primary: false,
             created_at: None,
             apply_status: apply_status::PENDING,
         })
@@ -498,6 +592,7 @@ async fn an_attachments_credential_secret_cannot_be_deleted() {
             credential_secret_id: Some(credential),
             minted_client: true,
             applied_now: true,
+            is_primary: false,
             created_at: None,
             apply_status: apply_status::APPLIED,
         })

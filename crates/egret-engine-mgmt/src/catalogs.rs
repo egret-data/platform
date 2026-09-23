@@ -15,7 +15,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::catalog_apply::{
-    attach_to_engine, propagate, retry_apply, validate_references, ApplyOutcome, CatalogOpError,
+    attach_to_engine, detach_from_engine, propagate, retry_apply, validate_references,
+    ApplyOutcome, CatalogOpError,
 };
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
@@ -34,6 +35,7 @@ pub(crate) fn routes() -> Router<CpState> {
         )
         .route("/catalogs/{id}/impact", get(catalog_impact))
         .route("/catalogs/{id}/reapply", post(reapply_registry_catalog))
+        .route("/catalogs/{id}/test", post(test_registry_catalog))
         .route("/catalogs/migration-report", get(get_migration_report))
         .route(
             "/catalogs/migration-report/acknowledge",
@@ -42,6 +44,10 @@ pub(crate) fn routes() -> Router<CpState> {
         .route(
             "/catalogs/{id}/workspaces",
             get(list_catalog_workspaces).put(set_catalog_workspaces),
+        )
+        .route(
+            "/catalogs/{id}/engines/{engine_id}",
+            post(registry_attach_catalog).delete(detach_catalog),
         )
         .route(
             "/engines/{id}/catalogs/{cid}/apply",
@@ -63,6 +69,20 @@ pub(crate) struct CatalogAttachmentDto {
     apply_status: String,
     apply_error: Option<String>,
     applied_at: Option<DateTime<Utc>>,
+    /// This catalog is that engine's PRIMARY: it leads the engine's render
+    /// order and cannot be detached or edited. At most one of an engine's
+    /// catalogs carries it (SP3c D2, migration 0150).
+    is_primary: bool,
+    /// When this attachment was recorded — `engine_catalog_attachments.created_at`.
+    ///
+    /// The clock a `pending` attachment has been waiting on. `pending` is
+    /// written only by the INSERT that creates the row (engine create and
+    /// attach; nothing flips a settled attachment back), so this is the moment
+    /// the wait began. A UI deciding whether a `pending` has outlived the
+    /// StarRocks bootstrap must measure against THIS and not against the
+    /// catalog's `updatedAt`: attaching an existing catalog never touches the
+    /// catalog row, so its `updatedAt` is already arbitrarily old.
+    created_at: DateTime<Utc>,
 }
 
 impl From<CatalogEngineRow> for CatalogAttachmentDto {
@@ -74,6 +94,8 @@ impl From<CatalogEngineRow> for CatalogAttachmentDto {
             apply_status: r.apply_status,
             apply_error: r.apply_error,
             applied_at: r.applied_at,
+            is_primary: r.is_primary,
+            created_at: r.created_at,
         }
     }
 }
@@ -554,6 +576,197 @@ pub(crate) struct MigrationReportQuery {
     all: bool,
 }
 
+/// Which of the three checks produced a [`CatalogTestResultDto`]. An enum, not
+/// a string, so Task 7's renderer gets a union it must switch on exhaustively:
+/// the whole point of the discriminant is that the three cannot be blurred, and
+/// a doc comment saying "read this first" is a comment doing a type's job (SP3c
+/// review F4). The wire values are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CatalogCheck {
+    /// `SHOW SCHEMAS FROM <name>` ran on an attached Trino engine that has this
+    /// catalog applied, and the catalog answered — credentials included.
+    Query,
+    /// A connect-only reachability check of the host and port in the STORED
+    /// configuration. It proves the port answers. It proves NOTHING about
+    /// credentials, TLS or permissions.
+    Tcp,
+    /// Nothing was measured: no Trino engine could run the query, and there was
+    /// no host to dial either. Render it neutral, not red — a `tpch` catalog
+    /// with nothing attached is not broken. `message` says which of the two
+    /// reasons applies, because "this kind has no endpoint" and "this
+    /// catalog's URI names no host" call for different fixes.
+    Unsupported,
+}
+
+/// `POST /catalogs/{id}/test` payload.
+///
+/// Every field a UI author must read is a schema property, so its doc comment
+/// reaches the generated client as JSDoc — a response description does not.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogTestResultDto {
+    /// Whether the check that ran succeeded — and it means only as much as
+    /// `check` says it does. Read `check` FIRST: `unsupported` is always
+    /// `ok:false` because nothing was measured, and that is not a broken
+    /// catalog, so it renders neutral rather than red.
+    ok: bool,
+    /// Which check ran, so a green tick can never be read as the other one.
+    check: CatalogCheck,
+    /// The engine the query ran on; null for `tcp` and `unsupported`.
+    engine_name: Option<String>,
+    /// For `tcp`, the `host:port` that was dialled, so the result names what it
+    /// measured; null otherwise.
+    target: Option<String>,
+    /// One sentence an operator can act on. For `tcp` it always says, in the
+    /// sentence itself, that reachability is all that was measured.
+    message: String,
+}
+
+/// Why no query ran, in words that fit in front of a weaker check's sentence.
+/// Empty when the catalog is attached to no Trino engine at all, which needs no
+/// explaining; otherwise it names the engine and what is wrong with it, because
+/// "no Trino engine is attached" would be false in those cases (SP3c review
+/// F3, F7).
+fn why_no_query(reason: Option<String>) -> String {
+    reason.map(|r| format!("{r} ")).unwrap_or_default()
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/catalogs/{id}/test",
+    tag = "control-plane-catalog-registry",
+    params(("id" = Uuid, Path, description = "Registry catalog id")),
+    responses(
+        (status = 200, description = "The verdict, and `check` names which of the three checks produced it. The target of a `tcp` check comes from the STORED configuration and never from the request, which carries no body at all", body = CatalogTestResultDto),
+        (status = 400, description = "The catalog's STORED configuration does not parse, so there was no target to decide and nothing to test. Reachable for a row written before a validation rule that has since tightened — the message names the field, and this is the one thing the operator can act on, so render it rather than the generic error", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
+        (status = 404, description = "No such catalog", body = ErrorBody),
+        (status = 502, description = "`query` only: the Trino coordinator could not be reached at all. A coordinator that answers with a failure is a 200 with `ok:false`", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn test_registry_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<CatalogTestResultDto>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
+    let row = load(&st, id).await?;
+    // D4: a Trino attachment answers the better question, so prefer it. Today's
+    // per-engine test route reaches only Trino (`monitor::coordinator_call`,
+    // fallback service `{name}-trino`), so a StarRocks-only catalog falls back
+    // to the probe until SP4 — which is a narrower answer, not a wrong one, and
+    // `check` is what keeps it honest.
+    let trino: Vec<_> = st
+        .engine_mgmt
+        .registry()
+        .list_catalog_attachments(id)
+        .await?
+        .into_iter()
+        .filter(|a| a.engine_type == "trino")
+        .collect();
+    // An APPLIED attachment, not merely the alphabetically first one
+    // (`list_catalog_attachments` is `ORDER BY e.name`). Querying an engine the
+    // catalog was never applied to answers "catalog not found" — a failure that
+    // says nothing about the catalog and everything about the attachment, and
+    // SP3c's own list page exists because `pending`/`failed` attachments are
+    // expected (SP3c review F3).
+    let applied = trino.iter().find(|a| a.apply_status == "applied");
+    let mut no_query: Option<String> = None;
+    if let Some(a) = applied {
+        if let Some(engine) = st.engine_mgmt.get_engine(a.engine_id).await? {
+            let (ok, message) =
+                crate::engines::show_schemas_verdict(&st, &engine, &row.name).await?;
+            return Ok(Json(CatalogTestResultDto {
+                ok,
+                check: CatalogCheck::Query,
+                engine_name: Some(engine.name),
+                target: None,
+                message,
+            }));
+        }
+        // The attachment row outlived its engine row. Fall through to the
+        // weaker check rather than 500ing, and do not claim nothing is
+        // attached.
+        no_query = Some(format!(
+            "The engine `{}` this catalog is applied to no longer exists, so egret could not run a query.",
+            a.engine_name
+        ));
+    } else if let Some(a) = trino.first() {
+        no_query = Some(format!(
+            "No Trino engine has this catalog applied yet (`{}` is `{}`), so a query would have \
+             tested the attachment rather than the catalog.",
+            a.engine_name, a.apply_status
+        ));
+    }
+
+    // Nothing to ask. The probe's target comes from the stored row and nowhere
+    // else — see `probe.rs` and `CatalogDef::probe_target`.
+    let def = CatalogDef::parse(&row.kind, &row.config, &row.advanced)
+        .map_err(|e| CpError::BadRequest(e.to_string()))?;
+    let why = why_no_query(no_query);
+    let Some((host, port)) = def.probe_target() else {
+        // Two different facts that call for different fixes: a kind with
+        // nothing to dial is fine, a stored URI naming no host is broken.
+        // `thrift_uri`/`http_uri` now require a host, so no VALID row reaches
+        // the first arm any more — a row written before that rule fails
+        // `CatalogDef::parse` above and is answered with the URI's own error,
+        // which names the right problem. The arm stays as a standing guard: if
+        // those validators are ever loosened, or a kind is added whose endpoint
+        // can be unreadable, the false sentence must not come back silently
+        // (SP3c review F2).
+        let message = if def.names_an_endpoint() {
+            format!(
+                "{why}The endpoint stored for this catalog names no host egret can read, so there \
+                 was nothing to dial. Fix the catalog's configuration."
+            )
+        } else {
+            format!(
+                "{why}A catalog of kind `{}` has no network endpoint egret can reach on its own, \
+                 so there was nothing to check. Attach it to a Trino engine to test it.",
+                row.kind
+            )
+        };
+        return Ok(Json(CatalogTestResultDto {
+            ok: false,
+            check: CatalogCheck::Unsupported,
+            engine_name: None,
+            target: None,
+            message,
+        }));
+    };
+    let target = format!("{host}:{port}");
+    let (ok, message) = match crate::probe::tcp_probe(&host, port).await {
+        crate::probe::ProbeOutcome::Open => (
+            true,
+            format!(
+                "{why}{target} accepted a TCP connection. This is a reachability check only — no \
+                 protocol was spoken and no credentials were used, so it does not show that this \
+                 catalog works."
+            ),
+        ),
+        crate::probe::ProbeOutcome::Refused(e) => {
+            (false, format!("{why}Could not reach {target}: {e}."))
+        }
+        crate::probe::ProbeOutcome::TimedOut => (
+            false,
+            format!(
+                "{why}{target} did not answer within {}s.",
+                crate::probe::PROBE_TIMEOUT.as_secs()
+            ),
+        ),
+    };
+    Ok(Json(CatalogTestResultDto {
+        ok,
+        check: CatalogCheck::Tcp,
+        engine_name: None,
+        target: Some(target),
+        message,
+    }))
+}
+
 async fn engine_or_404(st: &CpState, id: Uuid) -> Result<crate::Engine, CpError> {
     st.engine_mgmt
         .get_engine(id)
@@ -610,6 +823,75 @@ pub(crate) async fn attach_catalog(
         StatusCode::CREATED,
         Json(attachment_dto(&st, engine.id, cid).await?),
     ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/catalogs/{id}/engines/{engine_id}",
+    tag = "control-plane-catalog-registry",
+    params(
+        ("id" = Uuid, Path, description = "Registry catalog id"),
+        ("engine_id" = Uuid, Path, description = "Engine id"),
+    ),
+    responses(
+        (status = 201, description = "Attached. Trino: the catalog was applied to the cluster first, so `applyStatus` is `applied`. StarRocks: the attachment is recorded first and the catalog is created on the FE immediately afterwards, so `applyStatus` is `applied` on success and `failed` (with `applyError`) when the FE could not be reached or refused — the attachment still exists and is converged by `POST …/engines/{id}/catalogs/{cid}/apply` or by the engine's next bootstrap", body = CatalogAttachmentDto),
+        (status = 400, description = "The engine cannot read this catalog, the name is one StarRocks reserves, or Kubernetes is not configured", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
+        (status = 404, description = "No such catalog or engine", body = ErrorBody),
+        (status = 409, description = "Already attached, or the engine is being deleted", body = ErrorBody),
+        (status = 502, description = "Trino only: Kubernetes rejected the apply (`code` = `engine_cluster_apply_failed`); nothing was attached. A StarRocks FE that rejects the DDL is reported as a `failed` attachment in the 201 body, not as a 502", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn registry_attach_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, engine_id)): Path<(Uuid, Uuid)>,
+) -> Result<(StatusCode, Json<CatalogAttachmentDto>), CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
+    let engine = engine_or_404(&st, engine_id).await?;
+    let catalog = load(&st, id).await?;
+    attach_to_engine(&st, &engine, &catalog, None)
+        .await
+        .map_err(CatalogOpError::into_registry)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(attachment_dto(&st, engine.id, id).await?),
+    ))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/catalogs/{id}/engines/{engine_id}",
+    tag = "control-plane-catalog-registry",
+    params(
+        ("id" = Uuid, Path, description = "Registry catalog id"),
+        ("engine_id" = Uuid, Path, description = "Engine id"),
+    ),
+    responses(
+        (status = 204, description = "Removed from the engine, then detached. The registry catalog itself is kept, and the credential egret minted for this attachment is revoked"),
+        (status = 400, description = "This is the engine's primary catalog (detach it by deleting the engine), or Kubernetes is not configured", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
+        (status = 404, description = "No such catalog or engine, or the catalog is not attached to it", body = ErrorBody),
+        (status = 409, description = "The engine is being deleted; retry", body = ErrorBody),
+        (status = 502, description = "The engine rejected the removal; nothing was detached", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn detach_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, engine_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
+    let engine = engine_or_404(&st, engine_id).await?;
+    let catalog = load(&st, id).await?;
+    detach_from_engine(&st, &engine, &catalog)
+        .await
+        .map_err(CatalogOpError::into_registry)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(
@@ -797,7 +1079,10 @@ async fn acknowledge_migration_report(
         delete_registry_catalog,
         catalog_impact,
         reapply_registry_catalog,
+        test_registry_catalog,
         attach_catalog,
+        registry_attach_catalog,
+        detach_catalog,
         retry_catalog_apply,
         list_catalog_workspaces,
         set_catalog_workspaces,
@@ -810,6 +1095,8 @@ async fn acknowledge_migration_report(
         CreateRegistryCatalogBody,
         UpdateRegistryCatalogBody,
         ApplyOutcomeDto,
+        CatalogTestResultDto,
+        CatalogCheck,
         CatalogUpdateResultDto,
         CatalogImpactDto,
         CatalogImpactEngineDto,
@@ -824,3 +1111,42 @@ async fn acknowledge_migration_report(
     tags((name = "control-plane-catalog-registry", description = "Catalog registry: platform catalogs, their engine attachments and workspace assignment")),
 )]
 pub struct CatalogRegistryApi;
+
+#[cfg(test)]
+mod openapi_tests {
+    use super::*;
+    use egret_catalog_registry::CatalogKind;
+
+    /// `CreateRegistryCatalogBody.kind` is a plain `string` whose permitted
+    /// values exist only in its description. That sentence is therefore the
+    /// contract: `egret-server`'s `committed_openapi_json_is_current` copies it
+    /// into the repo-root `openapi.json`, orval copies it from there into the
+    /// generated model's JSDoc, and `CatalogCreate.test.tsx` pins the create
+    /// form's kind list to that JSDoc. This is the one link in that chain that
+    /// nothing else checks: the description against the kinds the backend
+    /// actually accepts.
+    ///
+    /// Written as an equality against `CatalogKind::ALL` rather than a "each
+    /// documented kind parses" loop, because the failure that matters is a kind
+    /// the backend accepts and the description omits — the UI then cannot offer
+    /// it, and a loop over the description would never notice.
+    #[test]
+    fn the_kind_description_lists_exactly_the_kinds_the_backend_accepts() {
+        use utoipa::OpenApi as _;
+        let doc = serde_json::to_value(CatalogRegistryApi::openapi()).unwrap();
+        let described = doc["components"]["schemas"]["CreateRegistryCatalogBody"]["properties"]
+            ["kind"]["description"]
+            .as_str()
+            .expect("CreateRegistryCatalogBody.kind has a description");
+        let expected = CatalogKind::ALL
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert_eq!(
+            described, expected,
+            "the documented kinds have drifted from CatalogKind::ALL — the create \
+             form's kind list is generated from this sentence"
+        );
+    }
+}

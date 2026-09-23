@@ -13,4 +13,19 @@ export interface EngineCatalogDto {
   isPrimary: boolean;
   /** @nullable */
   secretRef?: string | null;
+  /**
+     * Set only when this catalog's STORED configuration no longer parses, and
+     * then it carries the validation error. The entry is degraded, not
+     * complete: `kind` falls back to the stored column and `secretRef` is
+     * null, because neither can be derived without a parse. Render the row as
+     * broken and let the operator open it — do not hide it, and do not treat
+     * the absence of `secretRef` as "no secret".
+     *
+     * This exists because tightening a validator is a migration: rows that
+     * went through the old gate are still stored, and a list that refuses to
+     * show them leaves the operator unable to find the one row to repair
+     * (SP3c review N1).
+     * @nullable
+     */
+  configError?: string | null;
 }
