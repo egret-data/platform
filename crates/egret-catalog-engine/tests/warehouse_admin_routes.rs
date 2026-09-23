@@ -755,15 +755,12 @@ async fn warehouse_create_and_delete_keep_the_registry_in_step() {
         "the original owner must lose visibility once the catalog is reassigned elsewhere"
     );
 
-    // An engine on ANOTHER warehouse attaches this warehouse's catalog.
-    let engine_wh = store
-        .create_warehouse(&format!("eng-wh-{}", Uuid::new_v4().simple()), ws, sc)
-        .await
-        .unwrap();
+    // An engine attaches this warehouse's catalog as a NON-primary attachment
+    // (no `engines.warehouse_id` column exists any more to tie it elsewhere).
     let engine_name = format!("reg-eng-{}", Uuid::new_v4().simple());
     let engine_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb) RETURNING id")
-        .bind(&engine_name).bind(engine_wh.id)
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec) VALUES ($1, 'trino', 'egret-engines', '{}'::jsonb) RETURNING id")
+        .bind(&engine_name)
         .fetch_one(&f.db.pool).await.unwrap();
     sqlx::query(
         "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
@@ -809,40 +806,59 @@ async fn warehouse_create_and_delete_keep_the_registry_in_step() {
     );
 }
 
-/// SP3 catalog-registry review M3: a warehouse still un-migrated (no registry
-/// catalog at all yet — the state before the boot backfill reaches it) but
-/// still an engine's `engines.warehouse_id` PRIMARY must 409, naming the
-/// engine, instead of the pre-existing raw FK 500 (`engines_warehouse_id_fkey`,
-/// migration 0056).
+/// SP3c-2 Task 6: `engines.warehouse_id` (and the FK it carried,
+/// `engines_warehouse_id_fkey`, migration 0056) is gone. The scenario the old
+/// `warehouse_delete_maps_legacy_primary_fk_to_409` test guarded — an engine
+/// tied to a warehouse purely via that column, with no registry catalog and so
+/// no attachment for `delete_warehouse_releasing_catalog`'s own check to see —
+/// can no longer be constructed at all: an engine has NO channel to depend on
+/// a warehouse except `registry.engine_catalog_attachments`, and an attachment
+/// cannot exist without a `registry.catalogs` row for that warehouse. So a
+/// warehouse with no registry catalog is now UNCONDITIONALLY safe to delete,
+/// even with an engine row sharing its name/namespace prefix that has nothing
+/// to do with it — this pins that positive case rather than a 409 nothing can
+/// trigger any more.
 #[tokio::test]
-async fn warehouse_delete_maps_legacy_primary_fk_to_409() {
+async fn warehouse_with_no_registry_catalog_deletes_cleanly_even_with_other_engines_present() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
-    let token = session_for(&f, "wh_legacy_fk_admin", true).await;
+    let token = session_for(&f, "wh_no_catalog_admin", true).await;
     let ws: Uuid = sqlx::query_scalar(
-        "INSERT INTO workspaces (slug, name) VALUES ($1, 'Legacy WS') RETURNING id",
+        "INSERT INTO workspaces (slug, name) VALUES ($1, 'No-Catalog WS') RETURNING id",
     )
-    .bind(format!("legacy-ws-{}", Uuid::new_v4().simple()))
+    .bind(format!("no-cat-ws-{}", Uuid::new_v4().simple()))
     .fetch_one(&f.db.pool)
     .await
     .unwrap();
     let sc: Uuid = sqlx::query_scalar(
         "INSERT INTO storage.storage_connections (name, region, bucket, access_key) VALUES ($1, 'us-east-1', 'b', 'k') RETURNING id")
-        .bind(format!("legacy-sc-{}", Uuid::new_v4().simple()))
+        .bind(format!("no-cat-sc-{}", Uuid::new_v4().simple()))
         .fetch_one(&f.db.pool).await.unwrap();
 
     let store = egret_catalog_engine::CatalogStore::new(f.db.clone());
-    // A warehouse the backfill has NOT reached: no registry catalog at all.
+    // A warehouse `ensure_warehouse_catalog` has never touched: no registry
+    // catalog row for it at all.
     let wh = store
-        .create_warehouse(&format!("legacy-wh-{}", Uuid::new_v4().simple()), ws, sc)
+        .create_warehouse(&format!("no-cat-wh-{}", Uuid::new_v4().simple()), ws, sc)
         .await
         .unwrap();
-    let engine_name = format!("legacy-eng-{}", Uuid::new_v4().simple());
+    assert!(
+        store
+            .registry()
+            .get_catalog_for_warehouse(wh.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "premise: this warehouse has no registry catalog"
+    );
+    // An unrelated engine row exists in the same database — nothing links it
+    // to `wh`; there is no column left that could.
+    let engine_name = format!("no-cat-eng-{}", Uuid::new_v4().simple());
     sqlx::query(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb)")
-        .bind(&engine_name).bind(wh.id)
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec) VALUES ($1, 'trino', 'egret-engines', '{}'::jsonb)")
+        .bind(&engine_name)
         .execute(&f.db.pool).await.unwrap();
 
     let resp = f
@@ -856,14 +872,10 @@ async fn warehouse_delete_maps_legacy_primary_fk_to_409() {
         ))
         .await
         .unwrap();
-    let (status, j) = into_json(resp).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{j}");
-    let msg = j["error"].as_str().unwrap_or_default();
-    assert!(
-        msg.contains(&engine_name),
-        "409 body must name the engine still primary on this warehouse {engine_name}; got {j}"
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "no attachment can exist without a registry catalog, so nothing blocks this delete"
     );
-
-    // Nothing was mutated: the warehouse still exists.
-    assert!(store.get_warehouse(wh.id).await.unwrap().is_some());
+    assert!(store.get_warehouse(wh.id).await.unwrap().is_none());
 }

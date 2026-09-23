@@ -56,13 +56,12 @@ async fn warehouse(db: &Db, name: &str, ws: Uuid) -> Uuid {
     .expect("warehouse")
 }
 
-async fn engine(db: &Db, wh: Uuid) -> Uuid {
+async fn engine(db: &Db) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) \
-         VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb) RETURNING id",
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec) \
+         VALUES ($1, 'trino', 'egret-engines', '{}'::jsonb) RETURNING id",
     )
     .bind(format!("reg-eng-{}", Uuid::new_v4().simple()))
-    .bind(wh)
     .fetch_one(&db.pool)
     .await
     .expect("engine")
@@ -250,7 +249,7 @@ async fn attachments_order_status_and_block_deletes() {
     let store = RegistryStore::new(db.clone());
     let ws = workspace(&db).await;
     let wh = warehouse(&db, &unique("wh"), ws).await;
-    let eng = engine(&db, wh).await;
+    let eng = engine(&db).await;
     let (primary, _) = store
         .ensure_warehouse_catalog(
             &WarehouseIdentity {
@@ -391,7 +390,7 @@ async fn attachments_still_come_back_primary_first_then_created_then_name() {
     // The warehouse catalog's NAME comes from the warehouse's; `mm` sorts
     // between the two others, so "primary first" cannot be an accident of it.
     let wh = warehouse(&db, &unique("mm"), ws).await;
-    let eng = engine(&db, wh).await;
+    let eng = engine(&db).await;
     let (primary, _) = store
         .ensure_warehouse_catalog(
             &WarehouseIdentity {
@@ -468,8 +467,8 @@ async fn a_pending_attachment_converges_to_applied() {
     let Some(db) = db().await else { return };
     let store = RegistryStore::new(db.clone());
     let ws = workspace(&db).await;
-    let wh = warehouse(&db, &unique("wh"), ws).await;
-    let eng = engine(&db, wh).await;
+    let _wh = warehouse(&db, &unique("wh"), ws).await;
+    let eng = engine(&db).await;
     let tpch = store
         .create_catalog(
             &unique("bench"),
@@ -513,8 +512,8 @@ async fn set_apply_applied_on_a_gone_attachment_is_not_found() {
     let Some(db) = db().await else { return };
     let store = RegistryStore::new(db.clone());
     let ws = workspace(&db).await;
-    let wh = warehouse(&db, &unique("wh"), ws).await;
-    let eng = engine(&db, wh).await;
+    let _wh = warehouse(&db, &unique("wh"), ws).await;
+    let eng = engine(&db).await;
     let tpch = store
         .create_catalog(
             &unique("bench"),
@@ -548,7 +547,7 @@ async fn an_attachments_credential_secret_cannot_be_deleted() {
     let vault = secrets(&db);
     let ws = workspace(&db).await;
     let wh = warehouse(&db, &unique("wh"), ws).await;
-    let eng = engine(&db, wh).await;
+    let eng = engine(&db).await;
     let (catalog, _) = store
         .ensure_warehouse_catalog(
             &WarehouseIdentity {
@@ -744,16 +743,17 @@ async fn create_replacing_orphan_serialises_with_a_racing_assignment() {
     }
 }
 
-/// The two reads SP3c-2 Task 5 moved off `engines.warehouse_id`: the warehouse
-/// an engine LEADS with (its primary attachment's), and every warehouse it
-/// READS (one per attached egret warehouse catalog).
+/// The two reads SP3c-2 Task 5 moved off `engines.warehouse_id` (Task 6 has
+/// since dropped the column entirely): the warehouse an engine LEADS with
+/// (its primary attachment's), and every warehouse it READS (one per attached
+/// egret warehouse catalog).
 ///
-/// The engine row's own `warehouse_id` deliberately names a DIFFERENT warehouse
-/// from the primary attachment's, which the column still permits (nothing
-/// keeps the two in step once `create_engine` has run, and Task 6 removes the
-/// column). A reader that fell back to the column would answer `other` and
-/// fail here — without that divergence the assertion would pass for either
-/// implementation.
+/// `other`'s only role now is a second, non-primary attachment to prove
+/// `warehouse_ids_by_engine` returns every attached warehouse (primary
+/// first), not just the primary's — the column this test used to also set to
+/// `other`, to prove reads did NOT fall back to it, is gone, so that half of
+/// the proof no longer applies; the attachment-vs-attachment ordering proof
+/// still does.
 #[tokio::test]
 async fn warehouse_reads_come_from_the_attachments_not_the_engine_column() {
     let Some(db) = db().await else { return };
@@ -761,9 +761,9 @@ async fn warehouse_reads_come_from_the_attachments_not_the_engine_column() {
     let ws = workspace(&db).await;
     let led = warehouse(&db, &unique("wh_led"), ws).await;
     let other = warehouse(&db, &unique("wh_other"), ws).await;
-    // `engines.warehouse_id` = `other`; the PRIMARY attachment is `led`'s.
-    let eng = engine(&db, other).await;
-    let bare = engine(&db, other).await;
+    // `led`'s catalog is attached PRIMARY; `other`'s is attached SECONDARY.
+    let eng = engine(&db).await;
+    let bare = engine(&db).await;
 
     let (led_catalog, _) = store
         .ensure_warehouse_catalog(
@@ -821,7 +821,7 @@ async fn warehouse_reads_come_from_the_attachments_not_the_engine_column() {
     assert_eq!(
         store.primary_warehouse_id(eng).await.unwrap(),
         Some(led),
-        "the primary attachment's warehouse, not the engine row's ({other})"
+        "the primary attachment's warehouse ({led}), not the secondary's ({other})"
     );
     let by_engine = store.warehouse_ids_by_engine(&[eng, bare]).await.unwrap();
     assert_eq!(
@@ -830,8 +830,7 @@ async fn warehouse_reads_come_from_the_attachments_not_the_engine_column() {
         "every attached warehouse, primary first; the tpch catalog has none"
     );
 
-    // An engine with no attachments at all: `engines.warehouse_id` still names
-    // `other`, and both reads must nevertheless say "nothing".
+    // An engine with no attachments at all: both reads must say "nothing".
     assert_eq!(
         store.primary_warehouse_id(bare).await.unwrap(),
         None,

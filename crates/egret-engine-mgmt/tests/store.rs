@@ -1,9 +1,11 @@
 //! `EngineMgmtStore` (`engine_mgmt.engines`) integration tests. Moved verbatim
 //! from `egret-catalog/tests/embedded.rs`
-//! (E1b) alongside the store methods themselves; only the seeding of the
-//! `warehouse_id` FK now crosses the seam through `egret_catalog_engine::CatalogStore`
-//! (a dev-only dependency here), exactly like `create_engine`'s auto-wiring in
-//! control-plane. DB-gated; self-skips without `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
+//! (E1b) alongside the store methods themselves. `engines` has no
+//! `warehouse_id` column any more (SP3c-2 Task 6); `seed_warehouse` still
+//! crosses the seam through `egret_catalog_engine::CatalogStore` (a dev-only
+//! dependency here) wherever a test needs a real `catalog.warehouses` row —
+//! e.g. to recover its `workspace_id`. DB-gated; self-skips without
+//! `DATABASE_URL` ONLY under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS.
 use egret_catalog_engine::CatalogStore;
 use egret_engine_mgmt::store::Engine;
 use egret_engine_mgmt::EngineMgmtStore;
@@ -62,17 +64,16 @@ async fn create_list_get_delete_engine() {
         eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
-    let (wh_id, _wh_name) = seed_warehouse(&catalog, "eng").await;
+    let (_wh_id, _wh_name) = seed_warehouse(&catalog, "eng").await;
 
     let eng_name = format!("eng-{}", Uuid::new_v4().simple());
     let spec = serde_json::json!({ "coordinatorReplicas": 1, "workerReplicas": 2 });
     let created = engine_mgmt
-        .create_engine(&eng_name, "trino", "egret-engines", wh_id, &spec, None)
+        .create_engine(&eng_name, "trino", "egret-engines", &spec, None)
         .await
         .unwrap();
     assert_eq!(created.name, eng_name);
     assert_eq!(created.r#type, "trino");
-    assert_eq!(created.warehouse_id, wh_id);
     assert_eq!(created.status, "provisioning");
 
     // list includes it
@@ -108,7 +109,7 @@ async fn seed_engine_and_ws(
     let eng_name = format!("{prefix}-eng-{}", Uuid::new_v4().simple());
     let spec = serde_json::json!({ "coordinatorReplicas": 1, "workerReplicas": 2 });
     let engine = engine_mgmt
-        .create_engine(&eng_name, "trino", "egret-engines", wh_id, &spec, None)
+        .create_engine(&eng_name, "trino", "egret-engines", &spec, None)
         .await
         .unwrap();
 
@@ -176,7 +177,6 @@ fn coordinator_host_and_jwt_check() {
         name: "trino-prod".into(),
         r#type: "trino".into(),
         namespace: "engines".into(),
-        warehouse_id: Uuid::nil(),
         spec: serde_json::json!({ "trinoConfig": { "auth": { "jwt": { "jwksUri": "http://kc/jwks" } } } }),
         status: "running".into(),
         authz_service_id: None,
@@ -214,13 +214,12 @@ async fn engine_status_is_constrained_and_transitions_only_from_the_expected_val
         eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
-    let (wh_id, _) = seed_warehouse(&catalog, "status").await;
+    let (_wh_id, _) = seed_warehouse(&catalog, "status").await;
     let e = engine_mgmt
         .create_engine(
             &format!("status-{}", Uuid::new_v4().simple()),
             "trino",
             "egret-engines",
-            wh_id,
             &serde_json::json!({}),
             None,
         )
@@ -269,13 +268,12 @@ async fn internal_secret_ids_round_trip_on_the_engine_row() {
         eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
         return;
     };
-    let (wh_id, _) = seed_warehouse(&catalog, "isec").await;
+    let (_wh_id, _) = seed_warehouse(&catalog, "isec").await;
     let e = engine_mgmt
         .create_engine(
             &format!("isec-{}", Uuid::new_v4().simple()),
             "trino",
             "egret-engines",
-            wh_id,
             &serde_json::json!({}),
             None,
         )

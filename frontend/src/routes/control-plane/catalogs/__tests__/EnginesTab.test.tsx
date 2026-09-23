@@ -105,7 +105,6 @@ function engine(over: Partial<EngineDto> = {}): EngineDto {
     name: "trino-prod",
     type: "trino",
     namespace: "egret",
-    warehouseId: "wh-1",
     status: "ready",
     spec: {},
     ...over,

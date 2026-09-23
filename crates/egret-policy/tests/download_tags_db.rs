@@ -72,15 +72,15 @@ async fn seed_warehouse(pool: &sqlx::PgPool) -> Uuid {
     wh_id
 }
 
-/// A Trino engine bound to `service_id`, whose PRIMARY warehouse is
-/// `warehouse_id` (`engines.warehouse_id`).
-async fn seed_engine(pool: &sqlx::PgPool, service_id: i64, warehouse_id: Uuid) -> Uuid {
+/// A Trino engine bound to `service_id`. Its warehouse is not a column any
+/// more (SP3c-2 Task 6) — a caller that wants this engine tied to a warehouse
+/// must attach that warehouse's registry catalog itself, via `attach_catalog`.
+async fn seed_engine(pool: &sqlx::PgPool, service_id: i64) -> Uuid {
     let (eng_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, authz_service_id) \
-         VALUES ($1,'trino','egret',$2,'{}'::jsonb,$3) RETURNING id",
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
     )
     .bind(format!("tageng-{}", Uuid::new_v4().simple()))
-    .bind(warehouse_id)
     .bind(service_id)
     .fetch_one(pool)
     .await
@@ -148,7 +148,7 @@ async fn seed_tag_assignment(pool: &sqlx::PgPool, warehouse_id: Uuid) {
 /// reaches it by).
 async fn seed_bound_warehouse(pool: &sqlx::PgPool, service_id: i64) -> (Uuid, String) {
     let wh_id = seed_warehouse(pool).await;
-    let eng_id = seed_engine(pool, service_id, wh_id).await;
+    let eng_id = seed_engine(pool, service_id).await;
     // The engine reaches the warehouse through its registry catalog; the tag
     // export must emit THAT catalog's name (the SQL name Trino sees).
     let (catalog_id, catalog_name) = seed_registry_catalog(pool, wh_id, "tagcat").await;
@@ -351,12 +351,9 @@ async fn download_tags_secondary_attachment_scoped_to_attaching_engine() {
         .await
         .expect("create service");
 
-    // Two engines bound to the SAME service, each with its own (untagged,
-    // unattached-to-W) primary warehouse.
-    let wh_a = seed_warehouse(&pool).await;
-    let eng_a = seed_engine(&pool, svc_row.id, wh_a).await;
-    let wh_b = seed_warehouse(&pool).await;
-    let eng_b = seed_engine(&pool, svc_row.id, wh_b).await;
+    // Two engines bound to the SAME service, neither attached to W yet.
+    let eng_a = seed_engine(&pool, svc_row.id).await;
+    let eng_b = seed_engine(&pool, svc_row.id).await;
 
     // A THIRD warehouse W, tagged, whose catalog only engine B attaches — a
     // secondary attachment (W is not B's primary warehouse either).
@@ -382,7 +379,7 @@ async fn download_tags_secondary_attachment_scoped_to_attaching_engine() {
         srs[0]["resourceElements"]["catalog"]["values"][0],
         json!(catalog_name_w)
     );
-    let _ = (eng_a, wh_b);
+    let _ = eng_a;
 }
 
 /// I3: an engine bound to a DIFFERENT service exports nothing for a warehouse
@@ -429,14 +426,15 @@ async fn download_tags_unrelated_service_exports_nothing() {
     );
 }
 
-/// I3 leftover (SP3 catalog-registry review re-review): an engine whose own
-/// PRIMARY warehouse (its primary attachment's catalog) IS the tagged one, but which has
-/// no attachment — the fail-closed direction, e.g. right after a detach with
-/// nothing re-attached — exports nothing for it. This needs the
-/// exporting-nothing engine and the engine that DOES export it on TWO
-/// DIFFERENT services: sharing one service (as the secondary-attachment test
-/// above does) cannot isolate "this specific engine's own export" from "the
-/// service's export via some other bound engine".
+/// I3 leftover (SP3 catalog-registry review re-review), updated for SP3c-2
+/// Task 6: an engine with NO catalog attachment at all — the fail-closed
+/// direction, e.g. right after a detach with nothing re-attached — exports
+/// nothing for a warehouse it has no other relationship to (there is no
+/// `engines.warehouse_id` column any more for it to "own" W through). This
+/// needs the exporting-nothing engine and the engine that DOES export it on
+/// TWO DIFFERENT services: sharing one service (as the secondary-attachment
+/// test above does) cannot isolate "this specific engine's own export" from
+/// "the service's export via some other bound engine".
 #[tokio::test]
 async fn download_tags_owning_engine_with_no_attachment_exports_nothing() {
     let Some(db) = db().await else {
@@ -447,27 +445,25 @@ async fn download_tags_owning_engine_with_no_attachment_exports_nothing() {
     let store = PolicyStore::new(db);
     seed_trino(&store).await.expect("seed");
 
-    // Engine C: its OWN primary warehouse is W (tagged below), bound to
-    // service S1. No attachment for C at all — the state right after a
-    // detach with nothing re-attached.
+    // Engine C: bound to service S1, no catalog attachment at all — the state
+    // right after a detach with nothing re-attached.
     let svc_c = format!("trino_{}", Uuid::new_v4().simple());
     let svc_c_row = store
         .create_service(&svc_c, "trino", &json!({}))
         .await
         .expect("create service C");
     let wh_w = seed_warehouse(&pool).await;
-    let _eng_c = seed_engine(&pool, svc_c_row.id, wh_w).await;
+    let _eng_c = seed_engine(&pool, svc_c_row.id).await;
     seed_tag_assignment(&pool, wh_w).await;
 
-    // Engine D: a DIFFERENT service S2, its OWN primary is a different,
-    // untagged warehouse; it attaches W's registry catalog as a secondary.
+    // Engine D: a DIFFERENT service S2, attaches W's registry catalog as its
+    // only attachment.
     let svc_d = format!("trino_{}", Uuid::new_v4().simple());
     let svc_d_row = store
         .create_service(&svc_d, "trino", &json!({}))
         .await
         .expect("create service D");
-    let wh_d = seed_warehouse(&pool).await;
-    let eng_d = seed_engine(&pool, svc_d_row.id, wh_d).await;
+    let eng_d = seed_engine(&pool, svc_d_row.id).await;
     let (catalog_w, catalog_name_w) = seed_registry_catalog(&pool, wh_w, "detached_owner").await;
     attach_catalog(&pool, eng_d, catalog_w).await;
 

@@ -12,7 +12,6 @@ export interface EngineDto {
   name: string;
   type: string;
   namespace: string;
-  warehouseId: string;
   status: string;
   spec: EngineSpecDto;
 }

@@ -66,13 +66,12 @@ async fn seed_warehouse(db: &Db) -> (Uuid, Uuid) {
     (ws, wh.id)
 }
 
-async fn seed_engine(store: &EngineMgmtStore, warehouse_id: Uuid) -> Uuid {
+async fn seed_engine(store: &EngineMgmtStore) -> Uuid {
     store
         .create_engine(
             &format!("reg-eng-{}", Uuid::new_v4().simple()),
             "trino",
             "egret-engines",
-            warehouse_id,
             &serde_json::json!({}),
             None,
         )
@@ -250,8 +249,8 @@ async fn one_catalog_per_warehouse_but_many_with_no_warehouse() {
 async fn attachment_with_client_requires_a_credential_secret() {
     let db = harness_or_skip!();
     let store = EngineMgmtStore::new(db.clone());
-    let (_ws, wh) = seed_warehouse(&db).await;
-    let engine = seed_engine(&store, wh).await;
+    let (_ws, _wh) = seed_warehouse(&db).await;
+    let engine = seed_engine(&store).await;
     let catalog: Uuid = sqlx::query_scalar(
         "INSERT INTO registry.catalogs (name, kind, config) VALUES ($1, 'generic', '{}'::jsonb) RETURNING id",
     )
@@ -315,8 +314,8 @@ async fn attachment_with_client_requires_a_credential_secret() {
 async fn engine_delete_cascades_its_catalog_attachments() {
     let db = harness_or_skip!();
     let store = EngineMgmtStore::new(db.clone());
-    let (_ws, wh) = seed_warehouse(&db).await;
-    let engine = seed_engine(&store, wh).await;
+    let (_ws, _wh) = seed_warehouse(&db).await;
+    let engine = seed_engine(&store).await;
     let catalog: Uuid = sqlx::query_scalar(
         "INSERT INTO registry.catalogs (name, kind, config) VALUES ($1, 'generic', '{}'::jsonb) RETURNING id",
     )

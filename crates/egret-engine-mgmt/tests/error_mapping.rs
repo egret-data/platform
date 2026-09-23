@@ -88,7 +88,7 @@ async fn database_errors_are_logged_and_constraint_violations_are_409s() {
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    let wh = egret_catalog_engine::CatalogStore::new(db.clone())
+    let _wh = egret_catalog_engine::CatalogStore::new(db.clone())
         .create_warehouse(&format!("err-wh-{}", Uuid::new_v4().simple()), ws, sc)
         .await
         .unwrap();
@@ -97,7 +97,6 @@ async fn database_errors_are_logged_and_constraint_violations_are_409s() {
             &format!("err-eng-{}", Uuid::new_v4().simple()),
             "trino",
             "egret-engines",
-            wh.id,
             &serde_json::json!({}),
             None,
         )

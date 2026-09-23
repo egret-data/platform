@@ -61,33 +61,12 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..12])
 }
 
-async fn warehouse(db: &Db, ws: Uuid) -> Uuid {
-    let sc: Uuid = sqlx::query_scalar(
-        "INSERT INTO storage.storage_connections (name, provider, region, bucket, access_key, path_style) \
-         VALUES ($1, 's3', 'us-east-1', 'b', 'k', true) RETURNING id",
-    )
-    .bind(unique("f10-sc"))
-    .fetch_one(&db.pool)
-    .await
-    .expect("storage");
+async fn engine(db: &Db) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) VALUES ($1, $2, $3) RETURNING id",
-    )
-    .bind(unique("f10wh"))
-    .bind(ws)
-    .bind(sc)
-    .fetch_one(&db.pool)
-    .await
-    .expect("warehouse")
-}
-
-async fn engine(db: &Db, wh: Uuid) -> Uuid {
-    sqlx::query_scalar(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) \
-         VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb) RETURNING id",
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec) \
+         VALUES ($1, 'trino', 'egret-engines', '{}'::jsonb) RETURNING id",
     )
     .bind(unique("f10-eng"))
-    .bind(wh)
     .fetch_one(&db.pool)
     .await
     .expect("engine")
@@ -101,19 +80,11 @@ async fn an_engine_with_catalogs_and_no_primary_is_warned_about() {
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let store = RegistryStore::new(db.clone());
-    let ws: Uuid = sqlx::query_scalar(
-        "INSERT INTO workspaces (slug, name, status) VALUES ($1, 'F10', 'active') RETURNING id",
-    )
-    .bind(unique("f10"))
-    .fetch_one(&db.pool)
-    .await
-    .expect("workspace");
 
     // Two catalogs on a BROKEN engine: attachments, no primary. This is exactly
     // what an engine SP3a's backfill skipped looks like after migration 0150 —
     // the UPDATE matched nothing for it, and the partial unique index is happy.
-    let broken_wh = warehouse(&db, ws).await;
-    let broken = engine(&db, broken_wh).await;
+    let broken = engine(&db).await;
     for _ in 0..2 {
         let c = store
             .create_catalog(
@@ -140,8 +111,7 @@ async fn an_engine_with_catalogs_and_no_primary_is_warned_about() {
     }
 
     // A HEALTHY engine, listed through the same call in the same capture.
-    let healthy_wh = warehouse(&db, ws).await;
-    let healthy = engine(&db, healthy_wh).await;
+    let healthy = engine(&db).await;
     let lead = store
         .create_catalog(
             &unique("bench"),
@@ -167,8 +137,7 @@ async fn an_engine_with_catalogs_and_no_primary_is_warned_about() {
 
     // An engine with NO attachments at all: not an anomaly, just an engine
     // mid-create. It must not be warned about either.
-    let empty_wh = warehouse(&db, ws).await;
-    let empty = engine(&db, empty_wh).await;
+    let empty = engine(&db).await;
 
     let cap = LogCapture::default();
     let sub = tracing_subscriber::fmt()

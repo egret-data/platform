@@ -290,7 +290,6 @@ struct EngineDto {
     #[serde(rename = "type")]
     r#type: String,
     namespace: String,
-    warehouse_id: Uuid,
     status: String,
     spec: EngineSpecDto,
 }
@@ -303,7 +302,6 @@ impl From<Engine> for EngineDto {
             name: e.name,
             r#type: e.r#type,
             namespace: e.namespace,
-            warehouse_id: e.warehouse_id,
             status: e.status,
             spec,
         }
@@ -407,8 +405,8 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<BuiltReq, 
 }
 
 /// The warehouse an already-created engine leads with — the warehouse of its
-/// PRIMARY attachment's catalog, NOT `engines.warehouse_id` (SP3c-2 Task 5,
-/// which left that column unread so Task 6 can drop it).
+/// PRIMARY attachment's catalog. There is no `engines.warehouse_id` column
+/// any more (SP3c-2 Task 5 stopped reading it; Task 6 dropped it).
 ///
 /// Two facts come off it and both are cluster state rather than a display
 /// value: the StarRocks builtin storage volume's S3 coordinates, and (via
@@ -2571,7 +2569,7 @@ async fn bind_trino_profile(
 /// primary attachment's warehouse: `ensure_engine_role` seeds the engine's
 /// Ranger role from it, and a StarRocks engine's builtin storage volume gets
 /// its S3 coordinates from it ([`primary_warehouse`], which reads the
-/// attachment — not the `engines.warehouse_id` column SP3c-2 leaves unread).
+/// attachment; there is no `engines.warehouse_id` column any more).
 /// So a catalog with no warehouse cannot lead, the refusal below NAMES that
 /// reason so the wizard can repeat it rather than just greying a radio button,
 /// and it is decided HERE — before any registry row is written, so a refused
@@ -2920,14 +2918,7 @@ async fn create_engine(
     // 6. Record the intent row (status `provisioning`).
     let engine = match st
         .engine_mgmt
-        .create_engine(
-            &b.name,
-            "trino",
-            &namespace,
-            wh.id,
-            &spec,
-            b.tls_cert_secret_ref,
-        )
+        .create_engine(&b.name, "trino", &namespace, &spec, b.tls_cert_secret_ref)
         .await
     {
         Ok(e) => e,
@@ -3668,7 +3659,6 @@ async fn create_starrocks_engine(
             &b.name,
             "starrocks",
             &namespace,
-            wh.id,
             &spec,
             b.tls_cert_secret_ref,
         )
@@ -6566,7 +6556,6 @@ mod tests {
             name: "e".into(),
             r#type: "trino".into(),
             namespace: "egret-engines".into(),
-            warehouse_id: Uuid::new_v4(),
             spec: serde_json::json!({}),
             status: "pending".into(),
             authz_service_id: None,
@@ -6725,7 +6714,6 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 "egret-engines",
-                wh.id,
                 &serde_json::json!({ "trinoConfig": { "delegationMode": "impersonate", "auth": {} } }),
                 Some(admin_tls),
             )
@@ -6935,7 +6923,6 @@ mod tests {
                 &format!("sr-{}", Uuid::new_v4().simple()),
                 "starrocks",
                 "egret-engines",
-                wh.id,
                 &spec,
                 None,
             )
@@ -6981,7 +6968,6 @@ mod tests {
                 &format!("sr-{}", Uuid::new_v4().simple()),
                 "starrocks",
                 "egret-engines",
-                wh.id,
                 &spec2,
                 None,
             )
@@ -6999,15 +6985,10 @@ mod tests {
         assert!(boot2.is_none());
     }
 
-    /// SP3c-2 Task 5. A StarRocks engine's builtin storage volume is derived
-    /// from the warehouse of its PRIMARY ATTACHMENT, not from
-    /// `engines.warehouse_id`; an engine with NO primary is refused rather
-    /// than silently given some other warehouse's bucket.
-    ///
-    /// The engine row's column names warehouse A while the primary attachment
-    /// names warehouse B, and the two have DIFFERENT S3 secrets — so the
-    /// built request's `storage_secret_key` says which one was read. Without
-    /// that divergence the assertion would pass for either implementation.
+    /// SP3c-2 Task 6. A StarRocks engine's builtin storage volume is derived
+    /// from the warehouse of its PRIMARY ATTACHMENT; an engine with NO
+    /// primary is refused rather than silently coming up with no storage.
+    /// There is no `engines.warehouse_id` column any more to fall back to.
     #[tokio::test]
     async fn starrocks_storage_comes_from_the_primary_attachment() {
         let Some(st) = test_state().await else {
@@ -7020,11 +7001,7 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        // `column_wh` is what the (soon-to-be-dropped) column names; `led_wh`
-        // is what the engine actually leads with.
-        let (column_wh, column_secret) = seed_sr_warehouse(&st, &db).await;
         let (led_wh, led_secret) = seed_sr_warehouse(&st, &db).await;
-        assert_ne!(column_secret, led_secret, "the two warehouses must differ");
 
         let engine = st
             .engine_mgmt
@@ -7032,16 +7009,14 @@ mod tests {
                 &format!("sr-{}", Uuid::new_v4().simple()),
                 "starrocks",
                 "egret-engines",
-                column_wh.id,
                 &serde_json::json!({ "starrocksConfig": { "feReplicas": 1 } }),
                 None,
             )
             .await
             .expect("create engine row");
 
-        // (a) No attachment at all. The column still resolves to a perfectly
-        //     good warehouse, so an implementation that read it would build a
-        //     request here.
+        // (a) No attachment at all: refused rather than silently coming up
+        //     with no storage.
         let Err(err) = build_provision_req_with(&st, &engine, BuildOpts::default()).await else {
             panic!("an engine with no primary attachment must be refused");
         };
@@ -7094,10 +7069,6 @@ mod tests {
         assert_eq!(
             sr.storage_secret_key, led_secret,
             "storage follows the primary attachment's warehouse"
-        );
-        assert_ne!(
-            sr.storage_secret_key, column_secret,
-            "and NOT `engines.warehouse_id`"
         );
     }
 
@@ -7230,14 +7201,13 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let (_wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = st
             .engine_mgmt
             .create_engine(
                 &format!("sr-{}", Uuid::new_v4().simple()),
                 "starrocks",
                 "egret-engines",
-                wh.id,
                 &serde_json::json!({ "starrocksConfig": {} }),
                 None,
             )
@@ -7383,7 +7353,7 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let (_wh, _s) = seed_sr_warehouse(&st, &db).await;
 
         let mut data = std::collections::BTreeMap::new();
         data.insert("tls.crt".to_string(), "CERTPEM".to_string());
@@ -7406,7 +7376,6 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 "egret-engines",
-                wh.id,
                 &serde_json::json!({ "trinoConfig": {} }),
                 Some(cert_ref),
             )
@@ -8023,7 +7992,6 @@ mod tests {
                 &format!("sr-{}", Uuid::new_v4().simple()),
                 "starrocks",
                 "egret-engines",
-                wh.id,
                 &serde_json::json!({ "starrocksConfig": {} }),
                 None,
             )
@@ -8082,12 +8050,7 @@ mod tests {
             );
             return;
         };
-        let dsn = egret_test_db::url().await.unwrap();
-        let db = egret_metastore::Db::connect(&dsn, 5)
-            .await
-            .expect("connect");
-        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let legacy = seed_sr_engine(&st, wh.id).await;
+        let legacy = seed_sr_engine(&st).await;
         let (secret_id, plaintext) = ensure_root_password_secret(&st, &legacy)
             .await
             .expect("mint root password");
@@ -8180,12 +8143,12 @@ mod tests {
     /// Seed a stored StarRocks engine ROW (1 FE / 1 CN, no delegation) for the
     /// update-path tests. The row alone: tests that reach a path deriving the
     /// engine's warehouse (anything building a provisioning request) must also
-    /// call [`attach_primary_warehouse_catalog`], because since SP3c-2 Task 5
-    /// the primary attachment — not `engines.warehouse_id` — is where that
-    /// warehouse comes from. Tests that arrange their own attachments
+    /// call [`attach_primary_warehouse_catalog`], because the primary
+    /// attachment is where that warehouse comes from — there is no
+    /// `engines.warehouse_id` column any more. Tests that arrange their own attachments
     /// (`the_bootstrap_converges_every_attachment_in_name_order`) need the
     /// bare row.
-    async fn seed_sr_engine(st: &CpState, wh_id: Uuid) -> Engine {
+    async fn seed_sr_engine(st: &CpState) -> Engine {
         let spec = serde_json::json!({
             "imageVersion": DEFAULT_SR_FE_IMAGE,
             "starrocksConfig": {
@@ -8203,7 +8166,6 @@ mod tests {
                 &format!("sr-{}", Uuid::new_v4().simple()),
                 "starrocks",
                 "egret-engines",
-                wh_id,
                 &spec,
                 None,
             )
@@ -8286,8 +8248,8 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let (_wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st).await;
         let mut errors = 0u32;
         assert!(engine_still_current(&st.engine_mgmt, engine.id, &engine.name, &mut errors).await);
         assert_eq!(
@@ -8317,8 +8279,8 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let (_wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st).await;
 
         // A store whose pool is already closed: every `get_engine` call
         // errors deterministically, standing in for a transient DB blip
@@ -8446,8 +8408,8 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let (_wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st).await;
         prov.set_status(ready_fe_status(&engine.name));
         st.engine_mgmt.delete_engine(engine.id).await.unwrap();
 
@@ -8527,11 +8489,12 @@ mod tests {
     async fn seed_pending_attachments(
         st: &CpState,
         engine: &Engine,
+        wh_id: Uuid,
         names: &[&str],
     ) -> std::collections::BTreeMap<String, Uuid> {
         let wh = st
             .catalog
-            .get_warehouse(engine.warehouse_id)
+            .get_warehouse(wh_id)
             .await
             .expect("get_warehouse")
             .expect("warehouse present");
@@ -8560,10 +8523,15 @@ mod tests {
     /// The engine's PRIMARY attachment — the warehouse's own `egret-warehouse`
     /// catalog, with the OAuth2 credential its render needs — written
     /// `pending`, exactly as `create_starrocks_engine` now writes it (D1).
-    async fn seed_primary_attachment(st: &CpState, engine: &Engine, name: &str) -> Uuid {
+    async fn seed_primary_attachment(
+        st: &CpState,
+        engine: &Engine,
+        wh_id: Uuid,
+        name: &str,
+    ) -> Uuid {
         let wh = st
             .catalog
-            .get_warehouse(engine.warehouse_id)
+            .get_warehouse(wh_id)
             .await
             .expect("get_warehouse")
             .expect("warehouse present");
@@ -8650,14 +8618,14 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
         prov.set_status(ready_fe_status(&engine.name));
 
         let sfx = Uuid::new_v4().simple().to_string();
         let (a_name, m_name, z_name) = (format!("a_{sfx}"), format!("m_{sfx}"), format!("z_{sfx}"));
-        let z = seed_pending_attachments(&st, &engine, &[z_name.as_str()]).await[&z_name];
-        let m = seed_primary_attachment(&st, &engine, &m_name).await;
-        let a = seed_pending_attachments(&st, &engine, &[a_name.as_str()]).await[&a_name];
+        let z = seed_pending_attachments(&st, &engine, wh.id, &[z_name.as_str()]).await[&z_name];
+        let m = seed_primary_attachment(&st, &engine, wh.id, &m_name).await;
+        let a = seed_pending_attachments(&st, &engine, wh.id, &[a_name.as_str()]).await[&a_name];
 
         spawn_starrocks_catalog_wire(
             st.clone(),
@@ -8788,13 +8756,13 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
 
         let engine = give_a_short_root_password(&st, &engine).await;
         prov.set_status(ready_fe_status(&engine.name));
 
         let name = format!("a_{}", Uuid::new_v4().simple());
-        let ids = seed_pending_attachments(&st, &engine, &[name.as_str()]).await;
+        let ids = seed_pending_attachments(&st, &engine, wh.id, &[name.as_str()]).await;
 
         // The FE refuses the convergence's very first read and echoes the
         // credential it was given, the way a real `Access denied` does. Not
@@ -8850,11 +8818,11 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
         let engine = give_a_short_root_password(&st, &engine).await;
 
         let name = format!("a_{}", Uuid::new_v4().simple());
-        let ids = seed_pending_attachments(&st, &engine, &[name.as_str()]).await;
+        let ids = seed_pending_attachments(&st, &engine, wh.id, &[name.as_str()]).await;
 
         fake.fail_matching("DROP CATALOG", &access_denied_echoing_the_root_password());
 
@@ -8898,12 +8866,12 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
         let engine = give_a_short_root_password(&st, &engine).await;
         prov.set_status(ready_fe_status(&engine.name));
 
         let name = format!("a_{}", Uuid::new_v4().simple());
-        let ids = seed_pending_attachments(&st, &engine, &[name.as_str()]).await;
+        let ids = seed_pending_attachments(&st, &engine, wh.id, &[name.as_str()]).await;
         let catalog_id = ids[&name];
 
         // Fault one: the row is gone by the time the CREATE is recorded.
@@ -8985,13 +8953,13 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
         prov.set_status(ready_fe_status(&engine.name));
 
         let sfx = Uuid::new_v4().simple().to_string();
         let names = [format!("a_{sfx}"), format!("m_{sfx}"), format!("z_{sfx}")];
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        seed_pending_attachments(&st, &engine, &refs).await;
+        seed_pending_attachments(&st, &engine, wh.id, &refs).await;
 
         // The fake deletes the engine row the moment the FIRST catalog is
         // created, so the loop's next checkpoint is the one under test.
@@ -9056,13 +9024,13 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
         prov.set_status(ready_fe_status(&engine.name));
 
         let sfx = Uuid::new_v4().simple().to_string();
         let names = [format!("a_{sfx}"), format!("z_{sfx}")];
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let ids = seed_pending_attachments(&st, &engine, &refs).await;
+        let ids = seed_pending_attachments(&st, &engine, wh.id, &refs).await;
 
         // The first catalog is detached the instant its CREATE reaches the FE.
         let registry = st.engine_mgmt.registry();
@@ -9134,13 +9102,13 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
         prov.set_status(ready_fe_status(&engine.name));
 
         let sfx = Uuid::new_v4().simple().to_string();
         let names = [format!("a_{sfx}"), format!("m_{sfx}"), format!("z_{sfx}")];
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let ids = seed_pending_attachments(&st, &engine, &refs).await;
+        let ids = seed_pending_attachments(&st, &engine, wh.id, &refs).await;
         fake.fail_catalog(
             &names[1],
             "Getting analyzing error. Detail message: unsupported type",
@@ -9198,9 +9166,9 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
         let name = format!("a_{}", Uuid::new_v4().simple());
-        let ids = seed_pending_attachments(&st, &engine, &[name.as_str()]).await;
+        let ids = seed_pending_attachments(&st, &engine, wh.id, &[name.as_str()]).await;
 
         // (a) status reports a pod that is not an FE.
         prov.set_status(egret_engine_mgmt_api::EngineStatus {
@@ -9294,10 +9262,10 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
         prov.set_status(ready_fe_status(&engine.name));
         let name = format!("a_{}", Uuid::new_v4().simple());
-        let ids = seed_pending_attachments(&st, &engine, &[name.as_str()]).await;
+        let ids = seed_pending_attachments(&st, &engine, wh.id, &[name.as_str()]).await;
 
         let store = st.engine_mgmt.clone();
         let engine_id = engine.id;
@@ -9348,10 +9316,10 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_delegating_engine(&st, wh.id, "CERTPEM").await;
+        let engine = seed_sr_delegating_engine(&st, "CERTPEM").await;
         prov.set_status(ready_fe_status(&engine.name));
         let name = format!("a_{}", Uuid::new_v4().simple());
-        seed_pending_attachments(&st, &engine, &[name.as_str()]).await;
+        seed_pending_attachments(&st, &engine, wh.id, &[name.as_str()]).await;
 
         let store = st.engine_mgmt.clone();
         let engine_id = engine.id;
@@ -9400,8 +9368,8 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_delegating_engine(&st, wh.id, "CERTPEM").await;
+        let (_wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_delegating_engine(&st, "CERTPEM").await;
         prov.set_status(ready_fe_status(&engine.name));
         fake.fail_matching(
             "CREATE SECURITY INTEGRATION",
@@ -9478,8 +9446,8 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_delegating_engine(&st, wh.id, "CERTPEM").await;
+        let (_wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_delegating_engine(&st, "CERTPEM").await;
         prov.set_status(ready_fe_status(&engine.name));
         let store = st.engine_mgmt.clone();
         let engine_id = engine.id;
@@ -9548,8 +9516,8 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_delegating_engine(&st, wh.id, "CERTPEM").await;
+        let (_wh, _s) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_delegating_engine(&st, "CERTPEM").await;
         prov.set_status(ready_fe_status(&engine.name));
         let delegation = test_delegation();
 
@@ -9621,7 +9589,7 @@ mod tests {
     /// A stored StarRocks engine that has opted into delegation and carries a
     /// pinned coordinator certificate — the shape whose FE really serves TLS,
     /// and so the one whose every statement must go out over it (D6).
-    async fn seed_sr_delegating_engine(st: &CpState, wh_id: Uuid, cert: &str) -> Engine {
+    async fn seed_sr_delegating_engine(st: &CpState, cert: &str) -> Engine {
         let spec = serde_json::json!({
             "imageVersion": DEFAULT_SR_FE_IMAGE,
             "starrocksConfig": {
@@ -9640,7 +9608,6 @@ mod tests {
                 &format!("sr-{}", Uuid::new_v4().simple()),
                 "starrocks",
                 "egret-engines",
-                wh_id,
                 &spec,
                 None,
             )
@@ -9696,7 +9663,7 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
         // The warehouse this engine leads with comes from its PRIMARY
         // attachment (SP3c-2 Task 5), which `create_starrocks_engine` writes
         // and the bare row fixture does not.
@@ -9727,8 +9694,8 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let (_wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st).await;
         let body = sr_update_body(Some(StarRocksConfigBody {
             fe_replicas: Some(3),
             ..Default::default()
@@ -9763,8 +9730,8 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let (_wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st).await;
         assert_eq!(engine.status, crate::engine_status::PROVISIONING);
 
         // Concurrent DELETE flips the row to `deleting`.
@@ -9817,7 +9784,7 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
         // The warehouse this engine leads with comes from its PRIMARY
         // attachment (SP3c-2 Task 5), which `create_starrocks_engine` writes
         // and the bare row fixture does not.
@@ -9880,7 +9847,6 @@ mod tests {
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                wh.id,
                 &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
@@ -9954,14 +9920,13 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let (_wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = st
             .engine_mgmt
             .create_engine(
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                wh.id,
                 &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
@@ -10020,14 +9985,13 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let (_wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = st
             .engine_mgmt
             .create_engine(
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                wh.id,
                 &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
@@ -10078,14 +10042,13 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let (_wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = st
             .engine_mgmt
             .create_engine(
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                wh.id,
                 &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
@@ -10158,14 +10121,13 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let (_wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = st
             .engine_mgmt
             .create_engine(
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 DEFAULT_NAMESPACE,
-                wh.id,
                 &serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
                 None,
             )
@@ -10250,7 +10212,7 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
         // The warehouse this engine leads with comes from its PRIMARY
         // attachment (SP3c-2 Task 5), which `create_starrocks_engine` writes
         // and the bare row fixture does not.
@@ -10294,7 +10256,7 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
         // The warehouse this engine leads with comes from its PRIMARY
         // attachment (SP3c-2 Task 5), which `create_starrocks_engine` writes
         // and the bare row fixture does not.
@@ -10347,7 +10309,7 @@ mod tests {
             .await
             .expect("connect");
         let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
-        let engine = seed_sr_engine(&st, wh.id).await;
+        let engine = seed_sr_engine(&st).await;
         // The warehouse this engine leads with comes from its PRIMARY
         // attachment (SP3c-2 Task 5), which `create_starrocks_engine` writes
         // and the bare row fixture does not.
@@ -10377,14 +10339,13 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let (_wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = st
             .engine_mgmt
             .create_engine(
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 "egret-engines",
-                wh.id,
                 &serde_json::json!({ "trinoConfig": {} }),
                 None,
             )
@@ -10489,14 +10450,13 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let (_wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = st
             .engine_mgmt
             .create_engine(
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 "egret-engines",
-                wh.id,
                 &serde_json::json!({ "trinoConfig": {} }),
                 None,
             )
@@ -10600,14 +10560,13 @@ mod tests {
         let db = egret_metastore::Db::connect(&dsn, 5)
             .await
             .expect("connect");
-        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let (_wh, _secret) = seed_sr_warehouse(&st, &db).await;
         let engine = st
             .engine_mgmt
             .create_engine(
                 &format!("trino-{}", Uuid::new_v4().simple()),
                 "trino",
                 "egret-engines",
-                wh.id,
                 &serde_json::json!({ "trinoConfig": {} }),
                 None,
             )

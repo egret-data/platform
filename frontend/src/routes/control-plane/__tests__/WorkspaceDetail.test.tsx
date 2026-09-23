@@ -50,7 +50,6 @@ const ALL_ENGINES: EngineDto[] = [
     name: "analytics-trino",
     type: "trino",
     namespace: "engines",
-    warehouseId: "w1",
     status: "running",
     spec: {
       coordinatorReplicas: 1,
@@ -66,7 +65,6 @@ const ALL_ENGINES: EngineDto[] = [
     name: "reporting-trino",
     type: "trino",
     namespace: "engines",
-    warehouseId: "w2",
     status: "running",
     // JWT-enabled → assignable (the picker only offers these).
     spec: {

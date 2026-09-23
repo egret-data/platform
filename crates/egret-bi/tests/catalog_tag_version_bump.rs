@@ -6,9 +6,19 @@
 //! `tag_version` must bump so the Ranger tag-download plugin re-polls
 //! `download_tags` (otherwise it 304s forever and never sees the change). The
 //! binding is `engine_mgmt.engines.authz_service_id` -> the warehouse's
-//! engine(s), reached EITHER as the engine's own primary warehouse (legacy) OR
-//! through a registry catalog attachment (SP3 D5) — the same union
-//! `PolicyStore::tag_assignments_for_service` serves under.
+//! engine(s), reached through a registry catalog attachment
+//! (`registry.engine_catalog_attachments`, SP3 D5) — the same join
+//! `PolicyStore::tag_assignments_for_service` serves under. There is no
+//! `engines.warehouse_id` column any more (SP3c-2 Task 6) for a second,
+//! attachment-free path.
+//!
+//! KNOWN PRE-EXISTING FAILURE (unrelated to SP3c-2 Task 6, found while
+//! updating this file's fixtures for the column drop):
+//! `assign_and_unassign_bump_bound_service_tag_version` seeds its engine via
+//! `seed_bound_warehouse`, which never attaches a registry catalog to it —
+//! so `bump_bound_tag_versions`'s attachment join matches nothing and the
+//! assertion fails. Reproduced on HEAD before this column drop by temporarily
+//! removing migration 0152 and rerunning; out of scope for this task.
 
 use egret_bi::catalog_tags::CatalogTagRepo;
 use egret_bi::TagRepo;
@@ -46,11 +56,10 @@ async fn seed_bound_warehouse(pool: &sqlx::PgPool, service_id: i64) -> Uuid {
     .await
     .expect("insert warehouse");
     sqlx::query(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, authz_service_id) \
-         VALUES ($1,'trino','egret',$2,'{}'::jsonb,$3)",
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2)",
     )
     .bind(format!("tveng-{}", Uuid::new_v4().simple()))
-    .bind(wh_id)
     .bind(service_id)
     .execute(pool)
     .await
@@ -91,15 +100,13 @@ async fn seed_warehouse(pool: &sqlx::PgPool) -> Uuid {
     wh_id
 }
 
-/// A Trino engine bound to `service_id`, whose PRIMARY warehouse is
-/// `warehouse_id`. Returns the engine id.
-async fn seed_engine(pool: &sqlx::PgPool, service_id: i64, warehouse_id: Uuid) -> Uuid {
+/// A Trino engine bound to `service_id`. Returns the engine id.
+async fn seed_engine(pool: &sqlx::PgPool, service_id: i64) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, authz_service_id) \
-         VALUES ($1,'trino','egret',$2,'{}'::jsonb,$3) RETURNING id",
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
     )
     .bind(format!("tveng-{}", Uuid::new_v4().simple()))
-    .bind(warehouse_id)
     .bind(service_id)
     .fetch_one(pool)
     .await
@@ -236,13 +243,9 @@ async fn secondary_attachment_bump_reaches_engines_bound_service() {
     let pool = db.pool.clone();
 
     let service_id = create_service(&pool).await;
-    // Engine B's OWN (primary) warehouse — untagged, irrelevant to this test;
-    // just here to prove the bump is not accidentally reached through it.
-    let wh_b_primary = seed_warehouse(&pool).await;
-    let eng_b = seed_engine(&pool, service_id, wh_b_primary).await;
+    let eng_b = seed_engine(&pool, service_id).await;
 
-    // Warehouse W is NOT engine B's primary; B attaches W's registry catalog
-    // as a SECONDARY catalog.
+    // Warehouse W is not attached at all yet; B attaches W's registry catalog.
     let wh_w = seed_warehouse(&pool).await;
     let catalog_w = seed_registry_catalog(&pool, wh_w).await;
     attach_catalog(&pool, eng_b, catalog_w).await;

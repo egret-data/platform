@@ -25,7 +25,6 @@ const ENGINE: api.Engine = {
   name: "analytics-trino",
   type: "trino",
   namespace: "engines",
-  warehouseId: "w1",
   status: "running",
   spec: {
     coordinatorReplicas: 1,

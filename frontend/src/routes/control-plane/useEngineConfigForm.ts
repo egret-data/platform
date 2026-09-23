@@ -1288,7 +1288,6 @@ export function useEngineConfigForm(
     // the per-role editor, resources fall back to the stored flat values.
     const input: UpdateEngineInput = {
       name: engine.name,
-      warehouseId: engine.warehouseId,
       coordinatorReplicas:
         numOrUndef(coordinator.replicas) ?? engine.spec.coordinatorReplicas,
       workerReplicas: numOrUndef(worker.replicas) ?? engine.spec.workerReplicas,

@@ -547,7 +547,6 @@ export interface Engine {
   name: string;
   type: string;
   namespace: string;
-  warehouseId: string;
   status: string;
   spec: EngineSpec;
 }
@@ -877,9 +876,10 @@ export interface CreateEngineInput {
    * Registry catalogs to attach as part of the create, exactly one of them
    * `primary`. The server resolves EVERY id before it provisions anything, so
    * an unknown or repeated id refuses the whole create — a typo cannot leave a
-   * cluster running. The still-`NOT NULL` `engines.warehouse_id` is derived
-   * from the primary catalog's own warehouse, which is why the primary must be
-   * an egret warehouse catalog until SP3c-2 drops that column.
+   * cluster running. The primary must be an egret warehouse catalog: the
+   * engine's Ranger role and (for StarRocks) its builtin storage are derived
+   * from that warehouse — there is no `engines.warehouse_id` column any more
+   * (SP3c-2 Task 6) to fall back to.
    *
    * CREATE ONLY: `PUT /engines/{id}` refuses a body carrying it, which is why
    * {@link UpdateEngineInput} omits the field instead of relying on callers to

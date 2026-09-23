@@ -60,7 +60,9 @@ fn get(uri: &str) -> Request<Body> {
 }
 
 /// A workspace + storage connection + warehouse + a Trino engine bound to
-/// `trino_profile_id` (its primary warehouse). Returns the warehouse id.
+/// `trino_profile_id`, with the warehouse's registry catalog attached (the
+/// only channel left, since SP3c-2 Task 6, for an engine to reach a
+/// warehouse). Returns the warehouse id.
 async fn seed_warehouse_and_engine(pool: &sqlx::PgPool, trino_profile_id: i64) -> Uuid {
     let (ws_id,): (Uuid,) =
         sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
@@ -90,11 +92,10 @@ async fn seed_warehouse_and_engine(pool: &sqlx::PgPool, trino_profile_id: i64) -
     .await
     .expect("insert warehouse");
     let (eng_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, authz_service_id) \
-         VALUES ($1,'trino','egret',$2,'{}'::jsonb,$3) RETURNING id",
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
     )
     .bind(format!("tagbumpeng-{}", Uuid::new_v4().simple()))
-    .bind(wh_id)
     .bind(trino_profile_id)
     .fetch_one(pool)
     .await

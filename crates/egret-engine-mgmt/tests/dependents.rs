@@ -87,7 +87,7 @@ async fn seed_engine(db: &Db, store: &EngineMgmtStore) -> Uuid {
     .fetch_one(&db.pool)
     .await
     .expect("seed storage connection");
-    let wh = catalog
+    let _wh = catalog
         .create_warehouse(&format!("dep-wh-{}", Uuid::new_v4().simple()), owner, sc)
         .await
         .expect("create warehouse");
@@ -96,7 +96,6 @@ async fn seed_engine(db: &Db, store: &EngineMgmtStore) -> Uuid {
             &format!("dep-eng-{}", Uuid::new_v4().simple()),
             "trino",
             "egret-engines",
-            wh.id,
             &serde_json::json!({}),
             None,
         )

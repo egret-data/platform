@@ -1821,7 +1821,6 @@ async fn legacy_engine_adopts_internal_secrets_even_from_a_failed_apply() {
             &name,
             "trino",
             "egret-engines",
-            wh_id,
             &serde_json::json!({
                 "coordinatorReplicas": 1, "workerReplicas": 1,
                 "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
@@ -2610,9 +2609,10 @@ async fn scoped_permission_monitor_queries_and_cluster() {
 
 // ── engine ↔ workspace assignment (P1) ─────────────────────────────────────────
 
-/// Seed a JWT-capable Trino engine (`spec.trinoConfig.auth.jwt` object) tied to
-/// the given warehouse; returns its id.
-async fn seed_jwt_engine(f: &Fixture, warehouse_id: Uuid) -> Uuid {
+/// Seed a JWT-capable Trino engine (`spec.trinoConfig.auth.jwt` object); returns
+/// its id. Its warehouse is no longer a column here — the assignment routes
+/// this seeds for don't read it, so this bare row needs no primary attachment.
+async fn seed_jwt_engine(f: &Fixture) -> Uuid {
     let store = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
     let spec = serde_json::json!({
         "trinoConfig": { "auth": { "jwt": { "jwks_uri": "http://kc/jwks" } } }
@@ -2622,7 +2622,6 @@ async fn seed_jwt_engine(f: &Fixture, warehouse_id: Uuid) -> Uuid {
             &format!("trino-{}", Uuid::new_v4().simple()),
             "trino",
             "egret-engines",
-            warehouse_id,
             &spec,
             None,
         )
@@ -2671,8 +2670,8 @@ async fn cp_set_engine_workspaces_assigns_and_materializes() {
         return;
     };
     let token = session_for(&f, "engine_assign_admin", true).await;
-    let wh_id = seed_provisioned_warehouse(&f).await;
-    let engine_id = seed_jwt_engine(&f, wh_id).await;
+    let _wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f).await;
     let ws = seed_workspace(&f).await;
 
     // PUT the full set {ws} → 200.
@@ -2780,8 +2779,8 @@ async fn workspace_admin_assign_list_unassign_engine() {
         return;
     };
     let token = session_for(&f, "ws_engine_admin", true).await;
-    let wh_id = seed_provisioned_warehouse(&f).await;
-    let engine_id = seed_jwt_engine(&f, wh_id).await;
+    let _wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f).await;
     let ws = seed_workspace(&f).await;
 
     // Initially empty.
@@ -2977,8 +2976,8 @@ async fn assert_engine_delete_blocked_by(kind: &str) {
         return;
     };
     let token = session_for(&f, "engine_delete_blocked", true).await;
-    let wh = seed_provisioned_warehouse(&f).await;
-    let engine_id = seed_jwt_engine(&f, wh).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f).await;
     let ws = seed_workspace(&f).await;
     put_workspaces(&f, &token, engine_id, &[ws]).await;
     let db = materialized_db_id(&f, ws, engine_id).await;
@@ -3053,8 +3052,8 @@ async fn delete_engine_without_kubernetes_is_400_and_keeps_the_row() {
         return;
     };
     let token = session_for(&f, "engine_delete_nokube", true).await;
-    let wh = seed_provisioned_warehouse(&f).await;
-    let engine_id = seed_jwt_engine(&f, wh).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f).await;
 
     let resp = f
         .app
@@ -3098,8 +3097,8 @@ async fn delete_engine_cluster_failure_is_502_deleting_and_retryable() {
         return;
     };
     let token = session_for(&f, "engine_delete_retry", true).await;
-    let wh = seed_provisioned_warehouse(&f).await;
-    let engine_id = seed_jwt_engine(&f, wh).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f).await;
     let uri = format!("/engines/{engine_id}");
 
     let resp = f
@@ -3405,8 +3404,8 @@ async fn delete_engine_keeps_its_ranger_profile_and_tag_service() {
         return;
     };
     let token = session_for(&f, "engine_delete_keeps_ranger", true).await;
-    let wh = seed_provisioned_warehouse(&f).await;
-    let engine_id = seed_jwt_engine(&f, wh).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f).await;
     let name: String = sqlx::query_scalar("SELECT name FROM engine_mgmt.engines WHERE id = $1")
         .bind(engine_id)
         .fetch_one(&f.db.pool)
@@ -3458,14 +3457,14 @@ async fn unassign_is_refused_while_the_workspace_uses_the_engine() {
         return;
     };
     let token = session_for(&f, "unassign_blocked", true).await;
-    let wh = seed_provisioned_warehouse(&f).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
     for kind in [
         "dataapi_endpoint",
         "dataapi_endpoint_trashed",
         "schedule",
         "dataset",
     ] {
-        let engine_id = seed_jwt_engine(&f, wh).await;
+        let engine_id = seed_jwt_engine(&f).await;
         let ws = seed_workspace(&f).await;
         put_workspaces(&f, &token, engine_id, &[ws]).await;
         let db = materialized_db_id(&f, ws, engine_id).await;
@@ -3516,8 +3515,8 @@ async fn put_workspaces_applies_nothing_when_one_unassign_is_blocked() {
         return;
     };
     let token = session_for(&f, "put_ws_blocked", true).await;
-    let wh = seed_provisioned_warehouse(&f).await;
-    let engine_id = seed_jwt_engine(&f, wh).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f).await;
     let ws_a = seed_workspace(&f).await;
     let ws_b = seed_workspace(&f).await;
     put_workspaces(&f, &token, engine_id, &[ws_a]).await;
@@ -3566,8 +3565,8 @@ async fn unknown_workspaces_are_404_and_apply_nothing() {
         return;
     };
     let token = session_for(&f, "unknown_ws", true).await;
-    let wh = seed_provisioned_warehouse(&f).await;
-    let engine_id = seed_jwt_engine(&f, wh).await;
+    let _wh = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f).await;
     let real = seed_workspace(&f).await;
     let ghost = Uuid::new_v4();
 
@@ -3895,7 +3894,6 @@ async fn rotate_secrets_replaces_both_values_only_on_a_successful_apply() {
             &format!("sr-{}", Uuid::new_v4().simple()),
             "starrocks",
             "egret-engines",
-            wh_id,
             &serde_json::json!({ "starrocksConfig": {} }),
             None,
         )
@@ -7604,13 +7602,24 @@ async fn create_engine_still_accepts_a_bare_warehouse_id() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "bare warehouseId; body={j}");
-    assert_eq!(j["warehouseId"], serde_json::json!(wh_id), "body={j}");
     assert_eq!(
         j["catalogAttachErrors"],
         serde_json::json!([]),
         "nothing was asked to attach; body={j}"
     );
     let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // There is no `warehouseId` on the wire any more (SP3c-2 Task 6); the
+    // engine's warehouse comes from the PRIMARY catalog, read the same way
+    // production does.
+    assert_eq!(
+        registry(&f)
+            .primary_warehouse_id(Uuid::parse_str(&engine_id).unwrap())
+            .await
+            .expect("primary_warehouse_id"),
+        Some(wh_id),
+        "the auto-wired warehouse catalog is the engine's primary"
+    );
 
     let cats = registry(&f)
         .list_engine_attachments(Uuid::parse_str(&engine_id).unwrap())
@@ -7683,12 +7692,19 @@ async fn create_engine_with_catalogs_marks_exactly_one_primary() {
         serde_json::json!([]),
         "both catalogs attached; body={j}"
     );
-    assert_eq!(
-        j["warehouseId"],
-        serde_json::json!(wh_id),
-        "the engine row's warehouse comes from the PRIMARY catalog; body={j}"
-    );
     let engine_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+
+    // There is no `warehouseId` on the wire any more (SP3c-2 Task 6); the
+    // engine's warehouse comes from the PRIMARY catalog, read the same way
+    // production does.
+    assert_eq!(
+        registry(&f)
+            .primary_warehouse_id(engine_id)
+            .await
+            .expect("primary_warehouse_id"),
+        Some(wh_id),
+        "the engine's warehouse comes from the PRIMARY catalog"
+    );
 
     let cats = registry(&f)
         .list_engine_attachments(engine_id)

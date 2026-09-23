@@ -32988,7 +32988,6 @@
           "name",
           "type",
           "namespace",
-          "warehouseId",
           "status",
           "spec"
         ],
@@ -33005,10 +33004,6 @@
           },
           "namespace": {
             "type": "string"
-          },
-          "warehouseId": {
-            "type": "string",
-            "format": "uuid"
           },
           "status": {
             "type": "string"

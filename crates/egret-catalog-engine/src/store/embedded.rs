@@ -180,11 +180,23 @@ impl CatalogStore {
     /// catalog row before the attachment check, so a racing attach either
     /// commits first (and is then seen and 409s here) or blocks until this
     /// transaction ends (and then finds the catalog gone). A warehouse with no
-    /// registry catalog yet (`ensure_warehouse_catalog` has not run for it, or
-    /// a past attempt failed) falls straight through to the plain delete; a
-    /// warehouse that is still an engine's `engines.warehouse_id` primary hits that FK
-    /// (`engines_warehouse_id_fkey`, migration 0056) and is mapped to a 409
-    /// naming the engine(s) too, instead of a raw 500.
+    /// registry catalog (`ensure_warehouse_catalog` has not run for it, or a
+    /// past attempt failed) falls straight through to the plain delete.
+    ///
+    /// SP3c-2 Task 6: `engines.warehouse_id` — and the `engines_warehouse_id_fkey`
+    /// FK (migration 0056) this function used to also catch as a second,
+    /// belt-and-suspenders 409 — are both gone. That fallback protected exactly
+    /// one gap: an engine tied to a warehouse via the column alone, with no
+    /// registry catalog and so nothing for the attachment check above to see.
+    /// That gap is now closed by construction rather than by a second check: an
+    /// engine has no channel left to depend on a warehouse except
+    /// `registry.engine_catalog_attachments`, and an attachment cannot exist
+    /// without a `registry.catalogs` row for that warehouse — so "no registry
+    /// catalog" now IMPLIES "no attachment, from any engine, primary or not",
+    /// and the attachment check above is the sole and complete enforcement.
+    /// See `warehouse_with_no_registry_catalog_deletes_cleanly_even_with_other_engines_present`
+    /// (catalog-engine `warehouse_admin_routes` tests), which replaced the old
+    /// FK-fallback test.
     pub async fn delete_warehouse_releasing_catalog(&self, id: Uuid) -> Result<(), CatalogError> {
         let mut tx = self.pool().begin().await?;
         let catalog: Option<(Uuid, String)> = sqlx::query_as(
@@ -224,23 +236,6 @@ impl CatalogStore {
                 tx.commit().await?;
                 Ok(())
             }
-            Err(sqlx::Error::Database(d))
-                if d.constraint() == Some("engines_warehouse_id_fkey") =>
-            {
-                // `tx` rolls back on drop below. A fresh, unparameterized-by-tx
-                // read names the still-pointing engine(s) for the message.
-                drop(tx);
-                let names: Vec<String> = sqlx::query_scalar(
-                    "SELECT name FROM engine_mgmt.engines WHERE warehouse_id = $1 ORDER BY name",
-                )
-                .bind(id)
-                .fetch_all(self.pool())
-                .await?;
-                Err(CatalogError::Conflict(format!(
-                    "the warehouse is still engine(s) {}'s primary warehouse; delete or repoint them first",
-                    names.join(", ")
-                )))
-            }
             // SP3 catalog-registry review N4: our own `SELECT … FOR UPDATE`
             // above only locks a registry catalog that already exists when we
             // read it — it cannot lock the ABSENCE of one. If the warehouse had
@@ -251,14 +246,16 @@ impl CatalogStore {
             // assignment, atomically, in its own transaction) between our
             // SELECT and this DELETE commits fine, and this DELETE then
             // cascades into deleting that brand-new catalog row — which its
-            // `catalog_workspaces` row (NO ACTION) blocks, same shape as the
-            // engines FK above. Losing that race is rare but the failure mode
-            // without this arm is a raw 500, not a 409, so it is mapped the
-            // same way.
+            // `catalog_workspaces` row (NO ACTION) blocks. Losing that race is
+            // rare but the failure mode without this arm is a raw 500, not a
+            // 409, so it is mapped the same way.
             //
             // The boot backfill was this arm's original racer (review N4) and
             // is gone as of SP3c-2; the engine-create path races identically,
-            // so the arm stays.
+            // so the arm stays. (SP3c-2 Task 6: this used to be one of TWO
+            // fallback arms alongside `engines_warehouse_id_fkey`; that other
+            // arm is deleted along with the column and FK it caught — see the
+            // function doc.)
             Err(sqlx::Error::Database(d))
                 if d.constraint() == Some("catalog_workspaces_catalog_id_fkey") =>
             {
