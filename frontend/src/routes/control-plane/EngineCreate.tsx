@@ -174,9 +174,11 @@ export default function EngineCreate() {
 
   /**
    * Provisioned warehouses the registry has no catalog for. A warehouse gets
-   * one when it is created and again from the boot backfill, but that ensure is
-   * explicitly non-fatal — so a warehouse CAN exist with no catalog, and it is
-   * then simply absent from the list above with nothing said.
+   * one when it is created, and engine create calls the same idempotent ensure
+   * again — but that ensure is explicitly non-fatal (it logs and moves on), so
+   * a warehouse CAN exist with no catalog, and it is then simply absent from
+   * the list above with nothing said. (The boot backfill was a third chance at
+   * this until SP3c-2 Task 1 deleted it.)
    *
    * Computed only when the registry list actually ANSWERED. A 403 or a pending
    * read leaves `allCatalogs` empty, and "every warehouse is unregistered" is

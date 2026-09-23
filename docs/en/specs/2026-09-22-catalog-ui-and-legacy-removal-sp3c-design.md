@@ -49,8 +49,18 @@ always was — storing it on the engine is what forced one warehouse per engine.
 
 **D3 — One permission family.** `warehouse_admin` and the resource-tag endpoints move onto
 `catalog_registry:*`, and a migration grants `catalog_registry:{read,create,update,delete}` to every
-role that holds the matching `warehouse:*` before the old keys are dropped. Nobody gains access,
-nobody loses it. **That grant must be re-run by SP3c-2's own migration, not assumed done** (amended
+role that holds the matching `warehouse:*` before the old keys are dropped. ~~Nobody gains access,
+nobody loses it.~~ **Half true, corrected 2026-09-24 by the whole-branch review.** Nobody loses
+access — `0153`'s re-grant guarantees that. But somebody *does* gain: `catalog_registry:*` has
+existed since `0148`, so a platform role created since then holding it and never holding
+`warehouse:*` — the natural "catalog operator", since the Catalogs section is gated
+`catalog_registry:read` — now also reaches the 27 `warehouse_admin` routes: browsing lakehouse
+namespaces and tables, creating and deleting warehouses, and minting and revoking Catalog Clients,
+which are real data-lake credentials. Accepted (user decision, 2026-09-23): the surface belongs to
+the catalog now, since its tabs live on the catalog page. But the four permission descriptions in
+`egret-core/src/rbac.rs` must say so, because they are what an admin reads before granting — every
+per-task review checked only the no-lockout direction, and none of them could have caught this,
+because no single task both created the population and widened the gate. **That grant must be re-run by SP3c-2's own migration, not assumed done** (amended
 2026-09-23): migration `0148` performed it once, in the past, so every role created since holds
 `warehouse:*` with no `catalog_registry:*` counterpart — `warehouseRedirect.test.tsx:140-173` is an
 entire describe block about exactly that population. Grant then delete, in one transaction, in that

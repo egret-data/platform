@@ -505,7 +505,7 @@ async fn get_warehouse(
         (status = 204, description = "Warehouse deleted"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:delete permission", body = ErrorBody),
-        (status = 409, description = "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or the warehouse is still an engine's primary warehouse, or a concurrent engine create has just created and assigned its catalog (retry)", body = ErrorBody),
+        (status = 409, description = "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or a concurrent engine create has just created and assigned its catalog (retry)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -518,8 +518,10 @@ async fn delete_warehouse(
     // SP3: `CatalogStore::delete_warehouse_releasing_catalog` owns the
     // transaction that releases the registry catalog's workspace assignments
     // and deletes the warehouse atomically, and 409s (naming the engine(s))
-    // instead of a raw FK 500 when an engine still attaches the catalog or
-    // still has this warehouse as its primary.
+    // instead of a raw FK 500 when an engine still attaches the catalog. The
+    // "still its primary" arm went with `engines.warehouse_id` in SP3c-2 Task
+    // 6: primacy is now a flag on an attachment, so the attachment check is
+    // the whole of it.
     st.store.delete_warehouse_releasing_catalog(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

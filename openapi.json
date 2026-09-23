@@ -4300,7 +4300,7 @@
           "control-plane-engines"
         ],
         "summary": "`POST /engines/{id}/catalogs/{cid}/test` — \"test connection\": runs\n`SHOW SCHEMAS FROM \"<catalog>\"` against the engine's Trino coordinator via\nthe native-monitor coordinator proxy ([`crate::monitor::coordinator_call`],\nsame service name + auth headers as query monitoring) and reports whether\nthe query reaches `FINISHED`. Submits `POST /v1/statement`, then follows\n`nextUri` (GET) until a terminal state, an `error` object, or\n[`CATALOG_TEST_MAX_POLLS`] iterations are exhausted (→ `ok:false`,\n\"timed out\"). Never returns a transport/coordinator-shape failure as an\nHTTP error status — those map to `ok:false` with an explanatory message —\nEXCEPT when the coordinator itself is unreachable or kubernetes isn't\nconfigured, which surface as the usual `CpError` (mirrors the other\ncoordinator-proxied routes in this file and in `monitor.rs`).",
-        "description": "SP3c-2 Task 4 deleted this route's five siblings but KEPT this one: it is\nthe only route in the product that tests a *named engine's* view of a\ncatalog. The registry's `POST /catalogs/{id}/test` (`test_registry_catalog`\nin `catalogs.rs`) picks an applied Trino attachment across ALL of a\ncatalog's engines and cannot be pointed at one, and it gates on\n`catalog_registry:read` — which an `engine:read`-only operator (this\nroute's persona) does not hold. `EngineDetail.tsx`'s per-row Test button\ncalls this route for exactly that reason (SP3c review F-3, restoring the\ncapability D-6 had dropped); deleting it here would have deleted that\nbutton's endpoint out from under it (see `frontend/src/routes/control-plane/EngineDetail.tsx`).",
+        "description": "SP3c-2 Task 4 deleted this route's five siblings but KEPT this one: it is\nthe only route in the product that tests a *named engine's* view of a\ncatalog. The registry's `POST /catalogs/{id}/test` (`test_registry_catalog`\nin `catalogs.rs`) picks an applied Trino attachment across ALL of a\ncatalog's engines and cannot be pointed at one, and it gates on\n`catalog_registry:read`, and it tests an applied attachment across ALL of a\ncatalog's engines rather than one named engine. This route is the only\nENGINE-SCOPED test, which is why it survived SP3c-2 Task 4 while its five\nsiblings did not.\n\nIt is NOT kept for an `engine:read`-only persona, whatever an earlier draft\nof this comment said. Task 3 re-pointed `EngineDetail.tsx`'s Catalogs tab at\nthe registry list, so that operator now sees a 403 pane and zero rows —\nthere is no `cid` for them to press Test on. `EngineDetail.tsx`'s per-row\nTest button is a live caller (SP3c review F-3), but its user holds\n`catalog_registry:read` like everyone else who can see a row.",
         "operationId": "test_catalog",
         "parameters": [
           {
@@ -9500,7 +9500,7 @@
             }
           },
           "409": {
-            "description": "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or the warehouse is still an engine's primary warehouse, or a concurrent engine create has just created and assigned its catalog (retry)",
+            "description": "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or a concurrent engine create has just created and assigned its catalog (retry)",
             "content": {
               "application/json": {
                 "schema": {

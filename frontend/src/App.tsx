@@ -292,9 +292,11 @@ function ExploreRoutes() {
  * the only field that maps it to a catalog id, and it is only on the list, so
  * the redirect has to wait for that list rather than resolve the id locally.
  *
- * A warehouse with no registry row is impossible after SP3a's backfill, but a
- * 404 is not a crash: it lands on the Catalogs list, which is where the
- * operator would have gone next anyway. `?tab=` is carried across because the
+ * A warehouse with no registry row is rare but NOT impossible —
+ * `ensure_warehouse_catalog` is non-fatal on failure, and SP3c-2 Task 1 removed
+ * the boot backfill that used to be a second chance at it. A 404 here is not a
+ * crash: it lands on the Catalogs list, which is where the operator would have
+ * gone next anyway. `?tab=` is carried across because the
  * five tabs this page now redirects INTO kept their original `value`s, so a
  * bookmarked `?tab=browse` still opens Browse.
  *

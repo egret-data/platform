@@ -91,28 +91,42 @@ pub static PERMISSIONS: &[Permission] = &[
     // action namespace a policy names by string — one key meaning two
     // different things there is ambiguous even though Cedar's own enforcement
     // is safe.
+    // SP3c-2 widened these four beyond catalog DEFINITIONS: the 27
+    // `warehouse_admin` routes and the 3 resource-tag routes moved onto them
+    // from the retired `warehouse:*`. So they now also carry the egret-warehouse
+    // admin surface — browsing lakehouse namespaces and tables, creating and
+    // deleting warehouses, and minting and revoking Catalog Clients, which are
+    // real data-lake credentials.
+    //
+    // D3 claimed "nobody gains access, nobody loses it". The second half is
+    // guaranteed by 0153's re-grant. The FIRST half is not: a platform role
+    // created after 0148 holding `catalog_registry:*` and never `warehouse:*`
+    // gains all of the above. That is accepted (user decision, 2026-09-23) —
+    // the surface belongs to the catalog now, since its tabs live on the
+    // catalog page — but the descriptions below must say so, because they are
+    // what an admin reads in the Permissions UI before granting.
     perm!(
         "catalog_registry:read",
         "Catalogs",
-        "View registry catalogs and their engine attachments",
+        "View registry catalogs and their engine attachments, and browse an egret warehouse's namespaces, tables and Catalog Clients",
         Scope::Platform
     ),
     perm!(
         "catalog_registry:create",
         "Catalogs",
-        "Create registry catalogs",
+        "Create registry catalogs and egret warehouses, and mint Catalog Clients (data-lake credentials) and catalog roles",
         Scope::Platform
     ),
     perm!(
         "catalog_registry:update",
         "Catalogs",
-        "Edit registry catalogs, re-apply them to engines, and assign them to workspaces",
+        "Edit registry catalogs, re-apply them to engines, assign them to workspaces, and change an egret warehouse's settings, protection and format policy",
         Scope::Platform
     ),
     perm!(
         "catalog_registry:delete",
         "Catalogs",
-        "Delete registry catalogs",
+        "Delete registry catalogs and egret warehouses, and revoke Catalog Clients and catalog roles",
         Scope::Platform
     ),
     perm!(
