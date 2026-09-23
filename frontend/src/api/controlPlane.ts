@@ -868,8 +868,10 @@ export interface CreateEngineInput {
   /**
    * The legacy single-warehouse shape. Optional since SP3c-1 (Task 2), and
    * **mutually exclusive with `catalogs`** — the server refuses a body that
-   * sends both rather than quietly dropping one of them. Update still sends it
-   * (see {@link UpdateEngineInput}); the create wizard sends `catalogs`.
+   * sends both rather than quietly dropping one of them. Update no longer
+   * sends it — SP3c-2 Task 6 dropped `engines.warehouse_id`, so the field left
+   * `EngineDto` and the two config forms stopped echoing it back. The create
+   * wizard sends `catalogs`.
    */
   warehouseId?: string;
   /**

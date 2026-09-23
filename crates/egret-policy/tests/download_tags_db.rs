@@ -426,17 +426,24 @@ async fn download_tags_unrelated_service_exports_nothing() {
     );
 }
 
-/// I3 leftover (SP3 catalog-registry review re-review), updated for SP3c-2
-/// Task 6: an engine with NO catalog attachment at all — the fail-closed
-/// direction, e.g. right after a detach with nothing re-attached — exports
-/// nothing for a warehouse it has no other relationship to (there is no
-/// `engines.warehouse_id` column any more for it to "own" W through). This
-/// needs the exporting-nothing engine and the engine that DOES export it on
-/// TWO DIFFERENT services: sharing one service (as the secondary-attachment
-/// test above does) cannot isolate "this specific engine's own export" from
-/// "the service's export via some other bound engine".
+/// I3 leftover (SP3 catalog-registry review re-review). The fail-closed
+/// direction: an engine with NO catalog attachment — e.g. right after a
+/// detach with nothing re-attached — exports nothing for W.
+///
+/// Renamed in SP3c-2 Task 6 review: it used to be `…owning_engine…`, because
+/// engine C owned W through `engines.warehouse_id` and the point was that
+/// ownership alone did not export. That column is gone, so C owns nothing and
+/// the old name claimed a setup the fixture no longer builds.
+///
+/// What still earns the test its place is the POSITIVE CONTROL, not the
+/// absence: S1 exports nothing **while S2, at the same moment, exports W**.
+/// Without that pairing this would be indistinguishable from an export that
+/// is broken for everyone — which is how a tag export fails open unnoticed.
+/// The two engines must sit on TWO DIFFERENT services: sharing one service
+/// cannot isolate "this engine's own export" from "the service's export via
+/// some other bound engine".
 #[tokio::test]
-async fn download_tags_owning_engine_with_no_attachment_exports_nothing() {
+async fn download_tags_unattached_engine_exports_nothing_while_the_attaching_service_does() {
     let Some(db) = db().await else {
         eprintln!("skip");
         return;

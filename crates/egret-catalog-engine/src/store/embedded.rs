@@ -185,15 +185,21 @@ impl CatalogStore {
     ///
     /// SP3c-2 Task 6: `engines.warehouse_id` — and the `engines_warehouse_id_fkey`
     /// FK (migration 0056) this function used to also catch as a second,
-    /// belt-and-suspenders 409 — are both gone. That fallback protected exactly
-    /// one gap: an engine tied to a warehouse via the column alone, with no
-    /// registry catalog and so nothing for the attachment check above to see.
-    /// That gap is now closed by construction rather than by a second check: an
-    /// engine has no channel left to depend on a warehouse except
-    /// `registry.engine_catalog_attachments`, and an attachment cannot exist
-    /// without a `registry.catalogs` row for that warehouse — so "no registry
-    /// catalog" now IMPLIES "no attachment, from any engine, primary or not",
-    /// and the attachment check above is the sole and complete enforcement.
+    /// belt-and-suspenders 409 — are both gone. Be precise about what that
+    /// cost, because an earlier draft of this comment was not: the FK fired
+    /// whenever ANY engine still named this warehouse in the column, including
+    /// when a registry catalog existed but that engine held no attachment to
+    /// it. It guarded a strictly LARGER set than the attachment check above.
+    ///
+    /// Dropping it is safe anyway, and not because the two sets coincide. The
+    /// column WAS the dependency it was guarding: an engine that holds no
+    /// attachment now holds no reference to this warehouse through any column,
+    /// FK or table, so there is nothing left for the delete to dangle. An
+    /// engine that DOES hold an attachment is still caught above — and it is
+    /// caught completely, because an attachment cannot exist without a
+    /// `registry.catalogs` row for this warehouse (`catalogs_warehouse_id_key`
+    /// is unique, and `engine_catalog_attachments.catalog_id` FKs to it), so
+    /// "no registry catalog" implies "no attachment, from any engine".
     /// See `warehouse_with_no_registry_catalog_deletes_cleanly_even_with_other_engines_present`
     /// (catalog-engine `warehouse_admin_routes` tests), which replaced the old
     /// FK-fallback test.
