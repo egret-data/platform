@@ -1,5 +1,6 @@
-//! `registry.migration_report` rows: what the backfill did, kept until an admin
-//! acknowledges them on the Catalogs page.
+//! `registry.migration_report` rows: notable events in registry catalog
+//! management (e.g. a warehouse's implicit catalog getting created), kept
+//! until an admin acknowledges them on the Catalogs page.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;

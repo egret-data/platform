@@ -134,10 +134,10 @@ impl CatalogTagRepo {
     ///
     /// The resolution itself — the registry∪legacy `profiles` union and the
     /// `tagService` fan-out the plugin actually polls — lives in
-    /// `egret_catalog_registry::bump_bound_tag_versions`, because the boot
-    /// backfill has to bump the same services for the same reason (SP3
-    /// catalog-registry review C1/I1/N1/F-1). One implementation, three
-    /// callers, no drift: read that function for why each branch is there.
+    /// `egret_catalog_registry::bump_bound_tag_versions` (SP3
+    /// catalog-registry review C1/I1/N1/F-1). One implementation, two
+    /// callers (assign and unassign), no drift: read that function for why
+    /// each branch is there.
     async fn bump_bound_tag_versions(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         warehouse_id: Uuid,

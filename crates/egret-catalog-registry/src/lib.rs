@@ -1,10 +1,9 @@
 //! Platform catalog registry (SP3): a catalog is a platform resource that engines
 //! attach and workspaces are assigned. This crate owns the `registry` schema, the
-//! typed per-kind configuration and its validation, engine rendering and the
-//! boot-time backfill. Engine-side effects (applying to Trino, StarRocks DDL) live
+//! typed per-kind configuration and its validation, and engine rendering.
+//! Engine-side effects (applying to Trino, StarRocks DDL) live
 //! in `egret-engine-mgmt`, which depends on this crate.
 
-pub mod backfill;
 pub mod config;
 pub mod error;
 pub mod legacy;
@@ -16,7 +15,6 @@ pub mod sensitive;
 pub mod store;
 pub mod tag_version;
 
-pub use backfill::{run_backfill, BackfillSummary, BACKFILL_LOCK_KEY};
 pub use config::{
     Advanced, CatalogConfig, CatalogDef, CatalogKind, ElasticsearchConfig, EngineType,
     GenericConfig, HiveFamilyConfig, HiveMetastore, IcebergConfig, IcebergMetastore, JdbcConfig,

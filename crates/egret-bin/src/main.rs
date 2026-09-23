@@ -1257,21 +1257,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // and database connections reference named secrets.
     let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
 
-    // Catalog registry backfill (SP3 §4.8): idempotent, advisory-locked, on every
-    // boot. Not fatal: an engine whose catalogs could not be migrated refuses
-    // applies until a later boot migrates them, and the report says why.
-    match egret_catalog_registry::run_backfill(
-        &egret_catalog_registry::RegistryStore::new(db.clone()),
-        &workspace_secrets,
-    )
-    .await
-    {
-        Ok(s) => tracing::info!(run_id = %s.run_id, report_rows = s.report_rows,
-            failed_rows = s.failed_rows, "catalog registry backfill finished"),
-        Err(e) => tracing::error!(error = %e,
-            "catalog registry backfill failed; engines with unmigrated catalogs refuse applies"),
-    }
-
     // Externally-reachable catalog base URL, forwarded to the notebook-runtime
     // manifest as the catalog URL (what pyiceberg/Daft hit).
     let catalog_base_url = config

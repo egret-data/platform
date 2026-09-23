@@ -375,7 +375,6 @@ async fn attachments_order_status_and_block_deletes() {
     ));
     assert!(store.delete_attachment(eng, tpch.id).await.unwrap());
     assert!(store.delete_catalog(tpch.id).await.unwrap());
-    assert_eq!(store.unmigrated_legacy_catalog_count(eng).await.unwrap(), 0);
 }
 
 /// Trino numbers its catalog env vars by this order (SP3b plan row 9), so a

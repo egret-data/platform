@@ -2,14 +2,13 @@
 //! services a warehouse's catalog-tag export reaches, and therefore whose
 //! `tag_version` has to move when that export changes.
 //!
-//! Three places read this link and must agree, but only two of them can share
-//! code. The two BUMPS — the assign/unassign bump (`egret_bi::CatalogTagRepo`)
-//! and the boot backfill (`crate::backfill`) — are the same UPDATE, so they
-//! are one function, here, in the lowest crate both can reach. The third, the
-//! export (`egret_policy::PolicyStore::tag_assignments_for_service`), is a
-//! SELECT of a different shape (it returns catalog NAMES per tag assignment,
-//! keyed by the polled service) and keeps its own SQL; the doc below states
-//! branch for branch what it has to stay equal to, and
+//! Two places read this link and must agree. The BUMP — the assign/unassign
+//! bump (`egret_bi::CatalogTagRepo`) — lives here, in the lowest crate that
+//! reaches it. The other, the export
+//! (`egret_policy::PolicyStore::tag_assignments_for_service`), is a SELECT of
+//! a different shape (it returns catalog NAMES per tag assignment, keyed by
+//! the polled service) and keeps its own SQL; the doc below states branch for
+//! branch what it has to stay equal to, and
 //! `egret-policy/tests/download_tags_*.rs` is what holds the two together.
 
 use uuid::Uuid;

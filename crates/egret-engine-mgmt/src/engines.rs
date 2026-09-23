@@ -637,21 +637,8 @@ pub(crate) async fn build_provision_req_with(
             catalogs_read_at: None,
         });
     }
-    // Catalogs come from the registry (SP3). An engine whose legacy
-    // `engine_catalogs` rows the boot backfill has not migrated must not be
-    // applied: rendering only the registry would drop catalogs it runs today
-    // (plan decision #31).
+    // Catalogs come from the registry (SP3).
     let registry = st.engine_mgmt.registry();
-    let unmigrated = registry.unmigrated_legacy_catalog_count(engine.id).await?;
-    if unmigrated > 0 {
-        return Err(CpError::Conflict(format!(
-            "engine {} has {unmigrated} catalog(s) the boot-time catalog registry migration \
-             could not move, and applying it now would drop them from the running engine; \
-             the catalog migration report (GET /api/control-plane/catalogs/migration-report, \
-             code backfill_failed) says why — fix the cause and restart egret to retry the migration",
-            engine.name
-        )));
-    }
     let catalogs_read_at = registry.db_now().await?;
     let mut attached = registry.list_engine_attachments(engine.id).await?;
     attached.retain(|a| Some(a.catalog.id) != opts.exclude_catalog);
