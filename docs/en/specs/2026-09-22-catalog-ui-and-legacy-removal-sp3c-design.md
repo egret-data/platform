@@ -193,6 +193,13 @@ the warehouse (`engines.rs:626-635`, `:4977-4983`), and `ensure_engine_role` / `
 the engine's Ranger role and Catalog Client from it (`engines.rs:2899-2905`, `:3073`, `:3800`). A
 `jdbc` primary has `warehouse_id IS NULL` and answers neither.
 
+**Corrected 2026-09-23 during implementation: the survey over-counted.** Of the eleven reader sites
+it listed, only **two** genuinely read the column — the StarRocks storage ones. The rest already went
+through `resolve_primary_catalog`, which returns the primary *attachment's* catalog warehouse, and
+the warehouse-less-primary refusal **already shipped in SP3c-1** (`engines.rs:2832` at `14de835a`),
+before any registry write, with a live test. So this step is smaller than it reads — but the ruling
+below still matters, because without it an implementer reads D2 and builds the feature.
+
 Ruling (user decision, 2026-09-23): **the primary attachment must name a catalog that has a
 warehouse.** The backend refuses `is_primary` on a catalog without one, and says why. That is today's
 behaviour preserved, which keeps SP3c-2 a removal; letting a non-warehouse catalog lead is a feature,
