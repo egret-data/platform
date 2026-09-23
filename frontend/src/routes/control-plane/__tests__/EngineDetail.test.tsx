@@ -18,11 +18,7 @@ import type { Me } from "@/api/hooks";
 import type { EngineDependentDto } from "@/api/generated/model/engineDependentDto";
 import type { EngineWorkspaceDto } from "@/api/generated/model/engineWorkspaceDto";
 import type { WorkspaceDto } from "@/api/generated/model/workspaceDto";
-import type {
-  CatalogAttachmentDto,
-  EngineCatalogDto,
-  RegistryCatalogDto,
-} from "@/api/generated/model";
+import type { CatalogAttachmentDto, RegistryCatalogDto } from "@/api/generated/model";
 
 vi.mock("@/api/controlPlane");
 vi.mock("@/api/generated/control-plane-engines/control-plane-engines");
@@ -150,7 +146,7 @@ describe("EngineDetail — Workspaces tab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetEngine(ENGINE.spec);
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    mockRegistryList([]);
     vi.mocked(wsApi.useAdminWorkspacesListWs).mockReturnValue(
       query([WS_A, WS_B, WS_C]) as unknown as ReturnType<typeof wsApi.useAdminWorkspacesListWs>,
     );
@@ -249,7 +245,7 @@ describe("EngineDetail — Workspaces tab", () => {
 describe("EngineDetail — StarRocks engine", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    mockRegistryList([]);
     vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
       query(ASSIGNED) as unknown as ReturnType<
         typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
@@ -345,7 +341,7 @@ describe("EngineDetail — Trino Settings tab (merged Configuration + Security)"
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetEngine(ENGINE.spec);
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    mockRegistryList([]);
     vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
       query(ASSIGNED) as unknown as ReturnType<
         typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
@@ -467,7 +463,7 @@ describe("EngineDetail — Trino Settings tab (merged Configuration + Security)"
 describe("EngineDetail — header metadata + page-level actions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    mockRegistryList([]);
     vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
       query(ASSIGNED) as unknown as ReturnType<
         typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
@@ -538,7 +534,7 @@ describe("EngineDetail — header metadata + page-level actions", () => {
 describe("EngineDetail — StatusCard states", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    mockRegistryList([]);
     vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
       query(ASSIGNED) as unknown as ReturnType<
         typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
@@ -608,7 +604,7 @@ describe("EngineDetail — StatusCard states", () => {
 describe("EngineDetail — engine-aware Monitor tab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    mockRegistryList([]);
     vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
       query(ASSIGNED) as unknown as ReturnType<
         typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
@@ -795,15 +791,17 @@ describe("EngineDetail — engine-aware Monitor tab", () => {
 });
 
 describe("EngineDetail — Overview KPI strip", () => {
-  // Two catalogs → the strip's catalog count resolves to 2.
-  const CATALOGS = [
-    { id: "c1", name: "iceberg", kind: "iceberg", isPrimary: true },
-    { id: "c2", name: "pg", kind: "postgresql", isPrimary: false },
-  ] as unknown as Awaited<ReturnType<typeof api.listEngineCatalogs>>;
+  // Two catalogs attached to THIS engine → the strip's catalog count resolves
+  // to 2. The strip reads the registry list (SP3c-2 Task 3), filtered to this
+  // engine's attachments, not a catalog count off the whole registry.
+  const CATALOGS: RegistryCatalogDto[] = [
+    registryCatalog({ id: "c1", name: "iceberg", kind: "iceberg", engines: [attachment({ isPrimary: true })] }),
+    registryCatalog({ id: "c2", name: "pg", kind: "postgresql", engines: [attachment()] }),
+  ];
 
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue(CATALOGS);
+    mockRegistryList(CATALOGS);
     vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
       query(ASSIGNED) as unknown as ReturnType<
         typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
@@ -840,7 +838,7 @@ describe("EngineDetail — Overview KPI strip", () => {
     expect(screen.getByText("FE 1 · CN 1")).toBeInTheDocument(); // StarRocks replicas
     expect(screen.getByText("catalogs")).toBeInTheDocument();
     expect(screen.getByText("workspaces")).toBeInTheDocument();
-    // Catalog count resolves from listEngineCatalogs → 2.
+    // Catalog count resolves from the registry list, filtered to this engine → 2.
     expect(await screen.findByText("2")).toBeInTheDocument();
     // Auth item (StarRocks with no delegation → "No delegation").
     expect(screen.getByText("auth")).toBeInTheDocument();
@@ -905,7 +903,7 @@ describe("EngineDetail — delete", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetEngine(ENGINE.spec);
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    mockRegistryList([]);
     vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
       query(ASSIGNED) as unknown as ReturnType<
         typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
@@ -1002,8 +1000,11 @@ describe("EngineDetail — delete", () => {
 // SP3c-1 Task 9. The inline `CatalogForm` master/detail is gone: this tab is
 // now the mirror of Control Plane → Catalogs → detail → Engines, over the same
 // registry routes, and it is the ONE screen that renders
-// `EngineCatalogDto.configError` — the field `GET /engines/{id}/catalogs` sets
-// for a stored row the tightened validator now refuses.
+// `RegistryCatalogDto.configError` for a stored row the tightened validator
+// now refuses. SP3c-2 Task 3 moved the field onto the registry list (`GET
+// /catalogs`) this tab already reads — it used to live only on the legacy
+// `GET /engines/{id}/catalogs`, which this tab read purely to get it, and
+// that second query is gone along with the field's old home.
 
 const ADMIN: Me = {
   user_id: "u1",
@@ -1069,9 +1070,18 @@ const REMOTE = registryCatalog({
 /** Attached to nothing at all. */
 const SPARE = registryCatalog({ id: "c-4", name: "spare", kind: "tpch", engines: [] });
 
-/** The same three rows as `GET /engines/{id}/catalogs` sees them. */
-function legacyRow(over: Partial<EngineCatalogDto> = {}): EngineCatalogDto {
-  return { id: "c-1", name: "sales", kind: "postgresql", isPrimary: false, secretRef: null, ...over };
+/** A fixture with its own name and reason: a fixture that contained the
+ * literal string its own assertion searches for would be satisfied by the
+ * SERVER half whatever the client renders (SP3c Task 7 review F2). */
+const CONFIG_ERROR_MSG = "missing field `warehouse` at line 1 column 34";
+
+/** `row`, with `configError` set — the registry's own way of marking a
+ * stored configuration the tightened validator now refuses (SP3c-2 Task 3). */
+function withConfigError(
+  row: RegistryCatalogDto,
+  message = CONFIG_ERROR_MSG,
+): RegistryCatalogDto {
+  return { ...row, configError: message };
 }
 
 let registryAttachFn: ReturnType<typeof vi.fn>;
@@ -1130,10 +1140,6 @@ describe("EngineDetail — Catalogs tab", () => {
         typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
       >,
     );
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([
-      legacyRow(),
-      legacyRow({ id: "c-2", name: "events", kind: "egret-warehouse" }),
-    ]);
     mockRegistryList([SALES, EVENTS, REMOTE, SPARE]);
 
     registryAttachFn = vi
@@ -1259,7 +1265,6 @@ describe("EngineDetail — Catalogs tab", () => {
 
   test("an engine with no catalogs says so instead of showing an empty table", async () => {
     mockRegistryList([REMOTE, SPARE]);
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
     await openCatalogs();
 
     expect(await screen.findByText(/no catalogs, so it can query nothing/)).toBeInTheDocument();
@@ -1309,18 +1314,7 @@ describe("EngineDetail — Catalogs tab: a stored configuration that no longer p
   });
 
   test("the broken row is marked, its reason is on screen, and it links to where it is repaired", async () => {
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([
-      legacyRow(),
-      legacyRow({
-        id: "c-2",
-        name: "events",
-        // Deliberately naming neither the catalog nor any word this screen
-        // prints: a fixture that contains the string its own assertion
-        // searches for is satisfied by the SERVER half whatever the client
-        // renders (SP3c Task 7 review F2).
-        configError: "missing field `warehouse` at line 1 column 34",
-      }),
-    ]);
+    mockRegistryList([SALES, withConfigError(EVENTS), REMOTE, SPARE]);
     await openCatalogs();
 
     // Marked in the row, so scanning the table finds it…
@@ -1329,7 +1323,7 @@ describe("EngineDetail — Catalogs tab: a stored configuration that no longer p
     )).toBeInTheDocument();
     // …and the reason is quoted in full, verbatim, below the table.
     const box = screen.getByTestId("engine-catalog-config-errors");
-    expect(box).toHaveTextContent("missing field `warehouse` at line 1 column 34");
+    expect(box).toHaveTextContent(CONFIG_ERROR_MSG);
     // The repair path: the catalog's own page, named and linked.
     expect(within(box).getByRole("link", { name: /events/ })).toHaveAttribute(
       "href",
@@ -1338,10 +1332,7 @@ describe("EngineDetail — Catalogs tab: a stored configuration that no longer p
   });
 
   test("Retry is offered but cannot work on a broken row, and says why", async () => {
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([
-      legacyRow(),
-      legacyRow({ id: "c-2", name: "events", configError: "missing field `warehouse`" }),
-    ]);
+    mockRegistryList([SALES, withConfigError(EVENTS), REMOTE, SPARE]);
     await openCatalogs();
 
     const row = await screen.findByRole("row", { name: /^events/ });
@@ -1357,28 +1348,10 @@ describe("EngineDetail — Catalogs tab: a stored configuration that no longer p
   });
 
   test("a row that parses is never marked broken", async () => {
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([
-      legacyRow(),
-      legacyRow({ id: "c-2", name: "events" }),
-    ]);
     await openCatalogs();
 
     await screen.findByRole("table");
     expect(screen.queryByText(/config invalid/i)).not.toBeInTheDocument();
-    expect(screen.queryByTestId("engine-catalog-config-errors")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("engine-catalog-config-unchecked")).not.toBeInTheDocument();
-  });
-
-  test("egret says when it could NOT check, rather than letting silence read as fine", async () => {
-    vi.mocked(api.listEngineCatalogs).mockRejectedValue(new ApiError(500, "store unavailable"));
-    await openCatalogs();
-
-    await screen.findByRole("table");
-    const note = await screen.findByTestId("engine-catalog-config-unchecked");
-    expect(note).toHaveTextContent(/could not check/i);
-    expect(note).toHaveTextContent("store unavailable");
-    // Not-checked is not the same as checked-and-clean, and must not be
-    // painted as a defect either.
     expect(screen.queryByTestId("engine-catalog-config-errors")).not.toBeInTheDocument();
   });
 });
@@ -1392,10 +1365,6 @@ describe("EngineDetail — Catalogs tab: permissions", () => {
         typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
       >,
     );
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([
-      legacyRow(),
-      legacyRow({ id: "c-2", name: "events" }),
-    ]);
     mockRegistryList([SALES, EVENTS, REMOTE, SPARE]);
     registryAttachFn = vi.fn();
     registryDetachFn = vi.fn();
@@ -1419,7 +1388,10 @@ describe("EngineDetail — Catalogs tab: permissions", () => {
     expect(note).toHaveTextContent(/administrator/i);
   });
 
-  test("without catalog_registry:read the rows still list, the Apply column is not invented, and the key is named", async () => {
+  test("without catalog_registry:read nothing renders, and the missing permission is named", async () => {
+    // SP3c-2 Task 3: the registry list is now the ONLY read, so a 403 on it
+    // means egret cannot show even the names — the legacy engine-mounted
+    // fallback that used to keep them visible is gone with the second query.
     mockRegistryList([], {
       data: undefined,
       isError: true,
@@ -1427,16 +1399,11 @@ describe("EngineDetail — Catalogs tab: permissions", () => {
     });
     await openCatalogs();
 
-    // The engine's own catalog list is `engine:read`, which this page already
-    // needs — so the names do not disappear with the registry.
-    expect(within(await screen.findByRole("row", { name: /^sales/ })).getByText("sales"))
-      .toBeInTheDocument();
-    // …but nothing pretends to know the apply state.
-    expect(screen.queryByText("applied")).not.toBeInTheDocument();
-    const note = screen.getByTestId("engine-catalogs-registry-blocked");
+    const note = await screen.findByTestId("engine-catalogs-unreadable");
     expect(note).toHaveTextContent("catalog_registry:read");
     // Not the bare word `Error::Forbidden` renders: who can grant it, too.
     expect(note).toHaveTextContent(/administrator/i);
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: /Catalog to attach/ })).not.toBeInTheDocument();
   });
 
@@ -1448,7 +1415,7 @@ describe("EngineDetail — Catalogs tab: permissions", () => {
     });
     await openCatalogs();
 
-    const note = await screen.findByTestId("engine-catalogs-registry-blocked");
+    const note = await screen.findByTestId("engine-catalogs-unreadable");
     expect(note).toHaveTextContent("registry store unavailable");
     expect(note).not.toHaveTextContent("catalog_registry:read");
   });
@@ -1483,15 +1450,11 @@ const EVENTS_OK = registryCatalog({
   engines: [attachment()],
 });
 
-function mockBrokenEvents() {
-  vi.mocked(api.listEngineCatalogs).mockResolvedValue([
-    legacyRow(),
-    legacyRow({
-      id: "c-2",
-      name: "events",
-      configError: "missing field `warehouse` at line 1 column 34",
-    }),
-  ]);
+/** `rows`, with the `events` catalog (`id: "c-2"`) marked broken and mocked as
+ * the registry list — `configError` is catalog-scoped now (SP3c-2 Task 3), so
+ * this is the one place a test needs to touch to make `events` unparseable. */
+function mockBrokenEvents(rows: RegistryCatalogDto[]) {
+  mockRegistryList(rows.map((r) => (r.id === "c-2" ? withConfigError(r) : r)));
 }
 
 function catalogsTabBeforeEach() {
@@ -1502,10 +1465,6 @@ function catalogsTabBeforeEach() {
       typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
     >,
   );
-  vi.mocked(api.listEngineCatalogs).mockResolvedValue([
-    legacyRow(),
-    legacyRow({ id: "c-2", name: "events" }),
-  ]);
   mockRegistryList([SALES, EVENTS, REMOTE, SPARE]);
   registryAttachFn = vi.fn().mockResolvedValue({ status: 201, data: attachment() });
   registryDetachFn = vi.fn().mockResolvedValue({ status: 204, data: undefined });
@@ -1520,9 +1479,8 @@ function catalogsTabBeforeEach() {
 describe("EngineDetail — Catalogs tab: an unreadable list is not an empty one", () => {
   beforeEach(catalogsTabBeforeEach);
 
-  test("when BOTH reads fail the tab does not claim the engine has no catalogs", async () => {
-    vi.mocked(api.listEngineCatalogs).mockRejectedValue(new ApiError(500, "store unavailable"));
-    mockRegistryList([], { data: undefined, isError: true, error: new ApiError(403, "forbidden") });
+  test("when the read fails the tab does not claim the engine has no catalogs", async () => {
+    mockRegistryList([], { data: undefined, isError: true, error: new ApiError(500, "store unavailable") });
     await openCatalogs();
 
     const box = await screen.findByTestId("engine-catalogs-unreadable");
@@ -1534,19 +1492,6 @@ describe("EngineDetail — Catalogs tab: an unreadable list is not an empty one"
   });
 
   test("an engine that egret DID read and found empty still says so", async () => {
-    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
-    mockRegistryList([REMOTE, SPARE]);
-    await openCatalogs();
-
-    expect(await screen.findByText(/no catalogs, so it can query nothing/)).toBeInTheDocument();
-    expect(screen.queryByTestId("engine-catalogs-unreadable")).not.toBeInTheDocument();
-  });
-
-  test("one read is enough to know the engine is empty", async () => {
-    // The registry answered and this engine is on none of its catalogs; the
-    // engine's own list failed. Both lists are `list_engine_attachments`, so
-    // the registry's silence is authoritative about attachments.
-    vi.mocked(api.listEngineCatalogs).mockRejectedValue(new ApiError(500, "store unavailable"));
     mockRegistryList([REMOTE, SPARE]);
     await openCatalogs();
 
@@ -1559,8 +1504,7 @@ describe("EngineDetail — Catalogs tab: the blocked scope is the backend's", ()
   beforeEach(catalogsTabBeforeEach);
 
   test("on Trino one broken catalog blocks Retry AND Detach on every other row, and names it", async () => {
-    mockRegistryList([SALES_FAILED, EVENTS_OK]);
-    mockBrokenEvents();
+    mockBrokenEvents([SALES_FAILED, EVENTS_OK]);
     await openCatalogs();
 
     const sales = await screen.findByRole("row", { name: /^sales/ });
@@ -1575,8 +1519,7 @@ describe("EngineDetail — Catalogs tab: the blocked scope is the backend's", ()
   });
 
   test("on Trino the broken catalog itself can still be detached — it is left out of the rebuild", async () => {
-    mockRegistryList([SALES_FAILED, EVENTS_OK]);
-    mockBrokenEvents();
+    mockBrokenEvents([SALES_FAILED, EVENTS_OK]);
     await openCatalogs();
 
     const events = await screen.findByRole("row", { name: /^events/ });
@@ -1589,8 +1532,7 @@ describe("EngineDetail — Catalogs tab: the blocked scope is the backend's", ()
       type: "starrocks",
       status: { phase: "running", message: null, pods: [] },
     } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
-    mockRegistryList([SALES_FAILED, EVENTS_OK]);
-    mockBrokenEvents();
+    mockBrokenEvents([SALES_FAILED, EVENTS_OK]);
     await openCatalogs();
 
     const sales = await screen.findByRole("row", { name: /^sales/ });
@@ -1602,8 +1544,7 @@ describe("EngineDetail — Catalogs tab: the blocked scope is the backend's", ()
   });
 
   test("the blocked-scope sentence is Trino's on Trino", async () => {
-    mockRegistryList([SALES_FAILED, EVENTS_OK]);
-    mockBrokenEvents();
+    mockBrokenEvents([SALES_FAILED, EVENTS_OK]);
     await openCatalogs();
 
     const box = await screen.findByTestId("engine-catalog-config-errors");
@@ -1617,8 +1558,7 @@ describe("EngineDetail — Catalogs tab: the blocked scope is the backend's", ()
       type: "starrocks",
       status: { phase: "running", message: null, pods: [] },
     } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
-    mockRegistryList([SALES_FAILED, EVENTS_OK]);
-    mockBrokenEvents();
+    mockBrokenEvents([SALES_FAILED, EVENTS_OK]);
     await openCatalogs();
 
     const box = await screen.findByTestId("engine-catalog-config-errors");
@@ -1679,7 +1619,7 @@ describe("EngineDetail — Catalogs tab: Test runs against THIS engine", () => {
   });
 
   test("a catalog whose stored configuration does not parse can still be tested", async () => {
-    mockBrokenEvents();
+    mockBrokenEvents([SALES, EVENTS, REMOTE, SPARE]);
     testCatalogFn.mockResolvedValue({ status: 200, data: { ok: true, message: "fine" } });
     const user = await openCatalogs();
 
@@ -1740,10 +1680,8 @@ describe("EngineDetail — Catalogs tab: one problem, said once", () => {
     mockRegistryList([], { data: undefined, isError: true, error: new ApiError(403, "forbidden") });
     await openCatalogs(ENGINE_ONLY);
 
-    await screen.findByRole("table");
-    expect(screen.getByTestId("engine-catalogs-registry-blocked")).toHaveTextContent(
-      "catalog_registry:read",
-    );
+    const note = await screen.findByTestId("engine-catalogs-unreadable");
+    expect(note).toHaveTextContent("catalog_registry:read");
     // Advice they cannot act on yet, in a near-identical second paragraph.
     expect(screen.queryByTestId("engine-catalogs-readonly")).not.toBeInTheDocument();
   });
@@ -1755,24 +1693,5 @@ describe("EngineDetail — Catalogs tab: one problem, said once", () => {
     expect(screen.getByTestId("engine-catalogs-readonly")).toHaveTextContent(
       "catalog_registry:update",
     );
-  });
-
-  test("a row egret could only read from the engine says which vocabulary its Kind is", async () => {
-    mockRegistryList([], { data: undefined, isError: true, error: new ApiError(403, "forbidden") });
-    await openCatalogs(ENGINE_ONLY);
-
-    await screen.findByRole("table");
-    // `legacy_kind` is the Trino connector name; `RegistryCatalogDto.kind` is
-    // the registry kind. The same catalog reads differently to two personas.
-    expect(screen.getByTestId("engine-catalogs-kind-vocabulary")).toHaveTextContent(
-      /connector name/i,
-    );
-  });
-
-  test("an admin who can read the registry is not told about the connector vocabulary", async () => {
-    await openCatalogs();
-
-    await screen.findByRole("table");
-    expect(screen.queryByTestId("engine-catalogs-kind-vocabulary")).not.toBeInTheDocument();
   });
 });

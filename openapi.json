@@ -36392,6 +36392,13 @@
           "updatedAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "configError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why this row's stored `config` no longer parses, if it does not.\nA stored row the tightened validator now refuses stays visible and\nrepairable instead of vanishing — and, critically, never fails the\nwhole list (SP3c-1 review N1)."
           }
         }
       },

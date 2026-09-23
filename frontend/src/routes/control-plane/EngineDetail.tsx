@@ -14,11 +14,9 @@ import { toast } from "sonner";
 
 import {
   type Engine,
-  type EngineCatalog,
   type EngineStatus,
   deleteEngine,
   getEngine,
-  listEngineCatalogs,
   restartEngine,
 } from "@/api/controlPlane";
 import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
@@ -112,15 +110,6 @@ import { RotateSecretsSection } from "./RotateSecretsSection";
 import EngineMonitor from "./EngineMonitor";
 import PodLogsDialog from "./PodLogsDialog";
 import PodTerminalDialog from "./PodTerminalDialog";
-
-/**
- * `GET /engines/{id}/catalogs`, the hand-written query two places on this page
- * read: the Overview strip's catalog count and the Catalogs tab, which needs
- * the `configError` only this route reports. ONE definition, because two
- * literals that drift split the cache silently — both reads keep working and
- * neither sees the other's invalidation.
- */
-const engineCatalogsKey = (id: string) => ["cp", "engine-catalogs", id] as const;
 
 type EngineWithStatus = Omit<Engine, "status"> & { status: EngineStatus };
 
@@ -671,12 +660,14 @@ export function SaveBar({
  * and fall back to `—` while those queries load.
  */
 function EngineSummaryStrip({ engine }: { engine: EngineWithStatus }) {
-  // Same query key as CatalogsCard → shares the cache; we read the count only.
-  const catalogsQ = useQuery<EngineCatalog[], ApiError>({
-    queryKey: engineCatalogsKey(engine.id),
-    queryFn: () => listEngineCatalogs(engine.id),
-    retry: false,
-  });
+  // Same hook (and query key) as CatalogsCard's `registryQ` → shares the
+  // cache; we read the count only. SP3c-2 Task 3: this used to be the
+  // legacy `GET /engines/{id}/catalogs` list, dropped in favor of the
+  // registry list both screens now read.
+  const registryQ = useControlPlaneCatalogRegistryListRegistryCatalogs<
+    controlPlaneCatalogRegistryListRegistryCatalogsResponse,
+    ApiError
+  >(undefined, { query: { retry: false } });
   // Same hook as WorkspacesCard → shares the assignment query; count only.
   const workspacesQ = useControlPlaneEnginesListEngineWorkspaces(engine.id, {
     query: { retry: false },
@@ -694,7 +685,10 @@ function EngineSummaryStrip({ engine }: { engine: EngineWithStatus }) {
     ? `FE ${num(sr?.feReplicas)} · CN ${num(sr?.cnReplicas)}`
     : `Coord ${num(engine.spec.coordinatorReplicas)} · Worker ${num(engine.spec.workerReplicas)}`;
 
-  const catalogCount = catalogsQ.data?.length ?? "—";
+  const catalogCount =
+    registryQ.data?.status === 200
+      ? registryQ.data.data.filter((c) => c.engines.some((e) => e.engineId === engine.id)).length
+      : "—";
   const workspaceCount =
     workspacesQ.data?.status === 200 ? workspacesQ.data.data.length : "—";
 
@@ -1249,20 +1243,19 @@ function SecuritySection({
  * place now, Control Plane → Catalogs, and this screen attaches, detaches and
  * retries.
  *
- * TWO reads, deliberately, and neither is redundant:
- *
- *   - the **registry list** (`catalog_registry:read`) is the only source of
- *     `applyStatus`, `appliedAt` and the catalogs this engine does NOT have —
- *     the picker;
- *   - the engine's **own** catalog list (`engine:read`, the permission this
- *     page already needs, and the same cache key the Overview strip holds) is
- *     the only route that says a stored configuration no longer parses.
- *     `configError` exists precisely so a row the tightened validator refuses
- *     is findable rather than invisible, and this is the screen that renders it.
- *
- * Because they are gated differently, either can be missing, and the table is
- * their union: rows the registry cannot show still list by name, with the
- * Apply column left honestly empty and the missing permission named.
+ * ONE read now (SP3c-2 Task 3): the **registry list**
+ * (`catalog_registry:read`, `GET /catalogs`), which carries `applyStatus`,
+ * `appliedAt`, the catalogs this engine does NOT have — the picker — AND
+ * `configError` for a stored row the tightened validator now refuses. The
+ * field used to live only on the legacy, engine-mounted
+ * `GET /engines/{id}/catalogs`, so this screen used to read that list too,
+ * ONLY for `configError`, and treated the registry list's silence on a row as
+ * recoverable (the union with the legacy names, the Apply column left
+ * honestly empty). That fallback is gone along with the second request: a row
+ * this screen shows is now always one the registry itself named, so there is
+ * nothing left for the legacy list to add — and no more "checked or not"
+ * state to track, because the one read that lists a row is the same read that
+ * says whether it parses.
  */
 /**
  * What `POST /engines/{id}/catalogs/{cid}/test` measured, said in the client's
@@ -1317,8 +1310,7 @@ type AttachedRow = {
   name: string;
   kind: string;
   isPrimary: boolean;
-  /** `null` when egret could not read the registry — NOT "no attachment". */
-  a: CatalogAttachmentDto | null;
+  a: CatalogAttachmentDto;
   /** The stored configuration does not parse, and this is why. */
   configError: string | null;
 };
@@ -1345,24 +1337,16 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
   >(undefined, { query: { retry: false } });
   const all = registryQ.data?.status === 200 ? registryQ.data.data : [];
 
-  const legacyQ = useQuery<EngineCatalog[], ApiError>({
-    queryKey: engineCatalogsKey(engine.id),
-    queryFn: () => listEngineCatalogs(engine.id),
-    retry: false,
-  });
-
   // `engine:read` only — the same key the route guard already demands — so
   // every persona that can open this page can run it. It is a mutation because
   // the route is a POST that runs a statement, not a cacheable read.
   const test = useControlPlaneEnginesTestCatalog<ApiError>();
 
-  const queryClient = useQueryClient();
   const { attach, detach, retry } = useAttachmentActions({
-    // The registry keys are invalidated by the hook; this engine's own list is
-    // this page's, and it carries the `configError` verdict — a detached row
-    // that stayed in it would keep its broken badge after it had gone.
+    // The registry list carries `configError` too now (SP3c-2 Task 3), and
+    // `useAttachmentActions` already invalidates it — nothing else to
+    // invalidate here.
     onDone: () => {
-      void queryClient.invalidateQueries({ queryKey: engineCatalogsKey(engine.id) });
       // The verdict was measured against an attachment that may no longer
       // exist, or may have just been re-applied. Leaving a red box above a row
       // that has gone green is the lie the three states exist to prevent
@@ -1372,63 +1356,35 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
     },
   });
 
-  const legacyRows = legacyQ.data ?? [];
-  /**
-   * Whether egret CHECKED. `undefined` data is loading or failed, and "not
-   * checked" must not render like "checked and clean": silence where a defect
-   * would be shown reads as an all-clear.
-   */
-  const configChecked = legacyQ.data !== undefined;
-  const legacyById = new Map(legacyRows.map((c) => [c.id, c]));
-
   const rows: AttachedRow[] = [];
-  const seen = new Set<string>();
   for (const c of all) {
     const a = c.engines.find((e) => e.engineId === engine.id);
     if (!a) continue;
-    seen.add(c.id);
     rows.push({
       id: c.id,
       name: c.name,
       kind: c.kind,
       isPrimary: a.isPrimary,
       a,
-      configError: legacyById.get(c.id)?.configError ?? null,
-    });
-  }
-  // Rows the registry did not show. Normally none — both lists come from the
-  // same `list_engine_attachments` — so this is the 403 path: the operator
-  // keeps the names this page has always shown instead of losing the tab.
-  for (const l of legacyRows) {
-    if (seen.has(l.id)) continue;
-    rows.push({
-      id: l.id,
-      name: l.name,
-      kind: l.kind,
-      isPrimary: l.isPrimary,
-      a: null,
-      configError: l.configError ?? null,
+      configError: c.configError ?? null,
     });
   }
 
   const candidates = all.filter((c) => !c.engines.some((e) => e.engineId === engine.id));
   const broken = rows.filter((r) => r.configError);
-  const applyFailures = rows.filter((r) => r.a?.applyStatus === "failed" && r.a.applyError);
+  const applyFailures = rows.filter((r) => r.a.applyStatus === "failed" && r.a.applyError);
   const busy = retry.isPending || detach.isPending;
   const isTrino = !isStarRocksType(engine.type);
 
   /**
-   * Whether egret READ each list. Both lists are `list_engine_attachments`, so
-   * ONE success is authoritative about which catalogs this engine has — but
-   * zero successes is not "none", and saying so is the defect this pair
-   * exists to prevent (SP3c review F-1). An error must never render as a fact
-   * about the system; Task 8's "isn't provisioned yet" was the same shape one
-   * screen over.
+   * Whether egret READ the registry list. A failure must never render as a
+   * fact about the system (SP3c review F-1) — zero rows because the read
+   * failed is not "this engine has none", and Task 8's "isn't provisioned
+   * yet" was the same shape one screen over.
    */
   const registryRead = !registryQ.isError && registryQ.data !== undefined;
-  const engineListRead = configChecked;
-  const readNothing = !registryRead && !engineListRead;
-  const stillLoading = readNothing && !registryQ.isError && !legacyQ.isError;
+  const readNothing = !registryRead;
+  const stillLoading = readNothing && !registryQ.isError;
 
   // The brief's "adding a catalog rolls the pods" was true of Trino and false
   // of StarRocks, and the difference is the one an operator plans around.
@@ -1497,14 +1453,17 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
         stillLoading ? (
           <ListSkeleton rows={3} cols={4} />
         ) : readNothing ? (
-          // NOT "this engine has no catalogs". Neither list answered, so the
-          // only honest sentence is about egret, not about the engine.
+          // NOT "this engine has no catalogs". The registry list did not
+          // answer, so the only honest sentence is about egret, not about
+          // the engine — and it says the whole reason, permission included,
+          // rather than a second alert repeating the same failure below.
           <Alert variant="destructive" data-testid="engine-catalogs-unreadable">
             <AlertDescription>
-              egret could not read this engine&apos;s catalogs, from either route, so it cannot
-              tell you whether it has any — an empty table here is not evidence that there are
-              none. The registry said: {registryQ.error?.message ?? "nothing"}. The engine&apos;s
-              own catalog list said: {legacyQ.error?.message ?? "nothing"}.
+              {registryQ.error?.status === 403
+                ? "egret could not read this engine's catalogs: the catalog registry requires the catalog_registry:read permission, which your account does not have. A platform administrator can grant catalog_registry:read. An empty table here is not evidence that this engine has none."
+                : `egret could not read this engine's catalogs: ${
+                    registryQ.error?.message ?? "the request failed"
+                  }. An empty table here is not evidence that this engine has none.`}
             </AlertDescription>
           </Alert>
         ) : (
@@ -1550,14 +1509,10 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
                     {r.isPrimary ? <Badge variant="secondary">primary</Badge> : null}
                   </TableCell>
                   <TableCell>
-                    {r.a ? (
-                      <StatusBadge a={r.a} />
-                    ) : (
-                      <span className="text-sm text-muted-foreground">—</span>
-                    )}
+                    <StatusBadge a={r.a} />
                   </TableCell>
                   <TableCell className="text-sm text-muted-foreground">
-                    {r.a ? appliedCell(r.a) : "—"}
+                    {appliedCell(r.a)}
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex flex-col items-end gap-1">
@@ -1581,7 +1536,7 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
                           Test
                         </Button>
                       )}
-                      {canUpdate && r.a && (
+                      {canUpdate && (
                         <AttachmentActions
                           a={r.a}
                           retryBlockedReason={retryBlockedReason(r)}
@@ -1621,15 +1576,6 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
         </div>
       )}
 
-      {rows.some((r) => !r.a) && (
-        <p className="text-xs text-muted-foreground" data-testid="engine-catalogs-kind-vocabulary">
-          For the rows egret could read only from the engine, <strong>Kind</strong> is the Trino
-          connector name the engine uses (or <code>egret-warehouse</code>), not the registry kind
-          the catalog&apos;s own page shows — the same catalog can read <code>postgresql</code>
-          here and <code>jdbc</code> there. Both are true of it; they are not the same label.
-        </p>
-      )}
-
       {rows.length > 0 && !isTrino && (
         <p className="text-xs text-muted-foreground" data-testid="engine-catalogs-test-unavailable">
           egret cannot test a catalog from this page on a StarRocks engine: the per-engine check
@@ -1639,7 +1585,7 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
         </p>
       )}
 
-      {rows.some((r) => r.a) && (
+      {rows.length > 0 && (
         <p className="text-xs text-muted-foreground" data-testid="engine-apply-footnote">
           <strong>Apply</strong> is this catalog&apos;s state on this engine, not a check that it
           still works: a catalog that reached the engine before the engine broke is still recorded
@@ -1657,7 +1603,7 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
             <ul className="space-y-1">
               {applyFailures.map((r) => (
                 <li key={r.id}>
-                  <span className="font-medium">{r.name}</span>: {r.a?.applyError}
+                  <span className="font-medium">{r.name}</span>: {r.a.applyError}
                 </li>
               ))}
             </ul>
@@ -1706,26 +1652,6 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
                 </li>
               ))}
             </ul>
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {!configChecked && rows.length > 0 && legacyQ.isError && (
-        <p className="text-xs text-muted-foreground" data-testid="engine-catalog-config-unchecked">
-          egret could not check whether these catalogs&apos; stored configuration still parses:{" "}
-          {legacyQ.error?.message ?? "the request failed"}. A row that no longer parses would be
-          marked here, so an unmarked row is not evidence that it does.
-        </p>
-      )}
-
-      {registryQ.isError && (
-        <Alert data-testid="engine-catalogs-registry-blocked">
-          <AlertDescription>
-            {registryQ.error?.status === 403
-              ? "Apply status, Retry, Detach and attaching all go through the catalog registry, which requires the catalog_registry:read permission. Your account does not have it, so egret can show you which catalogs this engine has but not their state. A platform administrator can grant catalog_registry:read."
-              : `Couldn't read the catalog registry: ${
-                  registryQ.error?.message ?? "the request failed"
-                }. The catalogs above are the engine's own list; their apply status, Retry, Detach and the attach picker are unavailable until it answers.`}
           </AlertDescription>
         </Alert>
       )}

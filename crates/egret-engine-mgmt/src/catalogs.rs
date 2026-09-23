@@ -114,6 +114,12 @@ pub(crate) struct RegistryCatalogDto {
     workspace_ids: Vec<Uuid>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    /// Why this row's stored `config` no longer parses, if it does not.
+    /// A stored row the tightened validator now refuses stays visible and
+    /// repairable instead of vanishing — and, critically, never fails the
+    /// whole list (SP3c-1 review N1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config_error: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -243,6 +249,9 @@ async fn to_dto(st: &CpState, row: CatalogRow) -> Result<RegistryCatalogDto, CpE
         .into_iter()
         .map(|w| w.workspace_id)
         .collect();
+    // Recorded, never propagated: one stored row the tightened validator
+    // refuses must not fail this whole list with a 400 (SP3c-1 review N1).
+    let config_error = row.def().err().map(|e| e.to_string());
     Ok(RegistryCatalogDto {
         id: row.id,
         name: row.name,
@@ -255,6 +264,7 @@ async fn to_dto(st: &CpState, row: CatalogRow) -> Result<RegistryCatalogDto, CpE
         workspace_ids,
         created_at: row.created_at,
         updated_at: row.updated_at,
+        config_error,
     })
 }
 

@@ -762,14 +762,18 @@ describe("EnginesTab — Test names the check that ran (D4)", () => {
 });
 
 /**
- * Whole-branch review, F1. `EngineDetail` disables Retry and Detach on EVERY
- * row of a Trino engine while any of that engine's catalogs has a stored
- * configuration egret cannot parse; this screen renders the same
- * `AttachmentActions` from the other side and CANNOT compute that reason —
- * `configError` is on `GET /engines/{id}/catalogs`, which this page does not
- * read. The contract is therefore an explicit `null` plus one sentence saying
- * what the `null` costs, and these tests pin the sentence to the engines it can
- * actually be true of.
+ * Whole-branch review, F1, narrowed by SP3c-2 Task 3. `EngineDetail` disables
+ * Retry and Detach on EVERY row of a Trino engine while any of that engine's
+ * OTHER catalogs has a stored configuration egret cannot parse — a SIBLING's
+ * `configError`, which lives on that sibling's own `RegistryCatalogDto` and is
+ * structurally invisible from here: this page renders one catalog across many
+ * engines, not one engine's whole attachment set. (THIS catalog's own
+ * `configError` is no longer in that boat — it is `catalog.configError` on
+ * the very prop this page already holds, so `retryBlockedReason` uses it
+ * directly rather than passing `null`; see `attachmentUi.tsx`'s module doc.)
+ * So the sibling case is still an explicit `null` plus one sentence saying
+ * what the `null` costs, and these tests pin the sentence to the engines it
+ * can actually be true of.
  */
 describe("EnginesTab — the refusal scope this page cannot predict", () => {
   test("names the Trino engines a Retry can be refused for, and leaves the button enabled", () => {
@@ -814,6 +818,57 @@ describe("EnginesTab — the refusal scope this page cannot predict", () => {
   test("is not shown to an operator who is offered no Retry or Detach at all", () => {
     renderTab(catalog(), READER);
     expect(screen.queryByTestId("catalog-retry-scope-note")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * SP3c-2 Task 3. THIS is the half of the refusal scope the page CAN predict
+ * now: `configError` moved onto `RegistryCatalogDto`, which is the `catalog`
+ * prop this page already holds, so a broken stored configuration blocks
+ * Retry on every row — Trino or StarRocks alike, because rendering ONE
+ * catalog fails the same way regardless of the engine — without the `null`
+ * the sibling case above still needs.
+ */
+describe("EnginesTab — this catalog's own configError", () => {
+  test("blocks Retry on every attached row, Trino and StarRocks alike, with the reason on screen", () => {
+    renderTab(
+      catalog({
+        configError: "missing field `dialect`",
+        engines: [
+          attachment({ engineId: "e1", engineName: "trino-prod", applyStatus: "failed", applyError: "boom" }),
+          attachment({
+            engineId: "e2",
+            engineName: "sr-eu",
+            engineType: "starrocks",
+            applyStatus: "failed",
+            applyError: "boom",
+          }),
+        ],
+      }),
+    );
+
+    for (const name of ["trino-prod", "sr-eu"]) {
+      const row = rowFor(name);
+      expect(within(row).getByRole("button", { name: /Retry/ })).toBeDisabled();
+      expect(
+        within(row).getByText(/cannot parse this catalog's stored configuration/),
+      ).toBeInTheDocument();
+    }
+    // Detach is unaffected: a broken catalog can still be removed from an
+    // engine (it needs no render to drop), so this is Retry-only.
+    expect(within(rowFor("trino-prod")).getByRole("button", { name: /Detach/ })).toBeEnabled();
+  });
+
+  test("a healthy catalog's Retry names no configError reason", () => {
+    renderTab(
+      catalog({
+        engines: [attachment({ engineId: "e1", engineName: "trino-prod", applyStatus: "failed" })],
+      }),
+    );
+
+    expect(
+      within(rowFor("trino-prod")).queryByText(/cannot parse this catalog's stored configuration/),
+    ).toBeNull();
   });
 });
 

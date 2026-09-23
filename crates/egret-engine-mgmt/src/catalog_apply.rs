@@ -1268,7 +1268,8 @@ pub(crate) async fn retry_apply(
         //
         // What is NOT lost: the refusal still reaches the caller as a 400/502
         // with the same message, and the reason a row cannot render is reported
-        // independently as `configError` on `GET /engines/{id}/catalogs`.
+        // independently as `configError` on `GET /catalogs` (the registry list;
+        // SP3c-2 task 3 moved this off the legacy `/engines/{id}/catalogs`).
         if !matches!(e, ApplyError::Unrecorded(_) | ApplyError::Build(_)) {
             st.engine_mgmt
                 .registry()
