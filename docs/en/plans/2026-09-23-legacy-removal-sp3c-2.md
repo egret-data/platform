@@ -157,8 +157,6 @@ EOF
 - Create: `migrations/0151_drop_legacy_engine_catalogs.sql`
 - Create: `crates/egret-catalog-registry/tests/migration_0151_refuses_unmapped_rows.rs`
 - Modify: `crates/egret-engine-mgmt/src/store.rs:423-504` — delete `create_engine_catalog`, `list_engine_catalogs`, `get_engine_catalog`, `update_engine_catalog`, `delete_engine_catalog` and the `EngineCatalog` row struct if nothing else uses it
-- Modify: `crates/egret-engine-mgmt/src/catalogs.rs` — delete the two migration-report routes (`:39`, `:41-42`), `get_migration_report` (`:1015-1052`), `acknowledge_migration_report` (`:1054-1075`), `MigrationReportRowDto` (`:554`), `MigrationReportQuery` (`:573`) and their utoipa registrations (`:1089-1090`, `:1108`)
-- Modify: `crates/egret-engine-mgmt/tests/registry_schema_constraints.rs:484-510`, `tests/routes.rs:8302-8410`
 - Modify: `crates/egret-policy/src/store.rs:206-289` — delete the legacy `UNION` arm and rewrite the doc comment
 - Modify: `crates/egret-catalog-registry/src/tag_version.rs:26-90` — delete the legacy `UNION` arm and rewrite the doc comment
 - Modify: `crates/egret-engine-mgmt/tests/store.rs:93-224` (the five method tests), `tests/dependents.rs:235`, `tests/routes.rs:5606`
@@ -195,10 +193,10 @@ BEGIN
     END IF;
 END $$;
 
--- `migration_report` recorded what the backfill did. The backfill is deleted,
--- so nothing writes it; its two API routes go with it in this commit. The rows
--- describe a migration out of a table that no longer exists.
-DROP TABLE registry.migration_report;
+-- `registry.migration_report` is NOT dropped. 0147's comment calls it "what the
+-- backfill did", but `RegistryStore::ensure_warehouse_catalog` also writes it
+-- whenever a warehouse's implicit catalog is created, and that path is live
+-- (warehouse_admin/mod.rs:417, engines.rs:3050/3777/5740/9093).
 DROP TABLE registry.legacy_engine_catalogs;
 DROP TABLE engine_mgmt.engine_catalogs;
 ```
@@ -253,28 +251,25 @@ Remove `create_engine_catalog` / `list_engine_catalogs` / `get_engine_catalog` /
 
 Remove the `engine_mgmt.engine_catalogs` row from the FK-cascade table list in `crates/egret-engine-mgmt/tests/dependents.rs:235`, and the seed at `tests/routes.rs:5606`.
 
-- [ ] **Step 5b: Delete the migration-report routes**
+- [ ] **Step 5b: Correct what `migration_report` claims to be, do not delete it**
 
-`registry.migration_report` had exactly one writer — the deleted backfill — and no frontend consumer:
-SP3c-1 never built the UI that `0147`'s comment anticipated, so the only code referencing
-`GET /catalogs/migration-report` and `POST /catalogs/migration-report/acknowledge` outside the
-handlers is the orval-generated client nothing imports. Verify that before deleting:
+0147's comment calls `registry.migration_report` "what the backfill did", and an
+earlier revision of this plan took that literally and had Task 2 drop the table and
+its two routes. That is **wrong**: `RegistryStore::ensure_warehouse_catalog`
+(`catalog-registry/src/store.rs:555`) writes a report row whenever a warehouse's
+implicit catalog is created, and it has five live production callers
+(`catalog-engine/src/warehouse_admin/mod.rs:417`,
+`engine-mgmt/src/engines.rs:3050`, `:3777`, `:5740`, `:9093`).
 
-```bash
-cd /Users/1pro-l4r8/Documents/github/data-portal/egret-sp3c2
-grep -rn "migrationReport\|migration-report" frontend/src | grep -v "src/api/generated"
-```
+So the table, `report.rs`, `insert_report` / `list_report` / `acknowledge_report`
+and both API routes all **stay**. What changes is only the prose that says the
+backfill is their reason to exist. Task 1 already corrected `report.rs`'s module
+doc; check `0147`'s own comment and `catalogs.rs:1019`'s OpenAPI description
+("What the registry migration did") and make each say what is now true.
 
-Expected: no output. If a component does consume it, STOP and report — the routes stay and the table
-stays with them.
-
-Then delete both routes, `get_migration_report`, `acknowledge_migration_report`,
-`MigrationReportRowDto`, `MigrationReportQuery`, their utoipa `paths(…)` and `schemas(…)` entries, the
-store method they call, and the two tests: `registry_schema_constraints.rs:484-510` and
-`routes.rs:8302-8410` (`workspace_assignment_and_the_migration_report` — check whether its
-*workspace-assignment* half is the only coverage of that behaviour before deleting the whole test; if
-it is, keep that half and drop only the report assertions). `routes.rs:8524`'s comment about which
-permission the migration-report GETs require becomes false — delete it.
+Note for whoever picks this up later, not for this PR: those two routes have no
+frontend consumer — SP3c-1 never built the Catalogs-page banner 0147 anticipated.
+That is a missing feature, not dead code, and it is out of scope here.
 
 - [ ] **Step 6: Rewrite the policy tests that pin the legacy branch**
 
