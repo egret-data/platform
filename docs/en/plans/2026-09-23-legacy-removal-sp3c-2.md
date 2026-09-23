@@ -41,7 +41,7 @@
 
 **Deleted outright:**
 - `crates/egret-catalog-registry/src/backfill.rs` (809 lines) — the boot migration from the legacy table.
-- `crates/egret-catalog-registry/src/legacy.rs` (664 lines) — `classify` / `LegacyCatalog`; the backfill is its last consumer.
+- `crates/egret-catalog-registry/src/legacy.rs` (664 lines) — `classify` / `LegacyCatalog`, in **Task 4**: its last consumers are `add_catalog` and `update_catalog`, not the backfill.
 - `crates/egret-catalog-registry/tests/backfill_*.rs` (9 files).
 - `frontend/src/routes/control-plane/Warehouses.tsx` (401 lines) and its two test files.
 
@@ -69,7 +69,7 @@ The legacy table's other three production readers all exist to serve the backfil
 
 **Files:**
 - Delete: `crates/egret-catalog-registry/src/backfill.rs`
-- Delete: `crates/egret-catalog-registry/src/legacy.rs`
+- **Keep** `crates/egret-catalog-registry/src/legacy.rs` — corrected 2026-09-23. It has a second live consumer the survey missed: `engines.rs:5761` and `:6099` build a `LegacyCatalog` and call `classify` / `classify_generic` to shape untyped catalog request bodies, and `catalog_apply.rs:783` takes one too. All three sit inside `add_catalog` and `update_catalog` — the routes **Task 4** deletes. So `legacy.rs` dies in Task 4, not here.
 - Delete: `crates/egret-catalog-registry/tests/backfill_kind_cluster_report.rs`, `backfill_partial_run_and_scan_recovery.rs`, `backfill_primacy_matches_migration_0150.rs`, `backfill_secret_collision_survives_crash.rs`, `backfill_secret_collision.rs`, `backfill_several_primaries.rs`, `backfill_single_primary.rs`, `backfill_step1_fails_step2_recovers_primary_name.rs`, `backfill_warehouse_failure_isolated.rs`
 - Modify: `crates/egret-catalog-registry/src/lib.rs:19` (the `pub use backfill::…` re-export, and the `mod backfill;` / `mod legacy;` declarations)
 - Modify: `crates/egret-catalog-registry/src/store.rs` — delete `map_legacy_row_on` (`:289-303`) and `unmigrated_legacy_catalog_count` (`:948-962`)
@@ -88,11 +88,11 @@ Read `crates/egret-engine-mgmt/src/engines.rs:630-660` in full. The guard is an 
 
 ```bash
 cd /Users/1pro-l4r8/Documents/github/data-portal/egret
-git rm crates/egret-catalog-registry/src/backfill.rs crates/egret-catalog-registry/src/legacy.rs
+git rm crates/egret-catalog-registry/src/backfill.rs
 git rm crates/egret-catalog-registry/tests/backfill_*.rs
 ```
 
-Then remove `mod backfill;`, `mod legacy;` and the `pub use backfill::{…}` line from `crates/egret-catalog-registry/src/lib.rs`. If `legacy` is re-exported too, remove that.
+Then remove `mod backfill;` and the `pub use backfill::{…}` line from `crates/egret-catalog-registry/src/lib.rs`. **Leave `mod legacy;` and its `pub use` alone** — see the Files note above.
 
 - [ ] **Step 3: Delete the three remaining call sites**
 
@@ -141,8 +141,9 @@ at every boot. With SP3a/3b/3c-1 declared a required upgrade hop (design
 table's four production readers: both scan queries and the
 `unmigrated_legacy_catalog_count` guard that 409'd every Trino apply.
 
-Deleted with it: `legacy.rs`, whose only consumer was the backfill, and
-nine DB test files that exist to test the migration itself.
+Deleted with it: nine DB test files that exist to test the migration
+itself. `legacy.rs` stays — `add_catalog` and `update_catalog` still
+consume `classify`, so it dies in Task 4 with those routes.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
@@ -156,6 +157,8 @@ EOF
 - Create: `migrations/0151_drop_legacy_engine_catalogs.sql`
 - Create: `crates/egret-catalog-registry/tests/migration_0151_refuses_unmapped_rows.rs`
 - Modify: `crates/egret-engine-mgmt/src/store.rs:423-504` — delete `create_engine_catalog`, `list_engine_catalogs`, `get_engine_catalog`, `update_engine_catalog`, `delete_engine_catalog` and the `EngineCatalog` row struct if nothing else uses it
+- Modify: `crates/egret-engine-mgmt/src/catalogs.rs` — delete the two migration-report routes (`:39`, `:41-42`), `get_migration_report` (`:1015-1052`), `acknowledge_migration_report` (`:1054-1075`), `MigrationReportRowDto` (`:554`), `MigrationReportQuery` (`:573`) and their utoipa registrations (`:1089-1090`, `:1108`)
+- Modify: `crates/egret-engine-mgmt/tests/registry_schema_constraints.rs:484-510`, `tests/routes.rs:8302-8410`
 - Modify: `crates/egret-policy/src/store.rs:206-289` — delete the legacy `UNION` arm and rewrite the doc comment
 - Modify: `crates/egret-catalog-registry/src/tag_version.rs:26-90` — delete the legacy `UNION` arm and rewrite the doc comment
 - Modify: `crates/egret-engine-mgmt/tests/store.rs:93-224` (the five method tests), `tests/dependents.rs:235`, `tests/routes.rs:5606`
@@ -182,8 +185,8 @@ DECLARE
 BEGIN
     SELECT count(*) INTO unmapped
       FROM engine_mgmt.engine_catalogs c
-      LEFT JOIN registry.legacy_engine_catalogs m ON m.legacy_id = c.id
-     WHERE m.legacy_id IS NULL;
+      LEFT JOIN registry.legacy_engine_catalogs m ON m.engine_catalog_id = c.id
+     WHERE m.engine_catalog_id IS NULL;
 
     IF unmapped > 0 THEN
         RAISE EXCEPTION
@@ -192,11 +195,15 @@ BEGIN
     END IF;
 END $$;
 
+-- `migration_report` recorded what the backfill did. The backfill is deleted,
+-- so nothing writes it; its two API routes go with it in this commit. The rows
+-- describe a migration out of a table that no longer exists.
+DROP TABLE registry.migration_report;
 DROP TABLE registry.legacy_engine_catalogs;
 DROP TABLE engine_mgmt.engine_catalogs;
 ```
 
-Verify the real column name of the map table before writing this — read `migrations/0147_catalog_registry.sql:87-92` and use its actual columns. If the map column is not `legacy_id`, use the one that is.
+The map column is `engine_catalog_id` (`migrations/0147_catalog_registry.sql:87-92`) — confirmed, not guessed. Read that block anyway before writing the file; if `registry.migration_report` carries a foreign key into either dropped table, the drop order above must satisfy it.
 
 - [ ] **Step 2: Write the failing migration test**
 
@@ -245,6 +252,29 @@ Do the same in `crates/egret-catalog-registry/src/tag_version.rs` for `bump_boun
 Remove `create_engine_catalog` / `list_engine_catalogs` / `get_engine_catalog` / `update_engine_catalog` / `delete_engine_catalog` from `crates/egret-engine-mgmt/src/store.rs`, and the tests at `crates/egret-engine-mgmt/tests/store.rs:93-224`. Do **not** touch `crates/egret-query/src/registry/repo.rs:509`'s identically-named `list_engine_catalogs` — it reads `registry.catalogs` and is a name collision.
 
 Remove the `engine_mgmt.engine_catalogs` row from the FK-cascade table list in `crates/egret-engine-mgmt/tests/dependents.rs:235`, and the seed at `tests/routes.rs:5606`.
+
+- [ ] **Step 5b: Delete the migration-report routes**
+
+`registry.migration_report` had exactly one writer — the deleted backfill — and no frontend consumer:
+SP3c-1 never built the UI that `0147`'s comment anticipated, so the only code referencing
+`GET /catalogs/migration-report` and `POST /catalogs/migration-report/acknowledge` outside the
+handlers is the orval-generated client nothing imports. Verify that before deleting:
+
+```bash
+cd /Users/1pro-l4r8/Documents/github/data-portal/egret-sp3c2
+grep -rn "migrationReport\|migration-report" frontend/src | grep -v "src/api/generated"
+```
+
+Expected: no output. If a component does consume it, STOP and report — the routes stay and the table
+stays with them.
+
+Then delete both routes, `get_migration_report`, `acknowledge_migration_report`,
+`MigrationReportRowDto`, `MigrationReportQuery`, their utoipa `paths(…)` and `schemas(…)` entries, the
+store method they call, and the two tests: `registry_schema_constraints.rs:484-510` and
+`routes.rs:8302-8410` (`workspace_assignment_and_the_migration_report` — check whether its
+*workspace-assignment* half is the only coverage of that behaviour before deleting the whole test; if
+it is, keep that half and drop only the report assertions). `routes.rs:8524`'s comment about which
+permission the migration-report GETs require becomes false — delete it.
 
 - [ ] **Step 6: Rewrite the policy tests that pin the legacy branch**
 
@@ -443,6 +473,7 @@ EOF
 - Modify: `crates/egret-engine-mgmt/src/engines.rs` — the six route registrations at `:102-113` and the handlers `list_catalogs` (`:5640-5672`), `add_catalog` (`:5674-5824`), `get_catalog` (`:5826-5864`), `remove_catalog` (`:6020-6054`), `update_catalog` (`:6056-6176`), `test_catalog` (`:5917-5948`)
 - Modify: `crates/egret-engine-mgmt/src/engines.rs` — delete `EngineCatalogDto` (`:331-369`), `legacy_catalog_dto` (`:381-402`), `legacy_catalog_dto_degrading` (`:404-436`), `find_attached` (`:438-446`), `EngineCatalogDetailDto` (`:448-460`), `REDACTED_VALUE` (`:462-465`), `is_sensitive_config_key` (`:467-470`), `redact_catalog_config` (`:472-497`), `restore_redacted_properties` (`:499-528`), `AddCatalogBody` (`:530-540`), `UpdateCatalogBody` (`:542-552`), `CatalogTestDto` (`:5866-5872`)
 - Modify: `crates/egret-engine-mgmt/src/catalog_apply.rs` — delete `legacy_config_view` (`:727-780`), and `extract_plaintext_secrets` (`:783+`) **only if** `add_catalog` was its last caller
+- Delete: `crates/egret-catalog-registry/src/legacy.rs` (664 lines) and its `mod` / `pub use` in `lib.rs` — `add_catalog` (`engines.rs:5761`) and `update_catalog` (`:6099`) are its last consumers, so it dies with them. Confirm with the compiler; if a consumer outside the six deleted routes appears, keep the module and report it.
 - Modify: `crates/egret-engine-mgmt/tests/routes.rs` — `add_catalog_via_api` (`:5415-5433`) and its 13 call sites
 - Modify: `frontend/src/api/controlPlane.ts:1022-1047` — `EngineCatalog`, `listEngineCatalogs` and the prose note
 - Regenerate: `frontend/src/api/generated/**`
