@@ -23,9 +23,10 @@ import { FilterableTable, type Column } from "@/components/explore/FilterableTab
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { catalogsQueryKey, warehousesQueryKey } from "../queryKeys";
 
-// Re-exported so this page stays the obvious home of its own key (Task 5's
-// `CatalogCreate.tsx` and this file's tests both import it from here). It is
-// DEFINED in `../queryKeys` because `Warehouses.tsx` needs it too — see there.
+// Re-exported so this page stays the obvious home of its own key
+// (`CatalogCreate.tsx` and this file's tests both import it from here). It is
+// DEFINED in `../queryKeys` — a leaf module, so importing the key never drags
+// a page component in with it.
 export { catalogsQueryKey } from "../queryKeys";
 
 /**
@@ -276,8 +277,8 @@ export default function Catalogs() {
   const canDelete = (c: RegistryCatalogDto) =>
     isEgretWarehouse(c) ? canDeleteWarehouse : canDeleteCatalog;
 
-  // `?workspace=<id>` is the ROUTE's filter here, not a client-side one as on
-  // the warehouse list: the list endpoint takes `workspaceId`, and a catalog
+  // `?workspace=<id>` is the ROUTE's filter, not a client-side one: the list
+  // endpoint takes `workspaceId`, and a catalog
   // can be assigned to several workspaces, so filtering the returned rows
   // would have to reimplement the server's own membership test.
   const [searchParams] = useSearchParams();
@@ -291,11 +292,14 @@ export default function Catalogs() {
 
   const [deleteTarget, setDeleteTarget] = useState<RegistryCatalogDto | null>(null);
 
-  // BOTH keys, both branches. An egret-warehouse row is deleted through the
-  // very endpoint the Warehouses list calls, so refreshing only this page's
-  // cache leaves the deleted warehouse listed on the other one for the 30
-  // seconds of `staleTime` — reachable exactly because D5 keeps both sections
-  // live. `Warehouses.tsx` does the mirror of this.
+  // BOTH keys, both branches — and this stays true after SP3c-2 Task 8 deleted
+  // the Warehouses page, which is the opposite of what it looks like. An
+  // egret-warehouse row is deleted through the warehouse endpoint, and
+  // `warehousesQueryKey` still has live readers: `EngineCreate.tsx`'s picker
+  // and `CatalogDetail.tsx`'s per-warehouse fetch keyed under its prefix.
+  // Refreshing only this page's cache leaves the deleted warehouse in those
+  // for the 30 seconds of `staleTime`. Do not drop the second invalidation
+  // because the page that used to motivate it is gone.
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: catalogsQueryKey });
     void queryClient.invalidateQueries({ queryKey: warehousesQueryKey });
@@ -515,9 +519,10 @@ export default function Catalogs() {
 /**
  * What the confirm dialog says, what it lists, and whether it may proceed.
  *
- * The branch matters because the endpoint does. The warehouse sentence is
- * `Warehouses.tsx`'s, kept verbatim so the two sections say the same thing
- * while both exist (D5). The registry branch names the references off the row
+ * The branch matters because the endpoint does. The warehouse sentence came
+ * from the deleted `Warehouses.tsx` and is kept verbatim: it is what an
+ * operator was told before, and a delete confirmation is the worst place to
+ * change wording for its own sake. The registry branch names the references off the row
  * — the same engines and workspaces the server would send back in the 409's
  * `catalog_in_use` body — and, when there are any, WITHHOLDS the confirm
  * button: a dialog that explains the refusal and then invites the user to type

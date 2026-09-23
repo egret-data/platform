@@ -360,7 +360,7 @@ describe("delete routes by kind", () => {
   // Warehouses list calls, so refreshing only this page's cache leaves the
   // deleted warehouse listed on the other section for the 30 seconds of
   // `staleTime` — reachable precisely because D5 keeps both sections live.
-  test("an egret warehouse delete refreshes the Warehouses list too", async () => {
+  test("an egret warehouse delete invalidates warehousesQueryKey too", async () => {
     vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
       listResult([catalog()]),
     );

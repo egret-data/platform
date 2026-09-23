@@ -48,7 +48,7 @@ function extractRefusal(body: Record<string, unknown>): { code?: string; message
   };
 }
 
-/** Copies a value to the clipboard — same "Copy"/"Copied" idiom `WarehouseDetail.tsx` uses. */
+/** Copies a value to the clipboard — the shared "Copy"/"Copied" idiom. */
 function CopyButton({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
   return (

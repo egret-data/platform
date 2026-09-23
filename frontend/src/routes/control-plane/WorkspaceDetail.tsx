@@ -350,8 +350,8 @@ function ResourcesTab({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-/** Iceberg warehouses owned by this workspace (read-only list; management lives on
- * the Warehouses page). */
+/** Iceberg warehouses owned by this workspace (read-only list; management lives
+ * on the warehouse's catalog page, Control Plane → Catalogs). */
 function WarehousesSection({ workspaceId }: { workspaceId: string }) {
   const whQ = useQuery({
     queryKey: ["control-plane", "warehouses"],

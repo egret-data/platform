@@ -26,7 +26,7 @@ const ME: Me = {
   email: "u1@example.com",
   platform_roles: [],
   // `catalog_registry:read` alone: SP3c-2 (Task 7) retired `warehouse:read`
-  // and re-gated both the Warehouses list route and this redirect onto the
+  // and re-gated this redirect (and, before Task 8 deleted it, the list route) onto the
   // one key, so it is the only permission either needs.
   permissions: ["catalog_registry:read"],
 };
