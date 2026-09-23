@@ -328,7 +328,7 @@ async fn download_tags_via_tag_service_resolves_owning_trino_profile() {
 }
 
 /// I3: a SECONDARY attachment — a warehouse that is NOT the attaching engine's
-/// own `engines.warehouse_id` primary — is exported under its registry
+/// own primary attachment — is exported under its registry
 /// catalog name; an engine bound to the SAME service that does NOT attach
 /// that warehouse's catalog sees nothing for it, even though another engine
 /// (bound to the same service) does. This pins the attachment join: a mutant
@@ -430,7 +430,7 @@ async fn download_tags_unrelated_service_exports_nothing() {
 }
 
 /// I3 leftover (SP3 catalog-registry review re-review): an engine whose own
-/// PRIMARY warehouse (`engines.warehouse_id`) IS the tagged one, but which has
+/// PRIMARY warehouse (its primary attachment's catalog) IS the tagged one, but which has
 /// no attachment — the fail-closed direction, e.g. right after a detach with
 /// nothing re-attached — exports nothing for it. This needs the
 /// exporting-nothing engine and the engine that DOES export it on TWO

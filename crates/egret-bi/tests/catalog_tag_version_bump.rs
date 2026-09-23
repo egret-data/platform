@@ -221,7 +221,7 @@ async fn assign_and_unassign_bump_bound_service_tag_version() {
 }
 
 /// SP3 catalog-registry review I1: a tag change on a warehouse attached to an
-/// engine as a SECONDARY catalog (not its `engines.warehouse_id` primary) must
+/// engine as a SECONDARY catalog (not its primary attachment) must
 /// still bump that engine's bound service `tag_version` — otherwise
 /// `download_tags` keeps 304-ing and the new mask/tag never reaches the
 /// Ranger plugin. Pins `bump_bound_tag_versions`'s registry-attachment branch.

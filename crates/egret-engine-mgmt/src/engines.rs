@@ -8198,8 +8198,7 @@ mod tests {
                 "delegation": null,
             },
         });
-        let engine = st
-            .engine_mgmt
+        st.engine_mgmt
             .create_engine(
                 &format!("sr-{}", Uuid::new_v4().simple()),
                 "starrocks",
@@ -8209,8 +8208,7 @@ mod tests {
                 None,
             )
             .await
-            .expect("create engine row");
-        engine
+            .expect("create engine row")
     }
 
     /// Attach a warehouse's registry catalog to an engine as its PRIMARY, the
