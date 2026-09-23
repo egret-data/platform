@@ -110,8 +110,9 @@ impl AttachedCatalog {
     /// attachment rather than stored a second time here: primacy is one fact,
     /// and a copy on the pair could disagree with the row it was built from.
     /// Until SP3c-1 this was recomputed at three call sites as
-    /// `catalog.warehouse_id == Some(engine.warehouse_id)` (`legacy_catalog_dto`,
-    /// `update_catalog`'s edit guard, and `catalog_apply::is_primary`).
+    /// `catalog.warehouse_id == Some(engine.warehouse_id)`; two of those
+    /// sites were deleted with the legacy routes in SP3c-2 Task 4, and
+    /// `catalog_apply::is_primary` is the one that remains.
     pub fn is_primary(&self) -> bool {
         self.attachment.is_primary
     }

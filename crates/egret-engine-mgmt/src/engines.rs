@@ -5412,7 +5412,6 @@ async fn unassign_workspace_engine(
     Ok(StatusCode::NO_CONTENT)
 }
 
-
 /// Bound on the `/v1/statement` submit-then-poll loop: a hung/misbehaving
 /// coordinator must not block the request forever.
 const CATALOG_TEST_MAX_POLLS: u32 = 50;
@@ -5443,7 +5442,6 @@ fn coordinator_error_message(code: u16, body: &[u8]) -> String {
         String::from_utf8_lossy(body).trim()
     )
 }
-
 
 /// Run `SHOW SCHEMAS FROM "<catalog>"` on `engine`'s Trino coordinator and
 /// return the verdict as `(ok, message)`. Shared by the per-engine
@@ -10023,7 +10021,10 @@ mod tests {
                 .await
                 .expect_err("attach_to_engine on a deleting engine must fail");
         assert!(
-            matches!(err, crate::catalog_apply::CatalogOpError::Http(CpError::Conflict(_))),
+            matches!(
+                err,
+                crate::catalog_apply::CatalogOpError::Http(CpError::Conflict(_))
+            ),
             "got {err:?}"
         );
 

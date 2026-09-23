@@ -1086,7 +1086,10 @@ async fn create_engine_starrocks_persists_starrocks_type() {
     // D5: an engine reaches its warehouse under the warehouse catalog's name.
     let wh_cat = warehouse_catalog(&f, wh_id).await;
     assert_eq!(cats[0].catalog.name, wh_cat.name, "catalog name");
-    assert_eq!(cats[0].catalog.id, wh_cat.id, "legacy id is the registry id");
+    assert_eq!(
+        cats[0].catalog.id, wh_cat.id,
+        "legacy id is the registry id"
+    );
 
     // The client's credential lives in a named secret on the attachment and is
     // revoked when the engine is deleted, same as Trino's; confirm it was minted.
@@ -2368,7 +2371,6 @@ async fn update_engine_autoscaling_roundtrips() {
         "keda trigger kind round-trips; body={j}"
     );
 }
-
 
 #[tokio::test]
 async fn create_engine_unprovisioned_warehouse_400() {
@@ -4144,7 +4146,11 @@ async fn registry_detach_applies_before_deleting_and_revoking() {
 
     port.set_fail_update(true);
     let resp = f.app.clone().oneshot(remove()).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY, "rejected apply; {resp:?}");
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_GATEWAY,
+        "rejected apply; {resp:?}"
+    );
     assert!(
         port.last_updated()
             .catalogs
@@ -4836,7 +4842,11 @@ async fn attach_warehouse_via_api(
     token: &str,
     engine_id: &str,
     wh_id: Uuid,
-) -> (StatusCode, serde_json::Value, egret_catalog_registry::CatalogRow) {
+) -> (
+    StatusCode,
+    serde_json::Value,
+    egret_catalog_registry::CatalogRow,
+) {
     // Get-or-create: a warehouse's registry catalog is otherwise made lazily,
     // the first time an engine attaches it (`warehouse_catalog` above assumes
     // it already exists, which only holds once some engine has). This is what
@@ -4884,7 +4894,6 @@ fn elasticsearch_body(name: &str) -> serde_json::Value {
     serde_json::json!({ "name": name, "kind": "elasticsearch",
         "config": { "hosts": ["es1"], "port": 9200, "tls": false } })
 }
-
 
 /// `POST /engines` for a StarRocks engine with the wizard defaults; returns
 /// `(engine id, its warehouse id)`.
@@ -6869,10 +6878,13 @@ async fn registry_attach_is_404_for_an_unknown_catalog_or_engine() {
     );
 }
 
-/// The whole reason the registry route exists: `catalog_registry:update`
-/// reaches it and `engine:update` does not, and the legacy route keeps
-/// accepting `engine:update` as before — the split holds symmetrically on
-/// both attach routes exactly as it already does for detach.
+/// The whole reason the catalog-scoped attach route exists:
+/// `POST /catalogs/{id}/engines/{engine_id}` takes `catalog_registry:update`
+/// and refuses `engine:update`, while the engine-scoped
+/// `POST /engines/{id}/catalogs/{cid}` is the mirror image. Both are live —
+/// the engine-scoped one is NOT the deleted legacy route, which was its
+/// `GET`/`PUT`/`DELETE` siblings (SP3c-2 Task 4). The split holds
+/// symmetrically on both attach routes exactly as it does for detach.
 #[tokio::test]
 async fn registry_attach_requires_catalog_registry_update_not_engine_update() {
     let port = FakeEnginePort::default();
@@ -6944,7 +6956,7 @@ async fn registry_attach_requires_catalog_registry_update_not_engine_update() {
     assert_eq!(status, StatusCode::CREATED, "{j}");
     assert!(reg.get_attachment(e, c).await.unwrap().is_some());
 
-    // Detach (as admin) so the legacy route can attach it again.
+    // Detach (as admin) so the engine-scoped route can attach it again.
     let (status, j) = call(
         &f,
         "DELETE",
@@ -6955,8 +6967,8 @@ async fn registry_attach_requires_catalog_registry_update_not_engine_update() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{j}");
 
-    // The legacy route is the mirror image: `engine:update` gets through,
-    // `catalog_registry:update` alone is refused.
+    // The engine-scoped route is the mirror image: `engine:update` gets
+    // through, `catalog_registry:update` alone is refused.
     let (status, j) = call(
         &f,
         "POST",
