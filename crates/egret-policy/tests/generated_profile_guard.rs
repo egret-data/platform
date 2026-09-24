@@ -258,12 +258,32 @@ async fn post_policy(
     .await
 }
 
+/// Review fix (M-3): a single `contains("compiled")` would also pass for a
+/// reworded-but-opaque message ("compiled: no" or "recompiled recently"),
+/// which doesn't actually satisfy the brief's requirement that the refusal
+/// NAME the compiler — an operator reading it must be able to tell (a) WHICH
+/// system claimed this profile and (b) what to do about it instead of
+/// retrying. Check for all three, independently, against what the shipped
+/// message (`store.rs::refuse_if_generated`) actually carries: it names the
+/// compiler by name ("SP4a permission model"), says the profile IS compiled
+/// (so a retry looks pointless, not transient), and tells the operator the
+/// alternative ("grants and rules").
 fn assert_names_the_compiler(body: &serde_json::Value) {
     let text = body.to_string();
     assert!(
+        text.contains("SP4a permission model"),
+        "the refusal must name WHICH system owns this profile, not just say something is \
+         \"compiled\" in the abstract — body={body}"
+    );
+    assert!(
         text.contains("compiled"),
-        "the refusal must say WHY — a 409 that does not name the compiler reads as a bug, \
-         and the operator's next move is to retry; body={body}"
+        "the refusal must say the profile IS compiled — a 409 that does not say why reads as \
+         a bug, and the operator's next move is to retry; body={body}"
+    );
+    assert!(
+        text.contains("grants") && text.contains("rules"),
+        "the refusal must tell the operator what to do INSTEAD (edit the grants/rules that \
+         compile into this profile), not merely that the write failed; body={body}"
     );
 }
 
@@ -405,14 +425,29 @@ async fn the_editor_refuses_to_delete_a_policy_in_a_generated_profile() {
         .expect("cleanup");
 }
 
+/// Review fix (I-2): the fixture MUST already have a policy before the
+/// seed-defaults call. `seed_default_trino_policies` has two guards in
+/// series — Task 8's origin check, THEN (only if that passes) the pre-existing
+/// "already has policies → no-op" check reached via the loop of
+/// `create_policy` calls, which carries its OWN Task 8 guard. On an EMPTY
+/// generated profile, deleting `default_policies.rs`'s own guard still
+/// produces a 409 — just from the first `create_policy` call inside the seed
+/// loop, not from seed-defaults' own check — so a test with an empty fixture
+/// cannot tell the two guards apart and passes even when the one it claims to
+/// cover is gone. With an EXISTING policy already in place, the no-op branch
+/// (`list_policies` non-empty → `Ok(0)`) is what the seed path would hit
+/// BEFORE ever reaching a `create_policy` call, and only `seed_default_trino_policies`'s
+/// own guard — checked before that no-op — can catch it: exactly the "silent
+/// `Ok(0)`/200 instead of a 409" bug the guard's comment claims to prevent.
 #[tokio::test]
-async fn seed_defaults_refuses_a_generated_profile() {
+async fn seed_defaults_refuses_a_generated_profile_that_already_has_policies() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
     let token = admin_session(&f, "guard_seed").await;
     let (svc_name, svc_id) = seed_generated_profile(&f).await;
+    let policy_id = insert_policy_directly(&f, svc_id, "perm-grant-existing").await;
 
     let (status, body) = into_json(
         f.app()
@@ -429,11 +464,17 @@ async fn seed_defaults_refuses_a_generated_profile() {
     assert_eq!(status, StatusCode::CONFLICT, "body={body}");
     assert_names_the_compiler(&body);
 
+    // Exactly the pre-existing policy, untouched — not the no-op `Ok(0)`
+    // (which would ALSO leave exactly one row, so this alone wouldn't
+    // distinguish the bug; the 409 assertion above is what does that) and not
+    // 13 freshly-seeded defaults on top of it either.
     let rows = f.store.list_policies(svc_id).await.expect("list");
-    assert!(
-        rows.is_empty(),
-        "seed-defaults must not have created anything on a generated profile"
+    assert_eq!(
+        rows.len(),
+        1,
+        "seed-defaults must not have created anything on a generated profile; rows={rows:?}"
     );
+    assert_eq!(rows[0].id, policy_id);
 
     sqlx::query("DELETE FROM policy.authz_services WHERE id = $1")
         .bind(svc_id)

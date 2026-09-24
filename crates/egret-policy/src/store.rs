@@ -253,16 +253,37 @@ impl PolicyStore {
     /// the `perm.compiled` provenance `ON DELETE CASCADE`s from it, migration
     /// 0154) stays owned by the compiler until the perm model stops targeting
     /// it, not until an admin deletes it out from under a still-live recompile.
+    ///
+    /// Review fix (M-1): the origin check and the delete run on the SAME
+    /// transaction, not a pooled check followed by a separately-connected
+    /// delete (the shape Task 7's `recompile_service_in_tx` exists to avoid
+    /// for exactly this reason — see that function's own doc comment). Two
+    /// separate connections left a window: a compile stamping `generated`
+    /// between the check and the delete would let an unbound generated
+    /// profile be deleted anyway. One transaction closes it — Postgres holds
+    /// the row from the `SELECT` through the `DELETE`, so a concurrent
+    /// `UPDATE ... SET origin = 'generated'` from `apply_diff_in_tx` either
+    /// commits first (this delete then sees `generated` and refuses) or
+    /// blocks until this transaction ends (and if this transaction commits
+    /// the delete, the stamp's `UPDATE` then affects zero rows and is a
+    /// silent no-op, matching `apply_diff_in_tx`'s own `WHERE id = $1`
+    /// targeting a row that's simply gone).
     pub async fn delete_service(&self, id: i64) -> Result<(), PolicyStoreError> {
-        self.refuse_if_generated_pooled(id).await?;
+        let mut tx = self.db.pool.begin().await?;
+        if let Err(e) = refuse_if_generated(&mut tx, id).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
         let n = sqlx::query(r#"DELETE FROM policy.authz_services WHERE id = $1"#)
             .bind(id)
-            .execute(&self.db.pool)
+            .execute(&mut *tx)
             .await?
             .rows_affected();
         if n == 0 {
+            tx.rollback().await?;
             return Err(PolicyStoreError::NotFound(format!("service id {id}")));
         }
+        tx.commit().await?;
         Ok(())
     }
 
