@@ -8,6 +8,97 @@
 //! transaction, handed to `trigger` as a [`FixedClock`](crate::trigger::FixedClock).
 //!
 //! See `docs/en/specs/2026-09-24-workflow-w12-trigger-loop-design.md` §3.
+//!
+//! # Safety with N replicas, per statement
+//!
+//! `runtime::spawn` starts [`fire_due`] on its own ticker, behind its own gate
+//! (`RuntimeConfig::scheduler_enabled`), on **every** replica and with no
+//! leader election. `runtime.rs`'s rule applies here unchanged: the
+//! `SKIP LOCKED` sentence covers the statement that carries it and nothing
+//! else, so each statement a pass issues -- and the one a flow save issues --
+//! gets its own statement and its own test. The tests that run tickers are in
+//! `tests/runtime.rs`; each has a scratch database of its own, because a pass
+//! is global.
+//!
+//! ## 1. The claim -- safe by **exclusion**
+//!
+//! `SELECT … FROM workflow.triggers t JOIN workflow.flows f … LIMIT 1
+//! FOR UPDATE OF t SKIP LOCKED` (`fire.rs`), one trigger per transaction. Two
+//! replicas' passes **partition** the due set: a trigger another pass holds is
+//! skipped, not waited on, and the lock is held until that pass's `COMMIT`, so
+//! everything below runs with no second fire of this trigger in flight.
+//!
+//! Proved by `two_scheduler_tickers_never_fire_one_tick_twice`: 10 flows × 3
+//! due ticks under two tickers, asserted on rows (each `(flow, tick)` once,
+//! exactly 30) **and** on insert *attempts*, counted by a non-transactional
+//! sequence, so the test says which mechanism held. Mutations, W12 Task 5:
+//!
+//! - **drop `SKIP LOCKED`, keep `FOR UPDATE`: survives, 3 of 3, and the lock
+//!   is still what holds** -- attempts == rows. A blocked claim waits, and
+//!   READ COMMITTED re-checks the `WHERE` against the row the winner
+//!   committed and locks *that* version, so the loser sees the advanced date
+//!   and never repeats the tick. What `SKIP LOCKED` buys is throughput -- a
+//!   pass never waits behind another pass's fire -- and no test observes it.
+//!   (The brief predicted the index would be what holds; the measurement says
+//!   otherwise.)
+//! - **drop the whole lock: dies, 3 of 3, on the attempts assertion only** --
+//!   12 to 30 double fires reached the `INSERT`, the index refused every one,
+//!   and the rows were right. A rows-only test would have passed.
+//!
+//! ## 2. The execution's `INSERT` -- the unique index is the **backstop**
+//!
+//! [`start_execution_in`](crate::worker::start_execution_in) runs in a
+//! savepoint inside the claim's transaction. Its `workflow.executions` insert
+//! carries `scheduled_date`, and `workflow_executions_one_per_schedule_tick`
+//! (migration 0156, `(flow_id, execution_trigger->>'id', scheduled_date)`)
+//! makes a second execution for one tick **unrepresentable** rather than
+//! merely avoided. A violation of that index rolls back the savepoint and is a
+//! consumed tick (`PassReport::skipped`), not an error. Under statement 1 it
+//! never fires; it is there for the day statement 1 is wrong.
+//!
+//! Proved real by `tests/scheduler_fire.rs`'s
+//! `the_unique_index_refuses_a_second_fire` (the constraint name, with a
+//! one-tick-later control) and
+//! `a_tick_that_already_fired_is_consumed_not_taken_off_the_queue` (the
+//! classification); and by the lock-free mutation above, where it absorbed
+//! every double fire. Dropping the lock **and** the index dies on duplicate
+//! rows, 3 of 3.
+//!
+//! ## 3. The final `UPDATE` -- safe **under the claim's lock**
+//!
+//! `UPDATE workflow.triggers SET next_evaluation_date, evaluated_at,
+//! last_error … WHERE flow_id = $1 AND trigger_id = $2` -- and its two
+//! siblings on the other paths, `record_error` (reason only, dates kept) and
+//! `take_off_queue` (`next_evaluation_date = NULL`). No lock of their own and
+//! none needed: they write the row the claim locked, in the same transaction,
+//! keyed by its primary key, so nothing else can have written it since the
+//! claim read it. The values come from `tick` over what the claim read, and
+//! they commit with the execution or not at all.
+//!
+//! Proved by `tests/scheduler_fire.rs`'s `fire_and_advance_are_atomic` (a
+//! fault in this `UPDATE` rolls the execution back too) and, for two
+//! replicas, by statement 1's test: an advance written from a stale read
+//! would re-fire a tick, and the per-flow instants would not be exactly the
+//! three owed.
+//!
+//! ## 4. `sync`'s upsert -- **serialised by the row lock**; it waits
+//!
+//! `INSERT INTO workflow.triggers … ON CONFLICT (flow_id, trigger_id) DO
+//! UPDATE` and the `DELETE` of undeclared rows before it ([`sync`]), run in
+//! the transaction of every `FlowRepo` write. They take no `SKIP LOCKED`: a
+//! save that meets a trigger a pass has claimed **waits** for that pass to
+//! commit, then updates the version the pass committed -- `ON CONFLICT DO
+//! UPDATE` and `DELETE` both act on the latest row version -- so an unchanged
+//! `spec_key` keeps the *advanced* dates rather than rewinding them. The
+//! other order is the claim's business: a pass that meets a row a save holds
+//! skips it and finds it on a later pass. The pass's own call, `resync` (a
+//! source that disagrees with the row), runs inside the claim's transaction
+//! and already holds the lock.
+//!
+//! Proved by `tests/runtime.rs`'s
+//! `a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance`, which
+//! holds a real pass at its final `UPDATE`, observes the save **blocked on a
+//! lock** in `pg_stat_activity`, and asserts the advance survives the save.
 
 mod fire;
 mod sync;

@@ -1168,7 +1168,16 @@ async fn the_scheduler_gate_is_independent_of_the_worker_gate(pool: sqlx::PgPool
 /// trigger installed in this test's scratch database counts every *attempted*
 /// scheduled insert with `nextval`, which is non-transactional and so survives
 /// the savepoint rollback of an insert the index refused. Attempts == rows ==
-/// 30 means the lock held; attempts > rows means the index did the work.
+/// 30 means the lock held; attempts > rows means an insert was rolled back --
+/// with the lock gone, that is the index doing the work.
+///
+/// Measured (W12 Task 5): dropping only `SKIP LOCKED` survives with attempts
+/// == rows (a blocked claim re-reads the committed row, so the lock still
+/// excludes); dropping the whole lock dies here with 12-30 inserts absorbed
+/// and the rows still right; dropping the lock and the index dies on
+/// duplicate rows. The difference `attempts - rows` counts ANY rolled-back
+/// scheduled insert, not only an index refusal: with neither lock nor index,
+/// one run of three showed 1.
 #[sqlx::test(migrations = "../../migrations")]
 async fn two_scheduler_tickers_never_fire_one_tick_twice(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
@@ -1276,7 +1285,7 @@ async fn two_scheduler_tickers_never_fire_one_tick_twice(pool: sqlx::PgPool) {
     let rows = total().await;
     eprintln!(
         "two_scheduler_tickers: rows = {rows}, insert attempts = {attempts}, \
-         absorbed by the unique index = {}",
+         rolled back = {}",
         attempts - rows
     );
 
@@ -1297,10 +1306,11 @@ async fn two_scheduler_tickers_never_fire_one_tick_twice(pool: sqlx::PgPool) {
     assert_eq!(
         attempts,
         rows,
-        "the rows are right, but {} double fire(s) reached the INSERT and were \
-         absorbed by `workflow_executions_one_per_schedule_tick`: the claim's \
-         `FOR UPDATE OF t SKIP LOCKED` did not exclude the second replica. The \
-         index is the backstop, not the mechanism",
+        "the rows are right, but {} scheduled insert(s) were attempted and \
+         rolled back -- a double fire the claim's `FOR UPDATE OF t SKIP LOCKED` \
+         should have excluded, absorbed by \
+         `workflow_executions_one_per_schedule_tick`. The index is the \
+         backstop, not the mechanism",
         attempts - rows
     );
 }
