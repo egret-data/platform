@@ -7,7 +7,11 @@
 //! 2 = row-filter (`rowFilterPolicyItems`).
 
 mod error;
-mod ranger_json;
+// SP4a Task 4 (egret-perm's compiler) builds `AccessPolicyInput` values
+// directly and needs the struct fields — not just the editor-form
+// dispatchers re-exported below — so this submodule is public rather than
+// re-exporting the extra names one by one.
+pub mod ranger_json;
 mod reader;
 
 use axum::extract::{FromRef, Path, Query, State};

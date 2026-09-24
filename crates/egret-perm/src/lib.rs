@@ -3,11 +3,15 @@
 //! `policy.*` keeps serving raw Ranger JSON for hand-written profiles; `perm.*`
 //! is the model a later task COMPILES into it. One direction only — nothing in
 //! this crate reads Ranger JSON back into `perm`.
+pub mod actions;
+pub mod compile;
 pub mod error;
 pub mod eval;
 pub mod model;
 pub mod store;
 
+pub use actions::{engine_accesses, CompileError, EngineType};
+pub use compile::{compile_grant, CANONICAL_ADMIN_PRINCIPAL};
 pub use error::PermError;
 pub use eval::{evaluate, Decision, Reason, Subject};
 pub use model::{

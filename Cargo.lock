@@ -3475,8 +3475,10 @@ name = "egret-perm"
 version = "0.1.0"
 dependencies = [
  "egret-metastore",
+ "egret-policy",
  "egret-test-db",
  "serde",
+ "serde_json",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",

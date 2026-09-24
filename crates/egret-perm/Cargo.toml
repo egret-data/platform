@@ -15,8 +15,13 @@ uuid.workspace = true
 thiserror.workspace = true
 utoipa.workspace = true
 sqlx.workspace = true
+# Task 4: compiles a Grant into the Ranger AccessPolicyInput/AccessItemInput
+# shapes egret-policy's admin/ranger_json.rs already knows how to serialize —
+# the compiler builds those values and leaves rendering to that existing code.
+egret-policy.workspace = true
 
 [dev-dependencies]
 egret-metastore.workspace = true
 egret-test-db.workspace = true
 tokio.workspace = true
+serde_json.workspace = true
