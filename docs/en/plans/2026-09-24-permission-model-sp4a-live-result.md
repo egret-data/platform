@@ -1,5 +1,10 @@
 # SP4a Task 10 — the live gate: both engines, and the evaluator against reality
 
+> **Two runs live in this document.** What follows is the **FIRST** run, which found two Critical
+> defects. It is kept verbatim: the history of what failed is the point. The **SECOND RUN**, which
+> re-measures those two defects against the engine after Tasks 11 and 12, starts at
+> [SECOND RUN](#second-run--2026-09-24-re-measuring-the-two-critical-defects-after-tasks-11-and-12).
+
 **Measured:** 2026-09-24, kind context `kind-egret`, helm revision **62**, branch
 `feat/sp4a-permission-model` (`c90a9dad`).
 **Verdict:** the model, the store, the evaluator, the row filter, the path-selected mask and the
@@ -391,3 +396,402 @@ per recompile. The per-rule cap cannot see the profile total. A per-profile ceil
   was exercised only as a denial.
 - Group principals. D7 already settled this by mechanism (no group provider exists); nothing here
   re-opened it.
+
+---
+
+# SECOND RUN — 2026-09-24, re-measuring the two Critical defects after Tasks 11 and 12
+
+**Measured:** 2026-09-24, kind context `kind-egret`, helm revision **63**, branch
+`feat/sp4a-permission-model` (`414c2fe9`).
+**Why this run exists:** Task 11 closed both Critical defects and Task 12 added the profile-total
+ceiling, but Task 11's own leading concern was that *"nothing here re-ran the live gate, so the
+agreement is argued, not measured."* This section is the measurement. **The first run's record above
+is left untouched** — the history of what failed is the point.
+
+**Verdict:** both Critical defects are **closed against the live engine**. T1 (schema grant), the
+table-level grant and T3 (tag mask) now pass, every previously-passing case still passes, both
+ceilings refuse live, and evaluator/engine agreement went from **4/8 to 6/8** — the two that still
+disagree are the two the first run classified as semantics and a known blind spot, not as compiler
+bugs. The four StarRocks *query* cases are still **BLOCKED**, for a new and different reason that
+this run found and documents.
+
+## 0. The deploy, verified by the pod again
+
+The image the first gate ran (`sha256:05abd4b4a94e…`, built 09:20 UTC) predates all four fix commits
+(19:06–19:29 +07). It was rebuilt from `414c2fe9`, `kind load`ed, and helm-upgraded with all six
+`--set` values.
+
+```text
+helm upgrade … --set oidc.enabled=true --set ingress.enabled=true --set kernel.launcher=kubernetes \
+               --set backend.replicas=2 --set sharedStore.enabled=true --set ranger.enabled=true
+REVISION: 63   STATUS: deployed
+```
+
+| check | result |
+|---|---|
+| `helm get values` after the upgrade | all **six** user-supplied values present, `ranger.enabled: true` among them |
+| serving pods' `imageID` | `sha256:052699b15376ee5360ee3ae74ee013379cb8a71fb5729109a2f62ad859fe2ec0` on **both** `egret-5988b7-lvvkv` and `-xzmgx` — identical to the config digest `crictl images` reports for the freshly loaded `egret-backend:dev` (`052699b15376e`), which `kind load` announced as "not yet present on node … loading" |
+| `EGRET_RANGER__ENABLED` read from inside both running pods | `true` |
+| migrations | `_sqlx_migrations` max **155**, unchanged (no new migrations in Tasks 11/12) |
+| enforcement is real, not allow-all | `sp3c2-trino-live`'s coordinator carries `access-control.name=ranger`, `ranger.service.name=sp3c2-trino-live`, poll interval 30 000 ms |
+
+The subject is `analyst` again, not `admin`, for the same reason: the thirteen seeded `egret-admin`
+policies on profile 52 grant `*.*.*.*`. `SELECT current_user` as `analyst` → **`analyst`**, the bare
+username, measured not assumed.
+
+## 1. The two Critical defects, re-measured
+
+### T1 — PASS. A schema-level grant now grants
+
+The grant is the *same row* the first run measured — `42a57fd7`, `allow read` on
+`{catalog: sp4a10_wh, schema: sp4a}`, no table and no column. `POST /perm/compile/52` on the new
+image reported `created 0, updated 1, unchanged 5` — exactly one policy changed, and it is that one:
+
+```json
+"resources": { "catalog": {"values":["sp4a10_wh"]}, "schema": {"values":["sp4a"]},
+               "table":   {"values":["*"]},         "column": {"values":["*"]} }
+```
+
+After the plugin poll, as `analyst`:
+
+```text
+SELECT id, v FROM sp4a10_wh.sp4a.sibling ORDER BY id
+[[1,"alpha"],[2,"beta"]]
+```
+
+First run, same query, same grant: `Access Denied: Cannot select from columns [v, id] in table or
+view sibling`.
+
+### T1-table — PASS. The table-level grant too
+
+The schema grant was deleted and replaced with a **table**-level one (`e0182da4`,
+`{catalog, schema: sp4a, table: sibling}`, no column), which failed identically on the first run. It
+compiles to `table=["sibling"], column=["*"]` and:
+
+```text
+SELECT id, v FROM sp4a10_wh.sp4a.sibling ORDER BY id
+[[1,"alpha"],[2,"beta"]]
+```
+
+### T3 — PASS. The tag-selected mask masks
+
+A fresh tag rule (`rr-mask-pii`, `{kind: mask MASK, selector: {type: tag, key: pii}}`) against the
+same two tagged columns `sp4a.report.item` and `sp4a.report.country`.
+
+**Where the row is filed** — the assertion that matters, because the first run's *body* was already
+correct Ranger:
+
+```text
+perm-rule-3e9c3ce9-3484-47bf-b497-f1d14de450d1   service_id=51     ← sp3c2-trino-live_tag
+```
+
+51 is the **tag service**, not profile 52. First run: the same body sat under `service_id = 52`.
+
+**What the engine returned**, after the poll, as `analyst`:
+
+```text
+SELECT id, item, country FROM sp4a10_wh.sp4a.report ORDER BY id
+[[1,"xxxx","XX"],[2,"xxx","XX"],[3,"xxxx","XX"],[4,"xxxx","XX"]]
+```
+
+The literal values are `xxxx`, `xxx`, `xxxx`, `xxxx` for `item` and `XX` ×4 for `country` — Ranger's
+`MASK` transform, one `x` per lower-case letter and one `X` per upper-case one, which is why `pen`
+(3 letters) comes back as `xxx` and the rest as `xxxx`. **`book`, `pen`, `lamp`, `desk`, `US` and
+`VN` are all gone.** First run, same query, same rule shape: `book`, `pen`, `lamp`, `desk` — the real
+values.
+
+Both tagged columns are masked, so the tag *resolution* reaches every tagged column, not just the
+first.
+
+## 2. The tag service actually carries it now
+
+Read straight off the two downloads while the tag rule existed:
+
+| feed | first run | this run |
+|---|---|---|
+| `GET /service/plugins/policies/download/sp3c2-trino-live_tag` | `policyVersion 1`, **0 policies** | `policyVersion 2`, **1 policy** — `perm-rule-3e9c3ce9…`, `policyType 1`, `serviceType tag`, `resources {"tag":{"values":["pii"]}}` |
+| `GET /service/plugins/policies/download/sp3c2-trino-live` (the resource feed) | 22 policies, the **last one a `serviceType: tag` policy the Trino resource matcher can never match** | 22 policies, **`serviceType:tag` policies inside the profile feed: none** |
+| the resource feed's `tagPolicies` block | — | `serviceName sp3c2-trino-live_tag`, **1 policy**, the same `tag=["pii"]` mask |
+
+That last row is the part that actually makes the mask fire: the Trino plugin gets its tag policies
+through the `tagPolicies` block embedded in its own download, and that block is gated by the
+**profile's** version — which is why Task 11 had to bump both.
+
+**The sweep was measured too, not only the write.** Deleting the tag rule took the tag service's feed
+straight back to `policyVersion 7, 0 policies`. The delete case is the one that would otherwise leave
+a mask enforced forever one service over.
+
+## 3. Regression — everything that passed before still passes
+
+| # | case | observed now | verdict |
+|---|---|---|---|
+| T1b | the grant written down to `column:"*"` | `[[1,"book","US"],[2,"pen","VN"],[3,"lamp","US"],[4,"desk","VN"]]` — 4 rows, raw | **PASS** |
+| T2 | `deny` on one table, siblings still work | `secret` → `Access Denied: Cannot select from columns [note, id] in table or view secret`; `report` returns rows | **PASS** |
+| T3b | **path** mask on `report.item` | `[[1,"xxxx","US"],[3,"xxxx","US"]]` — `item` is the literal `xxxx` | **PASS** |
+| T4 | row filter `country = 'US'` | 4 rows → 2; `count(*)` → `[[2]]`; `WHERE country='VN'` → `[]` | **PASS** |
+
+The `WHERE country='VN'` probe returning **zero** rows is what distinguishes "the excluded rows are
+absent" from "there are merely fewer rows".
+
+Verbatim, for the two that carry literal values:
+
+```text
+SELECT id, item, country FROM sp4a10_wh.sp4a.report ORDER BY id   [[1,"xxxx","US"],[3,"xxxx","US"]]
+SELECT count(*)          FROM sp4a10_wh.sp4a.report               [[2]]
+SELECT id, country       FROM sp4a10_wh.sp4a.report WHERE country='VN'   []
+SELECT id, note          FROM sp4a10_wh.sp4a.secret ORDER BY id
+engine: Access Denied: Cannot select from columns [note, id] in table or view secret
+```
+
+So the shared resource-emission path that Task 11 widened for **access** policies did **not** widen
+the mask or the row-filter path: both still emit exactly the levels their selector names, and both
+still enforce.
+
+## 4. Both ceilings, live
+
+### The per-rule ceiling — PASS
+
+Isolated deliberately: every other rule was deleted first, so a successful compile would have left
+the profile at ~505 policies, well under the 1000 profile-total cap. A refusal here can therefore
+only be the per-rule cap.
+
+```text
+tagged columns : 501
+policies in profile 53 before: 4
+POST /perm/rules →
+{"error":"bad request: compiling rule \"rr-over-per-rule\" would expand to 501 entries, over the ceiling of 500"}
+policies in profile 53 after : 4
+rules now: []
+```
+
+Refused, named the rule and the count, wrote nothing, and did not create the rule either.
+
+### The profile-total ceiling — PASS, and it closes the first run's open gap
+
+The first run's finding was that four rules of 500 columns compiled **2006 policies with no refusal
+at all**, because the cap was per-rule and could not see the profile total. Re-measured with
+**4 rules × 300 columns** — 1200 expansions, every rule comfortably under its own 500 cap:
+
+```text
+tagged columns : 300
+rr-bulk-2  → created 601   profile 53 now holds 604 policies
+rr-bulk-3  → created 301   profile 53 now holds 904 policies
+rr-bulk-4  →
+{"error":"bad request: recompiling profile \"sp4a10-sr\" would total 1204 compiler-owned policies, over the profile-total ceiling of 1000"}
+           profile 53 still holds 904 policies
+```
+
+The message names the **profile** (`sp4a10-sr`) and the **total** (1204 = 4 × 300 + the 4 grants),
+not a rule — which is the point, since no rule is over its own cap. Nothing was written and the rule
+was not created.
+
+## 5. The evaluator against the engine — 6 of 8 now agree
+
+`POST /api/control-plane/perm/explain` was run for every case in this section, against the same model
+the engine was holding at the time.
+
+| # | subject / action / target | `explain` | engine | first run | now |
+|---|---|---|---|---|---|
+| E1 | `analyst` read `sp4a.sibling.v`, **schema**-level grant | `allowed: true`, `allowed_by_grant 42a57fd7` | 2 rows returned | **NO** | **YES** |
+| E1b | `analyst` read `sp4a.sibling.v`, **table**-level grant | `allowed: true`, `allowed_by_grant e0182da4` | 2 rows returned | (not run) | **YES** |
+| E2 | `analyst` read `sp4a.report` (no column named) | `allowed: false`, `no_grant_matched` | the `SELECT` succeeds | NO | **NO** |
+| E3 | `analyst` read `sp4a.report.item` | `allowed: true`, `masked_by_rule ce087d1f (MASK)`, `filtered_by_rule 24ff945b (country = 'US')`, `tags:["pii"]` | allowed, `item` = `xxxx`, 2 US rows | YES | **YES** |
+| E4 | `analyst` read `sp4a.report.country` (**tag**-masked) | `allowed: true`, `masked_by_rule 3e9c3ce9 (MASK)`, `tags:["pii"]` | allowed, `country` = **`XX`** | **NO** | **YES** |
+| E5 | `analyst` read `sp4a.secret` | `allowed: false`, `no_grant_matched` | denied | YES | **YES** |
+| E6 | `analyst` read `sp4a.secret.note` | `allowed: false`, `explicit_deny ea5109d4` | `Access Denied: Cannot select from columns [note, id]` | YES | **YES** |
+| E7 | `analyst` **write** `sp4a.report.*` | `allowed: false`, `no_grant_matched` | `Access Denied: Cannot insert into table report` | YES | **YES** |
+| E8 | `admin` read `sp4a.report.item` | `allowed: false`, `no_grant_matched`, `tags:["pii"]` | allowed (seeded `egret-admin` policy) | NO | **NO** |
+
+**Agreement: 6 of 8** (E1, E3, E4, E5, E6, E7), up from 4 of 8. Both of the disagreements the first
+run attributed to the **compiler** — E1 and E4 — are gone, and they are gone because the engine moved
+to the evaluator's answer, not because the test moved.
+
+The two that remain are the two the first run did not blame on the compiler, and **neither was
+adjusted to make it agree**:
+
+- **E2** — `explain` is stricter than the engine. A grant scoped to `column:"*"` still does not make
+  `explain` allow a *table*-granularity read. The caveat from the first run stands unchanged: Trino
+  has no table-level `select` a query can trigger without naming columns, so the engine column here
+  is the same `SELECT` as E3. It is a semantic question for SP4b's UI, not a defect measured here.
+- **E8** — `explain` is blind to hand-written policy. It evaluates the `perm` model only, so every
+  decision an engine makes from an `authz_policies` row the compiler did not write — including the
+  thirteen auto-seeded `egret-admin` policies on every profile — is invisible to it. Unchanged by
+  Tasks 11/12, and unchanged here.
+
+## 6. StarRocks — still BLOCKED, for a different reason, and the first blocker is gone
+
+The first run's blocker was the CN never joining: every new StarRocks engine gets a random `root`
+password while the CN image's entrypoint registers itself as `root` with none. **That one is now
+worked around**, cheaply and without touching egret: the StarRocks operator's CR takes a CN env
+block, and the CN entrypoint honours `MYSQL_PWD`.
+
+```bash
+kubectl patch starrockscluster sp3c2-sr-live -n egret-engines --type=merge -p \
+ '{"spec":{"starRocksCnSpec":{"cnEnvVars":[{"name":"MYSQL_PWD","valueFrom":
+   {"secretKeyRef":{"name":"sp3c2-sr-live-initpwd-secret","key":"password"}}}]}}}'
+```
+
+The CN came up on the next reconcile and joined:
+
+```text
+SHOW COMPUTE NODES\G
+ComputeNodeId: 10001   Alive: true   Version: 4.1.3-8a8e186   CpuCores: 8   MemLimit: 12.649GB
+```
+
+That is worth recording on its own: the provisioning bug is a **missing env var**, not a missing
+feature, and the one-line remedy is already expressible in the CR egret renders.
+
+### The new blocker — attaching a Ranger profile stops the FE from starting
+
+To make StarRocks *enforce* at all, the FE must be rendered with `access_control = ranger`, which
+egret does only for an engine whose `authz_service_id` is set — and `ranger_service_name` is derived
+from the **engine name** (`engines.rs:3157`), so the first run's `UPDATE … authz_service_id = 53`
+(profile `sp4a10-sr`) could never have matched a service the FE polls. A profile named after the
+engine was created (`sp3c2-sr-live`, id 54) and the engine re-bound to it.
+
+Two things then happened, both recorded as findings:
+
+1. **`authzServiceId` is accepted on the update body and silently ignored.** `PUT /engines/{id}` with
+   `authzServiceId: 54` returned 200 and left `authz_service_id = 53`. This is the first run's
+   finding 3 seen from the API side: the field is documented as "Link the new engine to an EXISTING
+   Ranger profile" with no hint that it is create-only, and a caller gets a success for a no-op.
+   Binding still required `UPDATE engine_mgmt.engines SET authz_service_id = 54`.
+2. **Once bound, the FE cannot start.** egret renders the Ranger config into a ConfigMap mounted
+   **on `/opt/starrocks/fe/conf`** — the very directory the FE entrypoint symlinks `fe.conf` into:
+
+   ```text
+   volumeMounts:
+     - mountPath: /etc/starrocks/fe/conf   name: sp3c2-sr-live-fe-cm
+     - mountPath: /opt/starrocks/fe/conf   name: sp3c2-sr-live-ranger-cm-2123
+   ```
+
+   ```text
+   [Thu Sep 24 12:56:31 UTC 2026] Process conf file fe.conf ...
+   ln: failed to create symbolic link '/opt/starrocks/fe/conf/fe.conf': Read-only file system
+   grep: /opt/starrocks/fe/conf/fe.conf: No such file or directory
+   [Thu Sep 24 12:56:31 UTC 2026] first start fe with meta not exist.
+   ```
+
+   The mount is read-only and shadows the directory, so the FE never reads its own config. The
+   `-fe-cm` ConfigMap *does* already carry `access_control = ranger`, so the intent is right and only
+   the mount point is wrong.
+
+   **Worked around**, again cluster-side only: the `fe.conf` key was copied from `-fe-cm` into
+   `-ranger-cm`, so the shadowing directory carries all three files. The FE then started and its
+   Ranger plugin came up. No egret code was changed — this is recorded as a finding, not a fix.
+
+3. **The FE lost its metadata across that restart** (`first start with no meta`), so both Iceberg
+   catalogs vanished. `POST /engines/{id}/catalogs/{cid}/apply` put `sp4a10_wh` back
+   (`{"status":"applied","error":null}`) and a CN restart re-registered the compute node.
+
+### What WAS measured on StarRocks — the first live StarRocks Ranger enforcement in this programme
+
+With profile 54 bound, egret's own download feeding the FE, and `analyst` as a StarRocks user:
+
+```text
+fe.log:
+[RangerPolicyRepository.init():930] This policy engine contains 19 policy evaluators
+   (PolicyRefresher(serviceName=sp3c2-sr-live))
+```
+
+19 = the 13 seeded `egret-admin` policies + the 6 the `perm` compiler wrote. The plugin is polling
+egret and loading the compiled model.
+
+The Iceberg **data** read is blocked by an unrelated S3 failure (below), but the authorization
+decision happens at **planning**, before any S3 request — so the two failures are distinguishable,
+and that makes a real enforcement probe possible:
+
+```text
+SELECT count(*) FROM sp4a10_wh.sp4a.report   (allow read report.*)
+ERROR 1064 (HY000): Bad Request (Service: S3, Status Code: 400, …)          ← authorization PASSED
+
+SELECT count(*) FROM sp4a10_wh.sp4a.secret   (allow + deny → deny wins)
+ERROR 5204 (42000): Access denied; you need (at least one of) the SELECT privilege(s)
+                    on COLUMN ___count___ for this operation.                ← DENIED by the model
+
+SELECT count(*) FROM sp4a10_wh.sp4a.sibling  (TABLE-level grant, no column named)
+ERROR 1064 (HY000): Bad Request (Service: S3, Status Code: 400, …)          ← authorization PASSED
+```
+
+So on StarRocks, live: **the compiled `deny` is enforced, the compiled `allow` is not blocking, and
+the Task 11 table-level widening works on the `database`-named chain too.** `S2` is effectively
+observed; `S1` is observed as far as the authorization decision and no further.
+
+`DESC` was tried first and rejected as an instrument: it returned the column list for `secret` too,
+so it is not Ranger-gated and could not have distinguished anything. Recorded because a run that had
+stopped at `DESC` would have reported a pass while measuring nothing.
+
+### Why the data read fails — pre-existing, not SP4a's
+
+```text
+SHOW CREATE CATALOG sp4a10_wh
+PROPERTIES ("iceberg.catalog.type" = "rest",
+            "iceberg.catalog.uri"  = "http://egret.egret-system.svc.cluster.local:8080/catalog", …)
+```
+
+The catalog carries no `aws.s3.*` properties at all, so StarRocks falls back to the FE's own
+`aws_s3_endpoint = http://minio:9000` from `fe.conf` — the same unresolvable-from-`egret-engines`
+address the first run recorded for `sp3c_live_wh` — and every object read comes back
+`S3, Status Code: 400`. Same family as the first run's `ICEBERG_FILESYSTEM_ERROR`, and again not
+caused by this branch.
+
+### StarRocks verdict
+
+| # | case | verdict |
+|---|---|---|
+| S1 | grant `read` on a schema/table → query succeeds | **PARTIAL** — authorization passes; the read fails on S3 |
+| S2 | `deny` on one table, siblings still work | **PASS** — `ERROR 5204 … Access denied`, verbatim above |
+| S3 | per-column tag mask returns masked values | **BLOCKED** — needs rows |
+| S4 | row filter removes rows | **BLOCKED** — needs rows |
+
+The per-column **expansion** itself was re-observed at the policy layer during T3: one tag rule
+compiled to `perm-rule-3e9c3ce9-…-sp4a10_wh.sp4a.report.item` and `…report.country` under the
+StarRocks profile, next to the single tag-keyed policy under Trino's tag service. D5's asymmetry,
+again.
+
+## 7. Cross-checks this run repeated on purpose
+
+- **`demo-trino` was not used and is untouched.** Its profile holds **15** policies and **0**
+  compiler-owned (`perm-grant-%`/`perm-rule-%`) rows, and its pod's restart count is unchanged. This
+  is a real improvement over the first run, where creating one tag rule wrote a policy into
+  `demo-trino`'s profile: a Trino profile whose `tagService` names no `policy.authz_services` row now
+  lands in the `MissingTagService` **skip**, verbatim from the compile response:
+
+  ```text
+  "skipped":[{"source_kind":"rule","id":"3e9c3ce9-…",
+    "reason":"profile has no usable `tagService` (unconfigured, or naming a profile that does not
+              exist), so tag rule \"rr-mask-pii\" cannot compile here"}]
+  ```
+
+- **The engine was confirmed to be enforcing before anything was trusted.** `access-control.name` on
+  `sp3c2-trino-live` is `ranger`, not `allow-all`; the first denial measured in this run
+  (`Cannot select from columns [note, id] … secret`) is a Ranger denial.
+
+- **Terminal query state is `finished`.** The polling loop accepts `finished`; a loop waiting for
+  `succeeded` would have reported timeouts for queries that had already returned.
+
+## 8. What this run did NOT settle
+
+- **S3 and S4 on StarRocks** — no rows can be read at all until the Iceberg catalog carries its own
+  S3 addressing. The per-column tag expansion remains verified only at the policy layer.
+- **E2 and E8** remain disagreements and are reported, not resolved. Neither test was adjusted.
+- **`write` beyond the `INSERT` denial of E7.** SP4a's `write` → `insert,delete` mapping is still
+  exercised only as a denial on Trino and not at all on StarRocks.
+- **Group principals.** Unchanged; no group provider exists.
+- **The ceiling *curve*** (§5 of the first run) was not re-measured — Task 12 did not change the
+  compiler's cost, only the refusal, and the refusal is what this run measured.
+
+## 9. New findings this run produced
+
+1. **`PUT /engines/{id}` accepts `authzServiceId` and silently ignores it.** 200 OK, no change. The
+   schema documents it as "Link the new engine to an EXISTING Ranger profile" with nothing saying
+   create-only. A caller cannot tell a no-op from a bind.
+2. **Binding a StarRocks engine to a Ranger profile stops its FE from starting** — the Ranger
+   ConfigMap is mounted *on* `/opt/starrocks/fe/conf`, shadowing `fe.conf`. This is almost certainly
+   why StarRocks Ranger enforcement had never been observed live before today.
+3. **The StarRocks CN root-password blocker has a one-line remedy** — `MYSQL_PWD` in
+   `starRocksCnSpec.cnEnvVars`, which the CR egret renders can already express.
+4. **A StarRocks Iceberg REST catalog is rendered with no `aws.s3.*` properties**, so object reads
+   fall back to the FE's own `aws_s3_endpoint` and fail with `S3, Status Code: 400`.
+
+None of the four is SP4a's, and none was fixed here.
