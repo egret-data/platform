@@ -657,3 +657,167 @@ async fn a_tick_that_already_fired_is_consumed_not_taken_off_the_queue() {
     let err = after.last_error.expect("the duplicate is noted");
     assert!(err.contains("already has an execution"), "{err}");
 }
+
+async fn spec_key_of(db: &Db, flow: Uuid, trig: &str) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT spec_key FROM workflow.triggers WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .fetch_optional(&db.pool)
+    .await
+    .unwrap()
+}
+
+async fn db_now(db: &Db) -> DateTime<Utc> {
+    sqlx::query_scalar("SELECT now()")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+/// Final review I2. Under `FOR UPDATE OF t`, a claim that waited on a save
+/// re-reads the NEWEST `t` but keeps its snapshot's `f`, so the pass can hold
+/// an old cron beside a row `sync` wrote for a new one. Firing then writes the
+/// old cron's dates under the new `spec_key`, for good -- a same-key save
+/// keeps dates. That race cannot be staged deterministically; its signature
+/// can: a row whose `spec_key` disagrees with the cron in the source the claim
+/// read. The pass must not fire it, must not advance it, and must re-sync.
+#[tokio::test]
+async fn a_spec_key_that_disagrees_with_the_source_does_not_fire_and_resyncs() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&flow_yaml("stale", "", "")).await;
+    let own_key = spec_key_of(&fx.db, flow, "s").await.expect("a row");
+    assert_eq!(own_key, "*/1 * * * *|false|", "control: the key sync wrote");
+    // Three ticks behind: an advance by `tick` would land in the PAST
+    // (due + 1 min), a re-initialisation by `sync` in the future, so the two
+    // cannot be confused below.
+    common::make_due(&fx.db, flow, "s", 3).await;
+    sqlx::query("UPDATE workflow.triggers SET spec_key = '0 2 * * *|false|' WHERE flow_id = $1")
+        .bind(flow)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            frozen: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(executions_of(&fx.db, flow).await, 0, "nothing fired");
+    assert_eq!(
+        spec_key_of(&fx.db, flow, "s").await.as_deref(),
+        Some(own_key.as_str()),
+        "sync re-ran and wrote the source's key back"
+    );
+    let after = row(&fx.db, flow).await.unwrap();
+    assert_eq!(after.evaluated_at, None, "no tick was evaluated");
+    let next = after.next_evaluation_date.expect("on the queue");
+    assert!(
+        next > db_now(&fx.db).await,
+        "re-initialised by sync to a future tick, not advanced by tick: {next}"
+    );
+}
+
+/// The other half of spec §4 point 5 that had no test: the claimed row's
+/// `trigger_id` is no longer declared by the source (renamed behind the
+/// row's back). Frozen, and `sync` replaces the row with the declared one.
+#[tokio::test]
+async fn an_undeclared_trigger_id_does_not_fire_and_resyncs() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&flow_yaml("renamed", "", "")).await;
+    common::make_due(&fx.db, flow, "s", 1).await;
+    let renamed = flow_yaml("renamed", "", "").replace("  - id: s\n", "  - id: s2\n");
+    assert!(renamed.contains("id: s2\n"), "control: the rename landed");
+    egret_workflow::spec::parse(&renamed).expect("the renamed source parses");
+    // Raw SQL, so the row `s` survives and only the pass can notice.
+    sqlx::query("UPDATE workflow.flows SET source = $2 WHERE id = $1")
+        .bind(flow)
+        .bind(&renamed)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            frozen: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(executions_of(&fx.db, flow).await, 0);
+    assert_eq!(row(&fx.db, flow).await, None, "the undeclared row is gone");
+    assert!(
+        spec_key_of(&fx.db, flow, "s2").await.is_some(),
+        "and the declared one exists"
+    );
+}
+
+/// Final review I3, the user's decision of 2026-09-25: a workspace whose
+/// `workflows` feature is OFF fires nothing, and its schedules FREEZE -- no
+/// tick consumed -- so turning the feature back on recovers every missed tick
+/// under `ALL`, like every other off switch. "Off" is read from the table the
+/// route gate reads (`workspace_features`, `enabled = false`).
+#[tokio::test]
+async fn a_workspace_with_workflows_off_freezes_its_schedules() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&flow_yaml("feature_off", "", "")).await;
+    // Another workspace, feature on: the switch is per workspace.
+    let (other_ws, other_user) = common::seed_workspace(&fx.db).await;
+    let other = common::seed_flow(
+        &fx.db,
+        other_ws,
+        other_user,
+        &flow_yaml("feature_on", "", ""),
+        "draft",
+    )
+    .await;
+    common::make_due(&fx.db, flow, "s", 3).await;
+    common::make_due(&fx.db, other, "s", 1).await;
+    let first = due_date(&fx.db, flow).await;
+    common::disable_feature(&fx.db, fx.ws, "workflows").await;
+    let before = row(&fx.db, flow).await.unwrap();
+
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            fired: 1,
+            ..Default::default()
+        },
+        "only the other workspace's trigger"
+    );
+    assert_eq!(executions_of(&fx.db, other).await, 1);
+    assert_eq!(common::execution_count(&fx.db, fx.ws).await, 0);
+    assert_eq!(
+        row(&fx.db, flow).await.unwrap(),
+        before,
+        "frozen: never claimed, so not even `updated_at` moved"
+    );
+
+    sqlx::query(
+        "UPDATE workspace_features SET enabled = true \
+         WHERE workspace_id = $1 AND feature = 'workflows'",
+    )
+    .bind(fx.ws)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    for i in 1..=3 {
+        assert_eq!(
+            fx.pass().await,
+            PassReport {
+                fired: 1,
+                ..Default::default()
+            },
+            "pass {i} after the feature came back"
+        );
+    }
+    let want: Vec<_> = (0..3).map(|k| first + Duration::minutes(k)).collect();
+    assert_eq!(
+        common::scheduled_dates(&fx.db, flow).await,
+        want,
+        "every tick missed while off is recovered"
+    );
+}

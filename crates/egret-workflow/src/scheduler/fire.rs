@@ -23,6 +23,13 @@ fn db_err(e: sqlx::Error) -> Error {
 /// matched by `workflow_executions_scheduled_date_iff_schedule`.
 const SCHEDULE_TYPE: &str = "io.kestra.plugin.core.trigger.Schedule";
 
+/// The per-workspace feature key whose OFF row freezes every schedule in the
+/// workspace (final review I3). Read from `workspace_features`, the table the
+/// route gate in `egret_workspace::context` (`WsContext`) reads through
+/// `WorkspaceRepo::disabled_features`, with the same rule: an absent row is ON,
+/// only `enabled = false` is OFF. Tied to the catalog by a unit test below.
+const WORKFLOWS_FEATURE: &str = "workflows";
+
 /// What one pass did, one count per claimed trigger.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct PassReport {
@@ -37,8 +44,11 @@ pub struct PassReport {
     /// parse, resolve or plan) or, for any other failure, its dates were left
     /// alone so the next pass retries the same tick.
     pub errored: usize,
-    /// The source says the trigger is off although the row said on: nothing
-    /// fired, nothing moved, and `sync` re-ran for the flow.
+    /// Nothing fired and nothing moved. Either the source disagrees with the
+    /// row -- the trigger is off, no longer declared, or its `spec_key` is not
+    /// the row's -- and `sync` re-ran for the flow; or `tick` declined a row
+    /// the claim found due (`NotDue`/`NotSchedulable`), which should not
+    /// happen and is logged at warn.
     pub frozen: usize,
 }
 
@@ -47,6 +57,10 @@ pub struct PassReport {
 struct Claimed {
     flow_id: Uuid,
     trigger_id: String,
+    /// What `sync` last wrote. Compared with the source's own (final review
+    /// I2): under `FOR UPDATE OF t` a claim that waited re-reads the NEWEST
+    /// `t` but keeps its snapshot's `f`, so the two can disagree.
+    spec_key: String,
     next_evaluation_date: Option<DateTime<Utc>>,
     evaluated_at: Option<DateTime<Utc>>,
     workspace_id: Uuid,
@@ -81,7 +95,7 @@ pub async fn fire_due(pool: &PgPool) -> Result<PassReport> {
     loop {
         let mut tx = pool.begin().await.map_err(db_err)?;
         let claimed: Option<Claimed> = sqlx::query_as(
-            "SELECT t.flow_id, t.trigger_id, t.next_evaluation_date, t.evaluated_at, \
+            "SELECT t.flow_id, t.trigger_id, t.spec_key, t.next_evaluation_date, t.evaluated_at, \
                     f.workspace_id, f.source, f.namespace, f.flow_id AS flow_key, \
                     now() AS db_now \
                FROM workflow.triggers t JOIN workflow.flows f ON f.id = t.flow_id \
@@ -89,6 +103,9 @@ pub async fn fire_due(pool: &PgPool) -> Result<PassReport> {
                 AND NOT t.disabled \
                 AND f.deleted_at IS NULL \
                 AND f.state <> 'disabled' \
+                AND NOT EXISTS (SELECT 1 FROM workspace_features wf \
+                                 WHERE wf.workspace_id = f.workspace_id \
+                                   AND wf.feature = $3 AND NOT wf.enabled) \
                 AND (t.flow_id, t.trigger_id) NOT IN \
                     (SELECT * FROM unnest($1::uuid[], $2::text[])) \
               ORDER BY t.next_evaluation_date \
@@ -97,6 +114,7 @@ pub async fn fire_due(pool: &PgPool) -> Result<PassReport> {
         )
         .bind(&seen_flows)
         .bind(&seen_ids)
+        .bind(WORKFLOWS_FEATURE)
         .fetch_optional(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -131,14 +149,21 @@ async fn fire_one(conn: &mut PgConnection, c: &Claimed) -> Result<Fate> {
         .find(|t| t.id == c.trigger_id && matches!(t.kind, TriggerKind::Schedule(_)));
     // The source read under the lock is the authority and the row is a copy
     // (spec §4 point 5). When the copy says "on" and the source says "off" --
-    // or no longer declares this schedule at all -- nothing fires, the dates
-    // stay, and `sync` puts the copy right.
-    let Some(trigger) = trigger.filter(|t| !flow.disabled && !t.disabled) else {
+    // or no longer declares this schedule at all, or declares it with a cron
+    // the copy's `spec_key` does not describe -- nothing fires, the dates
+    // stay, and `sync` puts the copy right. The last case is the stale-`f`
+    // race (final review I2): firing would evaluate the old cron against the
+    // new row and store its dates under the new key for good. `resync` is a
+    // fresh statement, so it reads the committed source.
+    let declared = trigger
+        .filter(|t| !flow.disabled && !t.disabled)
+        .and_then(|t| match &t.kind {
+            TriggerKind::Schedule(s) if super::sync::spec_key(s) == c.spec_key => Some((t, s)),
+            _ => None,
+        });
+    let Some((trigger, schedule)) = declared else {
         resync(conn, c.flow_id).await?;
         return Ok(Fate::Frozen);
-    };
-    let TriggerKind::Schedule(schedule) = &trigger.kind else {
-        unreachable!("found as a schedule above")
     };
     let resolved = match ScheduleTrigger::resolve(trigger) {
         Ok(r) => r,
@@ -162,10 +187,23 @@ async fn fire_one(conn: &mut PgConnection, c: &Claimed) -> Result<Fate> {
 
     let (fate, last_error) = match t.outcome {
         // The claim's `WHERE` and `tick` read the same `now()`, and a
-        // disabled trigger returned above, so neither can happen; if one did,
-        // the state is unchanged and there is nothing to write.
-        TickOutcome::NotDue => return Ok(Fate::Skipped),
-        TickOutcome::NotSchedulable(_) => return Ok(Fate::Frozen),
+        // disabled trigger returned above, so neither can happen. If one did,
+        // nothing is written: the row stays due, is claimed again next pass,
+        // and says so here every time rather than passing as a quiet skip.
+        declined @ (TickOutcome::NotDue | TickOutcome::NotSchedulable(_)) => {
+            let outcome = format!("{declined:?}");
+            // Loud in a debug build, so a test that ever reaches this fails.
+            if cfg!(debug_assertions) {
+                panic!("tick declined a claimed trigger: {outcome}");
+            }
+            tracing::warn!(
+                flow_id = %c.flow_id,
+                trigger_id = %c.trigger_id,
+                outcome,
+                "tick declined a trigger the claim found due; nothing written"
+            );
+            return Ok(Fate::Frozen);
+        }
         TickOutcome::Skipped(reason) => (Fate::Skipped, Some(format!("skipped: {reason:?}"))),
         // Refused inputs consume the tick (spec §5): the dates advance
         // exactly as `tick` computed them, and no execution is created.
@@ -174,7 +212,17 @@ async fn fire_one(conn: &mut PgConnection, c: &Claimed) -> Result<Fate> {
             Started::Yes => (Fate::Fired, None),
             // The unique index says this tick already has its execution: the
             // tick is consumed, not refired and not taken off the queue.
-            Started::AlreadyFired(why) => (Fate::Skipped, Some(why)),
+            // Under statement 1 of `scheduler`'s safety section this never
+            // happens, so it is a warning, not a routine skip.
+            Started::AlreadyFired(why) => {
+                tracing::warn!(
+                    flow_id = %c.flow_id,
+                    trigger_id = %c.trigger_id,
+                    scheduled_date = %e.scheduled_date,
+                    "a schedule tick that already has an execution was claimed again; consumed"
+                );
+                (Fate::Skipped, Some(why))
+            }
             // Deterministic in the source: only the author's next save helps.
             Started::Refused(why) => {
                 take_off_queue(conn, c, &why).await?;
@@ -418,6 +466,16 @@ mod tests {
         assert_eq!(
             schedule_trigger_record(&e)["variables"]["date"],
             "2026-09-24T07:42:00.000000Z"
+        );
+    }
+
+    /// The claim's feature predicate reads the key the route gate gates on.
+    #[test]
+    fn the_feature_key_is_the_one_the_route_gate_uses() {
+        assert!(egret_workspace::features::is_known(WORKFLOWS_FEATURE));
+        assert_eq!(
+            egret_workspace::features::gated_feature("workflows/flows", "GET"),
+            Some(WORKFLOWS_FEATURE)
         );
     }
 
