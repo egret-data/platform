@@ -49,16 +49,29 @@ cho mỗi engine.
 **D3 — Một họ permission (permission family) duy nhất.** `warehouse_admin` và các endpoint
 resource-tag chuyển sang `catalog_registry:*`, và một migration cấp
 `catalog_registry:{read,create,update,delete}` cho mọi role đang giữ `warehouse:*` tương ứng,
-trước khi các key cũ bị bỏ. Không ai được thêm quyền truy cập, không ai mất nó. **Lệnh cấp quyền đó
+trước khi các key cũ bị bỏ. ~~Không ai được thêm quyền truy cập, không ai mất nó.~~ **Đúng một nửa,
+sửa ngày 2026-09-24 bởi bản review toàn nhánh.** Không ai *mất* quyền — lệnh cấp lại của `0153` bảo
+đảm điều đó. Nhưng có người *được thêm*: `catalog_registry:*` đã tồn tại từ `0148`, nên một platform
+role tạo ra từ đó tới nay mà giữ nó và chưa bao giờ giữ `warehouse:*` — tức là "catalog operator" tự
+nhiên, vì mục Catalogs được gác bằng `catalog_registry:read` — nay với tới luôn 27 route
+`warehouse_admin`: duyệt namespace và bảng trong lakehouse, tạo và xoá warehouse, cấp và thu hồi
+Catalog Client, vốn là credentials thật của data lake. Chấp nhận (người dùng quyết, 2026-09-23): bề
+mặt đó giờ thuộc về catalog, vì các tab của nó nằm trên trang catalog. Nhưng bốn mô tả permission
+trong `egret-core/src/rbac.rs` **phải nói đúng điều đó**, vì đó là thứ một admin đọc trước khi cấp
+quyền — mọi review theo từng task chỉ kiểm chiều "không ai bị khoá ngoài", và không review nào trong
+số đó có thể bắt được chuyện này, bởi không task đơn lẻ nào vừa tạo ra nhóm người dùng đó vừa nới
+rộng cái cổng. **Lệnh cấp quyền đó
 phải được migration của chính SP3c-2 chạy lại, không được coi là đã xong** (sửa 2026-09-23):
 migration `0148` đã chạy nó một lần, trong quá khứ, nên mọi role tạo ra từ đó tới nay giữ
 `warehouse:*` mà không có `catalog_registry:*` tương ứng — `warehouseRedirect.test.tsx:140-173` là
 cả một khối describe về đúng nhóm này. Cấp rồi mới xoá, trong một transaction, theo đúng thứ tự đó.
 **Re-gate chứ không re-tag**: các route giữ nguyên path và giữ nguyên OpenAPI tag; chỉ chuỗi
 `require()` và mô tả 403 thay đổi (§4 bước 4).
-`catalog_registry:read` được thêm vào `CONTROL_PLANE_PERMS` trong cùng thay đổi loại bỏ
-`warehouse:read` khỏi đó, để không user nào có thể bị khoá ngoài (locked out) trong khoảng giữa
-hai việc đó.
+`catalog_registry:read` được thêm vào `CONTROL_PLANE_PERMS` ở **SP3c-1**, cùng lúc với mục mà nó
+gác, còn `warehouse:read` chỉ bị loại khỏi đó ở **SP3c-2**, cùng với chính permission đó. Trong
+khoảng giữa, cả hai key cùng nằm trong danh sách — và đó chính là thứ tự an toàn: ai giữ một trong
+hai key đều luôn vào được Control Plane, và không tồn tại khoảng thời gian nào mà không key nào cho
+họ vào.
 
 **D4 — Test nói đúng thứ nó đã test.** Với một engine đã attach, `SHOW SCHEMAS FROM <name>` thông
 qua engine đó. Không có engine nào, thì là một kiểm tra khả năng tiếp cận (reachability) TCP tới
