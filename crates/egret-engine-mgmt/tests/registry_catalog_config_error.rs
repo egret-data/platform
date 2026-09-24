@@ -89,6 +89,7 @@ async fn setup() -> Option<Fixture> {
             ranger_enabled: false,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(FakeStarRocksDdl::default()),
+            perm_compiler: None,
         });
 
     Some(Fixture {

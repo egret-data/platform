@@ -239,6 +239,28 @@ impl egret_kernel::engine_conn::EngineConnResolver for EngineConnResolverImpl {
 /// names. Backed by `EngineMgmtStore`; the composition root is the only place the
 /// two seams meet (the Policies module depends on `EngineBindingReader`, not on
 /// `egret-engine-mgmt`).
+/// The engine seam's `ProfileCompilerPort`, implemented here in the
+/// composition root (SP4a Task 9 review).
+///
+/// It cannot live in `egret-engine-mgmt`: the compiler is `egret-perm-compile`,
+/// which depends on `egret-policy`, and keeping `egret-policy`'s internals out
+/// of the engine seam's production graph is the whole reason
+/// `egret-policy-api::PolicyPort` exists there. Same shape, opposite direction,
+/// as `EngineBindingReaderImpl` below.
+struct ProfileCompilerImpl {
+    perm: egret_perm::PermStore,
+    policy: egret_policy::PolicyStore,
+}
+
+#[async_trait::async_trait]
+impl egret_engine_mgmt::ProfileCompilerPort for ProfileCompilerImpl {
+    async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::recompile_service(&self.perm, &self.policy, service_id)
+            .await
+            .map(|_| ())
+    }
+}
+
 struct EngineBindingReaderImpl {
     store: egret_engine_mgmt::EngineMgmtStore,
     /// Resolves a warehouse's lakekeeper id + browses its catalog metadata
@@ -2015,6 +2037,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // The real DDL runner (design D8): a live `mysql_async` connection per
         // statement. Tests substitute `FakeStarRocksDdl`.
         starrocks_ddl: std::sync::Arc::new(egret_engine_mgmt::MysqlDdlRunner),
+        // Binding an engine to a profile changes which catalogs that profile
+        // reaches, and no grant/rule mutation covers it — so the bind brings
+        // the profile's compiled policies up to date itself rather than
+        // leaving it stale until someone calls the manual trigger.
+        perm_compiler: Some(std::sync::Arc::new(ProfileCompilerImpl {
+            perm: egret_perm::PermStore::new(db.pool.clone()),
+            policy: egret_policy::PolicyStore::new(db.clone()),
+        })),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

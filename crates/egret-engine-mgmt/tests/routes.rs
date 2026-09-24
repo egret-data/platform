@@ -37,6 +37,28 @@ struct Fixture {
     /// holding this handle doesn't have its recorded state silently
     /// discarded by a mid-test rebuild (fix round 1 review, F-8).
     starrocks_ddl: FakeStarRocksDdl,
+    /// The SP4a profile compiler `f.app` was built with (`None` for every test
+    /// that does not care), threaded through the rebuilds for the same reason
+    /// `starrocks_ddl` is.
+    perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
+}
+
+/// Records which profiles the engine seam asked to have recompiled. The
+/// compiler itself is covered by `egret-perm-compile`'s own suite; what is new
+/// here — and what this fake is for — is that an engine BIND reaches it at all,
+/// with the right `service_id`, and only once every catalog the engine attaches
+/// is attached.
+#[derive(Clone, Default)]
+struct RecordingProfileCompiler {
+    calls: Arc<std::sync::Mutex<Vec<i64>>>,
+}
+
+#[async_trait::async_trait]
+impl egret_engine_mgmt::ProfileCompilerPort for RecordingProfileCompiler {
+    async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        self.calls.lock().unwrap().push(service_id);
+        Ok(())
+    }
 }
 
 /// Incidental PDP for `EngineMgmtState`: every existing route test authenticates
@@ -77,6 +99,7 @@ fn build_app(
     pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     ranger_enabled: bool,
     starrocks_ddl: FakeStarRocksDdl,
+    perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
 ) -> axum::Router {
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
@@ -108,6 +131,7 @@ fn build_app(
             ranger_enabled,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(starrocks_ddl),
+            perm_compiler,
         })
 }
 
@@ -129,6 +153,7 @@ async fn attach_real_pdp(f: &mut Fixture) {
         pdp,
         f.ranger_enabled,
         f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
     );
 }
 
@@ -155,6 +180,17 @@ async fn setup_with_ranger(
     kube: Option<Arc<dyn KubeClient>>,
     ranger_enabled: bool,
 ) -> Option<Fixture> {
+    setup_with_ranger_and_compiler(engine_provisioner, kube, ranger_enabled, None).await
+}
+
+/// `setup_with_ranger` with the SP4a profile compiler under the test's control.
+/// `None` — every existing caller — leaves the engine seam exactly as it was.
+async fn setup_with_ranger_and_compiler(
+    engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
+    kube: Option<Arc<dyn KubeClient>>,
+    ranger_enabled: bool,
+    perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
+) -> Option<Fixture> {
     let dsn = egret_test_db::url().await?;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
@@ -178,6 +214,7 @@ async fn setup_with_ranger(
         std::sync::Arc::new(AllowAllPdp),
         ranger_enabled,
         starrocks_ddl.clone(),
+        perm_compiler.clone(),
     );
 
     Some(Fixture {
@@ -189,6 +226,7 @@ async fn setup_with_ranger(
         kube,
         ranger_enabled,
         starrocks_ddl,
+        perm_compiler,
     })
 }
 
@@ -4585,6 +4623,7 @@ async fn apply_late_binds_ranger_once_it_is_enabled_after_an_unbound_create() {
         std::sync::Arc::new(AllowAllPdp),
         true,
         f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
     );
     f.ranger_enabled = true;
 
@@ -9379,5 +9418,75 @@ async fn saving_a_healthy_catalog_is_not_a_verdict_about_it() {
         row.apply_error, None,
         "and it must not carry the other catalog's message: {:?}",
         row.apply_error
+    );
+}
+
+/// SP4a Task 9 review: binding an engine to a policy profile changes which
+/// catalogs that profile reaches, but mutates no grant and no rule — so the
+/// `perm` compiler's affected-service sets, which are all derived from the
+/// MUTATED ROW, never fire for it. Before this the newly bound profile served
+/// a stale policy set until an operator happened to call
+/// `POST /api/control-plane/perm/compile/{service_id}` by hand.
+#[tokio::test]
+async fn creating_an_engine_bound_to_a_profile_recompiles_that_profile() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_sp4a_bind_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    let profile_name = format!("trino-{}", Uuid::new_v4().simple());
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    egret_policy_api::PolicyPort::ensure_trino_def(&policy)
+        .await
+        .unwrap();
+    let profile = egret_policy_api::PolicyPort::create_service(
+        &policy,
+        &profile_name,
+        "trino",
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        compiler.calls.lock().unwrap().is_empty(),
+        "nothing should have been recompiled before the engine exists"
+    );
+
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id, "authzServiceId": profile.id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(authz_service_of(&f, &name).await, Some(profile.id));
+
+    assert_eq!(
+        *compiler.calls.lock().unwrap(),
+        vec![profile.id],
+        "the create must have asked for exactly the profile it bound to be \
+         recompiled — otherwise that profile keeps serving a policy set that \
+         predates every catalog this engine just attached"
     );
 }

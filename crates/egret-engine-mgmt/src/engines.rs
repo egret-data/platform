@@ -553,7 +553,18 @@ pub(crate) async fn build_provision_req_with(
                             ProfilePlan::Existing(id) => Some(id),
                             ProfilePlan::Create => undo.created_profile_id,
                             ProfilePlan::Unbound => None,
-                        }
+                        };
+                        // The profile is newly reachable from this engine's
+                        // catalogs, which are already attached on this path —
+                        // compile the `perm` model into it now rather than
+                        // leaving it stale until someone calls the manual
+                        // trigger (SP4a Task 9 review).
+                        crate::profile_compiler::recompile_bound_profile(
+                            st,
+                            engine.id,
+                            &engine.name,
+                        )
+                        .await;
                     }
                     Err(e) => tracing::warn!(engine = %engine.name, error = %e,
                         "late Ranger bind failed; engine stays unbound"),
@@ -3000,6 +3011,16 @@ async fn create_engine(
     //     not the engine's.
     let catalog_attach_errors = attach_extra_catalogs(&st, &engine, &extra_catalogs).await;
 
+    // 11. Bring the bound profile's compiled `perm` policies up to date
+    //     (SP4a Task 9 review). Here, at the END, and not next to
+    //     `bind_trino_profile` in step 8: the compiler's desired set is derived
+    //     from the catalogs the profile's engines REACH, and this engine's
+    //     catalogs are attached in steps 5 and 10 — a recompile at bind time
+    //     would see none of them and compile nothing, which is the staleness it
+    //     exists to remove. Never fails the create; see
+    //     `profile_compiler::recompile_bound_profile`.
+    crate::profile_compiler::recompile_bound_profile(&st, engine.id, &engine.name).await;
+
     Ok((
         StatusCode::CREATED,
         Json(CreateEngineResponse {
@@ -3807,6 +3828,10 @@ async fn create_starrocks_engine(
     // failed.) The wire step above, or `POST …/catalogs/{cid}/apply`, converges
     // it once the FE answers.
     let catalog_attach_errors = attach_extra_catalogs(&st, &engine, &extra_catalogs).await;
+
+    // Same as the Trino create's step 11: recompile the bound profile once
+    // every catalog this engine reaches is attached.
+    crate::profile_compiler::recompile_bound_profile(&st, engine.id, &engine.name).await;
 
     Ok((
         StatusCode::CREATED,
@@ -6619,6 +6644,7 @@ mod tests {
             ranger_enabled: false,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(crate::starrocks_ddl::FakeStarRocksDdl::default()),
+            perm_compiler: None,
         })
     }
 
