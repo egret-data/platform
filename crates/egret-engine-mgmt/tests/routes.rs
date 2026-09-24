@@ -5687,10 +5687,17 @@ async fn registry_catalog_not_found_warehouse_change_and_permission_checks() {
     assert_eq!(status, StatusCode::CREATED, "{j}");
     let cat2_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
     let ws_id = seed_workspace(&f).await;
-    registry(&f)
-        .set_catalog_workspaces(cat2_id, &[ws_id])
+    // `set_catalog_workspaces` (the pool-opening wrapper) was deleted in
+    // SP4a Task 6 fix round 2 — it was the third path writing
+    // `registry.catalog_workspaces` with no `perm` grant sync composed in.
+    // Only `_in_tx` remains; this test asserts a 409 conflict body, not
+    // `perm.grants`, so it composes no sync — the route-level assertions of
+    // that (`workspace_assignment_route_syncs_perm_grants`) live elsewhere.
+    let mut tx = f.db.pool.begin().await.unwrap();
+    egret_catalog_registry::RegistryStore::set_catalog_workspaces_in_tx(&mut tx, cat2_id, &[ws_id])
         .await
         .unwrap();
+    tx.commit().await.unwrap();
     let (status, j) = call(&f, "DELETE", &format!("/catalogs/{cat2_id}"), &admin, None).await;
     assert_eq!(status, StatusCode::CONFLICT, "{j}");
     assert_eq!(j["code"], "catalog_in_use");

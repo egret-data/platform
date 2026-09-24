@@ -36,6 +36,22 @@ async fn workspace(db: &Db) -> Uuid {
     .expect("workspace")
 }
 
+/// `RegistryStore::set_catalog_workspaces_in_tx` composed the way this
+/// crate's own tests need it: no production caller left exists that skips
+/// opening a transaction (SP4a Task 6 fix round 2 — the pool-opening
+/// `set_catalog_workspaces` wrapper this helper replaced was deleted for
+/// exactly that reason). Deliberately does NOT sync a `perm` implicit grant
+/// the way `egret-engine-mgmt`'s production handler does — these tests
+/// exercise `registry.catalog_workspaces` in isolation and assert nothing
+/// about `perm.grants`.
+async fn set_catalog_workspaces(db: &Db, catalog_id: Uuid, workspace_ids: &[Uuid]) {
+    let mut tx = db.pool.begin().await.expect("begin");
+    RegistryStore::set_catalog_workspaces_in_tx(&mut tx, catalog_id, workspace_ids)
+        .await
+        .expect("set_catalog_workspaces_in_tx");
+    tx.commit().await.expect("commit");
+}
+
 async fn warehouse(db: &Db, name: &str, ws: Uuid) -> Uuid {
     let sc: Uuid = sqlx::query_scalar(
         "INSERT INTO storage.storage_connections (name, provider, region, bucket, access_key, path_style) \
@@ -221,7 +237,7 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
     );
 
     // Removing the assignment is not undone by ensuring again.
-    store.set_catalog_workspaces(c1.id, &[]).await.unwrap();
+    set_catalog_workspaces(&db, c1.id, &[]).await;
     store
         .ensure_warehouse_catalog(
             &WarehouseIdentity {
@@ -239,7 +255,7 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
         .unwrap()
         .is_empty());
     assert!(!store.warehouse_visible_to_workspace(wh1, ws).await.unwrap());
-    store.set_catalog_workspaces(c1.id, &[ws]).await.unwrap();
+    set_catalog_workspaces(&db, c1.id, &[ws]).await;
     assert!(store.warehouse_visible_to_workspace(wh1, ws).await.unwrap());
 }
 
@@ -632,7 +648,7 @@ async fn create_replacing_orphan_replaces_only_an_unused_catalog() {
     assert_ne!(again.id, row.id);
     assert!(store.get_catalog(row.id).await.unwrap().is_none());
 
-    store.set_catalog_workspaces(again.id, &[ws]).await.unwrap();
+    set_catalog_workspaces(&db, again.id, &[ws]).await;
     assert!(matches!(
         store
             .create_catalog_replacing_orphan(&fresh, &sample_def(), None)
@@ -656,7 +672,7 @@ async fn create_replacing_orphan_replaces_only_an_unused_catalog() {
         )
         .await
         .unwrap();
-    store.set_catalog_workspaces(wh_cat.id, &[]).await.unwrap();
+    set_catalog_workspaces(&db, wh_cat.id, &[]).await;
     assert!(
         matches!(
             store

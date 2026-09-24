@@ -42,6 +42,13 @@ egret-metastore = { workspace = true }
 # `egret_metastore::Db`. The `CatalogPort` it implements + the leaf DTOs it maps to.
 egret-catalog-api = { workspace = true }
 egret-catalog-registry = { workspace = true }
+# `RegistryError::Perm` (SP4a Task 6 fix round 1) wraps `egret_perm::PermError`
+# directly; `warehouse_admin::error` matches into it to log a grant-sync
+# failure distinctly from a plain database error (fix round 2 review). Safe
+# to add here: `egret-perm` itself carries no `egret-policy` dependency
+# (split into `egret-perm-compile`), so this stays a leaf model/store
+# dependency, not a Ranger one.
+egret-perm = { workspace = true }
 # The mini machine-IdP `ClientVerifier`/`VerifiedClient` the store implements.
 egret-machine-idp = { workspace = true }
 # Catalog Client secret hashing/verification + random client-id/secret material.

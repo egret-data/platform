@@ -905,25 +905,26 @@ impl RegistryStore {
         .await?)
     }
 
-    /// Replace the full assignment set.
-    pub async fn set_catalog_workspaces(
-        &self,
-        catalog_id: Uuid,
-        workspace_ids: &[Uuid],
-    ) -> Result<(), RegistryError> {
-        let mut tx = self.pool().begin().await?;
-        Self::set_catalog_workspaces_in_tx(&mut tx, catalog_id, workspace_ids).await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// Same write as [`set_catalog_workspaces`](Self::set_catalog_workspaces),
-    /// against a transaction the caller already holds and will commit.
-    /// `egret-engine-mgmt`'s catalog-workspace assignment handler uses this
-    /// so the assignment write and `perm`'s implicit-grant sync
-    /// (`egret_perm::sync_assignment_grants_in_tx`, SP4a Task 6) land in ONE
-    /// transaction — an assignment that commits while its grant sync fails
-    /// is exactly the split-brain D3 exists to remove.
+    /// Replace the full assignment set. This is the ONLY way to write
+    /// `registry.catalog_workspaces` in this crate — deliberately, since
+    /// SP4a Task 6 fix round 2 found two production paths writing this table
+    /// (this and `ensure_warehouse_catalog`), but only one of them syncing
+    /// the `perm` implicit-grant row D3 requires: a self-committing,
+    /// pool-opening `set_catalog_workspaces` wrapper existed alongside this
+    /// `_in_tx` core (used only by `ensure_warehouse_catalog` and the real
+    /// production caller, `egret-engine-mgmt`'s assignment handler), and
+    /// nothing stopped a THIRD caller from reaching for the convenient
+    /// wrapper and reintroducing the same gap with no grant sync at all —
+    /// exactly the "true in one place, false in another" shape D3 already
+    /// broke twice. The wrapper is gone; every caller (including this
+    /// crate's own tests, `egret-catalog-engine`'s and
+    /// `egret-engine-mgmt`'s) must now open its own transaction and, in
+    /// production, compose `egret_perm::sync_assignment_grants_in_tx` into
+    /// it — there is no entry point left that writes this table without a
+    /// transaction the caller controls. "Unrepresentable beats
+    /// unforgettable": the invariant now lives in the type signature
+    /// (no owned-pool method exists to reach for) rather than in a
+    /// reviewer's memory of which callers need the sync.
     pub async fn set_catalog_workspaces_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         catalog_id: Uuid,
