@@ -9,8 +9,8 @@
 //! warehouse_admin browse API. SP3c-2 retired the `warehouse:*` keys these
 //! constants used to hold; 0153 re-ran 0148's grant and deleted them.
 //!
-//! METADATA ONLY: no authorization decision / Ranger download reads these
-//! assignments in this phase (tag-based masking policies are Task 2).
+//! A write here also recompiles every SP4a `perm` policy profile bound to the
+//! warehouse (Task 7, D5) — see [`CatalogTagRepo::recompile_bound_services`].
 
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
@@ -60,7 +60,9 @@ impl CatalogTagRepo {
     ///
     /// Bumps `tag_version` on every policy service bound to this warehouse (see
     /// [`Self::bump_bound_tag_versions`]) in the SAME transaction, so the Ranger
-    /// tag-download plugin re-polls `download_tags` instead of 304-ing forever.
+    /// tag-download plugin re-polls `download_tags` instead of 304-ing forever,
+    /// then recompiles those services' `perm` profiles once that transaction
+    /// commits (see [`Self::recompile_bound_services`], SP4a Task 7).
     pub async fn assign_catalog(
         &self,
         tag_id: Uuid,
@@ -93,12 +95,14 @@ impl CatalogTagRepo {
         .map_err(crate::error::BiError::from)?;
         Self::bump_bound_tag_versions(&mut tx, warehouse_id).await?;
         tx.commit().await.map_err(crate::error::BiError::from)?;
+        self.recompile_bound_services(warehouse_id).await?;
         Ok(())
     }
 
     /// Detach `tag_id` from a catalog resource (idempotent — deletes 0 or 1 row).
     /// Bumps the bound services' `tag_version` in the same transaction (see
-    /// [`Self::assign_catalog`]).
+    /// [`Self::assign_catalog`]), then recompiles the same way `assign_catalog`
+    /// does.
     pub async fn unassign_catalog(
         &self,
         tag_id: Uuid,
@@ -128,6 +132,49 @@ impl CatalogTagRepo {
         .map_err(crate::error::BiError::from)?;
         Self::bump_bound_tag_versions(&mut tx, warehouse_id).await?;
         tx.commit().await.map_err(crate::error::BiError::from)?;
+        self.recompile_bound_services(warehouse_id).await?;
+        Ok(())
+    }
+
+    /// Recompile every policy profile `warehouse_id`'s engine(s) are bound
+    /// through (SP4a Task 7, D5): a catalog-tag write can add or remove a
+    /// column from a StarRocks tag rule's compile-time enumeration, and
+    /// StarRocks has no tag service to resolve that itself the way Trino's
+    /// plugin does — egret must recompile, or the new/removed column stays
+    /// un(un)masked until something else happens to trigger a recompile.
+    ///
+    /// Runs AFTER the tag-write transaction commits, not inside it:
+    /// `recompile_service` opens its OWN transaction (it needs one spanning
+    /// `perm.compiled` + `policy.authz_policies` + `policy.authz_services`,
+    /// not a nested savepoint), and that transaction's version-bump UPDATE
+    /// targets the SAME `policy.authz_services` row `bump_bound_tag_versions`
+    /// just updated — running it from a second connection while the first
+    /// transaction is still open would block on that row's lock until the
+    /// first transaction commits, i.e. deadlock the request against itself.
+    /// The tradeoff this accepts: the tag assignment and its recompile are
+    /// two commits, not one. A recompile failure surfaces as a genuine error
+    /// to the caller (`BiError::Engine`, not a swallowed 500 — see
+    /// `crate::error`'s `From<egret_perm_compile::CompileError>`) but does
+    /// NOT roll back the tag write that already committed; true single-
+    /// transaction atomicity would need `recompile_service` to accept a
+    /// caller-owned transaction the way `sync_assignment_grants_in_tx` does,
+    /// which this task did not build (the trigger's given interface takes
+    /// `&PermStore`/`&PolicyStore`, not a transaction).
+    async fn recompile_bound_services(&self, warehouse_id: Uuid) -> Result<(), BiApiError> {
+        let service_ids =
+            egret_catalog_registry::services_bound_to_warehouse(&self.db.pool, warehouse_id)
+                .await
+                .map_err(crate::error::BiError::from)?;
+        if service_ids.is_empty() {
+            return Ok(());
+        }
+        let perm = egret_perm::PermStore::new(self.db.pool.clone());
+        let policy = egret_policy::PolicyStore::new(self.db.clone());
+        for service_id in service_ids {
+            egret_perm_compile::recompile_service(&perm, &policy, service_id)
+                .await
+                .map_err(crate::error::BiError::from)?;
+        }
         Ok(())
     }
 

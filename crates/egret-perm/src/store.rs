@@ -244,10 +244,17 @@ impl PermStore {
         Self { pool }
     }
 
-    /// `pub(crate)`: only `assignment::sync_assignment_grants` needs the raw
-    /// pool (to open its own transaction); every other store method stays
-    /// self-contained.
-    pub(crate) fn pool(&self) -> &PgPool {
+    /// Widened from `pub(crate)` to `pub` in SP4a Task 7: `assignment::sync_assignment_grants`
+    /// was the first consumer (to open its own transaction); the second is
+    /// `egret-perm-compile`'s `trigger::recompile_service`, which needs ONE
+    /// transaction spanning `perm.compiled` (this crate's table) and
+    /// `policy.authz_policies` / `policy.authz_services` (`egret-policy`'s
+    /// tables, in the SAME physical Postgres database) so a diff's writes and
+    /// its single `policy_version` bump commit together. `egret-perm-compile`
+    /// cannot reach a `pub(crate)` item here, and there is no third schema
+    /// this pool needs to stay hidden from — every other `PermStore` method
+    /// stays self-contained regardless.
+    pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 

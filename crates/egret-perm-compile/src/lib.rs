@@ -14,9 +14,8 @@
 //! (`egret-policy` is a *dev*-only dependency of `egret-engine-mgmt`
 //! everywhere else). This crate is the seam: it depends on `egret-perm`
 //! (for the model types and `CompileError`/`EngineType`/`engine_accesses`,
-//! none of which need Ranger) and on `egret-policy`, and nothing depends on
-//! this crate except its own tests. `egret-perm` itself now carries no
-//! `egret-policy` dependency at all.
+//! none of which need Ranger) and on `egret-policy`. `egret-perm` itself
+//! carries no `egret-policy` dependency at all.
 //!
 //! This module builds typed `egret_policy::admin::{AccessPolicyInput,
 //! AccessItemInput, ResourceLevel, MaskingPolicyInput, RowFilterPolicyInput,
@@ -30,9 +29,22 @@
 //! masking/row-filter policies, with the StarRocks tag expansion), and
 //! `egret_perm::actions` for the `Action` → Ranger access-type map the
 //! former consumes.
+//!
+//! **`trigger::recompile_service` (SP4a Task 7)** is this crate's first real
+//! caller of `compile_grant`/`compile_rule` outside their own tests — nothing
+//! else in the codebase called either before this. It loads a profile's
+//! model, resolves the registry/tag reads `compile_grant`/`compile_rule`
+//! themselves stay free of (see those modules' doc comments), and diffs the
+//! result against `perm.compiled` so a recompile writes only what changed.
+//! `egret-bi::catalog_tags` calls it on every catalog-tag write, alongside
+//! the `tag_version` bump already there — see `trigger`'s own module doc for
+//! why a `WorkspaceMembers`-only refusal is skipped rather than aborting the
+//! whole recompile.
 
 pub mod grants;
 pub mod rules;
+pub mod trigger;
 
 pub use grants::compile_grant;
 pub use rules::{compile_rule, ResolvedNames, TaggedColumn};
+pub use trigger::{recompile_service, CompileSummary, SkippedItem, SourceKind};

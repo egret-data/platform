@@ -14,10 +14,20 @@ license.workspace = true
 # exists to prevent elsewhere (`egret-policy` is a dev-only dependency of
 # `egret-engine-mgmt`). Nothing outside this crate's own tests depends on it
 # yet; a later task's compile-profile driver is its first real consumer.
+#
+# SP4a Task 7: that consumer has landed (`trigger::recompile_service`), so
+# `uuid` (grant/rule ids) and `sqlx` (one transaction spanning `perm.compiled`
+# and `policy.authz_policies`/`policy.authz_services` — see
+# `egret_perm::store::PermStore::pool`'s doc comment) move from dev- to
+# regular dependencies.
 [dependencies]
 egret-perm.workspace = true
 egret-policy.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
+sqlx.workspace = true
 
 [dev-dependencies]
-uuid.workspace = true
+egret-metastore.workspace = true
+egret-test-db.workspace = true
+tokio.workspace = true

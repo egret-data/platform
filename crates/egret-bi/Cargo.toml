@@ -18,6 +18,13 @@ egret-query-api.workspace = true
 # `bump_bound_tag_versions`: the one service-resolution the tag export and the
 # assign/unassign bump share (SP3 review F-1).
 egret-catalog-registry.workspace = true
+# SP4a Task 7: a catalog-tag write must also recompile every StarRocks profile
+# whose enumerated masking policies it can stale (D5) — `egret-perm`'s model
+# store + `egret-perm-compile`'s recompile driver, alongside the
+# `bump_bound_tag_versions` call already here.
+egret-perm.workspace = true
+egret-perm-compile.workspace = true
+egret-policy.workspace = true
 axum.workspace = true
 sqlx.workspace = true
 serde.workspace = true

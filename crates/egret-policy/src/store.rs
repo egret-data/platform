@@ -132,6 +132,21 @@ impl PolicyStore {
         })
     }
 
+    /// Like [`get_service`], keyed by id instead of name — SP4a Task 7's
+    /// recompile driver is handed a `service_id` (the trigger's caller
+    /// already resolved which services a tag/grant write reaches; see
+    /// `egret_catalog_registry::services_bound_to_warehouse`) and has no
+    /// service name to look it up by until it reads this row.
+    pub async fn get_service_by_id(&self, id: i64) -> Result<ServiceRow, PolicyStoreError> {
+        sqlx::query_as::<_, ServiceRow>(
+            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services WHERE id = $1"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.db.pool)
+        .await?
+        .ok_or_else(|| PolicyStoreError::NotFound(format!("service id {id}")))
+    }
+
     pub async fn get_service(&self, name: &str) -> Result<ServiceRow, PolicyStoreError> {
         sqlx::query_as::<_, ServiceRow>(
             r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services WHERE name = $1"#,
@@ -261,6 +276,86 @@ impl PolicyStore {
         .fetch_all(&self.db.pool)
         .await?)
     }
+
+    /// Registry catalogs reachable by `service_id`'s engine(s), through
+    /// `registry.engine_catalog_attachments` (SP3 D5) — the DIRECT engine
+    /// bind (`e.authz_service_id = service_id`), not the tag-service
+    /// `COALESCE` `tag_assignments_for_service` resolves: a recompile always
+    /// targets the profile's own service id, never its paired tag service
+    /// (StarRocks has no tag service at all — D5).
+    pub async fn catalogs_for_service(
+        &self,
+        service_id: i64,
+    ) -> Result<Vec<CatalogRow>, PolicyStoreError> {
+        Ok(sqlx::query_as::<_, CatalogRow>(
+            r#"SELECT DISTINCT c.id, c.name
+               FROM registry.catalogs c
+               JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id
+               JOIN engine_mgmt.engines e ON e.id = ea.engine_id
+               WHERE e.authz_service_id = $1"#,
+        )
+        .bind(service_id)
+        .fetch_all(&self.db.pool)
+        .await?)
+    }
+
+    /// Columns carrying `tags.key = tag_key`, resolved to their Ranger-facing
+    /// NAMES, restricted to catalogs `service_id`'s engine(s) reach.
+    /// Table-level tags (`column_name = ''`, migration 0081) are excluded —
+    /// this feeds the StarRocks per-column expansion (D5), which masks a
+    /// COLUMN, never a whole table.
+    pub async fn tagged_columns_for_service(
+        &self,
+        service_id: i64,
+        tag_key: &str,
+    ) -> Result<Vec<TaggedColumnRow>, PolicyStoreError> {
+        Ok(sqlx::query_as::<_, TaggedColumnRow>(
+            r#"SELECT DISTINCT c.name AS catalog, a.schema_name, a.table_name, a.column_name
+               FROM catalog_tag_assignments a
+               JOIN tags t ON t.id = a.tag_id
+               JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id
+               JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id
+               JOIN engine_mgmt.engines e ON e.id = ea.engine_id
+               WHERE e.authz_service_id = $1 AND t.key = $2 AND a.column_name <> ''
+               ORDER BY c.name, a.schema_name, a.table_name, a.column_name"#,
+        )
+        .bind(service_id)
+        .bind(tag_key)
+        .fetch_all(&self.db.pool)
+        .await?)
+    }
+
+    /// `tags.name` for a `tags.key` — D6: rules select by the stable `key`,
+    /// but every engine (and the Ranger tag plugin) matches on the mutable
+    /// `name`, so this is the resolution `ResolvedNames.tag_name` needs
+    /// before a tag-selector rule can compile. `None` when no such key
+    /// exists (a rule can outlive the tag it named, e.g. after a tag
+    /// deletion — the caller decides what that means for the compile, not
+    /// this lookup).
+    pub async fn tag_name_for_key(&self, key: &str) -> Result<Option<String>, PolicyStoreError> {
+        Ok(
+            sqlx::query_scalar::<_, String>(r#"SELECT name FROM tags WHERE key = $1"#)
+                .bind(key)
+                .fetch_optional(&self.db.pool)
+                .await?,
+        )
+    }
+}
+
+/// One registry catalog: `(id, name)`.
+#[derive(Debug, sqlx::FromRow)]
+pub struct CatalogRow {
+    pub id: uuid::Uuid,
+    pub name: String,
+}
+
+/// One tagged column, Ranger-facing names only (see `tagged_columns_for_service`).
+#[derive(Debug, sqlx::FromRow)]
+pub struct TaggedColumnRow {
+    pub catalog: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub column_name: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]

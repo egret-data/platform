@@ -81,3 +81,33 @@ where
     .await?;
     Ok(())
 }
+
+/// The policy-profile service ids `warehouse_id`'s engine(s) are bound
+/// through — the SAME `profiles` resolution [`bump_bound_tag_versions`] uses,
+/// minus its tag-service fan-out leg. SP4a Task 7's recompile trigger calls
+/// this (from `egret-bi::catalog_tags`, alongside the `bump_bound_tag_versions`
+/// call already there) to learn which `policy.authz_services` rows to
+/// recompile after a catalog-tag write, and deliberately does NOT also
+/// recompile the paired tag service: `perm.compiled`/`policy.authz_policies`
+/// hold compiled access/masking/row-filter policies under the PROFILE
+/// service, never under its tag service, so there is nothing there for a
+/// recompile to touch. Runs on any executor — a caller's transaction, or the
+/// pool.
+pub async fn services_bound_to_warehouse<'e, E>(
+    executor: E,
+    warehouse_id: Uuid,
+) -> Result<Vec<i64>, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query_scalar::<_, i64>(
+        "SELECT DISTINCT e.authz_service_id \
+         FROM registry.catalogs c \
+         JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
+         JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
+         WHERE c.warehouse_id = $1 AND e.authz_service_id IS NOT NULL",
+    )
+    .bind(warehouse_id)
+    .fetch_all(executor)
+    .await
+}

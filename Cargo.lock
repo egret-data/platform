@@ -3018,6 +3018,9 @@ dependencies = [
  "egret-core",
  "egret-events",
  "egret-metastore",
+ "egret-perm",
+ "egret-perm-compile",
+ "egret-policy",
  "egret-query",
  "egret-query-api",
  "egret-secrets",
@@ -3490,9 +3493,13 @@ dependencies = [
 name = "egret-perm-compile"
 version = "0.1.0"
 dependencies = [
+ "egret-metastore",
  "egret-perm",
  "egret-policy",
+ "egret-test-db",
  "serde_json",
+ "sqlx",
+ "tokio",
  "uuid",
 ]
 

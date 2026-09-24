@@ -146,6 +146,18 @@ pub enum CompileError {
     /// which.
     #[error("rule {rule:?}'s exempt set cannot be compiled: {reason}")]
     UnexpressibleExemption { rule: String, reason: String },
+    /// A database error encountered by a caller doing I/O AROUND the pure
+    /// compiler — today, only `egret-perm-compile`'s `trigger::recompile_service`
+    /// (SP4a Task 7), which loads the model and diffs `perm.compiled` before
+    /// ever calling `compile_grant`/`compile_rule`. Carries the rendered
+    /// message, not the raw `sqlx::Error` / store error, because
+    /// `CompileError` is `Clone + PartialEq + Eq` (every other variant is
+    /// built from data that is) and neither `sqlx::Error` nor
+    /// `egret_perm::PermError`/`egret_policy::PolicyStoreError` are — the same
+    /// reason `ServiceDefUnreadable` above stores `detail: String` rather than
+    /// the parse error itself.
+    #[error("database error: {0}")]
+    Db(String),
 }
 
 /// The Ranger access types `a` compiles to on `e`. Every engine declares

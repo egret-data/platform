@@ -309,7 +309,14 @@ fn build_tag_body(
 /// `"serviceType": "trino"` (a hazard Task 4 found and left for this task —
 /// see the module doc comment). Overwrite it for StarRocks, exactly as
 /// `editor_to_ranger_json` already does for the hand-authored editor path.
-fn stamp_service_type(mut body: Value, e: EngineType) -> Value {
+///
+/// `pub(crate)`: `access_to_ranger_json` (`grants.rs`'s renderer, invoked from
+/// `egret-perm-compile`'s recompile driver — Task 7) hardcodes the SAME
+/// `"serviceType": "trino"` for exactly the same reason and was never fixed
+/// for a StarRocks-targeted access policy, since nothing outside this crate's
+/// tests called `compile_grant` before Task 7. The driver reuses this exact
+/// function rather than duplicating the stamp.
+pub(crate) fn stamp_service_type(mut body: Value, e: EngineType) -> Value {
     if e == EngineType::StarRocks {
         if let Value::Object(m) = &mut body {
             m.insert("serviceType".into(), Value::from("starrocks"));

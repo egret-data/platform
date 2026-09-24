@@ -30,11 +30,22 @@ pub use ranger_json::{
 };
 // SP4a Task 4 (egret-perm's compiler) builds these three directly rather
 // than hand-writing Ranger JSON, then leaves rendering to
-// `access_to_ranger_json` (kept crate-private: D2 forbids egret ever
-// emitting a tag *access* policy, and `ranger_json`'s tag builders — e.g.
-// `tag_access_to_ranger_json` — sit right next to it, so the module stays
-// private and only these three struct types are re-exported here).
+// `access_to_ranger_json`.
 pub use ranger_json::{AccessItemInput, AccessPolicyInput, ResourceLevel};
+// SP4a Task 7: `egret-perm-compile`'s recompile driver (`trigger::recompile_service`)
+// is the first real caller of `compile_grant` outside this crate's own
+// tests, and `compile_grant` returns a typed `AccessPolicyInput`, never
+// rendered JSON (the compiler stays free of `serde_json` rendering choices —
+// see `egret-perm-compile/src/grants.rs`'s module doc). Something outside
+// `egret-policy` has to render it before it can be written to
+// `policy.authz_policies.policy_jsonb`, so `access_to_ranger_json` (the plain,
+// resource-addressed renderer) is re-exported here too. `tag_access_to_ranger_json`
+// stays crate-private and unreachable — D2 forbids egret ever emitting a tag
+// *access* policy, and that is the one Ranger tag-first short-circuit hazard
+// this boundary still has to hold the line on; a plain resource-addressed
+// access policy carries no such hazard, the same distinction Task 5 already
+// drew for `tag_masking_to_ranger_json`/`tag_rowfilter_to_ranger_json` below.
+pub use ranger_json::access_to_ranger_json;
 // SP4a Task 5 (egret-perm's rule compiler) also needs the tag MASKING and
 // ROW-FILTER builders. D2 forbids only `tag_access_to_ranger_json` — a tag
 // ACCESS policy reintroduces Ranger's tag-first short-circuit; a tag
