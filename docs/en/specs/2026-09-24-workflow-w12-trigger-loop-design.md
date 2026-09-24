@@ -134,7 +134,15 @@ from the same transaction — the loop's clock (§4 point 4), so a first
      **untouched**. Editing a task must not reset a schedule;
    - **resolve refused** (bad cron, `lateMaximumDelay`, a `when` it cannot
      render) → upsert with `next_evaluation_date = NULL` and the refusal in
-     `last_error`.
+     `last_error`;
+   - **resolved, but no future tick** (`0 0 30 2 *`: a cron that never fires) →
+     the same: `next_evaluation_date = NULL`, and `last_error` says the schedule
+     never fires (final review I4).
+
+   The NULL-and-reason rule applies when the row is (re-)initialised. A refusal
+   whose cause is not part of `spec_key`, met by a row that is already queued
+   under an unchanged key, keeps that row's date; the claim finds the refusal at
+   fire time and takes the row off the queue then (§4 point 6).
 
 The four writers become transactional and call it:
 
@@ -151,6 +159,15 @@ of `crates/**/src` for statements that `INSERT INTO`, `UPDATE` or `DELETE FROM`
 `scheduler::sync` or is on an exemption list whose entries carry a reason. It has a
 positive control (it must find exactly the four above today), so it cannot pass
 by scanning nothing.
+
+**Flows that existed before the table (final review I1).** The migration creates
+`workflow.triggers` empty, and only the writers above call `sync`, so a flow saved
+before it and never saved again would never get a row. The scheduler ticker
+therefore runs `sync` over every non-deleted flow once when it starts, before its
+first pass, each flow in its own transaction. It is idempotent — an unchanged
+`spec_key` keeps its dates — and a flow whose `sync` fails is logged and skipped,
+never an aborted start. Like a save, it re-queues a row `fire_due` took off the
+queue, and removes the rows of a flow whose source no longer parses.
 
 A flow whose `state` becomes `disabled` keeps its rows and its
 `next_evaluation_date`; §4 simply does not fire it. When it is enabled again, the
@@ -174,6 +191,9 @@ BEGIN
      AND NOT t.disabled
      AND f.deleted_at IS NULL
      AND f.state <> 'disabled'
+     AND NOT EXISTS (SELECT 1 FROM workspace_features wf
+                      WHERE wf.workspace_id = f.workspace_id
+                        AND wf.feature = 'workflows' AND NOT wf.enabled)
      AND (t.flow_id, t.trigger_id) NOT IN (SELECT * FROM unnest($seen_flows, $seen_ids))
    ORDER BY t.next_evaluation_date
    LIMIT 1
@@ -210,15 +230,26 @@ COMMIT
    skewed clocks therefore agree, and W6's rule that `SystemClock::now` is the only
    wall-clock reader under `src/trigger/` still holds — `FixedClock` joins
    `TestClock` in that module.
-5. **All four ways to switch a trigger off are honoured, and none consumes a
+5. **All five ways to switch a trigger off are honoured, and none consumes a
    tick.** `deleted_at` and the `state` column are read from the flow in the
    `WHERE`; the flow's YAML `disabled: true` and the trigger's own are the
-   `disabled` column `sync` wrote (§3.1). All four leave the state frozen, which
-   is `NotSchedulable`'s measured behaviour. **The YAML is re-checked after
-   `parse` anyway**, because the source read under the lock is the authority and
-   the column is a copy: if they disagree the loop does not fire, leaves the dates
+   `disabled` column `sync` wrote (§3.1); and the workspace's `workflows`
+   feature, switched off, is a `NOT EXISTS` over `workspace_features` — the
+   table, and the `enabled = false` reading, that the route gate in `WsContext`
+   uses, so the two cannot disagree (final review I3; the user's decision of
+   2026-09-25). All five leave the state frozen, which is `NotSchedulable`'s
+   measured behaviour, so switching any of them back on recovers the missed
+   ticks under `ALL`. **The YAML is re-checked after `parse` anyway**, because
+   the source read under the lock is the authority and the column is a copy: if
+   they disagree — the trigger is off, no longer declared, or declares a cron
+   whose `spec_key` is not the row's — the loop does not fire, leaves the dates
    alone, and re-runs `sync` for that flow — the same third door
-   `subflow::spawn_one` closes (the W10 Critical).
+   `subflow::spawn_one` closes (the W10 Critical). The `spec_key` comparison is
+   not hypothetical (final review I2, measured): a claim that waited on a save
+   re-reads the newest trigger row under `FOR UPDATE OF t` but keeps its
+   snapshot's flow row, so without it a pass could fire the old cron and write
+   its dates under the new key — permanently, since a same-key save keeps dates.
+   `sync`'s own statement reads the committed source.
 6. **A broken trigger is taken off the queue, not retried each pass.** Setting
    `next_evaluation_date = NULL` stops a flow whose draft no longer parses from
    costing one failed transaction per second for ever. The next `sync` — i.e. the
@@ -283,7 +314,7 @@ is reported as unproved, not as covered.
 | `ALL` catch-up | `next_evaluation_date` five ticks in the past → five passes → five executions, `scheduled_date` ascending, one per pass | tick until idle within one pass |
 | a trigger that is behind does not starve the rest | trigger A five ticks behind, trigger B one tick due → the first pass fires one of each | drop the `seen` exclusion |
 | a broken trigger does not jam the loop | unparseable draft → `last_error` set, `next_evaluation_date` NULL; a sibling trigger in the same pass still fires | drop the take-off-queue branch |
-| every off switch | `state='disabled'`, YAML `disabled: true`, trigger `disabled: true`, `deleted_at` → zero executions **and** `next_evaluation_date` unchanged | drop each clause in turn |
+| every off switch | `state='disabled'`, YAML `disabled: true`, trigger `disabled: true`, `deleted_at`, workspace feature `workflows` off → zero executions **and** `next_evaluation_date` unchanged; the feature back on → the missed ticks fire | drop each clause in turn |
 | a disabled trigger does not starve the queue | the oldest due row is disabled, a younger one is enabled → the younger fires, and the disabled row is never claimed | drop `NOT t.disabled` from the claim |
 | re-enable recovers under `ALL` | disable, set `next_evaluation_date` three ticks in the past, enable → three passes, three executions | reset the dates when `disabled` toggles |
 | templated inputs refused | `inputs: {x: "{{ now() }}"}` → no execution, reason recorded | drop the check |

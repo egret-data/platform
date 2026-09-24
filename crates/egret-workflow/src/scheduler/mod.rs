@@ -28,6 +28,23 @@
 //! skipped, not waited on, and the lock is held until that pass's `COMMIT`, so
 //! everything below runs with no second fire of this trigger in flight.
 //!
+//! The `WHERE` also carries every off switch that is not in the YAML --
+//! `deleted_at`, `state`, and the workspace's `workflows` feature (a `NOT
+//! EXISTS` over `workspace_features`, the rows the route gate reads; final
+//! review I3) -- so an off trigger is never claimed and never consumes a tick.
+//!
+//! **What the lock does NOT give: a fresh flow row.** Under READ COMMITTED a
+//! claim that waited on a trigger row re-reads the NEWEST version of `t` but
+//! keeps its snapshot's version of `f` (EvalPlanQual re-fetches only the locked
+//! table; measured by the final review, I2). A save that committed while the
+//! claim waited can therefore leave the pass holding the old `f.source` beside
+//! the new row's dates and `spec_key`. `fire_one` compares the claimed
+//! `spec_key` with the key of the cron it parsed, and on a mismatch fires
+//! nothing, moves nothing and re-runs `sync`, whose own statement reads the
+//! committed source. Proved by `tests/scheduler_fire.rs`'s
+//! `a_spec_key_that_disagrees_with_the_source_does_not_fire_and_resyncs`,
+//! which stages the mismatch by hand rather than the race.
+//!
 //! Proved by `two_scheduler_tickers_never_fire_one_tick_twice`: 10 flows × 3
 //! due ticks under two tickers, asserted on rows (each `(flow, tick)` once,
 //! exactly 30) **and** on insert *attempts*, counted by a non-transactional
@@ -93,7 +110,10 @@
 //!
 //! `INSERT INTO workflow.triggers … ON CONFLICT (flow_id, trigger_id) DO
 //! UPDATE` and the `DELETE` of undeclared rows before it ([`sync`]), run in
-//! the transaction of every `FlowRepo` write. They take no `SKIP LOCKED`: a
+//! the transaction of `FlowRepo::create`, `update` and `soft_delete` --
+//! `set_live` is exempt, since it changes neither `source` nor `deleted_at` --
+//! and in one transaction per flow when [`reconcile`] runs at ticker start,
+//! after reading the flow `FOR SHARE`. They take no `SKIP LOCKED`: a
 //! save that meets a trigger a pass has claimed **waits** for that pass to
 //! commit, then updates the version the pass committed -- `ON CONFLICT DO
 //! UPDATE` and `DELETE` both act on the latest row version -- so an unchanged
@@ -109,6 +129,19 @@
 //! `a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance`, which
 //! holds a real pass at its final `UPDATE`, observes the save **blocked on a
 //! lock** in `pg_stat_activity`, and asserts the advance survives the save.
+//!
+//! **A known deadlock, left in place (final review M2).** An `update` that
+//! renames the flow changes `namespace` or `flow_id`, columns of the unique
+//! key `(workspace_id, namespace, flow_id)`, so its `UPDATE workflow.flows`
+//! takes `FOR UPDATE` on the flow row -- not the `FOR NO KEY UPDATE` an edit
+//! of the source takes -- and then its `sync` waits on the trigger row a pass
+//! holds. That pass's execution `INSERT` needs `KEY SHARE` on the same flow row
+//! for its foreign key, which `FOR UPDATE` blocks. Postgres detects the cycle
+//! and aborts one side: the pass (its transaction rolls back and the next pass
+//! retries the tick) or the save (a 500 the author can retry). Nothing is lost
+//! or written twice, which is why it is recorded here and not engineered away.
+//! A save that does not rename takes `FOR NO KEY UPDATE`, which `KEY SHARE`
+//! does not conflict with. Unproved: no test stages it.
 
 mod fire;
 mod sync;

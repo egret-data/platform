@@ -133,7 +133,15 @@ tiên không bao giờ được tính trên một đồng hồ rồi so trên đ
    - **`spec_key` không đổi** → để nguyên `next_evaluation_date` và
      `evaluated_at`. Sửa một task không được làm reset lịch;
    - **resolve từ chối** (cron hỏng, `lateMaximumDelay`, một `when` không render
-     được) → upsert với `next_evaluation_date = NULL` và lý do ở `last_error`.
+     được) → upsert với `next_evaluation_date = NULL` và lý do ở `last_error`;
+   - **resolve được, nhưng không có tick nào trong tương lai** (`0 0 30 2 *`: một
+     cron không bao giờ bắn) → như trên: `next_evaluation_date = NULL`, và
+     `last_error` nói rằng lịch không bao giờ bắn (final review I4).
+
+   Quy tắc NULL-kèm-lý-do áp dụng khi hàng được khởi tạo (lại). Một lời từ chối có
+   nguyên nhân không nằm trong `spec_key`, gặp một hàng đang nằm trong hàng đợi với
+   key không đổi, sẽ giữ nguyên ngày của hàng đó; câu claim gặp lời từ chối lúc bắn
+   và khi đó mới gỡ hàng khỏi hàng đợi (§4 điểm 6).
 
 Bốn chỗ ghi trở thành có transaction và gọi nó:
 
@@ -149,6 +157,15 @@ Bốn chỗ ghi trở thành có transaction và gọi nó:
 `workflow.flows`, và khẳng định mỗi câu nằm trong một hàm có gọi `scheduler::sync`,
 hoặc nằm trong danh sách miễn trừ mà mỗi mục mang một lý do. Nó có control dương
 (hôm nay phải tìm thấy đúng bốn câu trên), nên không thể pass nhờ quét rỗng.
+
+**Các flow có trước bảng (final review I1).** Migration tạo `workflow.triggers`
+rỗng, và chỉ các chỗ ghi ở trên gọi `sync`, nên một flow lưu trước đó và không bao
+giờ được lưu lại sẽ không bao giờ có hàng. Vì vậy ticker của scheduler chạy `sync`
+cho mọi flow chưa bị xoá một lần khi khởi động, trước pass đầu tiên, mỗi flow một
+transaction riêng. Nó idempotent — `spec_key` không đổi thì giữ nguyên ngày — và
+một flow mà `sync` lỗi được ghi log rồi bỏ qua, không bao giờ làm hỏng việc khởi
+động. Giống một lần lưu, nó đưa trở lại hàng đợi một hàng mà `fire_due` đã gỡ ra,
+và xoá các hàng của một flow mà source không còn parse được.
 
 Một flow có `state` chuyển thành `disabled` giữ nguyên hàng và
 `next_evaluation_date`; §4 chỉ đơn giản là không bắn nó. Khi được bật lại, các tick
@@ -172,6 +189,9 @@ BEGIN
      AND NOT t.disabled
      AND f.deleted_at IS NULL
      AND f.state <> 'disabled'
+     AND NOT EXISTS (SELECT 1 FROM workspace_features wf
+                      WHERE wf.workspace_id = f.workspace_id
+                        AND wf.feature = 'workflows' AND NOT wf.enabled)
      AND (t.flow_id, t.trigger_id) NOT IN (SELECT * FROM unnest($seen_flows, $seen_ids))
    ORDER BY t.next_evaluation_date
    LIMIT 1
@@ -208,14 +228,24 @@ COMMIT
    lệch giờ vì thế vẫn thống nhất, và quy tắc của W6 rằng `SystemClock::now` là chỗ
    đọc wall clock duy nhất dưới `src/trigger/` vẫn giữ — `FixedClock` nằm cạnh
    `TestClock` trong module đó.
-5. **Cả bốn cách tắt một trigger đều được tôn trọng, và không cách nào tiêu một
+5. **Cả năm cách tắt một trigger đều được tôn trọng, và không cách nào tiêu một
    tick.** `deleted_at` và cột `state` được đọc từ flow trong `WHERE`; `disabled:
    true` trong YAML của flow và của chính trigger là cột `disabled` mà `sync` đã ghi
-   (§3.1). Cả bốn để state đóng băng, đúng hành vi đã đo của `NotSchedulable`.
-   **YAML vẫn được kiểm lại sau `parse`**, vì source đọc dưới lock là nguồn thẩm
-   quyền còn cột chỉ là bản sao: nếu hai bên lệch nhau, vòng lặp không bắn, để
-   nguyên các ngày, và chạy lại `sync` cho flow đó — cùng cánh cửa thứ ba mà
-   `subflow::spawn_one` đóng (Critical của W10).
+   (§3.1); và feature `workflows` của workspace khi bị tắt là một `NOT EXISTS` trên
+   `workspace_features` — đúng bảng, và đúng cách đọc `enabled = false`, mà cổng
+   route trong `WsContext` dùng, nên hai bên không thể lệch nhau (final review I3;
+   quyết định của người dùng ngày 2026-09-25). Cả năm để state đóng băng, đúng hành
+   vi đã đo của `NotSchedulable`, nên bật lại bất kỳ cái nào cũng bù các tick bị lỡ
+   theo `ALL`. **YAML vẫn được kiểm lại sau `parse`**, vì source đọc dưới lock là
+   nguồn thẩm quyền còn cột chỉ là bản sao: nếu hai bên lệch nhau — trigger bị tắt,
+   không còn được khai báo, hoặc khai báo một cron có `spec_key` khác của hàng —
+   vòng lặp không bắn, để nguyên các ngày, và chạy lại `sync` cho flow đó — cùng
+   cánh cửa thứ ba mà `subflow::spawn_one` đóng (Critical của W10). Phép so
+   `spec_key` không phải giả định (final review I2, đã đo): một câu claim phải chờ
+   một lần lưu sẽ đọc lại hàng trigger mới nhất dưới `FOR UPDATE OF t` nhưng giữ
+   hàng flow của snapshot, nên thiếu nó một pass có thể bắn cron cũ và ghi ngày của
+   nó dưới key mới — vĩnh viễn, vì lần lưu cùng key giữ nguyên ngày. Câu lệnh riêng
+   của `sync` đọc source đã commit.
 6. **Trigger hỏng bị gỡ khỏi hàng đợi, không bị thử lại mỗi pass.** Đặt
    `next_evaluation_date = NULL` ngăn một flow có draft không còn parse được tốn một
    transaction lỗi mỗi giây mãi mãi. Lần `sync` kế tiếp — tức lần lưu kế tiếp của
@@ -276,7 +306,7 @@ là chưa chứng minh, không phải đã phủ.
 | bắt kịp theo `ALL` | `next_evaluation_date` lùi năm tick về quá khứ → năm pass → năm execution, `scheduled_date` tăng dần, mỗi pass một cái | tick tới khi rảnh trong một pass |
 | trigger tụt lại không bỏ đói trigger khác | trigger A tụt năm tick, trigger B đến hạn một tick → pass đầu bắn mỗi cái một lần | bỏ loại trừ `seen` |
 | trigger hỏng không làm kẹt vòng | draft không parse được → có `last_error`, `next_evaluation_date` NULL; một trigger bên cạnh trong cùng pass vẫn bắn | bỏ nhánh gỡ khỏi hàng đợi |
-| mọi công tắc tắt | `state='disabled'`, YAML `disabled: true`, trigger `disabled: true`, `deleted_at` → không execution nào **và** `next_evaluation_date` không đổi | bỏ lần lượt từng vế |
+| mọi công tắc tắt | `state='disabled'`, YAML `disabled: true`, trigger `disabled: true`, `deleted_at`, feature `workflows` của workspace bị tắt → không execution nào **và** `next_evaluation_date` không đổi; bật lại feature → các tick bị lỡ được bắn | bỏ lần lượt từng vế |
 | trigger bị tắt không bỏ đói hàng đợi | hàng đến hạn cũ nhất bị tắt, một hàng trẻ hơn đang bật → hàng trẻ hơn bắn, và hàng bị tắt không bao giờ được claim | bỏ `NOT t.disabled` khỏi câu claim |
 | bật lại thì bù theo `ALL` | tắt, đặt `next_evaluation_date` lùi ba tick, bật → ba pass, ba execution | reset các ngày khi `disabled` đổi |
 | input có template bị từ chối | `inputs: {x: "{{ now() }}"}` → không execution, có ghi lý do | bỏ phép kiểm |
