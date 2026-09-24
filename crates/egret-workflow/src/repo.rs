@@ -113,6 +113,9 @@ macro_rules! flow_cols {
          live_version_id, created_by, created_at, updated_at, deleted_at"
     };
 }
+// `scheduler::fire` re-reads a whole `FlowRow` to re-run `sync`; sharing the
+// projection keeps that read from drifting from every other one.
+pub(crate) use flow_cols;
 
 /// A flow draft row, as stored.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]

@@ -9,6 +9,8 @@
 //!
 //! See `docs/en/specs/2026-09-24-workflow-w12-trigger-loop-design.md` §3.
 
+mod fire;
 mod sync;
 
+pub use fire::{fire_due, PassReport};
 pub use sync::sync;

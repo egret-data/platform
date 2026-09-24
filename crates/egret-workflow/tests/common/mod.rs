@@ -575,3 +575,55 @@ pub async fn body_text(res: axum::response::Response) -> String {
         .unwrap();
     String::from_utf8_lossy(&bytes).into_owned()
 }
+
+// ---------------------------------------------------------------------------
+// The trigger loop (W12 Task 4; reused by Task 5's `tests/runtime.rs`)
+// ---------------------------------------------------------------------------
+
+/// Put a `*/1 * * * *` trigger so that **exactly `ticks` cron instants are
+/// due**: `next_evaluation_date = date_trunc('minute', now()) - (ticks - 1) min`.
+///
+/// Truncated to the minute so the date is itself a cron instant, which is what
+/// `tick` expects a stored date to be. `ticks - 1`, not `ticks`: the current
+/// minute's own instant is already `<= now()`, so `- ticks` minutes would leave
+/// `ticks + 1` instants due and "one tick behind" would fire twice.
+///
+/// Because "due" moves with the wall clock, a minute boundary crossed during a
+/// test makes one more instant due. So this first waits out the last ten
+/// seconds of a minute, giving every test that calls it at least that long
+/// before the count it set up can change.
+pub async fn make_due(db: &Db, flow: Uuid, trig: &str, ticks: i32) {
+    assert!(ticks >= 1, "make_due is for due triggers");
+    let sec: f64 = sqlx::query_scalar("SELECT extract(second FROM now())::float8")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    if sec >= 50.0 {
+        tokio::time::sleep(std::time::Duration::from_secs_f64(60.5 - sec)).await;
+    }
+    let n = sqlx::query(
+        "UPDATE workflow.triggers SET next_evaluation_date = \
+           date_trunc('minute', now()) - make_interval(mins => $3 - 1) \
+         WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow)
+    .bind(trig)
+    .bind(ticks)
+    .execute(&db.pool)
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(n, 1, "make_due must land on exactly one trigger row");
+}
+
+/// Every `scheduled_date` of `flow`'s executions, ascending.
+pub async fn scheduled_dates(db: &Db, flow: Uuid) -> Vec<chrono::DateTime<chrono::Utc>> {
+    sqlx::query_scalar(
+        "SELECT scheduled_date FROM workflow.executions \
+         WHERE flow_id = $1 ORDER BY scheduled_date",
+    )
+    .bind(flow)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap()
+}
