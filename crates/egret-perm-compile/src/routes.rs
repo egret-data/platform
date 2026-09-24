@@ -495,6 +495,10 @@ async fn list_rules(
     post,
     path = "/api/control-plane/perm/rules",
     tag = "perm",
+    description = "Create a named mask or row-filter rule and recompile the profiles it affects, \
+                   in one transaction. A tag-selected rule is installation-wide: it recompiles \
+                   every Trino and StarRocks profile an engine binds, and a compile failure on any \
+                   one of them fails this request and rolls the rule back.",
     request_body = NewRule,
     responses(
         (status = 201, description = "Rule created AND the profiles it affects recompiled, in one transaction"),

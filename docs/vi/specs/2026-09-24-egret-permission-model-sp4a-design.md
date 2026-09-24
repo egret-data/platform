@@ -90,6 +90,19 @@ chưa đưa ra. Grant trên DDL đợi tới khi có ca thật cần.
 Một steward không nên phải biết bên dưới là engine nào, và một hành động engine không diễn đạt được
 phải là lỗi biên dịch nêu đích danh engine, không bao giờ là im lặng bỏ qua.
 
+**Rule chọn theo tag có phạm vi toàn cài đặt, và đó vừa là bán kính ảnh hưởng vừa là bán kính thất
+bại.** Tag không bị giới hạn theo catalog (`tags.key` là toàn cài đặt, `catalog_tag_assignments` trải
+qua nhiều warehouse), và trên Trino một tag rule biên dịch thành đúng một tag policy không mang
+resource catalog nào — nên egret biên dịch lại **mọi profile Trino và StarRocks có engine bind**,
+trong toàn cài đặt, mỗi lần tạo hoặc xoá một rule như vậy. Đây là chủ ý: thu hẹp tập đó về "những
+profile mà catalog của chúng đang mang tag" sẽ khiến tập thay đổi theo từng lần ghi tag, và làm sai
+thì một cột mất mask — tức là hướng fail-open. Hệ quả phải tính trước là tập đó cũng chính là tập
+thất bại: chỉ cần một profile bất kỳ trong cài đặt không biên dịch được — mask type không được khai
+báo, user ref không phân giải được, profile vượt trần mở rộng — là cả lệnh ghi rule hỏng với 400 và bị
+rollback, còn người vận hành thì nhận về tên một profile họ có thể chưa từng nghe tới. Đổi grant và
+đổi rule chọn theo path thì hẹp hơn hẳn: chúng chỉ chạm tới các profile bind với catalog của chính
+chúng. Phản hồi của `POST /perm/rules` liệt kê mọi service nó đã biên dịch lại; không có dry-run.
+
 **D2 — Deny thắng, allow hợp, và tag không cấp quyền truy cập.** Một câu, đúng cho mọi engine:
 *thấy được nếu có grant nào cho phép, trừ khi có grant nào cấm; mask và row filter luôn áp dụng, bất
 kể quyền đến từ đâu.* Tập `exempt` của rule là cách một cá nhân thoát khỏi mask — không phải bằng một
@@ -162,6 +175,17 @@ với thứ tự khoá service tăng dần mà `lock_services_in_tx` đã thiế
 gãy: tag policy hôm nay lưu `tags.name` vốn thay đổi được và không duy nhất (`programme spec:43`), và
 danh tính catalog giờ nằm ở registry. Compiler phân giải key → name và id → name lúc biên dịch, nên
 một lần đổi tên dẫn tới biên dịch lại chứ không dẫn tới gãy.
+
+Hai kiểu đổi tên được đóng theo hai cách khác nhau, và sự khác nhau đó đáng ghi ra chứ không nên bắt
+người sau suy lại. Đổi tên **tag** là một sự kiện có thật — `TagRepo::update` ghi `tags.name` — nên nó
+là một trigger biên dịch lại: nó tăng `tag_version` trên mọi service phục vụ warehouse đang mang tag
+đó và biên dịch lại mọi profile mà một rule chọn tag đó chạm tới, ngay trên transaction của chính lần
+đổi tên. Thiếu nó thì policy đã biên dịch giữ tên cũ trong khi `download_tags` phục vụ tên mới, và
+mask ngừng tác dụng ngay lần plugin khởi động lại kế tiếp. Đổi tên **catalog** thì được đóng ngay từ
+cấu trúc: `registry.catalogs.name` không có chỗ nào ghi — đường cập nhật của registry chỉ thay
+config/advanced/description — nên ảnh phản chiếu fail-closed của nó, mọi grant gọi tên một catalog mà
+engine không còn, là không biểu diễn được. Nếu sau này có thêm đổi tên catalog thì nó cần đúng trigger
+mà đổi tên tag đang có; `crates/egret-bi/tests/tag_rename_recompiles.rs` phủ cả hai nửa.
 
 **D7 — Một dạng principal chuẩn duy nhất, và hỗ trợ nhóm phải được kiểm chứng chứ không giả định.**
 Principal hôm nay chỗ thì viết bằng email chỗ thì username (`programme spec:44`), và chính spec đó

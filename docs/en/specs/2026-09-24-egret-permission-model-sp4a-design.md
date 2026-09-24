@@ -89,6 +89,20 @@ taken. Grants over DDL wait for a case that asks for them.
 A steward should not have to know which engine is underneath, and an action an engine cannot express
 is a compile error naming the engine, never a silent drop.
 
+**A tag-selected rule is installation-wide, and that is a failure radius as well as a blast radius.**
+A tag is not catalog-scoped (`tags.key` is installation-wide and `catalog_tag_assignments` spans
+warehouses), and on Trino a tag rule compiles to one tag policy with no catalog resource at all — so
+egret recompiles **every Trino and StarRocks profile an engine binds**, in the installation, on every
+create or delete of one such rule. That is deliberate: narrowing the set to "profiles whose catalogs
+currently carry the tag" would make it change with every tag write, and getting it wrong leaves a
+mask **off** a column, which is the fail-open direction. The consequence to plan for is that the same
+set is the failure set: one profile anywhere that cannot compile — an undeclared mask type, an
+unresolvable user ref, a profile over the expansion ceiling — fails the whole rule write with a 400
+and rolls it back, and the operator is named a profile they may never have heard of. A grant mutation
+and a path-selected rule mutation are narrow by comparison: they reach only the profiles bound to
+their own catalog. `POST /perm/rules`' response lists every service it recompiled; there is no
+dry-run.
+
 **D2 — Deny wins, allow unions, and tags do not grant access.** One sentence, true for every
 engine: *you can see it if some grant allows it, unless some grant denies it; masks and row filters
 always apply, however the access was granted.* A rule's `exempt` set is how an individual escapes a
@@ -188,6 +202,17 @@ against the ascending service-lock order `lock_services_in_tx` already establish
 breakage: tag policies today store the mutable, non-unique `tags.name`
 (`programme spec:43`), and catalog identity now lives in the registry. The compiler resolves key →
 name and id → name at compile time, so a rename recompiles instead of breaking.
+
+The two renames are closed differently, and the difference is worth stating rather than
+re-deriving. A **tag** rename is a real event — `TagRepo::update` writes `tags.name` — so it is a
+recompile trigger: it bumps `tag_version` on every service serving a warehouse that carries the tag
+and recompiles every profile a rule selecting that tag reaches, on the rename's own transaction.
+Without it the compiled policy keeps the old name while `download_tags` serves the new one, and the
+mask stops applying at the next plugin restart. A **catalog** rename is closed by construction
+instead: `registry.catalogs.name` has no writer — the registry's update path replaces
+config/advanced/description only — so the fail-closed mirror image, every grant naming a catalog the
+engine no longer has, is unrepresentable. If a rename is ever added, it needs the trigger the tag
+rename has; `crates/egret-bi/tests/tag_rename_recompiles.rs` covers both halves.
 
 **D7 — One canonical principal form, and group support is verified, not assumed.** Principals are
 written today sometimes as email and sometimes as username (`programme spec:44`), and that spec

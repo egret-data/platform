@@ -764,6 +764,9 @@ export const getPermCreateRuleUrl = () => {
   return `/api/control-plane/perm/rules`
 }
 
+/**
+ * Create a named mask or row-filter rule and recompile the profiles it affects, in one transaction. A tag-selected rule is installation-wide: it recompiles every Trino and StarRocks profile an engine binds, and a compile failure on any one of them fails this request and rolls the rule back.
+ */
 export const permCreateRule = async (newRule: NewRule, options?: Parameters<typeof customInstance>[1]): Promise<permCreateRuleResponse> => {
 
   return customInstance<permCreateRuleResponse>(getPermCreateRuleUrl(),
