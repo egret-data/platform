@@ -50,14 +50,14 @@ missing `DATABASE_URL` is a failure, not an `ok`.
 
 ### 3.1 The table
 
-Migration `0154_workflow_triggers.sql`:
+Migration `NNNN_workflow_triggers.sql`, where `NNNN` is the next free number **when the task runs**: `0154` on `origin/main` today, but the unmerged SP4a branch (`feat/sp4a-permission-model`) already holds `0154` and `0155`, so whichever merges second renumbers:
 
 ```sql
 CREATE TABLE workflow.triggers (
   flow_id              uuid        NOT NULL REFERENCES workflow.flows (id) ON DELETE CASCADE,
   trigger_id           text        NOT NULL,   -- the trigger's `id:` in the YAML
   workspace_id         uuid        NOT NULL,   -- copied from the flow; see below
-  spec_hash            text        NOT NULL,   -- hash of (cron, withSeconds, timezone)
+  spec_key            text        NOT NULL,   -- canonical "cron|withSeconds|timezone", not a digest
   disabled             boolean     NOT NULL,   -- flow YAML `disabled` OR trigger `disabled`
   next_evaluation_date timestamptz,            -- NULL = not queued (see 3.3)
   evaluated_at         timestamptz,
@@ -110,22 +110,27 @@ uniqueness guarantee must not depend on a formatting decision.
 
 ### 3.3 Sync: one function, called at every write that changes what fires
 
-`trigger::sync(conn, flow: &FlowRow, parsed: Option<&Flow>)`, which reads `now()`
+The DB-facing code lives in a **new module, `src/scheduler/`**, not in
+`src/trigger/`: `trigger/mod.rs`'s own doc promises that nothing in that tree
+reaches a database, a container or a network, and its tests rely on it. `trigger/`
+stays pure; `scheduler/` is its only I/O caller.
+
+`scheduler::sync(conn, flow: &FlowRow, gone: bool)` (it parses `flow.source` itself unless `gone`), which reads `now()`
 from the same transaction — the loop's clock (§4 point 4), so a first
 `next_evaluation_date` is never computed on one clock and compared on another:
 
-1. Collect the flow's `Schedule` triggers (none if `parsed` is `None`, i.e. the
+1. Collect the flow's `Schedule` triggers (none if `gone`, or if the
    source does not parse, or the flow is being deleted).
 2. **Delete** rows whose `trigger_id` is no longer declared.
-3. For each declared schedule, compute `spec_hash` and resolve it with
+3. For each declared schedule, compute `spec_key` and resolve it with
    `ScheduleTrigger::resolve`:
-   - **new row, or `spec_hash` changed** → upsert with
+   - **new row, or `spec_key` changed** → upsert with
      `TriggerState::initialise` (the **next** cron tick after `now`, never `now`),
      `evaluated_at = NULL`, `last_error = NULL`;
    - in every case, `disabled` = the flow's `disabled:` OR the trigger's
      `disabled:`; toggling it does **not** touch the dates, so re-enabling
      recovers the missed ticks under `ALL`;
-   - **`spec_hash` unchanged** → leave `next_evaluation_date` and `evaluated_at`
+   - **`spec_key` unchanged** → leave `next_evaluation_date` and `evaluated_at`
      **untouched**. Editing a task must not reset a schedule;
    - **resolve refused** (bad cron, `lateMaximumDelay`, a `when` it cannot
      render) → upsert with `next_evaluation_date = NULL` and the refusal in
@@ -135,15 +140,15 @@ The four writers become transactional and call it:
 
 | writer | sync call |
 |---|---|
-| `create` | `sync(tx, row, parse(source))` |
-| `update` | `sync(tx, row, parse(source))` — also when only `namespace`/`folder_id` changed; it is a no-op then |
-| `soft_delete` | `sync(tx, row, None)` — deletes every row. Kestra deletes a deleted flow's trigger state; keeping it would make a future restore replay the whole time in the trash under `ALL` |
+| `create` | `sync(tx, row, false)` |
+| `update` | `sync(tx, row, false)` — also when only `namespace`/`folder_id` changed; it is a no-op then |
+| `soft_delete` | `sync(tx, row, true)` — deletes every row. Kestra deletes a deleted flow's trigger state; keeping it would make a future restore replay the whole time in the trash under `ALL` |
 | `set_live` | **exempt**, named: it changes neither `source` nor `deleted_at`, and `state` is read at fire time (§4) |
 
 **The guard against a fifth writer that forgets:** a test scans the non-test half
 of `crates/**/src` for statements that `INSERT INTO`, `UPDATE` or `DELETE FROM`
 `workflow.flows`, and asserts each one sits in a function that calls
-`trigger::sync` or is on an exemption list whose entries carry a reason. It has a
+`scheduler::sync` or is on an exemption list whose entries carry a reason. It has a
 positive control (it must find exactly the four above today), so it cannot pass
 by scanning nothing.
 
@@ -268,7 +273,7 @@ is reported as unproved, not as covered.
 
 | property | test | mutation it must kill |
 |---|---|---|
-| sync creates, deletes and preserves | add/remove a `Schedule`; edit an unrelated task → `next_evaluation_date` unchanged; change the cron → re-initialised to the next tick | drop the `spec_hash` comparison |
+| sync creates, deletes and preserves | add/remove a `Schedule`; edit an unrelated task → `next_evaluation_date` unchanged; change the cron → re-initialised to the next tick | drop the `spec_key` comparison |
 | sync on delete | `soft_delete` removes every row | drop the `soft_delete` call |
 | every writer syncs | the scanner in §3.3, positive control = 4 | delete the `sync` call in `update` |
 | fire exactly once | `next_evaluation_date` one tick in the past, two passes → one execution with a whole `execution_trigger` and `scheduled_date` | drop the state `UPDATE` |
@@ -310,10 +315,10 @@ One docs PR (this spec, en + vi, plus the programme-spec §6.1/§6.3/§9 updates
 then one code PR in six tasks:
 
 1. Measure the `Schedule` output format on the artifact (§5).
-2. Migration `0154` + `trigger::sync` + transactional `FlowRepo` writers + the
+2. Migration `NNNN` (§3.1) + `scheduler::sync` + transactional `FlowRepo` writers + the
    writer scanner.
 3. `start_execution_in` extracted; the old function becomes its wrapper.
-4. The fire transaction (`trigger::fire_due`), `FixedClock`, the off switches and
+4. The fire transaction (`scheduler::fire_due`), `FixedClock`, the off switches and
    the refusal paths.
 5. The ticker, `WorkflowConfig`, the safety sections in `runtime.rs`, the
    concurrency and end-to-end tests.

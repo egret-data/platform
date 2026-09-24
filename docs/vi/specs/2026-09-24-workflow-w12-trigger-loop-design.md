@@ -49,14 +49,14 @@ dưới một mutation có tên trước khi được tính — kỷ luật củ
 
 ### 3.1 Bảng
 
-Migration `0154_workflow_triggers.sql`:
+Migration `NNNN_workflow_triggers.sql`, với `NNNN` là số trống kế tiếp **vào lúc làm task**: hôm nay trên `origin/main` là `0154`, nhưng nhánh SP4a chưa merge (`feat/sp4a-permission-model`) đã giữ `0154` và `0155`, nên nhánh nào merge sau thì đánh số lại:
 
 ```sql
 CREATE TABLE workflow.triggers (
   flow_id              uuid        NOT NULL REFERENCES workflow.flows (id) ON DELETE CASCADE,
   trigger_id           text        NOT NULL,   -- `id:` của trigger trong YAML
   workspace_id         uuid        NOT NULL,   -- chép từ flow; xem dưới
-  spec_hash            text        NOT NULL,   -- hash của (cron, withSeconds, timezone)
+  spec_key            text        NOT NULL,   -- chuỗi chuẩn "cron|withSeconds|timezone", không băm
   disabled             boolean     NOT NULL,   -- `disabled` của flow YAML HOẶC của trigger
   next_evaluation_date timestamptz,            -- NULL = không nằm trong hàng đợi (xem 3.3)
   evaluated_at         timestamptz,
@@ -110,22 +110,27 @@ một quyết định định dạng.
 
 ### 3.3 Sync: một hàm, gọi ở mọi lần ghi làm thay đổi cái được bắn
 
-`trigger::sync(conn, flow: &FlowRow, parsed: Option<&Flow>)`, đọc `now()` từ chính
+Mã chạm database nằm trong **module mới `src/scheduler/`**, không nằm trong
+`src/trigger/`: chính doc của `trigger/mod.rs` hứa rằng không gì trong cây đó chạm
+database, container hay mạng, và test của nó dựa vào lời hứa ấy. `trigger/` giữ
+thuần; `scheduler/` là người gọi có I/O duy nhất của nó.
+
+`scheduler::sync(conn, flow: &FlowRow, gone: bool)` (nó tự parse `flow.source` trừ khi `gone`), đọc `now()` từ chính
 transaction đó — đồng hồ của vòng lặp (§4 điểm 4), để `next_evaluation_date` đầu
 tiên không bao giờ được tính trên một đồng hồ rồi so trên đồng hồ khác:
 
-1. Gom các trigger `Schedule` của flow (không có gì nếu `parsed` là `None`, tức
+1. Gom các trigger `Schedule` của flow (không có gì nếu `gone`, hoặc nếu
    source không parse được, hoặc flow đang bị xoá).
 2. **Xoá** các hàng mà `trigger_id` không còn được khai báo.
-3. Với mỗi schedule được khai báo, tính `spec_hash` và resolve bằng
+3. Với mỗi schedule được khai báo, tính `spec_key` và resolve bằng
    `ScheduleTrigger::resolve`:
-   - **hàng mới, hoặc `spec_hash` đổi** → upsert với `TriggerState::initialise`
+   - **hàng mới, hoặc `spec_key` đổi** → upsert với `TriggerState::initialise`
      (tick cron **kế tiếp** sau `now`, không bao giờ là `now`),
      `evaluated_at = NULL`, `last_error = NULL`;
    - trong mọi trường hợp, `disabled` = `disabled:` của flow HOẶC `disabled:` của
      trigger; bật/tắt nó **không** đụng tới các ngày, nên bật lại sẽ bù các tick bị
      lỡ theo `ALL`;
-   - **`spec_hash` không đổi** → để nguyên `next_evaluation_date` và
+   - **`spec_key` không đổi** → để nguyên `next_evaluation_date` và
      `evaluated_at`. Sửa một task không được làm reset lịch;
    - **resolve từ chối** (cron hỏng, `lateMaximumDelay`, một `when` không render
      được) → upsert với `next_evaluation_date = NULL` và lý do ở `last_error`.
@@ -134,14 +139,14 @@ Bốn chỗ ghi trở thành có transaction và gọi nó:
 
 | chỗ ghi | lời gọi sync |
 |---|---|
-| `create` | `sync(tx, row, parse(source))` |
-| `update` | `sync(tx, row, parse(source))` — kể cả khi chỉ đổi `namespace`/`folder_id`; khi đó nó không làm gì |
-| `soft_delete` | `sync(tx, row, None)` — xoá mọi hàng. Kestra xoá state trigger của flow bị xoá; giữ lại sẽ khiến một lần khôi phục sau này phát lại toàn bộ thời gian nằm trong thùng rác theo `ALL` |
+| `create` | `sync(tx, row, false)` |
+| `update` | `sync(tx, row, false)` — kể cả khi chỉ đổi `namespace`/`folder_id`; khi đó nó không làm gì |
+| `soft_delete` | `sync(tx, row, true)` — xoá mọi hàng. Kestra xoá state trigger của flow bị xoá; giữ lại sẽ khiến một lần khôi phục sau này phát lại toàn bộ thời gian nằm trong thùng rác theo `ALL` |
 | `set_live` | **miễn**, có nêu lý do: nó không đổi `source` lẫn `deleted_at`, còn `state` được đọc lúc bắn (§4) |
 
 **Chốt chặn cho chỗ ghi thứ năm hay quên:** một test quét nửa không-test của
 `crates/**/src` tìm các câu `INSERT INTO`, `UPDATE` hoặc `DELETE FROM`
-`workflow.flows`, và khẳng định mỗi câu nằm trong một hàm có gọi `trigger::sync`,
+`workflow.flows`, và khẳng định mỗi câu nằm trong một hàm có gọi `scheduler::sync`,
 hoặc nằm trong danh sách miễn trừ mà mỗi mục mang một lý do. Nó có control dương
 (hôm nay phải tìm thấy đúng bốn câu trên), nên không thể pass nhờ quét rỗng.
 
@@ -261,7 +266,7 @@ là chưa chứng minh, không phải đã phủ.
 
 | tính chất | test | mutation phải giết |
 |---|---|---|
-| sync tạo, xoá và giữ | thêm/bỏ một `Schedule`; sửa một task không liên quan → `next_evaluation_date` không đổi; đổi cron → khởi tạo lại về tick kế tiếp | bỏ phép so `spec_hash` |
+| sync tạo, xoá và giữ | thêm/bỏ một `Schedule`; sửa một task không liên quan → `next_evaluation_date` không đổi; đổi cron → khởi tạo lại về tick kế tiếp | bỏ phép so `spec_key` |
 | sync khi xoá | `soft_delete` xoá mọi hàng | bỏ lời gọi ở `soft_delete` |
 | mọi chỗ ghi đều sync | bộ quét ở §3.3, control dương = 4 | xoá lời gọi `sync` trong `update` |
 | bắn đúng một lần | `next_evaluation_date` lùi một tick về quá khứ, hai pass → một execution với `execution_trigger` đầy đủ và `scheduled_date` | bỏ câu `UPDATE` state |
@@ -302,10 +307,10 @@ Một PR docs (spec này, en + vi, cùng các cập nhật §6.1/§6.3/§9 của
 trình), rồi một PR code gồm sáu task:
 
 1. Đo định dạng output của `Schedule` trên artifact (§5).
-2. Migration `0154` + `trigger::sync` + các chỗ ghi `FlowRepo` có transaction + bộ
+2. Migration `NNNN` (§3.1) + `scheduler::sync` + các chỗ ghi `FlowRepo` có transaction + bộ
    quét chỗ ghi.
 3. Tách `start_execution_in`; hàm cũ thành lớp bọc của nó.
-4. Transaction bắn (`trigger::fire_due`), `FixedClock`, các công tắc tắt và các
+4. Transaction bắn (`scheduler::fire_due`), `FixedClock`, các công tắc tắt và các
    đường từ chối.
 5. Ticker, `WorkflowConfig`, các mục an toàn trong `runtime.rs`, test đồng thời và
    test đầu cuối.
