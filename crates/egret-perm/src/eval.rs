@@ -12,6 +12,27 @@
 //! denies it; masks and row filters always apply, however the access was
 //! granted.* A rule's `exempt` set is how an individual escapes a mask —
 //! never a competing grant.
+//!
+//! Two bounds on what this function can prove, recorded rather than fixed:
+//!
+//! - **Leaf granularity.** `covers` is strictly grant-scope ⊇ target-scope
+//!   (see its doc). A deny scoped to `sales.orders.email` does not deny a
+//!   target scoped only to `sales.orders` — the two `Scope`s are not
+//!   comparable by `covers` in that direction. Callers must evaluate at the
+//!   leaf level actually being read (the column, if a column is being read)
+//!   rather than at a coarser level and expect a finer-grained deny to apply.
+//! - **Group principals are structurally invisible to the real engine.**
+//!   Task 1 measured, on the live cluster, that Trino has no group provider
+//!   and egret never pushes one (no usersync), so a Ranger policy item
+//!   naming a group matches no one on any engine egret provisions today —
+//!   see `docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`. This
+//!   evaluator has no way to know that: a `Group` principal is matched
+//!   against `Subject.groups` exactly like `User`/`Role`, so `evaluate` will
+//!   report `AllowedByGrant` for a group grant that the real engine denies.
+//!   Because a later task checks the compiler against this same evaluator as
+//!   its oracle, the compiler will agree — the oracle is blind to this whole
+//!   class of dead grant, and nothing downstream of `evaluate` alone can
+//!   catch it.
 
 use uuid::Uuid;
 
@@ -146,9 +167,13 @@ fn matches_principal(s: &Subject, p: &Principal) -> bool {
 }
 
 /// A grant's (or a path-selector rule's) scope covers a target when every
-/// level the grant names matches. A level left `None` means "everything
-/// below"; `"*"` at a named level means the same thing at that level — the
-/// spec records scope as "nullable, wildcards allowed".
+/// level the grant names matches, and the grant's catalog is exactly the
+/// target's. **This is strictly grant ⊇ target — the reverse never holds.**
+/// A grant scoped to `sales.orders` does not cover a target scoped only to
+/// `sales.orders.email`; conversely (see `level_covers`) a grant naming a
+/// value at a level the target leaves unspecified never matches either,
+/// because there is nothing to test the value against. Callers must
+/// evaluate at the leaf granularity of the actual read.
 fn covers(g: &Scope, t: &Scope) -> bool {
     if g.catalog_id != t.catalog_id {
         return false;
@@ -158,23 +183,123 @@ fn covers(g: &Scope, t: &Scope) -> bool {
         && level_covers(&g.column, &t.column)
 }
 
+/// `None` on the grant side means "everything below" and matches any target
+/// (including a target that itself leaves the level unspecified). Once the
+/// grant names a value, the target must name one too — `(Some(_), None)` is
+/// `false`, deliberately NOT the same as `(None, None)`: a grant explicitly
+/// scoped to a level (even to `"*"`, matching every value there) says
+/// nothing about a target that IS the object one level up and does not
+/// descend to a specific value at this level. A named grant value that does
+/// resolve against a named target value is matched by `glob_match`, not
+/// plain equality — see its doc for why.
 fn level_covers(grant: &Option<String>, target: &Option<String>) -> bool {
     match (grant, target) {
         (None, _) => true,
         (Some(_), None) => false,
-        (Some(g), Some(t)) => g == "*" || g == t,
+        (Some(g), Some(t)) => glob_match(g, t),
     }
+}
+
+/// Ranger's resource matcher globs (`*` = any run of characters including
+/// none, `?` = exactly one character) rather than testing string equality.
+/// Migration `0154` puts no CHECK on `schema_name`/`table_name`/`column_name`
+/// restricting them to a closed `*`-or-literal vocabulary, so a stored scope
+/// value such as `"ord*"` is possible today and the live engine glob-matches
+/// it. An evaluator that only special-cased the literal string `"*"` would
+/// then say DENIED/NoGrantMatched for a target the engine actually allows —
+/// silent under-matching, which is worse than over-matching here because a
+/// later task checks the Ranger compiler against this evaluator as an
+/// oracle: an oracle that under-matches would bless a compiler that
+/// over-permits. So this implements real glob matching rather than treating
+/// `"*"` as a single special case.
+fn glob_match(pattern: &str, value: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let v: Vec<char> = value.chars().collect();
+    // Classic greedy wildcard match with backtracking: `star` remembers the
+    // last `*` seen in the pattern and how far into `value` we'd consumed
+    // when we saw it, so a later mismatch can retry by having that `*`
+    // absorb one more character instead of failing outright.
+    let (mut pi, mut vi) = (0usize, 0usize);
+    let (mut star, mut star_vi) = (None::<usize>, 0usize);
+    while vi < v.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == v[vi]) {
+            pi += 1;
+            vi += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            star_vi = vi;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            star_vi += 1;
+            vi = star_vi;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 /// Whether a rule's selector hits `target`. A tag selector is checked
 /// against `tags_on` — the tags the caller has already resolved as present
-/// on `target` (tags attach to tables/columns only; there is no catalog- or
-/// schema-level tag, per the spec, so resolving that is the caller's job,
-/// not this function's). A path selector is checked the same way a grant's
-/// scope is: `covers`.
+/// on `target` (tags attach to tables/columns only — `catalog_tag_assignments`
+/// is keyed `(tag_id, warehouse_id, schema_name, table_name, column_name)`
+/// with `column_name = ''` meaning table-level, and there is no catalog- or
+/// schema-level tag — so resolving *which* tags apply is necessarily the
+/// caller's job: it needs `catalog_tag_assignments`, which this crate does
+/// not read, keeping the evaluator DB-free). What this function DOES own is
+/// the boundary: a target that names no table (schema- or catalog-level)
+/// cannot carry a tag by construction, so a tag selector can never hit it —
+/// guarded here rather than trusted to every caller, so a caller that passes
+/// `tags_on` for a schema-level target cannot make this function claim a
+/// mask applies where no tag assignment could ever exist. A path selector is
+/// checked the same way a grant's scope is: `covers`.
 fn selector_hits(selector: &Selector, target: &Scope, tags_on: &[String]) -> bool {
     match selector {
-        Selector::Tag { key } => tags_on.iter().any(|t| t == key),
+        Selector::Tag { key } => target.table.is_some() && tags_on.iter().any(|t| t == key),
         Selector::Path(scope) => covers(scope, target),
+    }
+}
+
+#[cfg(test)]
+mod glob_match_tests {
+    use super::glob_match;
+
+    #[test]
+    fn literal_still_requires_exact_equality() {
+        assert!(glob_match("orders", "orders"));
+        assert!(!glob_match("orders", "order"));
+        assert!(!glob_match("orders", "orders2"));
+    }
+
+    #[test]
+    fn bare_star_matches_anything_including_empty() {
+        assert!(glob_match("*", "orders"));
+        assert!(glob_match("*", ""));
+    }
+
+    #[test]
+    fn trailing_star_matches_a_prefix() {
+        assert!(glob_match("ord*", "orders"));
+        assert!(glob_match("ord*", "ord"));
+        assert!(!glob_match("ord*", "customers"));
+        assert!(!glob_match("ord*", "xord"));
+    }
+
+    #[test]
+    fn star_in_the_middle_matches_a_run_of_any_length() {
+        assert!(glob_match("s*s", "sales"));
+        assert!(glob_match("s*s", "ss"));
+        assert!(!glob_match("s*s", "sale"));
+    }
+
+    #[test]
+    fn question_mark_matches_exactly_one_character() {
+        assert!(glob_match("s?les", "sales"));
+        assert!(!glob_match("s?les", "smiles"));
+        assert!(!glob_match("s?les", "sles"));
     }
 }
