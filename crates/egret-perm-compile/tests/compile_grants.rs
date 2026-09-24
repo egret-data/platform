@@ -16,9 +16,10 @@
 use uuid::Uuid;
 
 use egret_perm::{
-    compile_grant, engine_accesses, Action, CompileError, Effect, EngineType, Grant, GrantOrigin,
-    Principal, PrincipalKind, PrincipalSet, Scope,
+    engine_accesses, Action, CompileError, Effect, EngineType, Grant, GrantOrigin, Principal,
+    PrincipalKind, PrincipalSet, Scope,
 };
+use egret_perm_compile::compile_grant;
 
 // Dumb helpers only — a helper that computes anything is a second
 // implementation of the thing under test.

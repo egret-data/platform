@@ -65,8 +65,8 @@ pub enum CompileError {
     /// never an email … written through unchanged"). The compiler does no
     /// I/O and so cannot resolve `users.username` itself (round 1's fix
     /// guessed a resolution by splitting on `@`, which can collide two
-    /// distinct humans onto one engine principal — see
-    /// `compile::grants`'s module doc). Refusing is the only safe move
+    /// distinct humans onto one engine principal — see the sibling crate
+    /// `egret-perm-compile`'s `grants` module doc). Refusing is the only safe move
     /// left to a function that cannot look the real username up.
     // The format string can't spell the field name directly — `r#ref` is a
     // raw identifier, and Rust's format-string captures don't support those
@@ -97,7 +97,7 @@ pub enum CompileError {
     /// cannot even balance its parentheses would compile, deploy, and fail
     /// every query touching the masked column. A real SQL parser is SP5's;
     /// this check is deliberately the smallest one that still catches the
-    /// obvious case (see `crate::compile::rules`).
+    /// obvious case (see the sibling crate `egret-perm-compile`'s `rules` module).
     #[error("rule {rule:?}'s custom mask expression does not parse: {expr:?}")]
     InvalidCustomMask { rule: String, expr: String },
     /// A rule names a `mask_type` the target engine's service-def does not

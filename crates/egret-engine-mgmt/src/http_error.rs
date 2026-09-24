@@ -71,7 +71,15 @@ pub enum EngineHttpError {
 /// The one place a `sqlx::Error` becomes an HTTP error. It is logged here because
 /// this is the last point the error still exists: `Internal` has no payload, and
 /// "internal error with nothing in the logs" was the reported defect.
-fn db_error(e: sqlx::Error) -> EngineHttpError {
+/// `pub(crate)`: `catalogs::set_catalog_workspaces` maps `sqlx::Error` from
+/// its own `.begin()`/`.commit()` through this explicitly rather than
+/// through a blanket `From<sqlx::Error> for EngineHttpError` (Task 6 fix
+/// round 1, Minor) — a crate-wide `impl From` would make every OTHER raw
+/// sqlx `?` in this crate compile through the same mapping with no
+/// deliberate decision at the call site, which is not a promise this crate
+/// makes anywhere else (every other `sqlx::Error` here is wrapped in a
+/// seam-specific error type first).
+pub(crate) fn db_error(e: sqlx::Error) -> EngineHttpError {
     let (sqlstate, constraint) = match e.as_database_error() {
         Some(d) => (
             d.code().map(|c| c.into_owned()),
@@ -138,16 +146,10 @@ impl From<egret_catalog_registry::RegistryError> for EngineHttpError {
             E::Invalid(v) => EngineHttpError::BadRequest(v.to_string()),
             E::Secrets(s) => s.into(),
             E::Db(e) => db_error(e),
+            // `ensure_warehouse_catalog`'s implicit-grant sync (Task 6 fix
+            // round 1, Important 1) failing inside its own transaction.
+            E::Perm(e) => e.into(),
         }
-    }
-}
-
-/// The transaction `set_catalog_workspaces` opens directly (SP4a Task 6, so
-/// the assignment write and `perm`'s implicit-grant sync share one
-/// transaction) surfaces raw `sqlx::Error` from `.begin()`/`.commit()`.
-impl From<sqlx::Error> for EngineHttpError {
-    fn from(e: sqlx::Error) -> Self {
-        db_error(e)
     }
 }
 

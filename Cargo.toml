@@ -23,6 +23,7 @@ egret-controlplane = { path = "crates/egret-controlplane" }
 egret-policy-api = { path = "crates/egret-policy-api" }
 egret-policy = { path = "crates/egret-policy" }
 egret-perm = { path = "crates/egret-perm" }
+egret-perm-compile = { path = "crates/egret-perm-compile" }
 egret-secrets = { path = "crates/egret-secrets" }
 egret-query-api = { path = "crates/egret-query-api" }
 egret-query = { path = "crates/egret-query" }

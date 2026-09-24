@@ -17,9 +17,10 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 use egret_perm::{
-    compile_rule, CompileError, EngineType, Principal, PrincipalKind, PrincipalSet, ResolvedNames,
-    Rule, RuleKind, Scope, Selector, TaggedColumn,
+    CompileError, EngineType, Principal, PrincipalKind, PrincipalSet, Rule, RuleKind, Scope,
+    Selector,
 };
+use egret_perm_compile::{compile_rule, ResolvedNames, TaggedColumn};
 
 // Dumb helpers only — a helper that computes anything is a second
 // implementation of the thing under test.

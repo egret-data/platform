@@ -3153,6 +3153,7 @@ dependencies = [
  "chrono",
  "egret-config",
  "egret-metastore",
+ "egret-perm",
  "egret-secrets",
  "egret-test-db",
  "regex",
@@ -3476,14 +3477,22 @@ name = "egret-perm"
 version = "0.1.0"
 dependencies = [
  "egret-metastore",
- "egret-policy",
  "egret-test-db",
  "serde",
- "serde_json",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
  "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "egret-perm-compile"
+version = "0.1.0"
+dependencies = [
+ "egret-perm",
+ "egret-policy",
+ "serde_json",
  "uuid",
 ]
 

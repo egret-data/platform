@@ -64,6 +64,12 @@ impl From<egret_catalog_registry::RegistryError> for CatalogHttpError {
             E::Invalid(v) => CatalogHttpError::BadRequest(v.to_string()),
             E::Secrets(s) => s.into(),
             E::Db(_) => CatalogHttpError::Internal,
+            // `ensure_warehouse_catalog`'s implicit-grant sync (SP4a Task 6
+            // fix round 1, Important 1) failing inside its own transaction —
+            // same treatment as `Db`, since it is the same class of "the
+            // write didn't go through" failure, not something the caller's
+            // request was wrong about.
+            E::Perm(_) => CatalogHttpError::Internal,
         }
     }
 }

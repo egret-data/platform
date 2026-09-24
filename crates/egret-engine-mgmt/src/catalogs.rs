@@ -984,10 +984,19 @@ async fn set_catalog_workspaces(
     // The assignment write and `perm`'s implicit-grant sync share ONE
     // transaction (SP4a Task 6, D3): an assignment that commits while its
     // grant sync fails is exactly the split-brain this exists to remove.
-    let mut tx = st.engine_mgmt.pool().begin().await?;
+    // `sqlx::Error` from `.begin()`/`.commit()` is mapped explicitly here
+    // (not through a blanket `From<sqlx::Error>`, Task 6 fix round 1 Minor)
+    // so this is the one deliberate place this crate lets a raw sqlx error
+    // become an HTTP one.
+    let mut tx = st
+        .engine_mgmt
+        .pool()
+        .begin()
+        .await
+        .map_err(crate::http_error::db_error)?;
     egret_catalog_registry::RegistryStore::set_catalog_workspaces_in_tx(&mut tx, id, &ids).await?;
     egret_perm::sync_assignment_grants_in_tx(&mut tx, id, &ids).await?;
-    tx.commit().await?;
+    tx.commit().await.map_err(crate::http_error::db_error)?;
     Ok(Json(workspace_dtos(&st, id).await?))
 }
 

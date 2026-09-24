@@ -1,0 +1,23 @@
+[package]
+name = "egret-perm-compile"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# SP4a Task 6 fix round 1 (Important 3): split out of `egret-perm` so that
+# crate's model/store half — the half `egret-engine-mgmt` actually needs
+# (`sync_assignment_grants`, which touches only `perm.*` tables) — carries no
+# `egret-policy` dependency. Before the split, `egret-perm` depended on
+# `egret-policy` directly for this compiler alone, so any production
+# consumer of the model/store half pulled `egret-policy`'s internals into
+# its production graph too — the exact thing `egret-policy-api::PolicyPort`
+# exists to prevent elsewhere (`egret-policy` is a dev-only dependency of
+# `egret-engine-mgmt`). Nothing outside this crate's own tests depends on it
+# yet; a later task's compile-profile driver is its first real consumer.
+[dependencies]
+egret-perm.workspace = true
+egret-policy.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true

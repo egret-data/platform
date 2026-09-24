@@ -9,20 +9,19 @@ license.workspace = true
 # Model + store live in one crate (unlike the seam "api"/impl split elsewhere)
 # because nothing outside SP4a depends on this yet; a later task can split a
 # leaf `egret-perm-api` out if a second seam needs the DTOs without sqlx.
+#
+# Deliberately carries NO `egret-policy` dependency (Task 6 fix round 1,
+# Important 3): the grant/rule -> Ranger-JSON compiler that needs it lives in
+# the sibling crate `egret-perm-compile` instead, so a production consumer of
+# this crate's model/store half (e.g. `egret-engine-mgmt`'s
+# `sync_assignment_grants` call) never pulls `egret-policy`'s internals into
+# its dependency graph.
 [dependencies]
 serde.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 utoipa.workspace = true
 sqlx.workspace = true
-# Task 4: compiles a Grant into the Ranger AccessPolicyInput/AccessItemInput
-# shapes egret-policy's admin/ranger_json.rs already knows how to serialize —
-# the compiler builds those values and leaves rendering to that existing code.
-egret-policy.workspace = true
-# Task 5: compile_rule returns Vec<serde_json::Value> directly (the shape
-# egret_policy::admin's renderers already produce) rather than wrapping it in
-# a crate-local type.
-serde_json.workspace = true
 
 [dev-dependencies]
 egret-metastore.workspace = true

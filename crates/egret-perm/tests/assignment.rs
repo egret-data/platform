@@ -118,11 +118,31 @@ async fn assigning_a_catalog_creates_exactly_one_read_grant_for_that_workspace()
     );
 
     // Idempotent: re-running must not accumulate. The unique index is the
-    // enforcement; this asserts the code path agrees with it.
+    // enforcement; this asserts the code path agrees with it — and does so
+    // by identity and principal-row survival, not just a count: a
+    // delete-then-reinsert-without-principals implementation would also
+    // leave the count at 1, but would change the id and lose the principal.
     egret_perm::sync_assignment_grants(&store, catalog_id, &[ws])
         .await
         .unwrap();
-    assert_eq!(grants_for(&store, catalog_id).await.len(), 1);
+    let after: Vec<_> = grants_for(&store, catalog_id)
+        .await
+        .into_iter()
+        .filter(|g| matches!(g.origin, GrantOrigin::WorkspaceAssignment { .. }))
+        .collect();
+    assert_eq!(after.len(), 1);
+    assert_eq!(
+        after[0].id, g[0].id,
+        "a re-run must not delete-and-reinsert the same (catalog, workspace) grant"
+    );
+    assert_eq!(
+        after[0].principals.include,
+        vec![Principal {
+            kind: PrincipalKind::WorkspaceMembers,
+            r#ref: ws.to_string(),
+        }],
+        "the principal row must still be there after a no-op re-run"
+    );
 }
 
 #[tokio::test]

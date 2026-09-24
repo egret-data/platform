@@ -7334,6 +7334,144 @@ async fn workspace_assignment() {
     assert_eq!(j["workspaces"][0]["id"], serde_json::json!(ws2));
 }
 
+/// The route side of D3 (SP4a Task 6 fix round 1, Important 2): the review
+/// found `workspace_assignment` above proves the `registry.catalog_workspaces`
+/// side but nothing ever asserted the `perm.grants` side — that the PUT
+/// route actually creates the implicit read grant, and that unassigning
+/// removes it, through the real HTTP handler rather than a direct call to
+/// `sync_assignment_grants`.
+#[tokio::test]
+async fn workspace_assignment_route_syncs_perm_grants() {
+    let Some(f) = setup_full(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_ws_perm_admin", true).await;
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(
+            serde_json::json!({ "name": unique_catalog_name("gp"), "kind": "tpch", "config": {} }),
+        ),
+    )
+    .await;
+    let cid = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let ws = seed_workspace(&f).await;
+    let perm = egret_perm::PermStore::new(f.db.pool.clone());
+    let implicit_for = |grants: &[egret_perm::Grant], catalog: Uuid| -> Vec<egret_perm::Grant> {
+        grants
+            .iter()
+            .filter(|g| {
+                g.scope.catalog_id == catalog
+                    && matches!(
+                        g.origin,
+                        egret_perm::GrantOrigin::WorkspaceAssignment { .. }
+                    )
+            })
+            .cloned()
+            .collect()
+    };
+
+    let (status, _) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &token,
+        Some(serde_json::json!({ "workspaceIds": [ws] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let after_assign = implicit_for(&perm.list_grants().await.unwrap(), cid);
+    assert_eq!(
+        after_assign.len(),
+        1,
+        "the route must create exactly one implicit grant"
+    );
+    assert_eq!(after_assign[0].actions, vec![egret_perm::Action::Read]);
+    assert!(matches!(
+        after_assign[0].origin,
+        egret_perm::GrantOrigin::WorkspaceAssignment { workspace_id } if workspace_id == ws
+    ));
+
+    let (status, _) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &token,
+        Some(serde_json::json!({ "workspaceIds": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let after_unassign = implicit_for(&perm.list_grants().await.unwrap(), cid);
+    assert!(
+        after_unassign.is_empty(),
+        "unassigning through the route must remove the implicit grant"
+    );
+}
+
+/// The rollback side of D3 (SP4a Task 6 fix round 1, Important 2). The
+/// review's own words: "a rollback nobody has ever observed is a
+/// hypothesis." This calls the exact two `_in_tx` functions the handler
+/// composes (`RegistryStore::set_catalog_workspaces_in_tx` then
+/// `egret_perm::sync_assignment_grants_in_tx`) inside one transaction opened
+/// the same way the handler opens it, deliberately making the SECOND write
+/// fail with a real constraint violation (a workspace id that satisfies no
+/// FK) after the FIRST write has already gone through inside the
+/// (uncommitted) transaction — then rolls back exactly as the handler does
+/// when the `?` on the second call returns before `tx.commit()`, and proves
+/// the first write did not survive.
+#[tokio::test]
+async fn a_failed_grant_sync_rolls_back_the_assignment_write() {
+    let Some(f) = setup_full(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_ws_rollback_admin", true).await;
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(
+            serde_json::json!({ "name": unique_catalog_name("rb"), "kind": "tpch", "config": {} }),
+        ),
+    )
+    .await;
+    let cid = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let valid_ws = seed_workspace(&f).await;
+    // Never inserted into `workspaces` — `perm.grants.origin_workspace_id
+    // REFERENCES workspaces(id)` (migrations/0154_perm_model.sql) refuses it.
+    // `registry.catalog_workspaces` carries no such FK, so the first write
+    // below succeeds on its own before the second one fails — the scenario
+    // the handler's transaction exists to prevent from ever being observed
+    // as two independent facts.
+    let bogus_ws = Uuid::new_v4();
+
+    let mut tx = f.db.pool.begin().await.unwrap();
+    egret_catalog_registry::RegistryStore::set_catalog_workspaces_in_tx(&mut tx, cid, &[valid_ws])
+        .await
+        .expect("the registry write alone succeeds");
+    let grant_sync_result =
+        egret_perm::sync_assignment_grants_in_tx(&mut tx, cid, &[bogus_ws]).await;
+    assert!(
+        grant_sync_result.is_err(),
+        "the bogus workspace id must be refused by the FK, not silently accepted"
+    );
+    // What the handler does on `?`: never calls `tx.commit()`. Rolled back
+    // explicitly here for a deterministic assertion rather than relying on
+    // `Transaction::drop`'s background rollback racing the query below.
+    tx.rollback().await.unwrap();
+
+    let assigned = registry(&f).list_catalog_workspaces(cid).await.unwrap();
+    assert!(
+        assigned.is_empty(),
+        "the registry write must not survive a grant-sync failure in the same transaction, \
+         got: {assigned:?}"
+    );
+}
+
 #[tokio::test]
 async fn new_catalog_routes_enforce_their_permission_gates() {
     let port = FakeEnginePort::default();

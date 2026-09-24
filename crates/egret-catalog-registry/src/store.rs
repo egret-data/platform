@@ -497,6 +497,19 @@ impl RegistryStore {
     /// the catalog, so an admin's later un-assignment is never undone here.
     /// `preferred_name` is used verbatim when free (only a `#[cfg(test)]`
     /// helper passes one today).
+    ///
+    /// The `catalog_workspaces` write also syncs the implicit `perm.grants`
+    /// row for that (catalog, workspace) pair, in the SAME transaction (SP4a
+    /// Task 6 fix round 1, Important 1) — this is the OTHER path that
+    /// assigns a catalog to a workspace, alongside the PUT
+    /// `/catalogs/{id}/workspaces` handler
+    /// (`egret-engine-mgmt::catalogs::set_catalog_workspaces`), and D3's
+    /// invariant ("assigning a catalog to a workspace grants it read") must
+    /// hold on both or the review-caught defect shape repeats: true on one
+    /// write path, silently false on the other. `sync_assignment_grants_in_tx`
+    /// is safe to call unconditionally here even though it is a REPLACE (not
+    /// an upsert-only) operation — the catalog row was just created in this
+    /// same transaction, so it can carry no other implicit grant yet.
     pub async fn ensure_warehouse_catalog(
         &self,
         wh: &WarehouseIdentity<'_>,
@@ -523,6 +536,8 @@ impl RegistryStore {
                     .bind(wh.workspace_id)
                     .execute(&mut *tx)
                     .await?;
+                    egret_perm::sync_assignment_grants_in_tx(&mut tx, row.id, &[wh.workspace_id])
+                        .await?;
                     tx.commit().await?;
                     return Ok((row, true));
                 }

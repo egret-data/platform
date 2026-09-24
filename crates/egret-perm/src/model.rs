@@ -187,7 +187,7 @@ pub enum RuleKind {
 /// OpenAPI schema all accept it — `perm.rule_exemptions` has the same
 /// `mode` column `perm.grant_principals` does, precisely so "exempt this
 /// whole group except these people" round-trips the way a grant's subtract
-/// does. But `compile::rules::compile_rule` refuses any `Rule` whose
+/// does. But `egret-perm-compile`'s `rules::compile_rule` refuses any `Rule` whose
 /// `exempt.exclude` is non-empty (`CompileError::UnexpressibleExemption`):
 /// unlike an access-policy item, a Ranger masking/row-filter item
 /// (`MaskItemInput`/`RowFilterItemInput`) has no allow/deny-exception block

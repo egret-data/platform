@@ -78,9 +78,9 @@ use egret_policy::admin::{
 };
 use egret_policy::{starrocks_service_def, trino_service_def};
 
-use crate::actions::{CompileError, EngineType};
-use crate::compile::grants::{level, resource_level_names, scope_to_resources, validate_user_ref};
-use crate::model::{PrincipalKind, PrincipalSet, Rule, RuleKind, Selector};
+use egret_perm::{CompileError, EngineType, PrincipalKind, PrincipalSet, Rule, RuleKind, Selector};
+
+use crate::grants::{level, resource_level_names, scope_to_resources, validate_user_ref};
 
 /// One column carrying the tag a rule selects on, resolved by the CALLER —
 /// this compiler does no I/O and cannot itself know which columns carry

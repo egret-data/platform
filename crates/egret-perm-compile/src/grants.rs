@@ -62,11 +62,12 @@ use std::collections::BTreeMap;
 // `admin` itself.
 use egret_policy::admin::{AccessItemInput, AccessPolicyInput, ResourceLevel};
 
-use crate::actions::{engine_accesses, CompileError, EngineType};
-use crate::model::{Effect, Grant, Principal, PrincipalKind, Scope};
+use egret_perm::{
+    engine_accesses, CompileError, Effect, EngineType, Grant, Principal, PrincipalKind, Scope,
+};
 
 /// The one check every `User` ref gets before it is emitted, shared by
-/// `principal_item` here and `compile::rules::exempt_principals` — the two
+/// `principal_item` here and `crate::rules::exempt_principals` — the two
 /// places this compiler ever buckets a `User` principal. A `User` ref is
 /// emitted verbatim (see module doc comment) after being checked for the two
 /// shapes that prove it was never resolved to a bare `users.username`: empty,
@@ -127,7 +128,7 @@ fn principal_item(
 /// against each one's declared name + parent chain, so this can't drift
 /// from the service-defs silently the way the write-up in round 1 could
 /// have (its Trino-only test never opened a service-def).
-// `pub(crate)`: `compile::rules` (Task 5) reuses this and `level`/
+// `pub(crate)`: `crate::rules` (Task 5) reuses this and `level`/
 // `scope_to_resources` rather than duplicating the per-engine hierarchy
 // naming a second time.
 pub(crate) fn resource_level_names(e: EngineType) -> [&'static str; 4] {
