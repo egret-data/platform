@@ -49,8 +49,18 @@ always was — storing it on the engine is what forced one warehouse per engine.
 
 **D3 — One permission family.** `warehouse_admin` and the resource-tag endpoints move onto
 `catalog_registry:*`, and a migration grants `catalog_registry:{read,create,update,delete}` to every
-role that holds the matching `warehouse:*` before the old keys are dropped. Nobody gains access,
-nobody loses it. **That grant must be re-run by SP3c-2's own migration, not assumed done** (amended
+role that holds the matching `warehouse:*` before the old keys are dropped. ~~Nobody gains access,
+nobody loses it.~~ **Half true, corrected 2026-09-24 by the whole-branch review.** Nobody loses
+access — `0153`'s re-grant guarantees that. But somebody *does* gain: `catalog_registry:*` has
+existed since `0148`, so a platform role created since then holding it and never holding
+`warehouse:*` — the natural "catalog operator", since the Catalogs section is gated
+`catalog_registry:read` — now also reaches the 27 `warehouse_admin` routes: browsing lakehouse
+namespaces and tables, creating and deleting warehouses, and minting and revoking Catalog Clients,
+which are real data-lake credentials. Accepted (user decision, 2026-09-23): the surface belongs to
+the catalog now, since its tabs live on the catalog page. But the four permission descriptions in
+`egret-core/src/rbac.rs` must say so, because they are what an admin reads before granting — every
+per-task review checked only the no-lockout direction, and none of them could have caught this,
+because no single task both created the population and widened the gate. **That grant must be re-run by SP3c-2's own migration, not assumed done** (amended
 2026-09-23): migration `0148` performed it once, in the past, so every role created since holds
 `warehouse:*` with no `catalog_registry:*` counterpart — `warehouseRedirect.test.tsx:140-173` is an
 entire describe block about exactly that population. Grant then delete, in one transaction, in that
@@ -153,9 +163,35 @@ the stated order is right. Two corrections:
   Move the field first and the channel survives; delete first and a Trino build failure is invisible
   on **both** surfaces. This was not in the design and is now part of the precondition.
 
-Deleting the routes also retires `CatalogTestDto`'s undiscriminated `{ ok, message }`, which is what
-makes D4 true everywhere rather than on one route. Note that `POST /engines/{id}/catalogs/{cid}` and
+**Five routes, not six — amended 2026-09-23 during implementation.**
+`POST /engines/{id}/catalogs/{cid}/test` **stays**. `EngineDetail.tsx`'s per-row Test button is a
+live caller, and the registry's own test route is not a replacement: it tests an applied attachment
+across *all* of a catalog's engines rather than one named engine, and it requires
+`catalog_registry:read` where this one requires `engine:read` — the persona SP3c review F-3 added the
+per-engine route for. So `CatalogTestDto`'s undiscriminated `{ ok, message }` survives too, and D4
+remains true only on the registry route. Retiring it needs a per-engine registry test route first;
+that is a follow-on, not a deletion. Note that `POST /engines/{id}/catalogs/{cid}` and
 `…/apply` live under the same URL prefix but are **registry-era and stay**.
+
+**Two capabilities leave with `add_catalog`, and neither is replaced.** Written down here because
+both were found by the implementer, not by this design. (a) `config.clientId` — attaching under an
+*existing* Catalog Client's role. The registry mints a client per attachment and offers no way to
+name one; the legacy option mainly expressed what the backfill produced from a shared legacy row, and
+the backfill is gone. (b) Inline plaintext secrets, which `add_catalog` extracted into secret rows
+automatically. The registry takes a secret id, which is the stricter and intended shape (SP3c-1's UI
+is a secret picker). Both are accepted; neither should be rediscovered as a bug.
+
+A third was checked and is **not** a loss: the registry's `CatalogKind` is a closed nine-variant
+enum where the legacy route accepted any non-blank Trino connector name, but `generic` plus
+`advanced.trino["connector.name"]` expresses exactly that.
+
+**A consequence to state, because it is a capability loss.** Before SP3c-2, an operator holding
+`engine:read` and nothing else could see an engine's catalog names on its Catalogs tab, because
+`GET /engines/{id}/catalogs` was gated on `engine:read`. The registry list is gated on
+`catalog_registry:read`, so after this step that operator sees the tab, an explicit alert naming the
+missing permission, and no catalog names. That is the price of one permission family (D3) and it is
+accepted — but the tab must never simply look empty, because an empty table reads as "this engine has
+no catalogs". The alert says so in as many words.
 
 **3. `engines.warehouse_id` — and what "primary" may now mean.** One writer (`store.rs:203-227`),
 eleven production readers; four of them die with step 1. `EngineDto.warehouse_id` leaves the wire,
@@ -166,6 +202,13 @@ Two readers need an answer rather than a rewrite. StarRocks derives its builtin 
 the warehouse (`engines.rs:626-635`, `:4977-4983`), and `ensure_engine_role` / `create_client` seed
 the engine's Ranger role and Catalog Client from it (`engines.rs:2899-2905`, `:3073`, `:3800`). A
 `jdbc` primary has `warehouse_id IS NULL` and answers neither.
+
+**Corrected 2026-09-23 during implementation: the survey over-counted.** Of the eleven reader sites
+it listed, only **two** genuinely read the column — the StarRocks storage ones. The rest already went
+through `resolve_primary_catalog`, which returns the primary *attachment's* catalog warehouse, and
+the warehouse-less-primary refusal **already shipped in SP3c-1** (`engines.rs:2832` at `14de835a`),
+before any registry write, with a live test. So this step is smaller than it reads — but the ruling
+below still matters, because without it an implementer reads D2 and builds the feature.
 
 Ruling (user decision, 2026-09-23): **the primary attachment must name a catalog that has a
 warehouse.** The backend refuses `is_primary` on a catalog without one, and says why. That is today's

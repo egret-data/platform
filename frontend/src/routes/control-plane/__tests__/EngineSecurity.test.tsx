@@ -18,7 +18,6 @@ const BASE: Omit<Engine, "status"> = {
   name: "trino-one",
   type: "trino",
   namespace: "engines",
-  warehouseId: "w1",
   spec: {
     coordinatorReplicas: 1,
     workerReplicas: 1,

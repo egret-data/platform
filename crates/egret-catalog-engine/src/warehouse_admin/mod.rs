@@ -3,11 +3,14 @@
 //! Moved out of `egret-controlplane` into the Catalog seam (E3d-3); the router
 //! is still nested at `/api/control-plane` in `egret-server` (FE URLs
 //! unchanged). Every route is gated on `egret_core::authz::require(&*st.pdp, &p,
-//! "warehouse:*")` (platform_admin bypasses inside the PDP) and operates over the
-//! egret RBAC store
-//! (`CatalogStore`). NOTE: warehouse creation here records the egret-side row;
-//! provisioning the lakekeeper warehouse itself is done through the
-//! [`WarehouseProvisioner`] seam, wired in the composition root (egret-bin).
+//! "catalog_registry:*")` (platform_admin bypasses inside the PDP) and operates
+//! over the egret RBAC store (`CatalogStore`). SP3c-2 retired the router's
+//! original `warehouse:*` gate: migration 0153 re-ran 0148's grant and deleted
+//! the old keys, so `catalog_registry:*` alone now admits anyone who could
+//! reach these routes before. NOTE: warehouse creation here records the
+//! egret-side row; provisioning the lakekeeper warehouse itself is done
+//! through the [`WarehouseProvisioner`] seam, wired in the composition root
+//! (egret-bin).
 //!
 //! OpenAPI (E0·P4b-4): every handler carries a `#[utoipa::path]` with the FULL
 //! mounted path (`/api/control-plane` + the internal route), since utoipa does
@@ -346,7 +349,7 @@ struct CreateWarehouseBody {
     responses(
         (status = 200, description = "Embedded-catalog warehouses (egret rows)", body = Vec<WarehouseDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -354,7 +357,7 @@ async fn list_warehouses(
     State(st): State<CatalogAdminState>,
     Auth(p): Auth,
 ) -> Result<Json<Vec<WarehouseDto>>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
     Ok(Json(
         st.store
             .list_warehouses()
@@ -374,7 +377,7 @@ async fn list_warehouses(
         (status = 201, description = "Warehouse created (egret row + lakekeeper warehouse when a provisioner is wired) with its registry catalog, assigned to the workspace", body = WarehouseDto),
         (status = 400, description = "Unknown storage connection or invalid input", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:create permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:create permission", body = ErrorBody),
         (status = 409, description = "A warehouse with this name already exists", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable while provisioning", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -385,7 +388,7 @@ async fn create_warehouse(
     Auth(p): Auth,
     Json(b): Json<CreateWarehouseBody>,
 ) -> Result<(StatusCode, Json<WarehouseDto>), CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:create").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:create").await?;
     let w = st
         .store
         .create_warehouse(&b.name, b.workspace_id, b.storage_connection_id)
@@ -410,7 +413,8 @@ async fn create_warehouse(
         .ok_or(CatalogHttpError::NotFound)?;
 
     // SP3: the warehouse is a registry catalog, assigned to this workspace. A
-    // failure is not fatal — engine create and the boot backfill ensure it too.
+    // failure is not fatal — `ensure_warehouse_catalog` is idempotent, and
+    // engine create calls it again on every attach to this warehouse.
     if let Err(e) = st
         .store
         .registry()
@@ -421,7 +425,6 @@ async fn create_warehouse(
                 workspace_id: w.workspace_id,
             },
             None,
-            |_| Vec::new(),
         )
         .await
     {
@@ -474,7 +477,7 @@ async fn provision_lakekeeper(
     responses(
         (status = 200, description = "The warehouse", body = WarehouseDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 404, description = "No such warehouse", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -484,7 +487,7 @@ async fn get_warehouse(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WarehouseDto>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
     let w = st
         .store
         .get_warehouse(id)
@@ -501,8 +504,8 @@ async fn get_warehouse(
     responses(
         (status = 204, description = "Warehouse deleted"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:delete permission", body = ErrorBody),
-        (status = 409, description = "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or the warehouse is still an engine's primary warehouse, or the boot backfill has just created and assigned its catalog (retry)", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:delete permission", body = ErrorBody),
+        (status = 409, description = "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or a concurrent engine create has just created and assigned its catalog (retry)", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -511,12 +514,14 @@ async fn delete_warehouse(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:delete").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:delete").await?;
     // SP3: `CatalogStore::delete_warehouse_releasing_catalog` owns the
     // transaction that releases the registry catalog's workspace assignments
     // and deletes the warehouse atomically, and 409s (naming the engine(s))
-    // instead of a raw FK 500 when an engine still attaches the catalog or
-    // still has this warehouse as its primary.
+    // instead of a raw FK 500 when an engine still attaches the catalog. The
+    // "still its primary" arm went with `engines.warehouse_id` in SP3c-2 Task
+    // 6: primacy is now a flag on an attachment, so the attachment check is
+    // the whole of it.
     st.store.delete_warehouse_releasing_catalog(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -560,7 +565,7 @@ struct CreateRoleBody {
     responses(
         (status = 200, description = "Catalog roles defined on the warehouse", body = Vec<RoleDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -569,7 +574,7 @@ async fn list_roles(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<RoleDto>>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
     Ok(Json(
         st.store
             .list_roles(id)
@@ -589,7 +594,7 @@ async fn list_roles(
     responses(
         (status = 201, description = "Catalog role created", body = RoleDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:create permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:create permission", body = ErrorBody),
         (status = 409, description = "A role with this name already exists", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -600,7 +605,7 @@ async fn create_role(
     Path(id): Path<Uuid>,
     Json(b): Json<CreateRoleBody>,
 ) -> Result<(StatusCode, Json<RoleDto>), CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:create").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:create").await?;
     let desc = b.description.as_deref().filter(|d| !d.trim().is_empty());
     let r = st
         .store
@@ -618,7 +623,7 @@ async fn create_role(
         (status = 204, description = "Catalog role deleted"),
         (status = 400, description = "Role is in use by one or more Catalog Clients", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:delete permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:delete permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -627,7 +632,7 @@ async fn delete_role(
     Auth(p): Auth,
     Path(role_id): Path<Uuid>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:delete").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:delete").await?;
     st.store.delete_role(role_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -658,7 +663,7 @@ struct AddGrantBody {
     responses(
         (status = 200, description = "Grants held by the catalog role", body = Vec<GrantDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -667,7 +672,7 @@ async fn list_grants(
     Auth(p): Auth,
     Path(role_id): Path<Uuid>,
 ) -> Result<Json<Vec<GrantDto>>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
     Ok(Json(
         st.store
             .list_grants(role_id)
@@ -694,7 +699,7 @@ async fn list_grants(
         (status = 201, description = "Grant added to the catalog role"),
         (status = 400, description = "Invalid securable/privilege", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:create permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:create permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -704,7 +709,7 @@ async fn add_grant(
     Path(role_id): Path<Uuid>,
     Json(b): Json<AddGrantBody>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:create").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:create").await?;
     st.store
         .add_grant(
             role_id,
@@ -727,7 +732,7 @@ async fn add_grant(
     responses(
         (status = 204, description = "Grant revoked"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:delete permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:delete permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -736,7 +741,7 @@ async fn revoke_grant(
     Auth(p): Auth,
     Path(grant_id): Path<Uuid>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:delete").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:delete").await?;
     st.store.revoke_grant(grant_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -775,7 +780,7 @@ struct CreateClientBody {
     responses(
         (status = 200, description = "Catalog Clients bound to the warehouse", body = Vec<ClientDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -784,7 +789,7 @@ async fn list_clients(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<ClientDto>>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
     Ok(Json(
         st.store
             .list_clients(id)
@@ -810,7 +815,7 @@ async fn list_clients(
     responses(
         (status = 201, description = "Catalog Client created; client_secret is shown ONCE", body = CreatedClientDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:create permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:create permission", body = ErrorBody),
         (status = 404, description = "No such warehouse or catalog role", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -821,7 +826,7 @@ async fn create_client(
     Path(id): Path<Uuid>,
     Json(b): Json<CreateClientBody>,
 ) -> Result<(StatusCode, Json<CreatedClientDto>), CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:create").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:create").await?;
     let c = st
         .store
         .create_client(&NewClient {
@@ -850,7 +855,7 @@ async fn create_client(
     responses(
         (status = 204, description = "Catalog Client revoked"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:delete permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:delete permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -859,7 +864,7 @@ async fn revoke_client(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:delete").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:delete").await?;
     st.store.revoke_client(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -967,7 +972,7 @@ async fn lk_id(st: &CatalogAdminState, id: Uuid) -> Result<Option<String>, Catal
     responses(
         (status = 200, description = "Top-level namespaces (empty when no browser/lakekeeper warehouse is wired)", body = Vec<NamespaceDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -977,7 +982,7 @@ async fn browse_namespaces(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<NamespaceDto>>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
@@ -1004,7 +1009,7 @@ async fn browse_namespaces(
     responses(
         (status = 200, description = "Tables and views in the namespace", body = Vec<TabularDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -1014,7 +1019,7 @@ async fn browse_tables(
     Auth(p): Auth,
     Path((id, ns)): Path<(Uuid, String)>,
 ) -> Result<Json<Vec<TabularDto>>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
@@ -1044,7 +1049,7 @@ async fn browse_tables(
     responses(
         (status = 200, description = "Table detail (schema, partitioning, snapshots)", body = SchemaDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 404, description = "No such warehouse/browser or table", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1055,7 +1060,7 @@ async fn browse_schema(
     Auth(p): Auth,
     Path((id, ns, table)): Path<(Uuid, String, String)>,
 ) -> Result<Json<SchemaDto>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let b = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     let d = b.schema(&lk, &parse_ns(&ns), &table).await?;
@@ -1120,7 +1125,7 @@ async fn browse_schema(
     responses(
         (status = 200, description = "The view's current-schema columns", body = Vec<ColumnDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 404, description = "No such warehouse/browser or view", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1131,7 +1136,7 @@ async fn browse_view(
     Auth(p): Auth,
     Path((id, ns, view)): Path<(Uuid, String, String)>,
 ) -> Result<Json<Vec<ColumnDto>>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let b = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     let cols = b.view_columns(&lk, &parse_ns(&ns), &view).await?;
@@ -1154,7 +1159,7 @@ async fn browse_view(
     responses(
         (status = 200, description = "Soft-deleted tables/views awaiting purge", body = Vec<DeletedTabularDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -1164,7 +1169,7 @@ async fn browse_deleted(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<DeletedTabularDto>>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
@@ -1200,7 +1205,7 @@ struct UndropBody {
     responses(
         (status = 204, description = "Table/view recovered"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:update permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
         (status = 404, description = "No such warehouse/browser or tabular", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1212,7 +1217,7 @@ async fn undrop_tabular(
     Path(id): Path<Uuid>,
     Json(b): Json<UndropBody>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:update").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     browser.undrop(&lk, &b.kind, b.id).await?;
@@ -1242,7 +1247,7 @@ struct ProtectionDto {
     responses(
         (status = 200, description = "New protected flag for the target", body = ProtectionDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:update permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
         (status = 404, description = "No such warehouse/browser or target", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1254,7 +1259,7 @@ async fn set_protection(
     Path(id): Path<Uuid>,
     Json(b): Json<ProtectionBody>,
 ) -> Result<Json<ProtectionDto>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:update").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     let protected = browser
@@ -1281,7 +1286,7 @@ struct WarehouseConfigDto {
     responses(
         (status = 200, description = "Warehouse admin config (status, soft-delete TTL, statistics)", body = WarehouseConfigDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 404, description = "No such warehouse/browser", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1292,7 +1297,7 @@ async fn warehouse_config(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WarehouseConfigDto>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let b = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     let c = b.config(&lk).await?;
@@ -1319,7 +1324,7 @@ struct StatusBody {
     responses(
         (status = 204, description = "Warehouse activated/deactivated"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:update permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
         (status = 404, description = "No such warehouse/browser", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1331,7 +1336,7 @@ async fn set_warehouse_status(
     Path(id): Path<Uuid>,
     Json(b): Json<StatusBody>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:update").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     browser.set_active(&lk, b.active).await?;
@@ -1353,7 +1358,7 @@ struct DeleteProfileBody {
     responses(
         (status = 204, description = "Soft-delete retention updated"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:update permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
         (status = 404, description = "No such warehouse/browser", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1365,7 +1370,7 @@ async fn set_delete_profile_route(
     Path(id): Path<Uuid>,
     Json(b): Json<DeleteProfileBody>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:update").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     browser.set_delete_profile(&lk, b.seconds).await?;
@@ -1387,7 +1392,7 @@ struct FormatPolicyBody {
         (status = 204, description = "Allowed Iceberg format versions updated"),
         (status = 400, description = "At least one format version is required", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:update permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
         (status = 404, description = "No such warehouse/browser", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1399,7 +1404,7 @@ async fn set_format_policy(
     Path(id): Path<Uuid>,
     Json(b): Json<FormatPolicyBody>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:update").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
     if b.versions.is_empty() {
         return Err(CatalogHttpError::BadRequest(
             "at least one format version required".into(),
@@ -1427,7 +1432,7 @@ struct RotateCredBody {
     responses(
         (status = 204, description = "S3 storage credential rotated"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:update permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
         (status = 404, description = "No such warehouse/browser", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1439,7 +1444,7 @@ async fn rotate_credential(
     Path(id): Path<Uuid>,
     Json(b): Json<RotateCredBody>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:update").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     browser
@@ -1473,7 +1478,7 @@ struct SearchQuery {
     responses(
         (status = 200, description = "Table/view name-search matches", body = Vec<SearchResultDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -1484,7 +1489,7 @@ async fn search_tabulars(
     Path(id): Path<Uuid>,
     axum::extract::Query(sq): axum::extract::Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchResultDto>>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
     if sq.q.trim().is_empty() {
         return Ok(Json(vec![]));
     }
@@ -1520,7 +1525,7 @@ struct TaskDto {
     responses(
         (status = 200, description = "Recent background (GC) tasks on the warehouse", body = Vec<TaskDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 502, description = "Embedded catalog unreachable", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -1530,7 +1535,7 @@ async fn list_tasks(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<TaskDto>>, CatalogHttpError> {
-    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
+    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };

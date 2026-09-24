@@ -115,7 +115,12 @@ export function ClientsTab({ warehouseId }: { warehouseId: string }) {
                 <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
                   {clients.isError ? (
                     <span className="text-destructive">
-                      {clients.error?.message ?? "Couldn't load clients."}
+                      {/* `ApiError.message` for a 403 is `Error::Forbidden`'s Display, the
+                          bare word "forbidden". This route is gated `catalog_registry:read`
+                          (SP3c-2, Task 7 retired `warehouse:read`), named here instead. */}
+                      {clients.error?.status === 403
+                        ? "Couldn't load Catalog Clients: this needs the catalog_registry:read permission. A platform administrator can grant it."
+                        : (clients.error?.message ?? "Couldn't load clients.")}
                     </span>
                   ) : clients.isLoading ? (
                     <ListSkeleton rows={3} cols={4} />

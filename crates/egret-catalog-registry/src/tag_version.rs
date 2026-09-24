@@ -2,14 +2,13 @@
 //! services a warehouse's catalog-tag export reaches, and therefore whose
 //! `tag_version` has to move when that export changes.
 //!
-//! Three places read this link and must agree, but only two of them can share
-//! code. The two BUMPS — the assign/unassign bump (`egret_bi::CatalogTagRepo`)
-//! and the boot backfill (`crate::backfill`) — are the same UPDATE, so they
-//! are one function, here, in the lowest crate both can reach. The third, the
-//! export (`egret_policy::PolicyStore::tag_assignments_for_service`), is a
-//! SELECT of a different shape (it returns catalog NAMES per tag assignment,
-//! keyed by the polled service) and keeps its own SQL; the doc below states
-//! branch for branch what it has to stay equal to, and
+//! Two places read this link and must agree. The BUMP — the assign/unassign
+//! bump (`egret_bi::CatalogTagRepo`) — lives here, in the lowest crate that
+//! reaches it. The other, the export
+//! (`egret_policy::PolicyStore::tag_assignments_for_service`), is a SELECT of
+//! a different shape (it returns catalog NAMES per tag assignment, keyed by
+//! the polled service) and keeps its own SQL; the doc below states branch for
+//! branch what it has to stay equal to, and
 //! `egret-policy/tests/download_tags_*.rs` is what holds the two together.
 
 use uuid::Uuid;
@@ -21,21 +20,24 @@ use uuid::Uuid;
 /// catalog-tag assignments changed; without the bump it 304s forever. Runs on
 /// any executor — a caller's transaction, or the pool.
 ///
-/// `profiles` is the SAME union `PolicyStore::tag_assignments_for_service`
+/// `profiles` is the SAME source `PolicyStore::tag_assignments_for_service`
 /// serves under (SP3 catalog-registry review C1/I1) — an engine's service
-/// binds to this warehouse if EITHER:
-///   (a) the legacy branch — `engine_mgmt.engines.authz_service_id`, this
-///       warehouse is the engine's own primary (`engines.warehouse_id`); or
-///   (b) the registry branch — the engine attaches this warehouse's registry
-///       catalog through `registry.engine_catalog_attachments` (SP3 D5), NOT
-///       only as its primary.
-/// Missing (b) was fail-open for UPDATES specifically: a tag change on a
-/// warehouse an engine attaches only as a SECONDARY catalog never bumped that
-/// engine's service, so `download_tags` kept answering 304 and the new
-/// mask/tag never reached the plugin until an unrelated restart. The legacy
-/// branch stays until `engine_catalogs` is retired (SP3c), for the same
-/// un-migrated / rename-window reasons documented on
-/// `tag_assignments_for_service`.
+/// binds to this warehouse if the engine attaches this warehouse's registry
+/// catalog through `registry.engine_catalog_attachments` (SP3 D5), NOT only
+/// as its primary. Missing that reach was fail-open for UPDATES specifically:
+/// a tag change on a warehouse an engine attaches only as a SECONDARY catalog
+/// never bumped that engine's service, so `download_tags` kept answering 304
+/// and the new mask/tag never reached the plugin until an unrelated restart.
+///
+/// One branch only, since SP3c-2: the engine attaches this warehouse's
+/// registry catalog through `registry.engine_catalog_attachments`.
+///
+/// Until SP3c-2 a second branch read `engine_mgmt.engine_catalogs` for two
+/// populations the registry could not see: engines whose backfill failed,
+/// and a catalog renamed but not yet re-applied. Both are gone — the backfill
+/// is deleted, so no engine can be in the first state, and
+/// `registry.catalogs.name` is UNIQUE and immutable, so nothing renames a
+/// catalog at all.
 ///
 /// SP3 catalog-registry review N1: bumping only `profiles` is NOT enough. The
 /// Trino Ranger tag plugin polls the TAG service, not the trino profile —
@@ -58,10 +60,6 @@ where
 {
     sqlx::query(
         "WITH profiles AS ( \
-             SELECT DISTINCT e.authz_service_id AS id \
-             FROM engine_mgmt.engines e \
-             WHERE e.warehouse_id = $1 AND e.authz_service_id IS NOT NULL \
-             UNION \
              SELECT DISTINCT e.authz_service_id AS id \
              FROM registry.catalogs c \
              JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \

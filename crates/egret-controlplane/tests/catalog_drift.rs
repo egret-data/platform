@@ -13,8 +13,11 @@
 //! `egret-workspace/src/routes.rs`, so that file is scanned too. `engine:*`
 //! keys are enforced by `egret_auth::require_permission` in the
 //! `egret-engine-mgmt` seam's `engines.rs`/`monitor.rs` (E1c), `policy:*` keys in
-//! the `egret-policy` seam's `admin/mod.rs` (E2d), and `warehouse:*` keys in the
-//! `egret-catalog-engine` seam's `warehouse_admin/mod.rs` (E3d-3) — all scanned.
+//! the `egret-policy` seam's `admin/mod.rs` (E2d), and `catalog_registry:*` keys
+//! in both the engine seam's `catalogs.rs` and the `egret-catalog-engine` seam's
+//! `warehouse_admin/mod.rs` (E3d-3) — all scanned. `warehouse_admin/mod.rs` was
+//! `warehouse:*`-gated through SP3c-1; SP3c-2 retired that family onto
+//! `catalog_registry:*` (migration 0153), so it no longer names a distinct key.
 //!
 //! Workspace-feature keys (`query:run`, `dataset:*`, `chart:*`, `dashboard:*`,
 //! `notebook:*`, `workspace:manage_members`) are enforced by
@@ -50,7 +53,9 @@ const EXTRA_FILES: &[&str] = &[
     // `catalog_registry:*` (SP3) are gated in the engine seam's registry routes.
     "../egret-engine-mgmt/src/catalogs.rs",
     "../egret-policy/src/admin/mod.rs",
-    // `warehouse:*` keys moved into the Catalog seam's admin router (E3d-3).
+    // Warehouse admin router (E3d-3), in the Catalog seam. Its own permission
+    // family (`warehouse:*`) was retired in SP3c-2; it now enforces
+    // `catalog_registry:*`, the same keys `catalogs.rs` above already gates.
     "../egret-catalog-engine/src/warehouse_admin/mod.rs",
     // Workspace-feature keys are gated via `require_workspace` in the
     // feature-route crates (mostly via `const` args, resolved below).
@@ -343,7 +348,7 @@ fn scan_actually_finds_known_call_sites() {
         "engine:kill",
         "policy:read",
         "workspace:read",
-        "warehouse:read",
+        "catalog_registry:read",
         // Workspace-feature keys via `require_workspace`: `query:run` and
         // `dashboard:read` come from a `const` arg; `notebook:read` from an
         // inline literal (egret-kernel) — exercises both resolution paths.

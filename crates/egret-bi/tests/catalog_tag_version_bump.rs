@@ -6,9 +6,11 @@
 //! `tag_version` must bump so the Ranger tag-download plugin re-polls
 //! `download_tags` (otherwise it 304s forever and never sees the change). The
 //! binding is `engine_mgmt.engines.authz_service_id` -> the warehouse's
-//! engine(s), reached EITHER as the engine's own primary warehouse (legacy) OR
-//! through a registry catalog attachment (SP3 D5) — the same union
-//! `PolicyStore::tag_assignments_for_service` serves under.
+//! engine(s), reached through a registry catalog attachment
+//! (`registry.engine_catalog_attachments`, SP3 D5) — the same join
+//! `PolicyStore::tag_assignments_for_service` serves under. There is no
+//! `engines.warehouse_id` column any more (SP3c-2 Task 6) for a second,
+//! attachment-free path.
 
 use egret_bi::catalog_tags::CatalogTagRepo;
 use egret_bi::TagRepo;
@@ -16,7 +18,17 @@ use egret_metastore::Db;
 use uuid::Uuid;
 
 /// Seed a workspace + storage connection + warehouse + a Trino engine bound to
-/// `service_id`. Returns the warehouse id.
+/// `service_id`, with the warehouse's registry catalog attached to that engine.
+/// Returns the warehouse id.
+///
+/// The attachment is the binding. Until SP3c-2 Task 6 this function bound the
+/// two through `engines.warehouse_id` instead, and when that column went the
+/// INSERT simply dropped it — leaving an engine joined to the warehouse by
+/// nothing, so `bump_bound_tag_versions` matched no service and the assertion
+/// below failed. That failure was briefly labelled pre-existing; it was not.
+/// A fixture that no longer expresses the binding it is named for makes its
+/// test measure nothing, and this test guards the bump path that has already
+/// failed open once in this programme.
 async fn seed_bound_warehouse(pool: &sqlx::PgPool, service_id: i64) -> Uuid {
     let (ws_id,): (Uuid,) =
         sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
@@ -45,16 +57,17 @@ async fn seed_bound_warehouse(pool: &sqlx::PgPool, service_id: i64) -> Uuid {
     .fetch_one(pool)
     .await
     .expect("insert warehouse");
-    sqlx::query(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, authz_service_id) \
-         VALUES ($1,'trino','egret',$2,'{}'::jsonb,$3)",
+    let (eng_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
     )
     .bind(format!("tveng-{}", Uuid::new_v4().simple()))
-    .bind(wh_id)
     .bind(service_id)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .expect("insert engine");
+    let catalog_id = seed_registry_catalog(pool, wh_id).await;
+    attach_catalog(pool, eng_id, catalog_id).await;
     wh_id
 }
 
@@ -91,15 +104,13 @@ async fn seed_warehouse(pool: &sqlx::PgPool) -> Uuid {
     wh_id
 }
 
-/// A Trino engine bound to `service_id`, whose PRIMARY warehouse is
-/// `warehouse_id`. Returns the engine id.
-async fn seed_engine(pool: &sqlx::PgPool, service_id: i64, warehouse_id: Uuid) -> Uuid {
+/// A Trino engine bound to `service_id`. Returns the engine id.
+async fn seed_engine(pool: &sqlx::PgPool, service_id: i64) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, authz_service_id) \
-         VALUES ($1,'trino','egret',$2,'{}'::jsonb,$3) RETURNING id",
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
     )
     .bind(format!("tveng-{}", Uuid::new_v4().simple()))
-    .bind(warehouse_id)
     .bind(service_id)
     .fetch_one(pool)
     .await
@@ -221,7 +232,7 @@ async fn assign_and_unassign_bump_bound_service_tag_version() {
 }
 
 /// SP3 catalog-registry review I1: a tag change on a warehouse attached to an
-/// engine as a SECONDARY catalog (not its `engines.warehouse_id` primary) must
+/// engine as a SECONDARY catalog (not its primary attachment) must
 /// still bump that engine's bound service `tag_version` — otherwise
 /// `download_tags` keeps 304-ing and the new mask/tag never reaches the
 /// Ranger plugin. Pins `bump_bound_tag_versions`'s registry-attachment branch.
@@ -236,13 +247,9 @@ async fn secondary_attachment_bump_reaches_engines_bound_service() {
     let pool = db.pool.clone();
 
     let service_id = create_service(&pool).await;
-    // Engine B's OWN (primary) warehouse — untagged, irrelevant to this test;
-    // just here to prove the bump is not accidentally reached through it.
-    let wh_b_primary = seed_warehouse(&pool).await;
-    let eng_b = seed_engine(&pool, service_id, wh_b_primary).await;
+    let eng_b = seed_engine(&pool, service_id).await;
 
-    // Warehouse W is NOT engine B's primary; B attaches W's registry catalog
-    // as a SECONDARY catalog.
+    // Warehouse W is not attached at all yet; B attaches W's registry catalog.
     let wh_w = seed_warehouse(&pool).await;
     let catalog_w = seed_registry_catalog(&pool, wh_w).await;
     attach_catalog(&pool, eng_b, catalog_w).await;

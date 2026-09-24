@@ -360,7 +360,7 @@ describe("delete routes by kind", () => {
   // Warehouses list calls, so refreshing only this page's cache leaves the
   // deleted warehouse listed on the other section for the 30 seconds of
   // `staleTime` — reachable precisely because D5 keeps both sections live.
-  test("an egret warehouse delete refreshes the Warehouses list too", async () => {
+  test("an egret warehouse delete invalidates warehousesQueryKey too", async () => {
     vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
       listResult([catalog()]),
     );
@@ -536,13 +536,19 @@ describe("the list gates its own controls", () => {
     const note = screen.getByTestId("catalogs-readonly");
     expect(note).toHaveTextContent("catalog_registry:create");
     expect(note).toHaveTextContent("catalog_registry:delete");
-    expect(note).toHaveTextContent("warehouse:delete");
   });
 
-  test("the two Delete endpoints are gated separately, because they are two endpoints", async () => {
-    // A registry catalog goes to `DELETE /catalogs/{id}`; an egret warehouse
-    // one goes to `DELETE /warehouses/{id}`. Holding one key must offer exactly
-    // the rows it can act on.
+  test("holding catalog_registry:delete admits BOTH Delete endpoints — SP3c-2 unified their gate", async () => {
+    // Through SP3c-1, a registry catalog's `DELETE /catalogs/{id}` was gated
+    // `catalog_registry:delete` and an egret warehouse's `DELETE
+    // /warehouses/{id}` was gated the DISTINCT `warehouse:delete`, so holding
+    // one key offered exactly the rows it could act on and no others. SP3c-2
+    // (Task 7) retired `warehouse:delete` and re-gated the warehouse endpoint
+    // onto `catalog_registry:delete` too (migration 0153), so the two
+    // endpoints now share one key — `canDeleteWarehouse` in `Catalogs.tsx`
+    // reads the identical permission `canDeleteCatalog` does. A single key now
+    // offers BOTH rows' Delete buttons, which is the point of this test:
+    // proving the unification, not a hypothetical split that no longer exists.
     vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
       listResult([catalog(), JDBC]),
     );
@@ -552,24 +558,38 @@ describe("the list gates its own controls", () => {
     });
 
     expect(await screen.findByRole("button", { name: "Delete crm" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Delete analytics" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete analytics" })).toBeInTheDocument();
+    // The readonly note still names the missing CREATE key (this persona
+    // never held `catalog_registry:create`), but nothing about either Delete
+    // — both buttons are drawn, so there is nothing left to explain about them.
     const note = screen.getByTestId("catalogs-readonly");
-    expect(note).toHaveTextContent("warehouse:delete");
-    expect(note).not.toHaveTextContent("catalog_registry:delete");
+    expect(note).toHaveTextContent("catalog_registry:create");
+    expect(note).not.toHaveTextContent(/[Dd]elete/);
   });
 
   test("names only the permissions that would have drawn something on THIS list", async () => {
-    // No egret warehouse row, so `warehouse:delete` explains a button that was
-    // never going to exist — saying it would be noise about a permission the
-    // operator does not need.
+    // No egret warehouse row, so the warehouse-specific delete sentence
+    // explains a button that was never going to exist — saying it would be
+    // noise about a case the operator does not have on screen.
+    //
+    // Both hidden-delete branches now name the SAME key
+    // (`catalog_registry:delete`, since SP3c-2 re-gated the warehouse endpoint
+    // onto it too), so a bare `toHaveTextContent("catalog_registry:delete")` /
+    // `not.toHaveTextContent("warehouse:delete")` pair can no longer tell the
+    // two branches apart — the second assertion would pass even if the
+    // warehouse-only branch fired, because it never contained that retired
+    // string either way. Discriminate on the phrase that IS still unique to
+    // the warehouse branch instead: "egret warehouse" appears only in
+    // `"deleting an egret warehouse needs catalog_registry:delete, because it
+    // is removed with its warehouse"`, never in the plain-catalog sentence.
     vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue(
       listResult([JDBC]),
     );
     renderPage("/control-plane/catalogs", READER);
 
     const note = await screen.findByTestId("catalogs-readonly");
-    expect(note).toHaveTextContent("catalog_registry:delete");
-    expect(note).not.toHaveTextContent("warehouse:delete");
+    expect(note).toHaveTextContent("deleting a registered catalog needs catalog_registry:delete");
+    expect(note).not.toHaveTextContent(/egret warehouse/);
   });
 
   test("the empty state explains the missing create key instead of offering a dead button", async () => {
@@ -604,12 +624,7 @@ describe("the list gates its own controls", () => {
     );
     renderPage("/control-plane/catalogs", {
       ...READER,
-      permissions: [
-        "catalog_registry:read",
-        "catalog_registry:create",
-        "catalog_registry:delete",
-        "warehouse:delete",
-      ],
+      permissions: ["catalog_registry:read", "catalog_registry:create", "catalog_registry:delete"],
     });
 
     expect(await screen.findByRole("button", { name: "Delete analytics" })).toBeInTheDocument();

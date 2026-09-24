@@ -14,7 +14,6 @@ function makeEngine(serviceAccount?: string) {
     name: "eng",
     type: "trino",
     namespace: "ns",
-    warehouseId: "w1",
     status: "running",
     spec: {
       // A real engine's stored trinoConfig always carries coordinator/worker
@@ -87,7 +86,6 @@ describe("useEngineConfigForm editedSinceLoad (beforeunload guard)", () => {
       name: "eng",
       type: "trino",
       namespace: "ns",
-      warehouseId: "w1",
       status: "provisioning",
       spec: { trinoConfig: undefined },
     } as unknown as Parameters<typeof useEngineConfigForm>[0];

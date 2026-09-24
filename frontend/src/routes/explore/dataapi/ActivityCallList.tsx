@@ -485,7 +485,7 @@ function CallRow({
 /**
  * The `Clients.tsx` copy affordance, at the same size and with the same
  * "Copy"/"Copied" idiom (`TryIt.tsx`, `ClientCreate.tsx` and
- * `WarehouseDetail.tsx` each carry their own copy of it).
+ * each carry their own copy of it).
  *
  * It belongs on this table more than on most: the Request ID filter three rows
  * up is captioned "Look up a request out of an error body", so pasting a
@@ -515,7 +515,7 @@ function CopyIdButton({ value, label }: { value: string; label: string }) {
         // `writeText` REJECTS — denied permission, a document that is not
         // focused, no clipboard API at all over plain http. The four existing
         // copies of this idiom in the repo (`Clients.tsx:483`, `TryIt.tsx`,
-        // `ClientCreate.tsx`, `WarehouseDetail.tsx`) all `void` the promise and
+        // `ClientCreate.tsx`) all `void` the promise and
         // flip to "Copied" regardless, which tells the user the id is on their
         // clipboard when it is not — and the id is the whole point of the
         // button. This fifth copy waits for the promise instead. The other four

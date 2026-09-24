@@ -193,4 +193,71 @@ describe("warehouse tabs", () => {
       }
     },
   );
+
+  /**
+   * SP3c-2 Task 7 fix round 1. The four panes that used to render
+   * `ApiError.message` raw on a non-404 error — `Error::Forbidden`'s Display,
+   * the bare word "forbidden", naming no permission and offering no way
+   * forward. Each is driven the way the page actually reaches it: the
+   * underlying `api.*` call (NOT `useQuery` itself, which is real here) is
+   * made to reject with a 403 `ApiError`, so `isError`/`error` are genuine
+   * react-query state rather than a hand-built mock return value. A future
+   * `enabled: canRead…` added to any of these queries would starve the
+   * `queryFn` and turn these tests red — that is the point of driving the
+   * rejection through the real fetch instead of asserting on a string handed
+   * straight to the component.
+   */
+  test("RolesTab names the permission and the remedy on a 403, not the bare word forbidden", async () => {
+    vi.mocked(api.listRoles).mockRejectedValue(new ApiError(403, "forbidden"));
+    renderTab(<RolesTab warehouseId="w1" />);
+
+    const cell = await screen.findByText(/catalog_registry:read/);
+    expect(cell).toHaveTextContent("catalog_registry:read");
+    expect(cell).toHaveTextContent(/platform administrator can grant it/i);
+    expect(cell.textContent).not.toBe("forbidden");
+    await waitFor(() => expect(vi.mocked(api.listRoles)).toHaveBeenCalledWith("w1"));
+  });
+
+  test("ClientsTab names the permission and the remedy on a 403, not the bare word forbidden", async () => {
+    vi.mocked(api.listClients).mockRejectedValue(new ApiError(403, "forbidden"));
+    renderTab(<ClientsTab warehouseId="w1" />);
+
+    const cell = await screen.findByText(/catalog_registry:read/);
+    expect(cell).toHaveTextContent("catalog_registry:read");
+    expect(cell).toHaveTextContent(/platform administrator can grant it/i);
+    expect(cell.textContent).not.toBe("forbidden");
+    await waitFor(() => expect(vi.mocked(api.listClients)).toHaveBeenCalledWith("w1"));
+  });
+
+  test("BrowseTab names the permission and the remedy on a 403, not the bare word forbidden", async () => {
+    vi.mocked(api.listNamespaces).mockRejectedValue(new ApiError(403, "forbidden"));
+    renderTab(<BrowseTab warehouseId="w1" />);
+
+    const cell = await screen.findByText(/catalog_registry:read/);
+    expect(cell).toHaveTextContent("catalog_registry:read");
+    expect(cell).toHaveTextContent(/platform administrator can grant it/i);
+    expect(cell.textContent).not.toBe("forbidden");
+    await waitFor(() => expect(vi.mocked(api.listNamespaces)).toHaveBeenCalledWith("w1"));
+  });
+
+  test("SettingsTab's background-tasks card names the permission and the remedy on a 403", async () => {
+    // Independent of the config read above it (already covered by the 404/403
+    // pair test): give it a clean 200 so only the tasks query's own failure is
+    // under test here.
+    vi.mocked(api.getWarehouseConfig).mockResolvedValue({
+      active: true,
+      deleteProfileSeconds: null,
+      numTables: 0,
+      numViews: 0,
+      statsUpdatedMs: 0,
+    });
+    vi.mocked(api.listWarehouseTasks).mockRejectedValue(new ApiError(403, "forbidden"));
+    renderTab(<SettingsTab warehouseId="w1" storageConnId="st-1" />);
+
+    const cell = await screen.findByText(/catalog_registry:read/);
+    expect(cell).toHaveTextContent("catalog_registry:read");
+    expect(cell).toHaveTextContent(/platform administrator can grant it/i);
+    expect(cell.textContent).not.toBe("forbidden");
+    await waitFor(() => expect(vi.mocked(api.listWarehouseTasks)).toHaveBeenCalledWith("w1"));
+  });
 });

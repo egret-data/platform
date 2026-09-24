@@ -425,7 +425,6 @@ mod tests {
             name: "t".into(),
             r#type: "trino".into(),
             namespace: "ns".into(),
-            warehouse_id: Uuid::nil(),
             spec,
             status: "running".into(),
             authz_service_id: None,

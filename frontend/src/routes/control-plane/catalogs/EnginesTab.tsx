@@ -241,6 +241,19 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
       : null;
   const failures = catalog.engines.filter((a) => a.applyStatus === "failed" && a.applyError);
   /**
+   * THIS catalog's own stored config, not a sibling's. `configError` is
+   * catalog-scoped (`RegistryCatalogDto.configError`, SP3c-2 Task 3), so a
+   * broken row blocks Retry on every engine it is attached to, on either
+   * engine kind — rendering fails the same way whoever else is on the
+   * engine — and this page can say so directly. The OTHER Trino rule, a
+   * sibling catalog on the same engine breaking the whole rebuild, is still
+   * invisible from here (see `retryBlockedReason` below and
+   * `catalog-retry-scope-note`).
+   */
+  const retryBlockedReason = catalog.configError
+    ? "egret cannot parse this catalog's stored configuration, so it cannot render it for any engine. Repair it on this catalog's Configuration tab first."
+    : null;
+  /**
    * The engines whose Retry and Detach have a scope wider than the row.
    * StarRocks is excluded because its apply really is one statement about one
    * catalog; an unrecognised type is NOT, for the reason `isStarRocksType`
@@ -352,19 +365,18 @@ export function EnginesTab({ catalog }: { catalog: RegistryCatalogDto }) {
                     {canUpdate && (
                       <AttachmentActions
                         a={a}
-                        // `null`, DELIBERATELY AND IN WRITING (whole-branch
-                        // review, F1). The engine's own Catalogs tab blocks
-                        // Retry when a Trino engine holds any catalog whose
-                        // stored configuration egret cannot parse; that rule is
-                        // about the ENGINE's whole attachment set, and this
-                        // page reads one catalog across many engines. The
-                        // `configError` it would need is reported only by
-                        // `GET /engines/{id}/catalogs` — one request per row
-                        // here, and SP3c-2 owns moving the field. So the button
-                        // stays enabled, the server stays the refusal point,
-                        // and `catalog-retry-scope-note` below says so once
-                        // instead of a per-row reason this page cannot write.
-                        retryBlockedReason={null}
+                        // Only THIS catalog's own parse failure (whole-branch
+                        // review F1, narrowed by SP3c-2 Task 3): the SAME
+                        // reason applies to every row, because it is a fact
+                        // about the catalog, not about any one engine. A
+                        // SIBLING catalog breaking a Trino engine's whole
+                        // rebuild is still invisible from here — this page
+                        // reads one catalog across many engines — so the
+                        // button stays enabled for THAT reason and the server
+                        // stays the refusal point; `catalog-retry-scope-note`
+                        // below says so once instead of a per-row reason this
+                        // page cannot compute.
+                        retryBlockedReason={retryBlockedReason}
                         detachBlockedReason={
                           a.isPrimary
                             ? `This is ${a.engineName}'s primary catalog. Detach it by deleting the engine.`

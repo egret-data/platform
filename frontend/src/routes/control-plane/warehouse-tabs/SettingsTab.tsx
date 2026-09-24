@@ -309,7 +309,13 @@ function WarehouseTasksCard({ warehouseId }: { warehouseId: string }) {
       </div>
       {tasks.isError ? (
         <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-destructive">
-          {tasks.error?.message ?? "Couldn't load background tasks."}
+          {/* `ApiError.message` for a 403 is `Error::Forbidden`'s Display, the bare
+              word "forbidden". This route is gated `catalog_registry:read` (SP3c-2,
+              Task 7 retired `warehouse:read`), named here instead — the same
+              treatment the config read above (`:123`) already gives its own 403. */}
+          {tasks.error?.status === 403
+            ? "Couldn't load background tasks: this needs the catalog_registry:read permission. A platform administrator can grant it."
+            : (tasks.error?.message ?? "Couldn't load background tasks.")}
         </p>
       ) : tasks.isLoading ? (
         <ListSkeleton rows={3} cols={3} />

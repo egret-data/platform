@@ -79,30 +79,6 @@ pub static PERMISSIONS: &[Permission] = &[
         "Kill running queries",
         Scope::Platform
     ),
-    perm!(
-        "warehouse:read",
-        "Warehouses",
-        "View catalog warehouses",
-        Scope::Platform
-    ),
-    perm!(
-        "warehouse:create",
-        "Warehouses",
-        "Create warehouses",
-        Scope::Platform
-    ),
-    perm!(
-        "warehouse:update",
-        "Warehouses",
-        "Update warehouses",
-        Scope::Platform
-    ),
-    perm!(
-        "warehouse:delete",
-        "Warehouses",
-        "Delete warehouses",
-        Scope::Platform
-    ),
     // Registry catalogs (SP3). Deliberately NOT `catalog:*`: `catalog:read` is
     // the workspace-scope key every workspace role holds (0024) for
     // egret-query's workspace engine view. Cedar itself cannot confuse the two
@@ -115,28 +91,42 @@ pub static PERMISSIONS: &[Permission] = &[
     // action namespace a policy names by string — one key meaning two
     // different things there is ambiguous even though Cedar's own enforcement
     // is safe.
+    // SP3c-2 widened these four beyond catalog DEFINITIONS: the 27
+    // `warehouse_admin` routes and the 3 resource-tag routes moved onto them
+    // from the retired `warehouse:*`. So they now also carry the egret-warehouse
+    // admin surface — browsing lakehouse namespaces and tables, creating and
+    // deleting warehouses, and minting and revoking Catalog Clients, which are
+    // real data-lake credentials.
+    //
+    // D3 claimed "nobody gains access, nobody loses it". The second half is
+    // guaranteed by 0153's re-grant. The FIRST half is not: a platform role
+    // created after 0148 holding `catalog_registry:*` and never `warehouse:*`
+    // gains all of the above. That is accepted (user decision, 2026-09-23) —
+    // the surface belongs to the catalog now, since its tabs live on the
+    // catalog page — but the descriptions below must say so, because they are
+    // what an admin reads in the Permissions UI before granting.
     perm!(
         "catalog_registry:read",
         "Catalogs",
-        "View registry catalogs and their engine attachments",
+        "View registry catalogs and their engine attachments, and browse an egret warehouse's namespaces, tables and Catalog Clients",
         Scope::Platform
     ),
     perm!(
         "catalog_registry:create",
         "Catalogs",
-        "Create registry catalogs",
+        "Create registry catalogs and egret warehouses, and mint Catalog Clients (data-lake credentials) and catalog roles",
         Scope::Platform
     ),
     perm!(
         "catalog_registry:update",
         "Catalogs",
-        "Edit registry catalogs, re-apply them to engines, and assign them to workspaces",
+        "Edit registry catalogs, re-apply them to engines, assign them to workspaces, and change an egret warehouse's settings, protection and format policy",
         Scope::Platform
     ),
     perm!(
         "catalog_registry:delete",
         "Catalogs",
-        "Delete registry catalogs",
+        "Delete registry catalogs and egret warehouses, and revoke Catalog Clients and catalog roles",
         Scope::Platform
     ),
     perm!(
@@ -572,6 +562,30 @@ mod tests {
         assert!(PERMISSIONS
             .iter()
             .any(|p| p.key == "tag:manage" && p.scope == Scope::Platform));
+    }
+    #[test]
+    fn warehouse_permissions_are_retired_sp3c2() {
+        // SP3c-2 Task 7: `warehouse_admin` re-gated onto `catalog_registry:*`
+        // (migration 0153 re-ran 0148's grant, then deleted the old keys), so
+        // none of the four `warehouse:*` keys are known any more, and the
+        // "Warehouses" group they were the only members of disappears with
+        // them rather than surviving as an empty group.
+        for k in [
+            "warehouse:read",
+            "warehouse:create",
+            "warehouse:update",
+            "warehouse:delete",
+        ] {
+            assert!(!is_known(k), "{k} must be retired");
+            assert!(
+                !PERMISSIONS.iter().any(|p| p.key == k),
+                "{k} must not appear in the catalog"
+            );
+        }
+        assert!(
+            !groups().contains(&"Warehouses"),
+            "the Warehouses group must disappear with its only members"
+        );
     }
     #[test]
     fn catalog_registry_perms_are_platform_scoped_and_distinct() {

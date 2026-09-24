@@ -49,12 +49,13 @@ import type { StarRocksDelegationOption } from "./useStarRocksConfigForm";
 const DEFAULT_TRINO_IMAGE_VERSION = "470";
 
 /**
- * A registry catalog can be ATTACHED here whatever its kind, but until SP3c-2
- * drops `engines.warehouse_id` only an egret warehouse catalog can LEAD: the
- * server derives the still-`NOT NULL` column from the primary catalog's own
- * warehouse, and ten production sites read it — `ensure_engine_role` seeds the
- * engine's Ranger role from that warehouse, and the StarRocks path derives its
- * storage from the same one.
+ * A registry catalog can be ATTACHED here whatever its kind, but only an egret
+ * warehouse catalog can LEAD. SP3c-2 dropped `engines.warehouse_id`, so the
+ * reason is no longer "a NOT NULL column has to be filled" — it is that real
+ * cluster state is derived from the primary attachment's warehouse:
+ * `ensure_engine_role` seeds the engine's Ranger role from it, and a StarRocks
+ * engine derives its builtin storage volume from it. A catalog with no
+ * warehouse can answer neither, so the server refuses it as primary.
  *
  * So the row disables its radio and says why, in the server's own terms. The
  * alternative — offering a radio the server refuses — spends a round trip and a
@@ -86,9 +87,9 @@ export default function EngineCreate() {
   const isStarRocks = engineType === "starrocks";
 
   // `warehousesQueryKey`, not a local `["cp","warehouses"]` literal: the value
-  // this page used matched no other page's, so a warehouse deleted in Control
-  // Plane → Warehouses left this list stale for `staleTime` with every test
-  // green. The rows are only read for the "provisioned but not registered"
+  // this page used matched no other page's, so a warehouse deleted elsewhere
+  // (today: Control Plane → Catalogs, on an egret-warehouse row) left this list
+  // stale for `staleTime` with every test green. The rows are only read for the "provisioned but not registered"
   // note below — the attachable set comes from the registry.
   const warehouses = useQuery<Warehouse[], ApiError>({
     queryKey: warehousesQueryKey,
@@ -173,9 +174,11 @@ export default function EngineCreate() {
 
   /**
    * Provisioned warehouses the registry has no catalog for. A warehouse gets
-   * one when it is created and again from the boot backfill, but that ensure is
-   * explicitly non-fatal — so a warehouse CAN exist with no catalog, and it is
-   * then simply absent from the list above with nothing said.
+   * one when it is created, and engine create calls the same idempotent ensure
+   * again — but that ensure is explicitly non-fatal (it logs and moves on), so
+   * a warehouse CAN exist with no catalog, and it is then simply absent from
+   * the list above with nothing said. (The boot backfill was a third chance at
+   * this until SP3c-2 Task 1 deleted it.)
    *
    * Computed only when the registry list actually ANSWERED. A 403 or a pending
    * read leaves `allCatalogs` empty, and "every warehouse is unregistered" is

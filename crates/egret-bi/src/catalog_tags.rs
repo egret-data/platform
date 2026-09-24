@@ -4,8 +4,10 @@
 //! warehouse + schema + table + column, where an empty column (`""`) means a
 //! table-level tag. The repo methods run parameterized SQL against migration
 //! 0081's `catalog_tag_assignments` table; the router exposes control-plane
-//! endpoints gated on the catalog-manage permission (`warehouse:update` for
-//! writes, `warehouse:read` for reads), mirroring the warehouse_admin browse API.
+//! endpoints gated on the catalog-manage permission (`catalog_registry:update`
+//! for writes, `catalog_registry:read` for reads), mirroring the
+//! warehouse_admin browse API. SP3c-2 retired the `warehouse:*` keys these
+//! constants used to hold; 0153 re-ran 0148's grant and deleted them.
 //!
 //! METADATA ONLY: no authorization decision / Ranger download reads these
 //! assignments in this phase (tag-based masking policies are Task 2).
@@ -24,10 +26,11 @@ use crate::shares::TagDto;
 use crate::tags::Tag;
 
 /// The catalog-manage permission gating catalog-tag WRITES (assign/unassign);
-/// the same `warehouse:update` used by the warehouse_admin mutating browse ops.
-const WAREHOUSE_WRITE: &str = "warehouse:update";
+/// the same `catalog_registry:update` used by the warehouse_admin mutating
+/// browse ops.
+const WAREHOUSE_WRITE: &str = "catalog_registry:update";
 /// The permission gating catalog-tag READS (list); the warehouse_admin read perm.
-const WAREHOUSE_READ: &str = "warehouse:read";
+const WAREHOUSE_READ: &str = "catalog_registry:read";
 
 /// A classification tag attached to a specific catalog resource. `column` is
 /// empty (`""`) for a table-level assignment. `tag` is the full P3.1 tag row (its
@@ -134,10 +137,10 @@ impl CatalogTagRepo {
     ///
     /// The resolution itself — the registry∪legacy `profiles` union and the
     /// `tagService` fan-out the plugin actually polls — lives in
-    /// `egret_catalog_registry::bump_bound_tag_versions`, because the boot
-    /// backfill has to bump the same services for the same reason (SP3
-    /// catalog-registry review C1/I1/N1/F-1). One implementation, three
-    /// callers, no drift: read that function for why each branch is there.
+    /// `egret_catalog_registry::bump_bound_tag_versions` (SP3
+    /// catalog-registry review C1/I1/N1/F-1). One implementation, two
+    /// callers (assign and unassign), no drift: read that function for why
+    /// each branch is there.
     async fn bump_bound_tag_versions(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         warehouse_id: Uuid,
@@ -300,7 +303,7 @@ pub fn resource_tags_router() -> Router<BiState> {
     responses(
         (status = 200, description = "The table's tags plus its columns' tags", body = Vec<ResourceTagDto>),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
-        (status = 403, description = "Missing warehouse:read permission", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing catalog_registry:read permission", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -326,7 +329,7 @@ async fn list_resource_tags(
     responses(
         (status = 200, description = "Tag assigned to the catalog resource (idempotent)", body = egret_core::Ack),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
-        (status = 403, description = "Missing warehouse:update permission", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -371,7 +374,7 @@ async fn assign_resource_tag(
     responses(
         (status = 200, description = "Tag removed from the catalog resource (idempotent)", body = egret_core::Ack),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
-        (status = 403, description = "Missing warehouse:update permission", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing catalog_registry:update permission", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]

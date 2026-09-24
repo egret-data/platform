@@ -1,6 +1,6 @@
 //! Catalog registry routes (SP3 §4.4–4.7): platform catalogs, the engines they
-//! are attached to, their workspace assignment and the migration report. Merged
-//! into the engines router, so mounted under `/api/control-plane`.
+//! are attached to, and their workspace assignment. Merged into the engines
+//! router, so mounted under `/api/control-plane`.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -36,11 +36,6 @@ pub(crate) fn routes() -> Router<CpState> {
         .route("/catalogs/{id}/impact", get(catalog_impact))
         .route("/catalogs/{id}/reapply", post(reapply_registry_catalog))
         .route("/catalogs/{id}/test", post(test_registry_catalog))
-        .route("/catalogs/migration-report", get(get_migration_report))
-        .route(
-            "/catalogs/migration-report/acknowledge",
-            post(acknowledge_migration_report),
-        )
         .route(
             "/catalogs/{id}/workspaces",
             get(list_catalog_workspaces).put(set_catalog_workspaces),
@@ -119,6 +114,12 @@ pub(crate) struct RegistryCatalogDto {
     workspace_ids: Vec<Uuid>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    /// Why this row's stored `config` no longer parses, if it does not.
+    /// A stored row the tightened validator now refuses stays visible and
+    /// repairable instead of vanishing — and, critically, never fails the
+    /// whole list (SP3c-1 review N1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config_error: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -248,6 +249,9 @@ async fn to_dto(st: &CpState, row: CatalogRow) -> Result<RegistryCatalogDto, CpE
         .into_iter()
         .map(|w| w.workspace_id)
         .collect();
+    // Recorded, never propagated: one stored row the tightened validator
+    // refuses must not fail this whole list with a 400 (SP3c-1 review N1).
+    let config_error = row.def().err().map(|e| e.to_string());
     Ok(RegistryCatalogDto {
         id: row.id,
         name: row.name,
@@ -260,6 +264,7 @@ async fn to_dto(st: &CpState, row: CatalogRow) -> Result<RegistryCatalogDto, CpE
         workspace_ids,
         created_at: row.created_at,
         updated_at: row.updated_at,
+        config_error,
     })
 }
 
@@ -277,7 +282,7 @@ async fn load(st: &CpState, id: Uuid) -> Result<CatalogRow, CpError> {
     tag = "control-plane-catalog-registry",
     params(ListCatalogsQuery),
     responses(
-        (status = 200, description = "Registry catalogs with their engines and workspaces", body = Vec<RegistryCatalogDto>),
+        (status = 200, description = "Registry catalogs with their engines and workspaces. A catalog whose stored configuration no longer parses is listed with `configError` set rather than omitted, and never fails the whole list", body = Vec<RegistryCatalogDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -346,7 +351,7 @@ async fn create_registry_catalog(
     tag = "control-plane-catalog-registry",
     params(("id" = Uuid, Path, description = "Registry catalog id")),
     responses(
-        (status = 200, description = "The catalog", body = RegistryCatalogDto),
+        (status = 200, description = "The catalog. If its stored configuration no longer parses, `configError` is set rather than the request failing", body = RegistryCatalogDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
         (status = 404, description = "No such catalog", body = ErrorBody),
@@ -547,33 +552,6 @@ pub(crate) struct CatalogWorkspaceDto {
     name: String,
     slug: String,
     assigned_at: DateTime<Utc>,
-}
-
-#[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct MigrationReportRowDto {
-    id: i64,
-    run_id: Uuid,
-    created_at: DateTime<Utc>,
-    /// `info` | `warning`.
-    severity: String,
-    code: String,
-    catalog_id: Option<Uuid>,
-    engine_id: Option<Uuid>,
-    warehouse_id: Option<Uuid>,
-    subject: String,
-    message: String,
-    #[schema(value_type = Object)]
-    detail: serde_json::Value,
-    acknowledged_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Deserialize, utoipa::IntoParams)]
-#[into_params(parameter_in = Query)]
-pub(crate) struct MigrationReportQuery {
-    /// Include rows already acknowledged.
-    #[serde(default)]
-    all: bool,
 }
 
 /// Which of the three checks produced a [`CatalogTestResultDto`]. An enum, not
@@ -1010,65 +988,6 @@ async fn set_catalog_workspaces(
     Ok(Json(workspace_dtos(&st, id).await?))
 }
 
-#[utoipa::path(
-    get,
-    path = "/api/control-plane/catalogs/migration-report",
-    tag = "control-plane-catalog-registry",
-    params(MigrationReportQuery),
-    responses(
-        (status = 200, description = "What the registry migration did, oldest first (unacknowledged rows unless `all`)", body = Vec<MigrationReportRowDto>),
-        (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing catalog_registry:read permission", body = ErrorBody),
-        (status = 500, description = "Internal error", body = ErrorBody),
-    ),
-)]
-async fn get_migration_report(
-    State(st): State<CpState>,
-    Auth(p): Auth,
-    Query(q): Query<MigrationReportQuery>,
-) -> Result<Json<Vec<MigrationReportRowDto>>, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:read").await?;
-    let rows = st.engine_mgmt.registry().list_report(q.all).await?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| MigrationReportRowDto {
-                id: r.id,
-                run_id: r.run_id,
-                created_at: r.created_at,
-                severity: r.severity,
-                code: r.code,
-                catalog_id: r.catalog_id,
-                engine_id: r.engine_id,
-                warehouse_id: r.warehouse_id,
-                subject: r.subject,
-                message: r.message,
-                detail: r.detail,
-                acknowledged_at: r.acknowledged_at,
-            })
-            .collect(),
-    ))
-}
-
-#[utoipa::path(
-    post,
-    path = "/api/control-plane/catalogs/migration-report/acknowledge",
-    tag = "control-plane-catalog-registry",
-    responses(
-        (status = 204, description = "Every open report row acknowledged"),
-        (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing catalog_registry:update permission", body = ErrorBody),
-        (status = 500, description = "Internal error", body = ErrorBody),
-    ),
-)]
-async fn acknowledge_migration_report(
-    State(st): State<CpState>,
-    Auth(p): Auth,
-) -> Result<StatusCode, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "catalog_registry:update").await?;
-    st.engine_mgmt.registry().acknowledge_report().await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 #[derive(utoipa::OpenApi)]
 #[openapi(
     paths(
@@ -1086,8 +1005,6 @@ async fn acknowledge_migration_report(
         retry_catalog_apply,
         list_catalog_workspaces,
         set_catalog_workspaces,
-        get_migration_report,
-        acknowledge_migration_report,
     ),
     components(schemas(
         RegistryCatalogDto,
@@ -1105,7 +1022,6 @@ async fn acknowledge_migration_report(
         CatalogConflictWorkspace,
         SetCatalogWorkspacesBody,
         CatalogWorkspaceDto,
-        MigrationReportRowDto,
         ErrorBody,
     )),
     tags((name = "control-plane-catalog-registry", description = "Catalog registry: platform catalogs, their engine attachments and workspace assignment")),

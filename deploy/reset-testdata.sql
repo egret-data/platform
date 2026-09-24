@@ -28,7 +28,12 @@ BEGIN;
 DELETE FROM catalog.catalog_grants;
 DELETE FROM catalog.catalog_clients;
 DELETE FROM catalog.catalog_roles;
--- Engines FK-reference warehouses, so they must go first.
+-- Engines must go first (SP3c-2 Task 6: not because of `engines.warehouse_id`
+-- any more — that column and FK are gone — but because
+-- `registry.engine_catalog_attachments.engine_id` cascades from engines,
+-- while its `catalog_id` FK is NO ACTION; deleting warehouses first would
+-- cascade into deleting `registry.catalogs` while attachment rows still
+-- pointed at them).
 DELETE FROM engine_mgmt.engines;
 DELETE FROM catalog.warehouses;
 

@@ -209,7 +209,7 @@ describe("Sidebar – workspace zones", () => {
 });
 
 describe("Sidebar – Infrastructure group", () => {
-  test("renders the Infrastructure items (Workspaces, Engines, Catalogs, Warehouses, Storage, Secrets)", () => {
+  test("renders the Infrastructure items (Workspaces, Engines, Catalogs, Storage, Secrets)", () => {
     renderSidebar("/control-plane/workspaces");
     expect(screen.getByText("Infrastructure")).toBeInTheDocument();
 
@@ -221,17 +221,15 @@ describe("Sidebar – Infrastructure group", () => {
       "href",
       "/control-plane/engines",
     );
-    // SP3c-1 D5: Catalogs and Warehouses BOTH render until Task 8 turns the
-    // warehouse routes into redirects. Catalogs sits between Engines and
-    // Warehouses and takes its path from `slug("Catalogs")`, no explicit `to`.
+    // SP3c-2 (Task 8): the Warehouses entry is gone — its five tabs moved onto
+    // CatalogDetail in SP3c-1, and `/control-plane/warehouses/:id` survives
+    // only as an unlisted compatibility redirect. Catalogs takes its path
+    // from `slug("Catalogs")`, no explicit `to`.
     expect(screen.getByRole("link", { name: "Catalogs" })).toHaveAttribute(
       "href",
       "/control-plane/catalogs",
     );
-    expect(screen.getByRole("link", { name: "Warehouses" })).toHaveAttribute(
-      "href",
-      "/control-plane/warehouses",
-    );
+    expect(screen.queryByRole("link", { name: "Warehouses" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Storage" })).toHaveAttribute(
       "href",
       "/control-plane/storage",
@@ -246,20 +244,20 @@ describe("Sidebar – Infrastructure group", () => {
     }
   });
 
-  test("Catalogs sits between Engines and Warehouses", () => {
+  test("Catalogs sits between Engines and Storage", () => {
     renderSidebar("/control-plane/workspaces");
     const engines = screen.getByRole("link", { name: "Engines" });
     const catalogs = screen.getByRole("link", { name: "Catalogs" });
-    const warehouses = screen.getByRole("link", { name: "Warehouses" });
+    const storage = screen.getByRole("link", { name: "Storage" });
     expect(engines.compareDocumentPosition(catalogs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(catalogs.compareDocumentPosition(warehouses) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(catalogs.compareDocumentPosition(storage) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   // The other half of SP3c D3's lock-out guard: `catalog_registry:read` must
   // both admit the user to Control Plane (see appAccess.test.ts) and unlock a
   // section once they are in — a user admitted to an app with an empty sidebar
   // is locked out just as effectively.
-  test("a catalog_registry:read-only user sees Catalogs and no other Infrastructure item", () => {
+  test("a catalog_registry:read-only user sees Catalogs, no other Infrastructure item", () => {
     renderSidebar("/control-plane/catalogs", {
       user_id: "9",
       email: "catalogs@example.com",
@@ -464,7 +462,6 @@ describe("Sidebar – permission-based filtering", () => {
       "Permissions",
       "Workspaces",
       "Engines",
-      "Warehouses",
       "Storage",
       "Secrets",
       "Audit log",

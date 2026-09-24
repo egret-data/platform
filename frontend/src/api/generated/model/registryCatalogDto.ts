@@ -30,4 +30,12 @@ export interface RegistryCatalogDto {
   workspaceIds: string[];
   createdAt: string;
   updatedAt: string;
+  /**
+     * Why this row's stored `config` no longer parses, if it does not.
+     * A stored row the tightened validator now refuses stays visible and
+     * repairable instead of vanishing — and, critically, never fails the
+     * whole list (SP3c-1 review N1).
+     * @nullable
+     */
+  configError?: string | null;
 }

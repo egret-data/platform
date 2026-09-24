@@ -14,15 +14,24 @@
  * primary"), and a shared sentence would have to be vague in both places.
  *
  * NEITHER DOES THE BLOCKED-REASON RULE, and that is a statement about the DATA,
- * not about taste (whole-branch review, F1). The Trino rule — one unparseable
- * catalog refuses a Retry or a Detach aimed at any OTHER catalog on the same
- * engine — is a fact about an ENGINE's whole attachment set, and only one of
- * the two screens can see that set: `configError` is reported by
- * `GET /engines/{id}/catalogs` alone, so `EngineDetail` computes both reasons
- * and `EnginesTab`, which reads one CATALOG across many engines, structurally
- * cannot. (`GET /catalogs` never parses a stored config — that is what makes it
- * the repair path — and moving the field is SP3c-2's, tracked as Task 9's
- * critical carry.) So `AttachmentActions` takes both reasons as REQUIRED props:
+ * not about taste (whole-branch review, F1). Two different rules share the
+ * Trino name, and the two screens can see different halves of them:
+ *
+ *   - THIS catalog's own stored config not parsing blocks Retry wherever it is
+ *     attached, on either engine kind — rendering one catalog fails the same
+ *     way regardless of who else is on the engine. `configError` is
+ *     `RegistryCatalogDto`'s own field (SP3c-2 Task 3 moved it off the legacy
+ *     `GET /engines/{id}/catalogs`, which `EngineDetail` used to be the only
+ *     reader of), so `EnginesTab` now knows this one directly from `catalog`.
+ *   - a SIBLING catalog on the same Trino engine not parsing blocks Retry AND
+ *     Detach too, because a Trino apply rebuilds that engine's WHOLE
+ *     ConfigMap. That is a fact about the engine's other attachments, which
+ *     `EnginesTab` (one catalog, many engines) still cannot see —
+ *     `catalog-retry-scope-note` below says so once instead of inventing a
+ *     per-row reason it cannot compute. `EngineDetail` (one engine, many
+ *     catalogs) computes this half.
+ *
+ * So `AttachmentActions` takes both reasons as REQUIRED props:
  * a caller that cannot compute one passes `null` deliberately, in the place a
  * reader will look, rather than omitting it and leaving "not applicable" and
  * "forgotten" spelled identically. `EnginesTab` says out loud, once, what its

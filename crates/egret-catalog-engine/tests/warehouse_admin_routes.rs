@@ -7,7 +7,9 @@
 //!   - warehouse browse (namespaces/tables/schema) over a `FakeBrowser`,
 //!   - a non-admin session is Forbidden (403),
 //!   - an unprovisioned warehouse browses empty,
-//!   - the fine-grained `warehouse:read` / `warehouse:create` gates.
+//!   - the fine-grained `catalog_registry:read` / `catalog_registry:create`
+//!     gates (SP3c-2 retired the router's original `warehouse:read` /
+//!     `warehouse:create` keys onto these).
 //!
 //! Run with:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
@@ -522,7 +524,7 @@ async fn browse_non_admin_forbidden() {
     };
     let token = session_for(&f, "browse_nonadmin", false).await;
     // A real Cedar PDP (not the allow-all stub) must back this 403 — the principal
-    // holds no platform role/permission, so the PDP denies `warehouse:read`.
+    // holds no platform role/permission, so the PDP denies `catalog_registry:read`.
     attach_real_pdp(&mut f).await;
     // 403 fires before any DB lookup — use a random UUID.
     let wh_id = Uuid::new_v4();
@@ -574,10 +576,12 @@ async fn browse_unprovisioned_warehouse_empty() {
     assert_eq!(j, serde_json::json!([]), "should be empty array; body={j}");
 }
 
-/// Warehouses: `warehouse:read` gates `GET /warehouses`, `warehouse:create`
-/// gates `POST /warehouses`. Proves the NEW `resource:action` gate: a scoped,
-/// non-admin principal holding the wrong (or no) permission is Forbidden, and one
-/// holding exactly the right permission succeeds — without the superuser bypass.
+/// Warehouses: `catalog_registry:read` gates `GET /warehouses`,
+/// `catalog_registry:create` gates `POST /warehouses` (SP3c-2 retired the
+/// router's own `warehouse:read` / `warehouse:create` onto these). Proves the
+/// `resource:action` gate: a scoped, non-admin principal holding the wrong (or
+/// no) permission is Forbidden, and one holding exactly the right permission
+/// succeeds — without the superuser bypass.
 #[tokio::test]
 async fn scoped_permission_warehouses_read_and_create() {
     let Some(mut f) = setup().await else {
@@ -588,11 +592,12 @@ async fn scoped_permission_warehouses_read_and_create() {
     // Seed all three ad-hoc platform roles BEFORE the real Cedar PDP snapshots the
     // roles catalog (raw-SQL seeding emits no RolesChanged event, so the PDP never
     // reloads). This is the required real-PDP authz assertion: a non-platform_admin
-    // `warehouse:read` principal lists warehouses (200) but is denied create (403),
-    // resolved by a real `CedarPdp` — not the allow-all stub.
+    // `catalog_registry:read` principal lists warehouses (200) but is denied create
+    // (403), resolved by a real `CedarPdp` — not the allow-all stub.
     let wrong = session_for_with_permission(&f, "wh_scoped_wrong", "engine:read").await;
-    let reader = session_for_with_permission(&f, "wh_scoped_reader", "warehouse:read").await;
-    let creator = session_for_with_permission(&f, "wh_scoped_creator", "warehouse:create").await;
+    let reader = session_for_with_permission(&f, "wh_scoped_reader", "catalog_registry:read").await;
+    let creator =
+        session_for_with_permission(&f, "wh_scoped_creator", "catalog_registry:create").await;
     attach_real_pdp(&mut f).await;
 
     let resp = f
@@ -604,7 +609,7 @@ async fn scoped_permission_warehouses_read_and_create() {
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
-        "a principal without warehouse:read must not list warehouses"
+        "a principal without catalog_registry:read must not list warehouses"
     );
 
     let resp = f
@@ -617,7 +622,7 @@ async fn scoped_permission_warehouses_read_and_create() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "a scoped warehouse:read principal must list warehouses; body={body}"
+        "a scoped catalog_registry:read principal must list warehouses; body={body}"
     );
 
     let (ws_id,): (Uuid,) =
@@ -644,7 +649,7 @@ async fn scoped_permission_warehouses_read_and_create() {
         "storageConnectionId": storage_id,
     });
 
-    // warehouse:read alone must not create.
+    // catalog_registry:read alone must not create.
     let resp = f
         .app
         .clone()
@@ -654,7 +659,7 @@ async fn scoped_permission_warehouses_read_and_create() {
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
-        "warehouse:read alone must not create a warehouse"
+        "catalog_registry:read alone must not create a warehouse"
     );
 
     let resp = f
@@ -667,7 +672,7 @@ async fn scoped_permission_warehouses_read_and_create() {
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "a scoped warehouse:create principal must create; body={body}"
+        "a scoped catalog_registry:create principal must create; body={body}"
     );
 }
 
@@ -755,15 +760,12 @@ async fn warehouse_create_and_delete_keep_the_registry_in_step() {
         "the original owner must lose visibility once the catalog is reassigned elsewhere"
     );
 
-    // An engine on ANOTHER warehouse attaches this warehouse's catalog.
-    let engine_wh = store
-        .create_warehouse(&format!("eng-wh-{}", Uuid::new_v4().simple()), ws, sc)
-        .await
-        .unwrap();
+    // An engine attaches this warehouse's catalog as a NON-primary attachment
+    // (no `engines.warehouse_id` column exists any more to tie it elsewhere).
     let engine_name = format!("reg-eng-{}", Uuid::new_v4().simple());
     let engine_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb) RETURNING id")
-        .bind(&engine_name).bind(engine_wh.id)
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec) VALUES ($1, 'trino', 'egret-engines', '{}'::jsonb) RETURNING id")
+        .bind(&engine_name)
         .fetch_one(&f.db.pool).await.unwrap();
     sqlx::query(
         "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1, $2)",
@@ -809,40 +811,59 @@ async fn warehouse_create_and_delete_keep_the_registry_in_step() {
     );
 }
 
-/// SP3 catalog-registry review M3: a warehouse still un-migrated (no registry
-/// catalog at all yet — the state before the boot backfill reaches it) but
-/// still an engine's `engines.warehouse_id` PRIMARY must 409, naming the
-/// engine, instead of the pre-existing raw FK 500 (`engines_warehouse_id_fkey`,
-/// migration 0056).
+/// SP3c-2 Task 6: `engines.warehouse_id` (and the FK it carried,
+/// `engines_warehouse_id_fkey`, migration 0056) is gone. The scenario the old
+/// `warehouse_delete_maps_legacy_primary_fk_to_409` test guarded — an engine
+/// tied to a warehouse purely via that column, with no registry catalog and so
+/// no attachment for `delete_warehouse_releasing_catalog`'s own check to see —
+/// can no longer be constructed at all: an engine has NO channel to depend on
+/// a warehouse except `registry.engine_catalog_attachments`, and an attachment
+/// cannot exist without a `registry.catalogs` row for that warehouse. So a
+/// warehouse with no registry catalog is now UNCONDITIONALLY safe to delete,
+/// even with an engine row sharing its name/namespace prefix that has nothing
+/// to do with it — this pins that positive case rather than a 409 nothing can
+/// trigger any more.
 #[tokio::test]
-async fn warehouse_delete_maps_legacy_primary_fk_to_409() {
+async fn warehouse_with_no_registry_catalog_deletes_cleanly_even_with_other_engines_present() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
-    let token = session_for(&f, "wh_legacy_fk_admin", true).await;
+    let token = session_for(&f, "wh_no_catalog_admin", true).await;
     let ws: Uuid = sqlx::query_scalar(
-        "INSERT INTO workspaces (slug, name) VALUES ($1, 'Legacy WS') RETURNING id",
+        "INSERT INTO workspaces (slug, name) VALUES ($1, 'No-Catalog WS') RETURNING id",
     )
-    .bind(format!("legacy-ws-{}", Uuid::new_v4().simple()))
+    .bind(format!("no-cat-ws-{}", Uuid::new_v4().simple()))
     .fetch_one(&f.db.pool)
     .await
     .unwrap();
     let sc: Uuid = sqlx::query_scalar(
         "INSERT INTO storage.storage_connections (name, region, bucket, access_key) VALUES ($1, 'us-east-1', 'b', 'k') RETURNING id")
-        .bind(format!("legacy-sc-{}", Uuid::new_v4().simple()))
+        .bind(format!("no-cat-sc-{}", Uuid::new_v4().simple()))
         .fetch_one(&f.db.pool).await.unwrap();
 
     let store = egret_catalog_engine::CatalogStore::new(f.db.clone());
-    // A warehouse the backfill has NOT reached: no registry catalog at all.
+    // A warehouse `ensure_warehouse_catalog` has never touched: no registry
+    // catalog row for it at all.
     let wh = store
-        .create_warehouse(&format!("legacy-wh-{}", Uuid::new_v4().simple()), ws, sc)
+        .create_warehouse(&format!("no-cat-wh-{}", Uuid::new_v4().simple()), ws, sc)
         .await
         .unwrap();
-    let engine_name = format!("legacy-eng-{}", Uuid::new_v4().simple());
+    assert!(
+        store
+            .registry()
+            .get_catalog_for_warehouse(wh.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "premise: this warehouse has no registry catalog"
+    );
+    // An unrelated engine row exists in the same database — nothing links it
+    // to `wh`; there is no column left that could.
+    let engine_name = format!("no-cat-eng-{}", Uuid::new_v4().simple());
     sqlx::query(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb)")
-        .bind(&engine_name).bind(wh.id)
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec) VALUES ($1, 'trino', 'egret-engines', '{}'::jsonb)")
+        .bind(&engine_name)
         .execute(&f.db.pool).await.unwrap();
 
     let resp = f
@@ -856,14 +877,10 @@ async fn warehouse_delete_maps_legacy_primary_fk_to_409() {
         ))
         .await
         .unwrap();
-    let (status, j) = into_json(resp).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{j}");
-    let msg = j["error"].as_str().unwrap_or_default();
-    assert!(
-        msg.contains(&engine_name),
-        "409 body must name the engine still primary on this warehouse {engine_name}; got {j}"
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "no attachment can exist without a registry catalog, so nothing blocks this delete"
     );
-
-    // Nothing was mutated: the warehouse still exists.
-    assert!(store.get_warehouse(wh.id).await.unwrap().is_some());
+    assert!(store.get_warehouse(wh.id).await.unwrap().is_none());
 }

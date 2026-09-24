@@ -16,7 +16,6 @@ const ENGINE: Omit<Engine, "status"> = {
   name: "sr-one",
   type: "starrocks",
   namespace: "engines",
-  warehouseId: "w1",
   spec: {
     coordinatorReplicas: 1,
     workerReplicas: 2,

@@ -25,7 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { FieldLabel } from "../config/FieldLabel";
-import { warehousesQueryKey } from "../Warehouses";
+import { warehousesQueryKey } from "../queryKeys";
 import { catalogsQueryKey } from "./Catalogs";
 import {
   AdvancedEditor,

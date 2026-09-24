@@ -74,14 +74,14 @@ async fn seed_typed_engine_and_ws(
     .expect("seed storage connection");
 
     let wh_name = format!("{prefix}-wh-{}", Uuid::new_v4().simple());
-    let wh = catalog
+    let _wh = catalog
         .create_warehouse(&wh_name, ws_id, sc_id)
         .await
         .expect("create warehouse");
 
     let eng_name = format!("{prefix}-eng-{}", Uuid::new_v4().simple());
     let engine = engine_mgmt
-        .create_engine(&eng_name, engine_type, "egret-engines", wh.id, &spec, None)
+        .create_engine(&eng_name, engine_type, "egret-engines", &spec, None)
         .await
         .expect("create engine");
 

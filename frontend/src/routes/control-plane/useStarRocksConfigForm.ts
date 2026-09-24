@@ -503,7 +503,6 @@ export function useStarRocksConfigForm(
     setError(null);
     const input: UpdateEngineInput = {
       name: engine.name,
-      warehouseId: engine.warehouseId ?? "",
       kind: "starrocks",
       // The SAME body `dirty` is computed from — blank image/replicas/resources
       // are omitted (preserve stored) and delegation rides along for any

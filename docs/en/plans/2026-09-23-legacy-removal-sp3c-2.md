@@ -159,7 +159,11 @@ EOF
 - Modify: `crates/egret-engine-mgmt/src/store.rs:423-504` — delete `create_engine_catalog`, `list_engine_catalogs`, `get_engine_catalog`, `update_engine_catalog`, `delete_engine_catalog` and the `EngineCatalog` row struct if nothing else uses it
 - Modify: `crates/egret-policy/src/store.rs:206-289` — delete the legacy `UNION` arm and rewrite the doc comment
 - Modify: `crates/egret-catalog-registry/src/tag_version.rs:26-90` — delete the legacy `UNION` arm and rewrite the doc comment
-- Modify: `crates/egret-engine-mgmt/tests/store.rs:93-224` (the five method tests), `tests/dependents.rs:235`, `tests/routes.rs:5606`
+- Delete: `crates/egret-catalog-registry/src/report.rs` and its `mod` / `pub use` in `lib.rs`
+- Modify: `crates/egret-engine-mgmt/src/catalogs.rs` — the two migration-report routes (`:39`, `:41-42`), `get_migration_report` (`:1015-1052`), `acknowledge_migration_report` (`:1054-1075`), `MigrationReportRowDto` (`:554`), `MigrationReportQuery` (`:573`), their utoipa registrations (`:1089-1090`, `:1108`)
+- Modify: `crates/egret-catalog-registry/src/store.rs` — `insert_report_row`, `insert_report`, `list_report`, `acknowledge_report`, and `ensure_warehouse_catalog`'s `report_for` parameter
+- Modify: the five `ensure_warehouse_catalog` call sites that pass `|_| Vec::new()` — `catalog-engine/src/warehouse_admin/mod.rs:417`, `engine-mgmt/src/engines.rs:3050`, `:3777`, `:5740`, `:9093`
+- Modify: `crates/egret-engine-mgmt/tests/store.rs:93-224` (the five method tests), `tests/dependents.rs:235`, `tests/routes.rs:5606`, `tests/registry_schema_constraints.rs:484-510`, `tests/routes.rs:8302-8410`
 - Modify: `crates/egret-policy/tests/download_tags_db.rs`, `download_tags_after_backfill.rs`, `download_tags_backfill_atomicity.rs`, `crates/egret-server/tests/tag_bump_reaches_polled_tag_service.rs`
 
 **Interfaces:**
@@ -193,10 +197,10 @@ BEGIN
     END IF;
 END $$;
 
--- `registry.migration_report` is NOT dropped. 0147's comment calls it "what the
--- backfill did", but `RegistryStore::ensure_warehouse_catalog` also writes it
--- whenever a warehouse's implicit catalog is created, and that path is live
--- (warehouse_admin/mod.rs:417, engines.rs:3050/3777/5740/9093).
+-- `migration_report` recorded what the backfill did. Nothing writes it now: its
+-- other writer, `ensure_warehouse_catalog`, takes a `report_for` closure and
+-- every production caller passes one that returns an empty Vec (see step 5b).
+DROP TABLE registry.migration_report;
 DROP TABLE registry.legacy_engine_catalogs;
 DROP TABLE engine_mgmt.engine_catalogs;
 ```
@@ -251,25 +255,47 @@ Remove `create_engine_catalog` / `list_engine_catalogs` / `get_engine_catalog` /
 
 Remove the `engine_mgmt.engine_catalogs` row from the FK-cascade table list in `crates/egret-engine-mgmt/tests/dependents.rs:235`, and the seed at `tests/routes.rs:5606`.
 
-- [ ] **Step 5b: Correct what `migration_report` claims to be, do not delete it**
+- [ ] **Step 5b: Delete the migration-report facility**
 
-0147's comment calls `registry.migration_report` "what the backfill did", and an
-earlier revision of this plan took that literally and had Task 2 drop the table and
-its two routes. That is **wrong**: `RegistryStore::ensure_warehouse_catalog`
-(`catalog-registry/src/store.rs:555`) writes a report row whenever a warehouse's
-implicit catalog is created, and it has five live production callers
-(`catalog-engine/src/warehouse_admin/mod.rs:417`,
-`engine-mgmt/src/engines.rs:3050`, `:3777`, `:5740`, `:9093`).
+This entry has been wrong twice; here is the evidence rather than the conclusion.
+`registry.migration_report` is written in exactly two places. `RegistryStore::insert_report`
+has test-only callers. `insert_report_row` inside `ensure_warehouse_catalog`
+(`catalog-registry/src/store.rs:555`) writes whatever the `report_for` closure returns —
+and all five production callers pass `|_| Vec::new()`:
 
-So the table, `report.rs`, `insert_report` / `list_report` / `acknowledge_report`
-and both API routes all **stay**. What changes is only the prose that says the
-backfill is their reason to exist. Task 1 already corrected `report.rs`'s module
-doc; check `0147`'s own comment and `catalogs.rs:1019`'s OpenAPI description
-("What the registry migration did") and make each say what is now true.
+```bash
+cd /Users/1pro-l4r8/Documents/github/data-portal/egret-sp3c2
+grep -n -A8 "ensure_warehouse_catalog(" crates/egret-catalog-engine/src/warehouse_admin/mod.rs \
+  crates/egret-engine-mgmt/src/engines.rs | grep -E "\|_\| Vec::new|ensure_warehouse_catalog"
+```
 
-Note for whoever picks this up later, not for this PR: those two routes have no
-frontend consumer — SP3c-1 never built the Catalogs-page banner 0147 anticipated.
-That is a missing feature, not dead code, and it is out of scope here.
+Re-run that grep before deleting. If any caller now passes a closure that can return a
+non-empty `Vec`, STOP: the facility has a live writer again and none of this applies.
+
+(The mistake to avoid: confirming that `ensure_warehouse_catalog` has five live callers
+proves the *function* is live, not that it *writes a report row*. The closure is the writer.
+I checked the call sites exist and concluded the table was written — it is not.)
+
+With no writer, delete: `registry.migration_report` (in `0151`), `report.rs`,
+`insert_report_row`, `RegistryStore::insert_report` / `list_report` / `acknowledge_report`,
+the `report_for` parameter of `ensure_warehouse_catalog` and the `|_| Vec::new()` at all five
+call sites, the two routes (`catalogs.rs:39`, `:41-42`), `get_migration_report`,
+`acknowledge_migration_report`, `MigrationReportRowDto`, `MigrationReportQuery` and their
+utoipa registrations, and the two tests (`registry_schema_constraints.rs:484-510`;
+`routes.rs:8302-8410` — keep that test's workspace-assignment half if it is the only coverage
+of that behaviour, and drop only the report assertions). `routes.rs:8524`'s comment about
+which permission the migration-report GETs require becomes false.
+
+Add `DROP TABLE registry.migration_report;` to `0151`, before the two drops already there.
+
+First verify the frontend has no consumer:
+
+```bash
+grep -rn "migrationReport\|migration-report" frontend/src | grep -v "src/api/generated"
+```
+
+Expected: no output — SP3c-1 never built the Catalogs-page banner `0147` anticipated. If a
+component does consume it, STOP and report.
 
 - [ ] **Step 6: Rewrite the policy tests that pin the legacy branch**
 

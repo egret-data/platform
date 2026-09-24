@@ -123,7 +123,17 @@ export function RolesTab({ warehouseId }: { warehouseId: string }) {
                 <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
                   {roles.isError ? (
                     <span className="text-destructive">
-                      {roles.error?.message ?? "Couldn't load roles."}
+                      {/* `ApiError.message` for a 403 is `Error::Forbidden`'s Display, the
+                          bare word "forbidden" — it names no permission and offers no way
+                          forward. This route is gated `catalog_registry:read` (SP3c-2, Task 7
+                          retired `warehouse:read`), named here instead. A `catalog_registry:read`
+                          holder already cleared the page's own route guard and gets 200 here —
+                          this branch fires only for a stale `me.permissions` snapshot or
+                          PDP-replica lag behind the guard's own check, not as this tab's normal
+                          persona. */}
+                      {roles.error?.status === 403
+                        ? "Couldn't load catalog roles: this needs the catalog_registry:read permission. A platform administrator can grant it."
+                        : (roles.error?.message ?? "Couldn't load roles.")}
                     </span>
                   ) : roles.isLoading ? (
                     <ListSkeleton rows={3} cols={4} />

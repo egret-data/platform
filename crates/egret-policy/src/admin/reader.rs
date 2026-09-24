@@ -15,9 +15,18 @@ pub struct EngineBinding {
     pub status: String,
     /// The `policy.authz_services` id this engine enforces, if bound.
     pub authz_service_id: Option<i64>,
-    /// The egret warehouse this engine reads, if any — the key for resolving
-    /// catalog metadata (schemas/tables/columns) for resource autocomplete.
-    pub warehouse_id: Option<uuid::Uuid>,
+    /// The egret warehouses this engine reads — one per attached egret
+    /// warehouse catalog, primary first. The keys for resolving catalog
+    /// metadata (schemas/tables/columns) for resource autocomplete.
+    ///
+    /// A LIST since SP3c-2: an engine has attached several egret catalogs
+    /// (each with its own warehouse) since SP3a, and this was the last place
+    /// still describing one warehouse per engine — it carried
+    /// `engines.warehouse_id`, which SP3c-2 drops. The picker therefore now
+    /// offers the schemas of EVERY warehouse the engine can read, not only its
+    /// primary's. Empty for an engine that attaches no egret warehouse catalog
+    /// (a Trino reading only jdbc catalogs, say).
+    pub warehouse_ids: Vec<uuid::Uuid>,
 }
 
 /// Transport-neutral read error (no engine-seam error type leaks across).

@@ -1,0 +1,16 @@
+-- 0152_drop_engines_warehouse_id.sql
+-- SP3c-2 §4 step 3. Primary is a property of the engine↔catalog relationship
+-- (`registry.engine_catalog_attachments.is_primary`, 0150), not of the engine.
+-- This column forced one warehouse per engine.
+--
+-- Also drops `engines_warehouse_id_fkey` (migration 0056), which
+-- `delete_warehouse_releasing_catalog` used to catch as a fallback 409. That
+-- fallback fired whenever ANY engine still named this warehouse in the column
+-- — with or without a registry catalog, with or without an attachment — so it
+-- guarded a strictly larger set than the attachment check that remains. What
+-- makes dropping it safe is not that the set was the same, but that the column
+-- WAS the dependency: with it gone, an engine that holds no attachment holds
+-- no reference to the warehouse at all, and there is nothing left to dangle.
+-- An engine that DOES hold one is still caught, by the attachment check.
+-- See `crates/egret-catalog-engine/src/store/embedded.rs`.
+ALTER TABLE engine_mgmt.engines DROP COLUMN warehouse_id;

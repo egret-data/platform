@@ -2639,7 +2639,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Registry catalogs with their engines and workspaces",
+            "description": "Registry catalogs with their engines and workspaces. A catalog whose stored configuration no longer parses is listed with `configError` set rather than omitted, and never fails the whole list",
             "content": {
               "application/json": {
                 "schema": {
@@ -2762,113 +2762,6 @@
         }
       }
     },
-    "/api/control-plane/catalogs/migration-report": {
-      "get": {
-        "tags": [
-          "control-plane-catalog-registry"
-        ],
-        "operationId": "get_migration_report",
-        "parameters": [
-          {
-            "name": "all",
-            "in": "query",
-            "description": "Include rows already acknowledged.",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "What the registry migration did, oldest first (unacknowledged rows unless `all`)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/MigrationReportRowDto"
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not authenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Missing catalog_registry:read permission",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/control-plane/catalogs/migration-report/acknowledge": {
-      "post": {
-        "tags": [
-          "control-plane-catalog-registry"
-        ],
-        "operationId": "acknowledge_migration_report",
-        "responses": {
-          "204": {
-            "description": "Every open report row acknowledged"
-          },
-          "401": {
-            "description": "Not authenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Missing catalog_registry:update permission",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/control-plane/catalogs/{id}": {
       "get": {
         "tags": [
@@ -2889,7 +2782,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The catalog",
+            "description": "The catalog. If its stored configuration no longer parses, `configError` is set rather than the request failing",
             "content": {
               "application/json": {
                 "schema": {
@@ -3749,7 +3642,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:delete permission",
+            "description": "Missing catalog_registry:delete permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -4177,372 +4070,7 @@
         }
       }
     },
-    "/api/control-plane/engines/{id}/catalogs": {
-      "get": {
-        "tags": [
-          "control-plane-engines"
-        ],
-        "operationId": "list_catalogs",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Engine id",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Catalogs attached to the engine. A catalog whose stored configuration no longer parses is listed with `configError` set rather than omitted, and never fails the whole list",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/EngineCatalogDto"
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not authenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Missing engine:read permission",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such engine",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "control-plane-engines"
-        ],
-        "operationId": "add_catalog",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Engine id",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AddCatalogBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Catalog added to the registry (or the warehouse's registry catalog reused), applied to the engine, then attached",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/EngineCatalogDto"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Missing/invalid catalog kind, name, warehouse or properties, or engine update failed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not authenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Missing engine:create permission",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such engine",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The catalog is already attached to this engine, a registry catalog with this name is in use, or the engine changed concurrently (e.g. a delete in progress; retry)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/control-plane/engines/{id}/catalogs/{cid}": {
-      "get": {
-        "tags": [
-          "control-plane-engines"
-        ],
-        "operationId": "get_catalog",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Engine id",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "cid",
-            "in": "path",
-            "description": "Registry catalog id",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Full catalog config (system-minted secret material redacted)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/EngineCatalogDetailDto"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not authenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Missing engine:read permission",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such engine or catalog (or catalog not on this engine)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      },
-      "put": {
-        "tags": [
-          "control-plane-engines"
-        ],
-        "operationId": "update_catalog",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Engine id",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "cid",
-            "in": "path",
-            "description": "Registry catalog id",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdateCatalogBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Catalog config replaced in the registry and applied to every engine that attaches it",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/EngineCatalogDto"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Primary or managed egret-warehouse catalogs are not editable, the properties do not fit the catalog's kind, or this engine's update failed (the catalog is not reverted)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not authenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Missing engine:update permission",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such engine or catalog (or catalog not on this engine)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      },
       "post": {
         "tags": [
           "control-plane-catalog-registry"
@@ -4643,99 +4171,6 @@
           },
           "502": {
             "description": "Trino only: Kubernetes rejected the apply (`code` = `engine_cluster_apply_failed`); nothing was attached. A StarRocks FE that rejects the DDL is reported as a `failed` attachment in the 201 body, not as a 502",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "control-plane-engines"
-        ],
-        "operationId": "remove_catalog",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Engine id",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "cid",
-            "in": "path",
-            "description": "Registry catalog id",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Catalog removed from the cluster, then detached (the registry catalog is kept) and its minted client revoked"
-          },
-          "400": {
-            "description": "Cannot delete the primary catalog, Kubernetes not configured, or the engine update failed (the catalog is kept)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Not authenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Missing engine:delete permission",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "No such engine or catalog (or catalog not on this engine)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
             "content": {
               "application/json": {
                 "schema": {
@@ -4865,6 +4300,7 @@
           "control-plane-engines"
         ],
         "summary": "`POST /engines/{id}/catalogs/{cid}/test` — \"test connection\": runs\n`SHOW SCHEMAS FROM \"<catalog>\"` against the engine's Trino coordinator via\nthe native-monitor coordinator proxy ([`crate::monitor::coordinator_call`],\nsame service name + auth headers as query monitoring) and reports whether\nthe query reaches `FINISHED`. Submits `POST /v1/statement`, then follows\n`nextUri` (GET) until a terminal state, an `error` object, or\n[`CATALOG_TEST_MAX_POLLS`] iterations are exhausted (→ `ok:false`,\n\"timed out\"). Never returns a transport/coordinator-shape failure as an\nHTTP error status — those map to `ok:false` with an explanatory message —\nEXCEPT when the coordinator itself is unreachable or kubernetes isn't\nconfigured, which surface as the usual `CpError` (mirrors the other\ncoordinator-proxied routes in this file and in `monitor.rs`).",
+        "description": "SP3c-2 Task 4 deleted this route's five siblings but KEPT this one: it is\nthe only route in the product that tests a *named engine's* view of a\ncatalog. The registry's `POST /catalogs/{id}/test` (`test_registry_catalog`\nin `catalogs.rs`) picks an applied Trino attachment across ALL of a\ncatalog's engines and cannot be pointed at one, and it gates on\n`catalog_registry:read`, and it tests an applied attachment across ALL of a\ncatalog's engines rather than one named engine. This route is the only\nENGINE-SCOPED test, which is why it survived SP3c-2 Task 4 while its five\nsiblings did not.\n\nIt is NOT kept for an `engine:read`-only persona, whatever an earlier draft\nof this comment said. Task 3 re-pointed `EngineDetail.tsx`'s Catalogs tab at\nthe registry list, so that operator now sees a 403 pane and zero rows —\nthere is no `cid` for them to press Test on. `EngineDetail.tsx`'s per-row\nTest button is a live caller (SP3c review F-3), but its user holds\n`catalog_registry:read` like everyone else who can see a row.",
         "operationId": "test_catalog",
         "parameters": [
           {
@@ -5975,7 +5411,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:delete permission",
+            "description": "Missing catalog_registry:delete permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -7837,7 +7273,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:delete permission",
+            "description": "Missing catalog_registry:delete permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -7902,7 +7338,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -7975,7 +7411,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:create permission",
+            "description": "Missing catalog_registry:create permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9841,7 +9277,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9909,7 +9345,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:create permission",
+            "description": "Missing catalog_registry:create permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9991,7 +9427,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10054,7 +9490,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:delete permission",
+            "description": "Missing catalog_registry:delete permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10064,7 +9500,7 @@
             }
           },
           "409": {
-            "description": "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or the warehouse is still an engine's primary warehouse, or the boot backfill has just created and assigned its catalog (retry)",
+            "description": "The warehouse cannot be deleted yet: its registry catalog is attached to an engine, or a concurrent engine create has just created and assigned its catalog (retry)",
             "content": {
               "application/json": {
                 "schema": {
@@ -10129,7 +9565,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10199,7 +9635,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:create permission",
+            "description": "Missing catalog_registry:create permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10271,7 +9707,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10356,7 +9792,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10441,7 +9877,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10526,7 +9962,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10611,7 +10047,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10695,7 +10131,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10785,7 +10221,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10888,7 +10324,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -10980,7 +10416,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -11065,7 +10501,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -11135,7 +10571,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:create permission",
+            "description": "Missing catalog_registry:create permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -11219,7 +10655,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -11294,7 +10730,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -11379,7 +10815,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -11464,7 +10900,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -11539,7 +10975,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -11642,7 +11078,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:read permission",
+            "description": "Missing catalog_registry:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -11712,7 +11148,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -11782,7 +11218,7 @@
             }
           },
           "403": {
-            "description": "Missing warehouse:update permission",
+            "description": "Missing catalog_registry:update permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -29790,31 +29226,6 @@
           }
         }
       },
-      "AddCatalogBody": {
-        "type": "object",
-        "required": [
-          "name",
-          "kind"
-        ],
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "kind": {
-            "type": "string"
-          },
-          "config": {
-            "type": "object"
-          },
-          "secretRef": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          }
-        }
-      },
       "AddColumnBody": {
         "type": "object",
         "required": [
@@ -33474,80 +32885,6 @@
           "starrocks"
         ]
       },
-      "EngineCatalogDetailDto": {
-        "type": "object",
-        "description": "`GET /engines/{id}/catalogs/{cid}` payload: full stored config + secretRef,\nwith secret material removed or masked (see [`redact_catalog_config`]).",
-        "required": [
-          "id",
-          "name",
-          "kind",
-          "isPrimary",
-          "config"
-        ],
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "name": {
-            "type": "string"
-          },
-          "kind": {
-            "type": "string"
-          },
-          "isPrimary": {
-            "type": "boolean"
-          },
-          "secretRef": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "config": {
-            "type": "object"
-          }
-        }
-      },
-      "EngineCatalogDto": {
-        "type": "object",
-        "required": [
-          "id",
-          "name",
-          "kind",
-          "isPrimary"
-        ],
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "name": {
-            "type": "string"
-          },
-          "kind": {
-            "type": "string"
-          },
-          "isPrimary": {
-            "type": "boolean"
-          },
-          "secretRef": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "configError": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Set only when this catalog's STORED configuration no longer parses, and\nthen it carries the validation error. The entry is degraded, not\ncomplete: `kind` falls back to the stored column and `secretRef` is\nnull, because neither can be derived without a parse. Render the row as\nbroken and let the operator open it — do not hide it, and do not treat\nthe absence of `secretRef` as \"no secret\".\n\nThis exists because tightening a validator is a migration: rows that\nwent through the old gate are still stored, and a list that refuses to\nshow them leaves the operator unable to find the one row to repair\n(SP3c review N1)."
-          }
-        }
-      },
       "EngineConflictBody": {
         "type": "object",
         "description": "The 409 body for an engine delete/unassign that was refused. `code` is\n`engine_has_dependents` (with `dependents`) or `constraint_violation` (with\n`constraint`).",
@@ -33651,7 +32988,6 @@
           "name",
           "type",
           "namespace",
-          "warehouseId",
           "status",
           "spec"
         ],
@@ -33668,10 +33004,6 @@
           },
           "namespace": {
             "type": "string"
-          },
-          "warehouseId": {
-            "type": "string",
-            "format": "uuid"
           },
           "status": {
             "type": "string"
@@ -34890,77 +34222,6 @@
           }
         }
       },
-      "MigrationReportRowDto": {
-        "type": "object",
-        "required": [
-          "id",
-          "runId",
-          "createdAt",
-          "severity",
-          "code",
-          "subject",
-          "message",
-          "detail"
-        ],
-        "properties": {
-          "id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "runId": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "createdAt": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "severity": {
-            "type": "string",
-            "description": "`info` | `warning`."
-          },
-          "code": {
-            "type": "string"
-          },
-          "catalogId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "engineId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "warehouseId": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "detail": {
-            "type": "object"
-          },
-          "acknowledgedAt": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          }
-        }
-      },
       "NamespaceDto": {
         "type": "object",
         "required": [
@@ -34999,7 +34260,7 @@
           },
           "primary": {
             "type": "boolean",
-            "description": "Exactly one catalog in the list carries this. Until SP3c-2 drops\n`engines.warehouse_id`, the primary must be an egret warehouse catalog —\nthe engine's Ranger role and (for StarRocks) its storage are still\nderived from that warehouse."
+            "description": "Exactly one catalog in the list carries this, and it must be an egret\nwarehouse catalog: the engine's Ranger role and (for StarRocks) its\nbuiltin storage are derived from that warehouse, and since SP3c-2 they\nare read back through this attachment rather than off the engine row.\nA primary naming a catalog with no warehouse is refused, with the\nreason, before anything is created."
           }
         }
       },
@@ -36570,6 +35831,13 @@
           "updatedAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "configError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why this row's stored `config` no longer parses, if it does not.\nA stored row the tightened validator now refuses stays visible and\nrepairable instead of vanishing — and, critically, never fails the\nwhole list (SP3c-1 review N1)."
           }
         }
       },
@@ -39213,22 +38481,6 @@
           },
           "id": {
             "type": "string",
-            "format": "uuid"
-          }
-        }
-      },
-      "UpdateCatalogBody": {
-        "type": "object",
-        "description": "`PUT /engines/{id}/catalogs/{cid}` body: replaces the stored `config` +\n`secret_ref` in full (not a partial patch).",
-        "properties": {
-          "config": {
-            "type": "object"
-          },
-          "secretRef": {
-            "type": [
-              "string",
-              "null"
-            ],
             "format": "uuid"
           }
         }

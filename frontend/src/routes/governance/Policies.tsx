@@ -316,7 +316,8 @@ export default function Policies() {
 /**
  * "New profile" dialog — the manual analogue of Trino provisioning's
  * auto-bind, for engines egret doesn't provision itself (e.g. an existing
- * StarRocks cluster). Mirrors `Warehouses.tsx`'s `AddWarehouseDialog`.
+ * StarRocks cluster). Mirrors the create dialog pattern used across Control
+ * Plane (e.g. `Workspaces.tsx`).
  */
 function AddProfileDialog({
   open,

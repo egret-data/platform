@@ -8,7 +8,6 @@
 use egret_catalog_engine::CatalogStore;
 use egret_engine_mgmt::EngineMgmtStore;
 use egret_metastore::Db;
-use sqlx::Row;
 use uuid::Uuid;
 
 async fn harness() -> Option<Db> {
@@ -67,13 +66,12 @@ async fn seed_warehouse(db: &Db) -> (Uuid, Uuid) {
     (ws, wh.id)
 }
 
-async fn seed_engine(store: &EngineMgmtStore, warehouse_id: Uuid) -> Uuid {
+async fn seed_engine(store: &EngineMgmtStore) -> Uuid {
     store
         .create_engine(
             &format!("reg-eng-{}", Uuid::new_v4().simple()),
             "trino",
             "egret-engines",
-            warehouse_id,
             &serde_json::json!({}),
             None,
         )
@@ -251,8 +249,8 @@ async fn one_catalog_per_warehouse_but_many_with_no_warehouse() {
 async fn attachment_with_client_requires_a_credential_secret() {
     let db = harness_or_skip!();
     let store = EngineMgmtStore::new(db.clone());
-    let (_ws, wh) = seed_warehouse(&db).await;
-    let engine = seed_engine(&store, wh).await;
+    let (_ws, _wh) = seed_warehouse(&db).await;
+    let engine = seed_engine(&store).await;
     let catalog: Uuid = sqlx::query_scalar(
         "INSERT INTO registry.catalogs (name, kind, config) VALUES ($1, 'generic', '{}'::jsonb) RETURNING id",
     )
@@ -316,8 +314,8 @@ async fn attachment_with_client_requires_a_credential_secret() {
 async fn engine_delete_cascades_its_catalog_attachments() {
     let db = harness_or_skip!();
     let store = EngineMgmtStore::new(db.clone());
-    let (_ws, wh) = seed_warehouse(&db).await;
-    let engine = seed_engine(&store, wh).await;
+    let (_ws, _wh) = seed_warehouse(&db).await;
+    let engine = seed_engine(&store).await;
     let catalog: Uuid = sqlx::query_scalar(
         "INSERT INTO registry.catalogs (name, kind, config) VALUES ($1, 'generic', '{}'::jsonb) RETURNING id",
     )
@@ -479,35 +477,4 @@ async fn catalog_secret_refs_cascade_with_the_catalog() {
     .await
     .unwrap();
     assert_eq!(left, 0);
-}
-
-// -- migration_report basic shape --------------------------------------------
-
-/// `migration_report` accepts a row shaped like the backfill will write, and
-/// rejects an unknown `severity`.
-#[tokio::test]
-async fn migration_report_severity_is_checked() {
-    let db = harness_or_skip!();
-    let run_id = Uuid::new_v4();
-
-    let bad = sqlx::query(
-        "INSERT INTO registry.migration_report (run_id, severity, code, subject, message) \
-         VALUES ($1, 'critical', 'primary_named_egret', 'engine:demo', 'test')",
-    )
-    .bind(run_id)
-    .execute(&db.pool)
-    .await;
-    assert!(bad.is_err(), "an unknown severity must be rejected");
-
-    let row = sqlx::query(
-        "INSERT INTO registry.migration_report (run_id, severity, code, subject, message) \
-         VALUES ($1, 'info', 'primary_named_egret', 'engine:demo', 'test') \
-         RETURNING acknowledged_at",
-    )
-    .bind(run_id)
-    .fetch_one(&db.pool)
-    .await
-    .expect("a valid severity is accepted");
-    let acked: Option<chrono::DateTime<chrono::Utc>> = row.get("acknowledged_at");
-    assert!(acked.is_none(), "unacknowledged by default");
 }

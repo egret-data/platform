@@ -370,7 +370,7 @@ function Field({ label, value, testId }: { label: string; value: string; testId:
   );
 }
 
-/** Same "Copy"/"Copied" idiom as `TryIt.tsx`'s `CopyButton` / `WarehouseDetail.tsx`;
+/** Same "Copy"/"Copied" idiom as `TryIt.tsx`'s `CopyButton`;
  *  moved here verbatim from the secret dialog this page replaces. */
 function CopyButton({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);

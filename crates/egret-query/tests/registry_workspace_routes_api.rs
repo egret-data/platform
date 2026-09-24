@@ -422,7 +422,7 @@ async fn seed_engine(db: &Db, workspace_id: Uuid) -> Uuid {
     .fetch_one(&db.pool)
     .await
     .expect("seed storage connection");
-    let wh_id: Uuid = sqlx::query_scalar(
+    let _wh_id: Uuid = sqlx::query_scalar(
         "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
          VALUES ($1, $2, $3) RETURNING id",
     )
@@ -433,11 +433,10 @@ async fn seed_engine(db: &Db, workspace_id: Uuid) -> Uuid {
     .await
     .expect("seed warehouse");
     sqlx::query_scalar(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) \
-         VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb) RETURNING id",
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec) \
+         VALUES ($1, 'trino', 'egret-engines', '{}'::jsonb) RETURNING id",
     )
     .bind(uniq("eng"))
-    .bind(wh_id)
     .fetch_one(&db.pool)
     .await
     .expect("seed engine")
@@ -646,11 +645,10 @@ async fn seed_assigned_engine_with_catalog(
     .await
     .expect("seed warehouse");
     let engine_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, status) \
-         VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb, 'running') RETURNING id",
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, status) \
+         VALUES ($1, 'trino', 'egret-engines', '{}'::jsonb, 'running') RETURNING id",
     )
     .bind(&engine_name)
-    .bind(wh_id)
     .fetch_one(&db.pool)
     .await
     .expect("seed engine");

@@ -15,15 +15,17 @@ const user = (platform_roles: string[], permissions: string[]): Me => ({
   permissions,
 });
 
-// What `data_steward` holds after migrations 0003, 0059, 0080, 0108, 0109, 0148
-// (0060 later dropped `database:read`). It spans both apps. 0148 grants every
+// What `data_steward` holds after migrations 0003, 0059, 0080, 0108, 0109, 0148, 0153
+// (0060 later dropped `database:read`). It spans both apps. 0148 granted every
 // platform role the `catalog_registry:*` counterpart of each `warehouse:*` it
-// holds, which is where the steward's `catalog_registry:read` comes from.
+// held, which is where the steward's `catalog_registry:read` originally came
+// from; 0153 (SP3c-2, Task 7) then deleted `warehouse:read` itself, so today's
+// steward holds `catalog_registry:read` alone, with no `warehouse:*` alongside it.
 const STEWARD = user(
   ["data_steward"],
   [
     "workspace:read", "user:read", "policy:read", "policy:create", "policy:update",
-    "policy:delete", "policy:seed", "warehouse:read", "catalog_registry:read", "storage:read",
+    "policy:delete", "policy:seed", "catalog_registry:read", "storage:read",
     "engine:read", "group:read", "role:read", "tag:read", "tag:manage", "dashboard:certify",
     "dataset:certify",
   ],
@@ -58,7 +60,8 @@ describe("canEnterControlPlane / canEnterGovernance", () => {
   // Control Plane app — not just one page. A user re-gated onto the new key
   // before it joined this list would lose Engines, Storage, Secrets and the
   // rest along with Catalogs, so the key enters the list in the same change
-  // that adds the section. (`warehouse:read` only LEAVES it in SP3c-2.)
+  // that adds the section. (`warehouse:read` left the list in SP3c-2, once
+  // `warehouse_admin` was re-gated onto `catalog_registry:*`, Task 7.)
   it("admits a user holding only catalog_registry:read to Control Plane", () => {
     const catalogOnly = user([], ["catalog_registry:read"]);
     expect(canEnterControlPlane(catalogOnly)).toBe(true);

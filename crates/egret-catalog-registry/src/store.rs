@@ -1,9 +1,8 @@
 //! `registry` schema store (SP3). Runtime sqlx queries, schema-qualified.
-//! Reads `engine_mgmt.engines` / `engine_mgmt.engine_catalogs`,
-//! `catalog.warehouses` and `workspaces` by name for joins; writes only
-//! `registry.*`.
+//! Reads `engine_mgmt.engines`, `catalog.warehouses` and `workspaces` by name
+//! for joins; writes only `registry.*`.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use egret_metastore::Db;
@@ -13,7 +12,6 @@ use uuid::Uuid;
 use crate::config::{CatalogDef, ValidationError};
 use crate::error::RegistryError;
 use crate::name::{first_free_name, is_valid_catalog_name, normalize_catalog_name};
-use crate::report::{ReportEntry, ReportRow};
 
 macro_rules! catalog_cols {
     () => {
@@ -112,8 +110,9 @@ impl AttachedCatalog {
     /// attachment rather than stored a second time here: primacy is one fact,
     /// and a copy on the pair could disagree with the row it was built from.
     /// Until SP3c-1 this was recomputed at three call sites as
-    /// `catalog.warehouse_id == Some(engine.warehouse_id)` (`legacy_catalog_dto`,
-    /// `update_catalog`'s edit guard, and `catalog_apply::is_primary`).
+    /// `catalog.warehouse_id == Some(engine.warehouse_id)`; two of those
+    /// sites were deleted with the legacy routes in SP3c-2 Task 4, and
+    /// `catalog_apply::is_primary` is the one that remains.
     pub fn is_primary(&self) -> bool {
         self.attachment.is_primary
     }
@@ -240,29 +239,6 @@ async fn replace_secret_refs(
     Ok(())
 }
 
-/// Writes one report row on `conn` — the low-level primitive every atomic
-/// mutation+report transaction shares (see [`RegistryStore::insert_report`] and
-/// the backfill's per-row/per-warehouse/per-scan writers in `backfill.rs`).
-async fn insert_report_row(conn: &mut PgConnection, e: &ReportEntry) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO registry.migration_report \
-           (run_id, severity, code, catalog_id, engine_id, warehouse_id, subject, message, detail) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-    )
-    .bind(e.run_id)
-    .bind(e.severity.as_str())
-    .bind(e.code)
-    .bind(e.catalog_id)
-    .bind(e.engine_id)
-    .bind(e.warehouse_id)
-    .bind(&e.subject)
-    .bind(&e.message)
-    .bind(&e.detail)
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
-}
-
 pub(crate) async fn insert_attachment_row(
     conn: &mut PgConnection,
     a: &NewAttachment,
@@ -284,26 +260,6 @@ pub(crate) async fn insert_attachment_row(
     .bind(a.is_primary)
     .fetch_one(&mut *conn)
     .await
-}
-
-/// The backfill's only caller: marks an `engine_mgmt.engine_catalogs` row
-/// migrated, so it is never revisited on a later boot.
-pub(crate) async fn map_legacy_row_on(
-    conn: &mut PgConnection,
-    engine_catalog_id: Uuid,
-    engine_id: Uuid,
-    catalog_id: Option<Uuid>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO registry.legacy_engine_catalogs (engine_catalog_id, engine_id, catalog_id) \
-         VALUES ($1, $2, $3) ON CONFLICT (engine_catalog_id) DO NOTHING",
-    )
-    .bind(engine_catalog_id)
-    .bind(engine_id)
-    .bind(catalog_id)
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
 }
 
 #[derive(Clone)]
@@ -539,17 +495,12 @@ impl RegistryStore {
     /// The catalog of a warehouse, created (normalised name, assigned to the
     /// warehouse's workspace) the first time. The assignment is written only with
     /// the catalog, so an admin's later un-assignment is never undone here.
-    /// `preferred_name` is used verbatim when free (the backfill's `egret`).
-    ///
-    /// `report_for` is called at most once, only when a catalog is actually
-    /// created, right before the transaction commits: whatever it returns is
-    /// written in the SAME transaction, so the mutation and its report rows are
-    /// never observed apart (a crash before commit loses neither or both).
+    /// `preferred_name` is used verbatim when free (only a `#[cfg(test)]`
+    /// helper passes one today).
     pub async fn ensure_warehouse_catalog(
         &self,
         wh: &WarehouseIdentity<'_>,
         preferred_name: Option<&str>,
-        report_for: impl FnOnce(&CatalogRow) -> Vec<ReportEntry> + Send,
     ) -> Result<(CatalogRow, bool), RegistryError> {
         if let Some(c) = self.get_catalog_for_warehouse(wh.id).await? {
             return Ok((c, false));
@@ -572,9 +523,6 @@ impl RegistryStore {
                     .bind(wh.workspace_id)
                     .execute(&mut *tx)
                     .await?;
-                    for e in report_for(&row) {
-                        insert_report_row(&mut tx, &e).await?;
-                    }
                     tx.commit().await?;
                     return Ok((row, true));
                 }
@@ -670,9 +618,9 @@ impl RegistryStore {
     /// Whether an attachment OTHER than (`engine_id`, `catalog_id`) still names
     /// `client_id` as its Catalog Client.
     ///
-    /// Two attachments can share one client: the backfill takes it verbatim
-    /// from the legacy row and derives the credential secret's name from it
-    /// (`catalog-client-{id}`), so `create_or_reuse_secret` deliberately
+    /// Two attachments can share one client: the (now-gone) boot backfill took
+    /// it verbatim from the legacy row and derived the credential secret's
+    /// name from it (`catalog-client-{id}`), so `create_or_reuse_secret` deliberately
     /// collapses them onto one secret. Revoking on behalf of one of them would
     /// destroy a credential the OTHER engine's rendered Trino properties still
     /// present — the standing "never destroy a credential an engine may still
@@ -793,6 +741,70 @@ impl RegistryStore {
         .await?)
     }
 
+    /// The warehouse an engine leads with: the `warehouse_id` of its PRIMARY
+    /// attachment's catalog. SP3c-2 Task 5 made this the source for the two
+    /// facts that used to come off `engines.warehouse_id` — a StarRocks
+    /// engine's builtin storage volume and (through `ensure_engine_role`) the
+    /// engine's Ranger role.
+    ///
+    /// `None` covers BOTH ways an engine can fail to name one: no primary
+    /// attachment at all (migration 0150's partial unique index gives *at
+    /// most* one, never at least one), and a primary on a catalog with no
+    /// warehouse. The callers treat them alike — they need a warehouse and
+    /// there is none — and refuse rather than pick a catalog to stand in.
+    /// `create_engine` refuses a warehouse-less primary before it writes any
+    /// row, so the second case needs the table to have been written by
+    /// something other than egret.
+    pub async fn primary_warehouse_id(
+        &self,
+        engine_id: Uuid,
+    ) -> Result<Option<Uuid>, RegistryError> {
+        Ok(sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT c.warehouse_id \
+               FROM registry.catalogs c \
+               JOIN registry.engine_catalog_attachments a ON a.catalog_id = c.id \
+              WHERE a.engine_id = $1 AND a.is_primary",
+        )
+        .bind(engine_id)
+        .fetch_optional(self.pool())
+        .await?
+        .flatten())
+    }
+
+    /// Every warehouse each of `engine_ids` reaches — one per attached egret
+    /// warehouse catalog, primary first, then by attachment time. Engines with
+    /// no warehouse-backed attachment are absent from the map rather than
+    /// present with an empty vec.
+    ///
+    /// One query, not one per engine: the policy resource picker builds this
+    /// for every provisioned engine on every autocomplete keystroke.
+    pub async fn warehouse_ids_by_engine(
+        &self,
+        engine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<Uuid>>, RegistryError> {
+        let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT a.engine_id, c.warehouse_id \
+               FROM registry.engine_catalog_attachments a \
+               JOIN registry.catalogs c ON c.id = a.catalog_id \
+              WHERE a.engine_id = ANY($1) AND c.warehouse_id IS NOT NULL \
+              ORDER BY a.is_primary DESC, a.created_at, c.name",
+        )
+        .bind(engine_ids)
+        .fetch_all(self.pool())
+        .await?;
+        let mut out: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        for (engine_id, warehouse_id) in rows {
+            let ws = out.entry(engine_id).or_default();
+            // Two catalogs of the same warehouse on one engine is legal
+            // (different names, different configs); the picker wants the
+            // warehouse once.
+            if !ws.contains(&warehouse_id) {
+                ws.push(warehouse_id);
+            }
+        }
+        Ok(out)
+    }
+
     /// After a successful full apply: every attachment whose catalog the apply
     /// rendered (unchanged since `read_at`) is on the engine now.
     pub async fn mark_engine_applied(
@@ -905,9 +917,9 @@ impl RegistryStore {
 
     /// The §4.6 "assigned OR owned-and-not-yet-assigned" visibility rule, as
     /// one executable predicate: a workspace sees a warehouse when its registry
-    /// catalog is assigned there — or, for a warehouse the backfill has not
-    /// reached yet (no registry catalog at all), when the warehouse is that
-    /// workspace's own.
+    /// catalog is assigned there — or, for a warehouse with no registry catalog
+    /// yet (`ensure_warehouse_catalog` has not run for it, or a past attempt
+    /// failed), when the warehouse is that workspace's own.
     ///
     /// NO PRODUCTION CALLER TODAY, deliberately (review F-10). It is kept for
     /// two reasons, and a third that is NOT one of them:
@@ -941,195 +953,5 @@ impl RegistryStore {
         .bind(workspace_id)
         .fetch_one(self.pool())
         .await?)
-    }
-
-    // legacy map + report ------------------------------------------------------
-
-    /// `engine_mgmt.engine_catalogs` rows of this engine the backfill has not
-    /// migrated. Non-zero means rendering from the registry would drop catalogs
-    /// the engine runs today, so applies refuse (engines.rs).
-    pub async fn unmigrated_legacy_catalog_count(
-        &self,
-        engine_id: Uuid,
-    ) -> Result<i64, RegistryError> {
-        Ok(sqlx::query_scalar(
-            "SELECT count(*) FROM engine_mgmt.engine_catalogs c \
-              WHERE c.engine_id = $1 \
-                AND NOT EXISTS (SELECT 1 FROM registry.legacy_engine_catalogs m WHERE m.engine_catalog_id = c.id)",
-        )
-        .bind(engine_id)
-        .fetch_one(self.pool())
-        .await?)
-    }
-
-    /// Backfill: attach, mark the legacy row migrated, write its report rows,
-    /// and bump the tag versions this attachment changes — atomically. A crash
-    /// before commit loses all of them together (the row stays unmapped and is
-    /// retried whole next boot); a crash after commit loses none (review fix
-    /// I1, extended by review F-14).
-    ///
-    /// `bump_tags_for_warehouse` is the warehouse whose Ranger tag export this
-    /// attachment changes (`None` for a catalog with no warehouse, whose tags
-    /// the export does not carry). It MUST be part of this transaction, not a
-    /// pass afterwards: step 2 only ever selects legacy rows that are not yet
-    /// in `registry.legacy_engine_catalogs`, so once this commits the row is
-    /// never revisited. A bump left for later and lost to a kill — OOM, a
-    /// liveness probe, a failed deploy — is lost PERMANENTLY, and the plugin
-    /// 304s forever on a catalog the export has started emitting. Inside the
-    /// transaction, a bump that fails takes the attachment down with it and the
-    /// whole row is retried on the next boot.
-    pub(crate) async fn insert_attachment_and_map(
-        &self,
-        a: &NewAttachment,
-        engine_catalog_id: Uuid,
-        report: &[ReportEntry],
-        bump_tags_for_warehouse: Option<Uuid>,
-    ) -> Result<(), RegistryError> {
-        let mut tx = self.pool().begin().await?;
-        insert_attachment_row(&mut tx, a).await?;
-        map_legacy_row_on(&mut tx, engine_catalog_id, a.engine_id, Some(a.catalog_id)).await?;
-        for e in report {
-            insert_report_row(&mut tx, e).await?;
-        }
-        if let Some(warehouse_id) = bump_tags_for_warehouse {
-            crate::tag_version::bump_bound_tag_versions(&mut *tx, warehouse_id).await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// Backfill: mark a legacy row migrated (without writing an attachment) and
-    /// its report rows, atomically (review fix I1).
-    pub(crate) async fn map_legacy_row(
-        &self,
-        engine_catalog_id: Uuid,
-        engine_id: Uuid,
-        catalog_id: Option<Uuid>,
-        report: &[ReportEntry],
-    ) -> Result<(), RegistryError> {
-        let mut tx = self.pool().begin().await?;
-        map_legacy_row_on(&mut tx, engine_catalog_id, engine_id, catalog_id).await?;
-        for e in report {
-            insert_report_row(&mut tx, e).await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// Backfill: catalog + attachment + map, atomically. `report_for` is called
-    /// once, after the catalog row exists (so its id is known) but before commit,
-    /// same atomicity guarantee as [`Self::ensure_warehouse_catalog`] (review fix I1).
-    pub(crate) async fn create_catalog_for_legacy_row(
-        &self,
-        name: &str,
-        def: &CatalogDef,
-        engine_id: Uuid,
-        engine_catalog_id: Uuid,
-        created_at: DateTime<Utc>,
-        report_for: impl FnOnce(&CatalogRow) -> Vec<ReportEntry> + Send,
-    ) -> Result<CatalogRow, RegistryError> {
-        let mut tx = self.pool().begin().await?;
-        let row = insert_catalog(&mut tx, name, def, None)
-            .await
-            .map_err(|e| map_insert_error(e, name))?;
-        insert_attachment_row(
-            &mut tx,
-            &NewAttachment {
-                engine_id,
-                catalog_id: row.id,
-                catalog_client_id: None,
-                credential_secret_id: None,
-                minted_client: false,
-                applied_now: false,
-                // Connector rows only (`migrate_connector_row`): the catalog
-                // this creates carries no warehouse, so it never satisfied the
-                // pre-SP3c-1 primary predicate.
-                is_primary: false,
-                created_at: Some(created_at),
-                apply_status: apply_status::APPLIED,
-            },
-        )
-        .await?;
-        map_legacy_row_on(&mut tx, engine_catalog_id, engine_id, Some(row.id)).await?;
-        for e in report_for(&row) {
-            insert_report_row(&mut tx, &e).await?;
-        }
-        tx.commit().await?;
-        Ok(row)
-    }
-
-    /// Backfill step 3: every `engine_catalog_renamed` report row whose saved-SQL
-    /// scan has not completed yet — from this run's rows (already committed by the
-    /// time step 3 runs) and any earlier boot's (a crash, or a caught scan error,
-    /// left `scanPending` set). `scanPending` defaults to true when the key is
-    /// absent, so a row written before this marker existed is still picked up.
-    /// `(report id, old name, new name)`.
-    pub(crate) async fn pending_saved_sql_scans(
-        &self,
-    ) -> Result<Vec<(i64, String, Option<String>)>, RegistryError> {
-        Ok(sqlx::query_as(
-            "SELECT id, detail->>'oldName', detail->>'newName' FROM registry.migration_report \
-              WHERE code = 'engine_catalog_renamed' \
-                AND COALESCE((detail->>'scanPending')::boolean, true) \
-              ORDER BY id",
-        )
-        .fetch_all(self.pool())
-        .await?)
-    }
-
-    /// Backfill step 3: persist scan-hit report rows and clear `scanPending` on
-    /// every rename row that triggered them, atomically — a crash (or DB error)
-    /// before this commits leaves the markers untouched, so the whole scan (not
-    /// just the missing hits) is retried on the next boot rather than silently
-    /// treated as done (review fix I1).
-    pub(crate) async fn complete_saved_sql_scan(
-        &self,
-        rename_report_ids: &[i64],
-        entries: &[ReportEntry],
-    ) -> Result<(), RegistryError> {
-        let mut tx = self.pool().begin().await?;
-        for e in entries {
-            insert_report_row(&mut tx, e).await?;
-        }
-        sqlx::query(
-            "UPDATE registry.migration_report SET detail = jsonb_set(detail, '{scanPending}', 'false'::jsonb) \
-              WHERE id = ANY($1)",
-        )
-        .bind(rename_report_ids)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn insert_report(&self, entries: &[ReportEntry]) -> Result<(), RegistryError> {
-        let mut tx = self.pool().begin().await?;
-        for e in entries {
-            insert_report_row(&mut tx, e).await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn list_report(
-        &self,
-        include_acknowledged: bool,
-    ) -> Result<Vec<ReportRow>, RegistryError> {
-        Ok(sqlx::query_as::<_, ReportRow>(
-            "SELECT id, run_id, created_at, severity, code, catalog_id, engine_id, warehouse_id, subject, message, \
-                    detail, acknowledged_at \
-               FROM registry.migration_report \
-              WHERE $1 OR acknowledged_at IS NULL ORDER BY id",
-        )
-        .bind(include_acknowledged)
-        .fetch_all(self.pool())
-        .await?)
-    }
-
-    pub async fn acknowledge_report(&self) -> Result<u64, RegistryError> {
-        Ok(sqlx::query("UPDATE registry.migration_report SET acknowledged_at = now() WHERE acknowledged_at IS NULL")
-            .execute(self.pool())
-            .await?
-            .rows_affected())
     }
 }

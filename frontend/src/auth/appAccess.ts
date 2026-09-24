@@ -13,11 +13,12 @@ import type { Me } from "@/api/hooks";
  */
 export const CONTROL_PLANE_PERMS: readonly string[] = [
   "engine:read",
-  "warehouse:read",
-  // D3: `catalog_registry:read` gates the Catalogs section. It joins this list
-  // in the SAME change that adds the section, and `warehouse:read` only LEAVES
-  // it in SP3c-2, once `warehouse_admin` has been re-gated. Between the two
-  // releases a user may hold either key and is locked out of nothing.
+  // D3: `catalog_registry:read` gates the Catalogs section. It joined this
+  // list in the SAME change that added the section, alongside `warehouse:read`
+  // — the two keys overlapped through SP3c-1 so a user holding either was
+  // locked out of nothing. SP3c-2 (this task) re-gated `warehouse_admin` onto
+  // `catalog_registry:*` and retired `warehouse:read` (migration 0153), which
+  // is why it LEAVES this list here, in the same commit.
   "catalog_registry:read",
   "storage:read",
   "secret:read",

@@ -49,7 +49,7 @@ import { ServiceAccountActionsMenu } from "./ServiceAccountActionsMenu";
  * hand-rolled (see the component doc) and has no pagination, so the cap has to
  * be kept explicitly or a workspace with two hundred accounts fires two
  * hundred requests on first paint. 25 is the number every control-plane list
- * page uses for the same reason (`Workspaces.tsx`, `Warehouses.tsx`).
+ * page uses for the same reason (`Workspaces.tsx`).
  *
  * **The "Show N more service accounts" button is load-bearing, not decorative.**
  * The summary strip counts every account the search matched, while the table

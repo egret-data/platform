@@ -142,6 +142,13 @@ Xoá các route này cũng khai tử `CatalogTestDto` với hình dạng `{ ok, 
 `POST /engines/{id}/catalogs/{cid}` và `…/apply` nằm dưới cùng tiền tố URL nhưng **thuộc registry và
 ở lại**.
 
+**Một hệ quả phải nói rõ, vì đây là mất năng lực.** Trước SP3c-2, một operator chỉ có `engine:read`
+vẫn thấy được tên các catalog của engine trên tab Catalogs, vì `GET /engines/{id}/catalogs` gác bằng
+`engine:read`. Danh sách registry gác bằng `catalog_registry:read`, nên sau bước này operator đó thấy
+tab, thấy một cảnh báo nêu đúng tên quyền còn thiếu, và không thấy tên catalog nào. Đó là cái giá của
+một họ permission duy nhất (D3) và nó được chấp nhận — nhưng tab **tuyệt đối không được** trông như
+rỗng, vì một bảng rỗng đọc thành "engine này không có catalog nào". Cảnh báo nói đúng câu đó.
+
 **3. `engines.warehouse_id` — và "primary" từ nay nghĩa là gì.** Một writer (`store.rs:203-227`),
 mười một reader production; bốn trong số đó chết theo bước 1. `EngineDto.warehouse_id` rời khỏi dây,
 việc đó xoá hai dòng echo ở frontend (`useEngineConfigForm.ts:1291`,

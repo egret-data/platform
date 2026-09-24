@@ -3,7 +3,6 @@
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
 //!   env -u EGRET_ALLOW_DB_SKIP cargo test -p egret-catalog-registry --test store
 
-use egret_catalog_registry::report::ReportEntry;
 use egret_catalog_registry::store::{
     apply_status, CatalogFilter, NewAttachment, WarehouseIdentity,
 };
@@ -57,13 +56,12 @@ async fn warehouse(db: &Db, name: &str, ws: Uuid) -> Uuid {
     .expect("warehouse")
 }
 
-async fn engine(db: &Db, wh: Uuid) -> Uuid {
+async fn engine(db: &Db) -> Uuid {
     sqlx::query_scalar(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) \
-         VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb) RETURNING id",
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec) \
+         VALUES ($1, 'trino', 'egret-engines', '{}'::jsonb) RETURNING id",
     )
     .bind(format!("reg-eng-{}", Uuid::new_v4().simple()))
-    .bind(wh)
     .fetch_one(&db.pool)
     .await
     .expect("engine")
@@ -171,7 +169,6 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -200,7 +197,6 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -215,7 +211,6 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -235,7 +230,6 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -255,7 +249,7 @@ async fn attachments_order_status_and_block_deletes() {
     let store = RegistryStore::new(db.clone());
     let ws = workspace(&db).await;
     let wh = warehouse(&db, &unique("wh"), ws).await;
-    let eng = engine(&db, wh).await;
+    let eng = engine(&db).await;
     let (primary, _) = store
         .ensure_warehouse_catalog(
             &WarehouseIdentity {
@@ -264,7 +258,6 @@ async fn attachments_order_status_and_block_deletes() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -375,7 +368,6 @@ async fn attachments_order_status_and_block_deletes() {
     ));
     assert!(store.delete_attachment(eng, tpch.id).await.unwrap());
     assert!(store.delete_catalog(tpch.id).await.unwrap());
-    assert_eq!(store.unmigrated_legacy_catalog_count(eng).await.unwrap(), 0);
 }
 
 /// Trino numbers its catalog env vars by this order (SP3b plan row 9), so a
@@ -398,7 +390,7 @@ async fn attachments_still_come_back_primary_first_then_created_then_name() {
     // The warehouse catalog's NAME comes from the warehouse's; `mm` sorts
     // between the two others, so "primary first" cannot be an accident of it.
     let wh = warehouse(&db, &unique("mm"), ws).await;
-    let eng = engine(&db, wh).await;
+    let eng = engine(&db).await;
     let (primary, _) = store
         .ensure_warehouse_catalog(
             &WarehouseIdentity {
@@ -407,7 +399,6 @@ async fn attachments_still_come_back_primary_first_then_created_then_name() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -476,8 +467,8 @@ async fn a_pending_attachment_converges_to_applied() {
     let Some(db) = db().await else { return };
     let store = RegistryStore::new(db.clone());
     let ws = workspace(&db).await;
-    let wh = warehouse(&db, &unique("wh"), ws).await;
-    let eng = engine(&db, wh).await;
+    let _wh = warehouse(&db, &unique("wh"), ws).await;
+    let eng = engine(&db).await;
     let tpch = store
         .create_catalog(
             &unique("bench"),
@@ -521,8 +512,8 @@ async fn set_apply_applied_on_a_gone_attachment_is_not_found() {
     let Some(db) = db().await else { return };
     let store = RegistryStore::new(db.clone());
     let ws = workspace(&db).await;
-    let wh = warehouse(&db, &unique("wh"), ws).await;
-    let eng = engine(&db, wh).await;
+    let _wh = warehouse(&db, &unique("wh"), ws).await;
+    let eng = engine(&db).await;
     let tpch = store
         .create_catalog(
             &unique("bench"),
@@ -556,7 +547,7 @@ async fn an_attachments_credential_secret_cannot_be_deleted() {
     let vault = secrets(&db);
     let ws = workspace(&db).await;
     let wh = warehouse(&db, &unique("wh"), ws).await;
-    let eng = engine(&db, wh).await;
+    let eng = engine(&db).await;
     let (catalog, _) = store
         .ensure_warehouse_catalog(
             &WarehouseIdentity {
@@ -565,7 +556,6 @@ async fn an_attachments_credential_secret_cannot_be_deleted() {
                 workspace_id: ws,
             },
             None,
-            |_| vec![],
         )
         .await
         .unwrap();
@@ -612,45 +602,6 @@ async fn an_attachments_credential_secret_cannot_be_deleted() {
         .delete(None, credential)
         .await
         .expect("once nothing attaches it, the credential can go");
-}
-
-#[tokio::test]
-async fn report_rows_are_listed_until_acknowledged() {
-    let Some(db) = db().await else { return };
-    let store = RegistryStore::new(db.clone());
-    let run = Uuid::new_v4();
-    store
-        .insert_report(&[
-            ReportEntry::info(
-                run,
-                "warehouse_catalog_created",
-                "warehouse a",
-                "a is now catalog a",
-            ),
-            ReportEntry::warning(run, "backfill_failed", "engine x catalog y", "not migrated")
-                .detail(json!({ "why": "test" })),
-        ])
-        .await
-        .unwrap();
-    let open = store.list_report(false).await.unwrap();
-    assert!(open.iter().filter(|r| r.run_id == run).count() == 2);
-    assert!(store.acknowledge_report().await.unwrap() >= 2);
-    assert!(store
-        .list_report(false)
-        .await
-        .unwrap()
-        .iter()
-        .all(|r| r.run_id != run));
-    assert_eq!(
-        store
-            .list_report(true)
-            .await
-            .unwrap()
-            .iter()
-            .filter(|r| r.run_id == run)
-            .count(),
-        2
-    );
 }
 
 fn sample_def() -> CatalogDef {
@@ -702,7 +653,6 @@ async fn create_replacing_orphan_replaces_only_an_unused_catalog() {
                 workspace_id: ws,
             },
             None,
-            |_| Vec::new(),
         )
         .await
         .unwrap();
@@ -791,4 +741,100 @@ async fn create_replacing_orphan_serialises_with_a_racing_assignment() {
             );
         }
     }
+}
+
+/// The two reads SP3c-2 Task 5 moved off `engines.warehouse_id` (Task 6 has
+/// since dropped the column entirely): the warehouse an engine LEADS with
+/// (its primary attachment's), and every warehouse it READS (one per attached
+/// egret warehouse catalog).
+///
+/// `other`'s only role now is a second, non-primary attachment to prove
+/// `warehouse_ids_by_engine` returns every attached warehouse (primary
+/// first), not just the primary's — the column this test used to also set to
+/// `other`, to prove reads did NOT fall back to it, is gone, so that half of
+/// the proof no longer applies; the attachment-vs-attachment ordering proof
+/// still does.
+#[tokio::test]
+async fn warehouse_reads_come_from_the_attachments_not_the_engine_column() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let ws = workspace(&db).await;
+    let led = warehouse(&db, &unique("wh_led"), ws).await;
+    let other = warehouse(&db, &unique("wh_other"), ws).await;
+    // `led`'s catalog is attached PRIMARY; `other`'s is attached SECONDARY.
+    let eng = engine(&db).await;
+    let bare = engine(&db).await;
+
+    let (led_catalog, _) = store
+        .ensure_warehouse_catalog(
+            &WarehouseIdentity {
+                id: led,
+                name: &unique("led"),
+                workspace_id: ws,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let (other_catalog, _) = store
+        .ensure_warehouse_catalog(
+            &WarehouseIdentity {
+                id: other,
+                name: &unique("other"),
+                workspace_id: ws,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    // No warehouse at all: must not appear in either answer.
+    let tpch = store
+        .create_catalog(
+            &unique("bench"),
+            &CatalogDef::parse("tpch", &json!({}), &json!(null)).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    for (catalog_id, is_primary) in [
+        (led_catalog.id, true),
+        (other_catalog.id, false),
+        (tpch.id, false),
+    ] {
+        store
+            .insert_attachment(&NewAttachment {
+                engine_id: eng,
+                catalog_id,
+                catalog_client_id: None,
+                credential_secret_id: None,
+                minted_client: false,
+                applied_now: true,
+                is_primary,
+                created_at: None,
+                apply_status: apply_status::APPLIED,
+            })
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        store.primary_warehouse_id(eng).await.unwrap(),
+        Some(led),
+        "the primary attachment's warehouse ({led}), not the secondary's ({other})"
+    );
+    let by_engine = store.warehouse_ids_by_engine(&[eng, bare]).await.unwrap();
+    assert_eq!(
+        by_engine.get(&eng),
+        Some(&vec![led, other]),
+        "every attached warehouse, primary first; the tpch catalog has none"
+    );
+
+    // An engine with no attachments at all: both reads must say "nothing".
+    assert_eq!(
+        store.primary_warehouse_id(bare).await.unwrap(),
+        None,
+        "no primary attachment"
+    );
+    assert_eq!(by_engine.get(&bare), None, "absent, not an empty vec");
 }

@@ -1,5 +1,5 @@
-//! Engine-mgmt store: CRUD for the `engine_mgmt.engines` / `engine_mgmt.engine_catalogs`
-//! tables (this seam owns them). Runtime sqlx queries; schema-qualified.
+//! Engine-mgmt store: CRUD for the `engine_mgmt.engines` table (this seam owns
+//! it). Runtime sqlx queries; schema-qualified.
 
 use chrono::{DateTime, Utc};
 use egret_metastore::Db;
@@ -19,16 +19,16 @@ pub mod engine_status {
     pub const DELETING: &str = "deleting";
 }
 
-/// A provisioned query engine (control-plane, platform-global) wired to a
-/// warehouse. `spec` holds the desired provisioning parameters; `status` tracks
-/// the last-known lifecycle phase.
+/// A provisioned query engine (control-plane, platform-global). Its warehouse
+/// is not a column here — it is derived from `registry.engine_catalog_attachments
+/// .is_primary` (see `resolve_primary_catalog`). `spec` holds the desired
+/// provisioning parameters; `status` tracks the last-known lifecycle phase.
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct Engine {
     pub id: Uuid,
     pub name: String,
     pub r#type: String,
     pub namespace: String,
-    pub warehouse_id: Uuid,
     pub spec: serde_json::Value,
     pub status: String,
     pub authz_service_id: Option<i64>,
@@ -43,21 +43,6 @@ pub struct Engine {
     /// Named secret holding the `egret-monitor` password, as last applied.
     /// `None`: the pods still carry the legacy id-derived value.
     pub monitor_secret_id: Option<Uuid>,
-    pub created_at: DateTime<Utc>,
-}
-
-/// A catalog attached to a provisioned engine. Each row renders to one Trino
-/// `<name>.properties` file; `kind` selects the connector translation and
-/// `config` holds the typed per-kind parameters.
-#[derive(Clone, Debug, sqlx::FromRow)]
-pub struct EngineCatalog {
-    pub id: Uuid,
-    pub engine_id: Uuid,
-    pub name: String,
-    pub kind: String,
-    pub config: serde_json::Value,
-    pub secret_ref: Option<Uuid>,
-    pub is_primary: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -202,18 +187,16 @@ impl EngineMgmtStore {
         name: &str,
         r#type: &str,
         namespace: &str,
-        warehouse_id: Uuid,
         spec: &serde_json::Value,
         tls_cert_secret_ref: Option<Uuid>,
     ) -> Result<Engine, EngineMgmtError> {
         sqlx::query_as::<_, Engine>(
-            "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, tls_cert_secret_ref) VALUES ($1,$2,$3,$4,$5,$6) \
-             RETURNING id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at",
+            "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, tls_cert_secret_ref) VALUES ($1,$2,$3,$4,$5) \
+             RETURNING id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at",
         )
         .bind(name)
         .bind(r#type)
         .bind(namespace)
-        .bind(warehouse_id)
         .bind(spec)
         .bind(tls_cert_secret_ref)
         .fetch_one(self.pool())
@@ -228,7 +211,7 @@ impl EngineMgmtStore {
 
     pub async fn list_engines(&self) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at \
              FROM engine_mgmt.engines ORDER BY created_at",
         )
         .fetch_all(self.pool())
@@ -237,7 +220,7 @@ impl EngineMgmtStore {
 
     pub async fn get_engine(&self, id: Uuid) -> Result<Option<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at \
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at \
              FROM engine_mgmt.engines WHERE id = $1",
         )
         .bind(id)
@@ -418,91 +401,6 @@ impl EngineMgmtStore {
         Ok(())
     }
 
-    // engine catalogs ----------------------------------------------------------
-
-    pub async fn create_engine_catalog(
-        &self,
-        engine_id: Uuid,
-        name: &str,
-        kind: &str,
-        config: &serde_json::Value,
-        secret_ref: Option<Uuid>,
-        is_primary: bool,
-    ) -> Result<EngineCatalog, EngineMgmtError> {
-        sqlx::query_as::<_, EngineCatalog>(
-            "INSERT INTO engine_mgmt.engine_catalogs (engine_id, name, kind, config, secret_ref, is_primary) \
-             VALUES ($1,$2,$3,$4,$5,$6) \
-             RETURNING id, engine_id, name, kind, config, secret_ref, is_primary, created_at",
-        )
-        .bind(engine_id)
-        .bind(name)
-        .bind(kind)
-        .bind(config)
-        .bind(secret_ref)
-        .bind(is_primary)
-        .fetch_one(self.pool())
-        .await
-        .map_err(|e| match &e {
-            sqlx::Error::Database(d)
-                if d.constraint() == Some("engine_catalogs_engine_id_name_key") =>
-            {
-                EngineMgmtError::AlreadyExists(name.to_string())
-            }
-            _ => EngineMgmtError::Db(e),
-        })
-    }
-
-    pub async fn list_engine_catalogs(
-        &self,
-        engine_id: Uuid,
-    ) -> Result<Vec<EngineCatalog>, EngineMgmtError> {
-        Ok(sqlx::query_as::<_, EngineCatalog>(
-            "SELECT id, engine_id, name, kind, config, secret_ref, is_primary, created_at \
-             FROM engine_mgmt.engine_catalogs WHERE engine_id = $1 ORDER BY is_primary DESC, created_at",
-        )
-        .bind(engine_id)
-        .fetch_all(self.pool())
-        .await?)
-    }
-
-    pub async fn get_engine_catalog(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<EngineCatalog>, EngineMgmtError> {
-        Ok(sqlx::query_as::<_, EngineCatalog>(
-            "SELECT id, engine_id, name, kind, config, secret_ref, is_primary, created_at \
-             FROM engine_mgmt.engine_catalogs WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(self.pool())
-        .await?)
-    }
-
-    pub async fn update_engine_catalog(
-        &self,
-        id: Uuid,
-        config: &serde_json::Value,
-        secret_ref: Option<Uuid>,
-    ) -> Result<Option<EngineCatalog>, EngineMgmtError> {
-        Ok(sqlx::query_as::<_, EngineCatalog>(
-            "UPDATE engine_mgmt.engine_catalogs SET config = $2, secret_ref = $3 WHERE id = $1 \
-             RETURNING id, engine_id, name, kind, config, secret_ref, is_primary, created_at",
-        )
-        .bind(id)
-        .bind(config)
-        .bind(secret_ref)
-        .fetch_optional(self.pool())
-        .await?)
-    }
-
-    pub async fn delete_engine_catalog(&self, id: Uuid) -> Result<(), EngineMgmtError> {
-        sqlx::query("DELETE FROM engine_mgmt.engine_catalogs WHERE id = $1")
-            .bind(id)
-            .execute(self.pool())
-            .await?;
-        Ok(())
-    }
-
     // engine ↔ workspace assignments -------------------------------------------
 
     /// Assign an engine to a workspace. Idempotent: re-assigning is a no-op.
@@ -591,7 +489,7 @@ impl EngineMgmtStore {
         workspace_id: Uuid,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT e.id, e.name, e.type, e.namespace, e.warehouse_id, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at \
+            "SELECT e.id, e.name, e.type, e.namespace, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.root_secret_id, e.tls_secret_id, e.coordinator_cert, e.tls_cert_secret_ref, e.internal_secret_id, e.monitor_secret_id, e.created_at \
              FROM engine_mgmt.engines e JOIN engine_mgmt.engine_workspaces ew ON ew.engine_id = e.id \
              WHERE ew.workspace_id = $1 ORDER BY e.name",
         )
@@ -612,7 +510,6 @@ mod tests {
             name: "e".into(),
             r#type: "trino".into(),
             namespace: "ns".into(),
-            warehouse_id: Uuid::nil(),
             spec: serde_json::json!({ "trinoConfig": {} }),
             status: "provisioning".into(),
             authz_service_id: None,
@@ -637,7 +534,6 @@ mod tests {
             name: "e".into(),
             r#type: "trino".into(),
             namespace: "ns".into(),
-            warehouse_id: Uuid::nil(),
             spec: serde_json::json!({ "trinoConfig": { "delegationMode": "jwt", "auth": { "jwt": {} } } }),
             status: "provisioning".into(),
             authz_service_id: None,
@@ -662,7 +558,6 @@ mod tests {
             name: "e".into(),
             r#type: "trino".into(),
             namespace: "ns".into(),
-            warehouse_id: Uuid::nil(),
             spec: serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
             status: "provisioning".into(),
             authz_service_id: None,
@@ -689,7 +584,6 @@ mod tests {
             name: "sr1".into(),
             r#type: "starrocks".into(),
             namespace: "engines".into(),
-            warehouse_id: Uuid::nil(),
             spec,
             status: "provisioning".into(),
             authz_service_id: None,
@@ -725,7 +619,6 @@ mod tests {
             name: "trino1".into(),
             r#type: "trino".into(),
             namespace: "engines".into(),
-            warehouse_id: Uuid::nil(),
             spec: serde_json::json!({}),
             status: "provisioning".into(),
             authz_service_id: None,

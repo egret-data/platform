@@ -87,8 +87,8 @@ export const REGISTRY_KINDS: string[] = KIND_OPTIONS.filter(
  * NOT `components/SecretPicker.tsx`: that one is workspace-scoped (`ws: string`)
  * and offers inline secret creation, both wrong for a platform catalog, and six
  * other screens depend on its current shape. These are plain controlled
- * `<Select>`s over the platform lists, the same pattern `Warehouses.tsx`,
- * `EngineCreate.tsx` and `WarehouseDetail.tsx` each already inline.
+ * `<Select>`s over the platform lists, the same pattern `EngineCreate.tsx`
+ * already inlines.
  */
 export function StorageSelect({
   id,

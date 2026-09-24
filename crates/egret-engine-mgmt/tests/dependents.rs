@@ -87,7 +87,7 @@ async fn seed_engine(db: &Db, store: &EngineMgmtStore) -> Uuid {
     .fetch_one(&db.pool)
     .await
     .expect("seed storage connection");
-    let wh = catalog
+    let _wh = catalog
         .create_warehouse(&format!("dep-wh-{}", Uuid::new_v4().simple()), owner, sc)
         .await
         .expect("create warehouse");
@@ -96,7 +96,6 @@ async fn seed_engine(db: &Db, store: &EngineMgmtStore) -> Uuid {
             &format!("dep-eng-{}", Uuid::new_v4().simple()),
             "trino",
             "egret-engines",
-            wh.id,
             &serde_json::json!({}),
             None,
         )
@@ -227,12 +226,11 @@ async fn set_null_children_have_no_check_that_needs_the_column() {
     }
 }
 
-/// Deleting the engine row cascades these four; nothing else may reference it.
+/// Deleting the engine row cascades these three; nothing else may reference it.
 #[tokio::test]
 async fn every_fk_child_of_engines_cascades() {
     let (db, _store) = harness_or_skip!();
     let expected: BTreeSet<FkRow> = [
-        ("engine_mgmt.engine_catalogs", "engine_id", "c", true),
         ("engine_mgmt.engine_workspaces", "engine_id", "c", true),
         ("query.databases", "engine_id", "c", false),
         (
