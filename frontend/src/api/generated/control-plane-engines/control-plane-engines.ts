@@ -1033,11 +1033,17 @@ export const getControlPlaneEnginesTestCatalogUrl = (id: string,
  * catalog. The registry's `POST /catalogs/{id}/test` (`test_registry_catalog`
  * in `catalogs.rs`) picks an applied Trino attachment across ALL of a
  * catalog's engines and cannot be pointed at one, and it gates on
- * `catalog_registry:read` — which an `engine:read`-only operator (this
- * route's persona) does not hold. `EngineDetail.tsx`'s per-row Test button
- * calls this route for exactly that reason (SP3c review F-3, restoring the
- * capability D-6 had dropped); deleting it here would have deleted that
- * button's endpoint out from under it (see `frontend/src/routes/control-plane/EngineDetail.tsx`).
+ * `catalog_registry:read`, and it tests an applied attachment across ALL of a
+ * catalog's engines rather than one named engine. This route is the only
+ * ENGINE-SCOPED test, which is why it survived SP3c-2 Task 4 while its five
+ * siblings did not.
+ *
+ * It is NOT kept for an `engine:read`-only persona, whatever an earlier draft
+ * of this comment said. Task 3 re-pointed `EngineDetail.tsx`'s Catalogs tab at
+ * the registry list, so that operator now sees a 403 pane and zero rows —
+ * there is no `cid` for them to press Test on. `EngineDetail.tsx`'s per-row
+ * Test button is a live caller (SP3c review F-3), but its user holds
+ * `catalog_registry:read` like everyone else who can see a row.
  * @summary `POST /engines/{id}/catalogs/{cid}/test` — "test connection": runs
 `SHOW SCHEMAS FROM "<catalog>"` against the engine's Trino coordinator via
 the native-monitor coordinator proxy ([`crate::monitor::coordinator_call`],

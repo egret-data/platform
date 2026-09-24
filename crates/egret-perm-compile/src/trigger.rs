@@ -474,6 +474,29 @@ async fn apply_diff_in_tx(
         ..Default::default()
     };
 
+    // SP4a Task 8 (D4): the moment this compiler intends to own at least one
+    // policy under this service, the profile stops being editor-writable.
+    // Stamped HERE — inside the actual compile, on the actual write path —
+    // rather than by any HTTP handler, so every caller of `apply_diff_in_tx`
+    // (today, only `recompile_service_in_tx`) gets the same protection with
+    // nothing else to remember, and so `origin = 'generated'` is asserted
+    // only by a compile that really happened, never by a hand-written
+    // migration default. Sticky: a profile that currently compiles to ZERO
+    // policies (every grant/rule that reached it was deleted) is left
+    // `generated` as found — the compiler still claims it; only
+    // `PolicyStore::create_service` (never called for an existing row) ever
+    // starts a profile out as `manual`.
+    if !desired.is_empty() {
+        sqlx::query(
+            "UPDATE policy.authz_services SET origin = 'generated' \
+             WHERE id = $1 AND origin <> 'generated'",
+        )
+        .bind(service_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    }
+
     for (name, dp) in desired {
         debug_assert!(
             name.starts_with(GRANT_NAME_PREFIX) || name.starts_with(RULE_NAME_PREFIX),

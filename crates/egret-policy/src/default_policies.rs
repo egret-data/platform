@@ -161,6 +161,11 @@ impl PolicyStore {
         service_name: &str,
         admin_principal: &str,
     ) -> Result<usize, PolicyStoreError> {
+        // Task 8: check BEFORE the "already has policies" no-op below — a
+        // generated profile always has at least one policy once the compiler
+        // has run, so without this ordering the guard would never fire here
+        // and this call would just silently no-op instead of refusing.
+        self.refuse_if_generated_pooled(service_id).await?;
         if !self.list_policies(service_id).await?.is_empty() {
             return Ok(0);
         }

@@ -6281,7 +6281,7 @@
             }
           },
           "409": {
-            "description": "A policy with this name already exists",
+            "description": "A policy with this name already exists, or the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
             "content": {
               "application/json": {
                 "schema": {
@@ -6682,7 +6682,7 @@
             }
           },
           "409": {
-            "description": "Profile is still enforced by an engine",
+            "description": "Profile is still enforced by an engine, or is compiled by the SP4a permission model (generated) and cannot be deleted through the editor",
             "content": {
               "application/json": {
                 "schema": {
@@ -6755,6 +6755,16 @@
           },
           "404": {
             "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
             "content": {
               "application/json": {
                 "schema": {
@@ -7002,6 +7012,16 @@
               }
             }
           },
+          "409": {
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -7058,6 +7078,16 @@
           },
           "404": {
             "description": "No such policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
             "content": {
               "application/json": {
                 "schema": {
@@ -7134,6 +7164,16 @@
           },
           "404": {
             "description": "No such policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
             "content": {
               "application/json": {
                 "schema": {

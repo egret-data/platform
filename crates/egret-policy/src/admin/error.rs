@@ -31,6 +31,7 @@ impl From<PolicyStoreError> for PolicyHttpError {
             PolicyStoreError::NotFound(_) => PolicyHttpError::NotFound,
             PolicyStoreError::AlreadyExists(s) => PolicyHttpError::AlreadyExists(s),
             PolicyStoreError::BadRequest(s) => PolicyHttpError::BadRequest(s),
+            PolicyStoreError::GeneratedProfile(s) => PolicyHttpError::Conflict(s),
             PolicyStoreError::Db(_) | PolicyStoreError::Json(_) => PolicyHttpError::Internal,
         }
     }

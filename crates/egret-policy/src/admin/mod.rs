@@ -682,7 +682,7 @@ async fn create_profile(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:delete permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
-        (status = 409, description = "Profile is still enforced by an engine", body = ErrorBody),
+        (status = 409, description = "Profile is still enforced by an engine, or is compiled by the SP4a permission model (generated) and cannot be deleted through the editor", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -791,6 +791,7 @@ async fn trino_config(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:seed permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 409, description = "The profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1002,7 +1003,7 @@ fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
-        (status = 409, description = "A policy with this name already exists", body = ErrorBody),
+        (status = 409, description = "A policy with this name already exists, or the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1064,6 +1065,7 @@ async fn create_policy(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
+        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1101,6 +1103,7 @@ async fn update_policy(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:delete permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
+        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1131,6 +1134,7 @@ pub struct EnabledBody {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
+        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

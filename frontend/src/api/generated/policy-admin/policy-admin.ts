@@ -995,6 +995,11 @@ export type policyAdminSeedDefaultsResponse404 = {
   status: 404
 }
 
+export type policyAdminSeedDefaultsResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type policyAdminSeedDefaultsResponse500 = {
   data: ErrorBody
   status: 500
@@ -1003,7 +1008,7 @@ export type policyAdminSeedDefaultsResponse500 = {
 export type policyAdminSeedDefaultsResponseSuccess = (policyAdminSeedDefaultsResponse200) & {
   headers: Headers;
 };
-export type policyAdminSeedDefaultsResponseError = (policyAdminSeedDefaultsResponse401 | policyAdminSeedDefaultsResponse403 | policyAdminSeedDefaultsResponse404 | policyAdminSeedDefaultsResponse500) & {
+export type policyAdminSeedDefaultsResponseError = (policyAdminSeedDefaultsResponse401 | policyAdminSeedDefaultsResponse403 | policyAdminSeedDefaultsResponse404 | policyAdminSeedDefaultsResponse409 | policyAdminSeedDefaultsResponse500) & {
   headers: Headers;
 };
 
@@ -1380,6 +1385,11 @@ export type policyAdminUpdatePolicyResponse404 = {
   status: 404
 }
 
+export type policyAdminUpdatePolicyResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type policyAdminUpdatePolicyResponse500 = {
   data: ErrorBody
   status: 500
@@ -1388,7 +1398,7 @@ export type policyAdminUpdatePolicyResponse500 = {
 export type policyAdminUpdatePolicyResponseSuccess = (policyAdminUpdatePolicyResponse200) & {
   headers: Headers;
 };
-export type policyAdminUpdatePolicyResponseError = (policyAdminUpdatePolicyResponse400 | policyAdminUpdatePolicyResponse401 | policyAdminUpdatePolicyResponse403 | policyAdminUpdatePolicyResponse404 | policyAdminUpdatePolicyResponse500) & {
+export type policyAdminUpdatePolicyResponseError = (policyAdminUpdatePolicyResponse400 | policyAdminUpdatePolicyResponse401 | policyAdminUpdatePolicyResponse403 | policyAdminUpdatePolicyResponse404 | policyAdminUpdatePolicyResponse409 | policyAdminUpdatePolicyResponse500) & {
   headers: Headers;
 };
 
@@ -1485,6 +1495,11 @@ export type policyAdminDeletePolicyHandlerResponse404 = {
   status: 404
 }
 
+export type policyAdminDeletePolicyHandlerResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type policyAdminDeletePolicyHandlerResponse500 = {
   data: ErrorBody
   status: 500
@@ -1493,7 +1508,7 @@ export type policyAdminDeletePolicyHandlerResponse500 = {
 export type policyAdminDeletePolicyHandlerResponseSuccess = (policyAdminDeletePolicyHandlerResponse204) & {
   headers: Headers;
 };
-export type policyAdminDeletePolicyHandlerResponseError = (policyAdminDeletePolicyHandlerResponse401 | policyAdminDeletePolicyHandlerResponse403 | policyAdminDeletePolicyHandlerResponse404 | policyAdminDeletePolicyHandlerResponse500) & {
+export type policyAdminDeletePolicyHandlerResponseError = (policyAdminDeletePolicyHandlerResponse401 | policyAdminDeletePolicyHandlerResponse403 | policyAdminDeletePolicyHandlerResponse404 | policyAdminDeletePolicyHandlerResponse409 | policyAdminDeletePolicyHandlerResponse500) & {
   headers: Headers;
 };
 
@@ -1589,6 +1604,11 @@ export type policyAdminSetPolicyEnabledResponse404 = {
   status: 404
 }
 
+export type policyAdminSetPolicyEnabledResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type policyAdminSetPolicyEnabledResponse500 = {
   data: ErrorBody
   status: 500
@@ -1597,7 +1617,7 @@ export type policyAdminSetPolicyEnabledResponse500 = {
 export type policyAdminSetPolicyEnabledResponseSuccess = (policyAdminSetPolicyEnabledResponse204) & {
   headers: Headers;
 };
-export type policyAdminSetPolicyEnabledResponseError = (policyAdminSetPolicyEnabledResponse401 | policyAdminSetPolicyEnabledResponse403 | policyAdminSetPolicyEnabledResponse404 | policyAdminSetPolicyEnabledResponse500) & {
+export type policyAdminSetPolicyEnabledResponseError = (policyAdminSetPolicyEnabledResponse401 | policyAdminSetPolicyEnabledResponse403 | policyAdminSetPolicyEnabledResponse404 | policyAdminSetPolicyEnabledResponse409 | policyAdminSetPolicyEnabledResponse500) & {
   headers: Headers;
 };
 

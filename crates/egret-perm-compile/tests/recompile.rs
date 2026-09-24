@@ -770,3 +770,170 @@ async fn an_explicit_grant_on_starrocks_gets_the_starrocks_service_type_stamp() 
     );
     assert_eq!(body["policyType"], 0, "an access policy, not a masking one");
 }
+
+/// A StarRocks profile with one engine bound to it and one registry catalog
+/// attached — no grant or rule yet, and NO recompile during setup (unlike
+/// `seed_starrocks_engine_with_tag_rule`, which bakes one in). That gap is
+/// the point: it lets a test observe `policy.authz_services.origin` both
+/// BEFORE and AFTER the service's first real compile (SP4a Task 8, D4).
+struct EmptyFixture {
+    perm: PermStore,
+    policy: PolicyStore,
+    service_id: i64,
+    catalog_id: Uuid,
+}
+
+async fn seed_starrocks_engine_no_grants_yet(db: &Db) -> EmptyFixture {
+    let pool = &db.pool;
+    let perm = PermStore::new(pool.clone());
+    let policy = PolicyStore::new(db.clone());
+
+    egret_policy::seed_starrocks(&policy)
+        .await
+        .expect("seed starrocks service-def");
+
+    let service = policy
+        .create_service(&unique("sr_origin"), "starrocks", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    let ws_id: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
+            .bind(unique("origin-ws"))
+            .bind("Origin WS")
+            .fetch_one(pool)
+            .await
+            .expect("workspace");
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','egret-origin-test','AKIATEST') RETURNING id",
+    )
+    .bind(unique("origin-sc"))
+    .fetch_one(pool)
+    .await
+    .expect("storage connection");
+    let warehouse_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(unique("origin_wh"))
+    .bind(ws_id)
+    .bind(sc_id)
+    .fetch_one(pool)
+    .await
+    .expect("warehouse");
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+    )
+    .bind(unique("origin-eng"))
+    .bind(service.id)
+    .fetch_one(pool)
+    .await
+    .expect("engine");
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(unique("origin_cat"))
+    .bind(warehouse_id)
+    .fetch_one(pool)
+    .await
+    .expect("registry catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine_id)
+    .bind(catalog_id)
+    .execute(pool)
+    .await
+    .expect("attach catalog");
+
+    EmptyFixture {
+        perm,
+        policy,
+        service_id: service.id,
+        catalog_id,
+    }
+}
+
+async fn origin_of(pool: &sqlx::PgPool, service_id: i64) -> String {
+    sqlx::query_scalar("SELECT origin FROM policy.authz_services WHERE id = $1")
+        .bind(service_id)
+        .fetch_one(pool)
+        .await
+        .expect("origin")
+}
+
+/// SP4a Task 8 (D4): `origin` starts `'manual'` (migration 0155's default,
+/// via `PolicyStore::create_service`) and is stamped `'generated'` by the
+/// compiler's OWN write path (`egret-perm-compile::trigger::apply_diff_in_tx`)
+/// the moment it first produces a policy for the service — NOT by a
+/// recompile that has nothing to compile, and NOT by a hand-written `UPDATE`.
+/// This is the proof the editor guard in `egret-policy`
+/// (`crates/egret-policy/tests/generated_profile_guard.rs`) depends on:
+/// without a real write path that sets `'generated'`, that guard would be
+/// dead code, since nothing would ever produce the state it checks for.
+#[tokio::test]
+async fn a_real_recompile_stamps_the_profile_generated_only_once_it_compiles_something() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks_engine_no_grants_yet(&db).await;
+    let pool = &db.pool;
+
+    assert_eq!(
+        origin_of(pool, f.service_id).await,
+        "manual",
+        "a freshly created profile must start manual (migration 0155's default)"
+    );
+
+    // A recompile with nothing to compile (no grant/rule reaches this
+    // service yet) must NOT flip the profile to generated — a profile only
+    // becomes machine-owned once the compiler actually claims a policy in
+    // it, per this module's own doc comment.
+    let empty_summary = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile with nothing to compile");
+    assert_eq!(empty_summary.created, 0);
+    assert_eq!(
+        origin_of(pool, f.service_id).await,
+        "manual",
+        "a no-op recompile (no grant/rule reaches this service) must leave origin untouched"
+    );
+
+    let grant = Grant {
+        id: Uuid::nil(),
+        effect: Effect::Allow,
+        actions: vec![Action::Read],
+        scope: Scope {
+            catalog_id: f.catalog_id,
+            schema: None,
+            table: None,
+            column: None,
+        },
+        principals: PrincipalSet {
+            include: vec![Principal {
+                kind: PrincipalKind::User,
+                r#ref: "alice".into(),
+            }],
+            exclude: vec![],
+        },
+        origin: GrantOrigin::Explicit,
+    };
+    f.perm.create_grant(&grant).await.expect("create grant");
+
+    let summary = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile with a grant now reaching this service");
+    assert_eq!(
+        summary.created, 1,
+        "the new grant must compile to one policy"
+    );
+
+    assert_eq!(
+        origin_of(pool, f.service_id).await,
+        "generated",
+        "the FIRST real compile that produces a policy for this service must stamp \
+         origin = 'generated' — through recompile_service, not a hand-written UPDATE"
+    );
+}

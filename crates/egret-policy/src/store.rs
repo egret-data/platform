@@ -25,6 +25,13 @@ pub struct ServiceRow {
     /// Monotonic tag-assignment version; the Ranger tag-download plugin polls this
     /// (parallel to `policy_version`) to know when to re-pull catalog tags.
     pub tag_version: i64,
+    /// `"manual"` (hand-authored through the policy editor, the default — see
+    /// migration 0155) or `"generated"` (owned by SP4a's permission-model
+    /// compiler, `egret-perm-compile::trigger::apply_diff_in_tx`, which stamps
+    /// this the moment it first compiles a policy for the service). Every
+    /// hand-authored write path in this file refuses to write into a
+    /// `"generated"` profile — see [`refuse_if_generated`].
+    pub origin: String,
 }
 
 /// One catalog resource → tag pairing for a service's warehouse(s), the row
@@ -45,9 +52,60 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
 }
 
+/// SP4a Task 8 (D4): refuse a hand-authored write into a profile the
+/// permission-model compiler has claimed (`origin = 'generated'`, migration
+/// 0155). Connection-generic so every write path can call it on its OWN
+/// already-open transaction — `create_policy`/`update_policy`/`delete_policy`/
+/// `set_policy_enabled`/`delete_service` all do, and
+/// `default_policies::seed_default_trino_policies` calls the pool-based
+/// wrapper below. `egret-perm-compile`'s recompile driver
+/// (`trigger::apply_diff_in_tx`) never calls any of these — it writes
+/// `policy.authz_policies` with its own raw `sqlx::query` calls directly
+/// against the transaction it owns — so this refusal can never block the
+/// compiler itself, only a human (or anything else) going through this
+/// store's public write API.
+///
+/// `None`/absent service (a nonexistent `service_id`) is deliberately NOT an
+/// error here — the caller's own existence check (a `NotFound` from a prior
+/// lookup, or the FK violation an insert against a missing service would
+/// raise) is what surfaces that, unchanged from before this guard existed.
+async fn refuse_if_generated(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<(), PolicyStoreError> {
+    let origin: Option<String> = sqlx::query_scalar::<_, String>(
+        r#"SELECT origin FROM policy.authz_services WHERE id = $1"#,
+    )
+    .bind(service_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if origin.as_deref() == Some("generated") {
+        return Err(PolicyStoreError::GeneratedProfile(format!(
+            "profile {service_id} is compiled by the SP4a permission model — edit its grants \
+             and rules instead of writing a policy directly; the next recompile would silently \
+             overwrite this change"
+        )));
+    }
+    Ok(())
+}
+
 impl PolicyStore {
     pub fn new(db: Db) -> Self {
         Self { db }
+    }
+
+    /// Pool-based [`refuse_if_generated`], for a write path that has no
+    /// transaction open yet at the point the check belongs (`delete_service`,
+    /// and `default_policies::seed_default_trino_policies`, which must refuse
+    /// BEFORE its own "already has policies" no-op check — a generated
+    /// profile always has policies, so that check would otherwise silently
+    /// swallow the refusal as a no-op `Ok(0)`).
+    pub(crate) async fn refuse_if_generated_pooled(
+        &self,
+        service_id: i64,
+    ) -> Result<(), PolicyStoreError> {
+        let mut conn = self.db.pool.acquire().await?;
+        refuse_if_generated(&mut conn, service_id).await
     }
 
     /// Idempotent upsert of a service-def by name (used to seed Trino).
@@ -117,7 +175,7 @@ impl PolicyStore {
     ) -> Result<ServiceRow, PolicyStoreError> {
         sqlx::query_as::<_, ServiceRow>(
             r#"INSERT INTO policy.authz_services (name, type, config_jsonb)
-               VALUES ($1,$2,$3) RETURNING id, name, type, config_jsonb, policy_version, tag_version"#,
+               VALUES ($1,$2,$3) RETURNING id, name, type, config_jsonb, policy_version, tag_version, origin"#,
         )
         .bind(name)
         .bind(typ)
@@ -144,7 +202,7 @@ impl PolicyStore {
 
     pub async fn get_service(&self, name: &str) -> Result<ServiceRow, PolicyStoreError> {
         sqlx::query_as::<_, ServiceRow>(
-            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services WHERE name = $1"#,
+            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin FROM policy.authz_services WHERE name = $1"#,
         )
         .bind(name)
         .fetch_optional(&self.db.pool)
@@ -159,7 +217,7 @@ impl PolicyStore {
         name: &str,
     ) -> Result<Option<ServiceRow>, PolicyStoreError> {
         Ok(sqlx::query_as::<_, ServiceRow>(
-            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services WHERE name = $1"#,
+            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin FROM policy.authz_services WHERE name = $1"#,
         )
         .bind(name)
         .fetch_optional(&self.db.pool)
@@ -184,13 +242,19 @@ impl PolicyStore {
 
     pub async fn list_services(&self) -> Result<Vec<ServiceRow>, PolicyStoreError> {
         Ok(sqlx::query_as::<_, ServiceRow>(
-            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services ORDER BY name"#,
+            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin FROM policy.authz_services ORDER BY name"#,
         )
         .fetch_all(&self.db.pool)
         .await?)
     }
 
+    /// DELETE a profile outright — refused for a `generated` profile (Task 8),
+    /// same as every hand-authored policy write: a compiled profile's row (and
+    /// the `perm.compiled` provenance `ON DELETE CASCADE`s from it, migration
+    /// 0154) stays owned by the compiler until the perm model stops targeting
+    /// it, not until an admin deletes it out from under a still-live recompile.
     pub async fn delete_service(&self, id: i64) -> Result<(), PolicyStoreError> {
+        self.refuse_if_generated_pooled(id).await?;
         let n = sqlx::query(r#"DELETE FROM policy.authz_services WHERE id = $1"#)
             .bind(id)
             .execute(&self.db.pool)
@@ -325,7 +389,7 @@ pub async fn get_service_by_id_via(
     id: i64,
 ) -> Result<ServiceRow, PolicyStoreError> {
     sqlx::query_as::<_, ServiceRow>(
-        r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services WHERE id = $1"#,
+        r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin FROM policy.authz_services WHERE id = $1"#,
     )
     .bind(id)
     .fetch_optional(&mut *conn)
@@ -423,6 +487,10 @@ impl PolicyStore {
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
+        if let Err(e) = refuse_if_generated(&mut tx, service_id).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
         let id: i64 = sqlx::query_scalar::<_, i64>(
             r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb)
                VALUES ($1,$2,$3) RETURNING id"#,
@@ -500,6 +568,10 @@ impl PolicyStore {
             tx.rollback().await?;
             return Err(PolicyStoreError::NotFound(format!("policy {id}")));
         };
+        if let Err(e) = refuse_if_generated(&mut tx, service_id).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
         sqlx::query(
             r#"UPDATE policy.authz_policies SET name=$2, policy_jsonb=$3, enabled=$4, version=version+1, updated_at=now() WHERE id=$1"#,
         )
@@ -532,6 +604,10 @@ impl PolicyStore {
             tx.rollback().await?;
             return Err(PolicyStoreError::NotFound(format!("policy id {id}")));
         };
+        if let Err(e) = refuse_if_generated(&mut tx, service_id).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
         sqlx::query(
             r#"UPDATE policy.authz_policies SET enabled=$2, version=version+1, updated_at=now() WHERE id=$1"#,
         )
@@ -551,8 +627,11 @@ impl PolicyStore {
 
     pub async fn delete_policy(&self, id: i64) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
+        // Look the service up BEFORE deleting — Task 8's guard must refuse the
+        // delete outright, not delete-then-refuse (which would leave the
+        // policy gone despite the 409).
         let svc: Option<i64> = sqlx::query_scalar::<_, i64>(
-            r#"DELETE FROM policy.authz_policies WHERE id = $1 RETURNING service_id"#,
+            r#"SELECT service_id FROM policy.authz_policies WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&mut *tx)
@@ -561,6 +640,14 @@ impl PolicyStore {
             tx.rollback().await?;
             return Err(PolicyStoreError::NotFound(format!("policy {id}")));
         };
+        if let Err(e) = refuse_if_generated(&mut tx, service_id).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
+        sqlx::query(r#"DELETE FROM policy.authz_policies WHERE id = $1"#)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
         )
