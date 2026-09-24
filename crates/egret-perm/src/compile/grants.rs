@@ -12,82 +12,97 @@
 //!   (`include` minus `exclude`) is the only shape a human or the OpenAPI
 //!   schema ever sees; this function is where that subtract is realized as
 //!   Ranger's exception block, and only here.
-//! - **Principals are emitted in one canonical form: a bare username.**
-//!   Measured live on kind (D7 — `docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`,
-//!   2026-09-24): `current_user` inside Trino reports `admin`, not
-//!   `admin@egret.local`, for a query run as `admin@egret.local` through
-//!   egret's query API. A policy naming an email matches nobody, and
-//!   nothing in Ranger or egret would show it. `CANONICAL_ADMIN_PRINCIPAL`
-//!   below is that measured literal.
+//! - **A `User` principal's `r#ref` is emitted verbatim, never rewritten.**
+//!   Round 1 of this file split on `@` to turn an email into a guessed
+//!   username. That is not egret's username rule. The real one —
+//!   `ensure_username` (`crates/egret-auth/src/users.rs`) plus
+//!   `migrations/0040_user_username.sql` — lowercases, replaces
+//!   `[^a-z0-9_-]+` with `-`, and resolves collisions with a `-2`, `-3`, …
+//!   suffix. A compiler with no store handle cannot reproduce that: it
+//!   cannot see the collision suffix, and a naive split-on-`@` can compile
+//!   two distinct humans (`bob` and `bob-2`, both slugging from the same
+//!   local part) onto the SAME engine principal — an `exclude` of the
+//!   second lands on the first, and the one meant to be excluded stays
+//!   included. `model::Principal`'s doc comment already says refs are "a
+//!   username, never an email … written through unchanged" — canonicalising
+//!   here contradicted the store's own contract. So: this compiler performs
+//!   NO canonicalisation. It emits `r#ref` byte-for-byte and refuses
+//!   (`CompileError::UnusableUserRef`) a `User` ref that's empty or
+//!   contains `@`, since either one is a sign the value reaching this
+//!   function was never resolved to `users.username` in the first place. A
+//!   later, I/O-capable task (username resolution belongs at the authoring
+//!   boundary, where `users.username` is readable) owns turning an email
+//!   into the real, collision-resolved username.
 //!
-//! **Groups still compile through**, unchanged, even though the same D7
-//! measurement found groups never reach the engine (no group provider on
-//! Trino, no usersync in egret) — egret is not the only possible Ranger
-//! consumer, and the situation may change. No claim of enforcement is
-//! implied or tested here; see D7 §2-3 and `model::PrincipalKind`'s doc
-//! comment.
+//! **Groups still compile through**, unchanged, even though D7
+//! (`docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`) found
+//! groups never reach the engine (no group provider on Trino, no usersync in
+//! egret) — egret is not the only possible Ranger consumer, and the
+//! situation may change. No claim of enforcement is implied or tested here;
+//! see D7 §2-3 and `model::PrincipalKind`'s doc comment.
 //!
-//! `WorkspaceMembers` principals are not expanded here: doing so needs
-//! workspace-membership I/O this compiler does not have (`compile_grant`
-//! takes no store handle, by design — the caller resolves the catalog id to
-//! a name and stays the only I/O boundary). Per `model::PrincipalKind`'s doc
-//! comment, "nothing compiles it yet"; Task 6 expands it into the member
-//! list enumerated at compile time (D7 §3). A `WorkspaceMembers` principal
-//! reaching this function today contributes nothing to the compiled item
-//! rather than being mis-emitted as a Ranger group.
+//! **`WorkspaceMembers` principals are refused, not dropped.** Round 1
+//! silently contributed nothing for a `WorkspaceMembers` principal, on the
+//! theory that Task 6 (which expands it into the member list enumerated at
+//! compile time, needing workspace-membership I/O this compiler does not
+//! have) hadn't landed yet. That reasoning holds for `include` — an empty
+//! item matches nobody, so the grant fails closed — but not for `exclude`:
+//! dropping the only principal in an `exclude` set still produces a
+//! non-empty exception list containing one EMPTY item, which Ranger matches
+//! against nobody, so the subtract evaporates and the compiled policy grants
+//! MORE than the model states. There is no position-dependent way to get
+//! this right without the I/O this compiler doesn't have, so both positions
+//! refuse via `CompileError::UnexpandedPrincipalKind`.
 
 use std::collections::BTreeMap;
 
-use egret_policy::admin::ranger_json::{AccessItemInput, AccessPolicyInput, ResourceLevel};
+// `egret-policy` keeps `admin::ranger_json` module-private (D2: egret must
+// never emit a tag *access* policy, and that module's tag builders sit next
+// to the ones used here) and re-exports just these three struct types from
+// `admin` itself.
+use egret_policy::admin::{AccessItemInput, AccessPolicyInput, ResourceLevel};
 
 use crate::actions::{engine_accesses, CompileError, EngineType};
 use crate::model::{Effect, Grant, Principal, PrincipalKind, Scope};
 
-/// The bare-username form the engine reports for the seeded admin
-/// principal, per D7 (`docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`,
-/// measured 2026-09-24 on `kind-egret` / `demo-trino`): `SELECT current_user`
-/// run as `admin@egret.local` returns `admin`. The compiler canonicalises
-/// every `User` principal to this form (stripping an email's domain, the
-/// general case this literal instantiates) and emits nothing else.
-pub const CANONICAL_ADMIN_PRINCIPAL: &str = "admin";
-
-/// Canonicalise a `User` principal's reference to the bare-username form the
-/// engine reports (D7). `Group`/`Role`/`WorkspaceMembers` refs pass through
-/// unchanged — D7 measured what a *user* principal looks like to the
-/// engine, not a group or role, and groups don't reach the engine at all
-/// today (D7 §2).
-fn canonical_ref(p: &Principal) -> String {
-    match p.kind {
-        PrincipalKind::User => p.r#ref.split('@').next().unwrap_or(&p.r#ref).to_string(),
-        PrincipalKind::Group | PrincipalKind::Role | PrincipalKind::WorkspaceMembers => {
-            p.r#ref.clone()
-        }
-    }
-}
-
 /// Sort principals in `refs` into a Ranger item's `users`/`groups`/`roles`
-/// buckets, canonicalising user refs, and set `effect`/`accesses` on it.
-fn principal_item(refs: &[Principal], effect: Effect, accesses: &[String]) -> AccessItemInput {
+/// buckets and set `effect`/`accesses` on it. `User` refs are emitted
+/// verbatim (see module doc comment) after being checked for the two shapes
+/// that prove they were never resolved to a bare `users.username`: empty, or
+/// containing `@`. Any `WorkspaceMembers` principal refuses the whole
+/// compile rather than being silently dropped (module doc comment).
+fn principal_item(
+    refs: &[Principal],
+    effect: Effect,
+    accesses: &[String],
+) -> Result<AccessItemInput, CompileError> {
     let mut users = Vec::new();
     let mut groups = Vec::new();
     let mut roles = Vec::new();
     for p in refs {
         match p.kind {
-            PrincipalKind::User => users.push(canonical_ref(p)),
+            PrincipalKind::User => {
+                if p.r#ref.is_empty() || p.r#ref.contains('@') {
+                    return Err(CompileError::UnusableUserRef {
+                        r#ref: p.r#ref.clone(),
+                    });
+                }
+                users.push(p.r#ref.clone());
+            }
             PrincipalKind::Group => groups.push(p.r#ref.clone()),
             PrincipalKind::Role => roles.push(p.r#ref.clone()),
-            // See module doc comment: expansion needs I/O this compiler
-            // doesn't have, and is Task 6's job.
-            PrincipalKind::WorkspaceMembers => {}
+            PrincipalKind::WorkspaceMembers => {
+                return Err(CompileError::UnexpandedPrincipalKind { kind: p.kind });
+            }
         }
     }
-    AccessItemInput {
+    Ok(AccessItemInput {
         users,
         groups,
         roles,
         accesses: accesses.to_vec(),
         effect: effect.as_str().to_string(),
-    }
+    })
 }
 
 /// The Ranger resource-level names the target engine's service-def declares
@@ -96,6 +111,12 @@ fn principal_item(refs: &[Principal], effect: Effect, accesses: &[String]) -> Ac
 /// (`crates/egret-policy/src/service-defs/{trino,starrocks}.json`) — same
 /// position in the hierarchy, different declared name, so the compiler must
 /// pick the name per engine rather than hard-coding Trino's.
+/// `tests/compile_grants.rs`'s
+/// `the_scope_becomes_the_ranger_resource_levels_the_service_def_declares`
+/// re-reads both files' `resources` arrays and checks these four names
+/// against each one's declared name + parent chain, so this can't drift
+/// from the service-defs silently the way the write-up in round 1 could
+/// have (its Trino-only test never opened a service-def).
 fn resource_level_names(e: EngineType) -> [&'static str; 4] {
     match e {
         EngineType::Trino => ["catalog", "schema", "table", "column"],
@@ -113,14 +134,32 @@ fn level(value: String) -> ResourceLevel {
 
 /// Render a `Scope` into the engine's `resources` map. `catalog_name` is the
 /// name the caller already resolved from `scope.catalog_id` (the compiler
-/// stays free of registry I/O). A level the scope leaves unnamed is left
-/// OUT of the map entirely, never set to a wildcard `"*"` — Ranger treats a
-/// missing resource level and a `"*"`-valued one differently (a missing
-/// level does not constrain the hierarchy the same way a recorded wildcard
-/// does), and the model only ever narrows explicitly (`Scope`'s doc
-/// comment: "a column implies a table implies a schema"), so an absent
-/// level is the only faithful compilation of "the grant doesn't name this
-/// level".
+/// stays free of registry I/O, and does not itself check that `catalog_name`
+/// actually names `scope.catalog_id` — that binding is the caller's
+/// responsibility, same as the rest of the registry lookup it already owns).
+/// A level the scope leaves unnamed is left OUT of the map entirely, never
+/// set to a wildcard `"*"`.
+///
+/// This is deliberate, not merely asserted: Apache Ranger's
+/// `RangerDefaultPolicyResourceMatcher.getMatchType()` (`agents-common/…/
+/// policyresourcematcher/RangerDefaultPolicyResourceMatcher.java`, upstream
+/// `apache/ranger` master) walks the resource hierarchy level by level, and
+/// once it runs out of policy-side resource entries it treats any further,
+/// deeper levels present on the *request* as `MatchType.ANCESTOR` —
+/// unconditionally, with no `isRecursive` or `mandatory` gate on that
+/// branch. A policy resources map that stops at `table` therefore matches a
+/// request that goes on to name a `column`, the same way a Hive/Trino
+/// Ranger policy scoped to a table without ever opening the column picker
+/// covers every column beneath it. Emitting `"*"` at an unnamed level
+/// instead would still match today, but asserts a participation in the
+/// hierarchy the model never claims, and — unlike the ANCESTOR match above —
+/// its correctness for every case here has not been checked against the
+/// live plugin. **Not yet independently verified**: whether Ranger Admin's
+/// own policy-create REST validation enforces `mandatory: true` resource
+/// levels at write time (a distinct question from the runtime matcher cited
+/// above, and one egret's `default_policies.rs` sidesteps by always filling
+/// every level) — flagged for a live check against `demo-trino`'s now-active
+/// plugin (kind cluster, ranger enabled) rather than guessed here.
 fn scope_to_resources(
     scope: &Scope,
     catalog_name: &str,
@@ -143,11 +182,18 @@ fn scope_to_resources(
 
 /// Compile one `Grant` into a Ranger `AccessPolicyInput` for engine `e`.
 ///
-/// `catalog_name` is the caller-resolved name for `g.scope.catalog_id`;
-/// `service` is the target Ranger service name (e.g. `"trino-1"`) stamped
-/// onto the policy body. Returns `CompileError::UnsupportedAction` if any of
-/// `g.actions` has no access type on `e` (unreachable for SP4a's two
-/// actions — see `actions::CompileError`).
+/// `catalog_name` is the caller-resolved name for `g.scope.catalog_id` —
+/// nothing here checks that the two actually correspond; that binding is the
+/// caller's, made when it resolved the id in the first place. `service` is
+/// the target Ranger service name (e.g. `"trino-1"`) stamped onto the policy
+/// body.
+///
+/// Returns `CompileError::UnsupportedAction` if any of `g.actions` has no
+/// access type on `e` (unreachable for SP4a's two actions — see
+/// `actions::CompileError`); `CompileError::UnusableUserRef` if a `User`
+/// principal's ref is empty or contains `@`; `CompileError::
+/// UnexpandedPrincipalKind` if any principal (include or exclude) is a
+/// `WorkspaceMembers` reference this compiler cannot yet expand.
 pub fn compile_grant(
     g: &Grant,
     catalog_name: &str,
@@ -163,12 +209,12 @@ pub fn compile_grant(
         }
     }
 
-    let item = principal_item(&g.principals.include, g.effect, &accesses);
+    let item = principal_item(&g.principals.include, g.effect, &accesses)?;
 
     let mut allow_exceptions = Vec::new();
     let mut deny_exceptions = Vec::new();
     if !g.principals.exclude.is_empty() {
-        let exception = principal_item(&g.principals.exclude, g.effect, &accesses);
+        let exception = principal_item(&g.principals.exclude, g.effect, &accesses)?;
         match g.effect {
             Effect::Allow => allow_exceptions.push(exception),
             Effect::Deny => deny_exceptions.push(exception),

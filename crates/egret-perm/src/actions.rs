@@ -30,7 +30,7 @@
 //! type this map emits against them, so the map can't drift from the
 //! service-defs silently.
 
-use crate::model::Action;
+use crate::model::{Action, PrincipalKind};
 
 /// The two engines SP4a's compiler targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,15 +39,17 @@ pub enum EngineType {
     StarRocks,
 }
 
-/// A grant the compiler cannot express against the target engine.
-///
-/// `UnsupportedAction` is unreachable today — SP4a ships exactly `read` and
-/// `write`, and both map on both engines — but it stays in the error type
-/// because a later phase (SP4b/SP4c) may add an action, and a compiler that
-/// silently dropped one would grant less than the model says with nothing
-/// anywhere to show it.
+/// A grant the compiler cannot express against the target engine, or cannot
+/// express *correctly* — every variant here exists because a silent
+/// alternative would compile a policy that grants something other than what
+/// the model states, with nothing anywhere to show it.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompileError {
+    /// `UnsupportedAction` is unreachable today — SP4a ships exactly `read`
+    /// and `write`, and both map on both engines — but it stays in the
+    /// error type because a later phase (SP4b/SP4c) may add an action, and
+    /// a compiler that silently dropped one would grant less than the
+    /// model says.
     #[error("action {action:?} has no access type declared on {engine:?}'s service-def")]
     UnsupportedAction { action: Action, engine: EngineType },
     #[error(
@@ -58,6 +60,36 @@ pub enum CompileError {
         count: usize,
         ceiling: usize,
     },
+    /// A `User` principal's `r#ref` is not the bare username the store is
+    /// supposed to hold (`model::Principal`'s doc comment: "a username,
+    /// never an email … written through unchanged"). The compiler does no
+    /// I/O and so cannot resolve `users.username` itself (round 1's fix
+    /// guessed a resolution by splitting on `@`, which can collide two
+    /// distinct humans onto one engine principal — see
+    /// `compile::grants`'s module doc). Refusing is the only safe move
+    /// left to a function that cannot look the real username up.
+    // The format string can't spell the field name directly — `r#ref` is a
+    // raw identifier, and Rust's format-string captures don't support those
+    // — so the placeholder is bound explicitly to the field below.
+    #[error(
+        "user principal ref {value:?} is not usable as a bare username (empty, or contains \
+         '@') — canonicalise at the authoring boundary, where `users.username` is readable, \
+         not in the compiler",
+        value = r#ref
+    )]
+    UnusableUserRef { r#ref: String },
+    /// A principal kind this compiler cannot yet turn into Ranger users/
+    /// groups/roles (`WorkspaceMembers` today — Task 6 expands it into the
+    /// member list enumerated at compile time). Dropping it silently on an
+    /// `include` fails closed (an empty item matches nobody) but on an
+    /// `exclude` it fails OPEN: the subtract evaporates and the compiled
+    /// policy grants more than the model states. Refusing both is the only
+    /// answer that can't silently do the wrong thing in either position.
+    #[error(
+        "{kind:?} principals are not expanded by this compiler (Task 6) — compiling one would \
+         either grant nobody (as an include) or silently drop an exclude, both wrong"
+    )]
+    UnexpandedPrincipalKind { kind: PrincipalKind },
 }
 
 /// The Ranger access types `a` compiles to on `e`. Every engine declares

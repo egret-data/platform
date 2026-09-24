@@ -7,11 +7,7 @@
 //! 2 = row-filter (`rowFilterPolicyItems`).
 
 mod error;
-// SP4a Task 4 (egret-perm's compiler) builds `AccessPolicyInput` values
-// directly and needs the struct fields — not just the editor-form
-// dispatchers re-exported below — so this submodule is public rather than
-// re-exporting the extra names one by one.
-pub mod ranger_json;
+mod ranger_json;
 mod reader;
 
 use axum::extract::{FromRef, Path, Query, State};
@@ -31,6 +27,13 @@ pub use ranger_json::{
     editor_to_ranger_json, is_tag_kind, masking_to_ranger_json, rowfilter_to_ranger_json,
     tag_editor_to_ranger_json, MaskingPolicyInput, RangerPolicy, RowFilterPolicyInput,
 };
+// SP4a Task 4 (egret-perm's compiler) builds these three directly rather
+// than hand-writing Ranger JSON, then leaves rendering to
+// `access_to_ranger_json` (kept crate-private: D2 forbids egret ever
+// emitting a tag *access* policy, and `ranger_json`'s tag builders — e.g.
+// `tag_access_to_ranger_json` — sit right next to it, so the module stays
+// private and only these three struct types are re-exported here).
+pub use ranger_json::{AccessItemInput, AccessPolicyInput, ResourceLevel};
 pub use reader::{EngineBinding, EngineBindingReader, EngineReadError};
 use std::sync::Arc;
 
