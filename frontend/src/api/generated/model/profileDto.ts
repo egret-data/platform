@@ -25,4 +25,18 @@ export interface ProfileDto {
      * @nullable
      */
   tag_service?: string | null;
+  /**
+     * `"manual"` (hand-authored, fully editable) or `"generated"` (compiled
+     * by the SP4a permission model from its grants and rules).
+     *
+     * **Exposed because D4's requirement is that the profile says so BEFORE
+     * an edit is overwritten, not after** (whole-branch review, Important 4).
+     * The raw-JSON policy editor still ships in SP4a and is still the only
+     * policy UI, and a `'generated'` profile is now only PARTLY frozen — its
+     * `perm-*` policies are compiler-owned and refuse an edit with a 409,
+     * while foreign policies in the same profile stay editable. Without this
+     * field the editor cannot tell an operator which half they are looking
+     * at, and the first thing they learn is the 409 on save.
+     */
+  origin: string;
 }
