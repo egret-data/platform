@@ -252,6 +252,7 @@ export * from './paramType';
 export * from './partitionDto';
 export * from './permissionDto';
 export * from './permissionGroupDto';
+export * from './permPrincipal';
 export * from './permVia';
 export * from './podLogsDto';
 export * from './policyAdminCreatePolicyBody';

@@ -35803,6 +35803,22 @@
           }
         }
       },
+      "PermPrincipal": {
+        "type": "object",
+        "description": "One principal reference. `r#ref` is the bare identifier egret's D7\nmeasurement settled on for users (a username, never an email) — the store\nwrites it through unchanged for every kind.\n\n**The OpenAPI name is `PermPrincipal`, not `Principal`, and that is a\nbug fix** (SP4a Task 10, finding 2). `egret-policy`'s admin surface\nalready exports a DIFFERENT `Principal` — the policy picker's\n`{kind, name, label}` row (`egret-policy/src/admin/mod.rs`). Two distinct\nRust types deriving `ToSchema` under one schema name collapse into one\nentry in the merged document, and the picker's won: every `$ref` from\n`PrincipalSet` — and so every `NewGrant.principals` — resolved to\n`{kind, name, label}`, a shape this type cannot deserialize. A client\ngenerated from the committed `openapi.json` could not construct a grant at\nall. The two names are now distinct, and each DTO refs its own.",
+        "required": [
+          "kind",
+          "ref"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/PrincipalKind"
+          },
+          "ref": {
+            "type": "string"
+          }
+        }
+      },
       "PermVia": {
         "type": "object",
         "required": [
@@ -36056,13 +36072,13 @@
           "include": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Principal"
+              "$ref": "#/components/schemas/PermPrincipal"
             }
           },
           "exclude": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Principal"
+              "$ref": "#/components/schemas/PermPrincipal"
             }
           }
         }

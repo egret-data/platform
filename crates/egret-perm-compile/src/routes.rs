@@ -56,7 +56,8 @@ use egret_core::http::ErrorBody;
 use egret_perm::{
     create_grant_in_tx, create_rule_in_tx, delete_grant_in_tx, delete_rule_in_tx, evaluate,
     get_grant_via, get_rule_via, list_grants_via, list_rules_via, Action, Decision, Effect, Grant,
-    GrantOrigin, PermStore, PrincipalSet, Reason, Rule, RuleKind, Scope, Selector, Subject,
+    GrantOrigin, PermStore, PrincipalKind, PrincipalSet, Reason, Rule, RuleKind, Scope, Selector,
+    Subject,
 };
 use egret_policy::{tag_keys_for_resource_via, PolicyStore};
 
@@ -137,6 +138,14 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         Selector,
         RuleKind,
         PrincipalSet,
+        // Registered explicitly (it is only ever reached through
+        // `PrincipalSet`'s `$ref`) so the merged document carries the shape
+        // `PrincipalSet` actually points at. See `egret_perm::Principal`'s
+        // doc comment: its schema name is `PermPrincipal` precisely because
+        // `egret-policy`'s picker type already owns `Principal`, and before
+        // the rename one silently overwrote the other.
+        egret_perm::Principal,
+        PrincipalKind,
         Action,
         Effect,
         ErrorBody,

@@ -104,7 +104,19 @@ impl PrincipalKind {
 /// One principal reference. `r#ref` is the bare identifier egret's D7
 /// measurement settled on for users (a username, never an email) — the store
 /// writes it through unchanged for every kind.
+///
+/// **The OpenAPI name is `PermPrincipal`, not `Principal`, and that is a
+/// bug fix** (SP4a Task 10, finding 2). `egret-policy`'s admin surface
+/// already exports a DIFFERENT `Principal` — the policy picker's
+/// `{kind, name, label}` row (`egret-policy/src/admin/mod.rs`). Two distinct
+/// Rust types deriving `ToSchema` under one schema name collapse into one
+/// entry in the merged document, and the picker's won: every `$ref` from
+/// `PrincipalSet` — and so every `NewGrant.principals` — resolved to
+/// `{kind, name, label}`, a shape this type cannot deserialize. A client
+/// generated from the committed `openapi.json` could not construct a grant at
+/// all. The two names are now distinct, and each DTO refs its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = PermPrincipal)]
 pub struct Principal {
     pub kind: PrincipalKind,
     pub r#ref: String,

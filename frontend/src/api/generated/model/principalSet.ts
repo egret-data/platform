@@ -5,7 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
-import type { Principal } from './principal';
+import type { PermPrincipal } from './permPrincipal';
 
 /**
  * A principal subtract: `include` minus `exclude`. This is what lets egret
@@ -15,6 +15,6 @@ import type { Principal } from './principal';
  * table (`perm.grant_principals`, `perm.rule_exemptions`).
  */
 export interface PrincipalSet {
-  include: Principal[];
-  exclude: Principal[];
+  include: PermPrincipal[];
+  exclude: PermPrincipal[];
 }
