@@ -246,6 +246,11 @@ impl PermStore {
 
     // grants ---------------------------------------------------------------
 
+    /// Inserts `g` and its principal subtract in one transaction. `g.id` is
+    /// ignored — `perm.grants.id` is `DEFAULT gen_random_uuid()`, and the id
+    /// this returns is the one the database minted, not whatever the caller
+    /// put in `g.id` (tests pass `Uuid::nil()` there for exactly this
+    /// reason).
     pub async fn create_grant(&self, g: &Grant) -> Result<Uuid, PermError> {
         let actions: Vec<&str> = g.actions.iter().map(|a| a.as_str()).collect();
         let (origin, origin_workspace_id): (&str, Option<Uuid>) = match &g.origin {
@@ -320,6 +325,8 @@ impl PermStore {
 
     // rules ------------------------------------------------------------------
 
+    /// Same contract as `create_grant`: `r.id` is ignored in favor of the id
+    /// `perm.rules.id DEFAULT gen_random_uuid()` mints.
     pub async fn create_rule(&self, r: &Rule) -> Result<Uuid, PermError> {
         let (kind, mask_type, value_expr, filter_expr): (
             &str,

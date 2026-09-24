@@ -13,7 +13,14 @@ CREATE TYPE perm.selector_kind AS ENUM ('tag', 'path');
 CREATE TABLE perm.grants (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     effect      perm.effect NOT NULL,
-    actions     text[] NOT NULL CHECK (cardinality(actions) > 0),
+    -- SP4a ships exactly two actions (global constraints). The vocabulary
+    -- lives here, not only in Rust: a junk row would otherwise make every
+    -- OTHER row's read fail too (Action::parse turns a bad element into an
+    -- Err that Vec<Result<_,_>>::collect propagates for the whole batch),
+    -- so one bad write must never reach the table.
+    actions     text[] NOT NULL
+                CHECK (cardinality(actions) > 0)
+                CHECK (actions <@ ARRAY['read', 'write']),
     catalog_id  uuid NOT NULL REFERENCES registry.catalogs(id) ON DELETE CASCADE,
     schema_name text,
     table_name  text,
@@ -23,7 +30,6 @@ CREATE TABLE perm.grants (
     origin      text NOT NULL DEFAULT 'explicit'
                 CHECK (origin IN ('explicit', 'workspace_assignment')),
     origin_workspace_id uuid REFERENCES workspaces(id) ON DELETE CASCADE,
-    description text NOT NULL DEFAULT '',
     created_at  timestamptz NOT NULL DEFAULT now(),
     -- A path cannot skip a level: a column implies a table implies a schema.
     CHECK (schema_name IS NOT NULL OR table_name IS NULL),
@@ -61,12 +67,25 @@ CREATE TABLE perm.rules (
     schema_name   text,
     table_name    text,
     column_name   text,
-    description   text NOT NULL DEFAULT '',
     created_at    timestamptz NOT NULL DEFAULT now(),
     CHECK ((selector_kind = 'tag') = (tag_key IS NOT NULL)),
     CHECK ((selector_kind = 'path') = (catalog_id IS NOT NULL)),
+    -- A tag selector carries no path at all — not just no catalog_id — so a
+    -- tag rule cannot silently carry a schema/table/column that
+    -- rule_from_row would then drop on the floor.
+    CHECK (selector_kind = 'path' OR
+           (schema_name IS NULL AND table_name IS NULL AND column_name IS NULL)),
+    -- Same level-skip rule as perm.grants: a column implies a table implies
+    -- a schema. (This mirrors perm.grants exactly; egret_perm::model's own
+    -- doc comment claims this guard exists on perm.rules too, and until now
+    -- it did not.)
+    CHECK (schema_name IS NOT NULL OR table_name IS NULL),
+    CHECK (table_name IS NOT NULL OR column_name IS NULL),
     CHECK ((kind = 'mask') = (mask_type IS NOT NULL)),
-    CHECK ((kind = 'row_filter') = (filter_expr IS NOT NULL))
+    CHECK ((kind = 'row_filter') = (filter_expr IS NOT NULL)),
+    -- value_expr is mask-only payload (an optional value for the mask
+    -- expression); a row_filter rule has no use for it.
+    CHECK (kind = 'mask' OR value_expr IS NULL)
 );
 
 -- Same shape as perm.grant_principals, including the `mode` column: a rule's
@@ -91,7 +110,13 @@ CREATE TABLE perm.rule_exemptions (
 -- an engine has cached does not churn.
 CREATE TABLE perm.compiled (
     service_id  bigint NOT NULL REFERENCES policy.authz_services(id) ON DELETE CASCADE,
-    policy_id   bigint NOT NULL,
+    -- egret deletes individual policies by id (egret-policy's
+    -- PolicyStore::delete_policy), not only whole services. Without this FK
+    -- a deleted policy leaves its perm.compiled row behind, and a recompile
+    -- diffing against a dangling row concludes the policy still exists and
+    -- updates it in place instead of recreating it — the exact
+    -- silently-lost-enforcement failure this table exists to prevent.
+    policy_id   bigint NOT NULL REFERENCES policy.authz_policies(id) ON DELETE CASCADE,
     source_kind text NOT NULL CHECK (source_kind IN ('grant', 'rule')),
     grant_id    uuid REFERENCES perm.grants(id) ON DELETE CASCADE,
     rule_id     uuid REFERENCES perm.rules(id) ON DELETE CASCADE,

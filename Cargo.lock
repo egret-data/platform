@@ -3477,7 +3477,6 @@ dependencies = [
  "egret-metastore",
  "egret-test-db",
  "serde",
- "serde_json",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
