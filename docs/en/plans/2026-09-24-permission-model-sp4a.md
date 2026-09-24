@@ -11,6 +11,8 @@
 ## Global Constraints
 
 - **Read the spec first:** `docs/en/specs/2026-09-24-egret-permission-model-sp4a-design.md`. D1–D9 bind every task.
+- **A count assertion cannot catch a value defect.** All five of Task 5's tests asserted `out.len()` or `is_err()`, and both of its Criticals were "right count, wrong value" — a tag policy naming `tags.key` where the plugin matches `tags.name`, and a path policy naming a catalog UUID where the engine sends a name. Both deploy cleanly and match nothing, so the mask returns the real value. **At least one test per compiled shape must assert the emitted body's `resources` and `serviceType`.**
+- **Scope every count assertion to the fixture it owns.** This workspace shares one database across the `#[tokio::test]` functions of a binary, and they run concurrently: an unscoped `list_*().len()` races its siblings and fails non-deterministically. Two tests this plan wrote failed 2-vs-1 the first time Task 6 actually ran them.
 - **Migrations are append-only.** `0154` is the first free number. Never edit `0147`–`0153`; they are applied on the live kind cluster. Editing an applied migration breaks `egret_test_template` with `VersionMismatch` — drop that database and re-run if it happens.
 - **sqlx 0.9:** `sqlx::query()` takes `&'static str`. Never build SQL with `format!`; bind parameters.
 - **Tags are referenced by `tags.key`, never `tags.name`** (D6). Catalogs are referenced by `registry.catalogs.id`, never by name. Names are resolved at compile time only.
