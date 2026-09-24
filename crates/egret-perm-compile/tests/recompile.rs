@@ -181,6 +181,84 @@ async fn tag_column(
     .expect("tag column");
 }
 
+/// Bulk-tags `count` synthetic columns (`col_1`..`col_count`) under one
+/// `schema`/`table`, all carrying `tag_key` — the same shape as the existing
+/// per-rule ceiling test's bulk insert, generalised to a caller-chosen table
+/// so several rules (SP4a Task 12's profile-total tests) can each get their
+/// own tagged columns without colliding names.
+async fn bulk_tag_columns(
+    pool: &sqlx::PgPool,
+    warehouse_id: Uuid,
+    tag_key: &str,
+    table: &str,
+    count: i64,
+) {
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         SELECT t.id, $1, 'sales', $2, 'col_' || gs::text \
+         FROM tags t, generate_series(1, $3) gs WHERE t.key = $4",
+    )
+    .bind(warehouse_id)
+    .bind(table)
+    .bind(count)
+    .bind(tag_key)
+    .execute(pool)
+    .await
+    .expect("bulk-tag columns");
+}
+
+/// Creates a fresh tag key and a mask rule selecting it — a second (third,
+/// fourth, ...) rule alongside the fixture's own, for SP4a Task 12's
+/// profile-total tests, which need several rules each individually under
+/// `DEFAULT_EXPANSION_CEILING` summing past `PROFILE_EXPANSION_CEILING`.
+/// Returns `(rule_id, tag_key)` — the id so the rule can be deleted later,
+/// the key so [`bulk_tag_columns`] can tag columns under it.
+async fn create_tag_and_rule(perm: &PermStore, pool: &sqlx::PgPool, label: &str) -> (Uuid, String) {
+    let tag_key = unique(label);
+    sqlx::query("INSERT INTO tags (key, name) VALUES ($1, $2)")
+        .bind(&tag_key)
+        .bind(label)
+        .execute(pool)
+        .await
+        .expect("tag");
+    let rule = Rule {
+        id: Uuid::nil(),
+        name: unique(&format!("{label}-hash")),
+        kind: RuleKind::Mask {
+            mask_type: "MASK_HASH".to_string(),
+            value_expr: None,
+        },
+        selector: Selector::Tag {
+            key: tag_key.clone(),
+        },
+        exempt: PrincipalSet::default(),
+    };
+    let rule_id = perm.create_rule(&rule).await.expect("create rule");
+    (rule_id, tag_key)
+}
+
+/// Inserts `count` compiler-owned-LOOKING (correct name prefix) policy rows
+/// directly, bypassing the compiler entirely — simulating a profile that is
+/// already over `PROFILE_EXPANSION_CEILING` on disk, which is reachable only
+/// because this ceiling did not exist before SP4a Task 12 (a profile that
+/// compiled fine under the OLD per-rule-only guard can already be sitting
+/// above the new profile total). These rows are deliberately NOT produced by
+/// any real grant/rule, so a real recompile's diff sees them as no-longer-
+/// desired and reaps every one — that reap IS the "shrink" this test proves
+/// is never refused.
+async fn seed_dummy_compiler_policies(pool: &sqlx::PgPool, service_id: i64, count: i64) {
+    sqlx::query(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb) \
+         SELECT $1, $2 || gs::text, '{}'::jsonb FROM generate_series(1, $3) gs",
+    )
+    .bind(service_id)
+    .bind(egret_policy::COMPILER_RULE_PREFIX)
+    .bind(count)
+    .execute(pool)
+    .await
+    .expect("seed dummy compiler-owned policies");
+}
+
 /// Policies for `service_id`, scoped — never a bare `policy.authz_policies`
 /// total, which every concurrently-running test in this binary shares.
 async fn policies_for(pool: &sqlx::PgPool, service_id: i64) -> Vec<(i64, String, Value)> {
@@ -715,6 +793,183 @@ async fn the_expansion_ceiling_refuses_through_recompile_service_not_only_compil
         .expect("policy_version"),
         v_before,
         "a refused recompile must not bump the version either"
+    );
+}
+
+/// SP4a Task 12: the per-rule ceiling alone does not bound the profile
+/// TOTAL. Four rules each individually AT or under `DEFAULT_EXPANSION_CEILING`
+/// (300 < 500) still sum past `PROFILE_EXPANSION_CEILING` (1000) — the live
+/// gate's own finding, reproduced here at 300/rule so the assertion lands on
+/// the PROFILE ceiling specifically and not incidentally on the per-rule one
+/// too. Rule 1 is the fixture's own (grown from 1 to 300 tagged columns);
+/// three more rules bring the total to 1200.
+#[tokio::test]
+async fn the_profile_total_ceiling_refuses_and_names_the_profile_and_the_total() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks_engine_with_tag_rule(&db).await;
+    let pool = &db.pool;
+
+    let service_name: String =
+        sqlx::query_scalar("SELECT name FROM policy.authz_services WHERE id = $1")
+            .bind(f.service_id)
+            .fetch_one(pool)
+            .await
+            .expect("service name");
+
+    let before = policies_for(pool, f.service_id).await;
+    let v_before = policy_version(pool, f.service_id).await;
+
+    let tag_key: String = sqlx::query_scalar(
+        "SELECT t.key FROM tags t JOIN catalog_tag_assignments a ON a.tag_id = t.id \
+         WHERE a.warehouse_id = $1 LIMIT 1",
+    )
+    .bind(f.warehouse_id)
+    .fetch_one(pool)
+    .await
+    .expect("tag key");
+
+    // Rule 1 (the fixture's own): 1 -> 300 tagged columns, still well under
+    // `DEFAULT_EXPANSION_CEILING` (500).
+    bulk_tag_columns(pool, f.warehouse_id, &tag_key, "orders", 299).await;
+
+    // Three more rules, 300 tagged columns each — every rule individually
+    // under its own per-rule cap.
+    for i in 0..3 {
+        let label = unique(&format!("bulk{i}"));
+        let (_rule_id, rule_tag) = create_tag_and_rule(&f.perm, pool, &label).await;
+        bulk_tag_columns(pool, f.warehouse_id, &rule_tag, &label, 300).await;
+    }
+
+    let err = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect_err(
+            "4 rules x 300 columns = 1200, over the profile-total ceiling of 1000, must refuse \
+             even though every rule sits under its own per-rule cap",
+        );
+    match err {
+        egret_perm::CompileError::ProfileExpansionCeiling {
+            profile,
+            total,
+            ceiling,
+        } => {
+            assert_eq!(profile, service_name, "the refusal must name the PROFILE");
+            assert_eq!(total, 1200, "the refusal must name the running TOTAL");
+            assert_eq!(ceiling, 1000);
+        }
+        other => panic!("expected ProfileExpansionCeiling, got {other:?}"),
+    }
+
+    // The refusal must write NOTHING — same invariant as the per-rule
+    // ceiling's own refusal.
+    assert_eq!(
+        policies_for(pool, f.service_id).await,
+        before,
+        "a refused profile-total recompile must leave every existing policy exactly as it was"
+    );
+    assert_eq!(
+        policy_version(pool, f.service_id).await,
+        v_before,
+        "a refused recompile must not bump the version either"
+    );
+}
+
+/// SP4a Task 12, the subtlety this ceiling exists to get right: a profile
+/// that is ALREADY over `PROFILE_EXPANSION_CEILING` must still be able to
+/// recompile when the change SHRINKS the total (or leaves it unchanged) —
+/// even while the shrunk total is STILL over the ceiling. A naive
+/// "total > ceiling ⇒ refuse" bricks exactly this profile: every recompile
+/// that would accompany an operator's delete-your-way-back-under-the-cap
+/// refuses, and the delete rolls back with it — the same shape as Task 9's
+/// I-1 ("an uncompilable grant poisons every later recompile"), one level up.
+#[tokio::test]
+async fn a_profile_already_over_the_cap_can_still_shrink_by_deleting_a_rule() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks_engine_with_tag_rule(&db).await;
+    let pool = &db.pool;
+
+    let tag_key: String = sqlx::query_scalar(
+        "SELECT t.key FROM tags t JOIN catalog_tag_assignments a ON a.tag_id = t.id \
+         WHERE a.warehouse_id = $1 LIMIT 1",
+    )
+    .bind(f.warehouse_id)
+    .fetch_one(pool)
+    .await
+    .expect("tag key");
+
+    // Rule 1 (the fixture's own) grows from 1 to 400 tagged columns.
+    bulk_tag_columns(pool, f.warehouse_id, &tag_key, "orders", 399).await;
+
+    // Three more rules, 400 tagged columns each — 1600 desired in total,
+    // every rule individually well under `DEFAULT_EXPANSION_CEILING` (500).
+    let mut extra_rule_ids = Vec::new();
+    for i in 0..3 {
+        let label = unique(&format!("bulk{i}"));
+        let (rule_id, rule_tag) = create_tag_and_rule(&f.perm, pool, &label).await;
+        bulk_tag_columns(pool, f.warehouse_id, &rule_tag, &label, 400).await;
+        extra_rule_ids.push(rule_id);
+    }
+
+    // Simulate a profile that is ALREADY over the cap from before this
+    // ceiling existed: seed dummy compiler-owned rows so the STORED total (1
+    // real "email" policy + these dummies) comfortably exceeds the 1600 this
+    // recompile is about to desire.
+    seed_dummy_compiler_policies(pool, f.service_id, 1649).await;
+
+    let stored_before_first: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM policy.authz_policies WHERE service_id = $1")
+            .bind(f.service_id)
+            .fetch_one(pool)
+            .await
+            .expect("count");
+    assert_eq!(
+        stored_before_first, 1650,
+        "sanity: 1 real + 1649 dummy, already over PROFILE_EXPANSION_CEILING (1000)"
+    );
+
+    // First recompile: desired 1600 is OVER the ceiling, but the STORED
+    // total (1650) is even higher — the total is shrinking, so this must be
+    // ALLOWED despite 1600 > 1000.
+    let summary = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect(
+            "a recompile whose new total (1600) is <= the currently stored total (1650) must \
+             never be refused, even though both are over the profile-total ceiling",
+        );
+    assert_eq!(summary.deleted, 1649, "every dummy row must be reaped");
+
+    let after_first = policies_for(pool, f.service_id).await;
+    assert_eq!(
+        after_first.len(),
+        1600,
+        "1 unchanged (email) + 1599 newly created = 1600 real compiler-owned policies"
+    );
+
+    // Now delete ONE of the three extra rules: desired drops from 1600 to
+    // 1200 — STILL over the profile-total ceiling (1000), but less than the
+    // 1600 now actually stored. A naive "total > ceiling ⇒ refuse" gets this
+    // wrong; the correct answer is ALLOWED, because the total shrank.
+    let deleted_rule = extra_rule_ids[0];
+    f.perm
+        .delete_rule(deleted_rule)
+        .await
+        .expect("delete one of the three extra rules");
+
+    let summary2 = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect(
+            "deleting a rule from an over-cap profile must be allowed to recompile — the total \
+             shrank from 1600 to 1200, even though 1200 is still over the ceiling",
+        );
+    assert_eq!(
+        summary2.deleted, 400,
+        "the deleted rule's 400 policies must be reaped"
+    );
+
+    let after_second = policies_for(pool, f.service_id).await;
+    assert_eq!(
+        after_second.len(),
+        1200,
+        "1200 real compiler-owned policies remain after the rule delete"
     );
 }
 

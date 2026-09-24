@@ -126,9 +126,37 @@ gắn tag. egret vốn đã bump service bị ràng buộc ở mỗi lần ghi t
 trigger đó. Việc `ranger-tagsync` làm cho Trino, egret làm cho StarRocks.
 
 Cái giá là có thật và phải chặn: một rule trên một tag được gắn rộng sẽ thành N policy trên StarRocks.
-SP4a áp một **trần tại thời điểm biên dịch** cho số policy bung ra trên mỗi rule, **từ chối** biên
-dịch khi vượt trần kèm thông báo nêu tên rule và con số, và **không bao giờ cắt bớt âm thầm**. Giá trị
-của trần được đặt từ một phép đo trên kind, không chọn trước.
+SP4a áp **trần hai tầng tại thời điểm biên dịch**: một trần theo từng rule, **từ chối** biên dịch khi
+vượt trần kèm thông báo nêu tên rule và con số; và một trần theo TỔNG của cả profile (SP4a Task 12,
+xem dưới), **từ chối** một lần biên dịch lại nếu nó đẩy tổng số policy của profile vượt trần, kèm
+thông báo nêu tên PROFILE và con số tổng hiện tại — cả hai đều **không bao giờ cắt bớt âm thầm**. Cả
+hai giá trị đều được đặt từ một phép đo trên kind, không chọn trước.
+
+**Lỗ hổng phép đo này phơi bày, và cách vá (SP4a Task 12).** Một trần theo rule không chặn được đúng
+thứ gây tốn kém: nó tính theo rule, còn chi phí lại do TỔNG của profile quyết định. Live gate đã biên
+dịch bốn rule, mỗi rule 500 cột — từng rule đều ở mức hoặc dưới trần riêng — thành 2006 policy **mà
+không hề bị từ chối**, vượt qua điểm gãy, mất 2.2 giây mỗi lần biên dịch lại, và mỗi lần ghi tag đều
+kích hoạt một lần như vậy. SP4a áp thêm một **trần cấp-profile bằng 1000**, lấy từ cùng phép đo: 1000
+là điểm cuối cùng mà bảng đo ở trên vẫn cho thấy thời gian biên dịch còn tuyến tính (1006 → 2006 tốn
+gấp 3.4 lần thời gian cho gấp 2 lần số policy). Một lần biên dịch lại đẩy tổng số policy do compiler
+sở hữu của MỘT profile vượt quá 1000 sẽ bị từ chối, kèm thông báo nêu tên PROFILE và TỔNG hiện tại —
+không chỉ nêu tên một rule, vì một profile vượt trần tổng có thể đến từ nhiều rule mà rule nào cũng ở
+dưới trần riêng của nó, và một operator nghe "rule X vượt trần" trong khi không rule nào vượt sẽ đi
+sai hướng.
+
+**Hai trần cộng lại, và trần cấp-profile có lối thoát cố ý.** Nếu cứ từ chối mọi lần biên dịch lại khi
+tổng profile vượt 1000 thì một profile đã ở trên mức đó sẽ bị kẹt cứng — và điều này hoàn toàn có thể
+xảy ra, vì trần này không tồn tại trước Task 12. Cách duy nhất để operator quay lại dưới trần là xoá
+bớt grant hoặc rule, và mỗi lần xoá đều kéo theo một lần biên dịch lại cho profile bị ảnh hưởng
+(`recompile_service_in_tx`); nếu lần biên dịch lại đó luôn từ chối khi còn trên 1000, transaction của
+chính lần xoá đó sẽ bị cuốn theo, và operator sẽ không bao giờ xoá thoát được — đúng hình dạng
+"biên dịch lại bị đầu độc" mà Task 9's I-1 đã vá ở một tầng bên dưới ("một grant không biên dịch được
+sẽ đầu độc mọi lần biên dịch lại sau đó"). Vì vậy trần cấp-profile chỉ từ chối một thay đổi đẩy tổng
+số VƯỢT QUA 1000; một lần biên dịch lại mà tổng mới nhỏ hơn hoặc bằng tổng ĐANG LƯU của profile — co
+lại, hoặc giữ nguyên — luôn được cho phép, ngay cả khi cả hai con số vẫn còn trên 1000. "Tổng đang
+lưu" được đọc từ `policy.authz_policies` dưới một row lock mà lần biên dịch lại đã lấy sẵn (cùng câu
+truy vấn dùng để tìm ra cái cần so sánh), nên việc kiểm tra này không thêm lock mới và không thể deadlock
+với thứ tự khoá service tăng dần mà `lock_services_in_tx` đã thiết lập.
 
 **D6 — Rule trỏ `tags.key`, grant trỏ `registry.catalogs.id`.** Cả hai đều vá chỗ đã được ghi nhận là
 gãy: tag policy hôm nay lưu `tags.name` vốn thay đổi được và không duy nhất (`programme spec:43`), và

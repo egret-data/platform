@@ -126,9 +126,11 @@ new column gets the tag. egret already bumps the bound service on every tag writ
 same trigger. What `ranger-tagsync` does for Trino, egret does for StarRocks.
 
 The cost is real and must be bounded: one rule over a broadly-applied tag becomes N policies on
-StarRocks. SP4a enforces a **compile-time ceiling** on expanded policies per rule, refuses the
-compile above it with a message naming the rule and the count, and does not silently truncate. The
-ceiling's value is set from a measurement on kind, not chosen in advance.
+StarRocks. SP4a enforces a **two-level compile-time ceiling**: one per rule, refusing the compile
+above it with a message naming the rule and the count, and one across the whole profile (SP4a Task
+12, below), refusing a recompile that would push the profile's own policy count over its cap, naming
+the profile and the running total — neither silently truncates. Both values are set from a
+measurement on kind, not chosen in advance.
 
 **The measurement (Task 10, 2026-09-24, kind `kind-egret`, StarRocks profile `sp4a10-sr`).** N
 columns carrying one tag, one tag-mask rule, full rebuild of the profile each time; the download is
@@ -156,10 +158,31 @@ not: 0.49 s and 381 KB) but because the per-rule cap has to leave room for the p
 rules before the profile total reaches the ~1000-policy knee. One rule at the cap plus its
 neighbours is exactly the region where the curve is still linear.
 
-**Known gap this measurement exposes: the ceiling does not bound the thing that costs.** It is
-per-rule, and the cost is driven by the profile TOTAL. Four rules of 500 columns each compiled 2006
-policies with no refusal at all — past the knee, at 2.2 s per recompile, with every tag write
-triggering one. A per-profile total ceiling is the follow-up; SP4a ships the per-rule one.
+**The gap this measurement exposed, and its fix (SP4a Task 12).** A per-rule ceiling alone does not
+bound the thing that costs. It is per-rule, and the cost is driven by the profile TOTAL: the live
+gate compiled four rules of 500 columns each — every one individually AT or under the per-rule cap —
+into 2006 policies **with no refusal at all**, past the knee, at 2.2 s per recompile, with every tag
+write triggering one. SP4a ships a **second, profile-level ceiling of 1000** on top of the per-rule
+one, from the same measurement: 1000 is the last point the table above still shows linear compile
+time (1006 → 2006 costs 3.4× the time for 2× the policies). A recompile that would push a profile's
+own compiler-owned policy count over 1000 is refused, naming the PROFILE and the running TOTAL — not
+only a rule, because a profile over its total can get there from several rules each individually
+under their own cap, and an operator told "rule X is over its cap" when no rule is would chase the
+wrong thing.
+
+**The two ceilings compose, and the profile one has a deliberate escape hatch.** Refusing a
+recompile whenever the profile total is over 1000 would brick any profile already there — and one
+can already be there, since this ceiling did not exist before Task 12. An operator's only way back
+under the cap is to delete grants or rules, and every delete recompiles the profile it affects
+(`recompile_service_in_tx`); if that recompile always refused above 1000, the delete's own
+transaction would roll back with it, and the operator could never delete their way out — the same
+poisoned-recompile shape Task 9's I-1 fixed one level down ("an uncompilable grant poisons every
+later recompile"). So the profile ceiling refuses only a change that would push the total **over**
+1000; a recompile whose new total is less than or equal to the profile's CURRENTLY STORED total —
+shrinking, or unchanged — is always allowed, even while both numbers stay above 1000. "Currently
+stored" is read from `policy.authz_policies` under a row lock the recompile has already taken (the
+same query that finds what to diff against), so checking it adds no new lock and cannot deadlock
+against the ascending service-lock order `lock_services_in_tx` already established.
 
 **D6 — Rules reference `tags.key`, grants reference `registry.catalogs.id`.** Both fix documented
 breakage: tag policies today store the mutable, non-unique `tags.name`

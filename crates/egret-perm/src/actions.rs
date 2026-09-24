@@ -60,6 +60,23 @@ pub enum CompileError {
         count: usize,
         ceiling: usize,
     },
+    /// The per-rule [`Self::ExpansionCeiling`] bounds one rule; this bounds the
+    /// profile's SUM across every rule and grant compiled for it — the gap
+    /// SP4a Task 12 closes (see `egret-perm-compile::trigger::
+    /// PROFILE_EXPANSION_CEILING`'s doc comment for the measurement). Named
+    /// after the PROFILE and the running TOTAL, not a rule: an operator
+    /// chasing "which rule is over its cap" when every rule sits under its
+    /// own cap and the profile's SUM is what is over would find nothing —
+    /// this refusal has to point at the profile itself.
+    #[error(
+        "recompiling profile {profile:?} would total {total} compiler-owned policies, over the \
+         profile-total ceiling of {ceiling}"
+    )]
+    ProfileExpansionCeiling {
+        profile: String,
+        total: usize,
+        ceiling: usize,
+    },
     /// A `User` principal's `r#ref` is not the bare username the store is
     /// supposed to hold (`model::Principal`'s doc comment: "a username,
     /// never an email … written through unchanged"). The compiler does no

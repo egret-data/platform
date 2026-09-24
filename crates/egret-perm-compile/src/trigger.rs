@@ -133,10 +133,60 @@ use crate::rules::{compile_rule, stamp_service_type, ResolvedNames, TaggedColumn
 /// (1006 → 2006 costs 3.4× the time). 500 per rule is chosen so that a rule at
 /// the cap plus the profile's other rules still sits inside the linear region.
 ///
-/// **Known gap:** this ceiling is per-RULE, and the cost is driven by the
-/// profile TOTAL. Four rules of 500 columns compiled 2006 policies with no
-/// refusal at all. A per-profile total ceiling is the follow-up.
+/// **This ceiling alone does not bound the thing that costs (SP4a Task 12).**
+/// It is per-RULE, and compile cost is driven by the profile TOTAL: four
+/// rules of 500 columns each sat at or under this cap individually and
+/// compiled 2006 policies with no refusal at all — the live gate's own
+/// finding. [`PROFILE_EXPANSION_CEILING`] is the second half of the guard,
+/// enforced on the profile's running total rather than any one rule.
 pub const DEFAULT_EXPANSION_CEILING: usize = 500;
+
+/// The profile-TOTAL ceiling — the follow-up [`DEFAULT_EXPANSION_CEILING`]'s
+/// own doc comment named as a known gap, closed here (SP4a Task 12).
+///
+/// **Same measurement as `DEFAULT_EXPANSION_CEILING`** (Task 10, 2026-09-24,
+/// kind `kind-egret`, StarRocks profile `sp4a10-sr`; full table in the design
+/// spec's D5 and in `docs/en/plans/2026-09-24-permission-model-sp4a-live-result.md`),
+/// read as wall-clock compile time by policy count in ONE profile:
+///
+/// | policies | compile |
+/// |---|---|
+/// | 16 | 0.054 s |
+/// | 256 | 0.226 s |
+/// | 506 | 0.489 s |
+/// | 1006 | 0.653 s |
+/// | 1506 | 1.331 s |
+/// | 2006 | 2.224 s |
+///
+/// Compile time is roughly linear up to ~1000 policies and turns
+/// super-linear past it: 1006 → 2006 is a 2× policy count for a 3.4× time
+/// cost (2.224 s / 0.653 s), not 2×. 1000 is the last point still inside the
+/// linear region — the same reasoning `DEFAULT_EXPANSION_CEILING` uses for
+/// 500, one level up.
+///
+/// **Why this has to be a SEPARATE ceiling from the per-rule one, not a
+/// smaller per-rule number.** The per-rule cap bounds one rule; it says
+/// nothing about how many rules a profile carries. Four rules each sitting
+/// AT the per-rule cap (500) sum to 2000 — over the knee — while every rule
+/// individually reports "under my cap." Only a check against the profile's
+/// own running total catches that.
+///
+/// **Why a naive "total > ceiling ⇒ refuse" bricks an over-cap profile.**
+/// [`apply_diff_in_tx`] is what a tag write, a grant write, AND a rule
+/// *delete* all recompile through. If a profile is already over
+/// `PROFILE_EXPANSION_CEILING` — as one legitimately could be, since this
+/// ceiling did not exist before Task 12 — refusing every recompile of that
+/// profile would refuse the delete an operator needs to shrink it back
+/// under the cap: the delete writes the model row, the recompile that
+/// accompanies it refuses, and the whole write rolls back (Task 9's I-1 is
+/// this exact shape one level down — an uncompilable grant poisoning every
+/// later recompile). So this ceiling refuses only a change that would push
+/// the total OVER the ceiling; a recompile whose new total is less than or
+/// equal to the CURRENTLY STORED total for this profile — shrinking, or
+/// unchanged — is always allowed, even while both numbers stay above the
+/// ceiling. See [`apply_diff_in_tx`] for where "currently stored" is read
+/// and why that read cannot deadlock.
+pub const PROFILE_EXPANSION_CEILING: usize = 1000;
 
 // The name prefixes every policy `compile_grant`/`compile_rule` produces
 // carries (`grants.rs`'s `format!("{COMPILER_GRANT_PREFIX}{}", g.id)`,
@@ -430,6 +480,7 @@ async fn compile_desired(
         desired,
         skipped,
         sweep,
+        profile_name: svc.name,
     }))
 }
 
@@ -451,6 +502,10 @@ struct Compiled {
     desired: BTreeMap<PolicyKey, DesiredPolicy>,
     skipped: Vec<SkippedItem>,
     sweep: Vec<i64>,
+    /// The profile's own service NAME — carried alongside `sweep` so
+    /// [`apply_diff_in_tx`]'s [`CompileError::ProfileExpansionCeiling`]
+    /// refusal can name the profile, not just its numeric id.
+    profile_name: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -661,6 +716,7 @@ struct ExistingPolicyRow {
 async fn apply_diff_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     profile_service_id: i64,
+    profile_name: &str,
     sweep: &[i64],
     desired: BTreeMap<PolicyKey, DesiredPolicy>,
     skipped: Vec<SkippedItem>,
@@ -708,6 +764,41 @@ async fn apply_diff_in_tx(
     .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;
+
+    // **The profile-total ceiling (SP4a Task 12).** "Currently stored" is
+    // read from THIS SAME `existing` fetch — no extra query, no extra lock —
+    // scoped to the profile's own service id (not the whole `sweep`: a tag
+    // service's row count is a different, O(1)-per-rule world and is not
+    // what the measurement bounds). Reading it here cannot deadlock: every
+    // lock this recompile will take was already acquired above (and, for a
+    // multi-service model write, by `lock_services_in_tx` before this
+    // transaction touched any `perm.*` row), in the ascending order that
+    // invariant depends on — this is a plain `SELECT` against rows this same
+    // transaction already holds `FOR UPDATE`, not a new acquisition.
+    //
+    // **Refuse only a change that pushes the total OVER the ceiling.** A
+    // profile already at or above `PROFILE_EXPANSION_CEILING` — reachable
+    // only because this ceiling did not exist before Task 12 — must still be
+    // able to recompile when the change shrinks it or leaves it unchanged;
+    // see `PROFILE_EXPANSION_CEILING`'s own doc comment for why a naive
+    // "over the ceiling ⇒ refuse" bricks exactly that profile (an operator
+    // cannot delete their way back under the cap if every delete's
+    // accompanying recompile refuses and rolls the delete back with it).
+    let current_stored_total = existing
+        .iter()
+        .filter(|row| row.service_id == profile_service_id)
+        .count();
+    let new_total = desired
+        .keys()
+        .filter(|(service_id, _)| *service_id == profile_service_id)
+        .count();
+    if new_total > PROFILE_EXPANSION_CEILING && new_total > current_stored_total {
+        return Err(CompileError::ProfileExpansionCeiling {
+            profile: profile_name.to_string(),
+            total: new_total,
+            ceiling: PROFILE_EXPANSION_CEILING,
+        });
+    }
 
     let mut existing_by_key: HashMap<PolicyKey, (i64, Value)> = existing
         .into_iter()
@@ -883,6 +974,7 @@ pub async fn recompile_service_in_tx(
     apply_diff_in_tx(
         tx,
         service_id,
+        &compiled.profile_name,
         &compiled.sweep,
         compiled.desired,
         compiled.skipped,
