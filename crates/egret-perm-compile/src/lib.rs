@@ -50,7 +50,7 @@ pub use grants::{compile_grant, validate_grant_shape};
 pub use routes::{openapi, perm_router, PermHttpError, PermState};
 pub use rules::{compile_rule, validate_rule_shape, ResolvedNames, TaggedColumn};
 pub use trigger::{
-    affected_services_for_grant, affected_services_for_rule, lock_services_in_tx,
-    recompile_service, recompile_service_in_tx, recompile_services_in_tx, CompileSummary,
-    SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING, PROFILE_EXPANSION_CEILING,
+    affected_services_for_grant, affected_services_for_rule, affected_services_for_tag_rename,
+    lock_services_in_tx, recompile_service, recompile_service_in_tx, recompile_services_in_tx,
+    CompileSummary, SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING, PROFILE_EXPANSION_CEILING,
 };

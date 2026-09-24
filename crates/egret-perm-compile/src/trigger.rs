@@ -1094,6 +1094,44 @@ pub async fn affected_services_for_rule(
     Ok(ids)
 }
 
+/// The services a RENAME of tag `tag_key` can change the compiled output of
+/// (whole-branch review, Important 3 — D6's "a rename recompiles instead of
+/// breaking").
+///
+/// **Why a rename changes compiled output at all.** D6 resolves `tags.key` →
+/// `tags.name` at compile time, because the Ranger tag plugin matches on the
+/// NAME. A Trino tag policy therefore carries the name as it stood when it was
+/// compiled, while `download_tags` serves `t.name` live. Rename the tag and
+/// the two agree only until the next plugin restart or `lastKnownVersion=-1`
+/// poll, at which point the tag→resource map carries the NEW name and the
+/// policy still names the OLD one: **the mask stops applying and the column
+/// returns real values**, triggered by an unrelated restart. That is the exact
+/// silent breakage D6 says this model exists to remove.
+///
+/// The set is the one a tag-RULE mutation uses, for the same reason (see this
+/// module's Task 9 section): a tag is installation-wide, so any profile this
+/// compiler targets may carry a policy naming it. It is empty when no live
+/// rule selects the key at all — then nothing anywhere was compiled from that
+/// name, and a rename is a pure display change.
+pub async fn affected_services_for_tag_rename(
+    conn: &mut sqlx::PgConnection,
+    tag_key: &str,
+) -> Result<Vec<i64>, CompileError> {
+    let selected: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM perm.rules WHERE selector_kind = 'tag' AND tag_key = $1)",
+    )
+    .bind(tag_key)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    if !selected {
+        return Ok(Vec::new());
+    }
+    let mut ids = compiler_targeted_services_via(conn).await.map_err(db_err)?;
+    normalize_service_order(&mut ids);
+    Ok(ids)
+}
+
 /// Take the row locks a recompile of `service_ids` will need, in ascending id
 /// order, **before** the model write they accompany.
 ///

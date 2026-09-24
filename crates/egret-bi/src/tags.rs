@@ -118,6 +118,25 @@ impl TagRepo {
     /// Update the mutable fields; `None` leaves a field unchanged (COALESCE). The
     /// key is immutable (it's the stable selector token). Returns the updated tag
     /// or `None` if no such id.
+    ///
+    /// **A rename is a recompile trigger, in the same transaction as the
+    /// rename** (SP4a whole-branch review, Important 3 — D6 promised "a rename
+    /// recompiles instead of breaking" and nothing implemented it). D6 resolves
+    /// `tags.key` → `tags.name` at compile time because the Ranger tag plugin
+    /// matches on the NAME, so a compiled Trino tag policy carries the name as
+    /// it stood at compile time while [`Self::get`]'s sibling `download_tags`
+    /// serves `t.name` live. After a rename the two agree only until the next
+    /// plugin restart or `lastKnownVersion=-1` poll — at which point the tag
+    /// map carries the NEW name and the policy still names the OLD one, **the
+    /// mask stops applying, and the column returns real values**. Fail-open,
+    /// with an unrelated restart as the trigger.
+    ///
+    /// Both halves are needed and neither is sufficient: the recompile moves
+    /// the POLICIES to the new name, and the `tag_version` bump is what stops
+    /// the tag plugin being answered `304` and serving the old map against
+    /// them. The order and the shape are `CatalogTagRepo::assign_catalog`'s —
+    /// write, bump, then lock the expanded service set ascending and recompile
+    /// on this same transaction — so the two tag-write paths cannot drift.
     pub async fn update(
         &self,
         id: Uuid,
@@ -125,6 +144,18 @@ impl TagRepo {
         description: Option<&str>,
         color: Option<&str>,
     ) -> Result<Option<Tag>, BiError> {
+        let mut tx = self.db.pool.begin().await?;
+        // The key (for "is any rule compiled from this name?") and the current
+        // name (for "is this actually a rename?"), read inside the transaction
+        // that is about to change it.
+        let before: Option<(String, String)> =
+            sqlx::query_as("SELECT key, name FROM tags WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((key, old_name)) = before else {
+            return Ok(None);
+        };
         let affected = sqlx::query(
             "UPDATE tags SET \
                 name = COALESCE($2, name), \
@@ -136,13 +167,58 @@ impl TagRepo {
         .bind(name)
         .bind(description)
         .bind(color)
-        .execute(&self.db.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
         if affected == 0 {
             return Ok(None);
         }
+        if name.is_some_and(|n| n != old_name) {
+            Self::recompile_for_rename_in_tx(&mut tx, id, &key).await?;
+        }
+        tx.commit().await?;
         self.get(id).await
+    }
+
+    /// The recompile half of [`Self::update`]'s rename. Runs on the caller's
+    /// transaction so a crash cannot leave the new name committed with the old
+    /// one still compiled — there is only one commit, the same property
+    /// `CatalogTagRepo::recompile_bound_services_in_tx` exists for.
+    ///
+    /// A recompile FAILURE fails the rename, deliberately: the alternative is a
+    /// committed rename with policies still naming the old tag, which is the
+    /// fail-open state this whole function exists to prevent.
+    async fn recompile_for_rename_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tag_id: Uuid,
+        key: &str,
+    ) -> Result<(), BiError> {
+        // The tag MAP the plugin downloads carries `t.name` too, so every
+        // service serving a warehouse that carries this tag must stop 304-ing.
+        let warehouses: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT warehouse_id FROM catalog_tag_assignments WHERE tag_id = $1 \
+             ORDER BY warehouse_id",
+        )
+        .bind(tag_id)
+        .fetch_all(&mut **tx)
+        .await?;
+        for warehouse_id in warehouses {
+            egret_catalog_registry::bump_bound_tag_versions(&mut **tx, warehouse_id).await?;
+        }
+        let services = egret_perm_compile::affected_services_for_tag_rename(&mut **tx, key).await?;
+        egret_perm_compile::lock_services_in_tx(tx, &services).await?;
+        for service_id in services {
+            let summary = egret_perm_compile::recompile_service_in_tx(tx, service_id).await?;
+            if !summary.skipped.is_empty() {
+                tracing::warn!(
+                    tag = %key,
+                    service_id,
+                    skipped_count = summary.skipped.len(),
+                    "a tag rename's recompile skipped some grants/rules for this service"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Delete a tag. `tag_assignments` and `catalog_tag_assignments` cascade
