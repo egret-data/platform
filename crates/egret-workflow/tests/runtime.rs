@@ -181,6 +181,8 @@ fn fast(tick_ms: u64, batch: usize) -> RuntimeConfig {
         batch,
         reaper_interval: Duration::from_secs(3600),
         working_timeout: Duration::from_secs(3600),
+        scheduler_enabled: false,
+        trigger_interval: Duration::from_millis(tick_ms),
     }
 }
 
@@ -325,6 +327,8 @@ async fn a_cancelled_token_stops_both_tickers(pool: sqlx::PgPool) {
         batch: 4,
         reaper_interval: Duration::from_millis(10),
         working_timeout: Duration::from_secs(1),
+        scheduler_enabled: false,
+        trigger_interval: Duration::from_secs(3600),
     };
     spawn(pool.clone(), reg.clone(), cfg, cancel.clone());
 
@@ -891,6 +895,8 @@ async fn two_tickers_reclaim_an_expired_lease_once_and_leave_a_live_one(pool: sq
         batch: 4,
         reaper_interval: Duration::from_millis(10),
         working_timeout: Duration::from_secs(3600),
+        scheduler_enabled: false,
+        trigger_interval: Duration::from_secs(3600),
     };
     spawn(pool.clone(), reg.clone(), cfg, cancel.clone());
     spawn(pool.clone(), reg.clone(), cfg, cancel.clone());
@@ -985,4 +991,489 @@ fn the_config_default_working_timeout_equals_the_workers_own() {
          already past `working_timeout_s`, so running it more often reclaims \
          nothing sooner"
     );
+}
+
+// ── W12: the scheduler ticker ────────────────────────────────────────────────
+//
+// **Isolation.** A scheduler pass is global -- `fire_due` fires every due
+// trigger in the database it is pointed at, not just the calling test's. That
+// is safe here for the reason the claim tests above are: every test in this
+// file is a `#[sqlx::test]`, so each has a scratch database of its own and no
+// test's ticker can see another test's triggers. None of the tests above
+// declares a `triggers:` block (`one_task`, `one_task_with_retry` and
+// `a_lone_bounded_pause` are the only fixtures, and they start executions with
+// `flow_id = None`), and `fast()` leaves the scheduler off, so no existing test
+// ever runs the third ticker. The assertions below are per flow anyway.
+
+/// A one-task flow with a single `*/1 * * * *` schedule `s`.
+fn cron_flow(id: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntriggers:\n  - id: s\n    type: io.kestra.plugin.core.trigger.Schedule\n\
+         \x20   cron: \"*/1 * * * *\"\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n\
+         \x20   message: hi\n"
+    )
+}
+
+/// The scheduler-only variant of [`fast`]: the claim loop and reaper off, the
+/// scheduler on and ticking every `ms`.
+fn scheduler_only(ms: u64) -> RuntimeConfig {
+    RuntimeConfig {
+        enabled: false,
+        scheduler_enabled: true,
+        trigger_interval: Duration::from_millis(ms),
+        ..fast(10, 4)
+    }
+}
+
+/// A draft flow declaring [`cron_flow`]'s schedule, through `FlowRepo::create`,
+/// so `scheduler::sync` has already written its trigger row -- NOT yet due.
+async fn seed_cron_flow(pool: &sqlx::PgPool, id: &str) -> Uuid {
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::seed_flow(&db, ws, user, &cron_flow(id), "draft").await
+}
+
+async fn executions_of_flow(pool: &sqlx::PgPool, flow: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM workflow.executions WHERE flow_id = $1")
+        .bind(flow)
+        .fetch_one(pool)
+        .await
+        .expect("count the flow's executions")
+}
+
+/// **The shipping default is OFF, end to end**: the config a deployment that
+/// says nothing gets, carried into `spawn` the way `egret-bin` carries it, and a
+/// trigger that is due the whole time.
+///
+/// The worker is ON here, deliberately: the only gate left to stop the fire is
+/// the scheduler's own, so the zero is about that gate and nothing else.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_scheduler_is_off_by_default(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let parsed: egret_config::WorkflowConfig =
+        serde_json::from_str("{}").expect("an empty [workflow] section parses");
+    assert!(
+        !parsed.scheduler_enabled,
+        "**the ruling**: `scheduler_enabled` defaults to FALSE, for \
+         `worker_enabled`'s reason -- a loop that has never run in production \
+         is opt-in"
+    );
+    assert_eq!(parsed.trigger_interval_secs, 1);
+    assert_eq!(
+        parsed,
+        egret_config::Config::default().workflow,
+        "serde's fallback and the defaults layer must agree on every key"
+    );
+
+    let flow = seed_cron_flow(&pool, "off_by_default").await;
+    common::make_due(&Db { pool: pool.clone() }, flow, "s", 1).await;
+
+    let cancel = CancellationToken::new();
+    let cfg = RuntimeConfig {
+        scheduler_enabled: parsed.scheduler_enabled,
+        trigger_interval: Duration::from_millis(10),
+        ..fast(10, 4)
+    };
+    spawn(pool.clone(), Arc::new(Recorder::new()), cfg, cancel.clone());
+    // Twenty scheduler intervals; `interval` fires its first tick immediately.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    cancel.cancel();
+
+    assert_eq!(
+        executions_of_flow(&pool, flow).await,
+        0,
+        "a scheduler the config left off must fire nothing, although the \
+         trigger was due for all 200 ms"
+    );
+}
+
+/// **The scheduler's gate is its own**: scheduler on and worker off creates the
+/// execution, and nothing then runs it.
+///
+/// The half that is asserted is the one `if !cfg.enabled { return }` in front
+/// of all three tickers would break -- the execution must be **created**. The
+/// other half (it does not move) is what "worker off" means, and it is why the
+/// runtime warns at start.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_scheduler_gate_is_independent_of_the_worker_gate(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let flow = seed_cron_flow(&pool, "gates").await;
+    common::make_due(&Db { pool: pool.clone() }, flow, "s", 1).await;
+
+    let reg = Arc::new(Recorder::new());
+    let cancel = CancellationToken::new();
+    spawn(
+        pool.clone(),
+        reg.clone(),
+        scheduler_only(10),
+        cancel.clone(),
+    );
+
+    wait_until(
+        "the scheduler, with the worker off, to create the due tick's execution",
+        Duration::from_secs(5),
+        || async {
+            match executions_of_flow(&pool, flow).await {
+                0 => Err("no execution yet".into()),
+                _ => Ok(()),
+            }
+        },
+    )
+    .await;
+    let ex: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE flow_id = $1 AND scheduled_date IS NOT NULL",
+    )
+    .bind(flow)
+    .fetch_one(&pool)
+    .await
+    .expect("exactly one scheduled execution");
+    let created_as = execution_state(&pool, ex).await;
+
+    // Twenty claim intervals: a claim loop that had started would take the run
+    // on its first tick.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    cancel.cancel();
+
+    // The brief this test was written from said "stays CREATED". It does not
+    // START there: `start_execution_in` runs the execution's first settle, so
+    // a fresh execution is RUNNING with its first task run RUNNING and
+    // unleased -- exactly where a webhook-started one sits
+    // (`spawn_with_the_worker_disabled_never_calls_the_registry`).
+    assert_eq!(created_as, "RUNNING", "a fired schedule's first settle ran");
+    assert_eq!(run_state(&pool, ex, "a").await.as_deref(), Some("RUNNING"));
+    assert_eq!(
+        execution_state(&pool, ex).await,
+        created_as,
+        "and with the worker off nothing advances it"
+    );
+    assert_eq!(reg.seen(), Vec::new(), "no handler was called");
+    assert!(
+        lease_of(&pool, ex).await.is_none(),
+        "and no claim was issued: the lease is what a claim writes"
+    );
+}
+
+/// **Two replicas never fire one tick twice** -- the `SKIP LOCKED` claim of
+/// `scheduler/mod.rs`'s statement 1, under two tickers against one database.
+///
+/// Ten flows, each exactly three ticks behind: 30 ticks. Asserted on ROWS:
+/// every `(flow_id, scheduled_date)` appears once, the total is exactly 30, and
+/// each flow has exactly the three instants it was owed.
+///
+/// **And it says which mechanism held.** The unique index
+/// `workflow_executions_one_per_schedule_tick` is a backstop: a second fire of
+/// one tick fails on it, `fire_due` counts that as a consumed tick, and the rows
+/// come out identical. So the rows alone cannot tell "the lock excluded the
+/// second replica" from "the index absorbed its fire". A `BEFORE INSERT`
+/// trigger installed in this test's scratch database counts every *attempted*
+/// scheduled insert with `nextval`, which is non-transactional and so survives
+/// the savepoint rollback of an insert the index refused. Attempts == rows ==
+/// 30 means the lock held; attempts > rows means the index did the work.
+#[sqlx::test(migrations = "../../migrations")]
+async fn two_scheduler_tickers_never_fire_one_tick_twice(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let mut flows = Vec::new();
+    for i in 0..10 {
+        flows.push(seed_cron_flow(&pool, &format!("twice{i}")).await);
+    }
+
+    // The attempt counter. Its own sequence, in this test's scratch database.
+    for ddl in [
+        "CREATE SEQUENCE public.w12_fire_attempts",
+        "CREATE FUNCTION public.w12_count_fire() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN IF NEW.scheduled_date IS NOT NULL THEN \
+           PERFORM nextval('public.w12_fire_attempts'); END IF; RETURN NEW; END $$",
+        "CREATE TRIGGER w12_count_fire BEFORE INSERT ON workflow.executions \
+         FOR EACH ROW EXECUTE FUNCTION public.w12_count_fire()",
+    ] {
+        sqlx::query(ddl)
+            .execute(&pool)
+            .await
+            .expect("install the attempt counter");
+    }
+
+    // One minute guard for all ten, not ten: `make_due`'s own guard is per
+    // call, so ten calls straddling a boundary would owe the first flows a
+    // fourth tick. Twenty seconds of margin, then every row is set in one
+    // statement from the first one's date.
+    let sec: f64 = sqlx::query_scalar("SELECT extract(second FROM now())::float8")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    if sec >= 40.0 {
+        tokio::time::sleep(Duration::from_secs_f64(60.5 - sec)).await;
+    }
+    common::make_due(&db, flows[0], "s", 3).await;
+    let n = sqlx::query(
+        "UPDATE workflow.triggers SET next_evaluation_date = \
+           (SELECT next_evaluation_date FROM workflow.triggers WHERE flow_id = $1) \
+         WHERE flow_id = ANY($2) AND trigger_id = 's'",
+    )
+    .bind(flows[0])
+    .bind(&flows[1..])
+    .execute(&pool)
+    .await
+    .unwrap()
+    .rows_affected();
+    assert_eq!(n, 9);
+    let first: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT next_evaluation_date FROM workflow.triggers WHERE flow_id = $1")
+            .bind(flows[0])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let owed: Vec<_> = (0..3)
+        .map(|k| first + chrono::Duration::minutes(k))
+        .collect();
+
+    let cancel = CancellationToken::new();
+    let reg = Arc::new(Recorder::new());
+    spawn(pool.clone(), reg.clone(), scheduler_only(5), cancel.clone());
+    spawn(pool.clone(), reg.clone(), scheduler_only(5), cancel.clone());
+
+    let total = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.executions \
+              WHERE flow_id = ANY($1) AND scheduled_date IS NOT NULL",
+        )
+        .bind(&flows)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    wait_until(
+        "30 scheduled executions",
+        Duration::from_secs(10),
+        || async {
+            match total().await {
+                30.. => Ok(()),
+                n => Err(format!("{n} of 30")),
+            }
+        },
+    )
+    .await;
+    // Let an in-flight pass finish: nothing else is due until the next minute,
+    // so a pass that is still running can only add a double fire.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    cancel.cancel();
+
+    let dup: Vec<(Uuid, chrono::DateTime<chrono::Utc>, i64)> = sqlx::query_as(
+        "SELECT flow_id, scheduled_date, count(*) FROM workflow.executions \
+          WHERE flow_id = ANY($1) AND scheduled_date IS NOT NULL \
+          GROUP BY flow_id, scheduled_date HAVING count(*) > 1",
+    )
+    .bind(&flows)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let attempts: i64 = sqlx::query_scalar(
+        "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM public.w12_fire_attempts",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let rows = total().await;
+    eprintln!(
+        "two_scheduler_tickers: rows = {rows}, insert attempts = {attempts}, \
+         absorbed by the unique index = {}",
+        attempts - rows
+    );
+
+    assert_eq!(
+        dup,
+        Vec::new(),
+        "one tick fired twice: (flow, tick, executions). Neither the claim's \
+         lock nor the unique index held"
+    );
+    assert_eq!(rows, 30, "ten flows owed three ticks each");
+    for f in &flows {
+        assert_eq!(
+            common::scheduled_dates(&db, *f).await,
+            owed,
+            "each flow gets exactly the three instants it was owed"
+        );
+    }
+    assert_eq!(
+        attempts,
+        rows,
+        "the rows are right, but {} double fire(s) reached the INSERT and were \
+         absorbed by `workflow_executions_one_per_schedule_tick`: the claim's \
+         `FOR UPDATE OF t SKIP LOCKED` did not exclude the second replica. The \
+         index is the backstop, not the mechanism",
+        attempts - rows
+    );
+}
+
+/// **The end to end: a `cron:` runs to SUCCESS with nothing in this test
+/// driving it.** No call to `tick`, `fire_due` or `claim` below -- only
+/// `spawn`, the production handlers, and the database.
+///
+/// The control runs first against the same due trigger: the worker on and the
+/// scheduler off must leave the flow with no execution at all, so the SUCCESS
+/// after it is the scheduler's doing and not something the fixture created.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cron_runs_to_success_with_nothing_driving_it(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let flow = seed_cron_flow(&pool, "e2e").await;
+    common::make_due(&Db { pool: pool.clone() }, flow, "s", 1).await;
+    let handlers = Arc::new(egret_workflow::worker::Handlers::with_core_tasks());
+    let cfg = |scheduler_enabled| RuntimeConfig {
+        scheduler_enabled,
+        trigger_interval: Duration::from_millis(50),
+        ..fast(50, 8)
+    };
+
+    // ── control: the scheduler off ──
+    let cancel = CancellationToken::new();
+    spawn(pool.clone(), handlers.clone(), cfg(false), cancel.clone());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    cancel.cancel();
+    assert_eq!(
+        executions_of_flow(&pool, flow).await,
+        0,
+        "the control: with the scheduler off, a due cron creates nothing"
+    );
+
+    // ── the real thing ──
+    let cancel = CancellationToken::new();
+    spawn(pool.clone(), handlers.clone(), cfg(true), cancel.clone());
+    wait_until(
+        "a scheduled execution of the cron flow to reach SUCCESS",
+        Duration::from_secs(15),
+        || async {
+            let states: Vec<String> = sqlx::query_scalar(
+                "SELECT state FROM workflow.executions \
+                  WHERE flow_id = $1 AND scheduled_date IS NOT NULL",
+            )
+            .bind(flow)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            if states.iter().any(|s| s == "SUCCESS") {
+                Ok(())
+            } else {
+                Err(format!("scheduled executions: {states:?}"))
+            }
+        },
+    )
+    .await;
+    cancel.cancel();
+}
+
+/// **`sync`'s upsert, meeting a trigger a pass has claimed, WAITS -- and the
+/// advance the pass commits survives the save.** `scheduler/mod.rs`'s
+/// statement on `sync`.
+///
+/// The pass is held inside its transaction, after the claim and at its final
+/// `UPDATE`, by a `BEFORE UPDATE` trigger (this test's scratch database only)
+/// that sleeps whenever a row's date *moves* -- which the pass's advance does
+/// and a save with an unchanged `spec_key` does not. A save of the same flow is
+/// then started, and it is observed **blocked on a lock** in
+/// `pg_stat_activity` rather than inferred from timing. When the pass commits,
+/// the save proceeds, reads the advanced row, and keeps its dates: the trigger
+/// is one tick ahead, not rewound to the date the save could have read before.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let flow = common::seed_flow(&db, ws, user, &cron_flow("wait"), "draft").await;
+    common::make_due(&db, flow, "s", 1).await;
+    let due: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT next_evaluation_date FROM workflow.triggers WHERE flow_id = $1")
+            .bind(flow)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for ddl in [
+        "CREATE FUNCTION public.w12_hold() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN IF NEW.next_evaluation_date IS DISTINCT FROM OLD.next_evaluation_date THEN \
+           PERFORM pg_sleep(1); END IF; RETURN NEW; END $$",
+        "CREATE TRIGGER w12_hold BEFORE UPDATE ON workflow.triggers \
+         FOR EACH ROW EXECUTE FUNCTION public.w12_hold()",
+    ] {
+        sqlx::query(ddl)
+            .execute(&pool)
+            .await
+            .expect("install the hold");
+    }
+    let backends = |what: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM pg_stat_activity \
+                  WHERE datname = current_database() AND pid <> pg_backend_pid() \
+                    AND wait_event_type = $1",
+            )
+            .bind(what)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    let pass = {
+        let pool = pool.clone();
+        tokio::spawn(async move { egret_workflow::scheduler::fire_due(&pool).await })
+    };
+    wait_until(
+        "the pass to be held inside its transaction, at its final UPDATE",
+        Duration::from_secs(5),
+        || async {
+            match backends("Timeout").await {
+                0 => Err("no backend in pg_sleep".into()),
+                _ => Ok(()),
+            }
+        },
+    )
+    .await;
+
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let edited = cron_flow("wait").replace("message: hi", "message: edited");
+    let save = tokio::spawn(async move {
+        repo.update(
+            ws,
+            flow,
+            user,
+            &egret_workflow::UpdateFlowInput {
+                source: Some(edited),
+                plan: Some(serde_json::json!({})),
+                ..Default::default()
+            },
+        )
+        .await
+    });
+    wait_until(
+        "the save's `sync` to be blocked on the claimed trigger's row lock",
+        Duration::from_secs(5),
+        || async {
+            match backends("Lock").await {
+                0 => Err("no backend waiting on a lock".into()),
+                _ => Ok(()),
+            }
+        },
+    )
+    .await;
+    assert!(!save.is_finished(), "the save must still be waiting");
+
+    let report = pass.await.unwrap().expect("the pass");
+    assert_eq!(report.fired, 1, "{report:?}");
+    save.await
+        .unwrap()
+        .expect("the save, once the pass committed");
+
+    let after: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT next_evaluation_date FROM workflow.triggers WHERE flow_id = $1")
+            .bind(flow)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after,
+        due + chrono::Duration::minutes(1),
+        "the save kept the pass's advance rather than rewinding to the date it \
+         would have read before the pass committed"
+    );
+    assert_eq!(executions_of_flow(&pool, flow).await, 1);
 }

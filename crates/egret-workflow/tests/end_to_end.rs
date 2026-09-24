@@ -167,6 +167,8 @@ fn cfg(enabled: bool) -> RuntimeConfig {
         batch: 8,
         reaper_interval: Duration::from_secs(3600),
         working_timeout: Duration::from_secs(3600),
+        scheduler_enabled: false,
+        trigger_interval: Duration::from_secs(3600),
     }
 }
 

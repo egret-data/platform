@@ -451,8 +451,9 @@ fn default_starrocks() -> StarRocksSettings {
 /// `[workflow]` — what a deployment may switch on or off about the workflow
 /// engine.
 ///
-/// Six keys: the webhook exposure lever (W6 Task 7) and the five the runtime
-/// loops read (W10 Task 2). It is a section rather than a bare env var because
+/// Eight keys: the webhook exposure lever (W6 Task 7), the five the runtime
+/// loops read (W10 Task 2) and the scheduler's two (W12). It is a section
+/// rather than a bare env var because
 /// **`EGRET_<SECTION>__<KEY>` is this deployment's convention**
 /// (`EGRET_CATALOG__ENABLED`, `EGRET_OIDC__ENABLED`, `EGRET_RANGER__ENABLED`
 /// in `deploy/helm/egret/templates/configmap-env.yaml`), and W6 Task 7 fix
@@ -540,6 +541,29 @@ pub struct WorkflowConfig {
     /// ships as the timeout a run is measured against.
     #[serde(default = "default_working_timeout_s")]
     pub working_timeout_s: u64,
+
+    /// **The switch that makes `cron:` schedule triggers fire (W12), and it
+    /// defaults to `false` for [`WorkflowConfig::worker_enabled`]'s argument.**
+    ///
+    /// It starts the third ticker in `egret_workflow::runtime::spawn`, which
+    /// calls `scheduler::fire_due`: every due `Schedule` trigger creates its
+    /// execution. With it off, `workflow.triggers` is still kept in step with
+    /// every flow save, and nothing reads it.
+    ///
+    /// **Independent of `worker_enabled`**, in both directions: a replica may
+    /// run the claim loop without firing schedules, and one may fire schedules
+    /// without running anything -- which creates executions nobody advances, so
+    /// that combination logs a warning at start.
+    /// `EGRET_WORKFLOW__SCHEDULER_ENABLED=true`.
+    #[serde(default = "default_scheduler_enabled")]
+    pub scheduler_enabled: bool,
+
+    /// Seconds between scheduler passes. A pass evaluates every due trigger
+    /// once, so this is the latency between a cron instant and its execution,
+    /// and -- for a trigger that is behind -- the catch-up rate: one tick per
+    /// trigger per pass.
+    #[serde(default = "default_trigger_interval_secs")]
+    pub trigger_interval_secs: u64,
 }
 
 /// `false` — see [`WorkflowConfig::worker_enabled`]. A named function rather
@@ -576,6 +600,16 @@ fn default_working_timeout_s() -> u64 {
     3600
 }
 
+/// `false` -- see [`WorkflowConfig::scheduler_enabled`].
+fn default_scheduler_enabled() -> bool {
+    false
+}
+
+/// `1` -- see [`WorkflowConfig::trigger_interval_secs`].
+fn default_trigger_interval_secs() -> u64 {
+    1
+}
+
 /// Serde's fallback for a `[workflow]` section a deployment's TOML predates.
 ///
 /// Every value is the field's own `default_*` function, so the defaults layer
@@ -595,6 +629,8 @@ fn default_workflow() -> WorkflowConfig {
         batch: default_batch(),
         reaper_interval_secs: default_reaper_interval_secs(),
         working_timeout_s: default_working_timeout_s(),
+        scheduler_enabled: default_scheduler_enabled(),
+        trigger_interval_secs: default_trigger_interval_secs(),
     }
 }
 
