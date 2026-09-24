@@ -13,7 +13,7 @@ pub mod store;
 
 pub use actions::{engine_accesses, CompileError, EngineType};
 pub use assignment::{sync_assignment_grants, sync_assignment_grants_in_tx};
-pub use compile::{compile_grant, compile_rule, TaggedColumn};
+pub use compile::{compile_grant, compile_rule, ResolvedNames, TaggedColumn};
 pub use error::PermError;
 pub use eval::{evaluate, Decision, Reason, Subject};
 pub use model::{

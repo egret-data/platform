@@ -181,6 +181,22 @@ pub enum RuleKind {
 }
 
 /// One row of `perm.rules` plus its exemption set (`perm.rule_exemptions`).
+///
+/// **`exempt` is a full `PrincipalSet`, including `exclude`, but the
+/// compiler cannot express `exclude` here.** The model, the store, and the
+/// OpenAPI schema all accept it — `perm.rule_exemptions` has the same
+/// `mode` column `perm.grant_principals` does, precisely so "exempt this
+/// whole group except these people" round-trips the way a grant's subtract
+/// does. But `compile::rules::compile_rule` refuses any `Rule` whose
+/// `exempt.exclude` is non-empty (`CompileError::UnexpressibleExemption`):
+/// unlike an access-policy item, a Ranger masking/row-filter item
+/// (`MaskItemInput`/`RowFilterItemInput`) has no allow/deny-exception block
+/// to put a subtract in, so there is no correct Ranger shape for it. The
+/// same is true of a `Role` principal in `exempt` (those item types have no
+/// `roles` bucket at all). This makes `exempt.exclude`/`Role` an authorable,
+/// storable shape that can never compile — a limitation an authoring UI
+/// should surface when the rule is written, not one a steward discovers as
+/// a 500 the first time the rule is compiled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Rule {
     pub id: Uuid,

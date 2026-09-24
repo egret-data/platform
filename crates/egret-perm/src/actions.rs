@@ -118,6 +118,25 @@ pub enum CompileError {
     /// service itself; the caller must resolve and pass it.
     #[error("rule {rule:?} selects by tag but no tag_service was given for Trino")]
     MissingTagService { rule: String },
+    /// A tag-selected rule with `resolved.tag_name == None`. Fixed in the
+    /// round-1 review (Critical 1): the first signature of `compile_rule`
+    /// took no resolved tag name at all, so the compiler stamped
+    /// `Selector::Tag`'s `key` straight into the policy — but egret's own
+    /// tag download pushes `tags.name`, a separate, mutable column
+    /// (`egret-policy/src/store.rs:245` → `egret-policy-api/src/dto.rs:184`;
+    /// `migrations/0080_tags.sql`), so a policy keyed on `key` deployed
+    /// cleanly, was listed by Ranger, and matched no resource. Refusing here
+    /// is the only correct move — falling back to the key is exactly the
+    /// silent mis-stamp that caused the defect.
+    #[error("rule {rule:?} selects by tag but no resolved tag name was given")]
+    MissingTagName { rule: String },
+    /// The embedded service-def JSON (`egret-policy::{trino,starrocks}_service_def`)
+    /// failed to parse. Should be impossible — `egret-policy`'s own tests
+    /// pin that the embedded `include_str!` parses — but this compiler
+    /// returns `CompileError` for every other failure and a `.expect()`
+    /// here would be the one path that panics instead.
+    #[error("{engine:?}'s embedded service-def failed to parse: {detail}")]
+    ServiceDefUnreadable { engine: EngineType, detail: String },
     /// A rule's `exempt` set names something a masking/row-filter Ranger
     /// item cannot express: a non-empty `exempt.exclude` (those items carry
     /// no allow/deny-exception block the way an access-policy item does —

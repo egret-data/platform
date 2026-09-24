@@ -51,6 +51,21 @@
 //! Ranger source, is grounded in Apache's own documentation but has not been
 //! checked against the live plugin from this worktree. Flagged as a live
 //! check alongside the ones `grants.rs` and its round-1 fix already named.
+//!
+//! **`ResolvedNames` (added in the round-1 review fix, Criticals 1 and 2).**
+//! The first version of `compile_rule` took no resolved name at all: a tag
+//! selector stamped `Selector::Tag`'s `key` straight into the tag policy, and
+//! a path selector stamped `scope.catalog_id`'s raw UUID as the catalog
+//! resource. Both deploy cleanly, are listed by Ranger, and match no
+//! resource — egret's own tag download pushes `tags.name` (a separate,
+//! mutable column from `tags.key`;
+//! `egret-policy/src/store.rs:245` → `egret-policy-api/src/dto.rs:184`;
+//! `migrations/0080_tags.sql`), and every engine identifies a catalog by
+//! name, never by id. Spec D6 ("resolves key → name and id → name at compile
+//! time") named both halves; the original signature carried neither. The
+//! compiler still does no I/O — `ResolvedNames` is caller-resolved, and a
+//! tag selector with `tag_name: None` refuses rather than falling back to
+//! the key.
 
 use std::collections::BTreeMap;
 
@@ -64,7 +79,7 @@ use egret_policy::admin::{
 use egret_policy::{starrocks_service_def, trino_service_def};
 
 use crate::actions::{CompileError, EngineType};
-use crate::compile::grants::{level, resource_level_names, scope_to_resources};
+use crate::compile::grants::{level, resource_level_names, scope_to_resources, validate_user_ref};
 use crate::model::{PrincipalKind, PrincipalSet, Rule, RuleKind, Selector};
 
 /// One column carrying the tag a rule selects on, resolved by the CALLER —
@@ -80,17 +95,31 @@ pub struct TaggedColumn {
     pub column: String,
 }
 
+/// The engine-facing names `compile_rule` cannot resolve itself (no registry
+/// or tag I/O in this compiler). `catalog_name` is used only for a `Path`
+/// selector (`compile_grant`'s equivalent parameter); `tag_name` is used
+/// only for a `Tag` selector, and MUST be the tag's `tags.name` — never
+/// `tags.key`, which is stable but not what the Ranger tag plugin matches on
+/// (D6). A `Tag`-selector rule with `tag_name: None` is a `CompileError`
+/// (`MissingTagName`), never a silent fallback to the key.
+pub struct ResolvedNames<'a> {
+    pub catalog_name: &'a str,
+    pub tag_name: Option<&'a str>,
+}
+
 /// Compile one `Rule` into the Ranger masking/row-filter JSON bodies for
 /// engine `e`.
 ///
 /// - A tag selector on Trino compiles to exactly one tag policy, covering
 ///   whatever the plugin currently resolves the tag to (D5) —
-///   `tag_service` must be `Some`.
+///   `tag_service` and `resolved.tag_name` must both be `Some`.
 /// - A tag selector on StarRocks compiles to one policy per entry in
 ///   `tagged`, refusing with `CompileError::ExpansionCeiling` if that would
-///   exceed `ceiling`.
+///   exceed `ceiling` (`resolved.tag_name` must still be `Some` — see the
+///   module doc comment).
 /// - A path selector compiles to exactly one policy on either engine, at
-///   `r`'s own scope (`tagged`/`ceiling` are unused on this path).
+///   `r`'s own scope with `resolved.catalog_name` as the catalog resource
+///   (`tagged`/`ceiling`/`resolved.tag_name` are unused on this path).
 ///
 /// `service` is the target Ranger service name stamped onto the body (for a
 /// tag policy, `tagify` overwrites it with `tag_service` regardless of what
@@ -100,6 +129,7 @@ pub fn compile_rule(
     e: EngineType,
     service: &str,
     tag_service: Option<&str>,
+    resolved: &ResolvedNames,
     tagged: &[TaggedColumn],
     ceiling: usize,
 ) -> Result<Vec<Value>, CompileError> {
@@ -118,13 +148,32 @@ pub fn compile_rule(
     }
 
     match (&r.selector, e) {
-        (Selector::Tag { key }, EngineType::Trino) => {
+        (Selector::Tag { .. }, EngineType::Trino) => {
+            let tag_name = resolved
+                .tag_name
+                .ok_or_else(|| CompileError::MissingTagName {
+                    rule: r.name.clone(),
+                })?;
             let svc = tag_service.ok_or_else(|| CompileError::MissingTagService {
                 rule: r.name.clone(),
             })?;
-            Ok(vec![build_tag_body(r, service, key, svc)?])
+            Ok(vec![build_tag_body(r, service, tag_name, svc)?])
         }
         (Selector::Tag { .. }, EngineType::StarRocks) => {
+            // StarRocks' compiled body never carries the tag itself (each
+            // policy is addressed by its own column path — see
+            // `column_resources`), but a caller that hasn't resolved the
+            // tag name has not done the resolution step D6 requires either,
+            // and `tagged` being pre-filtered to the RIGHT tag is exactly
+            // the invariant `resolved.tag_name` stands for. Checked here too
+            // rather than only on the Trino path, so this branch can't
+            // silently proceed on a caller bug the Trino branch would have
+            // caught.
+            if resolved.tag_name.is_none() {
+                return Err(CompileError::MissingTagName {
+                    rule: r.name.clone(),
+                });
+            }
             if tagged.len() > ceiling {
                 return Err(CompileError::ExpansionCeiling {
                     rule: r.name.clone(),
@@ -145,14 +194,7 @@ pub fn compile_rule(
                 .collect()
         }
         (Selector::Path(scope), _) => {
-            // No catalog-NAME parameter reaches this function (unlike
-            // `compile_grant`'s explicit `catalog_name`) — flagged in the
-            // Task 5 report as a real gap: this stamps the catalog's raw
-            // UUID as the Ranger catalog resource value, which will not
-            // match anything a real engine sends. Path-selector rules are
-            // not exercised by any test in this task.
-            let catalog_name = scope.catalog_id.to_string();
-            let resources = scope_to_resources(scope, &catalog_name, e);
+            let resources = scope_to_resources(scope, resolved.catalog_name, e);
             let name = format!("perm-rule-{}", r.id);
             Ok(vec![build_body(r, e, service, name, resources)?])
         }
@@ -281,14 +323,19 @@ fn stamp_service_type(mut body: Value, e: EngineType) -> Value {
 /// JSON (no I/O — `trino_service_def`/`starrocks_service_def` parse a
 /// `include_str!`), not trusted from a table, because a name the plugin does
 /// not know is silently ignored: the policy compiles, deploys, and masks
-/// nothing.
-fn declared_mask_types(e: EngineType) -> Vec<String> {
+/// nothing. Returns `CompileError::ServiceDefUnreadable` rather than
+/// panicking if the embedded JSON somehow fails to parse — every other
+/// failure in this module is a `CompileError`, not a `.expect()`.
+fn declared_mask_types(e: EngineType) -> Result<Vec<String>, CompileError> {
     let def = match e {
         EngineType::Trino => trino_service_def(),
         EngineType::StarRocks => starrocks_service_def(),
     }
-    .expect("embedded service-def must parse — pinned by egret-policy's own tests");
-    def["dataMaskDef"]["maskTypes"]
+    .map_err(|err| CompileError::ServiceDefUnreadable {
+        engine: e,
+        detail: err.to_string(),
+    })?;
+    Ok(def["dataMaskDef"]["maskTypes"]
         .as_array()
         .map(|types| {
             types
@@ -296,7 +343,7 @@ fn declared_mask_types(e: EngineType) -> Vec<String> {
                 .filter_map(|t| t["name"].as_str().map(str::to_string))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 fn ensure_mask_type_declared(
@@ -304,7 +351,7 @@ fn ensure_mask_type_declared(
     mask_type: &str,
     e: EngineType,
 ) -> Result<(), CompileError> {
-    if declared_mask_types(e).iter().any(|m| m == mask_type) {
+    if declared_mask_types(e)?.iter().any(|m| m == mask_type) {
         Ok(())
     } else {
         Err(CompileError::UnsupportedMaskType {
@@ -348,15 +395,24 @@ fn invalid_custom_mask(rule_name: &str, expr: &str) -> CompileError {
     }
 }
 
+/// The literal group ref the compiler itself uses to mean "everyone" (see
+/// `mask_items`/`rowfilter_items`). An exempt principal naming this SAME
+/// group would carry `MASK_NONE`/an empty filter for "everyone", exempting
+/// every principal from the rule — the one fail-open this exempt design
+/// otherwise avoids by refusing everything it cannot express correctly.
+const PUBLIC_GROUP: &str = "public";
+
 /// Bucket a rule's exempt principals into (users, groups) for a
 /// masking/row-filter item. Those Ranger item shapes
 /// (`MaskItemInput`/`RowFilterItemInput`, `ranger_json.rs`) carry neither a
 /// `roles` bucket (unlike `AccessItemInput`) nor an exception/subtract block
 /// the way access-policy items do (`allowExceptions`/`denyExceptions`) — so
 /// a `Role` principal or a non-empty `exempt.exclude` cannot be compiled
-/// here and refuse via `CompileError::UnexpressibleExemption`.
-/// `WorkspaceMembers` refuses for the same not-yet-expanded reason
-/// `compile_grant` refuses it (Task 6; `CompileError::UnexpandedPrincipalKind`).
+/// here and refuse via `CompileError::UnexpressibleExemption`, and neither
+/// can an exempt `Group` principal literally named `"public"` (see
+/// `PUBLIC_GROUP`). `WorkspaceMembers` refuses for the same not-yet-expanded
+/// reason `compile_grant` refuses it (Task 6;
+/// `CompileError::UnexpandedPrincipalKind`).
 fn exempt_principals(rule: &Rule) -> Result<(Vec<String>, Vec<String>), CompileError> {
     let exempt: &PrincipalSet = &rule.exempt;
     if !exempt.exclude.is_empty() {
@@ -372,14 +428,22 @@ fn exempt_principals(rule: &Rule) -> Result<(Vec<String>, Vec<String>), CompileE
     for p in &exempt.include {
         match p.kind {
             PrincipalKind::User => {
-                if p.r#ref.is_empty() || p.r#ref.contains('@') {
-                    return Err(CompileError::UnusableUserRef {
-                        r#ref: p.r#ref.clone(),
-                    });
-                }
+                validate_user_ref(&p.r#ref)?;
                 users.push(p.r#ref.clone());
             }
-            PrincipalKind::Group => groups.push(p.r#ref.clone()),
+            PrincipalKind::Group => {
+                if p.r#ref == PUBLIC_GROUP {
+                    return Err(CompileError::UnexpressibleExemption {
+                        rule: rule.name.clone(),
+                        reason: format!(
+                            "an exempt group literally named {PUBLIC_GROUP:?} would exempt \
+                             everyone — that name is what this compiler's own \"applies to \
+                             everyone\" item already uses"
+                        ),
+                    });
+                }
+                groups.push(p.r#ref.clone());
+            }
             PrincipalKind::Role => {
                 return Err(CompileError::UnexpressibleExemption {
                     rule: rule.name.clone(),
@@ -416,7 +480,7 @@ fn mask_items(
     }
     items.push(MaskItemInput {
         users: Vec::new(),
-        groups: vec!["public".to_string()],
+        groups: vec![PUBLIC_GROUP.to_string()],
         mask_type: mask_type.to_string(),
         value_expr: value_expr.clone(),
     });
@@ -442,7 +506,7 @@ fn rowfilter_items(
     }
     items.push(RowFilterItemInput {
         users: Vec::new(),
-        groups: vec!["public".to_string()],
+        groups: vec![PUBLIC_GROUP.to_string()],
         filter_expr: filter_expr.to_string(),
     });
     Ok(items)

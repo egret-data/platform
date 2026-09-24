@@ -65,12 +65,26 @@ use egret_policy::admin::{AccessItemInput, AccessPolicyInput, ResourceLevel};
 use crate::actions::{engine_accesses, CompileError, EngineType};
 use crate::model::{Effect, Grant, Principal, PrincipalKind, Scope};
 
+/// The one check every `User` ref gets before it is emitted, shared by
+/// `principal_item` here and `compile::rules::exempt_principals` — the two
+/// places this compiler ever buckets a `User` principal. A `User` ref is
+/// emitted verbatim (see module doc comment) after being checked for the two
+/// shapes that prove it was never resolved to a bare `users.username`: empty,
+/// or containing `@`.
+pub(crate) fn validate_user_ref(r#ref: &str) -> Result<(), CompileError> {
+    if r#ref.is_empty() || r#ref.contains('@') {
+        Err(CompileError::UnusableUserRef {
+            r#ref: r#ref.to_string(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
 /// Sort principals in `refs` into a Ranger item's `users`/`groups`/`roles`
-/// buckets and set `effect`/`accesses` on it. `User` refs are emitted
-/// verbatim (see module doc comment) after being checked for the two shapes
-/// that prove they were never resolved to a bare `users.username`: empty, or
-/// containing `@`. Any `WorkspaceMembers` principal refuses the whole
-/// compile rather than being silently dropped (module doc comment).
+/// buckets and set `effect`/`accesses` on it. Any `WorkspaceMembers`
+/// principal refuses the whole compile rather than being silently dropped
+/// (module doc comment).
 fn principal_item(
     refs: &[Principal],
     effect: Effect,
@@ -82,11 +96,7 @@ fn principal_item(
     for p in refs {
         match p.kind {
             PrincipalKind::User => {
-                if p.r#ref.is_empty() || p.r#ref.contains('@') {
-                    return Err(CompileError::UnusableUserRef {
-                        r#ref: p.r#ref.clone(),
-                    });
-                }
+                validate_user_ref(&p.r#ref)?;
                 users.push(p.r#ref.clone());
             }
             PrincipalKind::Group => groups.push(p.r#ref.clone()),
