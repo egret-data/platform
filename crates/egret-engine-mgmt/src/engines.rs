@@ -3014,10 +3014,11 @@ async fn create_engine(
     // 11. Bring the bound profile's compiled `perm` policies up to date
     //     (SP4a Task 9 review). Here, at the END, and not next to
     //     `bind_trino_profile` in step 8: the compiler's desired set is derived
-    //     from the catalogs the profile's engines REACH, and this engine's
-    //     catalogs are attached in steps 5 and 10 — a recompile at bind time
-    //     would see none of them and compile nothing, which is the staleness it
-    //     exists to remove. Never fails the create; see
+    //     from the catalogs the profile's engines REACH, and the non-primary
+    //     ones are not attached until step 10. A recompile at bind time would
+    //     see the primary catalog (step 7, before the bind) but none of the
+    //     others, and would compile an INCOMPLETE set — a subtler form of the
+    //     staleness it exists to remove. Never fails the create; see
     //     `profile_compiler::recompile_bound_profile`.
     crate::profile_compiler::recompile_bound_profile(&st, engine.id, &engine.name).await;
 
