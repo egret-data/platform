@@ -95,6 +95,37 @@ pub fn is_compiler_owned_policy_name(name: &str) -> bool {
     name.starts_with(COMPILER_GRANT_PREFIX) || name.starts_with(COMPILER_RULE_PREFIX)
 }
 
+/// SP4a Task 8 fix round 3: refuse a human write that would put (or leave) a
+/// policy NAME under the compiler's reserved prefix (`COMPILER_GRANT_PREFIX`/
+/// `COMPILER_RULE_PREFIX`) — in ANY profile, `manual` or `generated`. Pure
+/// (no DB access): the fact under test is the string alone.
+///
+/// This exists because the profile/policy-origin guards above cannot close
+/// the round-2 report's finding: a human names a policy `perm-grant-foo` in
+/// a still-`manual` profile (`create_policy`'s origin check does not yet
+/// fire — the profile isn't `generated` yet), and the FIRST real recompile
+/// that ever reaches this service silently deletes it in the same
+/// transaction that stamps the profile `generated` (`apply_diff_in_tx`'s
+/// existing-state sweep matches on name alone, with or without a
+/// `perm.compiled` provenance row — Task 7 fix round 1's own Critical fix,
+/// which this reservation deliberately does NOT try to re-litigate: making
+/// the collision UNREPRESENTABLE at the only human entry point is simpler
+/// and strictly stronger than teaching the sweep to defend against it).
+///
+/// Deliberately does not require `origin = 'generated'`: a `manual` profile
+/// is exactly the case the round-2 report showed getting silently
+/// steamrolled, so gating this on `origin` would reopen the same hole.
+fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
+    if is_compiler_owned_policy_name(name) {
+        return Err(PolicyStoreError::CompilerOwned(format!(
+            "policy name {name:?} starts with a prefix reserved for the SP4a permission model \
+             ({COMPILER_GRANT_PREFIX:?} / {COMPILER_RULE_PREFIX:?}) — only its compiler writes \
+             policies there; rename this policy instead of retrying"
+        )));
+    }
+    Ok(())
+}
+
 /// SP4a Task 8 (D4): refuse adding brand-new content to a profile the
 /// permission-model compiler has claimed (`origin = 'generated'`, migration
 /// 0155) — used only by `create_policy` and
@@ -638,6 +669,11 @@ impl PolicyStore {
         name: &str,
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
+        // Fix round 3: reserved-namespace check first — pure, no DB needed,
+        // and applies regardless of this service's `origin` (see
+        // `refuse_reserved_name`'s doc comment for why `manual` is not
+        // exempt).
+        refuse_reserved_name(name)?;
         let mut tx = self.db.pool.begin().await?;
         if let Err(e) = refuse_if_generated(&mut tx, service_id).await {
             tx.rollback().await?;
@@ -724,6 +760,22 @@ impl PolicyStore {
             return Err(PolicyStoreError::NotFound(format!("policy {id}")));
         };
         if let Err(e) = refuse_if_compiler_owned(&mut tx, service_id, &current_name).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
+        // Fix round 3: reserved-namespace check on the NEW/target name, AFTER
+        // the ownership check above — an already-owned policy (caught above,
+        // whatever `name` the caller resent) gets the ownership-specific
+        // message ("this is compiler-owned, edit the grant/rule"), which is
+        // both more accurate and less confusing than "rename this" for a
+        // name the compiler itself is the one using legitimately. This check
+        // is what catches the round-2 finding's OTHER vector instead: a
+        // human renaming an ordinary (not-yet-owned) policy INTO the
+        // compiler's namespace, in ANY profile including `manual` — where
+        // the ownership check above does not fire at all (it requires
+        // `origin = 'generated'`, and the whole point of the round-2 finding
+        // was that a `manual` profile is not yet flagged as anything).
+        if let Err(e) = refuse_reserved_name(name) {
             tx.rollback().await?;
             return Err(e);
         }

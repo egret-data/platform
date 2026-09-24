@@ -937,3 +937,112 @@ async fn a_real_recompile_stamps_the_profile_generated_only_once_it_compiles_som
          origin = 'generated' — through recompile_service, not a hand-written UPDATE"
     );
 }
+
+/// SP4a Task 8 fix round 3: `egret-policy::store::create_policy`/`update_policy`
+/// now refuse any human write whose NAME carries the compiler's own reserved
+/// prefix (`COMPILER_GRANT_PREFIX`/`COMPILER_RULE_PREFIX`), in any profile.
+/// The compiler itself must be completely unaffected — `apply_diff_in_tx`
+/// writes `policy.authz_policies` with its own raw `sqlx::query` calls
+/// directly against its own transaction, never through `PolicyStore`'s
+/// guarded methods, so the new reservation cannot reach it. Proven here with
+/// a REAL `recompile_service` call (not a hand INSERT) that still produces
+/// (and can update) a `perm-grant-…`-named policy after the round-3 change.
+#[tokio::test]
+async fn the_compiler_itself_still_writes_reserved_prefix_policies_after_the_reservation() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks_engine_no_grants_yet(&db).await;
+    let pool = &db.pool;
+
+    let grant = Grant {
+        id: Uuid::nil(),
+        effect: Effect::Allow,
+        actions: vec![Action::Read],
+        scope: Scope {
+            catalog_id: f.catalog_id,
+            schema: None,
+            table: None,
+            column: None,
+        },
+        principals: PrincipalSet {
+            include: vec![Principal {
+                kind: PrincipalKind::User,
+                r#ref: "carol".into(),
+            }],
+            exclude: vec![],
+        },
+        origin: GrantOrigin::Explicit,
+    };
+    let grant_id = f.perm.create_grant(&grant).await.expect("create grant");
+
+    let summary = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("the compiler's own write path must not be blocked by the reservation it owns");
+    assert_eq!(summary.created, 1, "the grant must compile to one policy");
+
+    let expected_name = format!("perm-grant-{grant_id}");
+    let row: Option<(i64, String)> = sqlx::query_as(
+        "SELECT id, name FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(f.service_id)
+    .bind(&expected_name)
+    .fetch_optional(pool)
+    .await
+    .expect("query");
+    assert!(
+        row.is_some(),
+        "the compiler must still be able to write a policy named with its own reserved \
+         prefix ({expected_name:?}); row={row:?}"
+    );
+
+    // And it can still be UPDATED by a second recompile (the grant's
+    // principal changes, so the compiled body changes too) — proving the
+    // reservation blocks only the human write paths, not the compiler's
+    // create-or-update-in-place sweep.
+    f.perm
+        .delete_grant(grant_id)
+        .await
+        .expect("delete original grant");
+    let grant2 = Grant {
+        id: Uuid::nil(),
+        effect: Effect::Allow,
+        actions: vec![Action::Read, Action::Write],
+        scope: Scope {
+            catalog_id: f.catalog_id,
+            schema: None,
+            table: None,
+            column: None,
+        },
+        principals: PrincipalSet {
+            include: vec![Principal {
+                kind: PrincipalKind::User,
+                r#ref: "carol".into(),
+            }],
+            exclude: vec![],
+        },
+        origin: GrantOrigin::Explicit,
+    };
+    let grant2_id = f.perm.create_grant(&grant2).await.expect("create grant 2");
+    let summary2 = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile after replacing the grant");
+    assert_eq!(summary2.deleted, 1, "the old grant's policy must be reaped");
+    assert_eq!(
+        summary2.created, 1,
+        "the new grant must compile to a new policy"
+    );
+
+    let expected_name2 = format!("perm-grant-{grant2_id}");
+    let exists2: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM policy.authz_policies WHERE service_id = $1 AND name = $2)",
+    )
+    .bind(f.service_id)
+    .bind(&expected_name2)
+    .fetch_one(pool)
+    .await
+    .expect("query");
+    assert!(
+        exists2,
+        "the compiler must still be able to write a SECOND reserved-prefix policy on the \
+         next recompile ({expected_name2:?})"
+    );
+}

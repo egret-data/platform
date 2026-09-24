@@ -264,6 +264,17 @@ fn sample_policy(svc_name: &str) -> serde_json::Value {
     })
 }
 
+/// Like [`sample_policy`], with a caller-chosen name — used by the fix
+/// round 3 reserved-namespace tests to attempt a `perm-grant-`/`perm-rule-`
+/// named create/rename.
+fn sample_policy_named(svc_name: &str, name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": name, "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["iceberg"]}},
+        "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+    })
+}
+
 async fn post_policy(
     f: &Fixture,
     token: &str,
@@ -327,6 +338,37 @@ fn assert_names_the_compiler_and_the_policy(body: &serde_json::Value, policy_nam
         text.contains(policy_name),
         "the refusal must name WHICH policy is compiler-owned, not just that some policy in \
          this profile is — body={body}, policy_name={policy_name:?}"
+    );
+}
+
+/// Fix round 3: the RESERVED-NAMESPACE refusal (`refuse_reserved_name`) is a
+/// distinct guard from `refuse_if_generated`/`refuse_if_compiler_owned` — it
+/// fires regardless of the profile's `origin` and says something different
+/// ("this NAME is off-limits, rename it") from either of those ("this
+/// PROFILE/POLICY is compiled, edit the grant/rule instead"). Assert on that
+/// distinct vocabulary ("reserved") rather than reusing
+/// `assert_names_the_compiler`, so a test asserting THIS guard fired can't
+/// be satisfied by one of the other two firing instead.
+fn assert_names_reserved_prefix(body: &serde_json::Value, attempted_name: &str) {
+    let text = body.to_string();
+    assert!(
+        text.contains("SP4a permission model"),
+        "the refusal must name WHICH system reserves this prefix — body={body}"
+    );
+    assert!(
+        text.contains("reserved"),
+        "the refusal must say the NAME is reserved (not that a profile/policy is \"compiled\") \
+         — a human hitting this needs to know the fix is renaming, not waiting for a recompile \
+         or editing a grant; body={body}"
+    );
+    assert!(
+        text.contains(attempted_name),
+        "the refusal must name WHICH name was rejected; body={body}, attempted_name={attempted_name:?}"
+    );
+    assert!(
+        text.contains("rename"),
+        "the refusal must tell the operator the fix is to RENAME, so their next move is that, \
+         not a retry; body={body}"
     );
 }
 
@@ -803,4 +845,124 @@ async fn a_manual_profile_is_still_fully_editable() {
         "delete-profile must still work"
     );
     let _ = svc_id; // service already deleted above via the HTTP route
+}
+
+// ── Fix round 3: the compiler's prefix namespace is reserved everywhere ────
+//
+// The round-2 report found that a human could hand-name a policy
+// `perm-grant-foo` while its profile was still `manual` (allowed then,
+// since `create_policy`'s origin check only fires once the profile is
+// ALREADY `generated`), and the FIRST real recompile that ever reached that
+// service would silently delete it in the SAME transaction that first
+// stamped the profile `generated` — no observable window for an operator to
+// notice and intervene. The fix: make the collision unrepresentable at the
+// only human entry point (`create_policy`/`update_policy`), rather than
+// teaching the sweep to defend against it (Task 7 fix round 1's own
+// Critical was precisely that a name-matching row is reaped with or without
+// `perm.compiled` provenance — re-litigating that here would undo it).
+
+#[tokio::test]
+async fn a_manual_profile_refuses_creating_a_reserved_name_policy() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = admin_session(&f, "guard_reserved_create_manual").await;
+    let (svc_name, svc_id) = seed_manual_profile(&f).await;
+
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        sample_policy_named(&svc_name, "perm-grant-imposter"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a MANUAL profile must still refuse a reserved-prefix name; body={body}"
+    );
+    assert_names_reserved_prefix(&body, "perm-grant-imposter");
+
+    let rows = f.store.list_policies(svc_id).await.expect("list");
+    assert!(rows.is_empty(), "the refused create must not land");
+
+    sqlx::query("DELETE FROM policy.authz_services WHERE id = $1")
+        .bind(svc_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+async fn a_manual_profile_refuses_renaming_a_policy_to_a_reserved_name() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = admin_session(&f, "guard_reserved_rename_manual").await;
+    let (svc_name, svc_id) = seed_manual_profile(&f).await;
+
+    // An ordinary, non-reserved policy — creating it must still work.
+    let (status, body) = post_policy(&f, &token, sample_policy(&svc_name)).await;
+    assert_eq!(status, StatusCode::OK, "create; body={body}");
+    let policy_id = body["id"].as_i64().expect("id");
+
+    // Renaming it INTO the reserved namespace must be refused.
+    let rename = sample_policy_named(&svc_name, "perm-rule-imposter");
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PUT",
+                &format!("/policies/{policy_id}"),
+                &token,
+                Some(rename),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={body}");
+    assert_names_reserved_prefix(&body, "perm-rule-imposter");
+
+    // The policy must still have its ORIGINAL name — the refused rename
+    // must not have landed even partially.
+    let row = f.store.get_policy(policy_id).await.expect("get policy");
+    assert_eq!(row.name, "p-into-generated");
+
+    sqlx::query("DELETE FROM policy.authz_services WHERE id = $1")
+        .bind(svc_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("cleanup");
+}
+
+/// The generated-profile case, asserting the RESERVED-NAME reason is the
+/// operative one (not merely "this profile is compiled" — `refuse_if_generated`
+/// would ALSO refuse this exact call, but with different wording; this test
+/// pins down that the reserved-namespace guard is what actually fires,
+/// which matters because it is the guard that also protects `manual`
+/// profiles, where `refuse_if_generated` does not apply at all).
+#[tokio::test]
+async fn a_generated_profile_refuses_a_reserved_name_for_the_reserved_reason() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = admin_session(&f, "guard_reserved_create_generated").await;
+    let (svc_name, svc_id) = seed_generated_profile(&f).await;
+
+    let (status, body) = post_policy(
+        &f,
+        &token,
+        sample_policy_named(&svc_name, "perm-rule-imposter"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={body}");
+    assert_names_reserved_prefix(&body, "perm-rule-imposter");
+
+    sqlx::query("DELETE FROM policy.authz_services WHERE id = $1")
+        .bind(svc_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("cleanup");
 }
