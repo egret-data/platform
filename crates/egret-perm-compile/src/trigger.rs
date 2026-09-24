@@ -106,7 +106,7 @@ use egret_perm::{
 use egret_policy::admin::access_to_ranger_json;
 use egret_policy::{
     catalogs_for_service_via, get_service_by_id_via, tag_name_for_key_via,
-    tagged_columns_for_service_via, PolicyStore,
+    tagged_columns_for_service_via, PolicyStore, COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
 };
 
 use crate::grants::compile_grant;
@@ -121,14 +121,23 @@ use crate::rules::{compile_rule, stamp_service_type, ResolvedNames, TaggedColumn
 /// time a real StarRocks tag-rule fan-out is measured on kind.
 pub const DEFAULT_EXPANSION_CEILING: usize = 500;
 
-/// The name prefixes every policy `compile_grant`/`compile_rule` produces
-/// carries (`grants.rs`'s `format!("perm-grant-{}", g.id)`, `rules.rs`'s
-/// `format!("perm-rule-{}", ...)`). `apply_diff_in_tx` uses these to find
-/// every policy THIS COMPILER owns under a service directly from
-/// `policy.authz_policies`, independent of whether `perm.compiled` still has
-/// a provenance row for it (fix round 1 Critical — see module doc).
-const GRANT_NAME_PREFIX: &str = "perm-grant-";
-const RULE_NAME_PREFIX: &str = "perm-rule-";
+// The name prefixes every policy `compile_grant`/`compile_rule` produces
+// carries (`grants.rs`'s `format!("{COMPILER_GRANT_PREFIX}{}", g.id)`,
+// `rules.rs`'s `format!("{COMPILER_RULE_PREFIX}{}", ...)`). `apply_diff_in_tx`
+// uses these to find every policy THIS COMPILER owns under a service
+// directly from `policy.authz_policies`, independent of whether
+// `perm.compiled` still has a provenance row for it (fix round 1 Critical —
+// see module doc).
+//
+// Task 8 fix round 2 (I-1): `egret-policy`'s per-policy write guard
+// (`refuse_if_compiler_owned`) needs this SAME identity test to decide
+// whether a policy a human is trying to edit/delete is one this sweep would
+// itself reap/overwrite. Since `egret-perm-compile` depends on
+// `egret-policy` and not the reverse, the constants live THERE
+// (`egret_policy::COMPILER_GRANT_PREFIX`/`COMPILER_RULE_PREFIX`) and this
+// crate imports them, rather than each crate keeping its own copy — two
+// copies of this string WILL drift, and a drift makes a policy the sweep
+// reaps look editable to the guard, or the reverse.
 
 /// Which half of the `perm` model a compiled policy (or a skip) came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -457,9 +466,11 @@ async fn apply_diff_in_tx(
 ) -> Result<CompileSummary, CompileError> {
     let existing: Vec<ExistingPolicyRow> = sqlx::query_as(
         "SELECT id, name, policy_jsonb FROM policy.authz_policies \
-         WHERE service_id = $1 AND (name LIKE 'perm-grant-%' OR name LIKE 'perm-rule-%')",
+         WHERE service_id = $1 AND (name LIKE $2 || '%' OR name LIKE $3 || '%')",
     )
     .bind(service_id)
+    .bind(COMPILER_GRANT_PREFIX)
+    .bind(COMPILER_RULE_PREFIX)
     .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;
@@ -499,7 +510,7 @@ async fn apply_diff_in_tx(
 
     for (name, dp) in desired {
         debug_assert!(
-            name.starts_with(GRANT_NAME_PREFIX) || name.starts_with(RULE_NAME_PREFIX),
+            name.starts_with(COMPILER_GRANT_PREFIX) || name.starts_with(COMPILER_RULE_PREFIX),
             "compiled policy name {name:?} does not carry this compiler's own prefix — \
              the existing-state sweep above would never find it again"
         );

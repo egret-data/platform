@@ -20,9 +20,9 @@ pub use service_def::{
     trino_service_def, STARROCKS_DEF_NAME, TAG_DEF_NAME, TRINO_DEF_NAME,
 };
 pub use store::{
-    catalogs_for_service_via, get_service_by_id_via, tag_name_for_key_via,
-    tagged_columns_for_service_via, CatalogRow, PolicyRow, PolicyStore, ServiceRow,
-    TagAssignmentRow, TaggedColumnRow,
+    catalogs_for_service_via, get_service_by_id_via, is_compiler_owned_policy_name,
+    tag_name_for_key_via, tagged_columns_for_service_via, CatalogRow, PolicyRow, PolicyStore,
+    ServiceRow, TagAssignmentRow, TaggedColumnRow, COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
 };
 
 /// The Policy/Ranger seam's OpenAPI document (E0·P4b-5): the admin Policies

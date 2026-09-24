@@ -28,9 +28,22 @@ pub struct ServiceRow {
     /// `"manual"` (hand-authored through the policy editor, the default — see
     /// migration 0155) or `"generated"` (owned by SP4a's permission-model
     /// compiler, `egret-perm-compile::trigger::apply_diff_in_tx`, which stamps
-    /// this the moment it first compiles a policy for the service). Every
-    /// hand-authored write path in this file refuses to write into a
-    /// `"generated"` profile — see [`refuse_if_generated`].
+    /// this the moment it first compiles a policy for the service).
+    ///
+    /// Task 8 fix round 2 (I-1): the guard this drives is scoped PER POLICY,
+    /// not per profile — `create_policy` and `seed_default_trino_policies`
+    /// refuse outright once a profile is `"generated"` (see
+    /// [`refuse_if_generated`]; adding brand-new content to a compiled
+    /// profile is the confusion Task 8 exists to prevent), but
+    /// `update_policy`/`delete_policy`/`set_policy_enabled` only refuse a
+    /// SPECIFIC policy whose own name is compiler-owned (see
+    /// [`refuse_if_compiler_owned`] and [`is_compiler_owned_policy_name`]) —
+    /// a policy the compiler's sweep never touches is not protected by
+    /// "read-only", since read-only-ness exists only to guard what the
+    /// compiler would otherwise silently overwrite. `delete_service` mirrors
+    /// that: refused only while a compiler-owned policy still exists under
+    /// it (see [`refuse_if_compiler_owned_policies_remain`]), not merely
+    /// because the profile is (or was ever) `"generated"`.
     pub origin: String,
 }
 
@@ -52,14 +65,51 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
 }
 
-/// SP4a Task 8 (D4): refuse a hand-authored write into a profile the
+/// Name prefix every ACCESS policy SP4a's permission-model compiler
+/// (`egret-perm-compile::grants::compile_grant`) produces —
+/// `format!("{COMPILER_GRANT_PREFIX}{}", grant.id)`.
+///
+/// Defined HERE, not in `egret-perm-compile`, even though that crate is the
+/// one that actually mints names with it: `egret-perm-compile` depends on
+/// `egret-policy` (for `PolicyStore` and the Ranger JSON renderers), never
+/// the reverse, so a constant only `egret-perm-compile` owned could not be
+/// consumed by this crate's own guards. `egret-perm-compile`'s
+/// `trigger::apply_diff_in_tx` (the sweep that reaps any
+/// `policy.authz_policies` row under this prefix that its current compile no
+/// longer produces) and `grants.rs`'s name-builder both import THIS constant
+/// rather than keeping their own copy — see that crate's `trigger.rs` module
+/// doc. Two independent copies of this string would drift, and a drift makes
+/// a policy the sweep reaps look editable to the guards below, or the
+/// reverse.
+pub const COMPILER_GRANT_PREFIX: &str = "perm-grant-";
+/// Name prefix every MASKING/ROW-FILTER policy the compiler
+/// (`egret-perm-compile::rules::compile_rule`) produces. Same rationale as
+/// [`COMPILER_GRANT_PREFIX`].
+pub const COMPILER_RULE_PREFIX: &str = "perm-rule-";
+
+/// Whether `name` identifies a policy the SP4a permission-model compiler
+/// owns (produced by `compile_grant`/`compile_rule` and reachable by
+/// `apply_diff_in_tx`'s existing-state sweep) — see [`COMPILER_GRANT_PREFIX`]
+/// / [`COMPILER_RULE_PREFIX`].
+pub fn is_compiler_owned_policy_name(name: &str) -> bool {
+    name.starts_with(COMPILER_GRANT_PREFIX) || name.starts_with(COMPILER_RULE_PREFIX)
+}
+
+/// SP4a Task 8 (D4): refuse adding brand-new content to a profile the
 /// permission-model compiler has claimed (`origin = 'generated'`, migration
-/// 0155). Connection-generic so every write path can call it on its OWN
-/// already-open transaction — `create_policy`/`update_policy`/`delete_policy`/
-/// `set_policy_enabled`/`delete_service` all do, and
-/// `default_policies::seed_default_trino_policies` calls the pool-based
-/// wrapper below. `egret-perm-compile`'s recompile driver
-/// (`trigger::apply_diff_in_tx`) never calls any of these — it writes
+/// 0155) — used only by `create_policy` and
+/// `default_policies::seed_default_trino_policies` (via the pooled wrapper
+/// below). Unlike [`refuse_if_compiler_owned`], this is deliberately
+/// profile-wide: a NEW policy cannot yet be "compiler-owned or not" (it
+/// doesn't exist), so the only question create-time can ask is whether this
+/// profile is one a human should be adding hand-written policies to at all —
+/// Task 8 fix round 2 (I-1) kept this refusal exactly where the original
+/// Task 8 left it; only the EDIT/DELETE guards below moved from profile
+/// scope to policy scope.
+///
+/// Connection-generic so every caller can run it on its OWN already-open
+/// transaction. `egret-perm-compile`'s recompile driver
+/// (`trigger::apply_diff_in_tx`) never calls this — it writes
 /// `policy.authz_policies` with its own raw `sqlx::query` calls directly
 /// against the transaction it owns — so this refusal can never block the
 /// compiler itself, only a human (or anything else) going through this
@@ -80,10 +130,90 @@ async fn refuse_if_generated(
     .fetch_optional(&mut *conn)
     .await?;
     if origin.as_deref() == Some("generated") {
-        return Err(PolicyStoreError::GeneratedProfile(format!(
+        return Err(PolicyStoreError::CompilerOwned(format!(
             "profile {service_id} is compiled by the SP4a permission model — edit its grants \
              and rules instead of writing a policy directly; the next recompile would silently \
              overwrite this change"
+        )));
+    }
+    Ok(())
+}
+
+/// SP4a Task 8 fix round 2 (I-1): refuse an edit/delete/enable-toggle on a
+/// SPECIFIC policy only when it is itself compiler-owned (see
+/// [`is_compiler_owned_policy_name`]) AND its profile is currently
+/// `'generated'`. Read-only-ness protects what the compiler's sweep
+/// (`apply_diff_in_tx`) would otherwise silently overwrite or reap on the
+/// next recompile — a policy that sweep never looks at (a different name, no
+/// `perm-grant-`/`perm-rule-` prefix) is not protected by that reasoning, so
+/// it stays as editable/deletable as it would be in a `'manual'` profile.
+/// This is the "moves from profile level to policy level" the user ruled on
+/// for I-1: the old profile-wide refusal in `update_policy`/`delete_policy`/
+/// `set_policy_enabled` is what built the one-way door (an operator could
+/// never touch ANYTHING in a generated profile, including content the
+/// compiler had no opinion about).
+///
+/// The `origin` check still matters even though the name-prefix check runs
+/// first: a policy hand-named with this prefix in a still-`'manual'` profile
+/// is not YET at risk from a sweep that has never run against this service —
+/// see the fix-round-2 report's finding on whether that policy could later
+/// be silently reaped once the profile becomes `'generated'` (a Task 7
+/// property, tracked separately, not fixed by this guard).
+async fn refuse_if_compiler_owned(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    policy_name: &str,
+) -> Result<(), PolicyStoreError> {
+    if !is_compiler_owned_policy_name(policy_name) {
+        return Ok(());
+    }
+    let origin: Option<String> = sqlx::query_scalar::<_, String>(
+        r#"SELECT origin FROM policy.authz_services WHERE id = $1"#,
+    )
+    .bind(service_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if origin.as_deref() == Some("generated") {
+        return Err(PolicyStoreError::CompilerOwned(format!(
+            "policy {policy_name:?} is compiled by the SP4a permission model — it is produced \
+             by a grant or rule, not hand-authored; edit or delete that grant/rule instead of \
+             writing this policy directly, since the next recompile would otherwise silently \
+             overwrite this change"
+        )));
+    }
+    Ok(())
+}
+
+/// SP4a Task 8 fix round 2 (I-1): `delete_service`'s own guard — refuse only
+/// while at least one compiler-owned policy (see
+/// [`is_compiler_owned_policy_name`]) still exists under `service_id`,
+/// regardless of the profile's `origin`. A `'generated'` profile that the
+/// compiler has since reaped down to zero owned policies (every grant/rule
+/// reaching it was deleted) is deletable — `origin` is sticky (Task 8's
+/// original design) precisely so the EDIT guard above keeps distinguishing
+/// "this profile has been compiler-managed" from "this profile has never
+/// been touched", but that stickiness has no bearing on whether deleting the
+/// row right now would delete anything the compiler still owns.
+async fn refuse_if_compiler_owned_policies_remain(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<(), PolicyStoreError> {
+    let count: i64 = sqlx::query_scalar::<_, i64>(
+        r#"SELECT count(*) FROM policy.authz_policies
+           WHERE service_id = $1 AND (name LIKE $2 || '%' OR name LIKE $3 || '%')"#,
+    )
+    .bind(service_id)
+    .bind(COMPILER_GRANT_PREFIX)
+    .bind(COMPILER_RULE_PREFIX)
+    .fetch_one(&mut *conn)
+    .await?;
+    if count > 0 {
+        let noun = if count == 1 { "policy" } else { "policies" };
+        return Err(PolicyStoreError::CompilerOwned(format!(
+            "profile {service_id} still holds {count} {noun} compiled by the SP4a permission \
+             model (named with the perm-grant-/perm-rule- prefix) — delete the grants/rules \
+             that produce them first, or wait for the next recompile to reap them, before \
+             deleting the profile itself"
         )));
     }
     Ok(())
@@ -95,8 +225,8 @@ impl PolicyStore {
     }
 
     /// Pool-based [`refuse_if_generated`], for a write path that has no
-    /// transaction open yet at the point the check belongs (`delete_service`,
-    /// and `default_policies::seed_default_trino_policies`, which must refuse
+    /// transaction open yet at the point the check belongs
+    /// (`default_policies::seed_default_trino_policies`, which must refuse
     /// BEFORE its own "already has policies" no-op check — a generated
     /// profile always has policies, so that check would otherwise silently
     /// swallow the refusal as a no-op `Ok(0)`).
@@ -248,29 +378,30 @@ impl PolicyStore {
         .await?)
     }
 
-    /// DELETE a profile outright — refused for a `generated` profile (Task 8),
-    /// same as every hand-authored policy write: a compiled profile's row (and
-    /// the `perm.compiled` provenance `ON DELETE CASCADE`s from it, migration
-    /// 0154) stays owned by the compiler until the perm model stops targeting
-    /// it, not until an admin deletes it out from under a still-live recompile.
+    /// DELETE a profile outright — refused (Task 8) while it still holds any
+    /// compiler-owned policy (see [`refuse_if_compiler_owned_policies_remain`]):
+    /// a compiled profile's row (and the `perm.compiled` provenance `ON DELETE
+    /// CASCADE`s from it, migration 0154) stays owned by the compiler until
+    /// the perm model stops targeting it, not until an admin deletes it out
+    /// from under a still-live recompile. Fix round 2 (I-1): this is scoped to
+    /// the policies actually present, not the profile's `origin` — a
+    /// `'generated'` profile the compiler has since reaped down to zero owned
+    /// policies is deletable.
     ///
-    /// Review fix (M-1): the origin check and the delete run on the SAME
+    /// Review fix (M-1): the check and the delete run on the SAME
     /// transaction, not a pooled check followed by a separately-connected
     /// delete (the shape Task 7's `recompile_service_in_tx` exists to avoid
     /// for exactly this reason — see that function's own doc comment). Two
-    /// separate connections left a window: a compile stamping `generated`
-    /// between the check and the delete would let an unbound generated
-    /// profile be deleted anyway. One transaction closes it — Postgres holds
-    /// the row from the `SELECT` through the `DELETE`, so a concurrent
-    /// `UPDATE ... SET origin = 'generated'` from `apply_diff_in_tx` either
-    /// commits first (this delete then sees `generated` and refuses) or
-    /// blocks until this transaction ends (and if this transaction commits
-    /// the delete, the stamp's `UPDATE` then affects zero rows and is a
-    /// silent no-op, matching `apply_diff_in_tx`'s own `WHERE id = $1`
-    /// targeting a row that's simply gone).
+    /// separate connections left a window: a compile writing a NEW
+    /// compiler-owned policy between the check and the delete would let a
+    /// profile be deleted anyway despite that write. One transaction closes
+    /// it — Postgres holds the relevant rows from the `SELECT count(*)`
+    /// through the `DELETE`, so a concurrent write from `apply_diff_in_tx`
+    /// either commits first (this delete then sees the new row and refuses)
+    /// or blocks until this transaction ends.
     pub async fn delete_service(&self, id: i64) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
-        if let Err(e) = refuse_if_generated(&mut tx, id).await {
+        if let Err(e) = refuse_if_compiler_owned_policies_remain(&mut tx, id).await {
             tx.rollback().await?;
             return Err(e);
         }
@@ -579,17 +710,20 @@ impl PolicyStore {
         enabled: bool,
     ) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
-        let svc: Option<i64> = sqlx::query_scalar::<_, i64>(
-            r#"SELECT service_id FROM policy.authz_policies WHERE id = $1"#,
+        // Fetch the policy's CURRENT name — ownership (Task 8 fix round 2,
+        // I-1) is decided by what this policy IS today, not by the new name
+        // the caller is trying to write.
+        let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
+            r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(service_id) = svc else {
+        let Some((service_id, current_name)) = row else {
             tx.rollback().await?;
             return Err(PolicyStoreError::NotFound(format!("policy {id}")));
         };
-        if let Err(e) = refuse_if_generated(&mut tx, service_id).await {
+        if let Err(e) = refuse_if_compiler_owned(&mut tx, service_id, &current_name).await {
             tx.rollback().await?;
             return Err(e);
         }
@@ -615,17 +749,17 @@ impl PolicyStore {
     /// Flip a policy's enabled flag without rewriting its body; bumps versions.
     pub async fn set_policy_enabled(&self, id: i64, enabled: bool) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
-        let svc: Option<i64> = sqlx::query_scalar::<_, i64>(
-            r#"SELECT service_id FROM policy.authz_policies WHERE id = $1"#,
+        let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
+            r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(service_id) = svc else {
+        let Some((service_id, current_name)) = row else {
             tx.rollback().await?;
             return Err(PolicyStoreError::NotFound(format!("policy id {id}")));
         };
-        if let Err(e) = refuse_if_generated(&mut tx, service_id).await {
+        if let Err(e) = refuse_if_compiler_owned(&mut tx, service_id, &current_name).await {
             tx.rollback().await?;
             return Err(e);
         }
@@ -648,20 +782,20 @@ impl PolicyStore {
 
     pub async fn delete_policy(&self, id: i64) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
-        // Look the service up BEFORE deleting — Task 8's guard must refuse the
+        // Look the policy up BEFORE deleting — Task 8's guard must refuse the
         // delete outright, not delete-then-refuse (which would leave the
         // policy gone despite the 409).
-        let svc: Option<i64> = sqlx::query_scalar::<_, i64>(
-            r#"SELECT service_id FROM policy.authz_policies WHERE id = $1"#,
+        let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
+            r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(service_id) = svc else {
+        let Some((service_id, current_name)) = row else {
             tx.rollback().await?;
             return Err(PolicyStoreError::NotFound(format!("policy {id}")));
         };
-        if let Err(e) = refuse_if_generated(&mut tx, service_id).await {
+        if let Err(e) = refuse_if_compiler_owned(&mut tx, service_id, &current_name).await {
             tx.rollback().await?;
             return Err(e);
         }

@@ -76,7 +76,7 @@ use egret_policy::admin::{
     tag_rowfilter_to_ranger_json, MaskItemInput, MaskingPolicyInput, ResourceLevel,
     RowFilterItemInput, RowFilterPolicyInput,
 };
-use egret_policy::{starrocks_service_def, trino_service_def};
+use egret_policy::{starrocks_service_def, trino_service_def, COMPILER_RULE_PREFIX};
 
 use egret_perm::{CompileError, EngineType, PrincipalKind, PrincipalSet, Rule, RuleKind, Selector};
 
@@ -185,7 +185,7 @@ pub fn compile_rule(
                 .iter()
                 .map(|col| {
                     let name = format!(
-                        "perm-rule-{}-{}.{}.{}.{}",
+                        "{COMPILER_RULE_PREFIX}{}-{}.{}.{}.{}",
                         r.id, col.catalog, col.schema, col.table, col.column
                     );
                     let resources = column_resources(e, col);
@@ -195,7 +195,7 @@ pub fn compile_rule(
         }
         (Selector::Path(scope), _) => {
             let resources = scope_to_resources(scope, resolved.catalog_name, e);
-            let name = format!("perm-rule-{}", r.id);
+            let name = format!("{COMPILER_RULE_PREFIX}{}", r.id);
             Ok(vec![build_body(r, e, service, name, resources)?])
         }
     }
@@ -268,7 +268,7 @@ fn build_tag_body(
     tag_key: &str,
     tag_service: &str,
 ) -> Result<Value, CompileError> {
-    let name = format!("perm-rule-{}", r.id);
+    let name = format!("{COMPILER_RULE_PREFIX}{}", r.id);
     let body = match &r.kind {
         RuleKind::Mask {
             mask_type,

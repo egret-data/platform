@@ -61,6 +61,7 @@ use std::collections::BTreeMap;
 // to the ones used here) and re-exports just these three struct types from
 // `admin` itself.
 use egret_policy::admin::{AccessItemInput, AccessPolicyInput, ResourceLevel};
+use egret_policy::COMPILER_GRANT_PREFIX;
 
 use egret_perm::{
     engine_accesses, CompileError, Effect, EngineType, Grant, Principal, PrincipalKind, Scope,
@@ -236,7 +237,7 @@ pub fn compile_grant(
     }
 
     Ok(AccessPolicyInput {
-        name: format!("perm-grant-{}", g.id),
+        name: format!("{COMPILER_GRANT_PREFIX}{}", g.id),
         service: service.to_string(),
         is_enabled: true,
         resources: scope_to_resources(&g.scope, catalog_name, e),

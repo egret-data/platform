@@ -1,17 +1,37 @@
-//! SP4a Task 8 (D4): a profile the permission-model compiler owns
-//! (`policy.authz_services.origin = 'generated'`, migration 0155) is
-//! read-only through the policy editor. Before this guard, a human edit into
-//! such a profile would be silently overwritten (or its policy silently
-//! deleted) by the next recompile — see `egret-perm-compile::trigger`'s
+//! SP4a Task 8 (D4), fix round 2 (I-1): a profile the permission-model
+//! compiler owns (`policy.authz_services.origin = 'generated'`, migration
+//! 0155) is read-only through the policy editor ONLY for the specific
+//! policies the compiler produced. Before Task 8, any edit into such a
+//! profile could be silently overwritten (or its policy silently deleted) by
+//! the next recompile — see `egret-perm-compile::trigger`'s
 //! `apply_diff_in_tx`, which reaps any `policy.authz_policies` row under a
-//! service that this compiler no longer produces.
+//! service that this compiler no longer produces. Round 1 refused EVERY
+//! write into a `generated` profile, which protected policies the compiler
+//! never looks at too (anything not named with its `perm-grant-`/
+//! `perm-rule-` prefix — see `egret_policy::is_compiler_owned_policy_name`)
+//! and so built a one-way door: once a profile compiled anything, an
+//! operator could never touch ANY policy in it again through the editor.
+//! Round 2 (this file, per the user's I-1 ruling) moves the EDIT/DELETE
+//! guard from profile scope to policy scope: `create_policy` and
+//! `seed_default_trino_policies` still refuse outright on a `generated`
+//! profile (adding brand-new content to a compiled profile is still the
+//! confusion Task 8 exists to prevent), but `update_policy`/`delete_policy`/
+//! `set_policy_enabled` now refuse only the SPECIFIC policies the compiler
+//! owns, and `delete_service` refuses only while a compiler-owned policy
+//! still exists under it.
 //!
-//! This file proves the REFUSAL side: given a profile already marked
-//! `generated` (seeded directly via SQL here — the fixture is simulating "a
-//! profile the compiler has claimed", not exercising the compiler itself),
-//! every hand-authored write path refuses it with 409, naming the compiler in
-//! the body. The companion proof that a REAL compile is what sets
-//! `origin = 'generated'` in the first place lives in
+//! This file proves BOTH directions: the refusal side (given a profile
+//! already marked `generated`, seeded directly via SQL — the fixture is
+//! simulating "a profile the compiler has claimed", not exercising the
+//! compiler itself — a compiler-owned policy's edit/delete/enable-toggle,
+//! `create_policy`, and `delete_service` while an owned policy remains all
+//! refuse with 409, naming the compiler AND (where the refusal is
+//! policy-scoped) the specific policy in the body) and the escape-hatch side
+//! (a NON-owned policy in that same generated profile can still be updated,
+//! toggled, and deleted, and the profile itself can be deleted once no
+//! owned policy remains — proving I-1 is actually closed, not merely that
+//! the guard still refuses something). The companion proof that a REAL
+//! compile is what sets `origin = 'generated'` in the first place lives in
 //! `crates/egret-perm-compile/tests/recompile.rs` (this crate has no
 //! dependency on the compiler crate, so it cannot exercise that side).
 //!
@@ -262,12 +282,15 @@ async fn post_policy(
 /// reworded-but-opaque message ("compiled: no" or "recompiled recently"),
 /// which doesn't actually satisfy the brief's requirement that the refusal
 /// NAME the compiler — an operator reading it must be able to tell (a) WHICH
-/// system claimed this profile and (b) what to do about it instead of
-/// retrying. Check for all three, independently, against what the shipped
-/// message (`store.rs::refuse_if_generated`) actually carries: it names the
-/// compiler by name ("SP4a permission model"), says the profile IS compiled
-/// (so a retry looks pointless, not transient), and tells the operator the
-/// alternative ("grants and rules").
+/// system claimed this profile/policy and (b) what to do about it instead of
+/// retrying. Check for all three, independently, against what every shipped
+/// message in `store.rs` actually carries: it names the compiler by name
+/// ("SP4a permission model"), says the target IS compiled (so a retry looks
+/// pointless, not transient), and tells the operator the alternative (a
+/// grant or rule to edit/delete instead). Singular "grant"/"rule" substrings
+/// so this also matches a message that happens to pluralize them ("grants
+/// and rules") — the fact under test is that the concept is named, not its
+/// exact grammatical number.
 fn assert_names_the_compiler(body: &serde_json::Value) {
     let text = body.to_string();
     assert!(
@@ -277,13 +300,33 @@ fn assert_names_the_compiler(body: &serde_json::Value) {
     );
     assert!(
         text.contains("compiled"),
-        "the refusal must say the profile IS compiled — a 409 that does not say why reads as \
+        "the refusal must say the target IS compiled — a 409 that does not say why reads as \
          a bug, and the operator's next move is to retry; body={body}"
     );
     assert!(
-        text.contains("grants") && text.contains("rules"),
-        "the refusal must tell the operator what to do INSTEAD (edit the grants/rules that \
-         compile into this profile), not merely that the write failed; body={body}"
+        text.contains("grant") && text.contains("rule"),
+        "the refusal must tell the operator what to do INSTEAD (edit/delete the grant or rule \
+         that produces this), not merely that the write failed; body={body}"
+    );
+}
+
+/// Fix round 2 (I-1, review requirement 2): the PER-POLICY refusal
+/// (`update_policy`/`delete_policy`/`set_policy_enabled` on a
+/// compiler-owned policy) must additionally name WHICH policy is
+/// compiler-owned — an operator with several policies in a generated
+/// profile needs to know which one to leave alone, not just that some
+/// unspecified thing in this profile is off-limits (that genericity is
+/// exactly what made the round-1 profile-level refusal a one-way door: it
+/// gave no way to tell "this policy is protected" from "this profile is
+/// protected"). Builds on [`assert_names_the_compiler`] with the added,
+/// independent fact.
+fn assert_names_the_compiler_and_the_policy(body: &serde_json::Value, policy_name: &str) {
+    assert_names_the_compiler(body);
+    let text = body.to_string();
+    assert!(
+        text.contains(policy_name),
+        "the refusal must name WHICH policy is compiler-owned, not just that some policy in \
+         this profile is — body={body}, policy_name={policy_name:?}"
     );
 }
 
@@ -339,11 +382,107 @@ async fn the_editor_refuses_to_update_a_policy_in_a_generated_profile() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "body={body}");
-    assert_names_the_compiler(&body);
+    assert_names_the_compiler_and_the_policy(&body, "perm-grant-existing");
 
     // The body must be byte-identical to what was seeded — not partially applied.
     let row = f.store.get_policy(policy_id).await.expect("get policy");
     assert_eq!(row.policy_jsonb, sample_policy_body("perm-grant-existing"));
+
+    sqlx::query("DELETE FROM policy.authz_services WHERE id = $1")
+        .bind(svc_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("cleanup");
+}
+
+/// I-1 closed (review requirement 3): the escape hatch. A policy in the SAME
+/// generated profile whose name the compiler does not recognize (no
+/// `perm-grant-`/`perm-rule-` prefix) can still be updated, toggled, and
+/// deleted — proving the guard moved from profile scope to policy scope, not
+/// merely that it still refuses SOMETHING. Without this test the round-2 fix
+/// is unproven: every "refuses" test above would pass identically whether
+/// the guard checks the profile or the policy.
+#[tokio::test]
+async fn a_non_owned_policy_can_still_be_edited_and_deleted_in_a_generated_profile() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = admin_session(&f, "guard_escape_hatch").await;
+    let (svc_name, svc_id) = seed_generated_profile(&f).await;
+    let policy_id = insert_policy_directly(&f, svc_id, "hand-authored-policy").await;
+
+    // Update succeeds.
+    let update = serde_json::json!({
+        "name": "hand-authored-policy", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["iceberg"]}},
+        "items": [{"users": ["mallory"], "accesses": ["select"], "effect": "allow"}]
+    });
+    let resp = f
+        .app()
+        .oneshot(req(
+            "PUT",
+            &format!("/policies/{policy_id}"),
+            &token,
+            Some(update),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a non-owned policy must still be updatable in a generated profile"
+    );
+    let row = f.store.get_policy(policy_id).await.expect("get policy");
+    assert!(
+        row.policy_jsonb["policyItems"][0]["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "mallory"),
+        "the update must actually have landed, not just returned 200; body={:?}",
+        row.policy_jsonb
+    );
+
+    // Enabled-toggle succeeds.
+    let resp = f
+        .app()
+        .oneshot(req(
+            "PUT",
+            &format!("/policies/{policy_id}/enabled"),
+            &token,
+            Some(serde_json::json!({ "enabled": false })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "a non-owned policy must still be toggleable in a generated profile"
+    );
+    let row = f.store.get_policy(policy_id).await.expect("get policy");
+    assert!(!row.enabled, "the toggle must actually have landed");
+
+    // Delete succeeds.
+    let resp = f
+        .app()
+        .oneshot(req(
+            "DELETE",
+            &format!("/policies/{policy_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "a non-owned policy must still be deletable in a generated profile"
+    );
+    assert!(
+        f.store.get_policy(policy_id).await.is_err(),
+        "the delete must actually have landed"
+    );
 
     sqlx::query("DELETE FROM policy.authz_services WHERE id = $1")
         .bind(svc_id)
@@ -375,7 +514,7 @@ async fn the_editor_refuses_to_toggle_enabled_on_a_policy_in_a_generated_profile
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "body={body}");
-    assert_names_the_compiler(&body);
+    assert_names_the_compiler_and_the_policy(&body, "perm-grant-existing");
 
     let row = f.store.get_policy(policy_id).await.expect("get policy");
     assert!(row.enabled, "the refused toggle must not land");
@@ -410,7 +549,7 @@ async fn the_editor_refuses_to_delete_a_policy_in_a_generated_profile() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "body={body}");
-    assert_names_the_compiler(&body);
+    assert_names_the_compiler_and_the_policy(&body, "perm-grant-existing");
 
     // Still there.
     f.store
@@ -483,14 +622,57 @@ async fn seed_defaults_refuses_a_generated_profile_that_already_has_policies() {
         .expect("cleanup");
 }
 
+/// I-1 closed, `delete_service` side: a generated profile holding ONLY a
+/// foreign (non-compiler-owned) policy is deletable — the profile's
+/// `origin` alone no longer gates the delete, only whether a compiler-owned
+/// policy is still present under it.
 #[tokio::test]
-async fn delete_profile_refuses_a_generated_profile() {
+async fn delete_profile_succeeds_on_a_generated_profile_holding_only_foreign_policies() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
-    let token = admin_session(&f, "guard_delete_profile").await;
+    let token = admin_session(&f, "guard_delete_profile_foreign").await;
     let (svc_name, svc_id) = seed_generated_profile(&f).await;
+    insert_policy_directly(&f, svc_id, "hand-authored-policy").await;
+
+    let resp = f
+        .app()
+        .oneshot(req(
+            "DELETE",
+            &format!("/policies/services/{svc_name}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "a generated profile with no compiler-owned policy must be deletable"
+    );
+    assert!(
+        f.store.get_service(&svc_name).await.is_err(),
+        "the delete must actually have landed"
+    );
+    let _ = svc_id; // deleted via the HTTP route; nothing left to clean up
+}
+
+/// I-1 closed, `delete_service` side (the refusal half): the SAME generated
+/// profile is refused with 409 while a compiler-owned policy still exists
+/// under it — this is the case round 1's profile-level `origin` check would
+/// have also caught, so pairing it with the success case above is what
+/// proves the new rule is "owned policies remain", not "origin says
+/// generated".
+#[tokio::test]
+async fn delete_profile_refuses_while_a_compiler_owned_policy_remains() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = admin_session(&f, "guard_delete_profile_owned").await;
+    let (svc_name, svc_id) = seed_generated_profile(&f).await;
+    insert_policy_directly(&f, svc_id, "perm-grant-existing").await;
 
     let (status, body) = into_json(
         f.app()
@@ -507,11 +689,13 @@ async fn delete_profile_refuses_a_generated_profile() {
     assert_eq!(status, StatusCode::CONFLICT, "body={body}");
     assert_names_the_compiler(&body);
 
-    // Still resolvable.
+    // Still resolvable, and the owned policy is untouched.
     f.store
         .get_service(&svc_name)
         .await
         .expect("the profile must survive the refused delete");
+    let rows = f.store.list_policies(svc_id).await.expect("list");
+    assert_eq!(rows.len(), 1, "the owned policy must survive too");
 
     sqlx::query("DELETE FROM policy.authz_services WHERE id = $1")
         .bind(svc_id)
