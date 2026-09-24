@@ -77,8 +77,11 @@ use crate::executor::{
     RunIx, RunState, TaskKind, TaskRun, Tick,
 };
 
+/// Keeps the `sqlx::Error` as the source rather than flattening it to text:
+/// the Display is unchanged, and `scheduler::fire` downcasts it to tell a
+/// duplicate schedule tick (a unique violation) from a transient failure.
 fn db_err(e: sqlx::Error) -> Error {
-    Error::Internal(anyhow::anyhow!("{e}"))
+    Error::Internal(anyhow::Error::new(e))
 }
 
 fn worker_err(e: WorkerError) -> Error {

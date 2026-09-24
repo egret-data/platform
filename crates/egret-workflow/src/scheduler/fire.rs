@@ -29,10 +29,13 @@ pub struct PassReport {
     /// An execution was created and the dates advanced.
     pub fired: usize,
     /// The tick was consumed without an execution: `tick` skipped it, or its
-    /// inputs were refused (spec §5). The reason is in `last_error`.
+    /// inputs were refused (spec §5), or the unique index showed the tick
+    /// already had its execution. The reason is in `last_error`.
     pub skipped: usize,
-    /// The trigger could not be evaluated and was taken off the queue
-    /// (`next_evaluation_date = NULL`, reason in `last_error`).
+    /// The trigger could not be fired, reason in `last_error`. Either it was
+    /// taken off the queue (`next_evaluation_date = NULL`: the source does not
+    /// parse, resolve or plan) or, for any other failure, its dates were left
+    /// alone so the next pass retries the same tick.
     pub errored: usize,
     /// The source says the trigger is off although the row said on: nothing
     /// fired, nothing moved, and `sync` re-ran for the flow.
@@ -168,9 +171,20 @@ async fn fire_one(conn: &mut PgConnection, c: &Claimed) -> Result<Fate> {
         // exactly as `tick` computed them, and no execution is created.
         TickOutcome::Fired(_) if refused.is_some() => (Fate::Skipped, refused),
         TickOutcome::Fired(e) => match start(conn, c, &e).await? {
-            Ok(()) => (Fate::Fired, None),
-            Err(why) => {
+            Started::Yes => (Fate::Fired, None),
+            // The unique index says this tick already has its execution: the
+            // tick is consumed, not refired and not taken off the queue.
+            Started::AlreadyFired(why) => (Fate::Skipped, Some(why)),
+            // Deterministic in the source: only the author's next save helps.
+            Started::Refused(why) => {
                 take_off_queue(conn, c, &why).await?;
+                return Ok(Fate::Errored);
+            }
+            // Anything else may be transient (a timeout, a deadlock, a
+            // serialization failure). The dates stay, so the next pass fires
+            // this same tick again (spec §4 point 1); only the reason is kept.
+            Started::Failed(why) => {
+                record_error(conn, c, &why).await?;
                 return Ok(Fate::Errored);
             }
         },
@@ -192,15 +206,44 @@ async fn fire_one(conn: &mut PgConnection, c: &Claimed) -> Result<Fate> {
     Ok(fate)
 }
 
-/// Create the execution inside a savepoint. `Ok(Err(why))` is a refusal of
-/// this flow (it does not plan, an input does not coerce, ...), rolled back to
-/// the savepoint so the transaction can still take the trigger off the queue;
-/// the outer `Err` is a failure of the transaction itself.
-async fn start(
-    conn: &mut PgConnection,
-    c: &Claimed,
-    e: &ScheduledExecution,
-) -> Result<std::result::Result<(), String>> {
+/// The index that makes a second execution for one tick impossible
+/// (migration 0156).
+const ONE_PER_TICK: &str = "workflow_executions_one_per_schedule_tick";
+
+/// What starting a fired tick's execution came to.
+enum Started {
+    Yes,
+    /// `Error::InvalidInput`: the source does not parse or plan, or an input
+    /// is refused. Fixed only by a save, so the trigger leaves the queue.
+    Refused(String),
+    /// A unique violation on [`ONE_PER_TICK`]: the tick was already fired.
+    AlreadyFired(String),
+    /// Anything else. Possibly transient, so the tick is retried next pass.
+    Failed(String),
+}
+
+fn classify(err: &Error) -> Started {
+    let why = format!("the execution could not be started: {err}");
+    match err {
+        Error::InvalidInput(_) => Started::Refused(why),
+        Error::Internal(source)
+            if source
+                .downcast_ref::<sqlx::Error>()
+                .and_then(|e| e.as_database_error())
+                .and_then(|d| d.constraint())
+                == Some(ONE_PER_TICK) =>
+        {
+            Started::AlreadyFired(format!("this tick already has an execution: {err}"))
+        }
+        _ => Started::Failed(why),
+    }
+}
+
+/// Create the execution inside a savepoint, so that whatever goes wrong in it
+/// -- including a statement Postgres aborted -- can be rolled back while the
+/// claim's transaction lives on to record what happened. The outer `Err` is a
+/// failure of the transaction itself.
+async fn start(conn: &mut PgConnection, c: &Claimed, e: &ScheduledExecution) -> Result<Started> {
     let mut sp = conn.begin().await.map_err(db_err)?;
     let started = start_execution_in(
         &mut sp,
@@ -217,13 +260,29 @@ async fn start(
     match started {
         Ok(_) => {
             sp.commit().await.map_err(db_err)?;
-            Ok(Ok(()))
+            Ok(Started::Yes)
         }
         Err(err) => {
             sp.rollback().await.map_err(db_err)?;
-            Ok(Err(format!("the execution could not be started: {err}")))
+            Ok(classify(&err))
         }
     }
+}
+
+/// Keep the reason, touch nothing else: the dates stay where the claim found
+/// them, so the next pass retries the same tick.
+async fn record_error(conn: &mut PgConnection, c: &Claimed, why: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE workflow.triggers SET last_error = $3, updated_at = now() \
+          WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(c.flow_id)
+    .bind(&c.trigger_id)
+    .bind(why)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(())
 }
 
 /// Spec §4 point 6: a trigger that cannot be evaluated leaves the queue

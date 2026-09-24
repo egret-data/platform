@@ -427,10 +427,40 @@ async fn ddl(db: &Db, sql: String) {
         .unwrap();
 }
 
-async fn drop_fault(db: &Db, hex: &str) {
+/// A fault that RAISEs on `event` (e.g. `BEFORE UPDATE`) on `table`, for
+/// `flow`'s rows only, so nothing else in the pass is touched. Named per flow
+/// so parallel binaries cannot collide, and dropped first in case an earlier
+/// run died before its cleanup. In `public`, not `pg_temp`: a session-local
+/// function cannot back a trigger that the pool's other connections fire.
+async fn install_fault(db: &Db, flow: Uuid, event: &str, table: &str) {
+    let hex = flow.simple();
+    drop_fault(db, flow, table).await;
     ddl(
         db,
-        format!("DROP TRIGGER IF EXISTS w12_fail_{hex} ON workflow.triggers"),
+        format!(
+            "CREATE FUNCTION public.w12_fail_{hex}() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN \
+                  IF NEW.flow_id = '{flow}' THEN RAISE EXCEPTION 'w12 injected'; END IF; \
+                  RETURN NEW; \
+                END $$"
+        ),
+    )
+    .await;
+    ddl(
+        db,
+        format!(
+            "CREATE TRIGGER w12_fail_{hex} {event} ON {table} \
+             FOR EACH ROW EXECUTE FUNCTION public.w12_fail_{hex}()"
+        ),
+    )
+    .await;
+}
+
+async fn drop_fault(db: &Db, flow: Uuid, table: &str) {
+    let hex = flow.simple();
+    ddl(
+        db,
+        format!("DROP TRIGGER IF EXISTS w12_fail_{hex} ON {table}"),
     )
     .await;
     ddl(
@@ -445,33 +475,11 @@ async fn fire_and_advance_are_atomic() {
     let Some(fx) = fx().await else { return };
     let flow = fx.flow(&flow_yaml("atomic", "", "")).await;
     common::make_due(&fx.db, flow, "s", 1).await;
-    let hex = flow.simple().to_string();
-    drop_fault(&fx.db, &hex).await;
-    // In `public`, not `pg_temp`: a session-local function cannot back a
-    // trigger that the pool's other connections fire.
-    ddl(
-        &fx.db,
-        format!(
-            "CREATE FUNCTION public.w12_fail_{hex}() RETURNS trigger LANGUAGE plpgsql AS \
-             $$ BEGIN \
-                  IF NEW.flow_id = '{flow}' THEN RAISE EXCEPTION 'w12 injected'; END IF; \
-                  RETURN NEW; \
-                END $$"
-        ),
-    )
-    .await;
-    ddl(
-        &fx.db,
-        format!(
-            "CREATE TRIGGER w12_fail_{hex} BEFORE UPDATE ON workflow.triggers \
-             FOR EACH ROW EXECUTE FUNCTION public.w12_fail_{hex}()"
-        ),
-    )
-    .await;
+    install_fault(&fx.db, flow, "BEFORE UPDATE", "workflow.triggers").await;
     let before = row(&fx.db, flow).await.unwrap();
 
     let result = fire_due(&fx.db.pool).await;
-    drop_fault(&fx.db, &hex).await;
+    drop_fault(&fx.db, flow, "workflow.triggers").await;
 
     let err = result.expect_err("the aborted transaction fails the pass");
     assert!(err.to_string().contains("w12 injected"), "{err}");
@@ -525,4 +533,127 @@ async fn the_unique_index_refuses_a_second_fire() {
         .await
         .expect("a different tick");
     assert_eq!(executions_of(&fx.db, flow).await, 2);
+}
+
+#[tokio::test]
+async fn a_flow_that_does_not_plan_is_taken_off_the_queue_and_its_sibling_still_fires() {
+    let Some(fx) = fx().await else { return };
+    // Parses and resolves, but `build_plan`'s validation refuses it: the
+    // required input `x` is supplied by nothing (`schedule_missing_inputs`).
+    let src = flow_yaml("unplannable", "inputs:\n  - id: x\n    type: STRING\n", "");
+    let plan_err = egret_workflow::executor::build_plan(&src).expect_err("must not plan");
+    let broken = fx.flow(&src).await;
+    let sibling = fx.flow(&flow_yaml("sibling", "", "")).await;
+    // Older than the sibling, so it is claimed first.
+    common::make_due(&fx.db, broken, "s", 2).await;
+    common::make_due(&fx.db, sibling, "s", 1).await;
+
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            fired: 1,
+            errored: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(executions_of(&fx.db, broken).await, 0);
+    assert_eq!(executions_of(&fx.db, sibling).await, 1);
+    let after = row(&fx.db, broken).await.unwrap();
+    assert_eq!(after.next_evaluation_date, None, "off the queue");
+    let err = after.last_error.expect("and says why");
+    assert!(err.contains(&plan_err.message), "{err}");
+}
+
+#[tokio::test]
+async fn a_transient_failure_while_starting_keeps_the_tick_for_the_next_pass() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&flow_yaml("transient", "", "")).await;
+    let sibling = fx.flow(&flow_yaml("sibling", "", "")).await;
+    common::make_due(&fx.db, flow, "s", 2).await;
+    common::make_due(&fx.db, sibling, "s", 1).await;
+    let due = due_date(&fx.db, flow).await;
+    let before = row(&fx.db, flow).await.unwrap();
+    install_fault(&fx.db, flow, "BEFORE INSERT", "workflow.executions").await;
+
+    let first = fire_due(&fx.db.pool).await;
+    let during = row(&fx.db, flow).await.unwrap();
+    let executions_during = executions_of(&fx.db, flow).await;
+    drop_fault(&fx.db, flow, "workflow.executions").await;
+
+    assert_eq!(
+        first.expect("the pass survives a failed start"),
+        PassReport {
+            fired: 1,
+            errored: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(executions_during, 0);
+    assert_eq!(
+        executions_of(&fx.db, sibling).await,
+        1,
+        "the rest of the pass ran"
+    );
+    assert_eq!(
+        (during.next_evaluation_date, during.evaluated_at),
+        (before.next_evaluation_date, before.evaluated_at),
+        "the dates did not move, and the trigger is still on the queue"
+    );
+    let err = during.last_error.expect("the failure is recorded");
+    assert!(err.contains("w12 injected"), "{err}");
+
+    // The fault is gone: the very same tick fires, and the note is cleared.
+    let second = fx.pass().await;
+    assert_eq!(second.fired, 1, "{second:?}");
+    assert_eq!(common::scheduled_dates(&fx.db, flow).await, vec![due]);
+    assert_eq!(row(&fx.db, flow).await.unwrap().last_error, None);
+}
+
+#[tokio::test]
+async fn a_tick_that_already_fired_is_consumed_not_taken_off_the_queue() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&flow_yaml("again", "", "")).await;
+    common::make_due(&fx.db, flow, "s", 1).await;
+    let before = row(&fx.db, flow).await.unwrap();
+    let due = before.next_evaluation_date.unwrap();
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            fired: 1,
+            ..Default::default()
+        }
+    );
+    // Put the row back as it was before the fire, as a lost advance would.
+    sqlx::query(
+        "UPDATE workflow.triggers SET next_evaluation_date = $2, evaluated_at = $3 \
+         WHERE flow_id = $1",
+    )
+    .bind(flow)
+    .bind(before.next_evaluation_date)
+    .bind(before.evaluated_at)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            skipped: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(
+        common::scheduled_dates(&fx.db, flow).await,
+        vec![due],
+        "no second execution"
+    );
+    let after = row(&fx.db, flow).await.unwrap();
+    assert_eq!(
+        after.next_evaluation_date,
+        Some(due + Duration::minutes(1)),
+        "consumed: advanced past the tick, still on the queue"
+    );
+    assert_eq!(after.evaluated_at, Some(due));
+    let err = after.last_error.expect("the duplicate is noted");
+    assert!(err.contains("already has an execution"), "{err}");
 }
