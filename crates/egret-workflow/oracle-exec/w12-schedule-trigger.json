@@ -1,0 +1,51 @@
+{
+  "artifact": "kestra/kestra@sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd",
+  "captured_at": "2026-09-24T07:46:32Z",
+  "flow": {
+    "id": "w12_probe",
+    "namespace": "w12",
+    "trigger": {
+      "id": "every_minute",
+      "type": "io.kestra.plugin.core.trigger.Schedule",
+      "cron": "*/1 * * * *",
+      "timezone": "Asia/Ho_Chi_Minh"
+    }
+  },
+  "executions": [
+    {
+      "id": "6DFxQDRmB1kJ8qgFf73Wzo",
+      "scheduleDate": "2026-09-24T07:42:00.205053Z",
+      "trigger": {
+        "id": "every_minute",
+        "type": "io.kestra.plugin.core.trigger.Schedule",
+        "variables": {
+          "date": "2026-09-24T14:42:00.000000+07:00",
+          "next": "2026-09-24T14:43:00.000000+07:00",
+          "previous": "2026-09-24T14:41:00.000000+07:00"
+        }
+      },
+      "rendered_log_message": null
+    },
+    {
+      "id": "41V7HR4SQKMsbSs26Itaka",
+      "scheduleDate": "2026-09-24T07:43:00.208853Z",
+      "trigger": {
+        "id": "every_minute",
+        "type": "io.kestra.plugin.core.trigger.Schedule",
+        "variables": {
+          "date": "2026-09-24T14:43:00.000000+07:00",
+          "next": "2026-09-24T14:44:00.000000+07:00",
+          "previous": "2026-09-24T14:42:00.000000+07:00"
+        }
+      },
+      "rendered_log_message": null
+    }
+  ],
+  "findings": [
+    "Key set of `trigger.variables`: exactly `date`, `next`, `previous` on BOTH the first-ever fire and the second fire. Quoted from execution `6DFxQDRmB1kJ8qgFf73Wzo`.trigger.variables: `{\"date\": \"2026-09-24T14:42:00.000000+07:00\", \"next\": \"2026-09-24T14:43:00.000000+07:00\", \"previous\": \"2026-09-24T14:41:00.000000+07:00\"}`. No other key (e.g. no `id`/`hourly`/`labels` inside `variables`) appeared in either execution's trigger object.",
+    "Exact text form of `date` (and `next`/`previous`): offset form, NOT `Z`. Quoted verbatim from execution `6DFxQDRmB1kJ8qgFf73Wzo`: `\"date\": \"2026-09-24T14:42:00.000000+07:00\"`. It carries the trigger's own zone offset (`+07:00` for `Asia/Ho_Chi_Minh`), not UTC, and it is NOT wall-clock UTC despite the execution's own `scheduleDate` (`2026-09-24T07:42:00.205053Z`) being UTC with a `Z` suffix — the two are different fields with different zone/format conventions. Fractional seconds ARE present: six digits, always `.000000` for `date`/`next`/`previous` because a per-minute cron tick has zero sub-second component (not proof fractional seconds are always zero for finer-grained schedules, only that the field carries 6 fractional digits at this resolution).",
+    "`previous` and `next` ARE present on the first-ever fire of a brand-new trigger (no prior state existed for `every_minute` before this flow's first tick). Quoted from execution `6DFxQDRmB1kJ8qgFf73Wzo` (the flow's very first execution, created seconds after `POST /api/v1/main/flows`): `trigger.variables` = `{\"date\": \"2026-09-24T14:42:00.000000+07:00\", \"next\": \"2026-09-24T14:43:00.000000+07:00\", \"previous\": \"2026-09-24T14:41:00.000000+07:00\"}`. `previous` (14:41) is computed purely from the cron expression relative to `date` (one tick earlier), not from any execution history — it precedes the flow's own creation time (~14:41 VN / 07:41 UTC). So Kestra derives `previous`/`next` arithmetically from the cron spec at fire time; they are never absent, even on tick #1.",
+    "`rendered_log_message` could NOT be captured: Kestra's log API returned zero entries for both executions and for the whole `w12` namespace, despite both executions reaching `SUCCESS`. Quoted: `GET /api/v1/main/logs/6DFxQDRmB1kJ8qgFf73Wzo` -> `[]`; `GET /api/v1/main/logs/6DFxQDRmB1kJ8qgFf73Wzo?minLevel=TRACE` -> `[]`; `GET /api/v1/main/logs/search` (tenant-wide, no filter) -> `{\"results\":[],\"total\":0,\"type\":\"OFFSET\"}`; `GET /api/v1/main/logs/search?namespace=w12` -> `{\"results\":[],\"total\":0,\"type\":\"OFFSET\"}`. The absence is tenant-wide, not specific to this flow, so it looks like log persistence is not functioning in this compose stack (the `docker-compose.yml` configures `queue: {type: postgres}` and `repository: {type: postgres}` but no log-store-specific config), rather than the message being empty. This does not affect the measured `trigger` shape, which is the interface Task 4 depends on.",
+    "The execution search endpoint the brief guessed, `GET /api/v1/executions/search?namespace=w12&flowId=w12_probe` (no tenant segment), returned 200 in this build (not 404) — Kestra resolves the tenant to `main` implicitly. `GET /api/v1/main/executions/search?namespace=w12&flowId=w12_probe` (the tenant-qualified form `harvest.py` uses elsewhere, e.g. `f\"{BASE}/{TENANT}/flows/search\"`) also returned 200 with identical results. Both forms work; no alternate path needed to be discovered."
+  ]
+}
