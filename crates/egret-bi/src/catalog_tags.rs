@@ -179,6 +179,15 @@ impl CatalogTagRepo {
             egret_catalog_registry::services_bound_to_warehouse(&mut **tx, warehouse_id)
                 .await
                 .map_err(crate::error::BiError::from)?;
+        // SP4a Task 11, defect 2: a recompile now also locks and writes the
+        // profile's TAG service, whose id can be lower than the profile's. Take
+        // the whole expanded lock set ascending up front rather than letting
+        // service N's tag service be locked after service N+1's profile —
+        // `lock_services_in_tx` documents why that ordering is what keeps two
+        // overlapping recompiles queueing instead of deadlocking.
+        egret_perm_compile::lock_services_in_tx(tx, &service_ids)
+            .await
+            .map_err(crate::error::BiError::from)?;
         for service_id in service_ids {
             let summary = egret_perm_compile::recompile_service_in_tx(tx, service_id)
                 .await

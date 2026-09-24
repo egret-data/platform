@@ -106,8 +106,9 @@ use egret_perm::{
 use egret_policy::admin::access_to_ranger_json;
 use egret_policy::{
     catalogs_for_service_via, compiler_targeted_services_via, get_service_by_id_via,
-    services_for_catalog_via, tag_name_for_key_via, tagged_columns_for_service_via, PolicyStore,
-    COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
+    service_id_by_name_via, services_and_tag_services_via, services_for_catalog_via,
+    tag_name_for_key_via, tagged_columns_for_service_via, PolicyStore, COMPILER_GRANT_PREFIX,
+    COMPILER_RULE_PREFIX,
 };
 
 use crate::grants::compile_grant;
@@ -207,11 +208,57 @@ impl CompileSummary {
     }
 }
 
+/// One policy this recompile wants to exist. **Which service it must exist
+/// under travels in the map KEY** ([`PolicyKey`]), not here: a tag-selected
+/// rule on Trino compiles to a body whose own `service` field names the
+/// profile's TAG service (`rules::build_tag_body` → `tagify`), and that is
+/// where the row has to land or the tag plugin never downloads it. See
+/// [`target_service_id`] and `apply_diff_in_tx`.
 struct DesiredPolicy {
     body: Value,
     source_kind: SourceKind,
     grant_id: Option<Uuid>,
     rule_id: Option<Uuid>,
+}
+
+/// The `(service_id, name)` a desired policy is keyed by — the same pair
+/// `policy.authz_policies`' own `UNIQUE (service_id, name)` uses, and the
+/// reason the desired map is keyed by a pair at all: one recompile now writes
+/// into two services (the profile and its tag service).
+type PolicyKey = (i64, String);
+
+/// Resolve the service a rendered policy body belongs to from the body's OWN
+/// `service` field, against the names this recompile is allowed to write into.
+///
+/// **This is the fix for Task 10's case T3, and its shape is the point.**
+/// Round 1 stamped every row with the profile's `service_id` and never read
+/// the body at all, so a tag policy whose body said
+/// `"service": "sp3c2-trino-live_tag"` was stored under the *trino* profile
+/// (52) instead of the tag service (51). It deployed, egret listed it, the
+/// tag plugin's own download returned **0 policies**, and the masked column
+/// came back with its real values. Routing by the body's own declaration
+/// makes the row and the body unable to disagree; an unknown name is a hard
+/// error rather than a silent fallback to the profile, because a fallback is
+/// exactly the behaviour that produced the defect.
+fn target_service_id(
+    body: &Value,
+    writable: &HashMap<String, i64>,
+    what: &str,
+) -> Result<i64, CompileError> {
+    let named = body
+        .get("service")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            CompileError::Db(format!(
+                "compiled body for {what} carries no 'service' field"
+            ))
+        })?;
+    writable.get(named).copied().ok_or_else(|| {
+        CompileError::Db(format!(
+            "compiled body for {what} names service {named:?}, which is not a service this              recompile may write into ({:?})",
+            writable.keys().collect::<Vec<_>>()
+        ))
+    })
 }
 
 fn db_err<E: std::fmt::Display>(e: E) -> CompileError {
@@ -261,7 +308,7 @@ fn body_name(body: &Value, what: &str) -> Result<String, CompileError> {
 async fn compile_desired(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
-) -> Result<Option<(BTreeMap<String, DesiredPolicy>, Vec<SkippedItem>)>, CompileError> {
+) -> Result<Option<Compiled>, CompileError> {
     let svc = get_service_by_id_via(conn, service_id)
         .await
         .map_err(db_err)?;
@@ -275,19 +322,53 @@ async fn compile_desired(
     let catalog_names: HashMap<Uuid, String> =
         catalogs.into_iter().map(|c| (c.id, c.name)).collect();
 
+    // The services this recompile may write into, by the NAME a compiled body
+    // stamps on itself: the profile always, and its tag service when the
+    // profile both configures one AND that configured name resolves to a real
+    // `policy.authz_services` row. A `tagService` naming nothing is treated
+    // exactly like an absent one — the tag plugin polls that service BY NAME
+    // (`/service/plugins/policies/download/{service}`, 404 on an unknown
+    // name), so a policy filed under a profile that does not exist could not
+    // be served to anyone. That lands in the same `MissingTagService` skip the
+    // unconfigured case already took, rather than aborting the recompile.
+    let mut writable: HashMap<String, i64> = HashMap::new();
+    writable.insert(svc.name.clone(), service_id);
+    let mut sweep: Vec<i64> = vec![service_id];
+
     let tag_service: Option<String> = if engine == EngineType::Trino {
-        svc.config_jsonb
-            .get("tagService")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
+        match svc.config_jsonb.get("tagService").and_then(|v| v.as_str()) {
+            Some(name) => match service_id_by_name_via(conn, name).await.map_err(db_err)? {
+                Some(tag_id) => {
+                    writable.insert(name.to_string(), tag_id);
+                    sweep.push(tag_id);
+                    Some(name.to_string())
+                }
+                None => {
+                    tracing::warn!(
+                        service_id,
+                        tag_service = %name,
+                        "profile's `tagService` names no policy profile — tag rules cannot \
+                         compile for this profile"
+                    );
+                    None
+                }
+            },
+            None => None,
+        }
     } else {
         None
     };
 
+    // Ascending: `apply_diff_in_tx` takes a row lock per swept service and the
+    // acquisition order is what turns two overlapping recompiles into a queue
+    // instead of a deadlock (see that function).
+    sweep.sort_unstable();
+    sweep.dedup();
+
     let all_grants = list_grants_via(conn).await.map_err(db_err)?;
     let all_rules = list_rules_via(conn).await.map_err(db_err)?;
 
-    let mut desired: BTreeMap<String, DesiredPolicy> = BTreeMap::new();
+    let mut desired: BTreeMap<PolicyKey, DesiredPolicy> = BTreeMap::new();
     let mut skipped: Vec<SkippedItem> = Vec::new();
 
     for g in &all_grants {
@@ -298,8 +379,9 @@ async fn compile_desired(
             Ok(input) => {
                 let name = input.name.clone();
                 let body = stamp_service_type(access_to_ranger_json(&input), engine);
+                let target = target_service_id(&body, &writable, &format!("grant {}", g.id))?;
                 desired.insert(
-                    name,
+                    (target, name),
                     DesiredPolicy {
                         body,
                         source_kind: SourceKind::Grant,
@@ -337,13 +419,38 @@ async fn compile_desired(
             conn,
             service_id,
             &catalog_names,
+            &writable,
             &mut desired,
             &mut skipped,
         )
         .await?;
     }
 
-    Ok(Some((desired, skipped)))
+    Ok(Some(Compiled {
+        desired,
+        skipped,
+        sweep,
+    }))
+}
+
+/// What one profile's compile produced: the desired policies keyed by the
+/// `(service_id, name)` pair they must exist under, the items this compile
+/// could not express, and **every service whose compiler-owned policies this
+/// recompile is responsible for** — the profile, plus its tag service when it
+/// has one.
+///
+/// `sweep` is the half Task 10's defect 2 makes load-bearing. Once a tag rule
+/// compiles into a DIFFERENT service than the profile being recompiled, a
+/// delete sweep scoped to the profile alone would never see that rule's policy
+/// again — which is Task 7's own fix-round-1 Critical (a deleted rule's policy
+/// enforced forever) re-created one service over. So the sweep set is computed
+/// from the profile's configuration, not from what happened to compile: a
+/// profile with a tag service sweeps it even when zero tag policies are
+/// desired, which is exactly the "the rule was deleted" case.
+struct Compiled {
+    desired: BTreeMap<PolicyKey, DesiredPolicy>,
+    skipped: Vec<SkippedItem>,
+    sweep: Vec<i64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -355,7 +462,8 @@ async fn compile_one_rule(
     conn: &mut sqlx::PgConnection,
     service_id: i64,
     catalog_names: &HashMap<Uuid, String>,
-    desired: &mut BTreeMap<String, DesiredPolicy>,
+    writable: &HashMap<String, i64>,
+    desired: &mut BTreeMap<PolicyKey, DesiredPolicy>,
     skipped: &mut Vec<SkippedItem>,
 ) -> Result<(), CompileError> {
     let (catalog_name, tag_name, tagged): (String, Option<String>, Vec<TaggedColumn>) =
@@ -422,9 +530,13 @@ async fn compile_one_rule(
     match bodies {
         Ok(bodies) => {
             for body in bodies {
-                let name = body_name(&body, &format!("rule {:?}", r.name))?;
+                let what = format!("rule {:?}", r.name);
+                let name = body_name(&body, &what)?;
+                // A TAG body names the tag service here, a path body the
+                // profile — the routing that Task 10 found missing.
+                let target = target_service_id(&body, writable, &what)?;
                 desired.insert(
-                    name,
+                    (target, name),
                     DesiredPolicy {
                         body,
                         source_kind: SourceKind::Rule,
@@ -485,7 +597,8 @@ async fn compile_one_rule(
         // logs, so it is visible rather than silent.
         Err(CompileError::MissingTagService { rule }) => {
             let reason = format!(
-                "profile has no `tagService` configured, so tag rule {rule:?} cannot compile here"
+                "profile has no usable `tagService` (unconfigured, or naming a profile that \
+                 does not exist), so tag rule {rule:?} cannot compile here"
             );
             tracing::warn!(
                 service_id,
@@ -507,32 +620,56 @@ async fn compile_one_rule(
 #[derive(sqlx::FromRow)]
 struct ExistingPolicyRow {
     id: i64,
+    service_id: i64,
     name: String,
     policy_jsonb: Value,
 }
 
-/// Diff `desired` against the service's CURRENT `policy.authz_policies` state
-/// and write only the difference, on `tx` (never opens or commits its own —
-/// the caller owns both). Bumps `policy.authz_services.policy_version`
-/// exactly once, only if something was actually written.
+/// Diff `desired` against the CURRENT `policy.authz_policies` state of every
+/// service in `sweep` and write only the difference, on `tx` (never opens or
+/// commits its own — the caller owns both). Bumps
+/// `policy.authz_services.policy_version` at most once per service, and only
+/// for a service something was actually written under.
 ///
 /// **Fix round 1 Critical**: "current state" is read directly from
-/// `policy.authz_policies` (scoped by `service_id` and this compiler's own
-/// name prefixes), NOT through `perm.compiled` — see the module doc comment
-/// for why a join through `perm.compiled` is blind to a policy whose grant
-/// or rule was deleted (its `perm.compiled` row cascades away with it, but
-/// the policy itself does not).
+/// `policy.authz_policies` (scoped by service and this compiler's own name
+/// prefixes), NOT through `perm.compiled` — see the module doc comment for
+/// why a join through `perm.compiled` is blind to a policy whose grant or
+/// rule was deleted (its `perm.compiled` row cascades away with it, but the
+/// policy itself does not).
+///
+/// **SP4a Task 11, defect 2 — why the sweep is over a SET of services.** A
+/// Trino tag policy belongs to the profile's TAG service, not the profile
+/// (`target_service_id`). If the existing-state read stayed scoped to the
+/// profile alone, a deleted tag rule's policy would sit in the tag service
+/// where nothing enumerated it and nothing could ever reap it — the exact
+/// shape of the Critical the round-1 fix above closed, re-created one service
+/// over. `sweep` therefore comes from the profile's CONFIGURATION
+/// (`Compiled::sweep`), so the tag service is enumerated on every recompile,
+/// including the one where the rule that used to compile into it has just
+/// been deleted and `desired` holds nothing for it at all.
+///
+/// `profile_service_id` is still distinguished from the rest of `sweep`: it is
+/// the one this recompile stamps `origin = 'generated'` on (D4 — a tag service
+/// is not an editable profile and no engine binds one), and the one whose
+/// `policy_version` must bump whenever ANY swept service changed, because the
+/// resource plugin's own download embeds the tag service's policies as
+/// `tagPolicies` and is gated by the PROFILE's version
+/// (`egret-policy/src/ranger/api/download.rs`): a tag-only change that left
+/// the profile's version alone would answer that plugin `304 Not Modified`
+/// and the new mask would never reach it.
 async fn apply_diff_in_tx(
     tx: &mut Transaction<'_, Postgres>,
-    service_id: i64,
-    desired: BTreeMap<String, DesiredPolicy>,
+    profile_service_id: i64,
+    sweep: &[i64],
+    desired: BTreeMap<PolicyKey, DesiredPolicy>,
     skipped: Vec<SkippedItem>,
 ) -> Result<CompileSummary, CompileError> {
     // **Serialize concurrent recompiles of the SAME profile** (SP4a Task 9).
-    // Everything below reads `policy.authz_policies` for this service, decides
-    // a diff from what it read, and then writes against the policy ids it
-    // read. Under Postgres' default READ COMMITTED that plan is only valid if
-    // no other transaction can commit a change to this service's policies in
+    // Everything below reads `policy.authz_policies` for these services,
+    // decides a diff from what it read, and then writes against the policy ids
+    // it read. Under Postgres' default READ COMMITTED that plan is only valid
+    // if no other transaction can commit a change to those policies in
     // between — and one can: a concurrently deleted policy row makes the
     // `Some((policy_id, _))` branch below UPDATE zero rows and then insert a
     // `perm.compiled` row pointing at an id that no longer exists, which the
@@ -542,39 +679,48 @@ async fn apply_diff_in_tx(
     // recompiling one profile ordinary, and an installation-wide tag-rule
     // recompile makes it likely.
     //
-    // A row lock on the service is the smallest thing that makes the
+    // A row lock on each service is the smallest thing that makes the
     // read-decide-write sequence atomic. **Callers must acquire services in
     // ASCENDING id order** — `recompile_services_in_tx`,
     // `services_for_catalog_via`, `compiler_targeted_services_via` and
-    // `egret_catalog_registry::services_bound_to_warehouse` all order that way
-    // — so two transactions recompiling overlapping sets queue rather than
-    // deadlock.
-    sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
-        .bind(service_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_err)?;
+    // `egret_catalog_registry::services_bound_to_warehouse` all order that way,
+    // and `Compiled::sweep` is sorted — so two transactions recompiling
+    // overlapping sets queue rather than deadlock.
+    debug_assert!(
+        sweep.is_sorted(),
+        "apply_diff_in_tx requires an ascending sweep set, got {sweep:?}"
+    );
+    for &sid in sweep {
+        sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
+            .bind(sid)
+            .execute(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    }
 
     let existing: Vec<ExistingPolicyRow> = sqlx::query_as(
-        "SELECT id, name, policy_jsonb FROM policy.authz_policies \
-         WHERE service_id = $1 AND (name LIKE $2 || '%' OR name LIKE $3 || '%')",
+        "SELECT id, service_id, name, policy_jsonb FROM policy.authz_policies \
+         WHERE service_id = ANY($1) AND (name LIKE $2 || '%' OR name LIKE $3 || '%')",
     )
-    .bind(service_id)
+    .bind(sweep)
     .bind(COMPILER_GRANT_PREFIX)
     .bind(COMPILER_RULE_PREFIX)
     .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;
 
-    let mut existing_by_name: HashMap<String, (i64, Value)> = existing
+    let mut existing_by_key: HashMap<PolicyKey, (i64, Value)> = existing
         .into_iter()
-        .map(|row| (row.name, (row.id, row.policy_jsonb)))
+        .map(|row| ((row.service_id, row.name), (row.id, row.policy_jsonb)))
         .collect();
 
     let mut summary = CompileSummary {
         skipped,
         ..Default::default()
     };
+    // Which swept services this call actually wrote under — each one's
+    // `policy_version` gates its own plugin's 304.
+    let mut wrote_under: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
 
     // SP4a Task 8 (D4): the moment this compiler intends to own at least one
     // policy under this service, the profile stops being editor-writable.
@@ -587,25 +733,33 @@ async fn apply_diff_in_tx(
     // policies (every grant/rule that reached it was deleted) is left
     // `generated` as found — the compiler still claims it; only
     // `PolicyStore::create_service` (never called for an existing row) ever
-    // starts a profile out as `manual`.
+    // starts a profile out as `manual`. Only the PROFILE is stamped: a tag
+    // service is not an engine-bound, editor-facing profile, and its
+    // compiler-owned rows are already protected from a human write by
+    // `egret-policy`'s reserved-prefix guard in every profile alike.
     if !desired.is_empty() {
         sqlx::query(
             "UPDATE policy.authz_services SET origin = 'generated' \
              WHERE id = $1 AND origin <> 'generated'",
         )
-        .bind(service_id)
+        .bind(profile_service_id)
         .execute(&mut **tx)
         .await
         .map_err(db_err)?;
     }
 
-    for (name, dp) in desired {
+    for ((service_id, name), dp) in desired {
         debug_assert!(
             name.starts_with(COMPILER_GRANT_PREFIX) || name.starts_with(COMPILER_RULE_PREFIX),
             "compiled policy name {name:?} does not carry this compiler's own prefix — \
              the existing-state sweep above would never find it again"
         );
-        match existing_by_name.remove(&name) {
+        debug_assert!(
+            sweep.contains(&service_id),
+            "compiled policy {name:?} targets service {service_id}, which this recompile does \
+             not sweep — it could never be reaped again"
+        );
+        match existing_by_key.remove(&(service_id, name.clone())) {
             None => {
                 let policy_id: i64 = sqlx::query_scalar(
                     "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb) \
@@ -619,6 +773,7 @@ async fn apply_diff_in_tx(
                 .map_err(db_err)?;
                 record_compiled(tx, service_id, policy_id, &dp).await?;
                 summary.created += 1;
+                wrote_under.insert(service_id);
             }
             Some((policy_id, current_body)) => {
                 if current_body == dp.body {
@@ -635,6 +790,7 @@ async fn apply_diff_in_tx(
                     .await
                     .map_err(db_err)?;
                     summary.updated += 1;
+                    wrote_under.insert(service_id);
                 }
                 // Self-heal `perm.compiled` provenance whether the body
                 // changed or not — a row that survived to this branch is, by
@@ -646,28 +802,37 @@ async fn apply_diff_in_tx(
         }
     }
 
-    // Everything left in `existing_by_name` is a policy this recompile no
+    // Everything left in `existing_by_key` is a policy this recompile no
     // longer produces (the grant/rule behind it was deleted, its catalog is
     // no longer reachable, or a StarRocks column lost its tag) — reaped here
-    // regardless of whether a `perm.compiled` row for it still exists.
-    for (policy_id, _body) in existing_by_name.into_values() {
+    // regardless of whether a `perm.compiled` row for it still exists, and
+    // regardless of WHICH swept service it lives under, which is what keeps a
+    // deleted tag rule's policy from outliving the rule in the tag service.
+    for ((service_id, _name), (policy_id, _body)) in existing_by_key {
         sqlx::query("DELETE FROM policy.authz_policies WHERE id = $1")
             .bind(policy_id)
             .execute(&mut **tx)
             .await
             .map_err(db_err)?;
         summary.deleted += 1;
+        wrote_under.insert(service_id);
     }
 
     if summary.wrote_anything() {
-        sqlx::query(
-            "UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() \
-             WHERE id = $1",
-        )
-        .bind(service_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(db_err)?;
+        // The profile's own version always bumps when anything changed: its
+        // download embeds the tag service's policies and is gated by THIS
+        // version (see this function's doc comment).
+        wrote_under.insert(profile_service_id);
+        for sid in wrote_under {
+            sqlx::query(
+                "UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() \
+                 WHERE id = $1",
+            )
+            .bind(sid)
+            .execute(&mut **tx)
+            .await
+            .map_err(db_err)?;
+        }
     }
 
     Ok(summary)
@@ -712,10 +877,17 @@ pub async fn recompile_service_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<CompileSummary, CompileError> {
-    let Some((desired, skipped)) = compile_desired(&mut **tx, service_id).await? else {
+    let Some(compiled) = compile_desired(&mut **tx, service_id).await? else {
         return Ok(CompileSummary::default());
     };
-    apply_diff_in_tx(tx, service_id, desired, skipped).await
+    apply_diff_in_tx(
+        tx,
+        service_id,
+        &compiled.sweep,
+        compiled.desired,
+        compiled.skipped,
+    )
+    .await
 }
 
 /// Recompile `service_id`'s profile in its own, self-contained transaction —
@@ -843,10 +1015,23 @@ pub async fn lock_services_in_tx(
         "lock_services_in_tx requires ascending service ids, got {service_ids:?} — \
          an unordered producer reintroduces the deadlock this ordering removes"
     );
+    // **SP4a Task 11, defect 2: the set is EXPANDED before it is sorted.** A
+    // recompile now also reads, writes and locks the profile's TAG service
+    // (`Compiled::sweep`), and a tag service's id can be LOWER than its
+    // profile's — the live cluster's `sp3c2-trino-live` is profile 52 with tag
+    // service 51. Pre-locking the profiles alone and discovering their tag
+    // services only inside `apply_diff_in_tx` would therefore produce a
+    // DESCENDING pair on this path while a caller that does not pre-lock takes
+    // the same pair ascending: the exact opposed order two transactions
+    // deadlock on. Locking the expanded, sorted set here keeps every path's
+    // acquisition order ascending over the same universe.
+    let expanded = services_and_tag_services_via(&mut **tx, service_ids)
+        .await
+        .map_err(db_err)?;
     // One statement per id rather than `WHERE id = ANY(...) ORDER BY id FOR
     // UPDATE`: Postgres does not promise that a sort is applied before row
     // locks are taken, and the ORDER is the entire point here.
-    for &service_id in service_ids {
+    for &service_id in &expanded {
         sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
             .bind(service_id)
             .execute(&mut **tx)
@@ -870,6 +1055,12 @@ pub async fn recompile_services_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_ids: &[i64],
 ) -> Result<Vec<CompileSummary>, CompileError> {
+    // Take every lock this loop will need, expanded and ascending, BEFORE the
+    // first recompile — otherwise service N's tag service could be locked
+    // after service N+1's profile and the global order stops being ascending
+    // (see `lock_services_in_tx`). Re-taking a lock this transaction already
+    // holds is free, so callers that pre-locked lose nothing.
+    lock_services_in_tx(tx, service_ids).await?;
     let mut out = Vec::with_capacity(service_ids.len());
     for &service_id in service_ids {
         let summary = recompile_service_in_tx(tx, service_id).await?;

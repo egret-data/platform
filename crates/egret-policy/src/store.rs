@@ -580,6 +580,35 @@ pub async fn get_service_by_id_via(
     .ok_or_else(|| PolicyStoreError::NotFound(format!("service id {id}")))
 }
 
+/// The id of the profile NAMED `name`, or `None` when no such row exists.
+///
+/// **SP4a Task 11, defect 2.** A compiled policy's Ranger body carries the
+/// name of the service it belongs to (`"service": "<name>"`), and for a
+/// tag-selected rule on Trino that name is the profile's TAG service, not the
+/// profile itself (`admin::ranger_json::tagify`). `egret-perm-compile`'s
+/// recompile driver stored every policy it produced under the profile's own
+/// `service_id` regardless, so the tag plugin's download
+/// (`/service/plugins/policies/download/<profile>_tag`) served ZERO policies
+/// while the resource profile carried a `serviceType: tag` policy it can never
+/// match — a mask that deployed, listed as live, and returned the real values
+/// (`docs/en/plans/2026-09-24-permission-model-sp4a-live-result.md` §3, case
+/// T3). This is the lookup that turns the body's own `service` name into the
+/// row's `service_id`, so the two can no longer disagree.
+///
+/// Connection-generic for the same reason as [`get_service_by_id_via`]: the
+/// driver runs inside the caller's own open transaction.
+pub async fn service_id_by_name_via(
+    conn: &mut sqlx::PgConnection,
+    name: &str,
+) -> Result<Option<i64>, PolicyStoreError> {
+    Ok(
+        sqlx::query_scalar::<_, i64>(r#"SELECT id FROM policy.authz_services WHERE name = $1"#)
+            .bind(name)
+            .fetch_optional(&mut *conn)
+            .await?,
+    )
+}
+
 /// Connection-generic core of [`PolicyStore::catalogs_for_service`] — same
 /// rationale as [`get_service_by_id_via`].
 pub async fn catalogs_for_service_via(
@@ -594,6 +623,43 @@ pub async fn catalogs_for_service_via(
            WHERE e.authz_service_id = $1"#,
     )
     .bind(service_id)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// Every service in `service_ids`, **plus each one's tag service**, ascending.
+///
+/// SP4a Task 11, defect 2: a recompile of a Trino profile now reads and writes
+/// `policy.authz_policies` rows under the profile's TAG service as well as
+/// under the profile itself, and takes a `FOR UPDATE` row lock on each. The
+/// lock ORDER is what keeps two overlapping recompiles queueing instead of
+/// deadlocking (`egret_perm_compile::trigger::lock_services_in_tx`), and a
+/// profile's tag service can perfectly well have a LOWER id than the profile —
+/// the live cluster's `sp3c2-trino-live` is profile 52 with tag service 51. So
+/// the set every caller locks has to be the EXPANDED one, sorted once, rather
+/// than profiles first and their tag services discovered later.
+///
+/// A `tagService` naming no row contributes nothing (the join drops it), which
+/// is the same treatment the compiler gives it.
+pub async fn services_and_tag_services_via(
+    conn: &mut sqlx::PgConnection,
+    service_ids: &[i64],
+) -> Result<Vec<i64>, PolicyStoreError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        r#"SELECT DISTINCT q.id FROM (
+               SELECT s.id
+                 FROM policy.authz_services s
+                WHERE s.id = ANY($1)
+               UNION
+               SELECT t.id
+                 FROM policy.authz_services s
+                 JOIN policy.authz_services t
+                   ON t.name = s.config_jsonb ->> 'tagService'
+                WHERE s.id = ANY($1)
+           ) q
+           ORDER BY 1"#,
+    )
+    .bind(service_ids)
     .fetch_all(&mut *conn)
     .await?)
 }

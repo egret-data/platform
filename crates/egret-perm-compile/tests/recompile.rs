@@ -523,14 +523,15 @@ async fn renaming_a_tag_updates_the_trino_policy_in_place() {
     egret_policy::seed_trino(&policy)
         .await
         .expect("seed trino service-def");
-    let service = policy
-        .create_service(
-            &unique("trino_update"),
-            "trino",
-            &serde_json::json!({ "tagService": "trino-update-1_tag" }),
-        )
+    egret_policy::seed_tag(&policy)
         .await
-        .expect("create trino service");
+        .expect("seed tag service-def");
+    // SP4a Task 11, defect 2: a Trino tag policy is stored under the TAG
+    // service, so this fixture needs a real one. Round 1's version named a
+    // `tagService` that had no `policy.authz_services` row at all and still
+    // found the policy under the trino profile — which is precisely the bug
+    // Task 10 measured live (the tag plugin's own download served 0 policies).
+    let (service, tag_service_id) = trino_profile_with_tag_service(&policy, "trino_update").await;
 
     let tag_key = unique("rename-me");
     sqlx::query("INSERT INTO tags (key, name) VALUES ($1, 'Original Name')")
@@ -563,7 +564,7 @@ async fn renaming_a_tag_updates_the_trino_policy_in_place() {
     let (policy_id, row_version_before, body_before): (i64, i64, Value) = sqlx::query_as(
         "SELECT id, version, policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
     )
-    .bind(service.id)
+    .bind(tag_service_id)
     .bind(&policy_name)
     .fetch_one(pool)
     .await
@@ -593,7 +594,7 @@ async fn renaming_a_tag_updates_the_trino_policy_in_place() {
     let (policy_id_after, row_version_after, body_after): (i64, i64, Value) = sqlx::query_as(
         "SELECT id, version, policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
     )
-    .bind(service.id)
+    .bind(tag_service_id)
     .bind(&policy_name)
     .fetch_one(pool)
     .await
@@ -1045,4 +1046,37 @@ async fn the_compiler_itself_still_writes_reserved_prefix_policies_after_the_res
         "the compiler must still be able to write a SECOND reserved-prefix policy on the \
          next recompile ({expected_name2:?})"
     );
+}
+
+// ---------------------------------------------------------------------------
+// SP4a Task 11, defect 2 — the fixture half.
+// ---------------------------------------------------------------------------
+//
+// A Trino tag policy is stored under the profile's TAG service, not the
+// profile, so any Trino fixture carrying a tag rule needs a REAL tag-service
+// row. The routing and reaping assertions themselves live in their OWN test
+// binary, `tests/tag_service_routing.rs` — see that file for why they cannot
+// share this one's database.
+
+/// A Trino profile whose `tagService` names a REAL tag service row, with both
+/// service-defs seeded. Returns the profile row and the tag service's id.
+async fn trino_profile_with_tag_service(
+    policy: &PolicyStore,
+    prefix: &str,
+) -> (egret_policy::ServiceRow, i64) {
+    let profile_name = unique(prefix);
+    let tag_name = format!("{profile_name}_tag");
+    let profile = policy
+        .create_service(
+            &profile_name,
+            "trino",
+            &serde_json::json!({ "tagService": tag_name }),
+        )
+        .await
+        .expect("create trino profile");
+    let tag_service = policy
+        .create_service(&tag_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag service");
+    (profile, tag_service.id)
 }
