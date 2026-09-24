@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::error::PermError;
@@ -314,6 +314,220 @@ pub async fn list_rules_via(conn: &mut sqlx::PgConnection) -> Result<Vec<Rule>, 
         .collect()
 }
 
+/// Insert `g` and its principal subtract on the CALLER's open transaction —
+/// SP4a Task 9. The HTTP create path (`egret_perm_compile::routes`) has to
+/// write the grant and RECOMPILE the services it affects inside ONE
+/// transaction: a grant that commits but whose recompile then fails leaves
+/// the engine enforcing the previous policy set while egret's UI shows the
+/// grant as live, which is the exact defect Task 7 closed on the tag-write
+/// path. [`PermStore::create_grant`] is this function plus its own
+/// `begin`/`commit`, so there is one implementation of what "create a grant"
+/// means, not two that can drift.
+///
+/// `g.id` is ignored — `perm.grants.id` is `DEFAULT gen_random_uuid()` and
+/// the returned id is the one the database minted.
+pub async fn create_grant_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    g: &Grant,
+) -> Result<Uuid, PermError> {
+    let actions: Vec<&str> = g.actions.iter().map(|a| a.as_str()).collect();
+    let (origin, origin_workspace_id): (&str, Option<Uuid>) = match &g.origin {
+        GrantOrigin::Explicit => ("explicit", None),
+        GrantOrigin::WorkspaceAssignment { workspace_id } => {
+            ("workspace_assignment", Some(*workspace_id))
+        }
+    };
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.grants \
+           (effect, actions, catalog_id, schema_name, table_name, column_name, \
+            origin, origin_workspace_id) \
+         VALUES ($1::perm.effect, $2, $3, $4, $5, $6, $7, $8) \
+         RETURNING id",
+    )
+    .bind(g.effect.as_str())
+    .bind(&actions)
+    .bind(g.scope.catalog_id)
+    .bind(&g.scope.schema)
+    .bind(&g.scope.table)
+    .bind(&g.scope.column)
+    .bind(origin)
+    .bind(origin_workspace_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    insert_principals(tx, id, &g.principals).await?;
+    Ok(id)
+}
+
+/// Delete one grant on the caller's open transaction — same rationale as
+/// [`create_grant_in_tx`]: the delete and the recompile that reaps the
+/// policies it produced must commit together, or the engine keeps enforcing
+/// a grant egret no longer has.
+pub async fn delete_grant_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> Result<bool, PermError> {
+    let result = sqlx::query("DELETE FROM perm.grants WHERE id = $1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Insert `r` and its exemption set on the caller's open transaction — same
+/// rationale as [`create_grant_in_tx`]. `r.id` is ignored in favor of the id
+/// `perm.rules.id DEFAULT gen_random_uuid()` mints.
+pub async fn create_rule_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    r: &Rule,
+) -> Result<Uuid, PermError> {
+    let (kind, mask_type, value_expr, filter_expr): (
+        &str,
+        Option<&str>,
+        Option<&str>,
+        Option<&str>,
+    ) = match &r.kind {
+        RuleKind::Mask {
+            mask_type,
+            value_expr,
+        } => (
+            "mask",
+            Some(mask_type.as_str()),
+            value_expr.as_deref(),
+            None,
+        ),
+        RuleKind::RowFilter { filter_expr } => {
+            ("row_filter", None, None, Some(filter_expr.as_str()))
+        }
+    };
+    let (selector_kind, tag_key, catalog_id, schema_name, table_name, column_name): (
+        &str,
+        Option<&str>,
+        Option<Uuid>,
+        Option<&str>,
+        Option<&str>,
+        Option<&str>,
+    ) = match &r.selector {
+        Selector::Tag { key } => ("tag", Some(key.as_str()), None, None, None, None),
+        Selector::Path(scope) => (
+            "path",
+            None,
+            Some(scope.catalog_id),
+            scope.schema.as_deref(),
+            scope.table.as_deref(),
+            scope.column.as_deref(),
+        ),
+    };
+
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.rules \
+           (name, kind, mask_type, value_expr, filter_expr, selector_kind, \
+            tag_key, catalog_id, schema_name, table_name, column_name) \
+         VALUES ($1, $2::perm.rule_kind, $3, $4, $5, $6::perm.selector_kind, \
+                 $7, $8, $9, $10, $11) \
+         RETURNING id",
+    )
+    .bind(&r.name)
+    .bind(kind)
+    .bind(mask_type)
+    .bind(value_expr)
+    .bind(filter_expr)
+    .bind(selector_kind)
+    .bind(tag_key)
+    .bind(catalog_id)
+    .bind(schema_name)
+    .bind(table_name)
+    .bind(column_name)
+    .fetch_one(&mut **tx)
+    .await?;
+    insert_exemptions(tx, id, &r.exempt).await?;
+    Ok(id)
+}
+
+/// Delete one rule on the caller's open transaction — same rationale as
+/// [`delete_grant_in_tx`].
+pub async fn delete_rule_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> Result<bool, PermError> {
+    let result = sqlx::query("DELETE FROM perm.rules WHERE id = $1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// One grant by id, with its principal subtract — the read the HTTP delete
+/// path needs BEFORE the row is gone, because the affected-service set is
+/// computed from the grant's own `scope.catalog_id` (SP4a Task 9). `None`
+/// when no such grant exists.
+pub async fn get_grant_via(
+    conn: &mut sqlx::PgConnection,
+    id: Uuid,
+) -> Result<Option<Grant>, PermError> {
+    let Some(row): Option<GrantRow> = sqlx::query_as(
+        "SELECT id, effect::text AS effect, actions, catalog_id, schema_name, \
+                table_name, column_name, origin, origin_workspace_id \
+         FROM perm.grants WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let principal_rows: Vec<GrantPrincipalRow> = sqlx::query_as(
+        "SELECT grant_id, kind::text AS kind, ref AS principal_ref, mode::text AS mode \
+         FROM perm.grant_principals WHERE grant_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut sets = group_principal_sets(
+        principal_rows
+            .into_iter()
+            .map(|r| (r.grant_id, r.kind, r.principal_ref, r.mode)),
+    )?;
+    let principals = sets.remove(&id).unwrap_or_default();
+    grant_from_row(row, principals).map(Some)
+}
+
+/// One rule by id, with its exemption set — same rationale as
+/// [`get_grant_via`]: a rule's affected-service set depends on its SELECTOR
+/// (a tag selector reaches every compiler-targeted profile; a path selector
+/// only the profiles bound to its catalog), so the delete path has to read
+/// the rule before deleting it.
+pub async fn get_rule_via(
+    conn: &mut sqlx::PgConnection,
+    id: Uuid,
+) -> Result<Option<Rule>, PermError> {
+    let Some(row): Option<RuleRow> = sqlx::query_as(
+        "SELECT id, name, kind::text AS kind, mask_type, value_expr, filter_expr, \
+                selector_kind::text AS selector_kind, tag_key, catalog_id, \
+                schema_name, table_name, column_name \
+         FROM perm.rules WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let exemption_rows: Vec<RuleExemptionRow> = sqlx::query_as(
+        "SELECT rule_id, kind::text AS kind, ref AS principal_ref, mode::text AS mode \
+         FROM perm.rule_exemptions WHERE rule_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut sets = group_principal_sets(
+        exemption_rows
+            .into_iter()
+            .map(|r| (r.rule_id, r.kind, r.principal_ref, r.mode)),
+    )?;
+    let exempt = sets.remove(&id).unwrap_or_default();
+    rule_from_row(row, exempt).map(Some)
+}
+
 #[derive(Clone)]
 pub struct PermStore {
     pool: PgPool,
@@ -346,34 +560,8 @@ impl PermStore {
     /// put in `g.id` (tests pass `Uuid::nil()` there for exactly this
     /// reason).
     pub async fn create_grant(&self, g: &Grant) -> Result<Uuid, PermError> {
-        let actions: Vec<&str> = g.actions.iter().map(|a| a.as_str()).collect();
-        let (origin, origin_workspace_id): (&str, Option<Uuid>) = match &g.origin {
-            GrantOrigin::Explicit => ("explicit", None),
-            GrantOrigin::WorkspaceAssignment { workspace_id } => {
-                ("workspace_assignment", Some(*workspace_id))
-            }
-        };
-
         let mut tx = self.pool.begin().await?;
-        let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO perm.grants \
-               (effect, actions, catalog_id, schema_name, table_name, column_name, \
-                origin, origin_workspace_id) \
-             VALUES ($1::perm.effect, $2, $3, $4, $5, $6, $7, $8) \
-             RETURNING id",
-        )
-        .bind(g.effect.as_str())
-        .bind(&actions)
-        .bind(g.scope.catalog_id)
-        .bind(&g.scope.schema)
-        .bind(&g.scope.table)
-        .bind(&g.scope.column)
-        .bind(origin)
-        .bind(origin_workspace_id)
-        .fetch_one(&mut *tx)
-        .await?;
-
-        insert_principals(&mut tx, id, &g.principals).await?;
+        let id = create_grant_in_tx(&mut tx, g).await?;
         tx.commit().await?;
         Ok(id)
     }
@@ -396,68 +584,8 @@ impl PermStore {
     /// Same contract as `create_grant`: `r.id` is ignored in favor of the id
     /// `perm.rules.id DEFAULT gen_random_uuid()` mints.
     pub async fn create_rule(&self, r: &Rule) -> Result<Uuid, PermError> {
-        let (kind, mask_type, value_expr, filter_expr): (
-            &str,
-            Option<&str>,
-            Option<&str>,
-            Option<&str>,
-        ) = match &r.kind {
-            RuleKind::Mask {
-                mask_type,
-                value_expr,
-            } => (
-                "mask",
-                Some(mask_type.as_str()),
-                value_expr.as_deref(),
-                None,
-            ),
-            RuleKind::RowFilter { filter_expr } => {
-                ("row_filter", None, None, Some(filter_expr.as_str()))
-            }
-        };
-        let (selector_kind, tag_key, catalog_id, schema_name, table_name, column_name): (
-            &str,
-            Option<&str>,
-            Option<Uuid>,
-            Option<&str>,
-            Option<&str>,
-            Option<&str>,
-        ) = match &r.selector {
-            Selector::Tag { key } => ("tag", Some(key.as_str()), None, None, None, None),
-            Selector::Path(scope) => (
-                "path",
-                None,
-                Some(scope.catalog_id),
-                scope.schema.as_deref(),
-                scope.table.as_deref(),
-                scope.column.as_deref(),
-            ),
-        };
-
         let mut tx = self.pool.begin().await?;
-        let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO perm.rules \
-               (name, kind, mask_type, value_expr, filter_expr, selector_kind, \
-                tag_key, catalog_id, schema_name, table_name, column_name) \
-             VALUES ($1, $2::perm.rule_kind, $3, $4, $5, $6::perm.selector_kind, \
-                     $7, $8, $9, $10, $11) \
-             RETURNING id",
-        )
-        .bind(&r.name)
-        .bind(kind)
-        .bind(mask_type)
-        .bind(value_expr)
-        .bind(filter_expr)
-        .bind(selector_kind)
-        .bind(tag_key)
-        .bind(catalog_id)
-        .bind(schema_name)
-        .bind(table_name)
-        .bind(column_name)
-        .fetch_one(&mut *tx)
-        .await?;
-
-        insert_exemptions(&mut tx, id, &r.exempt).await?;
+        let id = create_rule_in_tx(&mut tx, r).await?;
         tx.commit().await?;
         Ok(id)
     }

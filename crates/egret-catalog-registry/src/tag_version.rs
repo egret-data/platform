@@ -93,6 +93,10 @@ where
 /// service, never under its tag service, so there is nothing there for a
 /// recompile to touch. Runs on any executor — a caller's transaction, or the
 /// pool.
+/// Ordered by id (SP4a Task 9): the caller recompiles each of these in turn,
+/// and `egret_perm_compile`'s `apply_diff_in_tx` takes a row lock per service.
+/// Ascending acquisition order across every producer of such a list is what
+/// keeps two overlapping recompiles queueing instead of deadlocking.
 pub async fn services_bound_to_warehouse<'e, E>(
     executor: E,
     warehouse_id: Uuid,
@@ -105,7 +109,8 @@ where
          FROM registry.catalogs c \
          JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id \
          JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
-         WHERE c.warehouse_id = $1 AND e.authz_service_id IS NOT NULL",
+         WHERE c.warehouse_id = $1 AND e.authz_service_id IS NOT NULL \
+         ORDER BY 1",
     )
     .bind(warehouse_id)
     .fetch_all(executor)

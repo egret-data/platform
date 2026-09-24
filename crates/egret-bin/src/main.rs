@@ -1948,6 +1948,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         pdp: pdp.clone(),
     });
 
+    // Data-permission model surface (SP4a Task 9): grants/rules/explain, plus
+    // the manual compile trigger. Both stores are built over the SAME `db`,
+    // which is what lets a grant write and its recompile share one
+    // transaction across the `perm.*` and `policy.*` schemas.
+    let perm = Some(egret_perm_compile::PermState {
+        perm: egret_perm::PermStore::new(db.pool.clone()),
+        policy: egret_policy::PolicyStore::new(db.clone()),
+        sessions: sessions.clone(),
+        pdp: pdp.clone(),
+    });
+
     // Engine-mgmt seam: owns the engine domain (HTTP router + provisioning).
     let engine_mgmt = Some(egret_engine_mgmt::EngineMgmtState {
         engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
@@ -2136,6 +2147,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         control_plane,
         catalog_admin,
         policy_admin,
+        perm,
         engine_mgmt,
         catalog_engine,
         idp,

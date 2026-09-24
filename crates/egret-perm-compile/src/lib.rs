@@ -42,11 +42,15 @@
 //! whole recompile.
 
 pub mod grants;
+pub mod routes;
 pub mod rules;
 pub mod trigger;
 
 pub use grants::compile_grant;
+pub use routes::{openapi, perm_router, PermHttpError, PermState};
 pub use rules::{compile_rule, ResolvedNames, TaggedColumn};
 pub use trigger::{
-    recompile_service, recompile_service_in_tx, CompileSummary, SkippedItem, SourceKind,
+    affected_services_for_grant, affected_services_for_rule, lock_services_in_tx,
+    recompile_service, recompile_service_in_tx, recompile_services_in_tx, CompileSummary,
+    SkippedItem, SourceKind,
 };

@@ -598,6 +598,88 @@ pub async fn catalogs_for_service_via(
     .await?)
 }
 
+/// **The reverse of [`catalogs_for_service_via`]**: which policy profiles does
+/// a change to THIS catalog affect? SP4a Task 9 needs it — a grant names a
+/// catalog, so a grant write has to recompile exactly the profiles whose
+/// engines reach that catalog. Same join, walked the other way, and the same
+/// `authz_service_id` binding `egret_catalog_registry::services_bound_to_warehouse`
+/// uses for the tag-write trigger; this one is keyed by catalog rather than
+/// by warehouse because that is the level a `perm.grants.catalog_id` names.
+///
+/// Profiles NO engine binds are deliberately absent: nothing downloads them,
+/// so nothing enforces them. `POST /api/control-plane/perm/compile/{id}` is
+/// the repair trigger for a profile that later acquires a binding.
+pub async fn services_for_catalog_via(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: uuid::Uuid,
+) -> Result<Vec<i64>, PolicyStoreError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        r#"SELECT DISTINCT e.authz_service_id
+           FROM registry.engine_catalog_attachments ea
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id
+           WHERE ea.catalog_id = $1 AND e.authz_service_id IS NOT NULL
+           ORDER BY 1"#,
+    )
+    .bind(catalog_id)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// Every profile the SP4a compiler targets and an engine actually binds —
+/// i.e. every `trino`/`starrocks` service some `engine_mgmt.engines` row
+/// points at.
+///
+/// **This is deliberately installation-wide.** A tag-selected rule is
+/// catalog-UNSCOPED on Trino by design (D5: one tag policy, resolved by the
+/// Ranger tag plugin, covering whatever the tag is on), so creating or
+/// deleting one rule changes the compiled output of EVERY Trino profile in
+/// the installation — there is no narrower honest answer. StarRocks profiles
+/// are included for the same mutation because the same rule compiles there
+/// too, per tagged column. See `egret_perm_compile::trigger::affected_services_for_rule`.
+pub async fn compiler_targeted_services_via(
+    conn: &mut sqlx::PgConnection,
+) -> Result<Vec<i64>, PolicyStoreError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        r#"SELECT DISTINCT s.id
+           FROM policy.authz_services s
+           JOIN engine_mgmt.engines e ON e.authz_service_id = s.id
+           WHERE s.type IN ('trino', 'starrocks')
+           ORDER BY s.id"#,
+    )
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// The `tags.key`s carried by ONE exact resource (`column = ""` means the
+/// table itself), resolved through the catalog's warehouse. SP4a Task 9's
+/// `explain` needs it: `egret_perm::evaluate` takes the tags already resolved
+/// as present on the target (it does no I/O — see `eval::selector_hits`), and
+/// an `explain` that made the caller supply them would answer a question the
+/// caller had already decided the answer to.
+pub async fn tag_keys_for_resource_via(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: uuid::Uuid,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<Vec<String>, PolicyStoreError> {
+    Ok(sqlx::query_scalar::<_, String>(
+        r#"SELECT DISTINCT t.key
+           FROM registry.catalogs c
+           JOIN catalog_tag_assignments a ON a.warehouse_id = c.warehouse_id
+           JOIN tags t ON t.id = a.tag_id
+           WHERE c.id = $1 AND a.schema_name = $2 AND a.table_name = $3
+             AND a.column_name = $4
+           ORDER BY t.key"#,
+    )
+    .bind(catalog_id)
+    .bind(schema)
+    .bind(table)
+    .bind(column)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
 /// Connection-generic core of [`PolicyStore::tagged_columns_for_service`] —
 /// same rationale as [`get_service_by_id_via`].
 pub async fn tagged_columns_for_service_via(

@@ -101,12 +101,13 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use egret_perm::{
-    list_grants_via, list_rules_via, CompileError, EngineType, PermStore, Rule, Selector,
+    list_grants_via, list_rules_via, CompileError, EngineType, Grant, PermStore, Rule, Selector,
 };
 use egret_policy::admin::access_to_ranger_json;
 use egret_policy::{
-    catalogs_for_service_via, get_service_by_id_via, tag_name_for_key_via,
-    tagged_columns_for_service_via, PolicyStore, COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
+    catalogs_for_service_via, compiler_targeted_services_via, get_service_by_id_via,
+    services_for_catalog_via, tag_name_for_key_via, tagged_columns_for_service_via, PolicyStore,
+    COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
 };
 
 use crate::grants::compile_grant;
@@ -436,6 +437,40 @@ async fn compile_one_rule(
             });
             Ok(())
         }
+        // A Trino profile with no `tagService` in its config cannot host a
+        // tag policy at all — the Ranger tag plugin it would be resolved by
+        // is not wired to this profile. That is a property of the PROFILE,
+        // not a defect in the rule, so it is recorded as a skip (and warned
+        // about) exactly like the dangling-tag-key case above rather than
+        // aborting the service's recompile.
+        //
+        // **Why this matters as of SP4a Task 9 and not before.** Task 7's
+        // only caller recompiled the handful of profiles bound to ONE
+        // warehouse. Task 9's rule-mutation path recompiles every
+        // compiler-targeted profile in the installation, because a Trino tag
+        // rule is catalog-unscoped (see `affected_services_for_rule`). Under
+        // an abort, one misconfigured Trino profile anywhere would make
+        // every tag-rule create and delete fail with a 500 — a profile
+        // nobody involved in the write has heard of blocking the write. Each
+        // skip still reaches the caller in `CompileSummary::skipped` and the
+        // logs, so it is visible rather than silent.
+        Err(CompileError::MissingTagService { rule }) => {
+            let reason = format!(
+                "profile has no `tagService` configured, so tag rule {rule:?} cannot compile here"
+            );
+            tracing::warn!(
+                service_id,
+                rule_id = %r.id,
+                reason = %reason,
+                "rule skipped during recompile"
+            );
+            skipped.push(SkippedItem {
+                source_kind: SourceKind::Rule,
+                id: r.id,
+                reason,
+            });
+            Ok(())
+        }
         Err(other) => Err(other),
     }
 }
@@ -464,6 +499,33 @@ async fn apply_diff_in_tx(
     desired: BTreeMap<String, DesiredPolicy>,
     skipped: Vec<SkippedItem>,
 ) -> Result<CompileSummary, CompileError> {
+    // **Serialize concurrent recompiles of the SAME profile** (SP4a Task 9).
+    // Everything below reads `policy.authz_policies` for this service, decides
+    // a diff from what it read, and then writes against the policy ids it
+    // read. Under Postgres' default READ COMMITTED that plan is only valid if
+    // no other transaction can commit a change to this service's policies in
+    // between — and one can: a concurrently deleted policy row makes the
+    // `Some((policy_id, _))` branch below UPDATE zero rows and then insert a
+    // `perm.compiled` row pointing at an id that no longer exists, which the
+    // `compiled_policy_id_fkey` foreign key rejects. That was not reachable
+    // while the compiler's only caller was the tag-write path (one warehouse's
+    // services, one writer); Task 9's model-mutation routes make two requests
+    // recompiling one profile ordinary, and an installation-wide tag-rule
+    // recompile makes it likely.
+    //
+    // A row lock on the service is the smallest thing that makes the
+    // read-decide-write sequence atomic. **Callers must acquire services in
+    // ASCENDING id order** — `recompile_services_in_tx`,
+    // `services_for_catalog_via`, `compiler_targeted_services_via` and
+    // `egret_catalog_registry::services_bound_to_warehouse` all order that way
+    // — so two transactions recompiling overlapping sets queue rather than
+    // deadlock.
+    sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
+        .bind(service_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+
     let existing: Vec<ExistingPolicyRow> = sqlx::query_as(
         "SELECT id, name, policy_jsonb FROM policy.authz_policies \
          WHERE service_id = $1 AND (name LIKE $2 || '%' OR name LIKE $3 || '%')",
@@ -642,4 +704,144 @@ pub async fn recompile_service(
     let summary = recompile_service_in_tx(&mut tx, service_id).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(summary)
+}
+
+// ---------------------------------------------------------------------------
+// SP4a Task 9: which services does a MODEL mutation affect?
+// ---------------------------------------------------------------------------
+//
+// Task 7 answered this for a TAG write ("every service bound to the warehouse
+// that was tagged"). A grant or rule mutation is a different question, and the
+// answer is not the same for the two halves of the model:
+//
+// - A **grant** names exactly one catalog (`perm.grants.catalog_id`, NOT NULL).
+//   `compile_desired` skips any grant whose catalog the service cannot reach
+//   (`catalog_names.get(&g.scope.catalog_id)` → `continue`), so a grant can
+//   only ever change the compiled output of a profile bound to THAT catalog.
+//   The affected set is the reverse of `catalogs_for_service_via`.
+//
+// - A **rule** depends on its selector. A path-selector rule is catalog-scoped
+//   in exactly the same way a grant is. A TAG-selector rule is not: on Trino it
+//   compiles to one tag policy addressed to the profile's tag service, with no
+//   catalog resource at all (D5, `rules::build_tag_body`), so it lands in EVERY
+//   Trino profile regardless of which catalogs that profile reaches. On
+//   StarRocks it compiles per tagged column, which is catalog-scoped in effect
+//   — but "which StarRocks profiles have a column carrying this tag" is a
+//   question whose answer changes with every tag write, and getting it wrong
+//   leaves a mask off a column. The honest set for a tag rule is therefore
+//   every profile this compiler targets.
+//
+// **Stated plainly, because it is a real operational property and not a
+// footnote:** creating or deleting ONE tag-selected rule recompiles EVERY
+// Trino and StarRocks profile in the installation that an engine binds. On an
+// installation with many engines that is the cost of one such request, and a
+// failure on any one of those profiles fails the whole request and rolls the
+// rule write back. Grant mutations and path-rule mutations are narrow; tag-rule
+// mutations are installation-wide.
+
+/// The services a create/delete of `g` can change the compiled output of —
+/// the profiles bound to the grant's own catalog. See this module's Task 9
+/// section for the derivation.
+pub async fn affected_services_for_grant(
+    conn: &mut sqlx::PgConnection,
+    g: &Grant,
+) -> Result<Vec<i64>, CompileError> {
+    let mut ids = services_for_catalog_via(conn, g.scope.catalog_id)
+        .await
+        .map_err(db_err)?;
+    normalize_service_order(&mut ids);
+    Ok(ids)
+}
+
+/// Ascending, deduplicated — the lock order `apply_diff_in_tx`'s `FOR UPDATE`
+/// depends on. The queries already `ORDER BY`, but the ordering is what keeps
+/// two overlapping recompiles from deadlocking, so it is asserted here rather
+/// than trusted to every query that feeds this module.
+fn normalize_service_order(ids: &mut Vec<i64>) {
+    ids.sort_unstable();
+    ids.dedup();
+}
+
+/// The services a create/delete of `r` can change the compiled output of.
+/// A path selector is catalog-scoped like a grant; a **tag selector reaches
+/// every compiler-targeted profile in the installation** — see this module's
+/// Task 9 section.
+pub async fn affected_services_for_rule(
+    conn: &mut sqlx::PgConnection,
+    r: &Rule,
+) -> Result<Vec<i64>, CompileError> {
+    let mut ids = match &r.selector {
+        Selector::Path(scope) => services_for_catalog_via(conn, scope.catalog_id)
+            .await
+            .map_err(db_err)?,
+        Selector::Tag { .. } => compiler_targeted_services_via(conn).await.map_err(db_err)?,
+    };
+    normalize_service_order(&mut ids);
+    Ok(ids)
+}
+
+/// Take the row locks a recompile of `service_ids` will need, in ascending id
+/// order, **before** the model write they accompany.
+///
+/// **This ordering is not an optimisation, it is what removes a deadlock.**
+/// `perm.compiled` carries `ON DELETE CASCADE` foreign keys onto
+/// `perm.grants`/`perm.rules`, so `apply_diff_in_tx`'s `record_compiled`
+/// INSERT takes a FK share lock on the grant row it records. Meanwhile a
+/// delete handler's `DELETE FROM perm.grants` takes an exclusive lock on that
+/// same row. If the delete transaction locked the grant row first and only
+/// then reached for the profile lock, while a concurrent tag-rule transaction
+/// held the profile lock and was blocked on the grant row, the two waited on
+/// each other and Postgres killed one with a deadlock — surfacing as an
+/// intermittent 500 on an otherwise valid delete. (Observed: one run in three
+/// of `tests/routes.rs` before this call was added.)
+///
+/// Acquiring every profile lock the request will need before touching any
+/// `perm.*` row makes the order global: profiles ascending, then model rows.
+/// `apply_diff_in_tx` still takes its own lock per service — re-taking a lock
+/// this transaction already holds is free, and it keeps the invariant true for
+/// callers that do not come through here (the tag-write path).
+pub async fn lock_services_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    service_ids: &[i64],
+) -> Result<(), CompileError> {
+    // One statement per id rather than `WHERE id = ANY(...) ORDER BY id FOR
+    // UPDATE`: Postgres does not promise that a sort is applied before row
+    // locks are taken, and the ORDER is the entire point here.
+    for &service_id in service_ids {
+        sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
+            .bind(service_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    }
+    Ok(())
+}
+
+/// Recompile every service in `service_ids` on the CALLER's open transaction.
+/// Stops at the first failure and propagates it, so the caller's `?` rolls the
+/// model write back with it: a grant or rule that is stored but never compiled
+/// is worse than a rejected one, because egret's UI shows it as live while the
+/// engine enforces the previous policy set.
+///
+/// `service_ids` must be in ascending order — `apply_diff_in_tx` takes a row
+/// lock per service, and a consistent acquisition order is what turns two
+/// overlapping recompiles into a queue instead of a deadlock.
+/// [`affected_services_for_grant`]/[`affected_services_for_rule`] guarantee it.
+pub async fn recompile_services_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    service_ids: &[i64],
+) -> Result<Vec<CompileSummary>, CompileError> {
+    let mut out = Vec::with_capacity(service_ids.len());
+    for &service_id in service_ids {
+        let summary = recompile_service_in_tx(tx, service_id).await?;
+        if !summary.skipped.is_empty() {
+            tracing::warn!(
+                service_id,
+                skipped_count = summary.skipped.len(),
+                "perm-model write's recompile skipped some grants/rules for this service"
+            );
+        }
+        out.push(summary);
+    }
+    Ok(out)
 }

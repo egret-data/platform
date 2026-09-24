@@ -29,4 +29,7 @@ pub use model::{
     Action, Effect, Grant, GrantOrigin, Principal, PrincipalKind, PrincipalSet, Rule, RuleKind,
     Scope, Selector,
 };
-pub use store::{list_grants_via, list_rules_via, PermStore};
+pub use store::{
+    create_grant_in_tx, create_rule_in_tx, delete_grant_in_tx, delete_rule_in_tx, get_grant_via,
+    get_rule_via, list_grants_via, list_rules_via, PermStore,
+};

@@ -20,7 +20,8 @@ pub use service_def::{
     trino_service_def, STARROCKS_DEF_NAME, TAG_DEF_NAME, TRINO_DEF_NAME,
 };
 pub use store::{
-    catalogs_for_service_via, get_service_by_id_via, is_compiler_owned_policy_name,
+    catalogs_for_service_via, compiler_targeted_services_via, get_service_by_id_via,
+    is_compiler_owned_policy_name, services_for_catalog_via, tag_keys_for_resource_via,
     tag_name_for_key_via, tagged_columns_for_service_via, CatalogRow, PolicyRow, PolicyStore,
     ServiceRow, TagAssignmentRow, TaggedColumnRow, COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
 };

@@ -31,8 +31,27 @@ sqlx.workspace = true
 # (`egret-bi::catalog_tags`) never inspected `CompileSummary::skipped`, so
 # the recompile driver itself logs every skip.
 tracing.workspace = true
+# SP4a Task 9: the `perm` HTTP surface (`routes`) lives here and not in
+# `egret-perm`, because every mutating route recompiles in the SAME
+# transaction as its write — and `egret-perm` depending on this crate would
+# be a dependency cycle. Same shape `egret-policy` already has (store plus
+# admin router in one crate).
+axum.workspace = true
+egret-auth.workspace = true
+egret-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+utoipa.workspace = true
 
 [dev-dependencies]
 egret-metastore.workspace = true
 egret-test-db.workspace = true
 tokio.workspace = true
+# `tests/routes.rs` drives the composed router with `oneshot` and a real
+# session cookie, and builds a real `CedarPdp` for the 403 assertions.
+tower.workspace = true
+http-body-util = "0.1"
+egret-events.workspace = true
+egret-secrets.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
