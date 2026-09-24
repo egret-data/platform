@@ -117,14 +117,17 @@ fn principal_item(
 /// against each one's declared name + parent chain, so this can't drift
 /// from the service-defs silently the way the write-up in round 1 could
 /// have (its Trino-only test never opened a service-def).
-fn resource_level_names(e: EngineType) -> [&'static str; 4] {
+// `pub(crate)`: `compile::rules` (Task 5) reuses this and `level`/
+// `scope_to_resources` rather than duplicating the per-engine hierarchy
+// naming a second time.
+pub(crate) fn resource_level_names(e: EngineType) -> [&'static str; 4] {
     match e {
         EngineType::Trino => ["catalog", "schema", "table", "column"],
         EngineType::StarRocks => ["catalog", "database", "table", "column"],
     }
 }
 
-fn level(value: String) -> ResourceLevel {
+pub(crate) fn level(value: String) -> ResourceLevel {
     ResourceLevel {
         values: vec![value],
         is_excludes: false,
@@ -160,7 +163,7 @@ fn level(value: String) -> ResourceLevel {
 /// above, and one egret's `default_policies.rs` sidesteps by always filling
 /// every level) — flagged for a live check against `demo-trino`'s now-active
 /// plugin (kind cluster, ranger enabled) rather than guessed here.
-fn scope_to_resources(
+pub(crate) fn scope_to_resources(
     scope: &Scope,
     catalog_name: &str,
     e: EngineType,

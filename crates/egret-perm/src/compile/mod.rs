@@ -6,9 +6,13 @@
 //! This module builds typed `egret_policy::admin::{AccessPolicyInput,
 //! AccessItemInput, ResourceLevel}` values and leaves rendering those to
 //! JSON to that existing code — nothing here hand-writes Ranger JSON. See
-//! `grants.rs` for `compile_grant`, and `crate::actions` for the `Action` →
-//! Ranger access-type map it consumes.
+//! `grants.rs` for `compile_grant` (grants → access policies) and
+//! `rules.rs` for `compile_rule` (named rules → masking/row-filter
+//! policies, with the StarRocks tag expansion), and `crate::actions` for the
+//! `Action` → Ranger access-type map the former consumes.
 
 pub mod grants;
+pub mod rules;
 
 pub use grants::compile_grant;
+pub use rules::{compile_rule, TaggedColumn};

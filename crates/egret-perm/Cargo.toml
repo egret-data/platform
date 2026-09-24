@@ -19,9 +19,12 @@ sqlx.workspace = true
 # shapes egret-policy's admin/ranger_json.rs already knows how to serialize —
 # the compiler builds those values and leaves rendering to that existing code.
 egret-policy.workspace = true
+# Task 5: compile_rule returns Vec<serde_json::Value> directly (the shape
+# egret_policy::admin's renderers already produce) rather than wrapping it in
+# a crate-local type.
+serde_json.workspace = true
 
 [dev-dependencies]
 egret-metastore.workspace = true
 egret-test-db.workspace = true
 tokio.workspace = true
-serde_json.workspace = true

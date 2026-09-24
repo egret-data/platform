@@ -25,7 +25,8 @@ use crate::PolicyStore;
 pub use error::PolicyHttpError;
 pub use ranger_json::{
     editor_to_ranger_json, is_tag_kind, masking_to_ranger_json, rowfilter_to_ranger_json,
-    tag_editor_to_ranger_json, MaskingPolicyInput, RangerPolicy, RowFilterPolicyInput,
+    tag_editor_to_ranger_json, MaskItemInput, MaskingPolicyInput, RangerPolicy, RowFilterItemInput,
+    RowFilterPolicyInput,
 };
 // SP4a Task 4 (egret-perm's compiler) builds these three directly rather
 // than hand-writing Ranger JSON, then leaves rendering to
@@ -34,6 +35,14 @@ pub use ranger_json::{
 // `tag_access_to_ranger_json` — sit right next to it, so the module stays
 // private and only these three struct types are re-exported here).
 pub use ranger_json::{AccessItemInput, AccessPolicyInput, ResourceLevel};
+// SP4a Task 5 (egret-perm's rule compiler) also needs the tag MASKING and
+// ROW-FILTER builders. D2 forbids only `tag_access_to_ranger_json` — a tag
+// ACCESS policy reintroduces Ranger's tag-first short-circuit; a tag
+// masking/row-filter policy carries no such hazard, and egret already emits
+// both through the hand-authored editor path (`tag_editor_to_ranger_json`,
+// above). `tag_access_to_ranger_json` itself stays unreachable outside this
+// module.
+pub use ranger_json::{tag_masking_to_ranger_json, tag_rowfilter_to_ranger_json};
 pub use reader::{EngineBinding, EngineBindingReader, EngineReadError};
 use std::sync::Arc;
 

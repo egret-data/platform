@@ -11,7 +11,7 @@ pub mod model;
 pub mod store;
 
 pub use actions::{engine_accesses, CompileError, EngineType};
-pub use compile::compile_grant;
+pub use compile::{compile_grant, compile_rule, TaggedColumn};
 pub use error::PermError;
 pub use eval::{evaluate, Decision, Reason, Subject};
 pub use model::{

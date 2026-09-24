@@ -90,6 +90,43 @@ pub enum CompileError {
          either grant nobody (as an include) or silently drop an exclude, both wrong"
     )]
     UnexpandedPrincipalKind { kind: PrincipalKind },
+    /// A rule's custom mask expression (`mask_type == "CUSTOM"`) fails the
+    /// compiler's minimal syntax check: unbalanced parentheses, or no
+    /// `{col}` token. Ranger never parses this string itself — it is spliced
+    /// verbatim into the engine's SQL at query time — so a string that
+    /// cannot even balance its parentheses would compile, deploy, and fail
+    /// every query touching the masked column. A real SQL parser is SP5's;
+    /// this check is deliberately the smallest one that still catches the
+    /// obvious case (see `crate::compile::rules`).
+    #[error("rule {rule:?}'s custom mask expression does not parse: {expr:?}")]
+    InvalidCustomMask { rule: String, expr: String },
+    /// A rule names a `mask_type` the target engine's service-def does not
+    /// declare under `dataMaskDef.maskTypes` (e.g. `MASK_SHOW_LAST_4`/
+    /// `MASK_SHOW_FIRST_4`, which Trino's service-def declares and
+    /// StarRocks's does not — read at compile time, not assumed). Emitting
+    /// it anyway would compile and deploy a policy the plugin silently
+    /// ignores, the same class of failure `UnsupportedAction` exists to
+    /// prevent for access types.
+    #[error("rule {rule:?}'s mask type {mask_type:?} is not declared by {engine:?}'s service-def")]
+    UnsupportedMaskType {
+        rule: String,
+        mask_type: String,
+        engine: EngineType,
+    },
+    /// A tag-selected rule targeting Trino with no `tag_service` given. The
+    /// compiler has no registry I/O to resolve the profile's bound tag
+    /// service itself; the caller must resolve and pass it.
+    #[error("rule {rule:?} selects by tag but no tag_service was given for Trino")]
+    MissingTagService { rule: String },
+    /// A rule's `exempt` set names something a masking/row-filter Ranger
+    /// item cannot express: a non-empty `exempt.exclude` (those items carry
+    /// no allow/deny-exception block the way an access-policy item does —
+    /// `MaskItemInput`/`RowFilterItemInput` in `ranger_json.rs` have no such
+    /// field), or a `Role` principal (those same item types declare no
+    /// `roles` bucket at all, unlike `AccessItemInput`). `reason` names
+    /// which.
+    #[error("rule {rule:?}'s exempt set cannot be compiled: {reason}")]
+    UnexpressibleExemption { rule: String, reason: String },
 }
 
 /// The Ranger access types `a` compiles to on `e`. Every engine declares
