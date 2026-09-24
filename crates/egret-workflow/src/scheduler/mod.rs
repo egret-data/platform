@@ -114,4 +114,4 @@ mod fire;
 mod sync;
 
 pub use fire::{fire_due, PassReport};
-pub use sync::sync;
+pub use sync::{reconcile, sync, Reconciled};

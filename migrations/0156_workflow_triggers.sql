@@ -3,9 +3,12 @@
 -- Workflow W12: the trigger loop's queue. See
 -- docs/en/specs/2026-09-24-workflow-w12-trigger-loop-design.md §3.
 --
--- One row per `Schedule` trigger a live flow declares. `scheduler::sync` is the
--- only writer outside the loop, and it is called inside the transaction of every
--- `FlowRepo` write that can change what fires (spec §3.3).
+-- One row per `Schedule` trigger that a non-deleted flow's draft source declares,
+-- whatever the flow's `state` (drafts fire too; `state` is read at fire time).
+-- `scheduler::sync` is the only writer outside the loop. It runs inside the
+-- transaction of `FlowRepo::create`, `update` and `soft_delete`, and once per
+-- flow when the scheduler starts, which is what gives a flow saved before this
+-- migration its rows (spec §3.3).
 CREATE TABLE workflow.triggers (
   flow_id              uuid        NOT NULL REFERENCES workflow.flows (id) ON DELETE CASCADE,
   -- The trigger's `id:` in the YAML.
@@ -19,7 +22,10 @@ CREATE TABLE workflow.triggers (
   -- The flow's YAML `disabled:` OR the trigger's own. A column, not a
   -- fire-time predicate, so the claim can skip it without consuming a tick.
   disabled             boolean     NOT NULL,
-  -- NULL = off the queue: the schedule was refused, and `last_error` says why.
+  -- NULL = off the queue, and `last_error` says why. Written NULL by `sync` when
+  -- the schedule is refused or has no future tick (`0 0 30 2 *`), and by the loop
+  -- when the source no longer parses, resolves or plans at fire time. The next
+  -- `sync` of the flow re-initialises it.
   next_evaluation_date timestamptz,
   evaluated_at         timestamptz,
   last_error           text,

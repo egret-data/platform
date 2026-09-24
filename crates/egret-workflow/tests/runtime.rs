@@ -1487,3 +1487,89 @@ async fn a_save_that_meets_a_claimed_trigger_waits_and_keeps_the_advance(pool: s
     );
     assert_eq!(executions_of_flow(&pool, flow).await, 1);
 }
+
+/// **A flow saved before migration 0156 still fires** (final review I1).
+///
+/// 0156 created `workflow.triggers` empty, and only a `FlowRepo` write calls
+/// `sync`, so a flow nobody re-saves would never get its row. The scheduler
+/// ticker therefore reconciles every non-deleted flow once, before its first
+/// pass. Both flows here are inserted by raw SQL -- as a pre-0156 row is --
+/// so no `sync` ran for either; the cron fires every second, so the first
+/// tick after the reconciliation is due within one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn flows_saved_before_the_trigger_table_are_reconciled_at_start(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let src = |id: &str| {
+        format!(
+            "id: {id}\nnamespace: t\ntriggers:\n  - id: s\n    type: io.kestra.plugin.core.trigger.Schedule\n\
+             \x20   cron: \"* * * * * *\"\n    withSeconds: true\ntasks:\n  - id: a\n\
+             \x20   type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+        )
+    };
+    let insert = |id: &'static str, deleted: bool| {
+        let pool = pool.clone();
+        let source = src(id);
+        async move {
+            egret_workflow::spec::parse(&source).expect("fixture must parse");
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO workflow.flows \
+                   (workspace_id, namespace, flow_id, source, plan, created_by, deleted_at) \
+                 VALUES ($1, 't', $2, $3, '{}'::jsonb, $4, \
+                         CASE WHEN $5 THEN now() END) \
+                 RETURNING id",
+            )
+            .bind(ws)
+            .bind(id)
+            .bind(&source)
+            .bind(user.0)
+            .bind(deleted)
+            .fetch_one(&pool)
+            .await
+            .expect("insert a flow behind FlowRepo's back")
+        }
+    };
+    let live = insert("pre_0156", false).await;
+    let deleted = insert("pre_0156_deleted", true).await;
+    let rows_of = |flow: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM workflow.triggers WHERE flow_id = $1",
+            )
+            .bind(flow)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(rows_of(live).await, 0, "control: no sync ran at insert");
+
+    let cancel = CancellationToken::new();
+    spawn(
+        pool.clone(),
+        Arc::new(Recorder::new()),
+        scheduler_only(10),
+        cancel.clone(),
+    );
+    wait_until(
+        "the reconciled flow to fire",
+        Duration::from_secs(5),
+        || async {
+            match executions_of_flow(&pool, live).await {
+                0 => Err("no execution yet".into()),
+                _ => Ok(()),
+            }
+        },
+    )
+    .await;
+    cancel.cancel();
+
+    assert_eq!(rows_of(live).await, 1, "the reconciliation wrote its row");
+    assert_eq!(
+        rows_of(deleted).await,
+        0,
+        "a deleted flow is not reconciled"
+    );
+}

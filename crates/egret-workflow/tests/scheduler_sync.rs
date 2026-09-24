@@ -379,6 +379,35 @@ async fn a_refused_schedule_is_stored_off_queue_with_its_reason() {
     assert!(err.contains("invalid cron"), "{err}");
 }
 
+/// A cron `resolve` ACCEPTS but that has no future instant (`0 0 30 2 *`,
+/// 30 February) is off the queue like a refused one -- and must say why, or an
+/// author sees a schedule that silently never fires. Final review I4.
+#[tokio::test]
+async fn a_schedule_that_never_fires_is_stored_off_queue_with_its_reason() {
+    let Some(fx) = fx().await else { return };
+    let src = flow_yaml("", &schedule("s", "0 0 30 2 *", ""), "hi");
+    let t = parses(&src).triggers.remove(0);
+    egret_workflow::trigger::ScheduleTrigger::resolve(&t)
+        .expect("control: resolve accepts it, so this is not the refusal path");
+
+    let flow = fx.create(&src).await;
+    let (next, disabled, err) = row(&fx.db, flow.id, "s").await.expect("a row, off queue");
+    assert_eq!(next, None, "no future tick, so nothing to queue");
+    assert!(!disabled);
+    let err = err.expect("the reason is stored");
+    assert!(err.contains("never fires"), "{err}");
+
+    // Control: a fixed cron clears the note and queues the row.
+    fx.update(
+        flow.id,
+        &flow_yaml("", &schedule("s", "0 2 * * *", ""), "hi"),
+    )
+    .await;
+    let (next, _, err) = row(&fx.db, flow.id, "s").await.expect("a row");
+    assert!(next.is_some(), "back on the queue");
+    assert_eq!(err, None);
+}
+
 /// Written before the `IS NOT NULL` term existed in the upsert, and watched
 /// failing against it (see the task report). `lateMaximumDelay` is refused by
 /// `resolve` but is not part of `spec_key`, so without the term the fix would
@@ -443,6 +472,26 @@ async fn a_webhook_or_flow_trigger_gets_no_row() {
 /// Every statement that writes `workflow.flows` must sit in a function that
 /// calls `scheduler::sync`, or be on [`EXEMPT`] with a reason. The guard
 /// against a fifth writer that forgets (spec §3.3).
+///
+/// **What the scanner cannot see** (final review M5). It reads Rust source
+/// text under `crates/*/src` with one regex, so a writer is invisible to it
+/// when:
+///
+/// - it is SQL outside Rust: a data migration under `migrations/`, a
+///   function or trigger defined in SQL, a script;
+/// - the statement text is split so the regex cannot match it, e.g. by
+///   `concat!("UPDATE workflow.", "flows ...")` or `format!` pieces;
+/// - the table name is built at run time (`format!("{schema}.flows")`, a
+///   bound identifier, a `const` holding the name);
+/// - it sits inside a `/* ... */` block comment -- only `//` lines are
+///   stripped, so such text counts as code (a false POSITIVE, not a miss);
+/// - it comes after the file's first `#[cfg(test)]`, which is taken as the
+///   start of the test half even when shipping code follows it.
+///
+/// It also judges by function body text: a writer whose `sync` call lives in
+/// a helper it calls, or whose body carries `scheduler::sync(` only in a
+/// trailing `//` comment or a string, is judged by that text, not by what
+/// runs.
 const EXEMPT: &[(&str, &str)] = &[(
     "set_live",
     "changes neither source nor deleted_at; state is read at fire time",

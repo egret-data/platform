@@ -316,12 +316,34 @@ pub fn spawn(pool: PgPool, reg: Arc<dyn Registry>, cfg: RuntimeConfig, cancel: C
 /// `every`. A pass fires every due trigger once and returns, so this is a
 /// fixed-interval loop for the same reason the claim loop is; a trigger that is
 /// behind catches up one tick per pass.
+///
+/// Before the first pass it runs [`reconcile`](crate::scheduler::reconcile)
+/// once, so a flow saved before migration 0156 gets its trigger rows (final
+/// review I1). A reconciliation that cannot even list the flows is logged and
+/// the ticker starts anyway: every flow saved since 0156 already has its rows.
 fn spawn_scheduler(pool: PgPool, every: Duration, cancel: CancellationToken) {
     tracing::info!(
         trigger_interval_secs = every.as_secs(),
         "workflow scheduler started"
     );
     tokio::spawn(async move {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!("workflow scheduler stopped");
+                return;
+            }
+            r = crate::scheduler::reconcile(&pool) => match r {
+                Ok(r) => tracing::info!(
+                    synced = r.synced,
+                    failed = r.failed,
+                    "workflow schedules reconciled"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "workflow schedule reconciliation failed; the ticker starts anyway"
+                ),
+            },
+        }
         let mut tick = tokio::time::interval(every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
