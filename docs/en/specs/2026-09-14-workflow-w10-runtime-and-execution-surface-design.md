@@ -40,9 +40,25 @@ migrations). `TriggerState::initialise` has **exactly one** caller and it is a
 `crates/egret-workflow/src/trigger/` calls `trigger::tick`; and
 `crates/egret-bin/src/main.rs` contains the string `trigger` **zero** times
 (control: `egret_workflow` appears **5** times in the same file). **So a `cron:`
-trigger cannot fire in production, and W10 as scoped does not change that** —
+trigger could not fire in production at the time this was measured (2026-09-14),
+and W10 as scoped did not change that** —
 W10 wires the *worker* loop, which has a table to claim from; the trigger loop
-has none.
+had none.
+
+> **RETIRED — false since W12 Task 2 (`workflow.triggers`, migration 0156) and
+> W12 Task 5 (the scheduler ticker), annotated at W12 Task 6, 2026-09-25.**
+> Every call-site zero in this section moved: `scheduler::sync` and
+> `scheduler::fire_due` are non-test callers of `trigger::tick` and
+> `TriggerState::initialise`, `crates/egret-workflow/src/runtime.rs` now calls
+> `crate::scheduler::fire_due` from its own ticker, and that ticker is started
+> from `crates/egret-bin/src/main.rs`. A `cron:` trigger **can** fire in
+> production now, behind `EGRET_WORKFLOW__SCHEDULER_ENABLED`
+> (`WorkflowConfig::scheduler_enabled`, default `false` — the same shape as
+> `worker_enabled`, W10's own gate). The table row above, *"a loop that fires
+> `cron:` and schedule triggers … none"*, is retired the same way: the owner is
+> **W12**. Left in place as the record of the finding that gave W12 its scope,
+> not as a current claim. See `oracle-exec/README.md`'s coverage statement, the
+> W12 section, and the programme spec's W12 row (§9).
 
 **This is the mirror image of a defect W8 closed.** There, `allowFailure` was
 assigned **twice** in two documents and the package had to say which owner was

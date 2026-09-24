@@ -7987,6 +7987,177 @@ does not mistake them for finished:**
    The only population with a mechanical guarantee is the call-site derivation,
    because the compiler agrees with it.
 
+### W12 — the trigger loop fires in production now, and the oracle still cannot see a single tick
+
+**`109` before W12 Task 1, `109` at this commit, and `109` with `fire_due`
+deleted.** The same three-number method W10 used, and for a related but not
+identical reason: W10's channel was empty because nothing called the worker
+loop; W12's is empty for **two** independent reasons stacked on top of each
+other, and merging them would lose the one a future package would have to fix.
+
+1. **The wiring gap, exactly W10's shape.** `driver::run` never calls
+   `scheduler::sync` or `scheduler::fire_due` — `crate::scheduler::` and
+   `crate::runtime::` are each **0** occurrences in `oracle-exec/driver.rs` and
+   `tests/executor.rs`, against `worker::` at **26** and **37** on the same
+   command (the identical positive control W10 used, unmoved, because neither
+   file has changed since). The oracle's driver builds executions through
+   `worker::start_execution_with_trigger` and ticks them through
+   `worker::tick`; nothing in it claims a `workflow.triggers` row.
+2. **The data-shape gap underneath it, which predates W12 and is not W12's to
+   fix.** Even a driver that called `fire_due` would create executions the
+   golden comparison cannot place: migration 0156 adds `scheduled_date` and a
+   `CHECK` tying it to `execution_trigger->>'type'`, but it does **not** give a
+   `Schedule`-fired execution a `parent_id` or any column `descendants()`
+   walks — because Kestra doesn't either. This is the W6 section's *"the
+   execution exists and hangs off nothing"* row, re-measured rather than
+   assumed: `parent_id` stays generated and NULL for every row
+   `start_execution_in` writes with `flow_id` set and no caller-supplied
+   parent, `scheduled_date`-bearing or not. **W12 built the loop; it did not
+   -- and could not, without changing what a `descendants()` union walks --
+   change what the ratchet can see fire.**
+
+Both are structural, not measured-once-and-argued: (1) is a `git ls-files` grep
+result that a future call site would flip, (2) is a schema fact `0156` itself
+states in its own `CHECK`. Neither can be shown false by running more tests
+against this corpus, which is the same limit the W6 section already recorded
+for `Schedule` — W12 inherits the blindness rather than introducing a new one.
+
+| | ratchet | what the task shipped |
+|---|---|---|
+| package base `6fb7520e` (origin/main, W10's tip) | 109 mismatching, 109 baselined, 0 broken | — |
+| Task 1 | 109 | `oracle-exec/w12-schedule-trigger.json` — the pinned artifact's own `Schedule.Output`, measured rather than guessed: variables are exactly `{date, next, previous}`, RFC 3339 with the trigger's own zone offset (not `Z`), six fractional digits |
+| Task 2 | 109 | migration 0156 — `workflow.triggers`, one row per `Schedule`; `scheduler::sync`, called inside every `FlowRepo` write |
+| Task 3 | 109 | `start_execution_in` — `start_execution_with_trigger`'s body, taking the caller's own transaction rather than opening one, so a later caller inside a transaction of its own can create the execution in it |
+| Task 4 | 109 | `scheduler::fire_due` — claim, tick, start, advance, one trigger per transaction; the unique-index backstop and the retry/consume/take-off-queue classification |
+| Task 5 | 109 | `runtime.rs`'s third ticker, behind `scheduler_enabled` (default `false`); the chart's lever |
+| Task 6 | 109 | this section, and the sweep below |
+
+#### `fire_due` deleted, measured rather than assumed
+
+Mutation, this task, on the working tree (reverted immediately after, never
+committed): `fire_due` given an unconditional early `return
+Ok(PassReport::default())`, so the claim, the tick, the start and the advance
+-- everything below the new line -- is unreachable, kept in the file behind
+`#[allow(dead_code, unreachable_code, ...)]` only so the crate still compiles
+(deleting the functions outright would also have deleted their own unit tests
+in the same file). `sync` untouched -- it is the write path `scheduler_sync.rs`
+and `runtime.rs`'s `a_save_that_meets_a_claimed_trigger…` still exercise, and
+gutting it would answer a different question. Evidence the mutation landed,
+printed before the verdict was read: `git diff --stat` reported
+`crates/egret-workflow/src/scheduler/fire.rs | 9 +++++++++` (9 insertions, 0
+deletions -- the early return and its attributes; nothing deleted, because an
+early return, not a deletion, is what makes the body unreachable) and the
+marker comment it carries, `W12 Task 6 mutation`, occurred **1** time in the
+file. `executor_matches_golden` then read **294 golden entries, 109
+mismatching, 109 baselined, 0 broken** -- byte-identical to the control, 1 run
+against 1 (the earlier, already-reported `executor_matches_golden ... ok` run
+on the unmutated tree, same build, same session -- this test carries no
+randomness anywhere in its own corpus walk, so a second control run would
+print the same thing rather than add information). Reverted with `git checkout
+-- crates/egret-workflow/src/scheduler/fire.rs`; `git diff` against `HEAD` was
+confirmed empty and the marker comment's count confirmed **0** before
+continuing.
+
+This is the weaker half of the two gaps above, and it is reported knowing
+that: it re-confirms (1), the wiring gap, and says nothing about (2), because
+deleting `fire_due`'s body cannot un-delete a `parent_id` the migration never
+added. A mutation that could move the ratchet by restoring a link column does
+not exist to run.
+
+#### The safety argument is not this file's; it is one call away
+
+`scheduler::mod`'s own doc (*Safety with N replicas, per statement*) carries
+the concurrency argument -- the claim's `FOR UPDATE OF t SKIP LOCKED`, the
+unique-index backstop on the execution insert, the final `UPDATE` under the
+claim's lock, and `sync`'s upsert serialised by the row lock -- with its own
+mutations (two, `tests/scheduler_fire.rs`'s `two_scheduler_tickers_never_fire_one_tick_twice`
+killing both) and its own test names. It is not duplicated here because a
+copy would be the fifth thing in this file's own history to go stale by
+position (the *"rows 2-7"* pointer W10 Task 7 found ageing under exactly that
+failure mode) -- one link, kept current by pointing at the module rather than
+quoting it.
+
+#### The sweep: "a cron cannot fire in production" is retired, and where it actually lived
+
+The phrase was handed as five literal patterns, plus two ordinals and a
+generated-data pass -- W10 Task 7's discipline, unchanged: every tracked file
+flattened to one line before matching, so a phrase wrapping a line break is not
+invisible, and a denominator computed over `git ls-files` so it is re-runnable.
+
+| # | population | examined | corrected |
+|---|---|---:|---:|
+| 1 | the phrase, English, whole repo -- `cannot fire`, `NOT BUILT: W12`, `Not built: W12`, `constructed only in tests`, `no caller outside` | **3811 files**, 18 matching `cannot fire` (15 files), 1 each for the other four (3 files total, 2 of them the same site) | **2** |
+| 2 | ordinals/counts in the regions population 1 landed in -- `one caller`, `exactly one` | **2 files** (the two spec passages population 1 corrected), 1 occurrence each once markdown emphasis is stripped (`**exactly one** caller` defeats a literal `one caller` grep -- the same line-break-shaped miss W10 Task 7 named, one level down, in `**`) | **2** |
+| 3 | data that feeds a generator -- the 13 files under `oracle-exec/` (7 data files, `driver.rs`, `harvest.py`, `normalise.py`, `handler_surface.py`) plus `w12-schedule-trigger.json` | **13 inputs**, 0 matching any of the five phrase patterns (positive controls: `why` 37/5/0/…, `runnable` 0/7/2/41/…, `schedule` 1/13/3/…, each nonzero somewhere in the set) | **0** |
+| 4 | the other language -- every file under `docs/vi/`, flattened, for `không thể nổ`, `không có caller nào ngoài`, `đúng một … caller`, `CHƯA DỰNG: W12` | **279 files**, 2 matching (the VI programme spec's W12 row, the VI W10 spec) | **2** |
+
+**Population 1's own denominator is data, not a coincidence**: three of its
+five patterns (`NOT BUILT: W12`, `Not built: W12`, `constructed only in
+tests`) return **zero** real sites -- the only place they occur at all is
+`docs/en/plans/2026-09-24-workflow-w12-trigger-loop.md`'s own Task 6 step
+text, which names them as search targets rather than asserting any of them.
+The actual sites use different words -- `designed in`, `cannot fire`,
+`exactly one caller` -- which is itself the finding: a list of patterns
+compiled before a package ships describes what its author expected the stale
+text to say, not what it turned out to say. `cannot fire`'s 18 occurrences
+across 15 files are mostly a different subject entirely and are the negative
+population this sweep is supposed to leave standing: `egret-dataapi`'s two
+(`ratelimit.rs`, `lifecycle.rs`, about an `expect`/`saturating_sub` that
+cannot panic), `oracle-exec/driver.rs`'s one (a `#[sqlx::test]` ordering
+comment), `runners/env.rs`'s *"no caller outside `runners`"* (module privacy,
+not this proposition), five frontend files (a disabled-button/cannot-submit
+sense), and the dashboard-parity plan's two (an `undefined`-guarded branch).
+Corrected: the programme spec's W12 row (§9) and the W10 spec's §1, each
+carrying the measurement dated and annotated in place -- *corrected where
+found* is not enough on its own, which is why population 4 re-runs the same
+question in translation rather than trusting that a fix in English reaches
+its Vietnamese twin.
+
+**Population 2's grep-defeating markdown is the same shape as W10 Task 7's
+line-break miss, one level in.** `` `TriggerState::initialise` has **exactly
+one** caller `` renders, flattened, as `exactly one** caller` -- the `**`
+between the ordinal and its noun breaks a literal `one caller` match even
+though a reader sees one contiguous claim. `exactly one` alone is a hopeless
+grep repo-wide (509 occurrences, most of them unrelated arithmetic in
+unrelated crates), so this population is scoped the way W10 Task 7 scoped its
+own population 2 -- **to the regions population 1 already found** -- rather
+than swept blind. Both hits are the same sentence in two languages, corrected
+in the same edit as population 1's.
+
+**Population 3's zero is a scan that could have found something and did
+not**, not a scan that found nothing to look at: `why`, `runnable` and
+`schedule` are all present somewhere in the thirteen inputs (`probe.json`'s
+`why` alone is 37), so an instrument capable of matching text in these files
+was run and came back clean. None of the corpus/golden/harvest data carries
+prose at all -- the proposition could only leak in through a Python
+generator's docstrings or `harvest.py`'s prose, and it does not.
+
+**Population 4 is why this sweep does not stop at population 1.** The two
+Vietnamese sites are translations, not copies -- `không thể nổ trong
+production` shares no characters with `cannot fire in production` beyond the
+Latin alphabet itself -- so an English-only sweep would have reported this
+proposition retired while its Vietnamese twin still asserted it. Both
+corrected in the same pass as their English originals, each dated
+2026-09-25 rather than silently rewritten.
+
+**No denominator equals its numerator.** Fifteen files matched `cannot fire`
+and thirteen of them were left standing, on purpose, as the control that says
+the pattern was capable of a hit this proposition does not own.
+
+**One more site, reachable only by widening the pattern to the proposition's
+GLOSS rather than its words -- the same shape W10 Task 7 found in
+`tests/worker.rs`.** `crates/egret-workflow/src/lib.rs`'s own module doc read
+*"W6 built the predicate as a pure function and no table, so nothing here
+fires in production"*, present tense, in the one file every reader of this
+crate opens first. It shares no word with any of the five patterns -- no
+*cannot*, no *fire in production* as a contiguous phrase -- and would not have
+been found by population 1 at all. Corrected in place, dated in this file's
+own commit rather than the spec's, because a module doc is closer to the code
+it describes than a spec is: *"so nothing here fired in production until
+**W12** built `workflow.triggers` and the loop that claims it
+(`scheduler::fire_due`, spec §9) -- behind `scheduler_enabled`, default
+`false`"*.
+
 ### What this ratchet does **not** prove
 
 Each of these has a section of its own above with the derivation; they are
