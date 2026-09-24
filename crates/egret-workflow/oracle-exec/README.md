@@ -8026,7 +8026,7 @@ for `Schedule` — W12 inherits the blindness rather than introducing a new one.
 |---|---|---|
 | package base `6fb7520e` (origin/main, W10's tip) | 109 mismatching, 109 baselined, 0 broken | — |
 | Task 1 | 109 | `oracle-exec/w12-schedule-trigger.json` — the pinned artifact's own `Schedule.Output`, measured rather than guessed: variables are exactly `{date, next, previous}`, RFC 3339 with the trigger's own zone offset (not `Z`), six fractional digits |
-| Task 2 | 109 | migration 0156 — `workflow.triggers`, one row per `Schedule`; `scheduler::sync`, called inside every `FlowRepo` write |
+| Task 2 | 109 | migration 0156 — `workflow.triggers`, one row per `Schedule`; `scheduler::sync`, called from `FlowRepo`'s three writers that can change what fires (`create`, `update`, `soft_delete`) — `set_live` is exempt, since it changes neither `source` nor `deleted_at` and `state` is read at fire time |
 | Task 3 | 109 | `start_execution_in` — `start_execution_with_trigger`'s body, taking the caller's own transaction rather than opening one, so a later caller inside a transaction of its own can create the execution in it |
 | Task 4 | 109 | `scheduler::fire_due` — claim, tick, start, advance, one trigger per transaction; the unique-index backstop and the retry/consume/take-off-queue classification |
 | Task 5 | 109 | `runtime.rs`'s third ticker, behind `scheduler_enabled` (default `false`); the chart's lever |
@@ -8087,8 +8087,8 @@ invisible, and a denominator computed over `git ls-files` so it is re-runnable.
 | # | population | examined | corrected |
 |---|---|---:|---:|
 | 1 | the phrase, English, whole repo -- `cannot fire`, `NOT BUILT: W12`, `Not built: W12`, `constructed only in tests`, `no caller outside` | **3811 files**, 18 matching `cannot fire` (15 files), 1 each for the other four (3 files total, 2 of them the same site) | **2** |
-| 2 | ordinals/counts in the regions population 1 landed in -- `one caller`, `exactly one` | **2 files** (the two spec passages population 1 corrected), 1 occurrence each once markdown emphasis is stripped (`**exactly one** caller` defeats a literal `one caller` grep -- the same line-break-shaped miss W10 Task 7 named, one level down, in `**`) | **2** |
-| 3 | data that feeds a generator -- the 13 files under `oracle-exec/` (7 data files, `driver.rs`, `harvest.py`, `normalise.py`, `handler_surface.py`) plus `w12-schedule-trigger.json` | **13 inputs**, 0 matching any of the five phrase patterns (positive controls: `why` 37/5/0/…, `runnable` 0/7/2/41/…, `schedule` 1/13/3/…, each nonzero somewhere in the set) | **0** |
+| 2 | ordinals/counts in the regions population 1/1b landed in -- `one caller`, `exactly one`, VI `đúng một … caller` | **4 files** (the two EN spec passages population 1 corrected, plus their VI twins), 1 occurrence each once markdown emphasis is stripped (`**exactly one** caller` defeats a literal `one caller` grep -- the same line-break-shaped miss W10 Task 7 named, one level down, in `**`) | **4** |
+| 3 | data that feeds a generator -- the 13 files under `oracle-exec/`: 9 data files (`baseline.txt`, `corpus.json`, `golden.json`, `handler-surface.txt`, `harvest-run.txt`, `probe.json`, `runnable.txt`, `stability.json`, `w12-schedule-trigger.json`) plus 4 generators (`driver.rs`, `harvest.py`, `normalise.py`, `handler_surface.py`) | **13 inputs**, 0 matching any of the five phrase patterns (positive controls: `why` 37/5/0/…, `runnable` 0/7/2/41/…, `schedule` 1/13/3/…, each nonzero somewhere in the set) | **0** |
 | 4 | the other language -- every file under `docs/vi/`, flattened, for `không thể nổ`, `không có caller nào ngoài`, `đúng một … caller`, `CHƯA DỰNG: W12` | **279 files**, 2 matching (the VI programme spec's W12 row, the VI W10 spec) | **2** |
 
 **Population 1's own denominator is data, not a coincidence**: three of its
@@ -8121,8 +8121,11 @@ though a reader sees one contiguous claim. `exactly one` alone is a hopeless
 grep repo-wide (509 occurrences, most of them unrelated arithmetic in
 unrelated crates), so this population is scoped the way W10 Task 7 scoped its
 own population 2 -- **to the regions population 1 already found** -- rather
-than swept blind. Both hits are the same sentence in two languages, corrected
-in the same edit as population 1's.
+than swept blind. The two English hits are the same sentence in two documents
+-- the programme spec's W12 row and the W10 spec's §1 -- corrected in the same
+edit as population 1's; the two Vietnamese hits are that same claim in
+translation, not a copy of the English words, corrected alongside population
+1b's pass rather than swept separately.
 
 **Population 3's zero is a scan that could have found something and did
 not**, not a scan that found nothing to look at: `why`, `runnable` and

@@ -52,8 +52,9 @@ pub mod runners;
 pub mod runtime;
 /// W12: `workflow.triggers` and the code that keeps it (the trigger loop's
 /// I/O half; `trigger` stays pure). `pub` because `scheduler::sync` is the
-/// call every `FlowRepo` writer makes and later W12 tasks drive it from
-/// integration tests.
+/// call `FlowRepo`'s three writers that can change what fires make (`create`,
+/// `update`, `soft_delete` -- `set_live` is exempt) and later W12 tasks drive
+/// it from integration tests.
 pub mod scheduler;
 /// W8 Task 6: `sla:` — `EXECUTION_ASSERTION` evaluated, `MAX_DURATION` refused
 /// by name with the measurement. `pub` so `tests/executor.rs` (an integration
