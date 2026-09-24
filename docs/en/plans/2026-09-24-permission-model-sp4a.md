@@ -17,7 +17,7 @@
 - **egret never emits a tag *access* policy** (D2). Tag selectors drive masks and row filters only. Emitting one reintroduces Ranger's short-circuit and makes the model lie.
 - **`allowExceptions` / `denyExceptions` are a compilation target only.** They must not appear in any egret API type, OpenAPI schema, or UI-facing name.
 - **A compile that would exceed the StarRocks expansion ceiling refuses**, naming the rule and the count. It never truncates silently (D5).
-- **Actions are egret's vocabulary:** `read`, `write`, `create`, `drop`. The compiler maps them per engine; an action an engine cannot express is a compile error naming the engine.
+- **Actions are egret's vocabulary, and SP4a ships exactly two:** `read` and `write`. `read` → `select` on both engines. `write` → `insert, delete` on Trino (it declares **no** `update` access type) and `insert, update, delete` on StarRocks. DDL is out: StarRocks has no bare `create`, only ten level-specific ones. An action an engine cannot express is a compile error naming the engine, never a silent drop.
 - Regenerate the committed OpenAPI with the built binary: `<CARGO_TARGET_DIR>/debug/egret openapi > openapi.json`. Never hand-edit. `committed_openapi_json_is_current` must pass.
 - Regenerate the frontend client with `npm run gen:api` from `frontend/`, never bare `orval`. `orval.config.ts` sets no `output.clean`: if a generated model orphans, delete the file AND `src/api/generated/model/index.ts`, then regenerate, then confirm `npx tsc --noEmit`.
 - `rm` is aliased interactive in this shell; use `command rm -f` in scripts.
@@ -132,7 +132,7 @@ git commit -m "docs: D7 — whether a group grant reaches the engine, measured"
 - Consumes: nothing.
 - Produces:
   ```rust
-  pub enum Action { Read, Write, Create, Drop }
+  pub enum Action { Read, Write }
   pub enum Effect { Allow, Deny }
   pub enum PrincipalKind { User, Group, Role, WorkspaceMembers }
   pub struct Principal { pub kind: PrincipalKind, pub r#ref: String }
@@ -606,25 +606,40 @@ fn a_deny_grants_subtract_compiles_to_deny_exceptions() {
 }
 
 #[test]
-fn read_maps_to_select_on_both_engines_and_write_to_three_access_types() {
+fn write_maps_to_two_accesses_on_trino_and_three_on_starrocks() {
     assert_eq!(engine_accesses(Action::Read, EngineType::Trino).unwrap(), vec!["select"]);
     assert_eq!(engine_accesses(Action::Read, EngineType::StarRocks).unwrap(), vec!["select"]);
-    let mut w = engine_accesses(Action::Write, EngineType::Trino).unwrap();
-    w.sort();
-    assert_eq!(w, vec!["delete", "insert", "update"]);
+
+    // Trino's service-def declares NO `update` access type. Asserting the same
+    // three on both engines would be asserting a mapping that cannot exist —
+    // this test exists because the plan's first draft did exactly that.
+    let mut t = engine_accesses(Action::Write, EngineType::Trino).unwrap();
+    t.sort();
+    assert_eq!(t, vec!["delete", "insert"]);
+
+    let mut s = engine_accesses(Action::Write, EngineType::StarRocks).unwrap();
+    s.sort();
+    assert_eq!(s, vec!["delete", "insert", "update"]);
 }
 
 #[test]
-fn an_action_an_engine_cannot_express_is_an_error_naming_the_engine() {
-    // Whichever action turns out to be unsupported on one engine, the failure
-    // must name the engine. A silent drop compiles a policy that grants less
-    // than the model says, and nothing anywhere would show it.
-    let err = engine_accesses(Action::Drop, EngineType::StarRocks);
-    match err {
-        Ok(v) => assert!(!v.is_empty(), "if it IS supported, it must map to something"),
-        Err(CompileError::UnsupportedAction { engine, .. }) =>
-            assert_eq!(engine, EngineType::StarRocks),
-        Err(other) => panic!("wrong error: {other:?}"),
+fn every_access_type_the_map_emits_is_declared_by_that_service_def() {
+    // The map is only correct relative to the service-defs, so read them
+    // rather than trusting the table above. An access type Ranger does not
+    // know is silently ignored by the plugin: the policy compiles, deploys,
+    // and grants nothing.
+    for (engine, path) in [(EngineType::Trino, "crates/egret-policy/src/service-defs/trino.json"),
+                           (EngineType::StarRocks, "crates/egret-policy/src/service-defs/starrocks.json")] {
+        let def: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let declared: Vec<String> = def["accessTypes"].as_array().unwrap().iter()
+            .map(|a| a["name"].as_str().unwrap().to_string()).collect();
+        for action in [Action::Read, Action::Write] {
+            for acc in engine_accesses(action, engine).unwrap() {
+                assert!(declared.iter().any(|d| d == acc),
+                        "{engine:?} does not declare access type {acc:?}");
+            }
+        }
     }
 }
 
@@ -663,7 +678,10 @@ for n in ('trino','starrocks'):
 "
 ```
 
-Write the mapping against that output. Where StarRocks and Trino differ, the map differs; where an action has no counterpart, return `CompileError::UnsupportedAction`.
+Write the mapping against that output. The two engines genuinely differ and the map must too — Trino
+declares no `update`. `CompileError::UnsupportedAction` stays in the error type even though neither
+of SP4a's two actions triggers it today: SP4b or SP4c may add an action, and a compiler that silently
+drops one grants less than the model says with nothing anywhere to show it.
 
 - [ ] **Step 4: Write `compile_grant`**
 

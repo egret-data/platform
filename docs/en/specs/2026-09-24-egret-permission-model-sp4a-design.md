@@ -71,12 +71,23 @@ authoring surface. Named rules are Snowflake's shape rather than Ranger's: one `
 covers every column carrying the tag, instead of one policy per column
 ([Snowflake POLICY_REFERENCES](https://docs.snowflake.com/en/sql-reference/account-usage/policy_references)).
 
-A grant's **actions** are egret's own small vocabulary, not either engine's: `read`, `write`,
-`create`, `drop`. The compiler maps each to the target engine's access types — `read` becomes Trino's
-`select` and StarRocks' `select`, `write` becomes `insert, update, delete` on both — because the two
-service-defs do not agree (Trino has `use`, `impersonate`, `read_sysinfo`; StarRocks has `node`,
-`plugin`, `usage`). A steward should not have to know which engine is underneath, and an action that
-one engine cannot express is a compile error naming the engine, not a silent drop.
+A grant's **actions** are egret's own small vocabulary, not either engine's. SP4a ships exactly two,
+`read` and `write`, and the compiler maps each to the target engine's access types:
+
+| egret action | Trino | StarRocks |
+|---|---|---|
+| `read` | `select` | `select` |
+| `write` | `insert`, `delete` | `insert`, `update`, `delete` |
+
+The two service-defs genuinely disagree, and reading them is what set this scope. **Trino declares no
+`update` access type at all**, so `write` is two accesses there and three on StarRocks. DDL is
+deliberately excluded: StarRocks has no single `create` — it declares ten level-specific ones
+(`create table`, `create view`, `create database`, `create materialized view`, …) while Trino has one
+bare `create`, so a `create` action would need a per-level mapping and a decision this spec has not
+taken. Grants over DDL wait for a case that asks for them.
+
+A steward should not have to know which engine is underneath, and an action an engine cannot express
+is a compile error naming the engine, never a silent drop.
 
 **D2 — Deny wins, allow unions, and tags do not grant access.** One sentence, true for every
 engine: *you can see it if some grant allows it, unless some grant denies it; masks and row filters

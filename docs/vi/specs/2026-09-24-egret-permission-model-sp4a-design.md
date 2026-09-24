@@ -72,12 +72,23 @@ thảo. Rule có tên là hình dạng của Snowflake chứ không phải của
 cột mang tag đó, thay vì mỗi cột một policy
 ([Snowflake POLICY_REFERENCES](https://docs.snowflake.com/en/sql-reference/account-usage/policy_references)).
 
-**Hành động** của grant là một bộ từ vựng nhỏ của riêng egret, không phải của engine nào:
-`read`, `write`, `create`, `drop`. Compiler ánh xạ từng cái sang access type của engine đích —
-`read` thành `select` trên cả hai, `write` thành `insert, update, delete` — bởi hai service-def
-không trùng nhau (Trino có `use`, `impersonate`, `read_sysinfo`; StarRocks có `node`, `plugin`,
-`usage`). Một steward không nên phải biết bên dưới là engine nào, và một hành động mà engine không
-diễn đạt được phải là lỗi biên dịch nêu đích danh engine, chứ không phải im lặng bỏ qua.
+**Hành động** của grant là bộ từ vựng nhỏ của riêng egret, không phải của engine nào. SP4a chỉ ship
+đúng hai: `read` và `write`. Compiler ánh xạ sang access type của engine đích:
+
+| hành động egret | Trino | StarRocks |
+|---|---|---|
+| `read` | `select` | `select` |
+| `write` | `insert`, `delete` | `insert`, `update`, `delete` |
+
+Hai service-def thật sự không trùng nhau, và chính việc đọc chúng đã định ra phạm vi này. **Trino
+không khai báo access type `update` nào cả**, nên `write` là hai access ở đó và ba ở StarRocks. DDL bị
+loại trừ có chủ ý: StarRocks không có `create` trần — nó khai báo mười cái theo từng mức
+(`create table`, `create view`, `create database`, `create materialized view`, …) trong khi Trino có
+một `create` duy nhất, nên một hành động `create` sẽ cần ánh xạ theo mức và một quyết định spec này
+chưa đưa ra. Grant trên DDL đợi tới khi có ca thật cần.
+
+Một steward không nên phải biết bên dưới là engine nào, và một hành động engine không diễn đạt được
+phải là lỗi biên dịch nêu đích danh engine, không bao giờ là im lặng bỏ qua.
 
 **D2 — Deny thắng, allow hợp, và tag không cấp quyền truy cập.** Một câu, đúng cho mọi engine:
 *thấy được nếu có grant nào cho phép, trừ khi có grant nào cấm; mask và row filter luôn áp dụng, bất
