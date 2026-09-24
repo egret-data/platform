@@ -142,6 +142,26 @@ impl From<egret_catalog_registry::RegistryError> for EngineHttpError {
     }
 }
 
+/// The transaction `set_catalog_workspaces` opens directly (SP4a Task 6, so
+/// the assignment write and `perm`'s implicit-grant sync share one
+/// transaction) surfaces raw `sqlx::Error` from `.begin()`/`.commit()`.
+impl From<sqlx::Error> for EngineHttpError {
+    fn from(e: sqlx::Error) -> Self {
+        db_error(e)
+    }
+}
+
+impl From<egret_perm::PermError> for EngineHttpError {
+    fn from(e: egret_perm::PermError) -> Self {
+        use egret_perm::PermError as E;
+        match e {
+            E::NotFound(_) => EngineHttpError::NotFound,
+            E::Invalid(s) => EngineHttpError::BadRequest(s),
+            E::Db(e) => db_error(e),
+        }
+    }
+}
+
 impl From<SecretsError> for EngineHttpError {
     fn from(e: SecretsError) -> Self {
         match e {

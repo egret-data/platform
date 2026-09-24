@@ -3307,6 +3307,7 @@ dependencies = [
  "egret-engine-mgmt-api",
  "egret-events",
  "egret-metastore",
+ "egret-perm",
  "egret-policy",
  "egret-policy-api",
  "egret-provisioner",

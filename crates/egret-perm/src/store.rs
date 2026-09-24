@@ -244,6 +244,13 @@ impl PermStore {
         Self { pool }
     }
 
+    /// `pub(crate)`: only `assignment::sync_assignment_grants` needs the raw
+    /// pool (to open its own transaction); every other store method stays
+    /// self-contained.
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     // grants ---------------------------------------------------------------
 
     /// Inserts `g` and its principal subtract in one transaction. `g.id` is

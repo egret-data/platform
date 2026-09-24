@@ -981,10 +981,13 @@ async fn set_catalog_workspaces(
     if !st.engine_mgmt.missing_workspace_ids(&ids).await?.is_empty() {
         return Err(CpError::NotFound);
     }
-    st.engine_mgmt
-        .registry()
-        .set_catalog_workspaces(id, &ids)
-        .await?;
+    // The assignment write and `perm`'s implicit-grant sync share ONE
+    // transaction (SP4a Task 6, D3): an assignment that commits while its
+    // grant sync fails is exactly the split-brain this exists to remove.
+    let mut tx = st.engine_mgmt.pool().begin().await?;
+    egret_catalog_registry::RegistryStore::set_catalog_workspaces_in_tx(&mut tx, id, &ids).await?;
+    egret_perm::sync_assignment_grants_in_tx(&mut tx, id, &ids).await?;
+    tx.commit().await?;
     Ok(Json(workspace_dtos(&st, id).await?))
 }
 

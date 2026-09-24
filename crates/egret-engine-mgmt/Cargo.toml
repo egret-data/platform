@@ -18,6 +18,11 @@ egret-auth.workspace = true
 # needed here as a dev-dep for test state construction.
 egret-catalog-api.workspace = true
 egret-catalog-registry.workspace = true
+# `perm` seam (SP4a Task 6). Assigning a catalog to a workspace must sync the
+# implicit `read` grant in the SAME transaction as the assignment write, so
+# this crate calls `egret_perm::sync_assignment_grants_in_tx` directly rather
+# than going through a port — there is no PermPort seam yet.
+egret-perm.workspace = true
 egret-storage.workspace = true
 egret-secrets.workspace = true
 # Policy/Ranger seam contract (E2a). Engine-create auto-binds an engine to a

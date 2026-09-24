@@ -896,12 +896,29 @@ impl RegistryStore {
         catalog_id: Uuid,
         workspace_ids: &[Uuid],
     ) -> Result<(), RegistryError> {
-        let ids = workspace_ids.to_vec();
         let mut tx = self.pool().begin().await?;
+        Self::set_catalog_workspaces_in_tx(&mut tx, catalog_id, workspace_ids).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Same write as [`set_catalog_workspaces`](Self::set_catalog_workspaces),
+    /// against a transaction the caller already holds and will commit.
+    /// `egret-engine-mgmt`'s catalog-workspace assignment handler uses this
+    /// so the assignment write and `perm`'s implicit-grant sync
+    /// (`egret_perm::sync_assignment_grants_in_tx`, SP4a Task 6) land in ONE
+    /// transaction — an assignment that commits while its grant sync fails
+    /// is exactly the split-brain D3 exists to remove.
+    pub async fn set_catalog_workspaces_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        catalog_id: Uuid,
+        workspace_ids: &[Uuid],
+    ) -> Result<(), RegistryError> {
+        let ids = workspace_ids.to_vec();
         sqlx::query("DELETE FROM registry.catalog_workspaces WHERE catalog_id = $1 AND NOT (workspace_id = ANY($2))")
             .bind(catalog_id)
             .bind(ids.clone())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         sqlx::query(
             "INSERT INTO registry.catalog_workspaces (catalog_id, workspace_id) \
@@ -909,9 +926,8 @@ impl RegistryStore {
         )
         .bind(catalog_id)
         .bind(ids)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
         Ok(())
     }
 
