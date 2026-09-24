@@ -1640,6 +1640,62 @@ mod tests {
         assert_eq!(accepted, 2, "arm 2 did not run for both spellings");
     }
 
+    /// The W12 scheduler lever, held to the worker lever's standard: off by
+    /// default, read through `EGRET_WORKFLOW__SCHEDULER_ENABLED`, independent
+    /// of the worker's key, and **carried by the chart** -- the backend
+    /// Deployment has no `extraEnv` hook, so a lever missing from the
+    /// configmap is one an operator can only set by patching rendered
+    /// manifests. `trigger_interval_secs` is a tuning knob and is deliberately
+    /// not a chart value, like the worker's.
+    #[test]
+    fn the_scheduler_lever_defaults_off_and_the_chart_carries_it() {
+        // 1. The default, with its interval.
+        figment::Jail::expect_with(|_jail| {
+            let c: Config = Config::figment().extract().expect("defaults");
+            assert!(
+                !c.workflow.scheduler_enabled,
+                "the scheduler must default to OFF"
+            );
+            assert_eq!(c.workflow.trigger_interval_secs, 1);
+            Ok(())
+        });
+
+        // 2. The env spelling is read, and moves only its own key.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_WORKFLOW__SCHEDULER_ENABLED", "true");
+            let c: Config = Config::figment().extract().expect("`true` must parse");
+            assert!(
+                c.workflow.scheduler_enabled,
+                "EGRET_WORKFLOW__SCHEDULER_ENABLED=true was not read"
+            );
+            assert!(
+                !c.workflow.worker_enabled,
+                "and the worker lever is untouched"
+            );
+            Ok(())
+        });
+
+        // 3. The chart emits it, and its default is off.
+        let chart = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/helm/egret/templates/configmap-env.yaml");
+        let src = std::fs::read_to_string(&chart)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", chart.display()));
+        assert!(
+            src.contains(
+                r#"EGRET_WORKFLOW__SCHEDULER_ENABLED: "{{ .Values.workflow.schedulerEnabled }}""#
+            ),
+            "the chart must carry the scheduler lever: the backend Deployment has \
+             no extraEnv hook, so without this line an operator cannot turn it on"
+        );
+        let values = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/helm/egret/values.yaml");
+        let vsrc = std::fs::read_to_string(&values).expect("values.yaml");
+        assert!(
+            vsrc.contains("schedulerEnabled: false"),
+            "and the chart's default must be off"
+        );
+    }
+
     /// `Env::split("__")` is recursive, so three levels — section, map key,
     /// field — work; this test is what proves that rather than assuming it
     /// (D5: `[starrocks.jdbc_drivers]` reaches a per-dialect field from the

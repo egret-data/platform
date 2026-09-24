@@ -42,8 +42,12 @@
 //!   (The brief predicted the index would be what holds; the measurement says
 //!   otherwise.)
 //! - **drop the whole lock: dies, 3 of 3, on the attempts assertion only** --
-//!   12 to 30 double fires reached the `INSERT`, the index refused every one,
-//!   and the rows were right. A rows-only test would have passed.
+//!   12, 30 and 30 scheduled inserts were attempted and rolled back, and the
+//!   rows were right. With the lock gone, the index is the only thing in the
+//!   path that refuses such an insert, but the counter (`attempts - rows`)
+//!   counts ANY rolled-back scheduled insert, not only an index refusal; the
+//!   run did not record which constraint refused each one. A rows-only test
+//!   would have passed.
 //!
 //! ## 2. The execution's `INSERT` -- the unique index is the **backstop**
 //!
@@ -60,9 +64,9 @@
 //! `the_unique_index_refuses_a_second_fire` (the constraint name, with a
 //! one-tick-later control) and
 //! `a_tick_that_already_fired_is_consumed_not_taken_off_the_queue` (the
-//! classification); and by the lock-free mutation above, where it absorbed
-//! every double fire. Dropping the lock **and** the index dies on duplicate
-//! rows, 3 of 3.
+//! classification); and by the lock-free mutation above, where the rows
+//! stayed right although 12 to 30 scheduled inserts were rolled back.
+//! Dropping the lock **and** the index dies on duplicate rows, 3 of 3.
 //!
 //! ## 3. The final `UPDATE` -- safe **under the claim's lock**
 //!
@@ -76,10 +80,14 @@
 //! they commit with the execution or not at all.
 //!
 //! Proved by `tests/scheduler_fire.rs`'s `fire_and_advance_are_atomic` (a
-//! fault in this `UPDATE` rolls the execution back too) and, for two
-//! replicas, by statement 1's test: an advance written from a stale read
-//! would re-fire a tick, and the per-flow instants would not be exactly the
-//! three owed.
+//! fault in this `UPDATE` rolls the execution back too). The two-replica half
+//! is carried by statement 1's test's **attempt counter** (`attempts ==
+//! rows`), and by nothing else in it. An advance written from a stale read
+//! makes the next pass re-fire a tick it already fired, but the unique index
+//! refuses that re-fire and `fire_due` records it as a consumed tick, so the
+//! rows, the total and the per-flow instants all stay correct. Under the
+//! lock-free mutation above, the per-flow `scheduled_dates` assertion PASSED
+//! and only `attempts == rows` died.
 //!
 //! ## 4. `sync`'s upsert -- **serialised by the row lock**; it waits
 //!
@@ -91,7 +99,9 @@
 //! UPDATE` and `DELETE` both act on the latest row version -- so an unchanged
 //! `spec_key` keeps the *advanced* dates rather than rewinding them. The
 //! other order is the claim's business: a pass that meets a row a save holds
-//! skips it and finds it on a later pass. The pass's own call, `resync` (a
+//! skips it and finds it on a later pass. **That direction is unproved**: it
+//! is the `SKIP LOCKED` property statement 1 records as unobserved, and no
+//! test holds a save open while a pass runs. The pass's own call, `resync` (a
 //! source that disagrees with the row), runs inside the claim's transaction
 //! and already holds the lock.
 //!
