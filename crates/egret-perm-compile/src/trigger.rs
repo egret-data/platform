@@ -824,16 +824,37 @@ async fn apply_diff_in_tx(
     // policies (every grant/rule that reached it was deleted) is left
     // `generated` as found — the compiler still claims it; only
     // `PolicyStore::create_service` (never called for an existing row) ever
-    // starts a profile out as `manual`. Only the PROFILE is stamped: a tag
-    // service is not an engine-bound, editor-facing profile, and its
-    // compiler-owned rows are already protected from a human write by
-    // `egret-policy`'s reserved-prefix guard in every profile alike.
+    // starts a profile out as `manual`.
+    //
+    // **The TAG service this compile writes into is stamped too** (whole-branch
+    // review, Important 5). Task 8 stamped the profile alone, on the reasoning
+    // that a tag service is not an engine-bound, editor-facing profile and that
+    // its compiler-owned rows are already protected by the reserved-prefix
+    // guard. Task 11 then moved compiled tag policies INTO the tag service, and
+    // that reasoning did not survive the move: the reserved-prefix guard
+    // protects the compiler's OWN rows, and the hazard here is a different
+    // policy entirely. Ranger evaluates tag policies FIRST and short-circuits,
+    // so one hand-written tag ACCESS allow — which `create_policy` still
+    // accepts into any `manual` service, and which the editor reaches through
+    // `tag_editor_to_ranger_json` — ends evaluation before any compiled
+    // resource policy, including every compiled DENY grant, is consulted. D2's
+    // "egret never emits a tag access policy" was true of the compiler and not
+    // of egret. Stamping the tag service makes `refuse_if_generated` cover it
+    // exactly as it covers the profile: no NEW hand-written policy in a service
+    // the compiler owns. It is scoped to services this compile actually writes
+    // into (`desired`'s own service ids), so a tag service nothing compiles
+    // into is left alone, and it does not affect `delete_service`, which is
+    // keyed on remaining compiler-owned POLICIES rather than on `origin`.
     if !desired.is_empty() {
+        let mut stamp: Vec<i64> = desired.keys().map(|(service_id, _)| *service_id).collect();
+        stamp.push(profile_service_id);
+        stamp.sort_unstable();
+        stamp.dedup();
         sqlx::query(
             "UPDATE policy.authz_services SET origin = 'generated' \
-             WHERE id = $1 AND origin <> 'generated'",
+             WHERE id = ANY($1) AND origin <> 'generated'",
         )
-        .bind(profile_service_id)
+        .bind(&stamp)
         .execute(&mut **tx)
         .await
         .map_err(db_err)?;

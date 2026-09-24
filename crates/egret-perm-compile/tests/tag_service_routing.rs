@@ -167,6 +167,55 @@ async fn a_trino_tag_rule_lands_in_the_tag_service_and_is_reaped_from_it_on_dele
     assert_eq!(body["service"], tag_service_name);
     assert_eq!(body["resources"]["tag"]["values"][0], "Route PII");
 
+    // ── 1b. the tag service is CLAIMED, like the profile ─────────────────────
+    // Whole-branch review, Important 5. Task 8 stamped `origin='generated'` on
+    // the profile alone; Task 11 then moved compiled tag policies into the tag
+    // service, which stayed `manual` and therefore still accepted a
+    // hand-written policy through `create_policy`. Ranger evaluates tag
+    // policies FIRST and short-circuits, so a hand-written tag ACCESS allow in
+    // this very service ends evaluation before any compiled deny grant is
+    // consulted — D2's "egret never emits a tag access policy" held for the
+    // compiler and not for egret.
+    let origin_of = |service_id: i64| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT origin FROM policy.authz_services WHERE id = $1",
+            )
+            .bind(service_id)
+            .fetch_one(&pool)
+            .await
+            .expect("origin")
+        }
+    };
+    assert_eq!(
+        origin_of(tag_service.id).await,
+        "generated",
+        "a tag service the compiler writes into must carry the same origin treatment as the \
+         profile it serves"
+    );
+    assert_eq!(origin_of(profile.id).await, "generated");
+    let refused = policy
+        .create_policy(
+            tag_service.id,
+            "hand-written-tag-allow",
+            &serde_json::json!({
+                "name": "hand-written-tag-allow",
+                "serviceType": "tag",
+                "policyType": 0,
+                "resources": { "tag": { "values": ["Route PII"] } },
+            }),
+        )
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(egret_policy::PolicyStoreError::CompilerOwned(_))
+        ),
+        "a hand-written tag policy in the compiler's own tag service must be refused, not \
+         evaluated ahead of every compiled deny; got {refused:?}"
+    );
+
     // ── 2. both versions bump ────────────────────────────────────────────────
     // The tag plugin polls the TAG service with `lastKnownVersion`; without its
     // bump it is answered 304 and never sees the mask. The resource plugin polls
