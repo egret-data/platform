@@ -855,12 +855,27 @@ impl PolicyStore {
     /// Insert a policy, or update its body in place if `(service_id, name)`
     /// already exists, bumping the policy's `version` and the service's
     /// `policy_version` atomically. Returns the policy id.
+    ///
+    /// **Guarded by the reserved-name check and by nothing else, deliberately**
+    /// (whole-branch review, Important 6). [`refuse_if_generated`] must NOT be
+    /// added here: this method's only caller is
+    /// `default_policies::seed_default_trino_policies`, `engines.rs` propagates
+    /// a seed failure as a 400, and a profile the compiler has claimed is
+    /// exactly the one an engine update would then be unable to save — the
+    /// exemption is load-bearing, not an oversight. [`refuse_reserved_name`] is
+    /// pure and name-only, so it cannot fail that seed (its
+    /// `egret-admin-*` names collide with nothing), and it closes the one way
+    /// this path could drift: a future second caller passing a
+    /// `perm-grant-`/`perm-rule-` name would silently overwrite compiled
+    /// output, which the next recompile restores — an edit that appears to
+    /// work and then vanishes.
     pub async fn upsert_policy(
         &self,
         service_id: i64,
         name: &str,
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
+        refuse_reserved_name(name)?;
         let mut tx = self.db.pool.begin().await?;
         let id: i64 = sqlx::query_scalar::<_, i64>(
             r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb)
