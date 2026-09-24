@@ -193,6 +193,18 @@ impl Clock for TestClock {
     }
 }
 
+/// A clock that answers one instant. Pure: the caller read it elsewhere
+/// (in `scheduler/`, from Postgres's `now()`), so W12's rule of one clock --
+/// the database's -- holds without this module reading any clock itself.
+#[derive(Debug, Clone, Copy)]
+pub struct FixedClock(pub DateTime<Utc>);
+
+impl Clock for FixedClock {
+    fn now(&self) -> DateTime<Utc> {
+        self.0
+    }
+}
+
 /// `io.kestra.core.scheduler.model.TriggerState`, reduced to what scheduling
 /// needs.
 ///
