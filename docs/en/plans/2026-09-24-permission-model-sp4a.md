@@ -738,8 +738,19 @@ git commit -m "feat: compile grants into Ranger access policies (SP4a)"
   pub struct TaggedColumn { pub catalog: String, pub schema: String,
                             pub table: String, pub column: String }
   pub fn compile_rule(r: &Rule, e: EngineType, service: &str, tag_service: Option<&str>,
-                      tagged: &[TaggedColumn], ceiling: usize)
+                      resolved: &ResolvedNames, tagged: &[TaggedColumn], ceiling: usize)
       -> Result<Vec<serde_json::Value>, CompileError>;
+
+  /// CORRECTED 2026-09-24, after the Task 5 review. The first signature took
+  /// neither the tag's name nor the catalog's, so the compiler stamped
+  /// `tags.key` and a catalog UUID into the policy — and spec D6 requires it to
+  /// "resolve key -> name and id -> name at compile time". Both halves of that
+  /// sentence are load-bearing: egret's own tag download pushes `tags.name` as
+  /// the Ranger tag type (`egret-policy/src/store.rs:245`), and engines send
+  /// the catalog NAME. A policy carrying the key or the id deploys cleanly,
+  /// appears in Ranger, and matches nothing — so the mask returns the real
+  /// value. The compiler still does no I/O; the caller resolves.
+  pub struct ResolvedNames<'a> { pub catalog_name: &'a str, pub tag_name: Option<&'a str> }
   ```
 
 - [ ] **Step 1: Write the failing tests**
