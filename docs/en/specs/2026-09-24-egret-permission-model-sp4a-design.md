@@ -130,6 +130,37 @@ StarRocks. SP4a enforces a **compile-time ceiling** on expanded policies per rul
 compile above it with a message naming the rule and the count, and does not silently truncate. The
 ceiling's value is set from a measurement on kind, not chosen in advance.
 
+**The measurement (Task 10, 2026-09-24, kind `kind-egret`, StarRocks profile `sp4a10-sr`).** N
+columns carrying one tag, one tag-mask rule, full rebuild of the profile each time; the download is
+`GET /service/plugins/policies/download/{service}?lastKnownVersion=-1`, which every plugin poll
+fetches in full:
+
+| tagged columns N | policies in profile | compile (wall clock) | download bytes | download time |
+|---|---|---|---|---|
+| 10 | 16 | 0.054 s | 22 KB | 0.032 s |
+| 50 | 56 | 0.081 s | 52 KB | 0.030 s |
+| 100 | 106 | 0.159 s | 88 KB | 0.038 s |
+| 250 | 256 | 0.226 s | 198 KB | 0.039 s |
+| 500 | 506 | 0.489 s | 381 KB | 0.057 s |
+| 500 × 2 rules | 1006 | 0.653 s | 748 KB | 0.094 s |
+| 500 × 3 rules | 1506 | 1.331 s | 1.11 MB | 0.113 s |
+| 500 × 4 rules | 2006 | 2.224 s | 1.48 MB | 0.142 s |
+
+The download is linear at ~740 bytes per policy and stays fast throughout; **compile time is what
+bends.** It is sub-linear up to ~500 policies (fixed overhead dominates), linear to ~1000, and
+super-linear after: doubling 1006 → 2006 costs 3.4× the time. The knee is at roughly **1000 policies
+in one profile**.
+
+**Ceiling = 500, and that is the number the measurement supports** — not because 500 hurts (it does
+not: 0.49 s and 381 KB) but because the per-rule cap has to leave room for the profile's *other*
+rules before the profile total reaches the ~1000-policy knee. One rule at the cap plus its
+neighbours is exactly the region where the curve is still linear.
+
+**Known gap this measurement exposes: the ceiling does not bound the thing that costs.** It is
+per-rule, and the cost is driven by the profile TOTAL. Four rules of 500 columns each compiled 2006
+policies with no refusal at all — past the knee, at 2.2 s per recompile, with every tag write
+triggering one. A per-profile total ceiling is the follow-up; SP4a ships the per-rule one.
+
 **D6 — Rules reference `tags.key`, grants reference `registry.catalogs.id`.** Both fix documented
 breakage: tag policies today store the mutable, non-unique `tags.name`
 (`programme spec:43`), and catalog identity now lives in the registry. The compiler resolves key →

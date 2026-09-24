@@ -113,13 +113,28 @@ use egret_policy::{
 use crate::grants::compile_grant;
 use crate::rules::{compile_rule, stamp_service_type, ResolvedNames, TaggedColumn};
 
-/// The StarRocks per-column expansion ceiling this driver enforces. D5's own
-/// words: "The ceiling's value is set from a measurement on kind, not chosen
-/// in advance" — no such measurement has been run in this worktree (unlike
-/// D7's, which WAS measured and is cited by name in `assignment.rs`). This
-/// number is therefore a conservative placeholder, not a measured one, and
-/// should be replaced (and, ideally, made configurable per profile) the first
-/// time a real StarRocks tag-rule fan-out is measured on kind.
+/// The StarRocks per-column expansion ceiling this driver enforces.
+///
+/// **Measured, not guessed** (Task 10, 2026-09-24, kind `kind-egret`, StarRocks
+/// profile `sp4a10-sr`; full table in the design spec's D5 and in
+/// `docs/en/plans/2026-09-24-permission-model-sp4a-live-result.md`). N tagged
+/// columns → a full profile rebuild and a full Ranger download:
+///
+/// | policies | compile | download |
+/// |---|---|---|
+/// | 256 | 0.226 s | 198 KB |
+/// | 506 | 0.489 s | 381 KB |
+/// | 1006 | 0.653 s | 748 KB |
+/// | 2006 | 2.224 s | 1.48 MB |
+///
+/// The download is linear (~740 bytes/policy) and never the constraint; compile
+/// time is, and it turns super-linear past roughly 1000 policies in one profile
+/// (1006 → 2006 costs 3.4× the time). 500 per rule is chosen so that a rule at
+/// the cap plus the profile's other rules still sits inside the linear region.
+///
+/// **Known gap:** this ceiling is per-RULE, and the cost is driven by the
+/// profile TOTAL. Four rules of 500 columns compiled 2006 policies with no
+/// refusal at all. A per-profile total ceiling is the follow-up.
 pub const DEFAULT_EXPANSION_CEILING: usize = 500;
 
 // The name prefixes every policy `compile_grant`/`compile_rule` produces
