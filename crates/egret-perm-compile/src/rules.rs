@@ -98,6 +98,7 @@ use egret_perm::{CompileError, EngineType, PrincipalKind, PrincipalSet, Rule, Ru
 
 use crate::grants::{
     level, resource_level_names, scope_to_resources, validate_user_ref, PolicyTarget,
+    ROW_FILTER_LEVELS,
 };
 
 /// One column carrying the tag a rule selects on, resolved by the CALLER —
@@ -151,8 +152,62 @@ pub fn validate_rule_shape(r: &Rule) -> Result<(), CompileError> {
             ensure_custom_mask_parses(&r.name, value_expr.as_deref().unwrap_or_default())?;
         }
     }
+    ensure_row_filter_scope_is_a_table(r)?;
     exempt_principals(r)?;
     Ok(())
+}
+
+/// A path-selected ROW FILTER must name exactly catalog + schema + table
+/// (whole-branch review, Critical 1).
+///
+/// **Service-independent, so it belongs here.** `rowFilterDef.resources`
+/// declares the same three mandatory levels and no `column` on BOTH engines
+/// this compiler targets, so a scope that names a column — or that leaves a
+/// gap above the table — is unrepresentable for every profile alike; nothing
+/// about which service is being compiled for can change the answer, which is
+/// the line `validate_grant_shape`'s doc draws for what may live at the
+/// authoring boundary.
+///
+/// **Why a refusal and not a best-effort render.** `scope_to_resources` now
+/// renders such a scope into something the def CAN match (the column dropped,
+/// a gap wildcarded), so nothing silently fails to filter any more — but what
+/// it renders is not what the author asked for. A row filter scoped to
+/// `orders.customer_email` would filter every row of `orders` for everyone,
+/// which reads to the author as "my column-scoped filter worked" and is a
+/// different control from the one they wrote. Refusing says so at the one
+/// moment the author can still fix it. The `Tag` selector needs no equivalent
+/// check: a tag row filter is table-granular by construction on both engines
+/// (Trino's tag policy carries no path at all, and `column_resources` stops at
+/// `table`), so there is no scope for an author to get wrong.
+fn ensure_row_filter_scope_is_a_table(r: &Rule) -> Result<(), CompileError> {
+    let (RuleKind::RowFilter { .. }, Selector::Path(scope)) = (&r.kind, &r.selector) else {
+        return Ok(());
+    };
+    debug_assert_eq!(
+        ROW_FILTER_LEVELS, 3,
+        "this check spells out catalog+schema+table; a different row-filter depth needs it rewritten"
+    );
+    let reason = match (&scope.schema, &scope.table, &scope.column) {
+        (_, _, Some(c)) => Some(format!(
+            "it is scoped to column {c:?}, and a row filter has no column to be scoped to — \
+             the engines' rowFilterDef declares catalog/schema/table and nothing below. Mask \
+             the column instead, or scope the row filter to its table"
+        )),
+        (None, _, None) | (_, None, None) => Some(
+            "it must name a catalog, a schema and a table — every level the engines' \
+             rowFilterDef declares is mandatory, so a scope that stops short of the table \
+             cannot be matched as written"
+                .to_string(),
+        ),
+        (Some(_), Some(_), None) => None,
+    };
+    match reason {
+        Some(reason) => Err(CompileError::UnfilterableRowFilterScope {
+            rule: r.name.clone(),
+            reason,
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Compile one `Rule` into the Ranger masking/row-filter JSON bodies for
@@ -229,17 +284,49 @@ pub fn compile_rule(
                     ceiling,
                 });
             }
-            tagged
-                .iter()
-                .map(|col| {
-                    let name = format!(
-                        "{COMPILER_RULE_PREFIX}{}-{}.{}.{}.{}",
-                        r.id, col.catalog, col.schema, col.table, col.column
-                    );
-                    let resources = column_resources(e, col);
-                    build_body(r, e, service, name, resources)
-                })
-                .collect()
+            // **A mask expands per COLUMN; a row filter expands per TABLE**
+            // (whole-branch review, Critical 1, third shape). A row-filter
+            // policy has no column resource to carry — `rowFilterDef` does not
+            // declare one — so two tagged columns of the same table are one
+            // and the same row filter, and emitting it twice would write two
+            // policies with identical bodies under two different names for the
+            // plugin to evaluate in an order nothing here controls. The
+            // dedup key is the row-filter resource map's own granularity, so
+            // it cannot disagree with what `column_resources` emits, and the
+            // policy NAME is built from the same key for the same reason:
+            // a name carrying a column this policy does not address would
+            // say the expansion is per-column when it is not.
+            //
+            // The ceiling above still counts `tagged` rather than the deduped
+            // set: it bounds the compile-time expansion the model asks for,
+            // which is what D5's measurement is about, and dedup can only
+            // ever make the emitted count smaller.
+            let target = policy_target(&r.kind);
+            let mut seen: std::collections::BTreeSet<Vec<String>> =
+                std::collections::BTreeSet::new();
+            let mut out = Vec::new();
+            for col in tagged {
+                let resources = column_resources(e, col, target);
+                let key: Vec<String> = resources
+                    .values()
+                    .map(|l| l.values.join(","))
+                    .collect::<Vec<_>>();
+                if !seen.insert(key) {
+                    continue;
+                }
+                let suffix = match target {
+                    PolicyTarget::RowFilter => {
+                        format!("{}.{}.{}", col.catalog, col.schema, col.table)
+                    }
+                    _ => format!(
+                        "{}.{}.{}.{}",
+                        col.catalog, col.schema, col.table, col.column
+                    ),
+                };
+                let name = format!("{COMPILER_RULE_PREFIX}{}-{suffix}", r.id);
+                out.push(build_body(r, e, service, name, resources)?);
+            }
+            Ok(out)
         }
         (Selector::Path(scope), _) => {
             // A masking policy and a row-filter policy are matched against
@@ -258,13 +345,31 @@ pub fn compile_rule(
 /// The Ranger `resources` map for one fully-resolved column (StarRocks tag
 /// expansion — every level is always known here, unlike a rule's own
 /// possibly-partial `Scope`).
-fn column_resources(e: EngineType, col: &TaggedColumn) -> BTreeMap<String, ResourceLevel> {
+///
+/// **It branches on `target` for the same reason `scope_to_resources` does,
+/// and did not (whole-branch review, Critical 1).** This function emitted all
+/// four levels unconditionally, ignoring the rule's `kind`, while its sibling
+/// already consulted `PolicyTarget` — so a tag-selected ROW FILTER on
+/// StarRocks compiled a body carrying a `column` resource that
+/// `rowFilterDef.resources` does not declare. Ranger accepted it, egret listed
+/// it as live, and it filtered no rows at all. A mask keeps all four levels
+/// (`dataMaskDef` declares `column`); a row filter stops at `table`
+/// ([`ROW_FILTER_LEVELS`]).
+fn column_resources(
+    e: EngineType,
+    col: &TaggedColumn,
+    target: PolicyTarget,
+) -> BTreeMap<String, ResourceLevel> {
     let names = resource_level_names(e);
+    let values = [&col.catalog, &col.schema, &col.table, &col.column];
+    let depth = match target {
+        PolicyTarget::RowFilter => ROW_FILTER_LEVELS,
+        PolicyTarget::Access | PolicyTarget::Mask => names.len(),
+    };
     let mut map = BTreeMap::new();
-    map.insert(names[0].to_string(), level(col.catalog.clone()));
-    map.insert(names[1].to_string(), level(col.schema.clone()));
-    map.insert(names[2].to_string(), level(col.table.clone()));
-    map.insert(names[3].to_string(), level(col.column.clone()));
+    for i in 0..depth {
+        map.insert(names[i].to_string(), level(values[i].clone()));
+    }
     map
 }
 

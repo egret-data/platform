@@ -260,16 +260,64 @@ pub(crate) fn scope_to_resources(
                 map.insert((*name).to_string(), level(value));
             }
         }
-        PolicyTarget::Mask | PolicyTarget::RowFilter => {
+        PolicyTarget::Mask => {
             for (i, name) in names.iter().enumerate() {
                 if let Some(v) = named[i] {
                     map.insert((*name).to_string(), level(v.to_string()));
                 }
             }
         }
+        PolicyTarget::RowFilter => {
+            // **The row-filter hierarchy is three levels, and every one of
+            // them is mandatory** (whole-branch review, Critical 1).
+            // `rowFilterDef.resources` declares exactly
+            // `catalog`/`schema`|`database`/`table`, each `"mandatory": true`,
+            // and declares no `column` at all — re-read from both service-def
+            // files by `tests/compile_rules.rs`'s
+            // `the_row_filter_resource_map_matches_what_the_service_def_declares`,
+            // not taken from this comment. So neither of the two things the
+            // `Mask` arm above does is legal here: emitting a `column` adds a
+            // resource the def cannot match, and omitting an unnamed `schema`
+            // or `table` drops a level the def marks mandatory. Both compile,
+            // deploy and are listed live, and both filter NOTHING — every row
+            // comes back, on a control whose whole purpose is to withhold
+            // rows.
+            //
+            // `RULE_SCOPE` at the authoring boundary
+            // (`crate::rules::validate_rule_shape`) refuses a path row-filter
+            // scope that does not name exactly catalog+schema+table, so a
+            // rule written through egret's own API never reaches either
+            // shape. This arm is what makes a row already in `perm.rules`
+            // (written before that guard existed) compile to something the
+            // plugin can still match rather than to a silent no-op: the
+            // column is dropped, and an unnamed level becomes `*` — the same
+            // "unspecified means every child" rendering the `Access` arm's
+            // live measurement validated, and the only one that can satisfy
+            // a mandatory level at all.
+            let mut wildcard_from_here = false;
+            for (i, name) in names.iter().take(ROW_FILTER_LEVELS).enumerate() {
+                let value = match named[i] {
+                    Some(v) if !wildcard_from_here => v.to_string(),
+                    _ => {
+                        wildcard_from_here = true;
+                        WILDCARD.to_string()
+                    }
+                };
+                map.insert((*name).to_string(), level(value));
+            }
+        }
     }
     map
 }
+
+/// How many levels of [`resource_level_names`] a ROW-FILTER policy may name:
+/// `catalog`, `schema`|`database`, `table` — and never `column`, which
+/// `rowFilterDef.resources` does not declare on either engine (Trino
+/// service-def id 203, StarRocks id 205). One constant, read by the emission
+/// (`scope_to_resources`, `crate::rules::column_resources`) and by the
+/// write-time refusal (`crate::rules::validate_rule_shape`), so the two
+/// cannot drift apart the way the mask and row-filter paths did.
+pub(crate) const ROW_FILTER_LEVELS: usize = 3;
 
 /// The part of compiling a grant that needs **no service and no engine** —
 /// run at the authoring boundary, before the grant is stored (SP4a Task 9

@@ -154,6 +154,19 @@ pub enum CompileError {
     /// here would be the one path that panics instead.
     #[error("{engine:?}'s embedded service-def failed to parse: {detail}")]
     ServiceDefUnreadable { engine: EngineType, detail: String },
+    /// A path-selected ROW-FILTER rule whose scope is not exactly
+    /// catalog + schema + table (SP4a whole-branch review, Critical 1). Both
+    /// engines' `rowFilterDef.resources` declares those three levels, every
+    /// one `"mandatory": true`, and declares no `column` — so a row filter
+    /// scoped to a column carries a resource the definition cannot match, and
+    /// one scoped above the table omits a level the definition requires.
+    /// Either way Ranger accepts the policy, egret lists it as live, and it
+    /// filters nothing: every row is returned from a control whose purpose is
+    /// to withhold rows. Refused where the author can still fix it rather than
+    /// rendered into a different control than the one they wrote (see
+    /// `egret-perm-compile`'s `rules::ensure_row_filter_scope_is_a_table`).
+    #[error("rule {rule:?} cannot be compiled as a row filter: {reason}")]
+    UnfilterableRowFilterScope { rule: String, reason: String },
     /// A rule's `exempt` set names something a masking/row-filter Ranger
     /// item cannot express: a non-empty `exempt.exclude` (those items carry
     /// no allow/deny-exception block the way an access-policy item does —

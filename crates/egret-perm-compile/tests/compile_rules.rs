@@ -20,7 +20,7 @@ use egret_perm::{
     CompileError, EngineType, Principal, PrincipalKind, PrincipalSet, Rule, RuleKind, Scope,
     Selector,
 };
-use egret_perm_compile::{compile_rule, ResolvedNames, TaggedColumn};
+use egret_perm_compile::{compile_rule, validate_rule_shape, ResolvedNames, TaggedColumn};
 
 // Dumb helpers only — a helper that computes anything is a second
 // implementation of the thing under test.
@@ -678,4 +678,335 @@ fn a_trino_tag_rule_with_no_tag_service_is_refused() {
             rule: "pii-hash".to_string()
         }
     );
+}
+
+// ---------------------------------------------------------------------------
+// Whole-branch review, Critical 1 — a row filter on a column returned every row
+// ---------------------------------------------------------------------------
+
+/// Read one embedded service-def from disk (same two files the compiler
+/// embeds; `CARGO_MANIFEST_DIR` because `cargo test` runs with CWD = this
+/// crate's manifest directory). Copied from `compile_grants.rs` rather than
+/// shared: an integration test binary cannot import another one's helpers,
+/// and the point of both is to re-read the DECLARATION rather than trust a
+/// constant.
+fn service_def(engine: EngineType) -> serde_json::Value {
+    let path = match engine {
+        EngineType::Trino => concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../egret-policy/src/service-defs/trino.json"
+        ),
+        EngineType::StarRocks => concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../egret-policy/src/service-defs/starrocks.json"
+        ),
+    };
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// The resource level names one policy-type definition declares, and which of
+/// them it marks `"mandatory": true`.
+fn declared_levels(engine: EngineType, def_key: &str) -> (Vec<String>, Vec<String>) {
+    let def = service_def(engine);
+    let resources = def[def_key]["resources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{engine:?}'s service-def declares no {def_key}.resources"))
+        .clone();
+    let names = resources
+        .iter()
+        .map(|r| r["name"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    let mandatory = resources
+        .iter()
+        .filter(|r| r["mandatory"].as_bool() == Some(true))
+        .map(|r| r["name"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    (names, mandatory)
+}
+
+fn resource_keys(body: &serde_json::Value) -> Vec<String> {
+    let mut keys = body["resources"]
+        .as_object()
+        .expect("every compiled body carries a resources object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys
+}
+
+fn rowfilter_rule_on_path(scope: Scope, filter_expr: &str) -> Rule {
+    Rule {
+        id: Uuid::nil(),
+        name: "path-rowfilter".to_string(),
+        kind: RuleKind::RowFilter {
+            filter_expr: filter_expr.to_string(),
+        },
+        selector: Selector::Path(scope),
+        exempt: PrincipalSet::default(),
+    }
+}
+
+fn scope_of(schema: Option<&str>, table: Option<&str>, column: Option<&str>) -> Scope {
+    Scope {
+        catalog_id: Uuid::nil(),
+        schema: schema.map(str::to_string),
+        table: table.map(str::to_string),
+        column: column.map(str::to_string),
+    }
+}
+
+/// **The assertion the branch was missing.** `tests` for row filters checked
+/// the policy body (`policyType`, the filter expression, the `public` item)
+/// and never the `resources` map against what `rowFilterDef` DECLARES — so
+/// three shapes emitted a map that definition cannot match, all of which
+/// compile, deploy, and are listed by egret as live while filtering nothing.
+///
+/// This test derives the expectation from the service-def files themselves
+/// (both engines), so it fails if the emission drifts OR if a service-def
+/// ever gains a `column` level the compiler is not taught about.
+#[test]
+fn the_row_filter_resource_map_matches_what_the_service_def_declares() {
+    for engine in [EngineType::Trino, EngineType::StarRocks] {
+        let (declared, mandatory) = declared_levels(engine, "rowFilterDef");
+        let mut expected = declared.clone();
+        expected.sort();
+        assert!(
+            !declared.iter().any(|n| n == "column"),
+            "{engine:?}: this test's whole premise is that rowFilterDef declares no column level"
+        );
+        assert_eq!(
+            mandatory.len(),
+            declared.len(),
+            "{engine:?}: every rowFilterDef level is expected to be mandatory — if that ever \
+             stops being true, the wildcard fill below needs re-deciding, not silently keeping"
+        );
+
+        // 1. The shape the live gate measured working: catalog + schema + table.
+        let exact = rowfilter_rule_on_path(
+            scope_of(Some("sales"), Some("orders"), None),
+            "country = 'US'",
+        );
+        let out = compile_rule(
+            &exact,
+            engine,
+            "svc",
+            Some("svc_tag"),
+            &resolved("wh", None),
+            &[],
+            100,
+        )
+        .unwrap();
+        assert_eq!(
+            resource_keys(&out[0]),
+            expected,
+            "{engine:?}: a table-scoped row filter must name exactly the declared levels"
+        );
+
+        // 2. Scoped to a COLUMN (refused at the authoring boundary now, but a
+        //    row already in `perm.rules` still has to compile to something
+        //    matchable): the undeclared `column` must not be emitted.
+        let on_column = rowfilter_rule_on_path(
+            scope_of(Some("sales"), Some("orders"), Some("customer_email")),
+            "country = 'US'",
+        );
+        let out = compile_rule(
+            &on_column,
+            engine,
+            "svc",
+            Some("svc_tag"),
+            &resolved("wh", None),
+            &[],
+            100,
+        )
+        .unwrap();
+        assert_eq!(
+            resource_keys(&out[0]),
+            expected,
+            "{engine:?}: a column-scoped row filter must NOT emit a column resource — \
+             rowFilterDef declares none, and a body carrying one filters no rows at all"
+        );
+
+        // 3. Scoped ABOVE the table: every mandatory level must still be
+        //    present, as an explicit wildcard.
+        let above = rowfilter_rule_on_path(scope_of(None, None, None), "country = 'US'");
+        let out = compile_rule(
+            &above,
+            engine,
+            "svc",
+            Some("svc_tag"),
+            &resolved("wh", None),
+            &[],
+            100,
+        )
+        .unwrap();
+        assert_eq!(
+            resource_keys(&out[0]),
+            expected,
+            "{engine:?}: a catalog-scoped row filter must fill the mandatory levels it does not \
+             name, never omit them"
+        );
+        for m in &mandatory {
+            assert!(
+                out[0]["resources"][m]["values"][0].is_string(),
+                "{engine:?}: mandatory level {m:?} carries no value"
+            );
+        }
+        assert_eq!(out[0]["resources"][&declared[1]]["values"][0], "*");
+        assert_eq!(out[0]["resources"][&declared[2]]["values"][0], "*");
+    }
+
+    // 4. A MASK keeps the column level, because `dataMaskDef` declares one —
+    //    the same call that must drop it for a row filter.
+    for engine in [EngineType::Trino, EngineType::StarRocks] {
+        let (mask_levels, _) = declared_levels(engine, "dataMaskDef");
+        assert!(
+            mask_levels.iter().any(|n| n == "column"),
+            "{engine:?}: dataMaskDef is expected to declare a column level"
+        );
+        let r = mask_rule_on_path(
+            scope_of(Some("sales"), Some("orders"), Some("customer_email")),
+            "MASK_HASH",
+        );
+        let out = compile_rule(&r, engine, "svc", None, &resolved("wh", None), &[], 100).unwrap();
+        assert_eq!(
+            out[0]["resources"]["column"]["values"][0], "customer_email",
+            "{engine:?}: a mask must still address its column"
+        );
+    }
+}
+
+/// C1's third shape, and the reason it is a recurring class rather than a
+/// one-off: `column_resources` (the StarRocks tag expansion) emitted all four
+/// levels unconditionally while its sibling `scope_to_resources` already
+/// branched on the policy target. Task 11 fixed one and not the other.
+#[test]
+fn a_starrocks_tag_row_filter_addresses_the_table_and_not_the_column() {
+    let (declared, _) = declared_levels(EngineType::StarRocks, "rowFilterDef");
+    let mut expected = declared.clone();
+    expected.sort();
+
+    let r = rowfilter_rule_on_tag("region", "country = 'US'");
+    let tagged = [
+        col("wh", "sales", "orders", "customer_email"),
+        // Same table, second tagged column: one row filter, not two.
+        col("wh", "sales", "orders", "customer_phone"),
+        col("wh", "sales", "shipments", "recipient"),
+    ];
+    let out = compile_rule(
+        &r,
+        EngineType::StarRocks,
+        "sr-1",
+        None,
+        &resolved("wh", Some("region-tag")),
+        &tagged,
+        100,
+    )
+    .unwrap();
+
+    assert_eq!(
+        out.len(),
+        2,
+        "a row filter is table-granular: two tagged columns of one table are one policy"
+    );
+    for body in &out {
+        assert_eq!(
+            resource_keys(body),
+            expected,
+            "a StarRocks tag row filter must name exactly the levels rowFilterDef declares"
+        );
+        assert_eq!(body["policyType"], 2);
+        assert_eq!(body["serviceType"], "starrocks");
+    }
+    let mut tables = out
+        .iter()
+        .map(|b| b["resources"]["table"]["values"][0].as_str().unwrap())
+        .collect::<Vec<_>>();
+    tables.sort();
+    assert_eq!(tables, vec!["orders", "shipments"]);
+    let names = out
+        .iter()
+        .map(|b| b["name"].as_str().unwrap())
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        names.len(),
+        2,
+        "two policies under one service need two names"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("customer_email")),
+        "a row filter's name must not claim a column it does not address: {names:?}"
+    );
+
+    // The MASK expansion over the same three columns is still per-column —
+    // this is the branch that must NOT have changed.
+    let m = mask_rule_on_tag("region", "MASK_HASH");
+    let masks = compile_rule(
+        &m,
+        EngineType::StarRocks,
+        "sr-1",
+        None,
+        &resolved("wh", Some("region-tag")),
+        &tagged,
+        100,
+    )
+    .unwrap();
+    assert_eq!(
+        masks.len(),
+        3,
+        "a mask still expands once per tagged column"
+    );
+    let mut mask_cols = masks
+        .iter()
+        .map(|b| b["resources"]["column"]["values"][0].as_str().unwrap())
+        .collect::<Vec<_>>();
+    mask_cols.sort();
+    assert_eq!(
+        mask_cols,
+        vec!["customer_email", "customer_phone", "recipient"]
+    );
+}
+
+/// The write-time half: a shape the compiler can only render as a DIFFERENT
+/// control than the author wrote is refused where the author can still fix
+/// it, the way every other uncompilable shape is (`validate_rule_shape` runs
+/// in `create_rule`, and `CompileError` maps to a 400).
+#[test]
+fn a_path_row_filter_must_name_exactly_catalog_schema_and_table() {
+    let ok = rowfilter_rule_on_path(
+        scope_of(Some("sales"), Some("orders"), None),
+        "country = 'US'",
+    );
+    validate_rule_shape(&ok).expect("the shape the live gate measured must stay legal");
+
+    for (scope, what) in [
+        (
+            scope_of(Some("sales"), Some("orders"), Some("customer_email")),
+            "a column",
+        ),
+        (scope_of(Some("sales"), None, None), "no table"),
+        (scope_of(None, None, None), "catalog only"),
+        (scope_of(None, Some("orders"), None), "a gap at schema"),
+    ] {
+        let r = rowfilter_rule_on_path(scope, "country = 'US'");
+        let err = validate_rule_shape(&r)
+            .expect_err(&format!("a row filter scoped to {what} must be refused"));
+        assert!(
+            matches!(err, CompileError::UnfilterableRowFilterScope { .. }),
+            "scoped to {what}: expected UnfilterableRowFilterScope, got {err:?}"
+        );
+    }
+
+    // A MASK on the very same scopes stays legal — dataMaskDef declares a
+    // column and marks nothing mandatory, so this refusal must not leak
+    // across to the other rule kind.
+    let m = mask_rule_on_path(
+        scope_of(Some("sales"), Some("orders"), Some("customer_email")),
+        "MASK_HASH",
+    );
+    validate_rule_shape(&m).expect("a column-scoped mask is exactly what a mask is for");
+
+    // Nor across to a TAG-selected row filter, which carries no scope at all.
+    validate_rule_shape(&rowfilter_rule_on_tag("region", "country = 'US'"))
+        .expect("a tag row filter has no path scope to get wrong");
 }
