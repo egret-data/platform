@@ -239,6 +239,45 @@ One direction only: model → Ranger JSON. Nothing reads Ranger JSON back into t
 against a live engine and not only against expected JSON: a mask Ranger accepts can still fail in
 Trino, and a JSON snapshot test would pass while the data leaked.
 
+**Two assumptions this section carried were refuted by exactly that live test, and are corrected
+here rather than left for the next reader** (Task 10, 2026-09-24, kind `kind-egret`, real Trino +
+Ranger plugin; full evidence in
+[`2026-09-24-permission-model-sp4a-live-result.md`](../plans/2026-09-24-permission-model-sp4a-live-result.md)).
+
+1. **An access policy must name EVERY resource level, with `*` where the scope stops.** The compiler
+   was built on a reading of Apache Ranger's
+   `RangerDefaultPolicyResourceMatcher.getMatchType()` — that once the matcher runs out of
+   policy-side resource entries, the deeper levels a *request* names resolve to `MatchType.ANCESTOR`
+   unconditionally, so a policy stopping at `schema` or `table` would cover everything beneath it.
+   **That is false for access policies.** A grant of `read` on a schema, compiled to
+   `{catalog, schema}`, produced `Access Denied: Cannot select from columns [v, id] in table or
+   view sibling`; a table-level grant failed identically; the same grant written down to
+   `column: "*"` returned every row (§3, cases T1 and T1b). The ancestor match does hold for the
+   *catalog* check — the denial moved from `Cannot access catalog` to `Cannot select from columns` —
+   and does **not** hold downward to the column-granular `select` Trino actually asks about. So a
+   compiled grant now carries the full chain the target engine's service-def declares (Trino
+   service-def **id 203**: `catalog`/`schema`/`table`/`column`, levels 10/20/30/40, every one
+   `mandatory: true`; StarRocks: `catalog`/`database`/`table`/`column`), with an explicit `*` at
+   every level the scope does not name. A grant that names only a schema and compiles to a policy
+   that grants nothing is worse than a rejected one: egret listed it as live and the engine enforced
+   nothing.
+
+   Masking and row-filter policies are **not** widened the same way, and that asymmetry is measured
+   too: the same run showed a path-selected mask masking for real (`xxxx` in place of the values)
+   and a path-selected row filter removing rows for real (§3, T3b and T4), while §1 above records
+   Ranger's own rule that masking and row-filter policies take no wildcards and no multi-values.
+   Widening them would replace one unverified assumption with another, in the direction that grants
+   more than the model states.
+
+2. **A tag policy belongs to the TAG service, and egret must store it there.** A rule's compiled
+   tag body names the profile's tag service in its own `service` field, but the recompile driver
+   filed every policy it produced under the resource profile's `service_id`. The tag plugin's feed
+   (`/service/plugins/policies/download/<profile>_tag`) therefore served **0 policies** while the
+   resource profile carried a `serviceType: tag` policy it can never match — a mask that deployed,
+   was listed as live, and returned the real values (§3, case T3). A compiled policy's row is now
+   routed by the body's own `service` name, and a recompile's delete sweep enumerates the tag
+   service alongside the profile, so a deleted tag rule's policy is still reaped.
+
 ## 5. What SP4b and SP4c inherit
 
 SP4a deliberately ships without a new UI. It leaves behind:

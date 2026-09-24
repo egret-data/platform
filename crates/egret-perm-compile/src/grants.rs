@@ -147,50 +147,126 @@ pub(crate) fn level(value: String) -> ResourceLevel {
     }
 }
 
+/// The Ranger resource value that means "every child at this level". A
+/// policy's resources map uses it to say "this table, whatever the column"
+/// in a way the plugin's matcher actually evaluates — see
+/// [`scope_to_resources`] for why an ABSENT level is not the same thing.
+pub(crate) const WILDCARD: &str = "*";
+
+/// Which Ranger policy type a `resources` map is being rendered for. The
+/// three do not share one resource hierarchy: an ACCESS policy is matched
+/// against the full `catalog/schema/table/column` chain the service-def's
+/// top-level `resources` array declares, a masking policy against
+/// `dataMaskDef.resources` (also down to `column`), and a row-filter policy
+/// against `rowFilterDef.resources`, which stops at `table`. They also do
+/// not behave the same way when a level is missing — which is the whole
+/// reason this enum exists rather than one map-builder for everybody.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolicyTarget {
+    Access,
+    Mask,
+    RowFilter,
+}
+
 /// Render a `Scope` into the engine's `resources` map. `catalog_name` is the
 /// name the caller already resolved from `scope.catalog_id` (the compiler
 /// stays free of registry I/O, and does not itself check that `catalog_name`
 /// actually names `scope.catalog_id` — that binding is the caller's
 /// responsibility, same as the rest of the registry lookup it already owns).
-/// A level the scope leaves unnamed is left OUT of the map entirely, never
-/// set to a wildcard `"*"`.
 ///
-/// This is deliberate, not merely asserted: Apache Ranger's
+/// # An ACCESS policy fills every level below the scope with `*`
+///
+/// **This is measured, and it replaces an assumption the live gate refuted.**
+/// Round 1 of this file left an unnamed level OUT of the map entirely, on the
+/// strength of a reading of Apache Ranger's
 /// `RangerDefaultPolicyResourceMatcher.getMatchType()` (`agents-common/…/
-/// policyresourcematcher/RangerDefaultPolicyResourceMatcher.java`, upstream
-/// `apache/ranger` master) walks the resource hierarchy level by level, and
-/// once it runs out of policy-side resource entries it treats any further,
-/// deeper levels present on the *request* as `MatchType.ANCESTOR` —
-/// unconditionally, with no `isRecursive` or `mandatory` gate on that
-/// branch. A policy resources map that stops at `table` therefore matches a
-/// request that goes on to name a `column`, the same way a Hive/Trino
-/// Ranger policy scoped to a table without ever opening the column picker
-/// covers every column beneath it. Emitting `"*"` at an unnamed level
-/// instead would still match today, but asserts a participation in the
-/// hierarchy the model never claims, and — unlike the ANCESTOR match above —
-/// its correctness for every case here has not been checked against the
-/// live plugin. **Not yet independently verified**: whether Ranger Admin's
-/// own policy-create REST validation enforces `mandatory: true` resource
-/// levels at write time (a distinct question from the runtime matcher cited
-/// above, and one egret's `default_policies.rs` sidesteps by always filling
-/// every level) — flagged for a live check against `demo-trino`'s now-active
-/// plugin (kind cluster, ranger enabled) rather than guessed here.
+/// policyresourcematcher/RangerDefaultPolicyResourceMatcher.java`): once the
+/// matcher runs out of policy-side resource entries, deeper levels present on
+/// the *request* were said to resolve to `MatchType.ANCESTOR`
+/// unconditionally, so a policy stopping at `table` would cover every column
+/// beneath it. That paragraph even flagged itself as **not verified against a
+/// live plugin**. Task 10 verified it, and **it is false for access policies**
+/// (`docs/en/plans/2026-09-24-permission-model-sp4a-live-result.md` §3, case
+/// T1): against a real Trino 4.7 + Ranger plugin on kind, a grant of `read` on
+/// a SCHEMA compiled to `{catalog, schema}` and produced
+///
+/// ```text
+/// Access Denied: Cannot select from columns [v, id] in table or view sibling
+/// ```
+///
+/// A table-level grant (`{catalog, schema, table}`) failed identically. The
+/// same grant written down to `column: "*"` returned all four rows. The
+/// ancestor match holds for the *catalog* check — the denial moved from
+/// `Cannot access catalog` to `Cannot select from columns` — and does **not**
+/// hold downward to the column-granular `select` Trino actually asks about.
+/// A grant above column level therefore compiled cleanly, deployed cleanly,
+/// was listed as live by egret, and granted nothing.
+///
+/// So an `Access` target now emits the FULL hierarchy the target engine's
+/// service-def declares — `catalog/schema/table/column` on Trino (service-def
+/// id 203, levels 10/20/30/40, every one of them `mandatory: true`),
+/// `catalog/database/table/column` on StarRocks — with `WILDCARD` at every
+/// level the scope does not name, and at every level below the first one it
+/// does not name (a scope cannot name a table without naming its schema, and
+/// if one ever did, `*` at the schema level is the only honest rendering of
+/// "unspecified"). `tests/compile_grants.rs`'s
+/// `the_scope_becomes_the_ranger_resource_levels_the_service_def_declares`
+/// re-reads both service-defs and asserts the emitted map carries exactly the
+/// declared chain, so this cannot drift back.
+///
+/// # A MASK or ROW_FILTER target keeps today's behaviour, deliberately
+///
+/// The same live gate measured both of these paths WORKING as they are
+/// emitted today: T3b masked a column for real (`item` came back as `xxxx`)
+/// and T4 removed rows for real (4 → 2, and the excluded rows probed absent),
+/// both from a path selector that named every level down to its own target.
+/// Nothing measured says a masking or row-filter policy needs — or tolerates
+/// — a `*` at an unnamed level, and the design spec's own reading of Ranger
+/// (§1, "masking and row-filter policies take no wildcards and no
+/// multi-values": one column per policy item, items ordered, first match
+/// wins) says the opposite. Widening them here would be swapping one
+/// unverified assumption for another, in the direction that grants MORE than
+/// the model states. The fix is applied exactly where the measurement demands
+/// it and nowhere else; if a mask scoped above column level is ever wanted,
+/// it needs its own live measurement first.
 pub(crate) fn scope_to_resources(
     scope: &Scope,
     catalog_name: &str,
     e: EngineType,
+    target: PolicyTarget,
 ) -> BTreeMap<String, ResourceLevel> {
     let names = resource_level_names(e);
+    let named: [Option<&str>; 4] = [
+        Some(catalog_name),
+        scope.schema.as_deref(),
+        scope.table.as_deref(),
+        scope.column.as_deref(),
+    ];
+
     let mut map = BTreeMap::new();
-    map.insert(names[0].to_string(), level(catalog_name.to_string()));
-    if let Some(schema) = &scope.schema {
-        map.insert(names[1].to_string(), level(schema.clone()));
-    }
-    if let Some(table) = &scope.table {
-        map.insert(names[2].to_string(), level(table.clone()));
-    }
-    if let Some(column) = &scope.column {
-        map.insert(names[3].to_string(), level(column.clone()));
+    match target {
+        PolicyTarget::Access => {
+            // Once a level is unnamed every level below it is unnamed too:
+            // `*` from there down, never a named leaf hanging under a gap.
+            let mut wildcard_from_here = false;
+            for (i, name) in names.iter().enumerate() {
+                let value = match named[i] {
+                    Some(v) if !wildcard_from_here => v.to_string(),
+                    _ => {
+                        wildcard_from_here = true;
+                        WILDCARD.to_string()
+                    }
+                };
+                map.insert((*name).to_string(), level(value));
+            }
+        }
+        PolicyTarget::Mask | PolicyTarget::RowFilter => {
+            for (i, name) in names.iter().enumerate() {
+                if let Some(v) = named[i] {
+                    map.insert((*name).to_string(), level(v.to_string()));
+                }
+            }
+        }
     }
     map
 }
@@ -275,7 +351,7 @@ pub fn compile_grant(
         name: format!("{COMPILER_GRANT_PREFIX}{}", g.id),
         service: service.to_string(),
         is_enabled: true,
-        resources: scope_to_resources(&g.scope, catalog_name, e),
+        resources: scope_to_resources(&g.scope, catalog_name, e, PolicyTarget::Access),
         items: vec![item],
         allow_exceptions,
         deny_exceptions,

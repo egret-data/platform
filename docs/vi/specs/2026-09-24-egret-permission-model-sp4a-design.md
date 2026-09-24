@@ -206,6 +206,44 @@ Một chiều duy nhất: mô hình → Ranger JSON. Không có gì đọc ngư�
 engine sống chứ không chỉ trên JSON kỳ vọng: một mask mà Ranger chấp nhận vẫn có thể hỏng trong
 Trino, và một snapshot test sẽ báo xanh trong khi dữ liệu rò ra ngoài.
 
+**Hai giả định mục này từng mang đã bị chính phép kiểm sống đó bác bỏ, và được sửa ngay tại đây thay
+vì để lại cho người đọc sau** (Task 10, 2026-09-24, kind `kind-egret`, Trino + plugin Ranger thật;
+bằng chứng đầy đủ trong
+[`2026-09-24-permission-model-sp4a-live-result.md`](../../en/plans/2026-09-24-permission-model-sp4a-live-result.md)).
+
+1. **Access policy phải nêu ĐỦ mọi tầng resource, với `*` ở chỗ scope dừng lại.** Compiler được xây
+   dựa trên một cách đọc `RangerDefaultPolicyResourceMatcher.getMatchType()` của Apache Ranger —
+   rằng khi matcher hết các mục resource phía policy, những tầng sâu hơn mà *request* nêu sẽ phân
+   giải thành `MatchType.ANCESTOR` một cách vô điều kiện, nên một policy dừng ở `schema` hay `table`
+   sẽ phủ hết mọi thứ bên dưới. **Điều đó SAI với access policy.** Một grant `read` trên một schema,
+   biên dịch thành `{catalog, schema}`, cho ra `Access Denied: Cannot select from columns [v, id] in
+   table or view sibling`; grant ở mức table hỏng y hệt; cùng grant đó viết xuống tới `column: "*"`
+   trả về đủ hàng (§3, ca T1 và T1b). Phép khớp ancestor CÓ đúng cho kiểm tra *catalog* — lời từ
+   chối chuyển từ `Cannot access catalog` sang `Cannot select from columns` — và **không** đúng khi
+   đi xuống tới `select` theo cột mà Trino thực sự hỏi. Vì vậy một grant đã biên dịch giờ mang đủ
+   chuỗi mà service-def của engine đích khai báo (service-def Trino **id 203**:
+   `catalog`/`schema`/`table`/`column`, level 10/20/30/40, mọi tầng đều `mandatory: true`;
+   StarRocks: `catalog`/`database`/`table`/`column`), với `*` tường minh ở mọi tầng scope không nêu.
+   Một grant chỉ nêu schema rồi biên dịch thành policy không cho quyền gì còn tệ hơn một grant bị từ
+   chối: egret liệt nó là live còn engine cưỡng chế con số không.
+
+   Mask và row-filter policy **không** được nới rộng theo cách đó, và sự bất đối xứng này cũng là đo
+   được: cùng lần chạy ấy cho thấy mask theo đường dẫn che thật (`xxxx` thay cho giá trị) và row
+   filter theo đường dẫn cắt hàng thật (§3, T3b và T4), trong khi §1 ở trên đã ghi chính quy tắc của
+   Ranger rằng masking và row-filter policy không nhận wildcard và không nhận nhiều giá trị. Nới
+   rộng chúng là thay một giả định chưa kiểm bằng một giả định chưa kiểm khác, theo hướng cho nhiều
+   quyền hơn những gì mô hình nói.
+
+2. **Tag policy thuộc về TAG service, và egret phải lưu nó ở đó.** Thân tag đã biên dịch của một rule
+   nêu tag service của profile ngay trong trường `service` của chính nó, nhưng driver biên dịch lại
+   đã nộp mọi policy nó sinh ra dưới `service_id` của resource profile. Nguồn của tag plugin
+   (`/service/plugins/policies/download/<profile>_tag`) vì thế phục vụ **0 policy**, trong khi
+   resource profile lại mang một policy `serviceType: tag` mà nó không bao giờ khớp được — một mask
+   deploy sạch, được liệt là live, và trả về giá trị thật (§3, ca T3). Hàng của một policy đã biên
+   dịch giờ được định tuyến theo chính tên `service` trong thân nó, và phép quét xoá của một lần
+   biên dịch lại liệt kê tag service song song với profile, nên policy của một tag rule đã xoá vẫn
+   bị thu hồi.
+
 ## 5. SP4b và SP4c thừa kế những gì
 
 SP4a cố ý không kèm UI mới. Nó để lại:

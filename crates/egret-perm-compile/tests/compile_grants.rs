@@ -236,11 +236,188 @@ fn the_scope_becomes_the_ranger_resource_levels_the_service_def_declares() {
     assert_eq!(out.resources["catalog"].values, vec!["warehouse"]);
     assert_eq!(out.resources["schema"].values, vec!["sales"]);
     assert_eq!(out.resources["table"].values, vec!["orders"]);
-    assert!(
-        !out.resources.contains_key("column"),
-        "an unnamed level must be ABSENT, not a wildcard string — Ranger \
-         treats a missing level and a '*' level differently"
+    assert_eq!(
+        out.resources["column"].values,
+        vec!["*"],
+        "an unnamed level below the scope must be an explicit wildcard, NOT absent — \
+         see `an_access_policy_fills_every_declared_level_below_the_scope`"
     );
+}
+
+/// **SP4a Task 11, defect 1 — the regression this file did not have.**
+///
+/// Round 1 left an unnamed resource level OUT of an access policy's map, on a
+/// reading of Ranger's `RangerDefaultPolicyResourceMatcher.getMatchType()` that
+/// the file itself flagged as unverified. Task 10 verified it against a real
+/// Trino + Ranger plugin on kind and **it is false**: a grant of `read` on a
+/// schema, compiled to `{catalog, schema}`, produced `Access Denied: Cannot
+/// select from columns [v, id] in table or view sibling`, and a table-level
+/// grant failed identically. Only a scope written down to `column: "*"`
+/// enforced anything
+/// (`docs/en/plans/2026-09-24-permission-model-sp4a-live-result.md` §3, T1/T1b).
+///
+/// Every existing compile test asserted the OUTPUT SHAPE and passed over this:
+/// the old body was well-formed Ranger, it deployed, egret listed it as live,
+/// and it granted nothing. So this test does not ask "is the map the one the
+/// code builds" — it asks **which levels the target engine's own service-def
+/// declares for an access policy**, and then asserts the emitted map carries
+/// exactly those, with `*` wherever the scope stopped.
+#[test]
+fn an_access_policy_fills_every_declared_level_below_the_scope() {
+    for (engine, chain) in [
+        (EngineType::Trino, ["catalog", "schema", "table", "column"]),
+        (
+            EngineType::StarRocks,
+            ["catalog", "database", "table", "column"],
+        ),
+    ] {
+        // 1. What the service-def actually requires, read from the file the
+        //    binary embeds — Trino's is service-def id 203. The data
+        //    hierarchy is the root-to-leaf chain ordered by the declared
+        //    `level`, and every level on it is `mandatory: true`, which is
+        //    what "an access policy names all four" means in Ranger's own
+        //    vocabulary.
+        let def = service_def(engine);
+        let resources = def["resources"].as_array().unwrap();
+        let by_name = |name: &str| -> serde_json::Value {
+            resources
+                .iter()
+                .find(|r| r["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("{engine:?} declares no resource named {name:?}"))
+                .clone()
+        };
+        let mut declared_levels: Vec<i64> = Vec::new();
+        for (i, name) in chain.iter().enumerate() {
+            let r = by_name(name);
+            assert_eq!(
+                r["mandatory"].as_bool(),
+                Some(true),
+                "{engine:?}: {name:?} is not declared mandatory, so filling it with a \
+                 wildcard would be asserting a level the def does not require"
+            );
+            assert_eq!(
+                r["parent"].as_str().unwrap_or(""),
+                if i == 0 { "" } else { chain[i - 1] },
+                "{engine:?}: {name:?} is not the child of {:?}",
+                if i == 0 { "<root>" } else { chain[i - 1] }
+            );
+            declared_levels.push(r["level"].as_i64().unwrap());
+        }
+        let mut ascending = declared_levels.clone();
+        ascending.sort_unstable();
+        assert_eq!(
+            declared_levels, ascending,
+            "{engine:?}: the chain {chain:?} is not in the def's own declared level order"
+        );
+
+        // 2. What the compiler emits, at each depth a scope can stop at.
+        let cases: [(Scope, [&str; 4]); 3] = [
+            (
+                Scope {
+                    catalog_id: Uuid::nil(),
+                    schema: None,
+                    table: None,
+                    column: None,
+                },
+                ["warehouse", "*", "*", "*"],
+            ),
+            (
+                Scope {
+                    catalog_id: Uuid::nil(),
+                    schema: Some("sales".into()),
+                    table: None,
+                    column: None,
+                },
+                ["warehouse", "sales", "*", "*"],
+            ),
+            (
+                Scope {
+                    catalog_id: Uuid::nil(),
+                    schema: Some("sales".into()),
+                    table: Some("orders".into()),
+                    column: None,
+                },
+                ["warehouse", "sales", "orders", "*"],
+            ),
+        ];
+        for (scope, expected) in cases {
+            let g = grant_allow_read_on(scope);
+            let out = compile_grant(&g, "warehouse", "svc-1", engine).unwrap();
+            let emitted: Vec<&str> = out.resources.keys().map(String::as_str).collect();
+            let mut want: Vec<&str> = chain.to_vec();
+            want.sort_unstable(); // the map is a BTreeMap, so keys come back sorted
+            assert_eq!(
+                emitted, want,
+                "{engine:?}: an access policy must carry every declared level, no more and \
+                 no fewer"
+            );
+            for (i, name) in chain.iter().enumerate() {
+                assert_eq!(
+                    out.resources[*name].values,
+                    vec![expected[i]],
+                    "{engine:?}: level {name:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The other half of defect 1's fix, stated as its own assertion: a MASK and a
+/// ROW-FILTER policy are NOT widened. Task 10 measured both working exactly as
+/// emitted (T3b masked a column for real; T4 removed rows for real), and the
+/// design spec's reading of Ranger says masking/row-filter policies take no
+/// wildcards at all. Widening them would swap one unverified assumption for
+/// another in the fail-OPEN direction. This test is what would fail if a later
+/// reader "made it consistent" without a live measurement to justify it.
+#[test]
+fn a_path_selected_rule_is_not_widened_the_way_an_access_policy_is() {
+    use egret_perm::{Rule, RuleKind, Selector};
+    use egret_perm_compile::{compile_rule, ResolvedNames};
+
+    let scope = Scope {
+        catalog_id: Uuid::nil(),
+        schema: Some("sales".into()),
+        table: Some("orders".into()),
+        column: None,
+    };
+    for kind in [
+        RuleKind::Mask {
+            mask_type: "MASK".to_string(),
+            value_expr: None,
+        },
+        RuleKind::RowFilter {
+            filter_expr: "country = 'US'".to_string(),
+        },
+    ] {
+        let r = Rule {
+            id: Uuid::nil(),
+            name: "r".to_string(),
+            kind,
+            selector: Selector::Path(scope.clone()),
+            exempt: PrincipalSet::default(),
+        };
+        let bodies = compile_rule(
+            &r,
+            EngineType::Trino,
+            "trino-1",
+            None,
+            &ResolvedNames {
+                catalog_name: "warehouse",
+                tag_name: None,
+            },
+            &[],
+            500,
+        )
+        .unwrap();
+        assert_eq!(bodies.len(), 1);
+        let resources = &bodies[0]["resources"];
+        assert_eq!(resources["table"]["values"][0], "orders");
+        assert!(
+            resources.get("column").is_none(),
+            "a masking/row-filter policy keeps today's measured shape: an unnamed level is \
+             absent, not a wildcard"
+        );
+    }
 }
 
 #[test]

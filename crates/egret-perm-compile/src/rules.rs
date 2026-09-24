@@ -46,11 +46,27 @@
 //! cannot be expressed this way (see `CompileError::UnexpressibleExemption`)
 //! and refuse rather than silently mis-compile.
 //!
-//! **Not yet independently verified**: the `public`-group idiom above, like
-//! the resource-hierarchy ANCESTOR match `grants.rs` cites from upstream
-//! Ranger source, is grounded in Apache's own documentation but has not been
-//! checked against the live plugin from this worktree. Flagged as a live
-//! check alongside the ones `grants.rs` and its round-1 fix already named.
+//! **Verified live (Task 10, 2026-09-24, kind `kind-egret`).** The
+//! `public`-group idiom above is no longer merely documented: a path-selected
+//! mask compiled exactly this way returned the literal string `xxxx` in place
+//! of the real values, and a path-selected row filter cut 4 rows to 2 with the
+//! excluded rows probed genuinely absent
+//! (`docs/en/plans/2026-09-24-permission-model-sp4a-live-result.md` §3, cases
+//! T3b and T4). The OTHER assumption that paragraph used to sit next to — the
+//! resource-hierarchy ANCESTOR match `grants.rs` cited from upstream Ranger
+//! source — was measured in the same run and **refuted** for access policies;
+//! see `grants::scope_to_resources`. The masking and row-filter resource maps
+//! this module emits are the ones that were measured working, and are
+//! deliberately left as they are.
+//!
+//! **Where a rule's compiled policy is STORED is not this module's choice and
+//! never was.** A tag body's own `service` field names the profile's TAG
+//! service (`tagify`, `egret-policy/src/admin/ranger_json.rs`), a path body's
+//! names the resource profile, and `trigger::apply_diff_in_tx` routes each row
+//! by that field. Task 10 found the driver ignoring it and filing every tag
+//! policy under the resource profile's `service_id`, where the tag plugin
+//! never sees it (live-result §3, case T3: a mask that returned `book`, `pen`,
+//! `lamp`, `desk` — the real values).
 //!
 //! **`ResolvedNames` (added in the round-1 review fix, Criticals 1 and 2).**
 //! The first version of `compile_rule` took no resolved name at all: a tag
@@ -80,7 +96,9 @@ use egret_policy::{starrocks_service_def, trino_service_def, COMPILER_RULE_PREFI
 
 use egret_perm::{CompileError, EngineType, PrincipalKind, PrincipalSet, Rule, RuleKind, Selector};
 
-use crate::grants::{level, resource_level_names, scope_to_resources, validate_user_ref};
+use crate::grants::{
+    level, resource_level_names, scope_to_resources, validate_user_ref, PolicyTarget,
+};
 
 /// One column carrying the tag a rule selects on, resolved by the CALLER —
 /// this compiler does no I/O and cannot itself know which columns carry
@@ -224,7 +242,13 @@ pub fn compile_rule(
                 .collect()
         }
         (Selector::Path(scope), _) => {
-            let resources = scope_to_resources(scope, resolved.catalog_name, e);
+            // A masking policy and a row-filter policy are matched against
+            // DIFFERENT declared hierarchies (`dataMaskDef.resources` goes
+            // down to `column`; `rowFilterDef.resources` stops at `table`),
+            // so which one this is travels with the call rather than being
+            // inferred later.
+            let resources =
+                scope_to_resources(scope, resolved.catalog_name, e, policy_target(&r.kind));
             let name = format!("{COMPILER_RULE_PREFIX}{}", r.id);
             Ok(vec![build_body(r, e, service, name, resources)?])
         }
@@ -242,6 +266,15 @@ fn column_resources(e: EngineType, col: &TaggedColumn) -> BTreeMap<String, Resou
     map.insert(names[2].to_string(), level(col.table.clone()));
     map.insert(names[3].to_string(), level(col.column.clone()));
     map
+}
+
+/// Which Ranger policy type a rule's own `kind` renders to — the parameter
+/// `scope_to_resources` needs to pick the declared resource hierarchy.
+fn policy_target(kind: &RuleKind) -> PolicyTarget {
+    match kind {
+        RuleKind::Mask { .. } => PolicyTarget::Mask,
+        RuleKind::RowFilter { .. } => PolicyTarget::RowFilter,
+    }
 }
 
 /// Build one non-tag (path-addressed) masking/row-filter body and stamp the
