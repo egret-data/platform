@@ -129,3 +129,56 @@ async fn create_dup_conflict_count_assign_cascade() {
         "delete cascades assignments"
     );
 }
+
+/// SP4a Task 7 fix round 1: the reviewer flagged a THIRD staleness path — a
+/// tag deleted out from under a StarRocks masking rule cascades away its
+/// `catalog_tag_assignments` with no `tag_version` bump and no recompile,
+/// leaving a compiled policy that still masks columns nobody has tagged
+/// PII any more. Investigated rather than assumed: `perm.rules.tag_key`
+/// (migration 0154) references `tags(key)` with no `ON DELETE` clause — the
+/// Postgres default is RESTRICT — so deleting a tag a live rule still
+/// SELECTS is refused outright, not silently allowed to cascade. This test
+/// pins that refusal (mapped to `BiError::Conflict`, not a bare 500) and,
+/// separately, that a tag with NO rule referencing it — the only shape that
+/// CAN be deleted — never had a compiled policy to begin with, so its
+/// cascade is not a staleness case at all.
+#[tokio::test]
+async fn deleting_a_tag_a_live_rule_selects_is_refused_not_silently_cascaded() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let repo = TagRepo::new(db.clone());
+    let by = seed_user(&db).await;
+    let key = format!("fk-guard-{}", Uuid::new_v4().simple());
+    let tag = repo
+        .create(&key, "PII", "", "", Some(by))
+        .await
+        .expect("create tag");
+
+    sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, tag_key) \
+         VALUES ($1, 'mask', 'MASK_HASH', 'tag', $2)",
+    )
+    .bind(format!("fk-guard-rule-{}", Uuid::new_v4().simple()))
+    .bind(&key)
+    .execute(&db.pool)
+    .await
+    .expect("insert perm rule referencing the tag");
+
+    let err = repo
+        .delete(tag.id)
+        .await
+        .expect_err("a tag a live perm.rules row selects must not delete");
+    assert!(
+        matches!(err, BiError::Conflict(_)),
+        "expected Conflict (not an opaque 500), got {err:?}"
+    );
+    assert!(
+        repo.get(tag.id).await.expect("get").is_some(),
+        "the tag must still exist — the delete must not have partially applied"
+    );
+}

@@ -145,12 +145,43 @@ impl TagRepo {
         self.get(id).await
     }
 
-    /// Delete a tag; its `tag_assignments` cascade (FK ON DELETE CASCADE).
+    /// Delete a tag. `tag_assignments` and `catalog_tag_assignments` cascade
+    /// (FK `ON DELETE CASCADE`, migrations 0080/0081) — a tag with no
+    /// `perm.rules` row selecting it never fed a compiled policy in the
+    /// first place (`egret-perm-compile::trigger`'s `compile_desired` only
+    /// ever resolves a tag's columns for a key a LIVE rule names), so
+    /// cascading those assignments away here creates no SP4a staleness (D5)
+    /// to recompile out of.
+    ///
+    /// A tag a `perm.rules` row still SELECTS (`perm.rules.tag_key REFERENCES
+    /// tags(key)`, migration 0154, no `ON DELETE` clause — the default
+    /// RESTRICT) cannot be deleted at all: Postgres refuses the DELETE with a
+    /// foreign-key violation rather than silently cascading the tag's own
+    /// row away out from under a compiled StarRocks masking policy that
+    /// still names it (SP4a Task 7 fix round 1 — verified against a live
+    /// `egret_test_template` connection, not assumed: inserting a tag, a
+    /// `perm.rules` row selecting its key, and then attempting `DELETE FROM
+    /// tags` raises `rules_tag_key_fkey`). Mapped to a clear `Conflict`
+    /// instead of the generic 500 a raw `sqlx::Error` would otherwise render
+    /// as — the caller should be told to delete/retarget the rule first, not
+    /// shown an opaque internal error.
     pub async fn delete(&self, id: Uuid) -> Result<(), BiError> {
         sqlx::query("DELETE FROM tags WHERE id = $1")
             .bind(id)
             .execute(&self.db.pool)
-            .await?;
+            .await
+            .map_err(|e| {
+                if let sqlx::Error::Database(ref dbe) = e {
+                    if dbe.is_foreign_key_violation() {
+                        return BiError::Conflict(
+                            "this tag is still selected by a permission rule (perm.rules) — \
+                             delete or retarget that rule first"
+                                .into(),
+                        );
+                    }
+                }
+                BiError::Db(e)
+            })?;
         Ok(())
     }
 

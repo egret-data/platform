@@ -394,3 +394,379 @@ async fn an_unexpanded_workspace_members_grant_is_skipped_not_fatal() {
             .expect("compiled rows");
     assert_eq!(rows, vec![(Some(f.rule_id),)]);
 }
+
+/// Fix round 1 CRITICAL: `perm.compiled.grant_id`/`rule_id` are `ON DELETE
+/// CASCADE` (`migrations/0154_perm_model.sql:121-122`), so deleting a grant
+/// erases its PROVENANCE row while the `policy.authz_policies` row it
+/// produced survives untouched. Before the fix, `apply_diff`'s "current
+/// state" read joined THROUGH `perm.compiled`, so a deleted grant's policy
+/// was invisible to that join the instant the grant was deleted — it never
+/// reached the delete sweep, and no later recompile could ever reap it. This
+/// is the branch that would have caught it: create an explicit grant,
+/// recompile (it compiles to a real access policy), delete the grant,
+/// recompile again, and assert the policy is GONE from `policy.authz_policies`
+/// — not merely that the count is right, the exact row by id.
+#[tokio::test]
+async fn deleting_a_grant_reaps_its_policy_on_the_next_recompile() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks_engine_with_tag_rule(&db).await;
+    let pool = &db.pool;
+
+    let grant = Grant {
+        id: Uuid::nil(),
+        effect: Effect::Allow,
+        actions: vec![Action::Read],
+        scope: Scope {
+            catalog_id: f.catalog_id,
+            schema: None,
+            table: None,
+            column: None,
+        },
+        principals: PrincipalSet {
+            include: vec![Principal {
+                kind: PrincipalKind::User,
+                r#ref: "alice".into(),
+            }],
+            exclude: vec![],
+        },
+        origin: GrantOrigin::Explicit,
+    };
+    let grant_id = f.perm.create_grant(&grant).await.expect("create grant");
+
+    let summary = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile with the new explicit grant");
+    assert_eq!(
+        summary.created, 1,
+        "the explicit grant must compile to exactly one new access policy"
+    );
+
+    let grant_policy_name = format!("perm-grant-{grant_id}");
+    let grant_policy_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(f.service_id)
+    .bind(&grant_policy_name)
+    .fetch_one(pool)
+    .await
+    .expect("the grant's policy must exist by its deterministic name");
+
+    // Before the fix, this delete cascades the `perm.compiled` provenance
+    // row away, leaving the `policy.authz_policies` row behind, untouched,
+    // and — because the old sweep read through `perm.compiled` — permanently
+    // invisible to every future recompile.
+    let deleted = f.perm.delete_grant(grant_id).await.expect("delete grant");
+    assert!(deleted);
+
+    let summary2 = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile after the grant is deleted");
+    assert_eq!(
+        summary2.deleted, 1,
+        "the deleted grant's policy must be reaped by the next recompile"
+    );
+    assert_eq!(summary2.created, 0);
+    assert_eq!(summary2.updated, 0);
+
+    let still_there: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM policy.authz_policies WHERE id = $1")
+            .bind(grant_policy_id)
+            .fetch_optional(pool)
+            .await
+            .expect("query");
+    assert!(
+        still_there.is_none(),
+        "the deleted grant's policy must be GONE from policy.authz_policies — a revocation \
+         that leaves the engine enforcing it is the worst shape in a permission system"
+    );
+
+    // The unrelated, still-live rule-based policy from the fixture must be
+    // untouched by this — proves the sweep reaps the RIGHT policy, not just
+    // any policy.
+    let remaining = policies_for(pool, f.service_id).await;
+    assert_eq!(
+        remaining.len(),
+        1,
+        "only the pre-existing rule-based policy should remain"
+    );
+    assert_ne!(remaining[0].0, grant_policy_id);
+}
+
+/// Fix round 1 Important: the `updated` branch — the one `perm.compiled`
+/// exists for — had no test at all. The only thing that can change a
+/// TRINO tag-selector rule's compiled body without changing the rule's own
+/// id is the underlying tag's `name` (D6: `tags.name` is mutable, unlike
+/// `tags.key`, which the rule selects by) — a Trino tag policy embeds the
+/// resolved NAME at `resources.tag.values[0]` (`tagify`,
+/// `egret-policy/src/admin/ranger_json.rs`). Renaming the tag must recompile
+/// the SAME policy id with a DIFFERENT body (the old name gone, the new name
+/// present), not create a new policy or leave the old name behind.
+///
+/// **Not scoped by `CompileSummary`'s whole-service counts**, deliberately:
+/// a Trino tag-selector rule has NO catalog/warehouse scope in the model at
+/// all (D5 — Trino's plugin resolves the tag itself, so the rule applies
+/// wherever the tag turns up), so EVERY Trino service in this shared
+/// test-process database compiles EVERY tag rule any concurrently-running
+/// test has created, including this file's other fixtures. `created`/
+/// `updated` on the whole-service `CompileSummary` are therefore not this
+/// test's own count to make — only `policy.authz_policies`'s OWN `id` and
+/// `version` columns for the ONE row this test created are (the same
+/// "scope every count assertion to the fixture it owns" rule
+/// `crates/egret-perm/tests/assignment.rs`'s `grants_for` documents).
+#[tokio::test]
+async fn renaming_a_tag_updates_the_trino_policy_in_place() {
+    let Some(db) = test_db().await else { return };
+    let pool = &db.pool;
+    let policy = PolicyStore::new(db.clone());
+    let perm = PermStore::new(pool.clone());
+
+    egret_policy::seed_trino(&policy)
+        .await
+        .expect("seed trino service-def");
+    let service = policy
+        .create_service(
+            &unique("trino_update"),
+            "trino",
+            &serde_json::json!({ "tagService": "trino-update-1_tag" }),
+        )
+        .await
+        .expect("create trino service");
+
+    let tag_key = unique("rename-me");
+    sqlx::query("INSERT INTO tags (key, name) VALUES ($1, 'Original Name')")
+        .bind(&tag_key)
+        .execute(pool)
+        .await
+        .expect("insert tag");
+
+    let rule_id = perm
+        .create_rule(&Rule {
+            id: Uuid::nil(),
+            name: unique("rename-rule"),
+            kind: RuleKind::Mask {
+                mask_type: "MASK_HASH".to_string(),
+                value_expr: None,
+            },
+            selector: Selector::Tag {
+                key: tag_key.clone(),
+            },
+            exempt: PrincipalSet::default(),
+        })
+        .await
+        .expect("create rule");
+
+    recompile_service(&perm, &policy, service.id)
+        .await
+        .expect("initial recompile");
+
+    let policy_name = format!("perm-rule-{rule_id}");
+    let (policy_id, row_version_before, body_before): (i64, i64, Value) = sqlx::query_as(
+        "SELECT id, version, policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(service.id)
+    .bind(&policy_name)
+    .fetch_one(pool)
+    .await
+    .expect("the rule's policy must exist");
+    assert_eq!(
+        body_before["resources"]["tag"]["values"][0],
+        "Original Name"
+    );
+
+    let svc_version_before: i64 =
+        sqlx::query_scalar("SELECT policy_version FROM policy.authz_services WHERE id = $1")
+            .bind(service.id)
+            .fetch_one(pool)
+            .await
+            .expect("policy_version");
+
+    sqlx::query("UPDATE tags SET name = 'Renamed PII' WHERE key = $1")
+        .bind(&tag_key)
+        .execute(pool)
+        .await
+        .expect("rename tag");
+
+    recompile_service(&perm, &policy, service.id)
+        .await
+        .expect("recompile after tag rename");
+
+    let (policy_id_after, row_version_after, body_after): (i64, i64, Value) = sqlx::query_as(
+        "SELECT id, version, policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(service.id)
+    .bind(&policy_name)
+    .fetch_one(pool)
+    .await
+    .expect("the rule's policy must still exist under the same name");
+    assert_eq!(policy_id_after, policy_id, "the policy id must not churn");
+    assert_eq!(
+        row_version_after,
+        row_version_before + 1,
+        "an UPDATE increments this row's own version; a delete-then-reinsert would have reset \
+         it to 1 instead"
+    );
+    assert_eq!(
+        body_after["resources"]["tag"]["values"][0], "Renamed PII",
+        "the new name must be in the compiled body"
+    );
+    assert_ne!(
+        body_after["resources"]["tag"]["values"][0], body_before["resources"]["tag"]["values"][0],
+        "the old name must be GONE, not merely joined by the new one"
+    );
+
+    // The SERVICE-level `policy_version` bump is safe to assert exactly
+    // (unlike the row-scoped counts above) because it increments ONCE PER
+    // RECOMPILE CALL THAT WROTE ANYTHING, not once per row — a second
+    // recompile call that also happens to touch a contaminating foreign
+    // rule's policy still bumps it by exactly 1, the same as if it had
+    // touched only this test's own row.
+    let svc_version_after: i64 =
+        sqlx::query_scalar("SELECT policy_version FROM policy.authz_services WHERE id = $1")
+            .bind(service.id)
+            .fetch_one(pool)
+            .await
+            .expect("policy_version");
+    assert_eq!(
+        svc_version_after,
+        svc_version_before + 1,
+        "a real update must still bump the version exactly once"
+    );
+}
+
+/// Fix round 1 Minor: `DEFAULT_EXPANSION_CEILING` is honestly labelled
+/// unmeasured, but nothing had ever driven the refusal through
+/// `recompile_service` end to end — only `compile_rule` directly
+/// (`egret-perm-compile/tests/compile_rules.rs`). Tags 500 MORE columns onto
+/// the fixture's existing tag key (501 total, one over the 500 ceiling) and
+/// asserts the recompile refuses, names the rule and the count, and writes
+/// NOTHING — a partial compile that silently masked 500 of 501 columns would
+/// look identical to success from every screen egret has.
+#[tokio::test]
+async fn the_expansion_ceiling_refuses_through_recompile_service_not_only_compile_rule() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks_engine_with_tag_rule(&db).await;
+    let pool = &db.pool;
+
+    let before = policies_for(pool, f.service_id).await;
+    let v_before: i64 =
+        sqlx::query_scalar("SELECT policy_version FROM policy.authz_services WHERE id = $1")
+            .bind(f.service_id)
+            .fetch_one(pool)
+            .await
+            .expect("policy_version");
+
+    let tag_key: String = sqlx::query_scalar(
+        "SELECT t.key FROM tags t JOIN catalog_tag_assignments a ON a.tag_id = t.id \
+         WHERE a.warehouse_id = $1 LIMIT 1",
+    )
+    .bind(f.warehouse_id)
+    .fetch_one(pool)
+    .await
+    .expect("tag key");
+    let rule_name: String = sqlx::query_scalar("SELECT name FROM perm.rules WHERE id = $1")
+        .bind(f.rule_id)
+        .fetch_one(pool)
+        .await
+        .expect("rule name");
+
+    // 500 more columns on top of the fixture's one pre-tagged "email" = 501,
+    // one over `DEFAULT_EXPANSION_CEILING` (500).
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, column_name) \
+         SELECT t.id, $1, 'sales', 'orders', 'col_' || gs::text \
+         FROM tags t, generate_series(1, 500) gs WHERE t.key = $2",
+    )
+    .bind(f.warehouse_id)
+    .bind(&tag_key)
+    .execute(pool)
+    .await
+    .expect("bulk-tag 500 more columns");
+
+    let err = recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect_err("501 tagged columns must refuse, not truncate to 500");
+    match err {
+        egret_perm::CompileError::ExpansionCeiling {
+            rule,
+            count,
+            ceiling,
+        } => {
+            assert_eq!(rule, rule_name);
+            assert_eq!(count, 501);
+            assert_eq!(ceiling, 500);
+        }
+        other => panic!("expected ExpansionCeiling, got {other:?}"),
+    }
+
+    // The refusal must write NOTHING — no partial 500-of-501 compile.
+    assert_eq!(
+        policies_for(pool, f.service_id).await,
+        before,
+        "a refused recompile must leave every existing policy exactly as it was"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT policy_version FROM policy.authz_services WHERE id = $1"
+        )
+        .bind(f.service_id)
+        .fetch_one(pool)
+        .await
+        .expect("policy_version"),
+        v_before,
+        "a refused recompile must not bump the version either"
+    );
+}
+
+/// Fix round 1 Minor: `compile_grant`'s output had no value-level test for
+/// the StarRocks `serviceType` stamp (`grants.rs`'s `stamp_service_type`
+/// reuse, fixed alongside the recompile driver itself) — only the RULE path
+/// had one (`tagging_a_new_column_recompiles_the_starrocks_profile`). An
+/// explicit grant on the same StarRocks fixture must render with
+/// `serviceType: "starrocks"`, not the renderer's hardcoded `"trino"`
+/// default.
+#[tokio::test]
+async fn an_explicit_grant_on_starrocks_gets_the_starrocks_service_type_stamp() {
+    let Some(db) = test_db().await else { return };
+    let f = seed_starrocks_engine_with_tag_rule(&db).await;
+    let pool = &db.pool;
+
+    let grant = Grant {
+        id: Uuid::nil(),
+        effect: Effect::Allow,
+        actions: vec![Action::Read],
+        scope: Scope {
+            catalog_id: f.catalog_id,
+            schema: None,
+            table: None,
+            column: None,
+        },
+        principals: PrincipalSet {
+            include: vec![Principal {
+                kind: PrincipalKind::User,
+                r#ref: "bob".into(),
+            }],
+            exclude: vec![],
+        },
+        origin: GrantOrigin::Explicit,
+    };
+    let grant_id = f.perm.create_grant(&grant).await.expect("create grant");
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile with the explicit grant");
+
+    let body: Value = sqlx::query_scalar(
+        "SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(f.service_id)
+    .bind(format!("perm-grant-{grant_id}"))
+    .fetch_one(pool)
+    .await
+    .expect("the grant's policy must exist");
+    assert_eq!(
+        body["serviceType"], "starrocks",
+        "an access policy compiled for a StarRocks profile must not carry the renderer's \
+         hardcoded Trino serviceType"
+    );
+    assert_eq!(body["policyType"], 0, "an access policy, not a masking one");
+}

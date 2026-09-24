@@ -26,6 +26,11 @@ egret-policy.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 sqlx.workspace = true
+# SP4a Task 7 fix round 1: a skipped grant/rule (WorkspaceMembers, not yet
+# expanded) must not vanish silently — the only production caller
+# (`egret-bi::catalog_tags`) never inspected `CompileSummary::skipped`, so
+# the recompile driver itself logs every skip.
+tracing.workspace = true
 
 [dev-dependencies]
 egret-metastore.workspace = true

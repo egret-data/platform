@@ -138,13 +138,8 @@ impl PolicyStore {
     /// `egret_catalog_registry::services_bound_to_warehouse`) and has no
     /// service name to look it up by until it reads this row.
     pub async fn get_service_by_id(&self, id: i64) -> Result<ServiceRow, PolicyStoreError> {
-        sqlx::query_as::<_, ServiceRow>(
-            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services WHERE id = $1"#,
-        )
-        .bind(id)
-        .fetch_optional(&self.db.pool)
-        .await?
-        .ok_or_else(|| PolicyStoreError::NotFound(format!("service id {id}")))
+        let mut conn = self.db.pool.acquire().await?;
+        get_service_by_id_via(&mut conn, id).await
     }
 
     pub async fn get_service(&self, name: &str) -> Result<ServiceRow, PolicyStoreError> {
@@ -287,16 +282,8 @@ impl PolicyStore {
         &self,
         service_id: i64,
     ) -> Result<Vec<CatalogRow>, PolicyStoreError> {
-        Ok(sqlx::query_as::<_, CatalogRow>(
-            r#"SELECT DISTINCT c.id, c.name
-               FROM registry.catalogs c
-               JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id
-               JOIN engine_mgmt.engines e ON e.id = ea.engine_id
-               WHERE e.authz_service_id = $1"#,
-        )
-        .bind(service_id)
-        .fetch_all(&self.db.pool)
-        .await?)
+        let mut conn = self.db.pool.acquire().await?;
+        catalogs_for_service_via(&mut conn, service_id).await
     }
 
     /// Columns carrying `tags.key = tag_key`, resolved to their Ranger-facing
@@ -309,20 +296,8 @@ impl PolicyStore {
         service_id: i64,
         tag_key: &str,
     ) -> Result<Vec<TaggedColumnRow>, PolicyStoreError> {
-        Ok(sqlx::query_as::<_, TaggedColumnRow>(
-            r#"SELECT DISTINCT c.name AS catalog, a.schema_name, a.table_name, a.column_name
-               FROM catalog_tag_assignments a
-               JOIN tags t ON t.id = a.tag_id
-               JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id
-               JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id
-               JOIN engine_mgmt.engines e ON e.id = ea.engine_id
-               WHERE e.authz_service_id = $1 AND t.key = $2 AND a.column_name <> ''
-               ORDER BY c.name, a.schema_name, a.table_name, a.column_name"#,
-        )
-        .bind(service_id)
-        .bind(tag_key)
-        .fetch_all(&self.db.pool)
-        .await?)
+        let mut conn = self.db.pool.acquire().await?;
+        tagged_columns_for_service_via(&mut conn, service_id, tag_key).await
     }
 
     /// `tags.name` for a `tags.key` — D6: rules select by the stable `key`,
@@ -333,13 +308,84 @@ impl PolicyStore {
     /// deletion — the caller decides what that means for the compile, not
     /// this lookup).
     pub async fn tag_name_for_key(&self, key: &str) -> Result<Option<String>, PolicyStoreError> {
-        Ok(
-            sqlx::query_scalar::<_, String>(r#"SELECT name FROM tags WHERE key = $1"#)
-                .bind(key)
-                .fetch_optional(&self.db.pool)
-                .await?,
-        )
+        let mut conn = self.db.pool.acquire().await?;
+        tag_name_for_key_via(&mut conn, key).await
     }
+}
+
+/// Connection-generic core of [`PolicyStore::get_service_by_id`] — SP4a
+/// Task 7 fix round 1: `egret-perm-compile`'s `recompile_service_in_tx`
+/// reads the service row from inside the caller's OWN open transaction
+/// (`egret-bi::catalog_tags`'s tag write), not a second pool-acquired
+/// connection — see `egret_perm::store::list_grants_via`'s doc comment for
+/// why that distinction matters (READ COMMITTED visibility of the caller's
+/// own uncommitted writes).
+pub async fn get_service_by_id_via(
+    conn: &mut sqlx::PgConnection,
+    id: i64,
+) -> Result<ServiceRow, PolicyStoreError> {
+    sqlx::query_as::<_, ServiceRow>(
+        r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(|| PolicyStoreError::NotFound(format!("service id {id}")))
+}
+
+/// Connection-generic core of [`PolicyStore::catalogs_for_service`] — same
+/// rationale as [`get_service_by_id_via`].
+pub async fn catalogs_for_service_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Vec<CatalogRow>, PolicyStoreError> {
+    Ok(sqlx::query_as::<_, CatalogRow>(
+        r#"SELECT DISTINCT c.id, c.name
+           FROM registry.catalogs c
+           JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id
+           WHERE e.authz_service_id = $1"#,
+    )
+    .bind(service_id)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// Connection-generic core of [`PolicyStore::tagged_columns_for_service`] —
+/// same rationale as [`get_service_by_id_via`].
+pub async fn tagged_columns_for_service_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    tag_key: &str,
+) -> Result<Vec<TaggedColumnRow>, PolicyStoreError> {
+    Ok(sqlx::query_as::<_, TaggedColumnRow>(
+        r#"SELECT DISTINCT c.name AS catalog, a.schema_name, a.table_name, a.column_name
+           FROM catalog_tag_assignments a
+           JOIN tags t ON t.id = a.tag_id
+           JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id
+           JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id
+           WHERE e.authz_service_id = $1 AND t.key = $2 AND a.column_name <> ''
+           ORDER BY c.name, a.schema_name, a.table_name, a.column_name"#,
+    )
+    .bind(service_id)
+    .bind(tag_key)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// Connection-generic core of [`PolicyStore::tag_name_for_key`] — same
+/// rationale as [`get_service_by_id_via`].
+pub async fn tag_name_for_key_via(
+    conn: &mut sqlx::PgConnection,
+    key: &str,
+) -> Result<Option<String>, PolicyStoreError> {
+    Ok(
+        sqlx::query_scalar::<_, String>(r#"SELECT name FROM tags WHERE key = $1"#)
+            .bind(key)
+            .fetch_optional(&mut *conn)
+            .await?,
+    )
 }
 
 /// One registry catalog: `(id, name)`.

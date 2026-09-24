@@ -19,7 +19,11 @@ pub use service_def::{
     seed_starrocks, seed_tag, seed_trino, starrocks_service_def, tag_service_def,
     trino_service_def, STARROCKS_DEF_NAME, TAG_DEF_NAME, TRINO_DEF_NAME,
 };
-pub use store::{PolicyRow, PolicyStore, ServiceRow, TagAssignmentRow};
+pub use store::{
+    catalogs_for_service_via, get_service_by_id_via, tag_name_for_key_via,
+    tagged_columns_for_service_via, CatalogRow, PolicyRow, PolicyStore, ServiceRow,
+    TagAssignmentRow, TaggedColumnRow,
+};
 
 /// The Policy/Ranger seam's OpenAPI document (E0·P4b-5): the admin Policies
 /// console router (`/api/control-plane`) and the Ranger Admin REST serving

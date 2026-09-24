@@ -234,6 +234,86 @@ async fn insert_exemptions(
     Ok(())
 }
 
+/// Connection-generic core of [`PermStore::list_grants`] — SP4a Task 7 fix
+/// round 1 (Critical/Important 2). `egret-perm-compile`'s
+/// `recompile_service_in_tx` has to read the CURRENT grants from inside a
+/// caller-owned, still-open transaction (`egret-bi::catalog_tags`'s tag
+/// write): a `PermStore` method bound to its own pool would acquire a
+/// SECOND connection, which — under Postgres' default READ COMMITTED
+/// isolation — cannot see that transaction's own uncommitted writes, i.e.
+/// the very tag assignment the recompile exists to react to. Taking `&mut
+/// PgConnection` (not a generic `PgExecutor`) lets the same query logic run
+/// on either a pool-acquired connection (`list_grants`) or a borrowed
+/// transaction (`&mut *tx`, the same `&mut *conn`-reborrow idiom
+/// `insert_principals`/`insert_exemptions` above already use for their own
+/// sequential queries) without duplicating the row-parsing logic a second
+/// time — this is a permission model; two copies of "what a grant means"
+/// that can drift is exactly the kind of defect this crate exists to avoid.
+pub async fn list_grants_via(conn: &mut sqlx::PgConnection) -> Result<Vec<Grant>, PermError> {
+    let rows: Vec<GrantRow> = sqlx::query_as(
+        "SELECT id, effect::text AS effect, actions, catalog_id, schema_name, \
+                table_name, column_name, origin, origin_workspace_id \
+         FROM perm.grants",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let principal_rows: Vec<GrantPrincipalRow> = sqlx::query_as(
+        "SELECT grant_id, kind::text AS kind, ref AS principal_ref, mode::text AS mode \
+         FROM perm.grant_principals WHERE grant_id = ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut sets = group_principal_sets(
+        principal_rows
+            .into_iter()
+            .map(|r| (r.grant_id, r.kind, r.principal_ref, r.mode)),
+    )?;
+
+    rows.into_iter()
+        .map(|row| {
+            let principals = sets.remove(&row.id).unwrap_or_default();
+            grant_from_row(row, principals)
+        })
+        .collect()
+}
+
+/// Connection-generic core of [`PermStore::list_rules`] — same rationale as
+/// [`list_grants_via`].
+pub async fn list_rules_via(conn: &mut sqlx::PgConnection) -> Result<Vec<Rule>, PermError> {
+    let rows: Vec<RuleRow> = sqlx::query_as(
+        "SELECT id, name, kind::text AS kind, mask_type, value_expr, filter_expr, \
+                selector_kind::text AS selector_kind, tag_key, catalog_id, \
+                schema_name, table_name, column_name \
+         FROM perm.rules",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let exemption_rows: Vec<RuleExemptionRow> = sqlx::query_as(
+        "SELECT rule_id, kind::text AS kind, ref AS principal_ref, mode::text AS mode \
+         FROM perm.rule_exemptions WHERE rule_id = ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut sets = group_principal_sets(
+        exemption_rows
+            .into_iter()
+            .map(|r| (r.rule_id, r.kind, r.principal_ref, r.mode)),
+    )?;
+
+    rows.into_iter()
+        .map(|row| {
+            let exempt = sets.remove(&row.id).unwrap_or_default();
+            rule_from_row(row, exempt)
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct PermStore {
     pool: PgPool,
@@ -299,34 +379,8 @@ impl PermStore {
     }
 
     pub async fn list_grants(&self) -> Result<Vec<Grant>, PermError> {
-        let rows: Vec<GrantRow> = sqlx::query_as(
-            "SELECT id, effect::text AS effect, actions, catalog_id, schema_name, \
-                    table_name, column_name, origin, origin_workspace_id \
-             FROM perm.grants",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
-        let principal_rows: Vec<GrantPrincipalRow> = sqlx::query_as(
-            "SELECT grant_id, kind::text AS kind, ref AS principal_ref, mode::text AS mode \
-             FROM perm.grant_principals WHERE grant_id = ANY($1)",
-        )
-        .bind(&ids)
-        .fetch_all(&self.pool)
-        .await?;
-        let mut sets = group_principal_sets(
-            principal_rows
-                .into_iter()
-                .map(|r| (r.grant_id, r.kind, r.principal_ref, r.mode)),
-        )?;
-
-        rows.into_iter()
-            .map(|row| {
-                let principals = sets.remove(&row.id).unwrap_or_default();
-                grant_from_row(row, principals)
-            })
-            .collect()
+        let mut conn = self.pool.acquire().await?;
+        list_grants_via(&mut conn).await
     }
 
     pub async fn delete_grant(&self, id: Uuid) -> Result<bool, PermError> {
@@ -409,35 +463,8 @@ impl PermStore {
     }
 
     pub async fn list_rules(&self) -> Result<Vec<Rule>, PermError> {
-        let rows: Vec<RuleRow> = sqlx::query_as(
-            "SELECT id, name, kind::text AS kind, mask_type, value_expr, filter_expr, \
-                    selector_kind::text AS selector_kind, tag_key, catalog_id, \
-                    schema_name, table_name, column_name \
-             FROM perm.rules",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
-        let exemption_rows: Vec<RuleExemptionRow> = sqlx::query_as(
-            "SELECT rule_id, kind::text AS kind, ref AS principal_ref, mode::text AS mode \
-             FROM perm.rule_exemptions WHERE rule_id = ANY($1)",
-        )
-        .bind(&ids)
-        .fetch_all(&self.pool)
-        .await?;
-        let mut sets = group_principal_sets(
-            exemption_rows
-                .into_iter()
-                .map(|r| (r.rule_id, r.kind, r.principal_ref, r.mode)),
-        )?;
-
-        rows.into_iter()
-            .map(|row| {
-                let exempt = sets.remove(&row.id).unwrap_or_default();
-                rule_from_row(row, exempt)
-            })
-            .collect()
+        let mut conn = self.pool.acquire().await?;
+        list_rules_via(&mut conn).await
     }
 
     pub async fn delete_rule(&self, id: Uuid) -> Result<bool, PermError> {

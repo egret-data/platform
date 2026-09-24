@@ -10,7 +10,8 @@
 //! constants used to hold; 0153 re-ran 0148's grant and deleted them.
 //!
 //! A write here also recompiles every SP4a `perm` policy profile bound to the
-//! warehouse (Task 7, D5) — see [`CatalogTagRepo::recompile_bound_services`].
+//! warehouse, in the SAME transaction as the write (Task 7, D5; fix round 1)
+//! — see [`CatalogTagRepo::recompile_bound_services_in_tx`].
 
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
@@ -59,10 +60,12 @@ impl CatalogTagRepo {
     /// the whole table.
     ///
     /// Bumps `tag_version` on every policy service bound to this warehouse (see
-    /// [`Self::bump_bound_tag_versions`]) in the SAME transaction, so the Ranger
-    /// tag-download plugin re-polls `download_tags` instead of 304-ing forever,
-    /// then recompiles those services' `perm` profiles once that transaction
-    /// commits (see [`Self::recompile_bound_services`], SP4a Task 7).
+    /// [`Self::bump_bound_tag_versions`]) and recompiles those same services'
+    /// `perm` profiles (see [`Self::recompile_bound_services_in_tx`], SP4a
+    /// Task 7 fix round 1), all in the SAME transaction — the Ranger
+    /// tag-download plugin re-polls `download_tags` instead of 304-ing
+    /// forever, and the compiled StarRocks masking policy set is never
+    /// visible in a state this transaction hasn't fully applied yet.
     pub async fn assign_catalog(
         &self,
         tag_id: Uuid,
@@ -94,15 +97,14 @@ impl CatalogTagRepo {
         .await
         .map_err(crate::error::BiError::from)?;
         Self::bump_bound_tag_versions(&mut tx, warehouse_id).await?;
+        Self::recompile_bound_services_in_tx(&mut tx, warehouse_id).await?;
         tx.commit().await.map_err(crate::error::BiError::from)?;
-        self.recompile_bound_services(warehouse_id).await?;
         Ok(())
     }
 
     /// Detach `tag_id` from a catalog resource (idempotent — deletes 0 or 1 row).
-    /// Bumps the bound services' `tag_version` in the same transaction (see
-    /// [`Self::assign_catalog`]), then recompiles the same way `assign_catalog`
-    /// does.
+    /// Bumps the bound services' `tag_version` and recompiles them in the same
+    /// transaction (see [`Self::assign_catalog`]).
     pub async fn unassign_catalog(
         &self,
         tag_id: Uuid,
@@ -131,8 +133,8 @@ impl CatalogTagRepo {
         .await
         .map_err(crate::error::BiError::from)?;
         Self::bump_bound_tag_versions(&mut tx, warehouse_id).await?;
+        Self::recompile_bound_services_in_tx(&mut tx, warehouse_id).await?;
         tx.commit().await.map_err(crate::error::BiError::from)?;
-        self.recompile_bound_services(warehouse_id).await?;
         Ok(())
     }
 
@@ -143,37 +145,52 @@ impl CatalogTagRepo {
     /// plugin does — egret must recompile, or the new/removed column stays
     /// un(un)masked until something else happens to trigger a recompile.
     ///
-    /// Runs AFTER the tag-write transaction commits, not inside it:
-    /// `recompile_service` opens its OWN transaction (it needs one spanning
-    /// `perm.compiled` + `policy.authz_policies` + `policy.authz_services`,
-    /// not a nested savepoint), and that transaction's version-bump UPDATE
-    /// targets the SAME `policy.authz_services` row `bump_bound_tag_versions`
-    /// just updated — running it from a second connection while the first
-    /// transaction is still open would block on that row's lock until the
-    /// first transaction commits, i.e. deadlock the request against itself.
-    /// The tradeoff this accepts: the tag assignment and its recompile are
-    /// two commits, not one. A recompile failure surfaces as a genuine error
-    /// to the caller (`BiError::Engine`, not a swallowed 500 — see
-    /// `crate::error`'s `From<egret_perm_compile::CompileError>`) but does
-    /// NOT roll back the tag write that already committed; true single-
-    /// transaction atomicity would need `recompile_service` to accept a
-    /// caller-owned transaction the way `sync_assignment_grants_in_tx` does,
-    /// which this task did not build (the trigger's given interface takes
-    /// `&PermStore`/`&PolicyStore`, not a transaction).
-    async fn recompile_bound_services(&self, warehouse_id: Uuid) -> Result<(), BiApiError> {
+    /// **Fix round 1: runs INSIDE the tag write's own transaction**, on the
+    /// SAME connection (`egret_perm_compile::recompile_service_in_tx`), not
+    /// after it commits. Round 1 opened `recompile_service`'s own,
+    /// SEPARATELY-connected transaction after this one committed, reasoning
+    /// that its `policy_version` bump would otherwise block on the row
+    /// `bump_bound_tag_versions` had already locked in the still-open outer
+    /// transaction — true, but the fix for that is to stop opening a SECOND
+    /// connection, not to defer the write past the boundary the brief asked
+    /// for one transaction to cover. `recompile_service_in_tx` takes `&mut
+    /// Transaction` directly (the same shape `sync_assignment_grants_in_tx`
+    /// already established) and does every read AND write against it, so a
+    /// crash between "the tag committed" and "the recompile committed" can no
+    /// longer happen — there is only one commit. Any recompile FAILURE now
+    /// rolls the tag write back too (via `?` before `tx.commit()`), rather
+    /// than leaving a committed tag with a stale compiled policy set behind
+    /// it; it still surfaces as a real error to the caller (`BiError::Engine`,
+    /// see `crate::error`'s `From<egret_perm::CompileError>`), not a
+    /// swallowed 500.
+    ///
+    /// A recompile that SKIPPED something (a `WorkspaceMembers` grant this
+    /// compiler cannot yet expand — see `egret_perm_compile::trigger`'s
+    /// module doc) is not itself a failure and does not roll anything back;
+    /// `recompile_service_in_tx` already logs each skip via `tracing::warn!`,
+    /// and this call site logs once more per service with the affected
+    /// `warehouse_id`, since `CatalogTagRepo` is the one place that knows
+    /// which tag write triggered it.
+    async fn recompile_bound_services_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        warehouse_id: Uuid,
+    ) -> Result<(), BiApiError> {
         let service_ids =
-            egret_catalog_registry::services_bound_to_warehouse(&self.db.pool, warehouse_id)
+            egret_catalog_registry::services_bound_to_warehouse(&mut **tx, warehouse_id)
                 .await
                 .map_err(crate::error::BiError::from)?;
-        if service_ids.is_empty() {
-            return Ok(());
-        }
-        let perm = egret_perm::PermStore::new(self.db.pool.clone());
-        let policy = egret_policy::PolicyStore::new(self.db.clone());
         for service_id in service_ids {
-            egret_perm_compile::recompile_service(&perm, &policy, service_id)
+            let summary = egret_perm_compile::recompile_service_in_tx(tx, service_id)
                 .await
                 .map_err(crate::error::BiError::from)?;
+            if !summary.skipped.is_empty() {
+                tracing::warn!(
+                    warehouse_id = %warehouse_id,
+                    service_id,
+                    skipped_count = summary.skipped.len(),
+                    "catalog-tag write's recompile skipped some grants/rules for this service"
+                );
+            }
         }
         Ok(())
     }

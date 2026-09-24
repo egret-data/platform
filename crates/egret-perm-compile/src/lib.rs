@@ -47,4 +47,6 @@ pub mod trigger;
 
 pub use grants::compile_grant;
 pub use rules::{compile_rule, ResolvedNames, TaggedColumn};
-pub use trigger::{recompile_service, CompileSummary, SkippedItem, SourceKind};
+pub use trigger::{
+    recompile_service, recompile_service_in_tx, CompileSummary, SkippedItem, SourceKind,
+};

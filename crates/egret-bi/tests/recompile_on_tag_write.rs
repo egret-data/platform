@@ -126,6 +126,29 @@ async fn policy_count(pool: &sqlx::PgPool, service_id: i64) -> i64 {
         .expect("count policies")
 }
 
+/// The `column` resource names of every StarRocks masking policy under
+/// `service_id`, sorted — a value-level view of "which columns are
+/// currently masked," not just how many.
+async fn masked_columns(pool: &sqlx::PgPool, service_id: i64) -> Vec<String> {
+    let bodies: Vec<(serde_json::Value,)> =
+        sqlx::query_as("SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1")
+            .bind(service_id)
+            .fetch_all(pool)
+            .await
+            .expect("policy bodies");
+    let mut cols: Vec<String> = bodies
+        .into_iter()
+        .map(|(b,)| {
+            b["resources"]["column"]["values"][0]
+                .as_str()
+                .expect("every StarRocks masking policy here names a column")
+                .to_string()
+        })
+        .collect();
+    cols.sort();
+    cols
+}
+
 #[tokio::test]
 async fn assign_and_unassign_through_the_real_repo_recompile_the_bound_starrocks_profile() {
     let Some(url) = egret_test_db::url().await else {
@@ -172,6 +195,11 @@ async fn assign_and_unassign_through_the_real_repo_recompile_the_bound_starrocks
         1,
         "assign_catalog must recompile the bound StarRocks profile — one masking policy for the tagged column"
     );
+    assert_eq!(
+        masked_columns(&pool, f.service_id).await,
+        vec!["email".to_string()],
+        "the one compiled policy must name the column actually tagged"
+    );
 
     repo.assign_catalog(tag.id, f.warehouse_id, "sales", "orders", "phone", Some(by))
         .await
@@ -180,6 +208,11 @@ async fn assign_and_unassign_through_the_real_repo_recompile_the_bound_starrocks
         policy_count(&pool, f.service_id).await,
         2,
         "a second tagged column must recompile to a second masking policy"
+    );
+    assert_eq!(
+        masked_columns(&pool, f.service_id).await,
+        vec!["email".to_string(), "phone".to_string()],
+        "both tagged columns must be masked, and only those two"
     );
 
     repo.unassign_catalog(tag.id, f.warehouse_id, "sales", "orders", "phone")
@@ -190,5 +223,15 @@ async fn assign_and_unassign_through_the_real_repo_recompile_the_bound_starrocks
         1,
         "untagging a column must recompile it OUT of the StarRocks profile — the enumeration \
          D5 says would otherwise stay stale"
+    );
+    // Value-level, not just a count: the SURVIVING policy must be the one
+    // for "email", never "phone" left behind under a different id and
+    // "email" dropped by mistake — a count-only assertion cannot tell those
+    // two outcomes apart, and this plan has already shipped two Criticals of
+    // exactly that "right count, wrong value" shape.
+    assert_eq!(
+        masked_columns(&pool, f.service_id).await,
+        vec!["email".to_string()],
+        "the remaining policy must be for the still-tagged column, not the untagged one"
     );
 }
