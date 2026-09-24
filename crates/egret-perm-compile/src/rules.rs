@@ -107,6 +107,36 @@ pub struct ResolvedNames<'a> {
     pub tag_name: Option<&'a str>,
 }
 
+/// The part of compiling a rule that needs **no service and no engine** —
+/// the rule-side twin of [`crate::grants::validate_grant_shape`]; read that
+/// function's doc for why a write-time check is needed at all and how "service
+/// independent" is drawn.
+///
+/// In: a `CUSTOM` mask expression that does not parse (`InvalidCustomMask`),
+/// and an exempt set a masking/row-filter item cannot express — a non-empty
+/// `exempt.exclude`, a `Role`, the literal `public` group
+/// (`UnexpressibleExemption`), or an unexpanded principal kind. Out:
+/// `UnsupportedMaskType` (reads the target engine's service-def),
+/// `MissingTagName`/`MissingTagService` (read the profile), `ExpansionCeiling`
+/// (counts that profile's tagged columns).
+///
+/// Like its grant-side twin this calls the same private helpers `compile_rule`
+/// calls — `ensure_custom_mask_parses` and `exempt_principals` — rather than
+/// restating their rules.
+pub fn validate_rule_shape(r: &Rule) -> Result<(), CompileError> {
+    if let RuleKind::Mask {
+        mask_type,
+        value_expr,
+    } = &r.kind
+    {
+        if mask_type == "CUSTOM" {
+            ensure_custom_mask_parses(&r.name, value_expr.as_deref().unwrap_or_default())?;
+        }
+    }
+    exempt_principals(r)?;
+    Ok(())
+}
+
 /// Compile one `Rule` into the Ranger masking/row-filter JSON bodies for
 /// engine `e`.
 ///

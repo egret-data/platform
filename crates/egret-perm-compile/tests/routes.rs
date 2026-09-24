@@ -595,6 +595,122 @@ async fn a_grant_on_an_unreachable_catalog_touches_no_profile() {
         Vec::<String>::new(),
         "the fixture's own profile must be untouched"
     );
+
+    // **The other half, and the one that matters.** An empty affected set means
+    // the recompile validates NOTHING, so a grant that can never compile would
+    // commit here and lie in wait: attach an engine to that catalog later and
+    // every recompile of the profile 400s, which also rolls back every tag
+    // write on the warehouse (`egret-bi::catalog_tags` recompiles inside the
+    // tag write's transaction). The service-INDEPENDENT half of compilation is
+    // therefore checked at write time, affected set or no affected set.
+    let before = grants_on(&f, orphan).await;
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(orphan, "analyst@egret.local")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an ill-formed grant must be refused even when it affects no profile — \
+         otherwise it poisons the first profile that ever reaches its catalog; \
+         body: {body}"
+    );
+    assert_eq!(
+        grants_on(&f, orphan).await,
+        before,
+        "the refused grant must not have been stored"
+    );
+}
+
+/// Grants naming one catalog — the scoped population a test can count without
+/// racing the shared database.
+async fn grants_on(f: &Fixture, catalog_id: Uuid) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM perm.grants WHERE catalog_id = $1")
+        .bind(catalog_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count grants")
+}
+
+/// The rule-side twin of the assertion above: a rule whose exempt set can never
+/// compile is refused at write time, even though its tag selector's affected
+/// set would have caught it here. The point is that the refusal does not depend
+/// on the affected set being non-empty.
+#[tokio::test]
+async fn a_rule_that_can_never_compile_is_refused_at_write_time() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let name = unique("unexpressible");
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/rules",
+                &token,
+                Some(json!({
+                    "name": name,
+                    "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+                    "selector": { "type": "path", "catalog_id": f.catalog_id,
+                                  "schema": "sales", "table": "orders", "column": "email" },
+                    // A masking item has no roles bucket at all — this can
+                    // never compile against any engine or profile.
+                    "exempt": { "include": [{ "kind": "role", "ref": "auditor" }], "exclude": [] }
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert_eq!(
+        rules_named(&f, &name).await,
+        0,
+        "the refused rule must not have been stored"
+    );
+}
+
+async fn rules_named(f: &Fixture, name: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM perm.rules WHERE name = $1")
+        .bind(name)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count rules")
+}
+
+/// `create_grant` refuses an empty `actions`; `create_rule` must refuse a blank
+/// name the same way rather than storing one and letting every later skip log
+/// and compile error identify the rule by `""`.
+#[tokio::test]
+async fn a_rule_with_a_blank_name_is_refused() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/rules",
+                &token,
+                Some(json!({
+                    "name": "   ",
+                    "kind": { "type": "row_filter", "filter_expr": "1=1" },
+                    "selector": { "type": "tag", "key": f.tag_key },
+                    "exempt": { "include": [], "exclude": [] }
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
 }
 
 /// A grant the compiler cannot express must be REFUSED, not stored. An email
@@ -970,6 +1086,57 @@ async fn policy_read_permits_the_reads_and_refuses_the_writes() {
         Vec::<String>::new(),
         "a refused write must have compiled nothing"
     );
+}
+
+/// **The positive half of the gate.** Every other write test here
+/// authenticates a `platform_admin`, who bypasses the PDP entirely — so a
+/// handler that gated writes on a typo'd key would pass both that test and the
+/// refusal test above, and the gate would be untested in the direction that
+/// matters. This asserts a NON-admin holding exactly `policy:update` can write,
+/// which fails if the key is anything other than `policy:update`.
+#[tokio::test]
+async fn policy_update_alone_permits_a_write() {
+    let Some(mut f) = setup().await else { return };
+    let token = session_with_permission(&mut f, "policy:update").await;
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(f.catalog_id, "analyst")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "policy:update alone must reach the write path; body: {body}"
+    );
+    let grant_id = body["id"].as_str().expect("minted grant id").to_string();
+    assert_eq!(
+        f.compiled_policy_names().await,
+        vec![format!("{COMPILER_GRANT_PREFIX}{grant_id}")],
+        "and the write must have compiled, same as it does for an admin"
+    );
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "DELETE",
+                &format!("/perm/grants/{grant_id}"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(f.compiled_policy_names().await, Vec::<String>::new());
 }
 
 #[tokio::test]

@@ -46,9 +46,9 @@ pub mod routes;
 pub mod rules;
 pub mod trigger;
 
-pub use grants::compile_grant;
+pub use grants::{compile_grant, validate_grant_shape};
 pub use routes::{openapi, perm_router, PermHttpError, PermState};
-pub use rules::{compile_rule, ResolvedNames, TaggedColumn};
+pub use rules::{compile_rule, validate_rule_shape, ResolvedNames, TaggedColumn};
 pub use trigger::{
     affected_services_for_grant, affected_services_for_rule, lock_services_in_tx,
     recompile_service, recompile_service_in_tx, recompile_services_in_tx, CompileSummary,

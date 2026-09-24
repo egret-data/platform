@@ -51,14 +51,27 @@ use uuid::Uuid;
 /// profile's `tagService` config is bumped too. Bumping the profile itself is
 /// kept: a service with no trino/tag split (bound to directly) has no separate
 /// tag service, and the direct bump is the only one that reaches it.
-pub async fn bump_bound_tag_versions<'e, E>(
-    executor: E,
+pub async fn bump_bound_tag_versions(
+    conn: &mut sqlx::PgConnection,
     warehouse_id: Uuid,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::PgExecutor<'e>,
-{
-    sqlx::query(
+) -> Result<(), sqlx::Error> {
+    // SP4a Task 9 review, I-2: resolve the affected ids FIRST, then take their
+    // row locks in ASCENDING order, and only then bump.
+    //
+    // The bulk `UPDATE policy.authz_services … WHERE id IN (…) OR name IN (…)`
+    // this used to be took its row locks in whatever order the plan scanned,
+    // and `egret_bi::CatalogTagRepo` runs it as the FIRST statement of the tag
+    // write, before the recompile. A concurrent `POST /perm/grants` takes the
+    // same rows' locks ascending (`egret_perm_compile::lock_services_in_tx`),
+    // so a tag write scanning {9, 5} against a grant write locking {5, 9}
+    // deadlocked, and one of the two died with an intermittent 500. Ordering
+    // the recompile's own list (`services_bound_to_warehouse`) did not help:
+    // by the time it runs, this bump already holds the locks.
+    //
+    // One statement per id rather than `WHERE id = ANY(…) ORDER BY id FOR
+    // UPDATE`: Postgres does not promise that a sort is applied before rows
+    // are locked, and the order is the entire point.
+    let ids: Vec<i64> = sqlx::query_scalar(
         "WITH profiles AS ( \
              SELECT DISTINCT e.authz_service_id AS id \
              FROM registry.catalogs c \
@@ -66,18 +79,34 @@ where
              JOIN engine_mgmt.engines e ON e.id = ea.engine_id \
              WHERE c.warehouse_id = $1 AND e.authz_service_id IS NOT NULL \
          ) \
-         UPDATE policy.authz_services s \
-            SET tag_version = tag_version + 1, updated_at = now() \
+         SELECT s.id FROM policy.authz_services s \
           WHERE s.id IN (SELECT id FROM profiles) \
              OR s.name IN ( \
                  SELECT tp.config_jsonb ->> 'tagService' \
                  FROM policy.authz_services tp \
                  WHERE tp.id IN (SELECT id FROM profiles) \
                    AND tp.config_jsonb ->> 'tagService' IS NOT NULL \
-             )",
+             ) \
+          ORDER BY s.id",
     )
     .bind(warehouse_id)
-    .execute(executor)
+    .fetch_all(&mut *conn)
+    .await?;
+
+    for id in &ids {
+        sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+    }
+
+    sqlx::query(
+        "UPDATE policy.authz_services \
+            SET tag_version = tag_version + 1, updated_at = now() \
+          WHERE id = ANY($1)",
+    )
+    .bind(&ids)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }

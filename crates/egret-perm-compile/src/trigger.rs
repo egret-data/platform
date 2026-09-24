@@ -444,6 +444,20 @@ async fn compile_one_rule(
         // about) exactly like the dangling-tag-key case above rather than
         // aborting the service's recompile.
         //
+        // **The discriminator for skip-vs-refuse, stated once here because it
+        // is the question every future variant will have to answer: would the
+        // skipped item have been ENFORCED had it compiled?**
+        //
+        // - A deny grant: yes. Skipping it silently drops an enforced denial,
+        //   which fails OPEN, so the compiler refuses instead.
+        // - A tag rule on a profile with no `tagService`: no. Ranger's
+        //   `download_tags` (`egret-policy/src/ranger/api/download.rs`) reads
+        //   the tag service strictly from `config_jsonb`, with no fallback, so
+        //   this profile serves no tag policies to anyone whatever we do here.
+        //   Aborting would have left it unmasked AND stopped every OTHER
+        //   profile from getting the mask. Skipping is strictly more
+        //   protective, not merely more convenient.
+        //
         // **Why this matters as of SP4a Task 9 and not before.** Task 7's
         // only caller recompiled the handful of profiles bound to ONE
         // warehouse. Task 9's rule-mutation path recompiles every
@@ -804,6 +818,16 @@ pub async fn lock_services_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_ids: &[i64],
 ) -> Result<(), CompileError> {
+    // The ascending order is the invariant this function exists to hold, so it
+    // is CHECKED here rather than left as a comment each producer is trusted to
+    // honour (SP4a Task 9 review, I-2: the one producer that did not —
+    // `bump_bound_tag_versions`' bulk UPDATE, which locked in scan order — is
+    // exactly what showed a prose invariant was not enough).
+    debug_assert!(
+        service_ids.is_sorted(),
+        "lock_services_in_tx requires ascending service ids, got {service_ids:?} — \
+         an unordered producer reintroduces the deadlock this ordering removes"
+    );
     // One statement per id rather than `WHERE id = ANY(...) ORDER BY id FOR
     // UPDATE`: Postgres does not promise that a sort is applied before row
     // locks are taken, and the ORDER is the entire point here.

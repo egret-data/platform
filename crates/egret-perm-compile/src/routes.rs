@@ -60,6 +60,8 @@ use egret_perm::{
 };
 use egret_policy::{tag_keys_for_resource_via, PolicyStore};
 
+use crate::grants::validate_grant_shape;
+use crate::rules::validate_rule_shape;
 use crate::trigger::{
     affected_services_for_grant, affected_services_for_rule, lock_services_in_tx,
     recompile_service, recompile_services_in_tx, CompileSummary, SourceKind,
@@ -391,6 +393,13 @@ async fn create_grant(
         principals: body.principals,
         origin: GrantOrigin::Explicit, // see `NewGrant`'s doc comment
     };
+    // The recompile below refuses a grant that cannot compile — but only for
+    // the profiles it actually touches, and that set is EMPTY for a catalog no
+    // engine attaches yet. Without this check such a grant commits and then
+    // breaks every future recompile of the profile that eventually reaches it,
+    // including `egret-bi::catalog_tags`'s, which rolls back tag writes on the
+    // whole warehouse. See `validate_grant_shape`.
+    validate_grant_shape(&g)?;
 
     // ONE transaction: the affected profiles' locks, the row, and every
     // recompile. The affected set is derived from the grant's own catalog, so
@@ -492,6 +501,16 @@ async fn create_rule(
     Json(body): Json<NewRule>,
 ) -> Result<(axum::http::StatusCode, Json<CreatedResponse>), PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    // `perm.rules.name` is `text NOT NULL UNIQUE` with no emptiness CHECK, and
+    // the name is what every skip log, compile error and audit line identifies
+    // the rule by. Refused here for the same reason `create_grant` refuses an
+    // empty `actions` — the two write paths should reject a nonsense body the
+    // same way.
+    if body.name.trim().is_empty() {
+        return Err(PermHttpError::BadRequest(
+            "a rule must have a non-blank name".into(),
+        ));
+    }
     let r = Rule {
         id: Uuid::nil(), // the database mints it
         name: body.name,
@@ -499,6 +518,8 @@ async fn create_rule(
         selector: body.selector,
         exempt: body.exempt,
     };
+    // Same reason as the grant path: an empty affected set validates nothing.
+    validate_rule_shape(&r)?;
 
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
     let services = affected_services_for_rule(&mut tx, &r).await?;

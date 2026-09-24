@@ -195,6 +195,41 @@ pub(crate) fn scope_to_resources(
     map
 }
 
+/// The part of compiling a grant that needs **no service and no engine** —
+/// run at the authoring boundary, before the grant is stored (SP4a Task 9
+/// review, I-1).
+///
+/// **Why a write-time check exists at all.** The HTTP create path recompiles
+/// every profile the grant affects in the same transaction, so a grant that
+/// cannot compile is normally refused by that recompile. But when the affected
+/// set is EMPTY — a catalog no engine attaches yet —
+/// `recompile_services_in_tx(&[])` validates nothing and the grant commits. It
+/// then sits there until someone attaches an engine to that catalog, at which
+/// point EVERY recompile of that profile fails: `POST /perm/compile` 400s, and
+/// `egret-bi::catalog_tags` rolls back every tag write on that warehouse. A
+/// grant nobody can see breaks tagging. Compilation has two failure classes,
+/// and this is the one that does not need a service to detect.
+///
+/// **What is in and what is out.** In: the checks that would fail against
+/// every service alike — a `User` ref that was never resolved to a bare
+/// `users.username` (`UnusableUserRef`), and a principal kind this compiler
+/// cannot expand (`UnexpandedPrincipalKind`). Out: everything that depends on
+/// which engine or profile is being compiled for (`UnsupportedMaskType` reads
+/// a service-def; `MissingTagService` reads a profile's config), because a
+/// grant can be perfectly valid for one profile and not another and only the
+/// recompile can tell.
+///
+/// This calls `principal_item`, the very function `compile_grant` uses, and
+/// throws the item away. Reusing it rather than restating the rules is the
+/// point: a permission model with two copies of "which principals can be
+/// compiled" gets a drift between them, and the drift is a grant that passes
+/// the gate and fails the compile.
+pub fn validate_grant_shape(g: &Grant) -> Result<(), CompileError> {
+    principal_item(&g.principals.include, g.effect, &[])?;
+    principal_item(&g.principals.exclude, g.effect, &[])?;
+    Ok(())
+}
+
 /// Compile one `Grant` into a Ranger `AccessPolicyInput` for engine `e`.
 ///
 /// `catalog_name` is the caller-resolved name for `g.scope.catalog_id` —
