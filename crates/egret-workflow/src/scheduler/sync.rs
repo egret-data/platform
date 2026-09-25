@@ -1,4 +1,7 @@
-//! `sync`: keep `workflow.triggers` in step with a flow's YAML (spec §3.3).
+//! `sync`: keep a flow's trigger rows in step with its YAML -- `workflow.triggers`
+//! for its `Schedule` triggers (W12 spec §3.3) and `workflow.flow_listeners` for
+//! its `Flow` triggers (W13 spec §4.2). A `Webhook` trigger has no row; the
+//! route resolves it from the flow's source on every request.
 
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result};
@@ -7,17 +10,21 @@ use uuid::Uuid;
 
 use crate::models::{Schedule, State, Trigger, TriggerKind};
 use crate::repo::{flow_cols, FlowRow};
-use crate::trigger::{FixedClock, FlowTriggerError, ScheduleTrigger, TriggerState, WindowFreeFlowTrigger};
+use crate::trigger::{
+    FixedClock, FlowTriggerError, ScheduleTrigger, TriggerState, WindowFreeFlowTrigger,
+};
 
 fn db_err(e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))
 }
 
-/// Bring `workflow.triggers` in line with `flow.source`. Called inside the
-/// transaction that wrote `flow`; `gone = true` for a delete.
+/// Bring `workflow.triggers` and `workflow.flow_listeners` in line with
+/// `flow.source`. Called inside the transaction that wrote `flow`; `gone =
+/// true` for a delete.
 ///
-/// 1. The flow's `Schedule` triggers are collected -- none if `gone` or if the
-///    source does not parse. Webhook and flow triggers never get a row.
+/// 1. The flow's `Schedule` and `Flow` triggers are collected in one pass --
+///    none if `gone` or if the source does not parse. A `Webhook` trigger
+///    never gets a row.
 /// 2. Rows whose `trigger_id` is no longer declared are deleted.
 /// 3. Each declared schedule is upserted. A new row, or one whose `spec_key`
 ///    changed, is initialised to the **next** cron tick after the
@@ -29,7 +36,11 @@ fn db_err(e: sqlx::Error) -> Error {
 ///    *`) -- it is stored with `next_evaluation_date = NULL` and the reason in
 ///    `last_error`.
 ///
-/// Point 4 does not reach a row that keeps its dates. A refusal whose cause is
+/// 5. The `Flow` triggers go to [`sync_flow_listeners`], in the same
+///    transaction: one `workflow.flow_listeners` row per declaration, stale
+///    rows deleted, `states`/`depends_on`/`disabled` rewritten every time.
+///
+/// Points 2-4 are about `workflow.triggers`. Point 4 does not reach a row that keeps its dates. A refusal whose cause is
 /// not in `spec_key` (`lateMaximumDelay`, `when`), written onto a row that is
 /// already queued under an unchanged key, leaves the old date and the old
 /// `last_error` in place; `fire_due` meets the refusal when that date comes

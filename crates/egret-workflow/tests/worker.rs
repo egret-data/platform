@@ -7107,6 +7107,9 @@ async fn start_execution_in_commits_nothing_when_the_caller_rolls_back(pool: sql
             inputs: serde_json::json!({}),
             trigger: None,
             scheduled_date: None,
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
         },
     )
     .await
@@ -7130,6 +7133,9 @@ async fn start_execution_in_commits_nothing_when_the_caller_rolls_back(pool: sql
             inputs: serde_json::json!({}),
             trigger: None,
             scheduled_date: None,
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
         },
     )
     .await
@@ -7162,6 +7168,9 @@ async fn scheduled_date_is_refused_without_a_schedule_trigger(pool: sqlx::PgPool
             inputs: serde_json::json!({}),
             trigger: None,
             scheduled_date: Some(chrono::Utc::now()),
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
         },
     )
     .await
@@ -7176,5 +7185,455 @@ async fn scheduled_date_is_refused_without_a_schedule_trigger(pool: sqlx::PgPool
         err.to_string()
             .contains("workflow_executions_scheduled_date_iff_schedule"),
         "refused by the wrong thing: {err}"
+    );
+}
+
+// ===========================================================================
+// W13a Task 3: the link and depth on `NewExecution`, the source's render
+// context, and the Flow-trigger outbox hook in `settle` (W13 spec §4.3-§4.5).
+// ===========================================================================
+
+/// A flow that declares one `Flow` trigger, `on`, with the given `states:`
+/// line (empty for Kestra's defaults). Filed through `FlowRepo`, whose writers
+/// call `scheduler::sync`, so the `workflow.flow_listeners` row is the one
+/// production writes -- never a hand-inserted row that could disagree with it.
+fn listener(id: &str, states: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntriggers:\n  - id: on\n    \
+         type: io.kestra.plugin.core.trigger.Flow\n{states}tasks:\n  \
+         - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: heard\n"
+    )
+}
+
+/// The outbox events `source` produced, in the order they were written.
+async fn events_of(pool: &sqlx::PgPool, source: Uuid) -> Vec<(Uuid, String)> {
+    sqlx::query_as(
+        "SELECT workspace_id, state FROM workflow.flow_trigger_events \
+          WHERE source_execution_id = $1 ORDER BY id",
+    )
+    .bind(source)
+    .fetch_all(pool)
+    .await
+    .expect("read outbox events")
+}
+
+async fn all_events(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM workflow.flow_trigger_events")
+        .fetch_one(pool)
+        .await
+        .expect("count outbox events")
+}
+
+/// **`start_execution_in` writes the three new columns it is handed.** The
+/// depth is `7`, not `1`, so a writer that ignored the field and let the
+/// column default (`0`) apply -- or wrote a constant -- cannot pass; the event
+/// id is likewise a value no default produces.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_start_writes_trigger_execution_id_and_depth(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = start_execution(&pool, ws, None, &one_task("source"), serde_json::json!({}))
+        .await
+        .expect("start the source");
+
+    let mut tx = pool.begin().await.expect("begin");
+    let fired = start_execution_in(
+        &mut tx,
+        NewExecution {
+            workspace_id: ws,
+            flow_id: None,
+            source: &one_task("fired"),
+            inputs: serde_json::json!({}),
+            trigger: Some(serde_json::json!({
+                "id": "on",
+                "type": "io.kestra.plugin.core.trigger.Flow",
+                "variables": {"executionId": source.to_string(), "state": "SUCCESS"},
+            })),
+            scheduled_date: None,
+            trigger_execution_id: Some(source),
+            execution_depth: 7,
+            flow_trigger_event_id: Some(4242),
+        },
+    )
+    .await
+    .expect("start the fired execution");
+    tx.commit().await.expect("commit");
+
+    let row: (Option<Uuid>, i32, Option<i64>, Option<i32>) = sqlx::query_as(
+        "SELECT trigger_execution_id, execution_depth, flow_trigger_event_id, trigger_run_ix \
+           FROM workflow.executions WHERE id = $1",
+    )
+    .bind(fired)
+    .fetch_one(&pool)
+    .await
+    .expect("read the fired row");
+    assert_eq!(
+        row,
+        (Some(source), 7, Some(4242), None),
+        "(trigger_execution_id, execution_depth, flow_trigger_event_id, \
+         trigger_run_ix): the link and the depth are what the caller passed, and \
+         there is no run ordinal -- which is what keeps a flow-fired execution's \
+         terminal from being reported to its source as a subflow child's would be"
+    );
+}
+
+/// **0157's `workflow_executions_flow_trigger_event_iff_flow`, both halves, by
+/// hand-inserted rows.** An event id on a row whose trigger is not a `Flow` is
+/// refused (the `Schedule` record here is otherwise legal, as 0156's own CHECK
+/// is satisfied), a `Flow` record without one is refused, and the pair
+/// together is accepted -- the control that shows the refusals are about the
+/// pairing and not about the fixture.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_flow_trigger_event_id_is_refused_on_anything_but_a_flow_fire(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let insert = |trigger: serde_json::Value, scheduled: bool, event: Option<i64>| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO workflow.executions \
+                   (workspace_id, namespace, flow_key, source, state, history, \
+                    execution_trigger, scheduled_date, flow_trigger_event_id) \
+                 VALUES ($1, 't', 'f', 'id: f', 'CREATED', '[\"CREATED\"]'::jsonb, $2, \
+                         CASE WHEN $3 THEN now() END, $4)",
+            )
+            .bind(ws)
+            .bind(trigger)
+            .bind(scheduled)
+            .bind(event)
+            .execute(&pool)
+            .await
+        }
+    };
+    let schedule = serde_json::json!({
+        "id": "s", "type": "io.kestra.plugin.core.trigger.Schedule", "variables": {}
+    });
+    let flow = serde_json::json!({
+        "id": "on", "type": "io.kestra.plugin.core.trigger.Flow", "variables": {}
+    });
+
+    let err = insert(schedule, true, Some(1))
+        .await
+        .expect_err("an event id on a Schedule fire must be refused");
+    assert!(
+        err.to_string()
+            .contains("workflow_executions_flow_trigger_event_iff_flow"),
+        "refused by the wrong thing: {err}"
+    );
+    let err = insert(flow.clone(), false, None)
+        .await
+        .expect_err("a Flow fire with no event id must be refused");
+    assert!(
+        err.to_string()
+            .contains("workflow_executions_flow_trigger_event_iff_flow"),
+        "refused by the wrong thing: {err}"
+    );
+    insert(flow, false, Some(1))
+        .await
+        .expect("control: a Flow fire carrying its event id is accepted");
+}
+
+/// **The backstop keys on the EVENT, so re-entering a state fires again** --
+/// the controller's ruling on Task 2's design finding. The same listener
+/// (flow + trigger id) fired twice for one event is refused by
+/// `workflow_executions_one_per_flow_trigger_event`; fired for a SECOND event
+/// from the same source and the same state -- a source that went PAUSED,
+/// RUNNING, PAUSED -- it is accepted. The old key,
+/// `(source, flow, trigger id, variables.state)`, refused that second fire.
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_event_fires_a_listener_once_and_a_second_event_in_the_same_state_fires_again(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let target = listener("target", "");
+    let flow = file_flow(&db, ws, user, &target).await;
+    let source = start_execution(&pool, ws, None, &one_task("src"), serde_json::json!({}))
+        .await
+        .expect("start the source");
+
+    let fire = |event: i64| {
+        let pool = pool.clone();
+        let target = target.clone();
+        async move {
+            let mut tx = pool.begin().await.expect("begin");
+            let r = start_execution_in(
+                &mut tx,
+                NewExecution {
+                    workspace_id: ws,
+                    flow_id: Some(flow),
+                    source: &target,
+                    inputs: serde_json::json!({}),
+                    trigger: Some(serde_json::json!({
+                        "id": "on",
+                        "type": "io.kestra.plugin.core.trigger.Flow",
+                        "variables": {"executionId": source.to_string(), "state": "PAUSED"},
+                    })),
+                    scheduled_date: None,
+                    trigger_execution_id: Some(source),
+                    execution_depth: 1,
+                    flow_trigger_event_id: Some(event),
+                },
+            )
+            .await;
+            if r.is_ok() {
+                tx.commit().await.expect("commit");
+            }
+            r
+        }
+    };
+
+    fire(10).await.expect("the first fire for event 10");
+    let err = fire(10)
+        .await
+        .expect_err("a second fire of the same listener for the same event");
+    assert!(
+        err.to_string()
+            .contains("workflow_executions_one_per_flow_trigger_event"),
+        "refused by the wrong thing: {err}"
+    );
+    fire(11)
+        .await
+        .expect("a NEW event from the same source in the same state fires again");
+}
+
+/// **A transition a listener can hear writes exactly one event, and one it
+/// cannot hear writes none.** The listener hears `SUCCESS` only, so the
+/// `RUNNING` the start produces is the in-workspace negative -- the `$3 =
+/// ANY (l.states)` half of the `EXISTS` -- and the drive to `SUCCESS` is the
+/// positive.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_transition_writes_one_event_when_a_listener_can_hear_it(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(
+        &db,
+        ws,
+        user,
+        &listener("hears-success", "    states: [SUCCESS]\n"),
+    )
+    .await;
+
+    let source = start_execution(&pool, ws, None, &one_task("src"), serde_json::json!({}))
+        .await
+        .expect("start the source");
+    assert_eq!(
+        execution_history(&pool, source).await,
+        serde_json::json!(["CREATED", "RUNNING"]),
+        "control: the start's own settle ended RUNNING"
+    );
+    assert_eq!(
+        events_of(&pool, source).await,
+        vec![],
+        "RUNNING is not in the listener's states, so it writes no event"
+    );
+
+    drain_with(&pool, &Recorder::default()).await;
+    assert_eq!(
+        execution_history(&pool, source).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+        "control: the source finished"
+    );
+    assert_eq!(
+        events_of(&pool, source).await,
+        vec![(ws, "SUCCESS".to_string())],
+        "exactly one event, for the SUCCESS transition, in the source's workspace"
+    );
+}
+
+/// **`PAUSED` writes an event, and it is not terminal.** The listener declares
+/// no `states:`, so it hears Kestra's defaults -- the terminated states plus
+/// `PAUSED`. A hook placed inside `notifies_parent`'s terminal-only branch
+/// would write nothing here, which is the mutation this test is for.
+///
+/// It also records what one `settle` boundary is: the start's settle takes the
+/// execution `CREATED -> RUNNING -> PAUSED` in one transaction, and the hook
+/// compares only the last state before and after it (spec §4.3's `was !=
+/// is`), so this start writes ONE event, `PAUSED`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn paused_writes_an_event_for_default_states(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(&db, ws, user, &listener("hears-defaults", "")).await;
+
+    let source = start_execution(
+        &pool,
+        ws,
+        None,
+        &a_pause("src", Some("PT30S")),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the source");
+    assert_eq!(
+        execution_history(&pool, source).await,
+        serde_json::json!(["CREATED", "RUNNING", "PAUSED"]),
+        "control: the source is paused, not terminal"
+    );
+    assert_eq!(
+        events_of(&pool, source).await,
+        vec![(ws, "PAUSED".to_string())]
+    );
+}
+
+/// **No listener in the source's workspace, no event** -- and the listener
+/// that exists, in ANOTHER workspace, is live: a source there, driven the same
+/// way, does write one. Without that control the negative would pass against a
+/// hook that wrote nothing at all.
+#[sqlx::test(migrations = "../../migrations")]
+async fn no_listener_in_the_workspace_writes_no_event(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (quiet, _) = common::seed_workspace(&db).await;
+    let (other, other_user) = common::seed_workspace(&db).await;
+    file_flow(
+        &db,
+        other,
+        other_user,
+        &listener("elsewhere", "    states: [SUCCESS]\n"),
+    )
+    .await;
+
+    let unheard = start_execution(
+        &pool,
+        quiet,
+        None,
+        &one_task("unheard"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start in the quiet workspace");
+    let heard = start_execution(
+        &pool,
+        other,
+        None,
+        &one_task("heard"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start in the listening workspace");
+    drain_with(&pool, &Recorder::default()).await;
+
+    for (label, execution) in [("unheard", unheard), ("heard", heard)] {
+        assert_eq!(
+            execution_history(&pool, execution).await,
+            serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+            "control: the {label} source finished"
+        );
+    }
+    assert_eq!(
+        events_of(&pool, heard).await,
+        vec![(other, "SUCCESS".to_string())],
+        "control: the other workspace's listener is live and hears its own source"
+    );
+    assert_eq!(
+        events_of(&pool, unheard).await,
+        vec![],
+        "a listener in another workspace must not make this workspace's \
+         transition an event"
+    );
+    assert_eq!(all_events(&pool).await, 1, "and nothing else was written");
+}
+
+/// **Atomic with the transition**: the event is written on the caller's
+/// connection, so a transaction that rolls back leaves no event, and the same
+/// start committed leaves exactly one. The listener hears `RUNNING`, which the
+/// start's own settle reaches -- so the event is written inside
+/// `start_execution_in`'s caller's transaction, and is visible there before
+/// the rollback, which shows the negative is a rollback and not an absence.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_rolled_back_transition_leaves_no_event(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(
+        &db,
+        ws,
+        user,
+        &listener("hears-running", "    states: [RUNNING]\n"),
+    )
+    .await;
+    let source = one_task("src");
+    let new = || NewExecution {
+        workspace_id: ws,
+        flow_id: None,
+        source: &source,
+        inputs: serde_json::json!({}),
+        trigger: None,
+        scheduled_date: None,
+        trigger_execution_id: None,
+        execution_depth: 0,
+        flow_trigger_event_id: None,
+    };
+
+    let mut tx = pool.begin().await.expect("begin");
+    start_execution_in(&mut tx, new()).await.expect("start");
+    let inside: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.flow_trigger_events")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("count inside the transaction");
+    assert_eq!(
+        inside, 1,
+        "control: the RUNNING event exists inside the transaction"
+    );
+    drop(tx);
+    assert_eq!(
+        all_events(&pool).await,
+        0,
+        "rolled back with its transition"
+    );
+
+    let mut tx = pool.begin().await.expect("begin");
+    let committed = start_execution_in(&mut tx, new()).await.expect("start");
+    tx.commit().await.expect("commit");
+    assert_eq!(
+        events_of(&pool, committed).await,
+        vec![(ws, "RUNNING".to_string())],
+        "and committed with it"
+    );
+}
+
+/// **`execution_render_context` is the finished SOURCE's context**: its posted
+/// `inputs` and its tasks' `outputs` render, and `trigger` does NOT -- exactly
+/// as W13a Task 1 measured Kestra refusing `{{ trigger.executionId }}` in a
+/// Flow trigger's `inputs` ("Unable to find `trigger`"). Task 4 turns that
+/// failure into a refused fire, so the refusal is asserted here where the
+/// context is built.
+#[sqlx::test(migrations = "../../migrations")]
+async fn execution_render_context_renders_the_sources_inputs_and_outputs(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = "id: src\nnamespace: t\ninputs:\n  - id: x\n    type: STRING\ntasks:\n\
+         \x20 - id: a\n    type: io.kestra.plugin.core.debug.Return\n    format: \"{{ inputs.x }}-out\"\n";
+    let ex = start_execution(&pool, ws, None, source, serde_json::json!({"x": "posted"}))
+        .await
+        .expect("start the source");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+        "control: the source finished"
+    );
+
+    let mut conn = pool.acquire().await.expect("acquire");
+    let cx = egret_workflow::worker::execution_render_context(&mut conn, ex)
+        .await
+        .expect("the source's render context");
+    assert_eq!(
+        egret_workflow::render_str("{{ inputs.x }}", &cx).expect("inputs render"),
+        "posted"
+    );
+    assert_eq!(
+        egret_workflow::render_str("{{ outputs.a.value }}", &cx).expect("outputs render"),
+        "posted-out",
+        "the task's persisted output, not the input it was rendered from"
+    );
+    let refused = egret_workflow::render_str("{{ trigger.executionId }}", &cx);
+    assert!(
+        refused.is_err(),
+        "`trigger` is not in the source's context, as on Kestra; got {refused:?}"
     );
 }

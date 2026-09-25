@@ -1006,6 +1006,52 @@ mod tests {
         );
     }
 
+    /// **`RunState::wire()` is `models::State`'s serde spelling, for every
+    /// `RunState`** -- W13a Task 3, a Task 2 review carry-over.
+    ///
+    /// Two derivations of one spelling meet in the Flow-trigger outbox:
+    /// `scheduler::sync` writes `flow_listeners.states` from `models::State`
+    /// through serde, and `claim::settle` matches `$state = ANY(states)`
+    /// binding `RunState::wire()`. A disagreement would not be an error
+    /// anywhere -- the `EXISTS` would simply never match, and a listener would
+    /// go deaf to that state in silence. Nothing tied the two together before
+    /// this test.
+    ///
+    /// The `RunState -> State` map is written out by hand and is exhaustive,
+    /// so it is an independent third statement of which state is which: a
+    /// round trip through `State`'s own `Deserialize` would accept a `wire()`
+    /// that named the WRONG state as long as that state exists.
+    #[test]
+    fn run_state_wire_is_the_model_states_serde_spelling() {
+        use crate::models::State;
+        fn model(r: RunState) -> State {
+            match r {
+                RunState::Created => State::Created,
+                RunState::Submitted => State::Submitted,
+                RunState::Running => State::Running,
+                RunState::Success => State::Success,
+                RunState::Failed => State::Failed,
+                RunState::Retrying => State::Retrying,
+                RunState::Retried => State::Retried,
+                RunState::Killed => State::Killed,
+                RunState::Skipped => State::Skipped,
+                RunState::Paused => State::Paused,
+                RunState::Restarted => State::Restarted,
+                RunState::Warning => State::Warning,
+                RunState::Cancelled => State::Cancelled,
+            }
+        }
+        for r in RunState::ALL {
+            let serde = serde_json::to_value(model(*r)).expect("State serialises");
+            assert_eq!(
+                serde,
+                serde_json::Value::String(r.wire().to_string()),
+                "{r:?}: RunState::wire() and models::State's serde spelling disagree, \
+                 so the outbox's `$state = ANY(flow_listeners.states)` cannot match it"
+            );
+        }
+    }
+
     /// **`SKIPPED` is terminal, and terminal in the half that does not fail.**
     ///
     /// `State.java:288` lists it in `isTerminated()` beside `SUCCESS` and

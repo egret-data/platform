@@ -1296,6 +1296,39 @@ pub(super) async fn settle(
     let was = before.history.last().copied();
     let is = state.history.last().copied();
     if was != is {
+        // **The Flow-trigger outbox (W13 spec §4.3), and it is the ONE
+        // statement W13a adds to this transaction.** Every new state except
+        // `CREATED` -- not only terminal ones, which is why it sits here and
+        // not inside `notifies_parent`'s branch below: `PAUSED` is in a Flow
+        // trigger's default `states` and is not terminal.
+        //
+        // The `EXISTS` keeps the outbox empty for a workspace with no
+        // listener that could hear this state, so the hot path costs one
+        // indexed probe there. It is written on `conn`, inside the caller's
+        // transaction, so a transition that rolls back leaves no event and
+        // one that commits always has its event. The listeners themselves are
+        // evaluated later, by the processor, never here.
+        //
+        // `wire()` is the spelling `flow_listeners.states` holds: `sync`
+        // writes `models::State`'s serde spelling, and
+        // `run_state_wire_is_the_model_states_serde_spelling` pins the two to
+        // each other for every `RunState`.
+        if let Some(new_state) = is.filter(|s| *s != RunState::Created) {
+            sqlx::query(
+                "INSERT INTO workflow.flow_trigger_events \
+                   (source_execution_id, workspace_id, state) \
+                 SELECT $1, $2, $3 \
+                  WHERE EXISTS (SELECT 1 FROM workflow.flow_listeners l \
+                                 WHERE l.workspace_id = $2 AND NOT l.disabled \
+                                   AND $3 = ANY (l.states))",
+            )
+            .bind(ctx.id)
+            .bind(ctx.workspace_id)
+            .bind(new_state.wire())
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        }
         if let Some(terminal) = is.filter(|s| notifies_parent(*s)) {
             spawn::on_execution_terminal(conn, ctx.id, terminal, ctx.depth).await?;
             // The other kind of link. `on_execution_terminal` reads
@@ -1404,6 +1437,12 @@ pub async fn start_execution_with_trigger(
             // advances `next_evaluation_date` -- this wrapper is never that
             // caller.
             scheduled_date: None,
+            // Likewise only the Flow-trigger processor (W13a Task 4) starts an
+            // execution because another one reached a state; this wrapper's
+            // callers -- the API, a webhook, the tests -- start at the bottom.
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
         },
     )
     .await?;
@@ -1421,6 +1460,22 @@ pub struct NewExecution<'a> {
     pub inputs: serde_json::Value,
     pub trigger: Option<serde_json::Value>,
     pub scheduled_date: Option<DateTime<Utc>>,
+    /// The SOURCE execution a Flow trigger fired on (W13 spec §4.5) -- the
+    /// same column a `Subflow` child's caller is written to, but with no
+    /// `trigger_run_ix`, which is what keeps `subflow::on_child_terminal`
+    /// (it zips the two) from reporting a flow-fired execution's terminal to
+    /// its source. `None` for every other start.
+    pub trigger_execution_id: Option<Uuid>,
+    /// Kestra's `metadata.executionDepth`: the source's own depth plus one
+    /// for a Flow-trigger fire, `0` for every other start. Persisted so a
+    /// chain's depth is data, not stack (spec §4.4 point 4).
+    pub execution_depth: i32,
+    /// The outbox event (`workflow.flow_trigger_events.id`) a Flow-trigger
+    /// fire consumed. Set iff `trigger` is a `Flow` record -- 0157's
+    /// `workflow_executions_flow_trigger_event_iff_flow` -- and keyed by
+    /// `workflow_executions_one_per_flow_trigger_event`, so one event fires
+    /// one listener at most once.
+    pub flow_trigger_event_id: Option<i64>,
 }
 
 /// [`start_execution_with_trigger`]'s body, taking the caller's own `conn`
@@ -1438,6 +1493,9 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
         inputs,
         trigger,
         scheduled_date,
+        trigger_execution_id,
+        execution_depth,
+        flow_trigger_event_id,
     } = new;
 
     let flow = crate::spec::parse(source)
@@ -1448,8 +1506,10 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
-            execution_trigger, scheduled_date) \
-         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6, $7, $8) RETURNING id",
+            execution_trigger, scheduled_date, trigger_execution_id, execution_depth, \
+            flow_trigger_event_id) \
+         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, \
+                 $11) RETURNING id",
     )
     .bind(workspace_id)
     .bind(flow_id)
@@ -1463,6 +1523,9 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
     })
     .bind(trigger)
     .bind(scheduled_date)
+    .bind(trigger_execution_id)
+    .bind(execution_depth)
+    .bind(flow_trigger_event_id)
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;

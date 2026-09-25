@@ -775,6 +775,41 @@ fn with_declared_defaults(posted: Value, flow: Option<&Flow>) -> Value {
     Value::Object(inputs)
 }
 
+/// The render context a Flow trigger's `when` and `inputs` are evaluated in:
+/// the **SOURCE** execution's -- Kestra's `runContextFactory.of(null,
+/// execution)`, a context over the execution with no task run of its own.
+///
+/// It is the context this worker renders the source's own tasks against, built
+/// by the same [`Surface::load`] and [`Surface::context`], with `run = None`.
+/// So it carries `inputs`, `vars`, `flow`, `labels`, `execution`, `outputs`
+/// and `tasks`, and it does **not** carry `trigger`: an expression reading
+/// `{{ trigger.executionId }}` fails to render against it, exactly as W13a
+/// Task 1 measured on the pinned artifact ("Unable to find `trigger`"). The
+/// processor (W13a Task 4) turns that failure into a refused fire.
+///
+/// **Reads without locking the execution** (`Lock::No`): the processor runs
+/// in its own transaction and must not serialise behind, or block, a source
+/// that is still running -- a `PAUSED` source can be resumed while its event
+/// waits. Spec §4.4 point 3 states what that costs.
+///
+/// `Stack::Fresh`, because the processor is entered from the scheduler ticker
+/// with nothing of this crate's below it; nothing `settle`-shaped runs on the
+/// context this returns.
+pub async fn execution_render_context(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+) -> Result<RenderContext> {
+    let (ctx, state, _now) = super::claim::load_with(
+        conn,
+        execution_id,
+        super::claim::Lock::No,
+        super::claim::Stack::Fresh,
+    )
+    .await?;
+    let surface = Surface::load(conn, &ctx).await?;
+    Ok(surface.context(&ctx.plan, &state, None))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

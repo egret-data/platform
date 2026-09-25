@@ -11,12 +11,14 @@
 -- but which belong on the table from its first row rather than as a later
 -- ALTER.
 --
--- The unique index keys directly on
--- `execution_trigger->'variables'->>'state'` (no typed `trigger_source_state`
--- column) because W13a Task 1 measured, on the pinned artifact, that
--- `trigger.variables.state` is the bare enum name (`"SUCCESS"`), not an
--- object -- so the spec's original expression stands and the typed-column
--- fallback the spec allows for is not needed.
+-- The backstop unique index keys on the outbox EVENT that fired the
+-- execution (`flow_trigger_event_id`), not on the source's state. An earlier
+-- draft keyed on `(trigger_execution_id, flow_id, trigger id,
+-- variables.state)`, and that made a legitimate second fire unrepresentable:
+-- a source that re-enters a state (PAUSED -> RUNNING -> PAUSED) is a NEW
+-- transition, Kestra fires its listeners on every transition, and the old key
+-- let a listener hear only the first. Event ids are bigserial and never
+-- reused, so "one fire per (event, listener)" is exactly the property.
 
 -- One row per Flow trigger a flow declares, kept by scheduler::sync.
 CREATE TABLE workflow.flow_listeners (
@@ -42,10 +44,22 @@ CREATE TABLE workflow.flow_trigger_events (
 );
 
 ALTER TABLE workflow.executions ADD COLUMN execution_depth integer NOT NULL DEFAULT 0;
+
+-- The outbox event a Flow-trigger fire consumed. Not a foreign key: the event
+-- row is deleted in the very transaction that fires (spec §4.4), so the id
+-- outlives its row by design.
+ALTER TABLE workflow.executions ADD COLUMN flow_trigger_event_id bigint;
+-- Set iff the execution was fired by a `Flow` trigger, mirroring 0156's
+-- `workflow_executions_scheduled_date_iff_schedule`. 0140's
+-- `workflow_executions_trigger_record_is_whole` guarantees a non-NULL
+-- `execution_trigger` carries a string `type`, so the right-hand side is never
+-- NULL and this CHECK cannot pass on an unknown.
+ALTER TABLE workflow.executions ADD CONSTRAINT workflow_executions_flow_trigger_event_iff_flow
+  CHECK ((flow_trigger_event_id IS NOT NULL)
+         = (execution_trigger IS NOT NULL
+            AND execution_trigger->>'type' = 'io.kestra.plugin.core.trigger.Flow'));
 -- A backstop, as W12's one-per-tick index: a listener fires at most once per
--- (source, source state).
+-- outbox event. Re-entering a state is a new event, so it fires again.
 CREATE UNIQUE INDEX workflow_executions_one_per_flow_trigger_event
-  ON workflow.executions (trigger_execution_id, flow_id, (execution_trigger->>'id'),
-                          (execution_trigger->'variables'->>'state'))
-  WHERE trigger_execution_id IS NOT NULL
-    AND execution_trigger->>'type' = 'io.kestra.plugin.core.trigger.Flow';
+  ON workflow.executions (flow_trigger_event_id, flow_id, (execution_trigger->>'id'))
+  WHERE flow_trigger_event_id IS NOT NULL;

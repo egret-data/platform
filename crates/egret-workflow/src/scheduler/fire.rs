@@ -304,6 +304,10 @@ async fn start(conn: &mut PgConnection, c: &Claimed, e: &ScheduledExecution) -> 
             inputs: serde_json::to_value(&e.inputs).map_err(|e| Error::Internal(e.into()))?,
             trigger: Some(schedule_trigger_record(e)),
             scheduled_date: Some(e.scheduled_date),
+            // A `Schedule` fire has no source execution and starts a chain.
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
         },
     )
     .await;

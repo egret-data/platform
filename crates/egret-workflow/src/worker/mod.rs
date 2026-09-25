@@ -96,6 +96,7 @@ pub use claim::{
 };
 pub use reaper::reap;
 pub use registry::Handlers;
+pub use render::execution_render_context;
 /// **How far down a chain of child executions this worker will spawn** — the
 /// backstop beside `subflow`'s cycle guard, and the second half of the one
 /// answer that module gives that is not the artifact's. See its own doc.

@@ -239,6 +239,60 @@ async fn removing_the_trigger_or_deleting_the_flow_deletes_the_row() {
     );
 }
 
+/// **An `update` rewrites `states` and `depends_on` on the row that is already
+/// there** -- W13a Task 3, a Task 2 review carry-over. Every other test here
+/// either creates a row or deletes one, so the upsert's `DO UPDATE SET states =
+/// EXCLUDED.states` and `depends_on = EXCLUDED.depends_on` survived being
+/// removed: a first `INSERT` writes both whatever the conflict arm says.
+///
+/// One trigger id across both saves, so the second write can only reach the
+/// row through `ON CONFLICT`; both columns change in the same save, and each
+/// is asserted on its own so one surviving arm cannot hide behind the other.
+#[tokio::test]
+async fn an_update_rewrites_states_and_depends_on_on_the_existing_row() {
+    let Some(fx) = fx().await else { return };
+    let before = flow_yaml(
+        "",
+        "  - id: on_done\n    type: io.kestra.plugin.core.trigger.Flow\n    states: [SUCCESS]\n",
+        "hi",
+    );
+    let flow = fx.create(&before).await;
+    let (states, depends_on, _) = listener_row(&fx.db, flow.id, "on_done")
+        .await
+        .expect("control: the row exists before the update");
+    assert_eq!(
+        states,
+        vec!["SUCCESS".to_string()],
+        "control: states before"
+    );
+    assert!(!depends_on, "control: not dependsOn before");
+
+    let after = flow_yaml(
+        "",
+        "  - id: on_done\n    type: io.kestra.plugin.core.trigger.Flow\n    states: [FAILED]\n    \
+         dependsOn:\n      - namespace: t\n        flowId: other\n",
+        "hi",
+    );
+    let TriggerKind::Flow(spec) = &parses(&after).triggers[0].kind else {
+        panic!("control: the updated fixture still declares a Flow trigger");
+    };
+    assert!(
+        !spec.depends_on.is_empty() && spec.states == vec![State::Failed],
+        "control: the updated fixture parses to FAILED + dependsOn"
+    );
+    fx.update(flow.id, &after).await;
+
+    let (states, depends_on, _) = listener_row(&fx.db, flow.id, "on_done")
+        .await
+        .expect("the row survives the update under the same trigger id");
+    assert_eq!(
+        states,
+        vec!["FAILED".to_string()],
+        "the conflict arm must rewrite `states`"
+    );
+    assert!(depends_on, "the conflict arm must rewrite `depends_on`");
+}
+
 #[tokio::test]
 async fn flow_or_trigger_disabled_sets_the_flag() {
     let Some(fx) = fx().await else { return };
@@ -260,7 +314,10 @@ async fn flow_or_trigger_disabled_sets_the_flag() {
         "  - id: on_done\n    type: io.kestra.plugin.core.trigger.Flow\n    states: [SUCCESS]\n",
         "hi",
     );
-    assert!(parses(&off).disabled, "control: the flow-level switch parsed");
+    assert!(
+        parses(&off).disabled,
+        "control: the flow-level switch parsed"
+    );
     fx.update(flow.id, &off).await;
     let (_, _, disabled) = listener_row(&fx.db, flow.id, "on_done")
         .await

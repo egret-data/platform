@@ -1614,6 +1614,22 @@ async fn a_start_runs_the_drafts_source_with_the_inputs_the_caller_sent() {
     // alone would survive a handler that swapped the values it forwarded.
     assert_eq!(inputs, serde_json::json!({ "who": "world", "n": 3 }));
     assert!(seq > 0, "the first settle ran; seq is {seq}");
+    // W13a Task 3: every caller that is not the Flow-trigger processor starts
+    // at the bottom of a chain -- no source link, depth 0, no outbox event.
+    let chain: (Option<Uuid>, i32, Option<i64>) = sqlx::query_as(
+        "SELECT trigger_execution_id, execution_depth, flow_trigger_event_id \
+           FROM workflow.executions WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read the chain columns");
+    assert_eq!(
+        chain,
+        (None, 0, None),
+        "an API start is not a Flow-trigger fire"
+    );
+
     assert_eq!(runs, 1, "the first settle created the Log run");
 
     // **The audit record, asserted rather than emitted into the void.** Mutation
