@@ -4,7 +4,7 @@
 //! live in one module because they share one rule, stated once below and
 //! restated on [`ExecutionRepo`] itself: every statement carries a
 //! `workspace_id` predicate. [`ExecutionRepo`] writes nothing -- the writes
-//! belong to `worker::claim`, which holds the `SELECT ... FOR UPDATE` this
+//! belong to `worker::claim`, which holds the `SELECT ... FOR NO KEY UPDATE` this
 //! module deliberately does not.
 //!
 //! Draft and version are two tables for the same reason `dataapi.endpoints` /
@@ -864,7 +864,7 @@ pub struct ExecutionPage {
 /// Reads over `workflow.executions` and `workflow.task_runs`.
 ///
 /// **Reads only, and that is a boundary rather than a scope note.**
-/// `worker::claim::load(Lock::Yes)` takes `SELECT ... FOR UPDATE` on the
+/// `worker::claim::load(Lock::Yes)` takes `SELECT ... FOR NO KEY UPDATE` on the
 /// execution row, and W10 Task 2 established that the lock is load-bearing:
 /// it closes a stale-snapshot lost update on `persist`'s
 /// `WHERE execution_id = $8 AND run_ix = $9`. Nothing here takes that lock,

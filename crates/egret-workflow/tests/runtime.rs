@@ -828,7 +828,7 @@ async fn two_tickers_reopen_a_due_retry_exactly_once(pool: sqlx::PgPool) {
         "**the property**: exactly TWO attempts. Both tickers' `due_retries` \
          named this execution (see \
          due_retries_excludes_nothing_so_two_tickers_both_name_the_same_execution), \
-         and the second `resume` must find, under the execution's FOR UPDATE \
+         and the second `resume` must find, under the execution's FOR NO KEY UPDATE \
          lock, a run that is no longer RETRYING — so it opens nothing"
     );
     assert_eq!(

@@ -1751,11 +1751,35 @@ impl Stack {
 
 /// Read the execution, **locking it**, and rebuild what `advance()` reads.
 ///
-/// `FOR UPDATE` is the serialisation two workers finishing two siblings of the
+/// The lock is the serialisation two workers finishing two siblings of the
 /// same `Parallel` need: without it both would read the same `ExecutionState`,
 /// both would compute the same successor, and both would try to create it. The
 /// `UNIQUE (execution_id, run_ix)` in migration 0134 is what happens if this
 /// lock is ever lost — a collision rather than a duplicate run.
+///
+/// # `FOR NO KEY UPDATE`, not `FOR UPDATE` (W13a final review I2)
+///
+/// Every writer of an execution comes through here, so the lock only has to
+/// exclude other writers, and `FOR NO KEY UPDATE` conflicts with itself exactly
+/// as `FOR UPDATE` does: two loads of one execution still queue, and `resume`'s
+/// lost-update argument (`runtime`'s statement 3) is unchanged. What the
+/// weaker mode stops blocking is `FOR KEY SHARE` -- the lock a foreign-key
+/// check takes on the row it references -- and nothing on this path changes a
+/// key: `settle` writes `state`, `history`, `seq` and `updated_at`, never `id`
+/// or `workspace_id`.
+///
+/// That matters to one reader. The Flow-trigger processor inserts an
+/// execution whose `trigger_execution_id` references the SOURCE, at
+/// `REPEATABLE READ`. Under `FOR UPDATE` a source that any worker settled
+/// after the processor's snapshot made that check fail `40001` (the reviewer
+/// measured it on Postgres 16), so a busy source's listeners failed and were
+/// given up. Every other `KEY SHARE` taker -- a task run, a loop iteration, a
+/// `Subflow` child, a replay, an outbox event -- is inserted by the writer that
+/// already holds this row, in its own transaction, where no lock conflicts
+/// with itself. So no serialisation anywhere relied on blocking one.
+/// `tests/flow_trigger_fire.rs`'s
+/// `a_source_settled_between_the_claim_and_the_fire_still_fires` is the
+/// reproduction.
 pub(super) async fn load(
     conn: &mut PgConnection,
     execution_id: Uuid,
@@ -1774,7 +1798,7 @@ pub(super) async fn load_with(
         "SELECT source, history, workspace_id, flow_id, seq, \
                 attempt_number, origin_offset_ms, \
                 (EXTRACT(EPOCH FROM (now() - created_at)) * 1000)::bigint AS now_ms \
-           FROM workflow.executions WHERE id = $1 FOR UPDATE"
+           FROM workflow.executions WHERE id = $1 FOR NO KEY UPDATE"
     } else {
         "SELECT source, history, workspace_id, flow_id, seq, \
                 attempt_number, origin_offset_ms, \
@@ -2188,7 +2212,7 @@ fn note_create_beside_a_created_sibling(state: &ExecutionState, cmds: &[Command]
 /// **The released run's UPDATE is fenced on that lease and every other run's is
 /// not**, which is the narrowest form of the rule: the only row this writer has
 /// a token for is the one it claimed. A sibling's row is written under the
-/// execution's `FOR UPDATE` lock, which is what serialises two workers there;
+/// execution's `FOR NO KEY UPDATE` lock, which is what serialises two workers there;
 /// fencing it on a token this writer does not hold would refuse every legitimate
 /// successor write.
 ///

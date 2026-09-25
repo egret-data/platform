@@ -48,8 +48,21 @@
 //!   READ`; against a parent whose **key** column was updated it fails with
 //!   `40001 could not serialize access due to concurrent update`, and rolling
 //!   back to the savepoint leaves the transaction usable. A source execution
-//!   moving on (`state`, `history`, `updated_at`) is a non-key update. A flow
-//!   save that edits the source is too; a save that **renames** the flow
+//!   moving on (`state`, `history`, `seq`, `updated_at`) is a non-key update
+//!   **only because `claim::load_with` locks it `FOR NO KEY UPDATE`** (final
+//!   review I2). The first version of this paragraph stopped at "non-key
+//!   update" and was false: every `settle` took the row `FOR UPDATE` before
+//!   updating it, and a `KEY SHARE` check against a row changed after the
+//!   snapshot by a `FOR UPDATE` holder fails `40001` exactly as a key change
+//!   does -- the reviewer measured it (PG16), and
+//!   `a_source_settled_between_the_claim_and_the_fire_still_fires` reproduces
+//!   it through the worker's own `resume`: under `FOR UPDATE` the fire is
+//!   `errored`, under `FOR NO KEY UPDATE` it fires. So a busy source no longer
+//!   costs its listeners their fires. `load_with`'s doc carries the check
+//!   that the weaker lock keeps every serialisation the worker relies on. A
+//!   flow save that edits the listener is a non-key update too (an `UPDATE`
+//!   that changes no key column takes `FOR NO KEY UPDATE`, as `scheduler`'s
+//!   module doc says); a save that **renames** the flow
 //!   changes `(workspace_id, namespace, flow_id)`, a unique key, and would
 //!   fail that listener's insert. `classify` answers `Failed` for it, the
 //!   savepoint rolls back, and the listener is retried next pass -- the same

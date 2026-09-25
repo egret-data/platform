@@ -105,7 +105,7 @@ pub struct WorkflowState {
     /// per request, for the reason `repo` is one: the handler must not have to
     /// reach into `db` to build it, and `db` is documented above as being here
     /// for `analytics.folders` and nothing else. It writes nothing -- the
-    /// writes stay in `worker::claim`, which holds the `FOR UPDATE` this type
+    /// writes stay in `worker::claim`, which holds the `FOR NO KEY UPDATE` this type
     /// deliberately does not.
     pub executions: ExecutionRepo,
     /// The seam `publish` resolves every reference through — see
@@ -781,7 +781,7 @@ async fn get_flow_version(
 // **Start, resume and replay landed in W10 Task 5** and are below;
 // [`ExecutionRepo`] still has no method that writes, and none of them reaches
 // for one — every write goes through `worker::claim`, which holds the
-// `FOR UPDATE` that repository deliberately does not. **Kill is a finding**;
+// `FOR NO KEY UPDATE` that repository deliberately does not. **Kill is a finding**;
 // see the write section's own comment.
 //
 // **A foreign execution is a 404 and never a 403.** [`ExecutionRepo::get`]
@@ -1509,7 +1509,7 @@ async fn start_flow_execution(
 /// # What this route can and cannot do, measured
 ///
 /// It calls [`worker::resume`](crate::worker::resume), which takes the same
-/// `FOR UPDATE` and runs the same `settle` as every other writer. That drives
+/// `FOR NO KEY UPDATE` and runs the same `settle` as every other writer. That drives
 /// `advance()` once more against the row as it now stands — which is exactly
 /// what un-parks a pause whose **deadline** has passed.
 ///

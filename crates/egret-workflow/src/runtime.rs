@@ -88,7 +88,9 @@
 //! [`wake`](crate::worker::wake) hands each id
 //! [`due_retries`](crate::worker::due_retries) named to
 //! [`resume`](crate::worker::resume), and `resume`'s
-//! `load` takes `SELECT … FROM workflow.executions WHERE id = $1 FOR UPDATE`
+//! `load` takes `SELECT … FROM workflow.executions WHERE id = $1 FOR NO KEY
+//! UPDATE` (`FOR UPDATE` until W13a final review I2; the weaker mode conflicts
+//! with itself exactly as `FOR UPDATE` does, so nothing below changes)
 //! (`worker/claim.rs:1521`). So the second replica's `resume` **blocks** behind
 //! the first's — it does not skip, and it must not: skipping would be a woken
 //! execution dropped. When it acquires the lock it re-reads the state the first
@@ -109,7 +111,7 @@
 //!
 //! ### The lock is load-bearing, and a surviving mutant does not say otherwise
 //!
-//! **Do not remove the `FOR UPDATE`.** W10 Task 2 mutation F flipped
+//! **Do not remove the `FOR NO KEY UPDATE`.** W10 Task 2 mutation F flipped
 //! `claim::load` from `Lock::Yes` to `Lock::No` — the whole of the
 //! serialisation this statement names — and
 //! `two_tickers_reopen_a_due_retry_exactly_once` stayed green, 3 runs of 3,

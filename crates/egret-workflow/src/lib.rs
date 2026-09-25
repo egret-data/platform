@@ -12,7 +12,7 @@
 //! - `repo`      — W1 (`workflow.flows` + `workflow.flow_versions`) and W10
 //!   Task 3 (`ExecutionRepo`, the READ layer over `workflow.executions` +
 //!   `workflow.task_runs`; the writes stay in `worker::claim`, which holds the
-//!   `FOR UPDATE` this one deliberately does not)
+//!   `FOR NO KEY UPDATE` this one deliberately does not)
 //! - `refs`      — W1 Task 7 (`WorkflowRefs`, the real `WorkflowRefPort`)
 //! - `routes`    — W1 Task 7 (the nine management routes, spec §10)
 //! - `runners`   — W2 (expression rendering)

@@ -1022,6 +1022,122 @@ async fn fire_and_delete_are_atomic() {
     assert_eq!(executions_of(&fx.db, listener).await, 2);
 }
 
+// ── A busy source (final review I2) ─────────────────────────────────────────
+
+/// A source that a worker settles AFTER the claim's snapshot and BEFORE the
+/// fire's foreign-key check must not fail the fire.
+///
+/// The fire's `INSERT` checks `trigger_execution_id` with `FOR KEY SHARE` on
+/// the source. At `REPEATABLE READ` that check fails `40001` when the source
+/// row was changed after the snapshot by a transaction that held it
+/// `FOR UPDATE` (the reviewer measured it on PG16; a plain `UPDATE` or one
+/// under `FOR NO KEY UPDATE` passes). Every `settle` loads its execution
+/// through `claim::load_with`, so the source's lock mode is the one under test.
+///
+/// The window is held open by a `BEFORE INSERT` trigger on the listener's
+/// executions that counts itself into a sequence and sleeps: the pass has
+/// claimed and read the source, and its FK check has not run yet. The test
+/// waits for the count, then `worker::resume`s the source -- the worker's own
+/// `load` + `settle`, which rewrites the row's `seq` -- and commits it.
+#[tokio::test]
+async fn a_source_settled_between_the_claim_and_the_fire_still_fires() {
+    let Some(fx) = fx().await else { return };
+    let producer_src = source_yaml("producer");
+    let producer = fx.flow(&producer_src).await;
+    let listener = fx.flow(&listener_yaml("listener", "", "")).await;
+    let exec = fx.run(producer, &producer_src, serde_json::json!({})).await;
+
+    let hex = listener.simple();
+    for ddl in [
+        format!("DROP TRIGGER IF EXISTS w13_hold_{hex} ON workflow.executions"),
+        format!("DROP FUNCTION IF EXISTS public.w13_hold_{hex}()"),
+        format!("DROP SEQUENCE IF EXISTS public.w13_hold_{hex}"),
+        format!("CREATE SEQUENCE public.w13_hold_{hex}"),
+        format!(
+            "CREATE FUNCTION public.w13_hold_{hex}() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN PERFORM nextval('public.w13_hold_{hex}'); PERFORM pg_sleep(1.5); \
+             RETURN NEW; END $$"
+        ),
+        format!(
+            "CREATE TRIGGER w13_hold_{hex} BEFORE INSERT ON workflow.executions \
+             FOR EACH ROW WHEN (NEW.flow_id = '{listener}') \
+             EXECUTE FUNCTION public.w13_hold_{hex}()"
+        ),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(ddl.clone()))
+            .execute(&fx.db.pool)
+            .await
+            .unwrap_or_else(|e| panic!("{ddl}: {e}"));
+    }
+
+    let seq_before: i64 = sqlx::query_scalar("SELECT seq FROM workflow.executions WHERE id = $1")
+        .bind(exec)
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
+    let pool = fx.db.pool.clone();
+    let pass = tokio::spawn(async move { process_events(&pool).await });
+    let entered = format!("SELECT is_called FROM public.w13_hold_{hex}");
+    let mut inside = false;
+    for _ in 0..200 {
+        let called: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(entered.clone()))
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+        if called {
+            inside = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(inside, "control: the pass reached the listener's insert");
+    egret_workflow::worker::resume(&fx.db.pool, exec)
+        .await
+        .expect("the worker settles the source while the fire waits");
+    let seq_after: i64 = sqlx::query_scalar("SELECT seq FROM workflow.executions WHERE id = $1")
+        .bind(exec)
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
+    assert!(
+        seq_after > seq_before,
+        "control: the settle committed a new version of the source row \
+         ({seq_before} -> {seq_after}) while the pass was inside the fire"
+    );
+
+    let logs = LogCapture::default();
+    let report = {
+        let _guard = logs.install();
+        pass.await.expect("the pass task").expect("a pass")
+    };
+    for ddl in [
+        format!("DROP TRIGGER IF EXISTS w13_hold_{hex} ON workflow.executions"),
+        format!("DROP FUNCTION IF EXISTS public.w13_hold_{hex}()"),
+        format!("DROP SEQUENCE IF EXISTS public.w13_hold_{hex}"),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(ddl.clone()))
+            .execute(&fx.db.pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        report,
+        EventReport {
+            events: 1,
+            fired: 1,
+            ..Default::default()
+        },
+        "the fire survived the source's settle; logs:\n{}",
+        logs.text()
+    );
+    assert_eq!(executions_of(&fx.db, listener).await, 1);
+    assert_eq!(
+        common::events(&fx.db).await,
+        vec![],
+        "the event is consumed"
+    );
+}
+
 // ── Draft and dependsOn ─────────────────────────────────────────────────────
 
 /// The user's decision (spec header): a draft listener fires, beside a live
