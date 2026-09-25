@@ -105,11 +105,11 @@
 //! events or [`MAX_PASS_DURATION`](process::MAX_PASS_DURATION), checking the
 //! shutdown token between events, so a backlog never holds `fire_due` back.
 //!
-//! **A `SELECT … FOR UPDATE`, not the spec's `DELETE … RETURNING`.** Per-
-//! listener retry (spec §4.4 point 1) sometimes KEEPS the event, updated, and
-//! a deleted row would have to be re-inserted. The delete moved to statement
-//! 5, in the same transaction, so "fire and consume commit together" holds
-//! exactly as the spec's shape had it.
+//! **A `SELECT … FOR UPDATE`, not the first spec draft's `DELETE …
+//! RETURNING`** (§4.4 now says so). Per-listener retry (spec §4.4 point 1)
+//! sometimes KEEPS the event, updated, and a deleted row would have to be
+//! re-inserted. The delete moved to statement 5, in the same transaction, so
+//! "fire and consume commit together" holds exactly as that draft had it.
 //!
 //! **Its one serialization failure, handled.** The snapshot is taken at the
 //! start of this statement and the lock after it. An event another processor
