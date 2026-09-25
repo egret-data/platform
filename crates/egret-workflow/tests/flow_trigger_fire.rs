@@ -135,6 +135,16 @@ async fn event_rows(db: &Db) -> Vec<(i64, Vec<String>, i32)> {
         .unwrap()
 }
 
+/// Make every kept event due now, as the next tick would find it once its
+/// backoff has passed (final review F2). A retry test calls this between
+/// passes; without it the second pass would find nothing due.
+async fn make_events_due(db: &Db) {
+    sqlx::query("UPDATE workflow.flow_trigger_events SET next_attempt_at = now()")
+        .execute(&db.pool)
+        .await
+        .expect("make the kept events due");
+}
+
 fn key(flow: Uuid) -> String {
     format!("{flow}/on_done")
 }
@@ -898,6 +908,7 @@ async fn a_transient_failure_keeps_the_event_for_that_listener_only() {
     assert_eq!(rows.len(), 1, "the event is kept");
     assert_eq!((rows[0].1.clone(), rows[0].2), (vec![key(healthy)], 1));
 
+    make_events_due(&fx.db).await;
     assert_eq!(
         fx.pass().await,
         EventReport {
@@ -910,6 +921,49 @@ async fn a_transient_failure_keeps_the_event_for_that_listener_only() {
     assert_eq!(executions_of(&fx.db, failing).await, 1);
     assert_eq!(executions_of(&fx.db, healthy).await, 1, "not fired twice");
     assert_eq!(common::events(&fx.db).await, vec![]);
+}
+
+/// Final review F2: `attempts` counts TICKS, not passes. A kept event is
+/// given a `next_attempt_at` one backoff ahead, and the claim skips an event
+/// that is not due -- so a second pass straight after the first (another
+/// replica's, or the same ticker's next one inside the backoff) finds nothing,
+/// and the event's `attempts` does not move. Once it is due, it is claimed.
+#[tokio::test]
+async fn a_kept_event_waits_for_its_backoff() {
+    let Some(fx) = fx().await else { return };
+    let producer_src = source_yaml("producer");
+    let producer = fx.flow(&producer_src).await;
+    let failing = fx.flow(&listener_yaml("failing", "", "")).await;
+    fx.run(producer, &producer_src, serde_json::json!({})).await;
+    install_fault(&fx.db, failing, false).await;
+
+    let errored = EventReport {
+        events: 1,
+        errored: 1,
+        ..Default::default()
+    };
+    assert_eq!(fx.pass().await, errored, "control: pass 1 keeps the event");
+    assert_eq!(
+        fx.pass().await,
+        EventReport::default(),
+        "a pass inside the backoff claims nothing"
+    );
+    make_events_due(&fx.db).await;
+    let third_after_due = fx.pass().await;
+    drop_fault(&fx.db, failing).await;
+    assert_eq!(third_after_due, errored, "a due event is claimed again");
+    let rows = event_rows(&fx.db).await;
+    assert_eq!(
+        rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+        vec![2],
+        "two ticks, two attempts -- not three passes"
+    );
+    let ahead: bool =
+        sqlx::query_scalar("SELECT next_attempt_at > now() FROM workflow.flow_trigger_events")
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert!(ahead, "the kept event is due one backoff from now");
 }
 
 /// A listener that fails on every pass: the event is kept for passes 1-4 and
@@ -929,6 +983,7 @@ async fn a_listener_that_keeps_failing_is_given_up_after_five_attempts() {
         ..Default::default()
     };
     for attempt in 1..=4 {
+        make_events_due(&fx.db).await;
         assert_eq!(fx.pass().await, errored, "pass {attempt}");
         let rows = event_rows(&fx.db).await;
         assert_eq!(
@@ -937,6 +992,7 @@ async fn a_listener_that_keeps_failing_is_given_up_after_five_attempts() {
             "kept after pass {attempt}"
         );
     }
+    make_events_due(&fx.db).await;
     let logs = LogCapture::default();
     let fifth = {
         let _guard = logs.install();

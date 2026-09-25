@@ -33,6 +33,13 @@ pub(crate) const FLOW_TYPE: &str = "io.kestra.plugin.core.trigger.Flow";
 /// number deletes the event instead and logs the listeners at `warn`.
 pub const MAX_ATTEMPTS: i32 = 5;
 
+/// How long a kept event waits before it is claimed again (final review F2):
+/// `flow_trigger_events.next_attempt_at` is set this far ahead, and the claim
+/// skips an event that is not yet due. One tick of the scheduler at its
+/// default interval, so [`MAX_ATTEMPTS`] counts ticks, not passes -- two
+/// replicas' passes inside one backoff find the event not due.
+pub const DEFAULT_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// The reason a `dependsOn` listener is skipped, logged and counted as
 /// `refused`. W13a's `settle` writes events such a listener hears, because the
 /// hook's `EXISTS` does not read `depends_on` (spec §4.2).
@@ -187,6 +194,7 @@ pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
             "SELECT id, source_execution_id, workspace_id, state, done, attempts \
                FROM workflow.flow_trigger_events \
               WHERE id <> ALL ($1) \
+                AND next_attempt_at <= now() \
               ORDER BY id \
               LIMIT 1 \
               FOR UPDATE SKIP LOCKED",
@@ -245,6 +253,10 @@ pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
         }
         report.events += 1;
     }
+}
+
+fn backoff_ms(backoff: std::time::Duration) -> i64 {
+    i64::try_from(backoff.as_millis()).unwrap_or(i64::MAX)
 }
 
 fn is_serialization_failure(e: &sqlx::Error) -> bool {
@@ -408,11 +420,14 @@ async fn finish_event(
 ) -> Result<()> {
     if !pending.is_empty() && ev.attempts + 1 < MAX_ATTEMPTS {
         sqlx::query(
-            "UPDATE workflow.flow_trigger_events SET done = $2, attempts = attempts + 1 \
+            "UPDATE workflow.flow_trigger_events \
+                SET done = $2, attempts = attempts + 1, \
+                    next_attempt_at = now() + $3::bigint * interval '1 millisecond' \
               WHERE id = $1",
         )
         .bind(ev.id)
         .bind(done)
+        .bind(backoff_ms(DEFAULT_RETRY_BACKOFF))
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;

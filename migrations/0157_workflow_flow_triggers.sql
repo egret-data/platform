@@ -6,10 +6,12 @@
 -- a flow because another execution in its workspace reached a state. See
 -- docs/en/specs/2026-09-25-workflow-w13-flow-triggers-design.md §4.1.
 --
--- Reproduced verbatim from the spec, including `flow_trigger_events.done` and
--- `.attempts`, which W13a Task 2 does not yet read (the processor is Task 4)
--- but which belong on the table from its first row rather than as a later
--- ALTER.
+-- Reproduced verbatim from the spec, including `flow_trigger_events.done`,
+-- `.attempts` and `.next_attempt_at`, which W13a Task 2 does not yet read (the
+-- processor is Task 4) but which belong on the table from its first row rather
+-- than as a later ALTER. `next_attempt_at` was added in place by the final
+-- review's fix wave (F2), while 0157 had been applied only to this branch's
+-- private database.
 --
 -- The backstop unique index keys on the outbox EVENT that fired the
 -- execution (`flow_trigger_event_id`), not on the source's state. An earlier
@@ -40,6 +42,10 @@ CREATE TABLE workflow.flow_trigger_events (
   state               text        NOT NULL,
   done                text[]      NOT NULL DEFAULT '{}', -- listeners already handled
   attempts            integer     NOT NULL DEFAULT 0,
+  -- A kept event is not claimed again before this (final review F2), so
+  -- `attempts` counts ticks rather than passes: N replicas' passes inside one
+  -- backoff find nothing due. A new event is due at once.
+  next_attempt_at     timestamptz NOT NULL DEFAULT now(),
   created_at          timestamptz NOT NULL DEFAULT now()
 );
 
