@@ -8227,7 +8227,7 @@ edited anything.
 | # | population | examined | corrected |
 |---|---|---:|---:|
 | 1 | the proposition and its glosses -- `wiring seam` (owed or missing), `no production constructor`, `has no such guarantee` -- across the whole repository, flattened | **3822 files**, 3 matching, **6 occurrences** | **4** |
-| 1b | the born-FAILED citation family -- every occurrence of `listener_run1_FAILED_bad_inputs` outside `oracle-exec/`'s generated inputs | **6 occurrences, 5 files** | **1** |
+| 1b | the born-FAILED citation family -- `git grep -n listener_run1_FAILED_bad_inputs 1ec0f79f -- . ':!crates/egret-workflow/oracle-exec/'` | **9 raw hits, 6 files** (2 code key literals + **7 prose citations**) | **1** |
 | 2 | ordinals and counts in the five regions populations 1 and 1b corrected | **5 regions** | **0** |
 | 3 | data that feeds a generator -- the 14 files under `oracle-exec/`: 10 data files (`baseline.txt`, `corpus.json`, `golden.json`, `handler-surface.txt`, `harvest-run.txt`, `probe.json`, `runnable.txt`, `stability.json`, `w12-schedule-trigger.json`, `w13-flow-trigger.json`) plus 4 generators (`driver.rs`, `harvest.py`, `normalise.py`, `handler_surface.py`) | **14 inputs** | **0** |
 | 4 | the other language -- every file under `docs/vi/`, flattened | **287 files**, 1 matching | **0** |
@@ -8293,23 +8293,51 @@ is **not** a refusal -- it is the born-FAILED execution
 (`inputs_that_fail_to_render_create_a_failed_execution`). The citation was
 accurate about the underlying Kestra fact and wrong about which egret
 mechanism it illustrated, which is why it reads, uncorrected, as evidence
-that naming `trigger` in a `when` refuses the same way. **The population is
-6 occurrences in 5 files, not 4** -- `flow_trigger::process` itself carries
-two (the one corrected, and a second, further down, over `inputs`); the
-other three are one apiece, in `worker/claim.rs`'s `born_failed` field doc,
-`tests/flow_trigger_fire.rs`'s test doc, and the EN design spec's §4.4
-walkthrough together with its VI twin, a sixth occurrence in a sixth file. A
-`.rs` test file has no VI twin; the twin belongs to the spec. The five other
-sites were already correctly framed -- four of them stating it in as many
-words (*"NOT a refusal"*, *"does NOT refuse"*, VI *"KHÔNG... từ chối"*), and
-`tests/flow_trigger_fire.rs`'s doc conveying the same fact without the word,
-through *"Kestra STILL creates the listener's execution"* -- which is the
-positive control: this package usually gets the distinction right, and the
-one site that did not is the one nobody had reread since Task 1's first,
-wrong draft of it. Corrected in place, the guard kept as `when`-only and the
-citation kept because it remains the only
-measured *"Unable to find `trigger`"* this package has -- reworded to say
-what it is evidence of rather than removed.
+that naming `trigger` in a `when` refuses the same way.
+
+**The command, so the count does not have to be trusted:**
+`git grep -n listener_run1_FAILED_bad_inputs 1ec0f79f -- . ':!crates/egret-workflow/oracle-exec/'`
+(the exclusion drops only the generated `oracle-exec/` inputs population 3
+already covers). **Raw output: 9 hits, in 6 files.** The rule that splits
+them: a hit inside a Rust string literal used as a data key -- indexing a
+parsed JSON fixture, or naming one in a test-data tuple -- is not a
+*citation* of the measurement, it is the SAME string doing the job a key
+does; a hit inside a doc comment or prose sentence citing the measurement as
+evidence IS a citation. That is **2 key literals + 7 prose citations**, and
+every site, named rather than counted:
+
+| site | line | kind |
+|---|---:|---|
+| `crates/egret-workflow/src/flow_trigger/process.rs` | 45 | prose -- the `FORBIDDEN_ROOTS` doc, the one corrected |
+| `crates/egret-workflow/src/flow_trigger/process.rs` | 544 | prose -- the `inputs` comment |
+| `crates/egret-workflow/src/flow_trigger/process.rs` | 776 | **key literal** -- `("listener_run1_FAILED_bad_inputs", "producer_run1")`, a test-data tuple |
+| `crates/egret-workflow/src/worker/claim.rs` | 1508 | prose -- the `born_failed` field doc |
+| `crates/egret-workflow/tests/flow_trigger_fire.rs` | 315 | prose -- the test's doc comment |
+| `crates/egret-workflow/tests/flow_trigger_fire.rs` | 335 | **key literal** -- `o["executions"]["listener_run1_FAILED_bad_inputs"]`, indexing the fixture |
+| `docs/en/plans/2026-09-25-workflow-w13a-flow-triggers-window-free.md` | 216 | prose -- the plan's own fix-round-1 amendment note |
+| `docs/en/specs/2026-09-25-workflow-w13-flow-triggers-design.md` | 150 | prose -- the design spec's §4.4 walkthrough |
+| `docs/vi/specs/2026-09-25-workflow-w13-flow-triggers-design.md` | 160 | prose -- its VI twin |
+
+Six files, not five: the plan doc is the sixth, and no earlier pass of this
+sweep had named it -- the same *"a list of patterns compiled before a
+package ships describes what its author expected"* shape W12 Task 6 named,
+here applied to a list of FILES rather than a list of patterns. **Of the 7
+prose citations, 1 is corrected** (`process.rs:45`) **and 6 were already
+correctly framed**: `process.rs:544` and `claim.rs:1508` say *"NOT a
+refusal"* in as many words; the design spec (`:150`) says *"does NOT refuse
+the fire"*; its VI twin (`:160`) says *"KHÔNG làm lần bắn bị từ chối"* --
+four of the six stating it in as many words. The other two convey the same
+fact without that phrase: `flow_trigger_fire.rs:315`'s doc says Kestra
+*"STILL creates the listener's execution"*, and the plan's own note
+(`:216`) says the line "first said the fire is refused, which misread the
+measurement" and then states the corrected fact without repeating the word
+*"refusal"*. **Six correctly-framed sites, four of six in as many words**,
+which is the positive control unchanged in substance from the earlier round:
+this package usually gets the distinction right, and the one site that did
+not is the one nobody had reread since Task 1's first, wrong draft of it.
+Corrected in place, the guard kept as `when`-only and the citation kept
+because it remains the only measured *"Unable to find `trigger`"* this
+package has -- reworded to say what it is evidence of rather than removed.
 
 **Population 2's zero is not vacuous**: the five corrected regions above
 carry other numerals untouched by this correction -- *"five id columns"* and
