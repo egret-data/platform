@@ -212,7 +212,8 @@ pub async fn process_events(pool: &PgPool) -> egret_core::Result<EventReport>;
   - `fired_by(db, source) -> Vec<(Uuid /*flow*/, i32 /*depth*/, Value /*trigger*/)>`.
   - The tests in this file share one DB per process and a pass is global. Serialise them with a static mutex and clear `flow_trigger_events` at the start of each, as `tests/scheduler_fire.rs` does.
 - [ ] **Step 2: Failing tests** in `tests/flow_trigger_fire.rs`, one per spec §7.1 row this task owns:
-  - `a_success_fires_the_listener_once`: one execution. `trigger_execution_id` = the source, `execution_depth` = 1, `execution_trigger` equals Task 1's shape (loaded with `include_str!`), and `inputs.src` equals the source id. The event is gone afterwards.
+  - `a_success_fires_the_listener_once`: one execution. `trigger_execution_id` = the source, `execution_depth` = 1, `execution_trigger` equals Task 1's shape (loaded with `include_str!`), and `inputs` equal the listener's literal inputs. The event is gone afterwards.
+  - `inputs_referencing_trigger_refuse_the_fire`: **measured in Task 1** (`oracle-exec/w13-flow-trigger.json`, `listener_run1_FAILED_bad_inputs`): Kestra fails `inputs: {src: "{{ trigger.executionId }}"}` with `Unable to find \`trigger\`` and does not fire. egret's source render context has no `trigger` root, so the same input must refuse the fire. Assert zero executions for that listener, a sibling with literal inputs still fires, and the event is consumed.
   - `refusals`: same flow; other workspace; `kind` not normal (write the source's kind column by SQL); `when: "{{ false }}"`; `when` that cannot render. Each gives zero executions, and the event is consumed.
   - `every_off_switch`: all six, each with an unaffected sibling listener that does fire.
   - `a_chain_runs_one_hop_per_pass`: A→B→C. Pass 1 fires B at depth 1; pass 2 fires C at depth 2.
