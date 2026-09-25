@@ -66,6 +66,7 @@ CREATE TABLE workflow.flow_trigger_events (
   state               text        NOT NULL,
   done                text[]      NOT NULL DEFAULT '{}', -- các listener đã xử lý xong
   attempts            integer     NOT NULL DEFAULT 0,
+  next_attempt_at     timestamptz NOT NULL DEFAULT now(), -- backoff của sự kiện được giữ lại
   created_at          timestamptz NOT NULL DEFAULT now()
 );
 
@@ -111,46 +112,69 @@ SELECT $1, $2, t.s
 
 ### 4.4 Processor
 
-`flow_trigger::process_events(&PgPool) -> Result<EventReport>` chạy từ **ticker scheduler của W12**, ngay sau `fire_due`, dưới cùng công tắc `scheduler_enabled`. Mỗi pass rút cạn outbox, **mỗi sự kiện một transaction**:
+`flow_trigger::process_events_with(&PgPool, &PassLimits, &CancellationToken) -> Result<EventReport>` chạy từ **ticker scheduler của W12**, ngay sau `fire_due`, dưới cùng công tắc `scheduler_enabled`. (`process_events(&PgPool)` là cùng pass đó với giới hạn mặc định và không huỷ.) Mỗi pass claim outbox **mỗi sự kiện một transaction**, và pass **có trần**:
 
 ```text
-BEGIN
-  DELETE FROM workflow.flow_trigger_events
-   WHERE id = (SELECT id FROM workflow.flow_trigger_events ORDER BY id
-               LIMIT 1 FOR UPDATE SKIP LOCKED)
-  RETURNING *                                    -- không có -> hết pass
-  nạp execution nguồn (namespace, flow key, kind, execution_depth, render surface)
-  SELECT listener: cùng workspace, state thuộc states, khác flow nguồn, không disabled,
-         flow nghe chưa xoá, state <> 'disabled', feature workflows bật,
-         workspace active                        -- sáu công tắc tắt của W12
-  với mỗi listener, trong một SAVEPOINT:
-    parse source của listener; WindowFreeFlowTrigger::resolve
-    render `when` và `inputs` trên context của NGUỒN
-    trigger::flow::evaluate(.., max_depth = 100)
-    Fired -> start_execution_in(tx, NewExecution { trigger_execution_id: nguồn,
-             execution_depth: nguồn + 1, flow_trigger_event_id: sự_kiện.id,
-             trigger: {id, type: Flow, variables}, .. })
-    lỗi -> phân loại như W12; lỗi của listener này không bao giờ làm hỏng lần bắn của listener khác
-COMMIT
+cursor := 0
+lặp:
+  đã huỷ -> return
+  BEGIN ISOLATION LEVEL REPEATABLE READ
+    SELECT id, source_execution_id, workspace_id, state, done, attempts
+      FROM workflow.flow_trigger_events
+     WHERE id > cursor AND next_attempt_at <= now()
+     ORDER BY id LIMIT 1
+       FOR UPDATE SKIP LOCKED                   -- không có -> return; 40001 -> claim lại
+    cursor := sự_kiện.id
+    SELECT listener: cùng workspace, state thuộc states, không disabled,
+           flow nghe chưa xoá, state <> 'disabled', feature workflows bật,
+           workspace active                     -- sáu công tắc tắt của W12
+    bỏ các listener đã có trong sự_kiện.done
+    nạp execution nguồn (workspace, namespace, flow key, kind, execution_depth,
+                         render surface), trong một SAVEPOINT
+    với mỗi listener, trong một SAVEPOINT:
+      parse source của listener; WindowFreeFlowTrigger::resolve
+      render `when` trên context của NGUỒN
+      trigger::flow::evaluate(.., max_depth = 100)
+      Fired -> render `inputs` (lỗi -> sinh ra đã FAILED, §4.5);
+               start_execution_in(tx, NewExecution { trigger_execution_id: nguồn,
+               execution_depth: nguồn + 1, flow_trigger_event_id: sự_kiện.id,
+               trigger: {id, type: Flow, variables}, .. })
+      đã bắn, bị từ chối, đã bắn từ trước, hỏng -> done
+      lỗi có thể tạm thời -> rollback savepoint, còn chờ
+    không còn gì chờ, hoặc attempts + 1 = 5 -> DELETE sự kiện (warn cho phần còn chờ)
+    ngược lại -> UPDATE sự kiện SET done, attempts + 1,
+                                    next_attempt_at = now() + backoff
+  COMMIT
+  cả transaction lỗi -> rollback toàn bộ; rồi, bên ngoài nó:
+    UPDATE ... SET attempts + 1, next_attempt_at = now() + backoff
+     WHERE id = (SELECT .. FOR UPDATE SKIP LOCKED); đến 5 -> DELETE + cùng câu warn
+  đã 500 sự kiện trong pass này, hoặc đã tốn 1 giây -> return
 ```
 
 **Vì sao từng dòng như vậy:**
 
-1. **Sự kiện bị xoá trong chính transaction bắn**, nên mỗi sự kiện được xử lý đúng một lần hoặc không lần nào. Nếu process chết, cả lần bắn lẫn lệnh xoá cùng rollback và pass sau thử lại. Unique index là chốt chặn.
+1. **Sự kiện bị xoá, hoặc được giữ lại, trong chính transaction bắn**, nên các lần bắn của một sự kiện và phần sổ sách của nó cùng commit hoặc cùng không. Nếu process chết, cả hai cùng rollback và một pass sau thử lại. Unique index là chốt chặn.
+   - **Là `SELECT … FOR UPDATE`, không phải `DELETE … RETURNING`.** Bản nháp trước của spec này xoá sự kiện ngay trong câu claim. Thử lại theo từng listener đôi khi phải GIỮ sự kiện, nên câu claim khoá nó, và câu lệnh cuối của sự kiện hoặc xoá hoặc cập nhật nó, trong cùng transaction.
    - **Thử lại theo từng listener, không theo cả sự kiện.** Listener gặp lỗi tạm thời chỉ rollback savepoint của nó, còn lần bắn của các listener khác vẫn commit.
-   - Sự kiện được giữ lại, ghi các listener đã xong vào `done` và tăng `attempts`. Pass sau chỉ đánh giá những listener chưa có trong `done`.
+   - Sự kiện được giữ lại, ghi các listener đã xong vào `done`, tăng `attempts` và đặt `next_attempt_at` lùi một khoảng backoff (chu kỳ tick của scheduler). Pass sau chỉ đánh giá những listener chưa có trong `done`.
    - Sau 5 lần thử, sự kiện bị bỏ và các listener vẫn lỗi được log ở mức `warn`. Nhờ vậy một listener lỗi không thể làm hỏng cũng không thể chặn các listener khác.
+   - **Cả transaction lỗi** (một savepoint, câu ghi cuối hoặc `COMMIT`) thì `attempts + 1` cũng bị rollback theo, nên nhánh lỗi đếm lại lần thử bằng một câu lệnh autocommit riêng. Câu này lấy hàng bằng `SKIP LOCKED`, nên không bao giờ chờ một replica vừa claim sự kiện. Sự kiện mà transaction luôn lỗi sẽ bị bỏ sau 5 lần với cùng câu `warn`, thay vì bị thử lại mãi mãi.
 2. **`SKIP LOCKED` chia sự kiện giữa các replica**, như câu claim của W12. Hai sự kiện cho cùng một listener có thể được xử lý song song. Chỉ nhánh cửa sổ cần chúng xếp hàng, và W13b làm việc đó bằng row lock của cửa sổ.
 3. **Context của nguồn được đọc lúc xử lý, không phải lúc đổi trạng thái.** `endDate` và `lastTaskId` của bản ghi trigger cũng vậy.
    - Với trạng thái kết thúc, hai thời điểm này thường như nhau. Chúng khác nhau khi nguồn đã đi tiếp trước khi sự kiện được xử lý: một nguồn đã kết thúc nhưng bị replay hoặc restart trong lúc đó sẽ render context muộn hơn, với `endDate`/`lastTaskId` muộn hơn.
    - Với `PAUSED`, nếu nguồn đã resume trước khi sự kiện được xử lý thì `when` sẽ render trên context muộn hơn. Đây là độ lệch có ghi rõ so với Kestra, vốn render trên execution nó được giao.
    - Cách còn lại là chụp nguyên render context vào mỗi hàng sự kiện. Làm vậy không đáng về dung lượng cho một độ lệch chỉ xảy ra khi nguồn đi tiếp trước khi sự kiện được xử lý.
-4. **Độ sâu là dữ liệu, không phải stack.** `evaluate` đọc `execution_depth` đã lưu của nguồn, và execution được bắn ghi depth + 1. Mỗi lần bắn là một lời gọi `start_execution_in` riêng trong vòng lặp của processor, không lồng nhau, nên không stack nào phình ra, và trần là 100 như Kestra. Một chuỗi tiến **ít nhất** một bước mỗi pass: sự kiện do settle ĐẦU TIÊN của execution vừa bắn ghi ra (listener nghe `RUNNING`, execution sinh ra đã FAILED, flow kết thúc ngay trong settle đầu) được commit cùng lần bắn và được claim ngay trong CÙNG pass, nên các bước như vậy nối nhau trong một pass. Độ sâu vẫn chặn nó.
+4. **Độ sâu là dữ liệu, không phải stack.** `evaluate` đọc `execution_depth` đã lưu của nguồn, và execution được bắn ghi depth + 1. Mỗi lần bắn là một lời gọi `start_execution_in` riêng trong vòng lặp của processor, không lồng nhau, nên không stack nào phình ra, và trần là 100 như Kestra. Một chuỗi tiến **ít nhất** một bước mỗi pass: sự kiện do settle ĐẦU TIÊN của execution vừa bắn ghi ra (listener nghe `RUNNING`, execution sinh ra đã FAILED, flow kết thúc ngay trong settle đầu) được commit cùng lần bắn và có id lớn hơn cursor, nên được claim ngay trong CÙNG pass, tới khi chạm trần. Độ sâu vẫn chặn nó.
+   - **Mọi liên kết khác cũng mang độ sâu, như của Kestra** (javap trên artifact đã ghim). Execution con của `Subflow` được ghi depth của cha + 1 và bị từ chối khi vượt 100: task của nó FAILED với "cannot execute flow '…'.'…': the execution chain exceeded the maximum depth of 100" (`ExecutableUtils.subflowExecution`). Một replay `CREATE_NEW_EXECUTION` giữ depth của bản gốc (`ExecutionService.replay` giữ metadata). Một vòng lặp `Loop` giữ depth của cha và có kind `LOOP` (`Execution.loopExecution`), kind mà `computeFlowTriggers` từ chối làm nguồn, nên egret từ chối vòng lặp đó với `NotNormalKind` (hàng của nó có `loop_index`). Trước bản sửa này, cả ba được ghi depth 0, và một vòng qua `Loop` không bao giờ chạm 100.
 5. **Độ trễ:** một bước mà listener có task phải chờ worker rồi chờ tick kế của scheduler, mặc định 1 giây, nên chuỗi 10 bước như vậy mất khoảng 10 giây trở lên. Các bước kết thúc hoặc phát sự kiện ngay trong settle đầu có thể nhanh hơn, như điểm 4. Chấp nhận và nói rõ.
 6. **Scheduler tắt thì outbox phình.**
    - `settle` ghi sự kiện hễ có listener, bất kể `scheduler_enabled`, vì `settle` không đọc config.
-   - Khi bật scheduler lên, phần tồn đọng sẽ được xử lý. Đây là bản tương ứng của việc cron bù lịch theo `ALL`.
-   - Operator nào để scheduler tắt trong khi có flow khai báo flow trigger sẽ tích luỹ mỗi lần đổi trạng thái được nghe một hàng. Điều này được ghi trong comment của chart, cạnh `schedulerEnabled`.
+   - Khi bật scheduler lên, phần tồn đọng sẽ được xử lý, mỗi tick nhiều nhất một pass có trần (điểm 7). Đây là bản tương ứng của việc cron bù lịch theo `ALL`.
+   - Operator nào để scheduler tắt trong khi có flow khai báo flow trigger sẽ tích luỹ mỗi lần đổi trạng thái được nghe một hàng.
+   - Phần tồn đọng cũng **không đều**: scheduler tắt thì `reconcile` chưa chạy, nên chỉ flow lưu sau migration 0157 mới có hàng listener, và chỉ các lần đổi trạng thái mà trigger của chúng nghe mới được ghi lại, cho tới lần đầu scheduler khởi động. Điều này được ghi trong comment của chart, cạnh `schedulerEnabled`.
+7. **Mỗi pass có giới hạn.** Pass dừng sau 500 sự kiện hoặc khi đã chạy 1 giây, kiểm sau mỗi sự kiện, và kiểm token tắt máy trước mỗi lần claim. Phần còn lại chờ tick kế, nên phần tồn đọng không giữ chân `fire_due` hay việc tắt máy. "Mỗi sự kiện nhiều nhất một lần mỗi pass" là nhờ **cursor**: câu claim lấy sự kiện đến hạn cũ nhất có `id > cursor`, nên cả sự kiện được giữ lại lẫn sự kiện có transaction lỗi đều không chiếm lại được pass. Sự kiện commit với id nhỏ hơn cursor sau khi cursor đã vượt qua nó (id được cấp trước khi commit, nên thứ tự commit có thể đảo) thuộc về pass sau.
+8. **Listener được chọn lại ở mỗi lần thử.** Lần thử lại của một sự kiện được giữ chạy lại câu `SELECT` listener, trừ `done`. Vì vậy một listener được tạo, hoặc được bật, sau lần đổi trạng thái nhưng trước lần thử lại có thể nghe được lần đổi trạng thái đó. Kestra đánh giá các flow đang có lúc nó xử lý lần đổi trạng thái, một lần. Đây là một độ lệch nhỏ, có ghi rõ: nó cần một listener khác của cùng sự kiện gặp lỗi tạm thời, và nó chỉ có thể thêm một lần bắn, không bao giờ làm mất lần nào.
+9. **Transaction chạy ở `REPEATABLE READ`**, nên hàng của nguồn, các task run và render surface của nó được đọc trong cùng một snapshot. Cái giá là lỗi serialization khi ghi, và phép kiểm khoá ngoại của lần bắn lên nguồn (`FOR KEY SHARE`) là một phép ghi như vậy. Nó thành công với một nguồn mà worker đã settle sau snapshot **vì worker khoá execution bằng `FOR NO KEY UPDATE`** (`claim::load_with`), chế độ xung đột với mọi writer khác y như `FOR UPDATE` nhưng không xung đột với một phép kiểm key-share. Dưới `FOR UPDATE`, phép kiểm đó lỗi `40001`, và listener của một nguồn đang bận bị lỗi rồi bị bỏ.
 
 `NewExecution` (W12 Task 3) thêm bốn trường: `trigger_execution_id: Option<Uuid>`, `execution_depth: i32`, `flow_trigger_event_id: Option<i64>` và `born_failed: bool` (§4.5).
 
@@ -239,6 +263,13 @@ Mỗi dòng nêu mutation phải làm nó đỏ.
 | bị từ chối: cùng flow, khác workspace, kind không phải normal, `when` sai, `when` không render được | bỏ lần lượt từng lọc |
 | sáu công tắc tắt | bỏ lần lượt từng vế |
 | chuỗi A→B→C bắn qua ba pass; vòng A→B→A dừng ở depth 100 | bỏ kiểm độ sâu; ghi depth 0 |
+| execution con của `Subflow` có depth của cha + 1 và bị từ chối khi vượt 100; vòng lặp `Loop` và replay giữ depth của cha | bỏ + 1; bỏ từ chối; ghi 0 cho một trong hai bản sao |
+| vòng lặp `Loop` không làm bắn listener nào (`NotNormalKind`) | truyền kind `None` cho mọi nguồn |
+| nguồn được settle giữa lúc claim và lúc bắn vẫn bắn được | khoá execution bằng `FOR UPDATE` trong `load_with` |
+| pass dừng ở 500 sự kiện hoặc 1 giây và pass sau đi tiếp; phần tồn đọng không giữ chân tick cron; pass đã huỷ không claim gì | bỏ trần; bỏ trần thời gian; bỏ kiểm huỷ |
+| sự kiện được giữ chờ hết backoff, nên attempts đếm theo tick | bỏ `next_attempt_at` khỏi câu claim; không đặt backoff |
+| sự kiện có transaction luôn lỗi bị bỏ sau 5 lần thử | bỏ phép đếm ở nhánh lỗi; không bao giờ bỏ ở đó |
+| workspace của nguồn được đọc từ hàng execution | đọc của sự kiện |
 | listener hỏng không chặn các listener khác của cùng sự kiện, và không làm mất sự kiện đối với chúng | bỏ savepoint |
 | một sự kiện được xử lý đúng một lần dù có hai processor (đếm số lần insert như W12) | bỏ `SKIP LOCKED` và index |
 | lỗi tiêm vào sau khi bắn thì lần bắn bị rollback và sự kiện vẫn còn | xoá sự kiện trong transaction riêng |

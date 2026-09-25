@@ -62,6 +62,7 @@ CREATE TABLE workflow.flow_trigger_events (
   state               text        NOT NULL,
   done                text[]      NOT NULL DEFAULT '{}', -- listeners already handled
   attempts            integer     NOT NULL DEFAULT 0,
+  next_attempt_at     timestamptz NOT NULL DEFAULT now(), -- a kept event's backoff
   created_at          timestamptz NOT NULL DEFAULT now()
 );
 
@@ -107,40 +108,62 @@ SELECT $1, $2, t.s
 
 ### 4.4 The processor
 
-`flow_trigger::process_events(&PgPool) -> Result<EventReport>` runs from the **W12 scheduler ticker**, after `fire_due`, behind the same `scheduler_enabled` switch. A pass drains the outbox **one event per transaction**:
+`flow_trigger::process_events_with(&PgPool, &PassLimits, &CancellationToken) -> Result<EventReport>` runs from the **W12 scheduler ticker**, after `fire_due`, behind the same `scheduler_enabled` switch. (`process_events(&PgPool)` is the same pass with the default limits and no cancellation.) A pass claims the outbox **one event per transaction**, and it is **capped**:
 
 ```text
-BEGIN
-  DELETE FROM workflow.flow_trigger_events
-   WHERE id = (SELECT id FROM workflow.flow_trigger_events ORDER BY id
-               LIMIT 1 FOR UPDATE SKIP LOCKED)
-  RETURNING *                                    -- none -> pass ends
-  load the source execution (namespace, flow key, kind, execution_depth, render surface)
-  SELECT listeners: same workspace, state in states, flow <> source, not disabled,
-         listener flow not deleted, state <> 'disabled', workflows feature on,
-         workspace active                       -- the six W12 off switches
-  per listener, in a SAVEPOINT:
-    parse listener source; WindowFreeFlowTrigger::resolve
-    render `when` and `inputs` against the SOURCE's context
-    trigger::flow::evaluate(.., max_depth = 100)
-    Fired -> start_execution_in(tx, NewExecution { trigger_execution_id: source,
-             execution_depth: source + 1, flow_trigger_event_id: event.id,
-             trigger: {id, type: Flow, variables}, .. })
-    error -> classify as W12 does; a listener's failure never undoes another's fire
-COMMIT
+cursor := 0
+loop:
+  cancel fired -> return
+  BEGIN ISOLATION LEVEL REPEATABLE READ
+    SELECT id, source_execution_id, workspace_id, state, done, attempts
+      FROM workflow.flow_trigger_events
+     WHERE id > cursor AND next_attempt_at <= now()
+     ORDER BY id LIMIT 1
+       FOR UPDATE SKIP LOCKED                   -- none -> return; 40001 -> claim again
+    cursor := event.id
+    SELECT listeners: same workspace, state in states, not disabled,
+           listener flow not deleted, state <> 'disabled', workflows feature on,
+           workspace active                     -- the six W12 off switches
+    drop the listeners already in event.done
+    load the source execution (workspace, namespace, flow key, kind, execution_depth,
+                               render surface), in a SAVEPOINT
+    per listener, in a SAVEPOINT:
+      parse listener source; WindowFreeFlowTrigger::resolve
+      render `when` against the SOURCE's context
+      trigger::flow::evaluate(.., max_depth = 100)
+      Fired -> render `inputs` (a failure -> born FAILED, §4.5);
+               start_execution_in(tx, NewExecution { trigger_execution_id: source,
+               execution_depth: source + 1, flow_trigger_event_id: event.id,
+               trigger: {id, type: Flow, variables}, .. })
+      fired, refused, already fired, broken -> done
+      a possibly transient error -> savepoint rolled back, pending
+    nothing pending, or attempts + 1 = 5 -> DELETE the event (warn for what is pending)
+    otherwise -> UPDATE the event SET done, attempts + 1,
+                                      next_attempt_at = now() + backoff
+  COMMIT
+  the transaction failed -> rolled back whole; then, outside it:
+    UPDATE ... SET attempts + 1, next_attempt_at = now() + backoff
+     WHERE id = (SELECT .. FOR UPDATE SKIP LOCKED); at 5 -> DELETE + the same warn
+  500 events this pass, or 1 s spent -> return
 ```
 
 **Why each line is the way it is:**
 
-1. **The event is deleted in the transaction that fires**, so an event is processed exactly once or not at all. A crash rolls back both the fire and the delete, and the next pass retries. The unique index is the backstop.
+1. **The event is deleted, or kept, in the transaction that fires**, so an event's fires and its bookkeeping commit together or not at all. A crash rolls back both, and a later pass retries. The unique index is the backstop.
+   - **A `SELECT … FOR UPDATE`, not a `DELETE … RETURNING`.** An earlier draft of this spec deleted the event in the claim. Per-listener retry sometimes KEEPS the event, so the claim locks it and the event's last statement either deletes it or updates it, in the same transaction.
    - **Retries are per listener, not per event.** A listener that hits a transient error rolls back only its own savepoint, and its siblings' fires commit.
-   - The event is then kept with those siblings recorded in `done` and `attempts + 1`. The next pass evaluates only the listeners not yet in `done`.
+   - The event is then kept with those siblings recorded in `done`, `attempts + 1` and a `next_attempt_at` one backoff ahead (the scheduler's tick interval). A later pass evaluates only the listeners not yet in `done`.
    - After 5 attempts the event is dropped and the still-failing listeners are logged at `warn`. A failing listener can therefore neither undo nor block the others.
+   - **A transaction that fails as a whole** (a savepoint, the final write or the `COMMIT`) rolls back its `attempts + 1` too, so the failure path counts the attempt again in an autocommit statement of its own. It takes the row `SKIP LOCKED`, so it never waits on a replica that claimed the event since. An event whose transaction always fails is given up at 5 with the same `warn`, rather than retried for ever.
 2. **`SKIP LOCKED` partitions events across replicas**, as the W12 claim does. Two events for one listener can be processed concurrently. Only the window arm needs them serialised, and W13b does that with the window's row lock.
 3. **The source's render context is read at processing time, not at transition time.** So are the trigger record's `endDate` and `lastTaskId`. For a terminal state they are usually the same. They differ when the source moved on before its event was processed: a terminal source that was replayed or restarted meanwhile renders its later context and later `endDate`/`lastTaskId`. For `PAUSED`, a source that resumed before its event was processed renders a later context. This is a stated divergence from Kestra, which renders the execution it was handed. The alternative is snapshotting the whole render context into each event row. That is not worth the size for a divergence that exists only when the source moves on before its event is processed.
-4. **Depth is data, not stack.** `evaluate` reads the source's persisted `execution_depth`, and a fired execution is written with depth + 1. Each fire is its own `start_execution_in` in the processor's loop, not a nested call, so no stack grows, and the cap is Kestra's 100. A chain advances **at least** one hop per pass: an event that a fired execution's FIRST settle writes (a listener on `RUNNING`, an execution born FAILED, a flow that ends in its first settle) is committed with that fire and claimed later in the SAME pass, so such hops chain within one pass. Depth still bounds it.
+4. **Depth is data, not stack.** `evaluate` reads the source's persisted `execution_depth`, and a fired execution is written with depth + 1. Each fire is its own `start_execution_in` in the processor's loop, not a nested call, so no stack grows, and the cap is Kestra's 100. A chain advances **at least** one hop per pass: an event that a fired execution's FIRST settle writes (a listener on `RUNNING`, an execution born FAILED, a flow that ends in its first settle) is committed with that fire and has a higher id than the cursor, so it is claimed later in the SAME pass, up to the cap. Depth still bounds it.
+   - **Every other link carries the depth too, as Kestra's do** (javap on the pinned artifact). A `Subflow` child is written with its parent's depth + 1 and is refused past 100: its task fails with "cannot execute flow '…'.'…': the execution chain exceeded the maximum depth of 100" (`ExecutableUtils.subflowExecution`). A `CREATE_NEW_EXECUTION` replay keeps its original's depth (`ExecutionService.replay` keeps the metadata). A `Loop` iteration keeps its parent's depth and is of kind `LOOP` (`Execution.loopExecution`), which `computeFlowTriggers` refuses as a source, so egret refuses an iteration `NotNormalKind` (its row carries a `loop_index`). Before this, all three were written at depth 0, and a cycle through a loop never reached 100.
 5. **Latency.** A hop whose listener runs tasks waits for the worker and then for the next scheduler tick, 1 s by default, so a 10-hop chain of such flows takes about 10 s or more. Hops that end or re-emit in their first settle can take less, as point 4 says. This is accepted and stated.
-6. **With the scheduler off, the outbox grows.** `settle` writes events whenever a listener exists, whatever `scheduler_enabled` says, because `settle` does not read config. Turning the scheduler on then processes the backlog, the flow-trigger analogue of cron's `ALL` recovery. An operator who keeps the scheduler off while flows declare flow triggers accumulates one row per heard transition. This is stated in the chart comment next to `schedulerEnabled`.
+6. **With the scheduler off, the outbox grows.** `settle` writes events whenever a listener exists, whatever `scheduler_enabled` says, because `settle` does not read config. Turning the scheduler on then processes the backlog, the flow-trigger analogue of cron's `ALL` recovery, at most one capped pass per tick (point 7). An operator who keeps the scheduler off while flows declare flow triggers accumulates one row per heard transition. The backlog is also **uneven**: with the scheduler off, `reconcile` has not run, so only flows saved after migration 0157 have listener rows, and only their triggers' transitions are recorded until the scheduler first starts. This is stated in the chart comment next to `schedulerEnabled`.
+7. **A pass is bounded.** It stops after 500 events or once it has run 1 s, checked after each event, and it checks the shutdown token before each claim. The rest waits for the next tick, so a backlog holds neither `fire_due` nor shutdown back. "Each event at most once per pass" is the **cursor**: the claim takes the oldest due event with `id > cursor`, so neither a kept event nor one whose transaction failed can take the pass again. An event that commits with an id lower than the cursor after the cursor passed it (ids are handed out before commit, so commits can land out of order) is the next pass's.
+8. **Listeners are selected again on every attempt.** A kept event's retry re-runs the listener `SELECT`, minus `done`. So a listener created, or switched on, after the transition but before the retry can hear that transition. Kestra evaluates the flows that exist when it processes the transition, once. This is a small, stated divergence: it needs a transient failure of another listener on the same event, and it can only add a fire, never lose one.
+9. **The transaction runs at `REPEATABLE READ`**, so the source's row, its task runs and its render surface are read in one snapshot. The price is a serialization failure on a write, and the fire's foreign-key check on the source (`FOR KEY SHARE`) is such a write. It succeeds against a source that a worker settled after the snapshot **because the worker locks the execution `FOR NO KEY UPDATE`** (`claim::load_with`), which conflicts with every other writer exactly as `FOR UPDATE` did but not with a key-share check. Under `FOR UPDATE` that check failed `40001`, and a busy source's listeners failed and were given up.
 
 `NewExecution` (W12 Task 3) gains four fields: `trigger_execution_id: Option<Uuid>`, `execution_depth: i32`, `flow_trigger_event_id: Option<i64>` and `born_failed: bool` (§4.5).
 
@@ -229,6 +252,13 @@ Every row names the mutation that must turn it red.
 | refused: same flow, other workspace, non-normal kind, falsy `when`, unrenderable `when` | drop each filter in turn |
 | the six off switches | drop each clause in turn |
 | a chain A→B→C fires over three passes; a cycle A→B→A stops at depth 100 | drop the depth check; write depth 0 |
+| a `Subflow` child is its parent's depth + 1 and refused past 100; a `Loop` iteration and a replay keep their parent's depth | drop the + 1; drop the refusal; write 0 for either copy |
+| a `Loop` iteration fires no listener (`NotNormalKind`) | pass kind `None` for every source |
+| a source settled between the claim and the fire still fires | lock the execution `FOR UPDATE` in `load_with` |
+| a pass stops at 500 events or 1 s and the next pass goes on; a backlog does not hold the cron ticks back; a cancelled pass claims nothing | drop the cap; drop the time cap; drop the cancel check |
+| a kept event waits for its backoff, so attempts count ticks | ignore `next_attempt_at` in the claim; set no backoff |
+| an event whose transaction always fails is given up after 5 attempts | drop the failure path's count; never give up there |
+| the source's workspace is read from its execution row | read the event's |
 | a broken listener neither blocks the event's other listeners nor loses the event for them | drop the savepoint |
 | an event is processed once across two processors (counted by insert attempts, as W12 did) | drop `SKIP LOCKED` and the index |
 | a fault after the fire rolls back the fire and keeps the event | delete the event in its own transaction |
