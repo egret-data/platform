@@ -127,6 +127,7 @@ struct Source {
 
 #[derive(sqlx::FromRow)]
 struct SourceRow {
+    workspace_id: Uuid,
     namespace: String,
     flow_key: String,
     execution_depth: i32,
@@ -591,7 +592,7 @@ async fn load_source(
     state: State,
 ) -> Result<(Source, RenderContext)> {
     let row: SourceRow = sqlx::query_as(
-        "SELECT e.namespace, e.flow_key, e.execution_depth, e.created_at, e.updated_at, \
+        "SELECT e.workspace_id, e.namespace, e.flow_key, e.execution_depth, e.created_at, e.updated_at, \
                 e.source, e.loop_index, \
                 (SELECT r.task_id FROM workflow.task_runs r \
                   WHERE r.execution_id = e.id ORDER BY r.run_ix DESC LIMIT 1) AS last_task_id \
@@ -607,7 +608,13 @@ async fn load_source(
         .unwrap_or_default();
     let execution = SourceExecution {
         id: ev.source_execution_id,
-        workspace_id: ev.workspace_id,
+        // The EXECUTION's workspace, from its row (final review M-a). The
+        // event's copy is what the listener `SELECT` narrows by, and `settle`
+        // writes the two equal; reading the row means a disagreeing event is
+        // refused `DifferentWorkspace` instead of reaching the fire, where
+        // 0138's `(trigger_execution_id, workspace_id)` key would fail it and
+        // the event would be retried until given up.
+        workspace_id: row.workspace_id,
         namespace: row.namespace.clone(),
         flow_id: row.flow_key.clone(),
         state,

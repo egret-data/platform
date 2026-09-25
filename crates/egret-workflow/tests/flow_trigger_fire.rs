@@ -519,6 +519,62 @@ async fn refusals() {
     );
 }
 
+/// Final review M-a: the source's workspace is the EXECUTION's, read from its
+/// row, not the event's copy of it. They agree for every event `settle`
+/// writes; this stages one where they do not -- an event naming this
+/// workspace for a source that lives in another -- and the listener here
+/// must not hear it (`DifferentWorkspace`).
+#[tokio::test]
+async fn the_source_workspace_is_read_from_the_execution_not_the_event() {
+    let Some(fx) = fx().await else { return };
+    let (other_ws, other_user) = common::seed_workspace(&fx.db).await;
+    let producer_src = source_yaml("producer");
+    let producer = common::seed_flow(&fx.db, other_ws, other_user, &producer_src, "draft").await;
+    let listener = fx.flow(&listener_yaml("listener", "", "")).await;
+    let foreign = run_in(
+        &fx.db,
+        other_ws,
+        producer,
+        &producer_src,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        common::events(&fx.db).await,
+        vec![],
+        "control: no listener there"
+    );
+    sqlx::query(
+        "INSERT INTO workflow.flow_trigger_events (source_execution_id, workspace_id, state) \
+         VALUES ($1, $2, 'SUCCESS')",
+    )
+    .bind(foreign)
+    .bind(fx.ws)
+    .execute(&fx.db.pool)
+    .await
+    .expect("stage an event whose workspace disagrees with its source's");
+
+    let logs = LogCapture::default();
+    let report = {
+        let _guard = logs.install();
+        fx.pass().await
+    };
+    assert_eq!(
+        report,
+        EventReport {
+            events: 1,
+            refused: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(executions_of(&fx.db, listener).await, 0);
+    assert!(
+        logs.text().contains("DifferentWorkspace"),
+        "the refusal is the workspace one:\n{}",
+        logs.text()
+    );
+}
+
 // ── Off switches ────────────────────────────────────────────────────────────
 
 /// Spec §6: the six W12 switches, each with an unaffected sibling that fires.
