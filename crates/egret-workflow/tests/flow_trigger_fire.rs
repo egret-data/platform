@@ -1012,7 +1012,8 @@ async fn a_listener_that_keeps_failing_is_given_up_after_five_attempts() {
 
 /// Spec §4.4 point 1: the fire and the event's delete commit together. A
 /// fault raised at COMMIT -- after the fire and after the delete -- rolls back
-/// both: no execution, and the event still there, untouched.
+/// both: no execution, and the event still there, with nothing done (only its
+/// `attempts`, counted apart since final review F1, moves).
 ///
 /// Fix round 1 (M2): that failure does not end the pass. Two sources, the
 /// fault scoped to the FIRST one's fires: the older event rolls back, and the
@@ -1060,12 +1061,15 @@ async fn fire_and_delete_are_atomic() {
         1,
         "the newer event was not blocked"
     );
+    let (id, done, attempts) = before[0].clone();
     assert_eq!(
         event_rows(&fx.db).await,
-        before[..1].to_vec(),
-        "the failed event is untouched, and only it remains"
+        vec![(id, done, attempts + 1)],
+        "only the failed event remains, its fires undone and nothing marked \
+         done; its attempt is counted outside the rolled-back transaction (F1)"
     );
 
+    make_events_due(&fx.db).await;
     assert_eq!(
         fx.pass().await,
         EventReport {
@@ -1192,6 +1196,53 @@ async fn a_source_settled_between_the_claim_and_the_fire_still_fires() {
         vec![],
         "the event is consumed"
     );
+}
+
+/// Final review F1: an event whose whole TRANSACTION fails every time -- here
+/// a fault at `COMMIT`, after the fire and the event's own write -- used to be
+/// retried for ever, because the `attempts + 1` rolled back with it. The
+/// failure path now counts the attempt in a statement of its own, outside the
+/// rolled-back transaction, and gives the event up at `MAX_ATTEMPTS` with the
+/// same `warn` as a listener that keeps failing.
+#[tokio::test]
+async fn an_event_whose_transaction_always_fails_is_given_up() {
+    let Some(fx) = fx().await else { return };
+    let producer_src = source_yaml("producer");
+    let producer = fx.flow(&producer_src).await;
+    let listener = fx.flow(&listener_yaml("listener", "", "")).await;
+    let exec = fx.run(producer, &producer_src, serde_json::json!({})).await;
+    install_fault_on(&fx.db, "trigger_execution_id", exec, true).await;
+
+    let errored = EventReport {
+        events: 1,
+        errored: 1,
+        ..Default::default()
+    };
+    for attempt in 1..=4 {
+        make_events_due(&fx.db).await;
+        assert_eq!(fx.pass().await, errored, "pass {attempt}");
+        let rows = event_rows(&fx.db).await;
+        assert_eq!(
+            rows.iter().map(|r| (r.1.clone(), r.2)).collect::<Vec<_>>(),
+            vec![(Vec::<String>::new(), attempt)],
+            "kept after pass {attempt}, its attempt counted, nothing done"
+        );
+    }
+    make_events_due(&fx.db).await;
+    let logs = LogCapture::default();
+    let fifth = {
+        let _guard = logs.install();
+        fx.pass().await
+    };
+    drop_fault(&fx.db, exec).await;
+    assert_eq!(fifth, errored, "pass 5");
+    assert_eq!(common::events(&fx.db).await, vec![], "given up: deleted");
+    let text = logs.text();
+    assert!(
+        text.contains("WARN") && text.contains("gave up"),
+        "a warn saying the event was given up:\n{text}"
+    );
+    assert_eq!(executions_of(&fx.db, listener).await, 0);
 }
 
 // ── Draft and dependsOn ─────────────────────────────────────────────────────

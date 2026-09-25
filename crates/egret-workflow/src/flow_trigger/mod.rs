@@ -75,10 +75,16 @@
 //! savepoint, the event's last write or the `COMMIT` failing rolls back that
 //! event's fires and leaves its row as it was; the pass logs it at `warn`,
 //! counts it `errored`, keeps it in `seen` and moves on to newer events, and
-//! the next pass claims it again. Its `attempts` do not move, because the write
-//! that would count them rolled back too, so an event whose transaction ALWAYS
-//! fails is retried every pass rather than given up. Proved by
-//! `fire_and_delete_are_atomic`, whose second event fires in the same pass.
+//! a later pass claims it again. **Its attempt is counted apart** (final
+//! review F1): the write that counts it inside the transaction rolled back
+//! too, so the failure path issues its own autocommit `UPDATE … SET attempts =
+//! attempts + 1, next_attempt_at = …` on the row (`FOR UPDATE SKIP LOCKED`, so
+//! it never waits on a replica that has claimed the event since), and at
+//! [`MAX_ATTEMPTS`](process::MAX_ATTEMPTS) deletes it with the same "gave up"
+//! `warn`. Before that, an event whose transaction ALWAYS fails was retried
+//! every pass for ever. Proved by `fire_and_delete_are_atomic`, whose second
+//! event fires in the same pass, and by
+//! `an_event_whose_transaction_always_fails_is_given_up`.
 //!
 //! ## 1. The outbox `INSERT` -- **atomic with the transition**
 //!

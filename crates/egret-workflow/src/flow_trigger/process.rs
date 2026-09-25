@@ -235,12 +235,12 @@ pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
             }
         };
         // A failure of the event's TRANSACTION -- a savepoint, the final
-        // write, the COMMIT -- rolls back every fire it made and leaves the
-        // event exactly as it was. It does not end the pass: the event is in
-        // `seen`, so the pass moves on to newer events, and the next pass
-        // claims this one again. One event that always fails therefore cannot
-        // block every event behind it (its own `attempts` do not move, since
-        // the update that would count them rolled back too).
+        // write, the COMMIT -- rolls back every fire it made and the event's
+        // own write with it. It does not end the pass: the event is in
+        // `seen`, so the pass moves on to newer events. The attempt is then
+        // counted OUTSIDE that transaction (final review F1), so an event
+        // whose transaction always fails is given up like a listener that
+        // always fails, instead of being retried for ever.
         if let Err(e) = committed {
             tracing::warn!(
                 event_id = ev.id,
@@ -250,8 +250,72 @@ pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
             );
             report = before;
             report.errored += 1;
+            count_a_failed_transaction(pool, &ev, DEFAULT_RETRY_BACKOFF).await;
         }
         report.events += 1;
+    }
+}
+
+/// The failure path's own `attempts + 1` (final review F1): one autocommit
+/// statement, after the event's transaction rolled back. **Best effort** -- a
+/// failure here is logged and the event is simply claimed again, as before.
+///
+/// It takes the row `FOR UPDATE SKIP LOCKED` so it never waits on another
+/// replica that has claimed the event since: that replica's own pass counts
+/// its own attempt. The event is due again one `backoff` later (F2), and at
+/// [`MAX_ATTEMPTS`] it is deleted with the same `warn` as a listener given up.
+async fn count_a_failed_transaction(pool: &PgPool, ev: &Event, backoff: std::time::Duration) {
+    let counted: std::result::Result<Option<i32>, sqlx::Error> = sqlx::query_scalar(
+        "UPDATE workflow.flow_trigger_events \
+            SET attempts = attempts + 1, \
+                next_attempt_at = now() + $2::bigint * interval '1 millisecond' \
+          WHERE id = (SELECT id FROM workflow.flow_trigger_events \
+                       WHERE id = $1 FOR UPDATE SKIP LOCKED) \
+         RETURNING attempts",
+    )
+    .bind(ev.id)
+    .bind(backoff_ms(backoff))
+    .fetch_optional(pool)
+    .await;
+    let attempts = match counted {
+        Ok(Some(n)) => n,
+        // Gone, or held by another pass: nothing to count here.
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(
+                event_id = ev.id,
+                error = %e,
+                "could not count a failed flow-trigger event's attempt; it is claimed again as it is"
+            );
+            return;
+        }
+    };
+    if attempts < MAX_ATTEMPTS {
+        return;
+    }
+    let deleted = sqlx::query(
+        "DELETE FROM workflow.flow_trigger_events \
+          WHERE id = (SELECT id FROM workflow.flow_trigger_events \
+                       WHERE id = $1 FOR UPDATE SKIP LOCKED)",
+    )
+    .bind(ev.id)
+    .execute(pool)
+    .await;
+    match deleted {
+        Ok(r) if r.rows_affected() == 1 => tracing::warn!(
+            event_id = ev.id,
+            source_execution_id = %ev.source_execution_id,
+            state = %ev.state,
+            attempts,
+            "gave up on a flow-trigger event after {MAX_ATTEMPTS} attempts; its transaction \
+             failed every time, so none of the listeners it still owed fired"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            event_id = ev.id,
+            error = %e,
+            "could not give up a failed flow-trigger event; it is claimed again"
+        ),
     }
 }
 
