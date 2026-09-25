@@ -7110,6 +7110,7 @@ async fn start_execution_in_commits_nothing_when_the_caller_rolls_back(pool: sql
             trigger_execution_id: None,
             execution_depth: 0,
             flow_trigger_event_id: None,
+            born_failed: false,
         },
     )
     .await
@@ -7136,6 +7137,7 @@ async fn start_execution_in_commits_nothing_when_the_caller_rolls_back(pool: sql
             trigger_execution_id: None,
             execution_depth: 0,
             flow_trigger_event_id: None,
+            born_failed: false,
         },
     )
     .await
@@ -7171,6 +7173,7 @@ async fn scheduled_date_is_refused_without_a_schedule_trigger(pool: sqlx::PgPool
             trigger_execution_id: None,
             execution_depth: 0,
             flow_trigger_event_id: None,
+            born_failed: false,
         },
     )
     .await
@@ -7253,6 +7256,7 @@ async fn a_start_writes_trigger_execution_id_and_depth(pool: sqlx::PgPool) {
             trigger_execution_id: Some(source),
             execution_depth: 7,
             flow_trigger_event_id: Some(4242),
+            born_failed: false,
         },
     )
     .await
@@ -7374,6 +7378,7 @@ async fn one_event_fires_a_listener_once_and_a_second_event_in_the_same_state_fi
                     trigger_execution_id: Some(source),
                     execution_depth: 1,
                     flow_trigger_event_id: Some(event),
+                    born_failed: false,
                 },
             )
             .await;
@@ -7568,6 +7573,7 @@ async fn a_rolled_back_transition_leaves_no_event(pool: sqlx::PgPool) {
         trigger_execution_id: None,
         execution_depth: 0,
         flow_trigger_event_id: None,
+        born_failed: false,
     };
 
     let mut tx = pool.begin().await.expect("begin");
@@ -7599,10 +7605,10 @@ async fn a_rolled_back_transition_leaves_no_event(pool: sqlx::PgPool) {
 
 /// **`execution_render_context` is the finished SOURCE's context**: its posted
 /// `inputs` and its tasks' `outputs` render, and `trigger` does NOT -- exactly
-/// as W13a Task 1 measured Kestra refusing `{{ trigger.executionId }}` in a
+/// as W13a Task 1 measured Kestra failing `{{ trigger.executionId }}` in a
 /// Flow trigger's `inputs` ("Unable to find `trigger`"). Task 4 turns that
-/// failure into a refused fire, so the refusal is asserted here where the
-/// context is built.
+/// failure into an execution born FAILED (Kestra's behaviour), so the render
+/// failure itself is asserted here where the context is built.
 #[sqlx::test(migrations = "../../migrations")]
 async fn execution_render_context_renders_the_sources_inputs_and_outputs(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();

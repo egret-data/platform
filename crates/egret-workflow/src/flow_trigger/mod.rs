@@ -58,6 +58,15 @@
 //!
 //! So `REPEATABLE READ` was kept, with the claim's own failure handled below.
 //!
+//! **A failed event transaction does not end the pass** (fix round 1, M2). A
+//! savepoint, the event's last write or the `COMMIT` failing rolls back that
+//! event's fires and leaves its row as it was; the pass logs it at `warn`,
+//! counts it `errored`, keeps it in `seen` and moves on to newer events, and
+//! the next pass claims it again. Its `attempts` do not move, because the write
+//! that would count them rolled back too, so an event whose transaction ALWAYS
+//! fails is retried every pass rather than given up. Proved by
+//! `fire_and_delete_are_atomic`, whose second event fires in the same pass.
+//!
 //! ## 1. The outbox `INSERT` -- **atomic with the transition**
 //!
 //! Written by `settle`, inside the source's own transaction (spec §4.3). A

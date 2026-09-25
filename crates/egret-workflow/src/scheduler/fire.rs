@@ -267,6 +267,7 @@ async fn start(conn: &mut PgConnection, c: &Claimed, e: &ScheduledExecution) -> 
             trigger_execution_id: None,
             execution_depth: 0,
             flow_trigger_event_id: None,
+            born_failed: false,
         },
     )
     .await;

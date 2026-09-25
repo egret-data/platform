@@ -64,7 +64,7 @@ data:
   # NOT a chart value, for the reason given above for the worker's.
   #
   # The same ticker also processes Flow triggers (W13a: a flow that starts
-  # because another execution reached a state), one hop per tick. With the
+  # because another execution reached a state), at least one hop per tick. With the
   # scheduler OFF, the flow-trigger outbox (workflow.flow_trigger_events) still
   # GROWS: every execution transition that some flow's Flow trigger listens to
   # writes one row, whatever this switch says. Turning the scheduler on then

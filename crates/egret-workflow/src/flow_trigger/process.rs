@@ -48,16 +48,20 @@ pub const DEPENDS_ON_IS_W13B: &str =
 const FORBIDDEN_ROOTS: &[&str] = &["trigger"];
 
 /// What one pass did.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EventReport {
     /// Events claimed, each once per pass.
     pub events: usize,
     /// Listeners that fired an execution.
     pub fired: usize,
+    /// Listeners that fired an execution born FAILED because their `inputs`
+    /// did not render (Kestra's behaviour, measured). Counted apart from
+    /// `fired` so a pass that only produced failures does not read as success.
+    pub born_failed: usize,
     /// Listeners that heard an event and did not fire, deliberately: a
     /// `dependsOn` listener (W13b's), a refusal by
-    /// [`evaluate`](crate::trigger::flow::evaluate), `inputs` that do not
-    /// render, or a fire the unique index says already happened.
+    /// [`evaluate`](crate::trigger::flow::evaluate) (including a `when` that
+    /// does not render), or a fire the unique index says already happened.
     pub refused: usize,
     /// Listeners that failed. Either deterministically -- the flow does not
     /// parse, resolve or plan -- and the event is done with them, or possibly
@@ -131,6 +135,8 @@ pub(crate) struct SourceRecord {
 /// What became of one listener on one event.
 enum Fate {
     Fired,
+    /// Fired born FAILED: the `inputs` did not render. Done with.
+    FiredFailed(String),
     /// Heard and deliberately not fired. Done with.
     Refused(String),
     /// The unique index says this (event, listener) already fired. Done with.
@@ -152,8 +158,11 @@ enum Fate {
 /// outbox between replicas; `seen` makes "at most once per pass" a property of
 /// the query, so a kept event -- always the oldest -- cannot take the pass.
 ///
-/// A transaction that fails returns `Err` and ends the pass; its rollback
-/// leaves the event as it was, so the next pass retries it.
+/// An event whose transaction fails is rolled back -- every fire it made
+/// and its own update -- counted as one `errored`, logged at `warn`, and
+/// skipped for the rest of the pass, so the next pass retries it and newer
+/// events are not held behind it. `Err` is returned only when a transaction
+/// cannot even begin or the claim itself fails.
 pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
     let mut report = EventReport::default();
     let mut seen: Vec<i64> = Vec::new();
@@ -190,11 +199,39 @@ pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
             Err(e) => return Err(db_err(e)),
         };
         seen.push(ev.id);
-        report.events += 1;
+        // What this event adds is kept only if its transaction commits.
+        let before = report.clone();
 
-        let (done, pending) = process_one(&mut tx, &ev, &mut report).await?;
-        finish_event(&mut tx, &ev, &done, &pending).await?;
-        tx.commit().await.map_err(db_err)?;
+        let body = match process_one(&mut tx, &ev, &mut report).await {
+            Ok((done, pending)) => finish_event(&mut tx, &ev, &done, &pending).await,
+            Err(e) => Err(e),
+        };
+        let committed = match body {
+            Ok(()) => tx.commit().await.map_err(db_err),
+            Err(e) => {
+                // Best effort: dropping the transaction rolls it back too.
+                let _ = tx.rollback().await;
+                Err(e)
+            }
+        };
+        // A failure of the event's TRANSACTION -- a savepoint, the final
+        // write, the COMMIT -- rolls back every fire it made and leaves the
+        // event exactly as it was. It does not end the pass: the event is in
+        // `seen`, so the pass moves on to newer events, and the next pass
+        // claims this one again. One event that always fails therefore cannot
+        // block every event behind it (its own `attempts` do not move, since
+        // the update that would count them rolled back too).
+        if let Err(e) = committed {
+            tracing::warn!(
+                event_id = ev.id,
+                source_execution_id = %ev.source_execution_id,
+                error = %e,
+                "a flow-trigger event's transaction failed and rolled back; left for the next pass"
+            );
+            report = before;
+            report.errored += 1;
+        }
+        report.events += 1;
     }
 }
 
@@ -291,6 +328,16 @@ async fn process_one(
         match listen(tx, ev, l, &source, &ctx).await? {
             Fate::Fired => {
                 report.fired += 1;
+                done.push(key);
+            }
+            Fate::FiredFailed(why) => {
+                report.born_failed += 1;
+                tracing::warn!(
+                    event_id = ev.id,
+                    listener = %key,
+                    reason = %why,
+                    "a flow-trigger listener's inputs did not render; its execution was created FAILED, as Kestra does"
+                );
                 done.push(key);
             }
             Fate::Refused(why) => {
@@ -491,23 +538,26 @@ async fn listen(
     };
 
     // `inputs` render against the same context, by the same
-    // `runContext.render(Map)` the webhook uses. A failure refuses the fire,
-    // as `WhenUnrenderable` does (spec §4.5). Kestra, measured, instead
-    // creates the listener's execution FAILED with no `inputs`
-    // (`listener_run1_FAILED_bad_inputs`); egret creates none.
+    // `runContext.render(Map)` the webhook uses. **A failure is NOT a
+    // refusal**, unlike an unrenderable `when`: Kestra, measured, still creates
+    // the listener's execution, `CREATED -> FAILED` with no task run and no
+    // `inputs` (W13a Task 1, `listener_run1_FAILED_bad_inputs`). So the fire
+    // goes ahead born FAILED with `inputs = {}` -- the column is `NOT NULL
+    // DEFAULT '{}'` -- and the render error, which egret has no
+    // execution-level column to keep, is logged.
     let declared = Value::Object(fired.inputs.clone().into_iter().collect());
-    let inputs = match render_value(&declared, ctx, "") {
-        Ok(v) => v,
-        Err(InputRefusal::NeedsTriggerContext { key }) => {
-            return Ok(Fate::Refused(format!(
+    let (inputs, render_failure) = match render_value(&declared, ctx, "") {
+        Ok(v) => (v, None),
+        Err(InputRefusal::NeedsTriggerContext { key }) => (
+            Value::Object(Map::new()),
+            Some(format!(
                 "inputs.{key} reads `trigger`, which a Flow trigger's render context does not bind"
-            )))
-        }
-        Err(InputRefusal::Unrenderable { key, error }) => {
-            return Ok(Fate::Refused(format!(
-                "inputs.{key} does not render: {error}"
-            )))
-        }
+            )),
+        ),
+        Err(InputRefusal::Unrenderable { key, error }) => (
+            Value::Object(Map::new()),
+            Some(format!("inputs.{key} does not render: {error}")),
+        ),
     };
 
     // The listener's savepoint: whatever `start_execution_in` does -- its
@@ -529,13 +579,17 @@ async fn listen(
             execution_depth: i32::try_from(fired.execution_depth)
                 .map_err(|e| Error::Internal(e.into()))?,
             flow_trigger_event_id: Some(ev.id),
+            born_failed: render_failure.is_some(),
         },
     )
     .await;
     Ok(match started {
         Ok(_) => {
             sp.commit().await.map_err(db_err)?;
-            Fate::Fired
+            match render_failure {
+                None => Fate::Fired,
+                Some(why) => Fate::FiredFailed(why),
+            }
         }
         Err(err) => {
             sp.rollback().await.map_err(db_err)?;
@@ -568,6 +622,11 @@ async fn listen(
 ///
 /// Dates carry six fractional digits and `Z`, the measured shape. A date whose
 /// microseconds end in zeros was not measured.
+///
+/// `endDate` and `lastTaskId` are read when the event is PROCESSED, not when
+/// the transition happened (spec §4.4 point 3). For a terminal source they
+/// agree unless the source was replayed or restarted before its event was
+/// processed; then they describe the later run.
 pub(crate) fn flow_trigger_record(fired: &FiredExecution, source: &SourceRecord) -> Value {
     let fmt = |at: DateTime<Utc>| at.to_rfc3339_opts(SecondsFormat::Micros, true);
     let mut variables = Map::new();

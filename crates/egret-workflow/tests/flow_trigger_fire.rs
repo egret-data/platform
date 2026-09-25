@@ -139,11 +139,11 @@ fn key(flow: Uuid) -> String {
     format!("{flow}/on_done")
 }
 
-/// A `RAISE` on every insert of an execution of `flow`, raised `BEFORE
-/// INSERT` (`deferred = false`) or at `COMMIT` (`deferred = true`, a
-/// deferred constraint trigger). Scoped to one flow, so a sibling's fire is
-/// untouched.
-async fn install_fault(db: &Db, flow: Uuid, deferred: bool) {
+/// A `RAISE` on every insert of an execution whose `column` is `flow`, raised
+/// `BEFORE INSERT` (`deferred = false`) or at `COMMIT` (`deferred = true`, a
+/// deferred constraint trigger). Scoped to one value -- a listener flow, or a
+/// source execution -- so a sibling's fire is untouched.
+async fn install_fault_on(db: &Db, column: &str, flow: Uuid, deferred: bool) {
     let hex = flow.simple();
     drop_fault(db, flow).await;
     sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -156,19 +156,23 @@ async fn install_fault(db: &Db, flow: Uuid, deferred: bool) {
     let ddl = if deferred {
         format!(
             "CREATE CONSTRAINT TRIGGER w13_fail_{hex} AFTER INSERT ON workflow.executions \
-             DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.flow_id = '{flow}') \
+             DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.{column} = '{flow}') \
              EXECUTE FUNCTION public.w13_fail_{hex}()"
         )
     } else {
         format!(
             "CREATE TRIGGER w13_fail_{hex} BEFORE INSERT ON workflow.executions \
-             FOR EACH ROW WHEN (NEW.flow_id = '{flow}') EXECUTE FUNCTION public.w13_fail_{hex}()"
+             FOR EACH ROW WHEN (NEW.{column} = '{flow}') EXECUTE FUNCTION public.w13_fail_{hex}()"
         )
     };
     sqlx::query(sqlx::AssertSqlSafe(ddl.clone()))
         .execute(&db.pool)
         .await
         .unwrap();
+}
+
+async fn install_fault(db: &Db, flow: Uuid, deferred: bool) {
+    install_fault_on(db, "flow_id", flow, deferred).await;
 }
 
 async fn drop_fault(db: &Db, flow: Uuid) {
@@ -310,10 +314,17 @@ async fn a_success_fires_the_listener_once() {
 
 /// Task 1 measured it (`listener_run1_FAILED_bad_inputs`): `{{
 /// trigger.executionId }}` in a Flow trigger's `inputs` fails with "Unable to
-/// find `trigger`" and the listener does not run. egret refuses the fire; a
-/// sibling with literal inputs is unaffected, and the event is consumed.
+/// find `trigger`", and Kestra STILL creates the listener's execution:
+/// `CREATED -> FAILED`, no task run, no `inputs`, the full trigger record,
+/// `executionDepth` = source + 1. egret does the same. A sibling with literal
+/// inputs fires normally, and the event is consumed.
+///
+/// The knock-on: the born-FAILED execution's own settle writes a `FAILED`
+/// event, and a listener on FAILED hears it -- in the SAME pass, because the
+/// event commits with the fire and the pass claims every event it has not seen
+/// (spec §4.4 point 4).
 #[tokio::test]
-async fn inputs_referencing_trigger_refuse_the_fire() {
+async fn inputs_that_fail_to_render_create_a_failed_execution() {
     let Some(fx) = fx().await else { return };
     let o = oracle();
     let rev1 = &o["flows"]["listener"]["revision_1"];
@@ -321,6 +332,9 @@ async fn inputs_referencing_trigger_refuse_the_fire() {
         rev1["triggers"][0]["inputs"]["src"], "{{ trigger.executionId }}",
         "control: the measured revision reads `trigger`"
     );
+    let measured = &o["executions"]["listener_run1_FAILED_bad_inputs"];
+    assert_eq!(measured["state"]["current"], "FAILED", "control");
+    assert_eq!(measured["taskRunList"], serde_json::json!([]), "control");
     let producer_src = source_yaml("producer");
     let producer = fx.flow(&producer_src).await;
     let reads_trigger = fx
@@ -337,24 +351,81 @@ async fn inputs_referencing_trigger_refuse_the_fire() {
             "    states: [SUCCESS]\n    inputs:\n      src: listener-fired\n",
         ))
         .await;
+    let on_failed = fx
+        .flow(&listener_yaml(
+            "on_failed",
+            "",
+            "    states: [FAILED]\n    when: \"{{ flow.id == 'listener' }}\"\n",
+        ))
+        .await;
 
     let exec = fx.run(producer, &producer_src, serde_json::json!({})).await;
     assert_eq!(
         fx.pass().await,
         EventReport {
-            events: 1,
-            fired: 1,
-            refused: 1,
+            events: 2,
+            fired: 2,
+            born_failed: 1,
             ..Default::default()
-        }
+        },
+        "the producer's SUCCESS: `listener` born FAILED, `listener2` fired; then \
+         the born-FAILED execution's FAILED: `on_failed` fired"
     );
-    assert_eq!(executions_of(&fx.db, reads_trigger).await, 0);
+
+    let (id, state, history, inputs, depth, trigger, event_id, link): (
+        Uuid,
+        String,
+        serde_json::Value,
+        serde_json::Value,
+        i32,
+        serde_json::Value,
+        Option<i64>,
+        Option<Uuid>,
+    ) = sqlx::query_as(
+        "SELECT id, state, history, inputs, execution_depth, execution_trigger, \
+                flow_trigger_event_id, trigger_execution_id \
+           FROM workflow.executions WHERE flow_id = $1",
+    )
+    .bind(reads_trigger)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("exactly one execution of the listener whose inputs failed");
+    assert_eq!(state, "FAILED");
+    assert_eq!(history, serde_json::json!(["CREATED", "FAILED"]));
+    assert_eq!(
+        inputs,
+        serde_json::json!({}),
+        "no inputs (the column is NOT NULL)"
+    );
+    assert_eq!(depth, 1, "the source's depth plus one");
+    assert_eq!(link, Some(exec));
+    assert!(event_id.is_some());
+    assert_eq!(trigger["id"], "on_done");
+    assert_eq!(trigger["type"], FLOW);
+    assert_eq!(trigger["variables"]["executionId"], exec.to_string());
+    assert_eq!(trigger["variables"]["state"], "SUCCESS");
+    let runs: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1")
+            .bind(id)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(runs, 0, "no task run, as `taskRunList: []`");
+
     assert_eq!(executions_of(&fx.db, literal).await, 1);
-    assert_eq!(common::fired_by(&fx.db, exec).await.len(), 1);
+    let knock_on = common::fired_by(&fx.db, id).await;
+    assert_eq!(
+        knock_on
+            .iter()
+            .map(|(f, d, _)| (*f, *d))
+            .collect::<Vec<_>>(),
+        vec![(on_failed, 2)],
+        "a listener on FAILED hears the born-FAILED execution"
+    );
     assert_eq!(
         common::events(&fx.db).await,
         vec![],
-        "the event is consumed"
+        "every event is consumed"
     );
 }
 
@@ -549,7 +620,10 @@ async fn every_off_switch() {
 
 // ── Depth ───────────────────────────────────────────────────────────────────
 
-/// A -> B -> C, one hop per pass, depth 1 then 2 (spec §4.4 point 4).
+/// A -> B -> C, depth 1 then 2 (spec §4.4 point 4). One hop per pass HERE
+/// because B has a task: its SUCCESS needs the worker, between the passes. A
+/// hop whose first settle already emits (see
+/// `inputs_that_fail_to_render_create_a_failed_execution`) chains within one.
 #[tokio::test]
 async fn a_chain_runs_one_hop_per_pass() {
     let Some(fx) = fx().await else { return };
@@ -713,6 +787,7 @@ async fn a_broken_listener_does_not_stop_its_siblings() {
             fired: 1,
             refused: 1,
             errored: 1,
+            ..Default::default()
         }
     );
     assert_eq!(executions_of(&fx.db, sibling).await, 1);
@@ -818,27 +893,58 @@ async fn a_listener_that_keeps_failing_is_given_up_after_five_attempts() {
 /// Spec §4.4 point 1: the fire and the event's delete commit together. A
 /// fault raised at COMMIT -- after the fire and after the delete -- rolls back
 /// both: no execution, and the event still there, untouched.
+///
+/// Fix round 1 (M2): that failure does not end the pass. Two sources, the
+/// fault scoped to the FIRST one's fires: the older event rolls back, and the
+/// newer event behind it still fires in the same pass.
 #[tokio::test]
 async fn fire_and_delete_are_atomic() {
     let Some(fx) = fx().await else { return };
     let producer_src = source_yaml("producer");
     let producer = fx.flow(&producer_src).await;
     let listener = fx.flow(&listener_yaml("listener", "", "")).await;
-    fx.run(producer, &producer_src, serde_json::json!({})).await;
+    let first = fx.run(producer, &producer_src, serde_json::json!({})).await;
+    let second = fx.run(producer, &producer_src, serde_json::json!({})).await;
     let before = event_rows(&fx.db).await;
-    assert_eq!(before.len(), 1);
+    assert_eq!(before.len(), 2);
 
-    install_fault(&fx.db, listener, true).await;
-    let r = process_events(&fx.db.pool).await;
-    drop_fault(&fx.db, listener).await;
-    let err = r.expect_err("the COMMIT raised");
-    assert!(err.to_string().contains("w13 injected fault"), "{err}");
+    install_fault_on(&fx.db, "trigger_execution_id", first, true).await;
+    let logs = LogCapture::default();
+    let report = {
+        let _guard = logs.install();
+        fx.pass().await
+    };
+    drop_fault(&fx.db, first).await;
     assert_eq!(
-        executions_of(&fx.db, listener).await,
-        0,
+        report,
+        EventReport {
+            events: 2,
+            fired: 1,
+            errored: 1,
+            ..Default::default()
+        },
+        "the failed event counts once as errored, and its fire is not counted"
+    );
+    assert!(
+        logs.text().contains("w13 injected fault"),
+        "the COMMIT's error is logged:\n{}",
+        logs.text()
+    );
+    assert_eq!(
+        common::fired_by(&fx.db, first).await,
+        vec![],
         "the fire rolled back"
     );
-    assert_eq!(event_rows(&fx.db).await, before, "the event is untouched");
+    assert_eq!(
+        common::fired_by(&fx.db, second).await.len(),
+        1,
+        "the newer event was not blocked"
+    );
+    assert_eq!(
+        event_rows(&fx.db).await,
+        before[..1].to_vec(),
+        "the failed event is untouched, and only it remains"
+    );
 
     assert_eq!(
         fx.pass().await,
@@ -849,7 +955,7 @@ async fn fire_and_delete_are_atomic() {
         },
         "control: with the fault gone the same event fires"
     );
-    assert_eq!(executions_of(&fx.db, listener).await, 1);
+    assert_eq!(executions_of(&fx.db, listener).await, 2);
 }
 
 // ── Draft and dependsOn ─────────────────────────────────────────────────────

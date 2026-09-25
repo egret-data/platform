@@ -784,8 +784,9 @@ fn with_declared_defaults(posted: Value, flow: Option<&Flow>) -> Value {
 /// So it carries `inputs`, `vars`, `flow`, `labels`, `execution`, `outputs`
 /// and `tasks`, and it does **not** carry `trigger`: an expression reading
 /// `{{ trigger.executionId }}` fails to render against it, exactly as W13a
-/// Task 1 measured on the pinned artifact ("Unable to find `trigger`"). The
-/// processor (W13a Task 4) turns that failure into a refused fire.
+/// Task 1 measured on the pinned artifact ("Unable to find `trigger`"). In a
+/// `when` that failure refuses the fire; in `inputs` the processor (W13a Task
+/// 4) still fires, and the execution is born FAILED, as Kestra's is.
 ///
 /// **Reads without locking the execution** (`Lock::No`): the processor runs
 /// in its own transaction and must not serialise behind, or block, a source

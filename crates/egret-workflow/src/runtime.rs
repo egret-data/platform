@@ -319,8 +319,9 @@ pub fn spawn(pool: PgPool, reg: Arc<dyn Registry>, cfg: RuntimeConfig, cancel: C
 ///
 /// After each `fire_due`, one
 /// [`process_events`](crate::flow_trigger::process_events) pass (W13a): every
-/// Flow-trigger event in the outbox, once. A chain therefore advances one hop
-/// per tick (spec §4.4 point 5).
+/// Flow-trigger event in the outbox, once. A chain therefore advances at
+/// least one hop per tick, and more when a fired execution's first settle
+/// already writes an event its listeners hear (spec §4.4 points 4-5).
 ///
 /// Before the first pass it runs [`reconcile`](crate::scheduler::reconcile)
 /// once, so a flow saved before migration 0156 gets its trigger rows (final
@@ -378,9 +379,10 @@ fn spawn_scheduler(pool: PgPool, every: Duration, cancel: CancellationToken) {
                     // behind the same switch (spec §4.4). With the scheduler
                     // off the outbox grows; turned on, this drains it.
                     match crate::flow_trigger::process_events(&pool).await {
-                        Ok(r) if r.fired > 0 => tracing::info!(
+                        Ok(r) if r.fired > 0 || r.born_failed > 0 => tracing::info!(
                             events = r.events,
                             fired = r.fired,
+                            born_failed = r.born_failed,
                             refused = r.refused,
                             errored = r.errored,
                             "workflow flow-trigger pass"

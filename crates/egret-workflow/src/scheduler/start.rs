@@ -80,17 +80,20 @@ pub(crate) fn classify(err: &Error) -> Started {
     let why = format!("the execution could not be started: {err}");
     match err {
         Error::InvalidInput(_) => Started::Refused(why),
-        Error::Internal(source)
-            if matches!(
-                source
-                    .downcast_ref::<sqlx::Error>()
-                    .and_then(|e| e.as_database_error())
-                    .and_then(|d| d.constraint()),
-                Some(ONE_PER_TICK | ONE_PER_FLOW_TRIGGER_EVENT)
-            ) =>
+        Error::Internal(source) => match source
+            .downcast_ref::<sqlx::Error>()
+            .and_then(|e| e.as_database_error())
+            .and_then(|d| d.constraint())
         {
-            Started::AlreadyFired(format!("this fire already has an execution: {err}"))
-        }
+            // W12's wording, unchanged: it lands in `workflow.triggers.last_error`.
+            Some(ONE_PER_TICK) => {
+                Started::AlreadyFired(format!("this tick already has an execution: {err}"))
+            }
+            Some(ONE_PER_FLOW_TRIGGER_EVENT) => Started::AlreadyFired(format!(
+                "this listener already fired on this flow-trigger event: {err}"
+            )),
+            _ => Started::Failed(why),
+        },
         _ => Started::Failed(why),
     }
 }

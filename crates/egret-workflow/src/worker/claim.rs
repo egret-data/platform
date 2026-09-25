@@ -1467,6 +1467,7 @@ pub async fn start_execution_with_trigger(
             trigger_execution_id: None,
             execution_depth: 0,
             flow_trigger_event_id: None,
+            born_failed: false,
         },
     )
     .await?;
@@ -1500,6 +1501,17 @@ pub struct NewExecution<'a> {
     /// `workflow_executions_one_per_flow_trigger_event`, so one event fires
     /// one listener at most once.
     pub flow_trigger_event_id: Option<i64>,
+    /// **Start the execution already FAILED, with no task run** (W13a fix
+    /// round 1). A Flow trigger whose `inputs:` do not render against the
+    /// source's context is not a refusal on the artifact: Kestra creates the
+    /// listener's execution `CREATED -> FAILED`, `taskRunList: []`, no
+    /// `inputs` (W13a Task 1, `listener_run1_FAILED_bad_inputs`). `false`
+    /// for every other start.
+    ///
+    /// A `bool`, not the reason: `workflow.executions` has no
+    /// execution-level message column, so there is nowhere to keep it. The
+    /// processor logs the render error at `warn` instead.
+    pub born_failed: bool,
 }
 
 /// [`start_execution_with_trigger`]'s body, taking the caller's own `conn`
@@ -1520,6 +1532,7 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
         trigger_execution_id,
         execution_depth,
         flow_trigger_event_id,
+        born_failed,
     } = new;
 
     let flow = crate::spec::parse(source)
@@ -1566,6 +1579,20 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
     };
     let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();
+    // Born FAILED: the caller's own command, applied before the first settle
+    // exactly as `settle` applies an SLA's terminal before `drive` -- and for
+    // the same effect: `advance()` returns nothing for a terminal execution, so
+    // no run is created, the history is `[CREATED, FAILED]`, and the settle's
+    // outbox hook, parent notification and every other terminal path see an
+    // ordinary FAILED transition.
+    if born_failed {
+        apply(
+            &mut state,
+            &Command::SetExecutionState {
+                state: RunState::Failed,
+            },
+        );
+    }
     // `Tick(0)` is the execution's own origin — `Tick` is milliseconds since
     // the execution was created (`executor::state::Tick`), and this is that
     // instant.

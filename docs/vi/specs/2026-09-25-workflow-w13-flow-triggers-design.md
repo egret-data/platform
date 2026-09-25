@@ -141,23 +141,23 @@ COMMIT
    - Sự kiện được giữ lại, ghi các listener đã xong vào `done` và tăng `attempts`. Pass sau chỉ đánh giá những listener chưa có trong `done`.
    - Sau 5 lần thử, sự kiện bị bỏ và các listener vẫn lỗi được log ở mức `warn`. Nhờ vậy một listener lỗi không thể làm hỏng cũng không thể chặn các listener khác.
 2. **`SKIP LOCKED` chia sự kiện giữa các replica**, như câu claim của W12. Hai sự kiện cho cùng một listener có thể được xử lý song song. Chỉ nhánh cửa sổ cần chúng xếp hàng, và W13b làm việc đó bằng row lock của cửa sổ.
-3. **Context của nguồn được đọc lúc xử lý, không phải lúc đổi trạng thái.**
-   - Với trạng thái kết thúc, hai thời điểm này như nhau.
+3. **Context của nguồn được đọc lúc xử lý, không phải lúc đổi trạng thái.** `endDate` và `lastTaskId` của bản ghi trigger cũng vậy.
+   - Với trạng thái kết thúc, hai thời điểm này thường như nhau. Chúng khác nhau khi nguồn đã đi tiếp trước khi sự kiện được xử lý: một nguồn đã kết thúc nhưng bị replay hoặc restart trong lúc đó sẽ render context muộn hơn, với `endDate`/`lastTaskId` muộn hơn.
    - Với `PAUSED`, nếu nguồn đã resume trước khi sự kiện được xử lý thì `when` sẽ render trên context muộn hơn. Đây là độ lệch có ghi rõ so với Kestra, vốn render trên execution nó được giao.
-   - Cách còn lại là chụp nguyên render context vào mỗi hàng sự kiện. Làm vậy không đáng về dung lượng cho một độ lệch chỉ có ở trạng thái chưa kết thúc.
-4. **Độ sâu là dữ liệu, không phải stack.** `evaluate` đọc `execution_depth` đã lưu của nguồn, và execution được bắn ghi depth + 1. Một chuỗi chạy mỗi pass một bước, nên không stack nào phình ra, và trần là 100 như Kestra.
-5. **Độ trễ:** mỗi bước chờ một tick của scheduler, mặc định 1 giây. Một chuỗi 10 bước mất khoảng 10 giây. Chấp nhận và nói rõ.
+   - Cách còn lại là chụp nguyên render context vào mỗi hàng sự kiện. Làm vậy không đáng về dung lượng cho một độ lệch chỉ xảy ra khi nguồn đi tiếp trước khi sự kiện được xử lý.
+4. **Độ sâu là dữ liệu, không phải stack.** `evaluate` đọc `execution_depth` đã lưu của nguồn, và execution được bắn ghi depth + 1. Mỗi lần bắn là một lời gọi `start_execution_in` riêng trong vòng lặp của processor, không lồng nhau, nên không stack nào phình ra, và trần là 100 như Kestra. Một chuỗi tiến **ít nhất** một bước mỗi pass: sự kiện do settle ĐẦU TIÊN của execution vừa bắn ghi ra (listener nghe `RUNNING`, execution sinh ra đã FAILED, flow kết thúc ngay trong settle đầu) được commit cùng lần bắn và được claim ngay trong CÙNG pass, nên các bước như vậy nối nhau trong một pass. Độ sâu vẫn chặn nó.
+5. **Độ trễ:** một bước mà listener có task phải chờ worker rồi chờ tick kế của scheduler, mặc định 1 giây, nên chuỗi 10 bước như vậy mất khoảng 10 giây trở lên. Các bước kết thúc hoặc phát sự kiện ngay trong settle đầu có thể nhanh hơn, như điểm 4. Chấp nhận và nói rõ.
 6. **Scheduler tắt thì outbox phình.**
    - `settle` ghi sự kiện hễ có listener, bất kể `scheduler_enabled`, vì `settle` không đọc config.
    - Khi bật scheduler lên, phần tồn đọng sẽ được xử lý. Đây là bản tương ứng của việc cron bù lịch theo `ALL`.
    - Operator nào để scheduler tắt trong khi có flow khai báo flow trigger sẽ tích luỹ mỗi lần đổi trạng thái được nghe một hàng. Điều này được ghi trong comment của chart, cạnh `schedulerEnabled`.
 
-`NewExecution` (W12 Task 3) thêm ba trường: `trigger_execution_id: Option<Uuid>`, `execution_depth: i32` và `flow_trigger_event_id: Option<i64>`.
+`NewExecution` (W12 Task 3) thêm bốn trường: `trigger_execution_id: Option<Uuid>`, `execution_depth: i32`, `flow_trigger_event_id: Option<i64>` và `born_failed: bool` (§4.5).
 
 ### 4.5 Execution được bắn
 
 - `execution_trigger = { id, type: "io.kestra.plugin.core.trigger.Flow", variables }`. W6 mới đo được một phần `variables` (`executionId`, `namespace`, `flowId`, `state`, `flowRevision`, …). **Task 1 của W13a đo toàn bộ object** trên artifact đã ghim, như Task 1 của W12, và code tái tạo đúng theo file đo đó.
-- `inputs` được render trên context của nguồn. Render lỗi thì không bắn, giống `WhenUnrenderable`.
+- `inputs` được render trên context của nguồn. **Render lỗi KHÔNG làm lần bắn bị từ chối.** Kestra, đã đo (W13a Task 1, `listener_run1_FAILED_bad_inputs`), vẫn tạo execution của listener, `CREATED → FAILED`, `taskRunList: []`, không có `inputs`, đủ bản ghi trigger và depth + 1. egret làm y như vậy: execution được khởi tạo với `born_failed`, áp `SetExecutionState { FAILED }` trước settle đầu tiên, nên không run nào được tạo và hook outbox phát sự kiện `FAILED` như mọi trường hợp khác. `inputs` lưu là `{}` (cột `NOT NULL`). `workflow.executions` không có cột message cấp execution, nên lỗi render được log chứ không lưu. Chỉ `when` không render được mới là từ chối thuần, không tạo execution (W6 đã đo).
 - **Chưa làm, và nói rõ:** nhãn `system.correlationId` (egret chưa có cột labels), và việc đưa `trigger.*` vào render context. Cron cũng ở tình trạng tương tự.
 
 ## 5. W13b: `dependsOn` và cửa sổ
