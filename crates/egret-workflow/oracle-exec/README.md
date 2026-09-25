@@ -8227,8 +8227,8 @@ edited anything.
 | # | population | examined | corrected |
 |---|---|---:|---:|
 | 1 | the proposition and its glosses -- `wiring seam` (owed or missing), `no production constructor`, `has no such guarantee` -- across the whole repository, flattened | **3822 files**, 3 matching, **6 occurrences** | **4** |
-| 1b | the born-FAILED citation family -- every occurrence of `listener_run1_FAILED_bad_inputs` | **6 occurrences, 4 files** | **1** |
-| 2 | ordinals and counts in the six regions populations 1 and 1b landed in | **6 regions** | **0** |
+| 1b | the born-FAILED citation family -- every occurrence of `listener_run1_FAILED_bad_inputs` outside `oracle-exec/`'s generated inputs | **6 occurrences, 5 files** | **1** |
+| 2 | ordinals and counts in the five regions populations 1 and 1b corrected | **5 regions** | **0** |
 | 3 | data that feeds a generator -- the 14 files under `oracle-exec/`: 10 data files (`baseline.txt`, `corpus.json`, `golden.json`, `handler-surface.txt`, `harvest-run.txt`, `probe.json`, `runnable.txt`, `stability.json`, `w12-schedule-trigger.json`, `w13-flow-trigger.json`) plus 4 generators (`driver.rs`, `harvest.py`, `normalise.py`, `handler_surface.py`) | **14 inputs** | **0** |
 | 4 | the other language -- every file under `docs/vi/`, flattened | **287 files**, 1 matching | **0** |
 
@@ -8293,25 +8293,35 @@ is **not** a refusal -- it is the born-FAILED execution
 (`inputs_that_fail_to_render_create_a_failed_execution`). The citation was
 accurate about the underlying Kestra fact and wrong about which egret
 mechanism it illustrated, which is why it reads, uncorrected, as evidence
-that naming `trigger` in a `when` refuses the same way. Five other citations
-of the same fixture -- `worker/claim.rs`'s `born_failed` field doc,
-`flow_trigger::process`'s own `inputs` comment, and
-`tests/flow_trigger_fire.rs`'s test doc and its VI twin -- were already
-correctly framed (*"NOT a refusal"*, stated in as many words in three of the
-five), which is the positive control: this package usually gets the
-distinction right, and the one site that did not is the one nobody had
-reread since Task 1's first, wrong draft of it. Corrected in place, the guard
-kept as `when`-only and the citation kept because it remains the only
+that naming `trigger` in a `when` refuses the same way. **The population is
+6 occurrences in 5 files, not 4** -- `flow_trigger::process` itself carries
+two (the one corrected, and a second, further down, over `inputs`); the
+other three are one apiece, in `worker/claim.rs`'s `born_failed` field doc,
+`tests/flow_trigger_fire.rs`'s test doc, and the EN design spec's §4.4
+walkthrough together with its VI twin, a sixth occurrence in a sixth file. A
+`.rs` test file has no VI twin; the twin belongs to the spec. The five other
+sites were already correctly framed -- four of them stating it in as many
+words (*"NOT a refusal"*, *"does NOT refuse"*, VI *"KHÔNG... từ chối"*), and
+`tests/flow_trigger_fire.rs`'s doc conveying the same fact without the word,
+through *"Kestra STILL creates the listener's execution"* -- which is the
+positive control: this package usually gets the distinction right, and the
+one site that did not is the one nobody had reread since Task 1's first,
+wrong draft of it. Corrected in place, the guard kept as `when`-only and the
+citation kept because it remains the only
 measured *"Unable to find `trigger`"* this package has -- reworded to say
 what it is evidence of rather than removed.
 
-**Population 2's zero is not vacuous**: the six regions above carry other
-numerals untouched by this correction -- *"five id columns"* in the
-`DifferentWorkspace` doc (a different, still-accurate historical fact about
-the STS cross-workspace incident), *"22 corpus flows... 3... 2 flows"* in the
-SEEDED-divergence table row, `DEFAULT_MAX_EXECUTION_DEPTH`'s **100** nearby --
-so the scan reads content rather than skipping past digits, and none of them
-described the wiring seam's own status.
+**Population 2's zero is not vacuous**: the five corrected regions above
+carry other numerals untouched by this correction -- *"five id columns"* and
+*"Migration 0138"* in the `DifferentWorkspace` doc (a different,
+still-accurate historical fact about the STS cross-workspace incident), and
+*"W6 Task 8"* named twice, in the module doc and in
+[`FiredExecution::correlation_id`]'s doc, both correctly -- so the scan reads
+content rather than skipping past digits, and none of them described the
+wiring seam's own status. (The SEEDED-divergence table row's *"22 corpus
+flows... 3... 2 flows"* is a different, LEFT-STANDING region -- population
+1's control, not population 2's population -- and is untouched for the
+reason given above, not because this scan missed it.)
 
 **Population 3's zero has positive controls the same way W10 Task 7's and
 W12 Task 6's did**: `why`, `runnable`, `schedule` and `trigger` are all
