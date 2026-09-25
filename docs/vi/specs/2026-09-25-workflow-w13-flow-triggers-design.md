@@ -70,16 +70,20 @@ CREATE TABLE workflow.flow_trigger_events (
 );
 
 ALTER TABLE workflow.executions ADD COLUMN execution_depth integer NOT NULL DEFAULT 0;
+-- Sự kiện outbox mà một lần bắn đã dùng; có giá trị khi và chỉ khi trigger là Flow.
+ALTER TABLE workflow.executions ADD COLUMN flow_trigger_event_id bigint;
+ALTER TABLE workflow.executions ADD CONSTRAINT workflow_executions_flow_trigger_event_iff_flow
+  CHECK ((flow_trigger_event_id IS NOT NULL)
+         = (execution_trigger IS NOT NULL
+            AND execution_trigger->>'type' = 'io.kestra.plugin.core.trigger.Flow'));
 -- Chốt chặn, như index một-tick-một-lần của W12: mỗi listener bắn nhiều nhất
--- một lần cho mỗi cặp (nguồn, trạng thái của nguồn).
+-- một lần cho mỗi sự kiện outbox.
 CREATE UNIQUE INDEX workflow_executions_one_per_flow_trigger_event
-  ON workflow.executions (trigger_execution_id, flow_id, (execution_trigger->>'id'),
-                          (execution_trigger->'variables'->>'state'))
-  WHERE trigger_execution_id IS NOT NULL
-    AND execution_trigger->>'type' = 'io.kestra.plugin.core.trigger.Flow';
+  ON workflow.executions (flow_trigger_event_id, flow_id, (execution_trigger->>'id'))
+  WHERE flow_trigger_event_id IS NOT NULL;
 ```
 
-Unique index lấy khoá từ chuỗi `state` trong variables. Điều này chỉ an toàn nếu Task 1 xác nhận `state` là tên enum trần. Nếu không, index sẽ dùng một cột có kiểu riêng, như W12 đã làm với `scheduled_date`.
+Unique index lấy khoá theo sự kiện outbox, không theo trạng thái của nguồn, vì một nguồn quay lại một trạng thái (`PAUSED`, `RUNNING`, `PAUSED`) là một lần chuyển mới, tức một sự kiện mới, và Kestra bắn lại cho nó. Khoá theo `(nguồn, trạng thái)` sẽ chỉ cho listener nghe được lần đầu. Id sự kiện là `bigserial` và không bao giờ bị dùng lại. `flow_trigger_event_id` không phải khoá ngoại, vì processor xoá sự kiện ngay trong transaction bắn (§4.4).
 
 ### 4.2 Giữ `flow_listeners` đồng bộ
 
@@ -121,7 +125,8 @@ BEGIN
     render `when` và `inputs` trên context của NGUỒN
     trigger::flow::evaluate(.., max_depth = 100)
     Fired -> start_execution_in(tx, NewExecution { trigger_execution_id: nguồn,
-             execution_depth: nguồn + 1, trigger: {id, type: Flow, variables}, .. })
+             execution_depth: nguồn + 1, flow_trigger_event_id: sự_kiện.id,
+             trigger: {id, type: Flow, variables}, .. })
     lỗi -> phân loại như W12; lỗi của listener này không bao giờ làm hỏng lần bắn của listener khác
 COMMIT
 ```
@@ -144,7 +149,7 @@ COMMIT
    - Khi bật scheduler lên, phần tồn đọng sẽ được xử lý. Đây là bản tương ứng của việc cron bù lịch theo `ALL`.
    - Operator nào để scheduler tắt trong khi có flow khai báo flow trigger sẽ tích luỹ mỗi lần đổi trạng thái được nghe một hàng. Điều này được ghi trong comment của chart, cạnh `schedulerEnabled`.
 
-`NewExecution` (W12 Task 3) thêm hai trường: `trigger_execution_id: Option<Uuid>` và `execution_depth: i32`.
+`NewExecution` (W12 Task 3) thêm ba trường: `trigger_execution_id: Option<Uuid>`, `execution_depth: i32` và `flow_trigger_event_id: Option<i64>`.
 
 ### 4.5 Execution được bắn
 

@@ -66,16 +66,20 @@ CREATE TABLE workflow.flow_trigger_events (
 );
 
 ALTER TABLE workflow.executions ADD COLUMN execution_depth integer NOT NULL DEFAULT 0;
+-- The outbox event a fire consumed; set iff the trigger is a Flow trigger.
+ALTER TABLE workflow.executions ADD COLUMN flow_trigger_event_id bigint;
+ALTER TABLE workflow.executions ADD CONSTRAINT workflow_executions_flow_trigger_event_iff_flow
+  CHECK ((flow_trigger_event_id IS NOT NULL)
+         = (execution_trigger IS NOT NULL
+            AND execution_trigger->>'type' = 'io.kestra.plugin.core.trigger.Flow'));
 -- A backstop, as W12's one-per-tick index: a listener fires at most once per
--- (source, source state).
+-- outbox event.
 CREATE UNIQUE INDEX workflow_executions_one_per_flow_trigger_event
-  ON workflow.executions (trigger_execution_id, flow_id, (execution_trigger->>'id'),
-                          (execution_trigger->'variables'->>'state'))
-  WHERE trigger_execution_id IS NOT NULL
-    AND execution_trigger->>'type' = 'io.kestra.plugin.core.trigger.Flow';
+  ON workflow.executions (flow_trigger_event_id, flow_id, (execution_trigger->>'id'))
+  WHERE flow_trigger_event_id IS NOT NULL;
 ```
 
-The unique index keys on the variables' `state` text. That is safe only if Task 1 confirms `state` is the bare enum name. If it is not, the index keys on a typed column instead, as W12 did with `scheduled_date`.
+The unique index keys on the outbox event, not on the source's state, because a source that re-enters a state (`PAUSED`, `RUNNING`, `PAUSED`) makes a new transition, and so a new event, which Kestra fires on again. A key on `(source, state)` would let a listener hear only the first. Event ids are `bigserial` and never reused. `flow_trigger_event_id` is not a foreign key, because the processor deletes the event in the transaction that fires (§4.4).
 
 ### 4.2 Keeping `flow_listeners` in step
 
@@ -117,7 +121,8 @@ BEGIN
     render `when` and `inputs` against the SOURCE's context
     trigger::flow::evaluate(.., max_depth = 100)
     Fired -> start_execution_in(tx, NewExecution { trigger_execution_id: source,
-             execution_depth: source + 1, trigger: {id, type: Flow, variables}, .. })
+             execution_depth: source + 1, flow_trigger_event_id: event.id,
+             trigger: {id, type: Flow, variables}, .. })
     error -> classify as W12 does; a listener's failure never undoes another's fire
 COMMIT
 ```
@@ -134,7 +139,7 @@ COMMIT
 5. **Latency.** One hop per scheduler tick, 1 s by default. A 10-hop chain takes about 10 s. This is accepted and stated.
 6. **With the scheduler off, the outbox grows.** `settle` writes events whenever a listener exists, whatever `scheduler_enabled` says, because `settle` does not read config. Turning the scheduler on then processes the backlog, the flow-trigger analogue of cron's `ALL` recovery. An operator who keeps the scheduler off while flows declare flow triggers accumulates one row per heard transition. This is stated in the chart comment next to `schedulerEnabled`.
 
-`NewExecution` (W12 Task 3) gains two fields, `trigger_execution_id: Option<Uuid>` and `execution_depth: i32`.
+`NewExecution` (W12 Task 3) gains three fields: `trigger_execution_id: Option<Uuid>`, `execution_depth: i32` and `flow_trigger_event_id: Option<i64>`.
 
 ### 4.5 The fired execution
 
