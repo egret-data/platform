@@ -7,6 +7,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use egret_core::{Error, Result};
 use serde_json::{Map, Value};
 use sqlx::{Connection, PgConnection, PgPool};
+use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::models::{ExecutionKind, Label, State, TriggerKind};
@@ -38,7 +40,7 @@ pub const MAX_ATTEMPTS: i32 = 5;
 /// skips an event that is not yet due. One tick of the scheduler at its
 /// default interval, so [`MAX_ATTEMPTS`] counts ticks, not passes -- two
 /// replicas' passes inside one backoff find the event not due.
-pub const DEFAULT_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+pub const DEFAULT_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 
 /// The reason a `dependsOn` listener is skipped, logged and counted as
 /// `refused`. W13a's `settle` writes events such a listener hears, because the
@@ -167,25 +169,85 @@ enum Fate {
     Retry(String),
 }
 
-/// One pass: every event in the outbox claimed at most once. Returns when none
-/// is left.
+/// How much one pass may do (final review I3). A pass runs on the scheduler's
+/// ticker right after `fire_due`, so it must not run for as long as the outbox
+/// is deep: a backlog -- the scheduler switched on after a while off (spec
+/// §4.4 point 6) -- would otherwise hold every cron tick, and shutdown, until
+/// it was drained.
+#[derive(Debug, Clone)]
+pub struct PassLimits {
+    /// Stop after this many events. Checked after each event, so a pass
+    /// always makes progress.
+    pub max_events: usize,
+    /// Stop once the pass has run this long, checked after each event (so a
+    /// pass overruns by at most one event).
+    pub max_duration: Duration,
+    /// How far ahead a kept event's `next_attempt_at` is set (F2). The
+    /// runtime passes its tick interval.
+    pub retry_backoff: Duration,
+}
+
+/// [`PassLimits::max_events`]'s default.
+pub const MAX_EVENTS_PER_PASS: usize = 500;
+/// [`PassLimits::max_duration`]'s default.
+pub const MAX_PASS_DURATION: Duration = Duration::from_secs(1);
+
+impl Default for PassLimits {
+    fn default() -> Self {
+        PassLimits {
+            max_events: MAX_EVENTS_PER_PASS,
+            max_duration: MAX_PASS_DURATION,
+            retry_backoff: DEFAULT_RETRY_BACKOFF,
+        }
+    }
+}
+
+/// One pass with the default [`PassLimits`] and no cancellation: what a test
+/// or a one-off caller wants. The runtime calls [`process_events_with`].
+pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
+    process_events_with(pool, &PassLimits::default(), &CancellationToken::new()).await
+}
+
+/// One pass: events claimed oldest first, each at most once, until none is
+/// due, the pass reaches a [`PassLimits`] cap, or `cancel` fires -- whichever
+/// comes first. What is left waits for the next pass.
 ///
 /// Each event is claimed, evaluated, fired and then deleted (or kept, with its
-/// `done` listeners and `attempts + 1`) in **its own** transaction, at
-/// `REPEATABLE READ`, so every read of the source -- its row, its task runs,
-/// its render surface -- sees one snapshot. `SKIP LOCKED` partitions the
-/// outbox between replicas; `seen` makes "at most once per pass" a property of
-/// the query, so a kept event -- always the oldest -- cannot take the pass.
+/// `done` listeners, `attempts + 1` and a `next_attempt_at` one backoff ahead)
+/// in **its own** transaction, at `REPEATABLE READ`, so every read of the
+/// source -- its row, its task runs, its render surface -- sees one snapshot.
+/// `SKIP LOCKED` partitions the outbox between replicas.
+///
+/// **"At most once per pass" is a cursor** (final review I3): the claim takes
+/// the oldest due event with `id > cursor`, and the cursor moves to each event
+/// claimed. So neither a kept event nor one whose transaction failed can take
+/// the pass again, and the claim binds one integer instead of the growing list
+/// of every id seen so far (that list made a pass quadratic in its length). An
+/// event that commits with a LOWER id than the cursor after the cursor passed
+/// it -- ids are handed out before commit, so commits can land out of order --
+/// is simply the next pass's. Events written DURING the pass (a fired
+/// execution's first settle) have higher ids and are claimed in it, up to the
+/// cap.
+///
+/// `cancel` is checked before each claim, so a shutdown waits for at most the
+/// event in hand.
 ///
 /// An event whose transaction fails is rolled back -- every fire it made
-/// and its own update -- counted as one `errored`, logged at `warn`, and
-/// skipped for the rest of the pass, so the next pass retries it and newer
-/// events are not held behind it. `Err` is returned only when a transaction
+/// and its own update -- counted as one `errored`, logged at `warn`, and its
+/// attempt counted apart (F1). `Err` is returned only when a transaction
 /// cannot even begin or the claim itself fails.
-pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
+pub async fn process_events_with(
+    pool: &PgPool,
+    limits: &PassLimits,
+    cancel: &CancellationToken,
+) -> Result<EventReport> {
+    let started = Instant::now();
     let mut report = EventReport::default();
-    let mut seen: Vec<i64> = Vec::new();
+    let mut cursor: i64 = 0;
     loop {
+        if cancel.is_cancelled() {
+            return Ok(report);
+        }
         let mut tx = pool
             .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ")
             .await
@@ -193,13 +255,13 @@ pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
         let claimed: std::result::Result<Option<Event>, sqlx::Error> = sqlx::query_as(
             "SELECT id, source_execution_id, workspace_id, state, done, attempts \
                FROM workflow.flow_trigger_events \
-              WHERE id <> ALL ($1) \
+              WHERE id > $1 \
                 AND next_attempt_at <= now() \
               ORDER BY id \
               LIMIT 1 \
               FOR UPDATE SKIP LOCKED",
         )
-        .bind(&seen)
+        .bind(cursor)
         .fetch_optional(&mut *tx)
         .await;
         let ev = match claimed {
@@ -218,12 +280,14 @@ pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
             }
             Err(e) => return Err(db_err(e)),
         };
-        seen.push(ev.id);
+        cursor = ev.id;
         // What this event adds is kept only if its transaction commits.
         let before = report.clone();
 
         let body = match process_one(&mut tx, &ev, &mut report).await {
-            Ok((done, pending)) => finish_event(&mut tx, &ev, &done, &pending).await,
+            Ok((done, pending)) => {
+                finish_event(&mut tx, &ev, &done, &pending, limits.retry_backoff).await
+            }
             Err(e) => Err(e),
         };
         let committed = match body {
@@ -236,8 +300,8 @@ pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
         };
         // A failure of the event's TRANSACTION -- a savepoint, the final
         // write, the COMMIT -- rolls back every fire it made and the event's
-        // own write with it. It does not end the pass: the event is in
-        // `seen`, so the pass moves on to newer events. The attempt is then
+        // own write with it. It does not end the pass: the cursor has passed
+        // the event, so the pass moves on to newer events. The attempt is then
         // counted OUTSIDE that transaction (final review F1), so an event
         // whose transaction always fails is given up like a listener that
         // always fails, instead of being retried for ever.
@@ -250,9 +314,12 @@ pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
             );
             report = before;
             report.errored += 1;
-            count_a_failed_transaction(pool, &ev, DEFAULT_RETRY_BACKOFF).await;
+            count_a_failed_transaction(pool, &ev, limits.retry_backoff).await;
         }
         report.events += 1;
+        if report.events >= limits.max_events || started.elapsed() >= limits.max_duration {
+            return Ok(report);
+        }
     }
 }
 
@@ -264,7 +331,7 @@ pub async fn process_events(pool: &PgPool) -> Result<EventReport> {
 /// replica that has claimed the event since: that replica's own pass counts
 /// its own attempt. The event is due again one `backoff` later (F2), and at
 /// [`MAX_ATTEMPTS`] it is deleted with the same `warn` as a listener given up.
-async fn count_a_failed_transaction(pool: &PgPool, ev: &Event, backoff: std::time::Duration) {
+async fn count_a_failed_transaction(pool: &PgPool, ev: &Event, backoff: Duration) {
     let counted: std::result::Result<Option<i32>, sqlx::Error> = sqlx::query_scalar(
         "UPDATE workflow.flow_trigger_events \
             SET attempts = attempts + 1, \
@@ -319,7 +386,7 @@ async fn count_a_failed_transaction(pool: &PgPool, ev: &Event, backoff: std::tim
     }
 }
 
-fn backoff_ms(backoff: std::time::Duration) -> i64 {
+fn backoff_ms(backoff: Duration) -> i64 {
     i64::try_from(backoff.as_millis()).unwrap_or(i64::MAX)
 }
 
@@ -481,6 +548,7 @@ async fn finish_event(
     ev: &Event,
     done: &[String],
     pending: &[String],
+    backoff: Duration,
 ) -> Result<()> {
     if !pending.is_empty() && ev.attempts + 1 < MAX_ATTEMPTS {
         sqlx::query(
@@ -491,7 +559,7 @@ async fn finish_event(
         )
         .bind(ev.id)
         .bind(done)
-        .bind(backoff_ms(DEFAULT_RETRY_BACKOFF))
+        .bind(backoff_ms(backoff))
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;

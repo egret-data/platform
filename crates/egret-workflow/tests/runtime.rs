@@ -1810,3 +1810,119 @@ async fn two_processors_never_fire_one_event_twice(pool: sqlx::PgPool) {
         attempts - rows
     );
 }
+
+/// **A flow-trigger backlog does not hold the schedule back** (W13a final
+/// review I3). The processor runs on the scheduler's ticker right after
+/// `fire_due`, so an unbounded pass delays every cron tick -- and shutdown --
+/// until the whole outbox is drained. A pass is capped instead
+/// (`MAX_EVENTS_PER_PASS` or `MAX_PASS_DURATION`, whichever first), and the
+/// rest waits for the next tick.
+///
+/// 200 events are waiting (written by SQL, as a backlog left by a scheduler
+/// that was off), and each fire is slowed to ~20 ms by a `BEFORE INSERT`
+/// sleep, so draining them takes several seconds. A cron is owed three ticks,
+/// and `fire_due` catches up one tick per pass. When the third tick has fired,
+/// the backlog must still be there: the schedule was served between capped
+/// passes, not after the drain. Then the backlog drains, every event once.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_flow_trigger_backlog_does_not_hold_the_schedule_back(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let cron = seed_cron_flow(&pool, "tick").await;
+    let (ws, user) = common::seed_workspace(&db).await;
+    let producer_src = w13_source("producer");
+    let producer = common::seed_flow(&db, ws, user, &producer_src, "draft").await;
+    let listener = common::seed_flow(&db, ws, user, &w13_listener("listener"), "draft").await;
+    let source = start_execution(
+        &pool,
+        ws,
+        Some(producer),
+        &producer_src,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the producer");
+    const BACKLOG: i64 = 200;
+    sqlx::query(
+        "INSERT INTO workflow.flow_trigger_events (source_execution_id, workspace_id, state) \
+         SELECT $1, $2, 'SUCCESS' FROM generate_series(1, $3)",
+    )
+    .bind(source)
+    .bind(ws)
+    .bind(BACKLOG)
+    .execute(&pool)
+    .await
+    .expect("seed the backlog");
+    for ddl in [
+        "CREATE FUNCTION public.w13_slow_fire() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN PERFORM pg_sleep(0.02); RETURN NEW; END $$"
+            .to_string(),
+        format!(
+            "CREATE TRIGGER w13_slow_fire BEFORE INSERT ON workflow.executions \
+             FOR EACH ROW WHEN (NEW.flow_id = '{listener}') EXECUTE FUNCTION public.w13_slow_fire()"
+        ),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(ddl))
+            .execute(&pool)
+            .await
+            .expect("slow the listener's fires down");
+    }
+    let sec: f64 = sqlx::query_scalar("SELECT extract(second FROM now())::float8")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    if sec >= 40.0 {
+        tokio::time::sleep(Duration::from_secs_f64(60.5 - sec)).await;
+    }
+    common::make_due(&db, cron, "s", 3).await;
+
+    let outbox = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM workflow.flow_trigger_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let cancel = CancellationToken::new();
+    spawn(
+        pool.clone(),
+        Arc::new(Recorder::new()),
+        scheduler_only(50),
+        cancel.clone(),
+    );
+    wait_until(
+        "the cron's three owed ticks",
+        Duration::from_secs(20),
+        || async {
+            match common::scheduled_dates(&db, cron).await.len() {
+                3.. => Ok(()),
+                n => Err(format!("{n} of 3")),
+            }
+        },
+    )
+    .await;
+    let left = outbox().await;
+    assert!(
+        left > 0,
+        "the third cron tick fired only after the whole backlog of {BACKLOG} was drained: \
+         the processor's pass held the ticker"
+    );
+    eprintln!("backlog left when the third tick fired: {left} of {BACKLOG}");
+
+    wait_until(
+        "the backlog to drain over later passes",
+        Duration::from_secs(60),
+        || async {
+            match outbox().await {
+                0 => Ok(()),
+                n => Err(format!("{n} events left")),
+            }
+        },
+    )
+    .await;
+    cancel.cancel();
+    assert_eq!(
+        executions_of_flow(&pool, listener).await,
+        BACKLOG,
+        "every event fired its listener once"
+    );
+}

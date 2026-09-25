@@ -27,7 +27,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use egret_core::UserId;
 use egret_metastore::Db;
-use egret_workflow::flow_trigger::{process_events, EventReport, DEPENDS_ON_IS_W13B};
+use egret_workflow::flow_trigger::{
+    process_events, process_events_with, EventReport, PassLimits, DEPENDS_ON_IS_W13B,
+    MAX_EVENTS_PER_PASS,
+};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1243,6 +1247,122 @@ async fn an_event_whose_transaction_always_fails_is_given_up() {
         "a warn saying the event was given up:\n{text}"
     );
     assert_eq!(executions_of(&fx.db, listener).await, 0);
+}
+
+// ── A bounded pass (final review I3) ────────────────────────────────────────
+
+/// A pass stops at `MAX_PASS_DURATION` (1 s) and leaves the rest to the next
+/// one. Three events whose fires are each held ~0.6 s: the pass that has
+/// spent 1.2 s after its second event stops there, and the next pass takes the
+/// third. Before the cap, one pass took all three, however long they took.
+#[tokio::test]
+async fn a_pass_stops_at_its_time_cap_and_the_next_pass_goes_on() {
+    let Some(fx) = fx().await else { return };
+    let producer_src = source_yaml("producer");
+    let producer = fx.flow(&producer_src).await;
+    let listener = fx.flow(&listener_yaml("listener", "", "")).await;
+    for _ in 0..3 {
+        fx.run(producer, &producer_src, serde_json::json!({})).await;
+    }
+    let hex = listener.simple();
+    let ddl = [
+        format!(
+            "CREATE FUNCTION public.w13_slow_{hex}() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN PERFORM pg_sleep(0.6); RETURN NEW; END $$"
+        ),
+        format!(
+            "CREATE TRIGGER w13_slow_{hex} BEFORE INSERT ON workflow.executions \
+             FOR EACH ROW WHEN (NEW.flow_id = '{listener}') EXECUTE FUNCTION public.w13_slow_{hex}()"
+        ),
+    ];
+    for d in ddl {
+        sqlx::query(sqlx::AssertSqlSafe(d))
+            .execute(&fx.db.pool)
+            .await
+            .unwrap();
+    }
+    let first = fx.pass().await;
+    let second = fx.pass().await;
+    for d in [
+        format!("DROP TRIGGER w13_slow_{hex} ON workflow.executions"),
+        format!("DROP FUNCTION public.w13_slow_{hex}()"),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(d))
+            .execute(&fx.db.pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        (first.events, first.fired),
+        (2, 2),
+        "the first pass stops once it has run past its time cap"
+    );
+    assert_eq!(
+        (second.events, second.fired),
+        (1, 1),
+        "the next pass goes on"
+    );
+    assert_eq!(executions_of(&fx.db, listener).await, 3);
+    assert_eq!(common::events(&fx.db).await, vec![]);
+}
+
+/// The count cap: `max_events` per pass, the rest to the next pass, oldest
+/// first. Five events drain as 2, 2, 1, then nothing.
+#[tokio::test]
+async fn a_pass_stops_at_its_event_cap_and_the_next_pass_goes_on() {
+    let Some(fx) = fx().await else { return };
+    let producer_src = source_yaml("producer");
+    let producer = fx.flow(&producer_src).await;
+    let listener = fx.flow(&listener_yaml("listener", "", "")).await;
+    for _ in 0..5 {
+        fx.run(producer, &producer_src, serde_json::json!({})).await;
+    }
+    let limits = PassLimits {
+        max_events: 2,
+        ..Default::default()
+    };
+    let mut drained = Vec::new();
+    for _ in 0..4 {
+        let r = process_events_with(&fx.db.pool, &limits, &CancellationToken::new())
+            .await
+            .expect("a pass");
+        drained.push((r.events, r.fired));
+    }
+    assert_eq!(drained, vec![(2, 2), (2, 2), (1, 1), (0, 0)]);
+    assert_eq!(executions_of(&fx.db, listener).await, 5);
+    assert_eq!(
+        PassLimits::default().max_events,
+        MAX_EVENTS_PER_PASS,
+        "the runtime's default is the named cap"
+    );
+    assert_eq!(MAX_EVENTS_PER_PASS, 500);
+}
+
+/// Shutdown is checked between events: a pass whose token is already
+/// cancelled claims nothing and leaves the outbox as it was.
+#[tokio::test]
+async fn a_cancelled_pass_claims_nothing() {
+    let Some(fx) = fx().await else { return };
+    let producer_src = source_yaml("producer");
+    let producer = fx.flow(&producer_src).await;
+    let listener = fx.flow(&listener_yaml("listener", "", "")).await;
+    let exec = fx.run(producer, &producer_src, serde_json::json!({})).await;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let report = process_events_with(&fx.db.pool, &PassLimits::default(), &cancel)
+        .await
+        .expect("a pass");
+    assert_eq!(report, EventReport::default());
+    assert_eq!(
+        common::events(&fx.db).await,
+        vec![(exec, "SUCCESS".to_string())]
+    );
+    assert_eq!(
+        fx.pass().await.fired,
+        1,
+        "control: an uncancelled pass fires it"
+    );
+    assert_eq!(executions_of(&fx.db, listener).await, 1);
 }
 
 // ── Draft and dependsOn ─────────────────────────────────────────────────────

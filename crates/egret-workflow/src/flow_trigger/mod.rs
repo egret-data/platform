@@ -74,7 +74,7 @@
 //! **A failed event transaction does not end the pass** (fix round 1, M2). A
 //! savepoint, the event's last write or the `COMMIT` failing rolls back that
 //! event's fires and leaves its row as it was; the pass logs it at `warn`,
-//! counts it `errored`, keeps it in `seen` and moves on to newer events, and
+//! counts it `errored`, moves its cursor past it to newer events, and
 //! a later pass claims it again. **Its attempt is counted apart** (final
 //! review F1): the write that counts it inside the transaction rolled back
 //! too, so the failure path issues its own autocommit `UPDATE … SET attempts =
@@ -94,10 +94,16 @@
 //!
 //! ## 2. The claim -- safe by **exclusion**
 //!
-//! `SELECT … FROM workflow.flow_trigger_events WHERE id <> ALL($seen) ORDER
-//! BY id LIMIT 1 FOR UPDATE SKIP LOCKED`, one event per transaction. Two
-//! replicas' passes **partition** the outbox: an event another pass holds is
-//! skipped, not waited on, and the lock is held until that pass commits.
+//! `SELECT … FROM workflow.flow_trigger_events WHERE id > $cursor AND
+//! next_attempt_at <= now() ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED`, one
+//! event per transaction. Two replicas' passes **partition** the outbox: an
+//! event another pass holds is skipped, not waited on, and the lock is held
+//! until that pass commits. The cursor (the last id this pass claimed) and
+//! `next_attempt_at` (a kept event's backoff) are not part of the exclusion
+//! argument: they bound what ONE pass claims (final review I3, F2), and a
+//! pass is capped at [`MAX_EVENTS_PER_PASS`](process::MAX_EVENTS_PER_PASS)
+//! events or [`MAX_PASS_DURATION`](process::MAX_PASS_DURATION), checking the
+//! shutdown token between events, so a backlog never holds `fire_due` back.
 //!
 //! **A `SELECT … FOR UPDATE`, not the spec's `DELETE … RETURNING`.** Per-
 //! listener retry (spec §4.4 point 1) sometimes KEEPS the event, updated, and
@@ -195,4 +201,7 @@
 
 mod process;
 
-pub use process::{process_events, EventReport, DEPENDS_ON_IS_W13B, MAX_ATTEMPTS};
+pub use process::{
+    process_events, process_events_with, EventReport, PassLimits, DEFAULT_RETRY_BACKOFF,
+    DEPENDS_ON_IS_W13B, MAX_ATTEMPTS, MAX_EVENTS_PER_PASS, MAX_PASS_DURATION,
+};

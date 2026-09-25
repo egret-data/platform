@@ -320,10 +320,13 @@ pub fn spawn(pool: PgPool, reg: Arc<dyn Registry>, cfg: RuntimeConfig, cancel: C
 /// behind catches up one tick per pass.
 ///
 /// After each `fire_due`, one
-/// [`process_events`](crate::flow_trigger::process_events) pass (W13a): every
-/// Flow-trigger event in the outbox, once. A chain therefore advances at
-/// least one hop per tick, and more when a fired execution's first settle
-/// already writes an event its listeners hear (spec §4.4 points 4-5).
+/// [`process_events_with`](crate::flow_trigger::process_events_with) pass
+/// (W13a): the due Flow-trigger events in the outbox, each once, up to
+/// [`PassLimits`](crate::flow_trigger::PassLimits)' cap (500 events or about
+/// 1 s, final review I3) so a backlog cannot hold `fire_due` or shutdown back;
+/// the rest waits for the next tick. A chain therefore advances at least one
+/// hop per tick, and more when a fired execution's first settle already writes
+/// an event its listeners hear (spec §4.4 points 4-5).
 ///
 /// Before the first pass it runs [`reconcile`](crate::scheduler::reconcile)
 /// once, so a flow saved before migration 0156 gets its trigger rows (final
@@ -352,6 +355,12 @@ fn spawn_scheduler(pool: PgPool, every: Duration, cancel: CancellationToken) {
                 ),
             },
         }
+        // A capped pass (final review I3), its kept events due again one tick
+        // later (F2), and the shutdown token checked between its events.
+        let limits = crate::flow_trigger::PassLimits {
+            retry_backoff: every,
+            ..Default::default()
+        };
         let mut tick = tokio::time::interval(every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -380,7 +389,7 @@ fn spawn_scheduler(pool: PgPool, every: Duration, cancel: CancellationToken) {
                     // W13a: the Flow-trigger outbox, after the schedules and
                     // behind the same switch (spec §4.4). With the scheduler
                     // off the outbox grows; turned on, this drains it.
-                    match crate::flow_trigger::process_events(&pool).await {
+                    match crate::flow_trigger::process_events_with(&pool, &limits, &cancel).await {
                         Ok(r) if r.fired > 0 || r.born_failed > 0 => tracing::info!(
                             events = r.events,
                             fired = r.fired,
