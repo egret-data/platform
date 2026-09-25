@@ -7736,3 +7736,177 @@ async fn paused_resumed_and_paused_again_writes_two_paused_events(pool: sqlx::Pg
         "re-entering PAUSED is a new transition and a new event; history {history}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// W13a final review I1: `execution_depth` through Subflow, Loop and replay.
+// ---------------------------------------------------------------------------
+
+/// A flow whose `Subflow` (or `Loop`) comes AFTER a `Log`, so the test can set
+/// the execution's depth between its first settle (which only opens `pre`) and
+/// the settle that spawns.
+fn after_a_log(id: &str, then: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: pre\n    type: io.kestra.plugin.core.log.Log\n    \
+         message: hi\n{then}"
+    )
+}
+
+const SUBFLOW_TO_CHILD: &str = "  - id: sub\n    type: io.kestra.plugin.core.flow.Subflow\n    \
+                                namespace: t\n    flowId: depth-child\n";
+
+async fn depth_of(pool: &sqlx::PgPool, execution: Uuid) -> i32 {
+    sqlx::query_scalar("SELECT execution_depth FROM workflow.executions WHERE id = $1")
+        .bind(execution)
+        .fetch_one(pool)
+        .await
+        .expect("read execution_depth")
+}
+
+async fn set_depth(pool: &sqlx::PgPool, execution: Uuid, depth: i32) {
+    sqlx::query("UPDATE workflow.executions SET execution_depth = $2 WHERE id = $1")
+        .bind(execution)
+        .bind(depth)
+        .execute(pool)
+        .await
+        .expect("set execution_depth");
+}
+
+/// `(id, execution_depth)` of the `Subflow` children of `parent`.
+async fn subflow_children(pool: &sqlx::PgPool, parent: Uuid) -> Vec<(Uuid, i32)> {
+    sqlx::query_as(
+        "SELECT id, execution_depth FROM workflow.executions \
+          WHERE trigger_execution_id = $1 AND trigger_run_ix IS NOT NULL ORDER BY id",
+    )
+    .bind(parent)
+    .fetch_all(pool)
+    .await
+    .expect("read the subflow children")
+}
+
+/// Kestra, `ExecutableUtils.subflowExecution` on the pinned artifact (javap,
+/// offsets 703-792 and 1092-1100): the child's `metadata.executionDepth` is
+/// `executionDepthOrZero() + 1`, and a child that would exceed `maxDepth`
+/// (100) is not created -- the task fails with "Cannot execute flow '%s'.'%s':
+/// the execution chain exceeded the maximum depth of %d". A parent at 7 gives
+/// a child at 8; a parent at 99 still gives a child, at 100; a parent at 100
+/// gives none and a FAILED `sub` run that says why.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_is_one_deeper_and_refused_past_depth_100(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let child = "id: depth-child\nnamespace: t\ntasks:\n  - id: a\n    \
+                 type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+    file_flow(&db, ws, user, child).await;
+    let parent = after_a_log("depth-parent", SUBFLOW_TO_CHILD);
+    file_flow(&db, ws, user, &parent).await;
+
+    let mut roots = Vec::new();
+    for depth in [7, 99, 100] {
+        let root = start_execution(&pool, ws, None, &parent, serde_json::json!({}))
+            .await
+            .expect("start the parent");
+        set_depth(&pool, root, depth).await;
+        roots.push(root);
+    }
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let depths: Vec<Vec<i32>> = {
+        let mut out = Vec::new();
+        for root in &roots {
+            out.push(
+                subflow_children(&pool, *root)
+                    .await
+                    .into_iter()
+                    .map(|(_, d)| d)
+                    .collect(),
+            );
+        }
+        out
+    };
+    assert_eq!(
+        depths,
+        vec![vec![8], vec![100], vec![]],
+        "parent 7 -> child 8; parent 99 -> child 100; parent 100 -> no child"
+    );
+    let message: Option<String> = sqlx::query_scalar(
+        "SELECT message FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'sub'",
+    )
+    .bind(roots[2])
+    .fetch_one(&pool)
+    .await
+    .expect("the refused run");
+    assert_eq!(
+        (
+            run_state(&pool, roots[2], "sub").await.as_deref(),
+            message.as_deref()
+        ),
+        (
+            Some("FAILED"),
+            Some(
+                "cannot execute flow 't'.'depth-child': the execution chain exceeded \
+                 the maximum depth of 100"
+            )
+        )
+    );
+    assert_eq!(
+        run_state(&pool, roots[1], "sub").await.as_deref(),
+        Some("SUCCESS"),
+        "control: the depth-100 child ran"
+    );
+}
+
+/// Kestra, `Execution.loopExecution` on the pinned artifact (javap): an
+/// iteration is built with the parent's own `metadata` -- so its
+/// `executionDepth` is the parent's, not one more -- and `ExecutionKind.LOOP`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_iteration_keeps_its_parents_depth(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = after_a_log(
+        "depth-loop",
+        "  - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"x\"]'\n    \
+         tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        \
+         message: hi\n",
+    );
+    let root = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start");
+    set_depth(&pool, root, 7).await;
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let iterations: Vec<i32> = sqlx::query_scalar(
+        "SELECT execution_depth FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND loop_index IS NOT NULL",
+    )
+    .bind(root)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(iterations, vec![7], "one iteration, at its parent's depth");
+    assert_eq!(depth_of(&pool, root).await, 7, "control");
+}
+
+/// Kestra, `ExecutionService.replay`: the replacement keeps the metadata
+/// (`metadata.nextAttempt()`, a `toBuilder` copy with the attempt bumped), so
+/// its `executionDepth` is the original's.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_keeps_its_depth(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = "id: depth-replay\nnamespace: t\nretry:\n  behavior: CREATE_NEW_EXECUTION\n  \
+                  type: constant\n  interval: PT1S\n  maxAttempts: 2\ntasks:\n  - id: a\n    \
+                  type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+    let root = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start");
+    set_depth(&pool, root, 7).await;
+    let reg = AlwaysFails::default();
+    drain_with(&pool, &reg).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(wake(&pool, 8).await.expect("wake"), vec![root]);
+    let replay = replay_of(&pool, root)
+        .await
+        .expect("the replacement exists");
+    assert_eq!(depth_of(&pool, replay).await, 7, "the original's depth");
+}

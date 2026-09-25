@@ -738,6 +738,70 @@ async fn a_cycle_stops_at_depth_100() {
     );
 }
 
+/// Final review I1: a `Loop` iteration is a sub-execution of kind LOOP on the
+/// artifact (`Execution.loopExecution` passes `ExecutionKind.LOOP`), and
+/// `computeFlowTriggers` answers an empty list for a kind that is not normal
+/// (offset 12, `ExecutionKind.isNormal`). So the iteration's SUCCESS is heard
+/// and refused, and only the looping execution's own SUCCESS fires. Before
+/// this, egret passed `kind: None` for every source, the iteration fired too,
+/// and -- the iteration's depth being reset to 0 -- a cycle through a loop
+/// never reached 100.
+#[tokio::test]
+async fn a_loop_iteration_fires_no_listener() {
+    let Some(fx) = fx().await else { return };
+    let looper_src = "id: looper\nnamespace: w13\ntasks:\n  - id: loop\n    \
+                      type: io.kestra.plugin.core.flow.Loop\n    values: '[\"x\"]'\n    \
+                      tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        \
+                      message: hi\n";
+    let looper = fx.flow(looper_src).await;
+    let listener = fx.flow(&listening_to("listener", "looper")).await;
+    let exec = fx.run(looper, looper_src, serde_json::json!({})).await;
+    let iteration: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 AND loop_index = 0",
+    )
+    .bind(exec)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("control: the loop ran one iteration");
+    let mut events = common::events(&fx.db).await;
+    events.sort();
+    let mut want = vec![
+        (iteration, "SUCCESS".to_string()),
+        (exec, "SUCCESS".to_string()),
+    ];
+    want.sort();
+    assert_eq!(events, want, "control: both transitions reached the outbox");
+
+    let logs = LogCapture::default();
+    let report = {
+        let _guard = logs.install();
+        fx.pass().await
+    };
+    assert_eq!(
+        report,
+        EventReport {
+            events: 2,
+            fired: 1,
+            refused: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(common::fired_by(&fx.db, iteration).await, vec![]);
+    assert_eq!(
+        common::fired_by(&fx.db, exec)
+            .await
+            .iter()
+            .map(|(f, d, _)| (*f, *d))
+            .collect::<Vec<_>>(),
+        vec![(listener, 1)]
+    );
+    assert!(
+        logs.text().contains("NotNormalKind"),
+        "the refusal is the kind one:\n{}",
+        logs.text()
+    );
+}
+
 // ── Failure isolation ───────────────────────────────────────────────────────
 
 /// A listener whose YAML no longer parses (errored), and one whose fire the

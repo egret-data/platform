@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::models::{Label, State, TriggerKind};
+use crate::models::{ExecutionKind, Label, State, TriggerKind};
 use crate::runners::{render_str_guarded, GuardedRender, RenderContext};
 use crate::scheduler::start::{classify, flow_is_on, Started, WORKFLOWS_FEATURE};
 use crate::trigger::flow::{
@@ -125,6 +125,7 @@ struct SourceRow {
     updated_at: DateTime<Utc>,
     source: String,
     last_task_id: Option<String>,
+    loop_index: Option<i32>,
 }
 
 /// The source's half of `execution.trigger.variables`, with egret's values
@@ -444,7 +445,7 @@ async fn load_source(
 ) -> Result<(Source, RenderContext)> {
     let row: SourceRow = sqlx::query_as(
         "SELECT e.namespace, e.flow_key, e.execution_depth, e.created_at, e.updated_at, \
-                e.source, \
+                e.source, e.loop_index, \
                 (SELECT r.task_id FROM workflow.task_runs r \
                   WHERE r.execution_id = e.id ORDER BY r.run_ix DESC LIMIT 1) AS last_task_id \
            FROM workflow.executions e WHERE e.id = $1",
@@ -463,11 +464,15 @@ async fn load_source(
         namespace: row.namespace.clone(),
         flow_id: row.flow_key.clone(),
         state,
-        // egret has no execution kind: every execution is a normal one, which
-        // is what Kestra's `ExecutionKind.isNormal` answers for a null kind.
-        // `NotNormalKind` is therefore unreachable from here (a finding for
-        // the day a `kind` column exists).
-        kind: None,
+        // egret has no `kind` column, but one kind IS identifiable: a `Loop`
+        // iteration, whose row carries a `loop_index`. Kestra builds an
+        // iteration with `ExecutionKind.LOOP` (`Execution.loopExecution`,
+        // javap) and `computeFlowTriggers` answers an empty list for a kind
+        // that is not normal (offset 12), so an iteration is heard and
+        // refused `NotNormalKind` (W13a final review I1). Every other egret
+        // execution is normal, which is what `isNormal` answers for a null
+        // kind; `Test` and `Playground` have no egret row.
+        kind: row.loop_index.map(|_| ExecutionKind::Loop),
         execution_depth: Some(u32::try_from(row.execution_depth).unwrap_or(0)),
     };
     let record = SourceRecord {

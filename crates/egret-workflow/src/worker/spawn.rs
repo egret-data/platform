@@ -298,12 +298,21 @@ async fn spawn_one(
     // can disagree with it. A chain of nested loops therefore inherits
     // transitively, one level at a time, because each parent already holds what
     // it inherited.
+    //
+    // **`execution_depth` is the PARENT's too, not one more** (W13a final
+    // review I1). `Execution.loopExecution` on the pinned artifact (javap)
+    // builds the iteration with the parent's own `metadata` field, so its
+    // `executionDepth` is the parent's, and with `ExecutionKind.LOOP` -- the
+    // kind `flow_trigger` reads off `loop_index` to refuse an iteration as a
+    // Flow-trigger source. Read from the row for the same reason as `inputs`.
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, \
-            parent_execution_id, parent_run_ix, loop_index, loop_value, inputs) \
+            parent_execution_id, parent_run_ix, loop_index, loop_value, inputs, \
+            execution_depth) \
          VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9, \
-                 COALESCE((SELECT inputs FROM workflow.executions WHERE id = $6), '{}'::jsonb)) \
+                 COALESCE((SELECT inputs FROM workflow.executions WHERE id = $6), '{}'::jsonb), \
+                 (SELECT execution_depth FROM workflow.executions WHERE id = $6)) \
          RETURNING id",
     )
     .bind(parent.workspace_id)

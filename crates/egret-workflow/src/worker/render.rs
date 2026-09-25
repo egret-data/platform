@@ -372,6 +372,15 @@ impl Surface {
         // and `workflow_executions_no_self_link` refuses the degenerate case,
         // so there is still no depth bound here, for the reason
         // `flowable::descend` gives for not having one either.
+        //
+        // **Finite is not the same as short, and W13a made it matter**: the
+        // walk crosses a Flow-trigger link too (`trigger_execution_id`), so a
+        // Flow-trigger chain is walked whole. What keeps that chain short is
+        // `execution_depth` (final review I1): a Flow-trigger fire and a
+        // `Subflow` child each add one and both refuse past 100, a replay and
+        // a `Loop` iteration keep their parent's, and an iteration never fires
+        // a Flow trigger. Before that fix a cycle through a `Loop` reset the
+        // count and this walk grew with it.
         let mut inheriting = true;
         // Nearest ancestor first, so a nearer scope wins where two ancestors
         // ran a task of the same id. The chain is a DAG by construction --
