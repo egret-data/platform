@@ -821,3 +821,74 @@ async fn a_workspace_with_workflows_off_freezes_its_schedules() {
         "every tick missed while off is recovered"
     );
 }
+
+/// Companion to `a_workspace_with_workflows_off_freezes_its_schedules`: an
+/// archived workspace (`workspaces.status <> 'active'`) freezes its schedules
+/// by the same rule `WsContext` (`crates/egret-workspace/src/context.rs`
+/// ~line 45: `.filter(|w| w.status == "active")`) and the webhook route
+/// (`crates/egret-workflow/src/webhook_routes.rs` ~line 518) already apply to
+/// every other entry point. No tick is consumed while archived, so
+/// re-activating the workspace recovers every missed tick under `ALL`, like
+/// every other off switch.
+#[tokio::test]
+async fn an_archived_workspace_freezes_its_schedules() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&flow_yaml("archived_ws", "", "")).await;
+    // Another workspace, active: the switch is per workspace.
+    let (other_ws, other_user) = common::seed_workspace(&fx.db).await;
+    let other = common::seed_flow(
+        &fx.db,
+        other_ws,
+        other_user,
+        &flow_yaml("archived_ws_other", "", ""),
+        "draft",
+    )
+    .await;
+    common::make_due(&fx.db, flow, "s", 3).await;
+    common::make_due(&fx.db, other, "s", 1).await;
+    let first = due_date(&fx.db, flow).await;
+    sqlx::query("UPDATE workspaces SET status = 'archived' WHERE id = $1")
+        .bind(fx.ws)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+    let before = row(&fx.db, flow).await.unwrap();
+
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            fired: 1,
+            ..Default::default()
+        },
+        "only the other workspace's trigger"
+    );
+    assert_eq!(executions_of(&fx.db, other).await, 1);
+    assert_eq!(common::execution_count(&fx.db, fx.ws).await, 0);
+    assert_eq!(
+        row(&fx.db, flow).await.unwrap(),
+        before,
+        "frozen: never claimed, so not even `updated_at` moved"
+    );
+
+    sqlx::query("UPDATE workspaces SET status = 'active' WHERE id = $1")
+        .bind(fx.ws)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+    for i in 1..=3 {
+        assert_eq!(
+            fx.pass().await,
+            PassReport {
+                fired: 1,
+                ..Default::default()
+            },
+            "pass {i} after the workspace was reactivated"
+        );
+    }
+    let want: Vec<_> = (0..3).map(|k| first + Duration::minutes(k)).collect();
+    assert_eq!(
+        common::scheduled_dates(&fx.db, flow).await,
+        want,
+        "every tick missed while archived is recovered"
+    );
+}

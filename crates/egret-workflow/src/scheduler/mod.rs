@@ -29,9 +29,13 @@
 //! everything below runs with no second fire of this trigger in flight.
 //!
 //! The `WHERE` also carries every off switch that is not in the YAML --
-//! `deleted_at`, `state`, and the workspace's `workflows` feature (a `NOT
+//! `deleted_at`, `state`, the workspace's `workflows` feature (a `NOT
 //! EXISTS` over `workspace_features`, the rows the route gate reads; final
-//! review I3) -- so an off trigger is never claimed and never consumes a tick.
+//! review I3), and the workspace's own `status` (an `EXISTS` over
+//! `workspaces` requiring `status = 'active'`, the same column and value
+//! `WsContext` and the webhook route already refuse a non-active workspace
+//! on; the user's decision of 2026-09-25) -- so an off trigger is never
+//! claimed and never consumes a tick.
 //!
 //! **What the lock does NOT give: a fresh flow row.** Under READ COMMITTED a
 //! claim that waited on a trigger row re-reads the NEWEST version of `t` but

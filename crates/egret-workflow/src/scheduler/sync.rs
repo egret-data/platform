@@ -157,6 +157,16 @@ pub struct Reconciled {
 /// for this transaction; rows are never resurrected for a deleted flow. The
 /// lock order is the save's (flow, then trigger rows), and a fire's `KEY
 /// SHARE` on the flow does not conflict with `FOR SHARE`.
+///
+/// **Deliberately does not read `workspaces.status`.** An archived
+/// workspace's flows are still synced -- their dates kept current, a fresh
+/// row initialised, a stale one dropped -- exactly as an active workspace's
+/// are. This is harmless: `sync` only ever writes queue state, never fires
+/// anything, and `fire_one`'s claim (`fire.rs`) already excludes a non-active
+/// workspace, so a row this leaves due simply sits frozen until the workspace
+/// is re-activated. Filtering it out here would buy nothing and cost the one
+/// thing catch-up needs -- current dates -- so re-activation would have to
+/// re-sync before it could recover anything under `ALL`.
 pub async fn reconcile(pool: &PgPool) -> Result<Reconciled> {
     let ids: Vec<Uuid> =
         sqlx::query_scalar("SELECT id FROM workflow.flows WHERE deleted_at IS NULL ORDER BY id")

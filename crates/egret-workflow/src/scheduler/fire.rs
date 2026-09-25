@@ -103,6 +103,8 @@ pub async fn fire_due(pool: &PgPool) -> Result<PassReport> {
                 AND NOT t.disabled \
                 AND f.deleted_at IS NULL \
                 AND f.state <> 'disabled' \
+                AND EXISTS (SELECT 1 FROM workspaces w \
+                             WHERE w.id = f.workspace_id AND w.status = 'active') \
                 AND NOT EXISTS (SELECT 1 FROM workspace_features wf \
                                  WHERE wf.workspace_id = f.workspace_id \
                                    AND wf.feature = $3 AND NOT wf.enabled) \

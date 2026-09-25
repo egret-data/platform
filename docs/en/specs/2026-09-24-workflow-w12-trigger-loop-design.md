@@ -230,14 +230,19 @@ COMMIT
    skewed clocks therefore agree, and W6's rule that `SystemClock::now` is the only
    wall-clock reader under `src/trigger/` still holds — `FixedClock` joins
    `TestClock` in that module.
-5. **All five ways to switch a trigger off are honoured, and none consumes a
+5. **All six ways to switch a trigger off are honoured, and none consumes a
    tick.** `deleted_at` and the `state` column are read from the flow in the
    `WHERE`; the flow's YAML `disabled: true` and the trigger's own are the
-   `disabled` column `sync` wrote (§3.1); and the workspace's `workflows`
+   `disabled` column `sync` wrote (§3.1); the workspace's `workflows`
    feature, switched off, is a `NOT EXISTS` over `workspace_features` — the
    table, and the `enabled = false` reading, that the route gate in `WsContext`
    uses, so the two cannot disagree (final review I3; the user's decision of
-   2026-09-25). All five leave the state frozen, which is `NotSchedulable`'s
+   2026-09-25); and the workspace's own `status`, an `EXISTS` over `workspaces`
+   requiring `status = 'active'` — the same column and value `WsContext`
+   (`crates/egret-workspace/src/context.rs`) and the webhook route
+   (`webhook_routes.rs`) already refuse a non-active workspace on, so an
+   archived workspace cannot disagree with them either (the user's decision of
+   2026-09-25). All six leave the state frozen, which is `NotSchedulable`'s
    measured behaviour, so switching any of them back on recovers the missed
    ticks under `ALL`. **The YAML is re-checked after `parse` anyway**, because
    the source read under the lock is the authority and the column is a copy: if
@@ -314,7 +319,7 @@ is reported as unproved, not as covered.
 | `ALL` catch-up | `next_evaluation_date` five ticks in the past → five passes → five executions, `scheduled_date` ascending, one per pass | tick until idle within one pass |
 | a trigger that is behind does not starve the rest | trigger A five ticks behind, trigger B one tick due → the first pass fires one of each | drop the `seen` exclusion |
 | a broken trigger does not jam the loop | unparseable draft → `last_error` set, `next_evaluation_date` NULL; a sibling trigger in the same pass still fires | drop the take-off-queue branch |
-| every off switch | `state='disabled'`, YAML `disabled: true`, trigger `disabled: true`, `deleted_at`, workspace feature `workflows` off → zero executions **and** `next_evaluation_date` unchanged; the feature back on → the missed ticks fire | drop each clause in turn |
+| every off switch | `state='disabled'`, YAML `disabled: true`, trigger `disabled: true`, `deleted_at`, workspace feature `workflows` off, workspace `status='archived'` → zero executions **and** `next_evaluation_date` unchanged; the switch back on → the missed ticks fire | drop each clause in turn |
 | a disabled trigger does not starve the queue | the oldest due row is disabled, a younger one is enabled → the younger fires, and the disabled row is never claimed | drop `NOT t.disabled` from the claim |
 | re-enable recovers under `ALL` | disable, set `next_evaluation_date` three ticks in the past, enable → three passes, three executions | reset the dates when `disabled` toggles |
 | templated inputs refused | `inputs: {x: "{{ now() }}"}` → no execution, reason recorded | drop the check |
