@@ -113,6 +113,9 @@ macro_rules! flow_cols {
          live_version_id, created_by, created_at, updated_at, deleted_at"
     };
 }
+// `scheduler::fire` re-reads a whole `FlowRow` to re-run `sync`; sharing the
+// projection keeps that read from drifting from every other one.
+pub(crate) use flow_cols;
 
 /// A flow draft row, as stored.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -208,6 +211,9 @@ impl FlowRepo {
         by: UserId,
         input: &CreateFlowInput,
     ) -> Result<FlowRow> {
+        // W12: the insert and `scheduler::sync` commit together, so a flow
+        // never exists without the trigger rows its YAML declares.
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         let row: std::result::Result<FlowRow, sqlx::Error> = sqlx::query_as(concat!(
             "INSERT INTO workflow.flows \
                (workspace_id, folder_id, namespace, flow_id, source, plan, created_by) \
@@ -222,19 +228,28 @@ impl FlowRepo {
         .bind(&input.source)
         .bind(&input.plan)
         .bind(by.0)
-        .fetch_one(&self.db.pool)
+        .fetch_one(&mut *tx)
         .await;
         // A `match` rather than `map_err`: telling a trashed collision apart
         // from a visible one needs a second query, and a query can only be
         // awaited -- same reasoning `EndpointStore::create` gives for the
         // identical shape.
-        match row {
-            Ok(row) => Ok(row),
-            Err(e) if is_namespace_conflict(&e) => Err(self
-                .namespace_conflict(workspace, &input.namespace, &input.flow_id)
-                .await),
-            Err(e) => Err(db_err(e)),
-        }
+        //
+        // The failed statement has aborted `tx`, so it is rolled back (dropped)
+        // before that second query, which stays on the pool.
+        let row = match row {
+            Ok(row) => row,
+            Err(e) if is_namespace_conflict(&e) => {
+                drop(tx);
+                return Err(self
+                    .namespace_conflict(workspace, &input.namespace, &input.flow_id)
+                    .await);
+            }
+            Err(e) => return Err(db_err(e)),
+        };
+        crate::scheduler::sync(&mut tx, &row, false).await?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(row)
     }
 
     /// Which conflict this is: a visible flow holding the name, or a
@@ -316,6 +331,9 @@ impl FlowRepo {
         input: &UpdateFlowInput,
     ) -> Result<FlowRow> {
         let _ = by;
+        // W12: the update and `scheduler::sync` commit together -- also when
+        // only `namespace`/`folder_id` changed, where `sync` is a no-op.
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         let row: std::result::Result<Option<FlowRow>, sqlx::Error> = sqlx::query_as(concat!(
             "UPDATE workflow.flows SET \
                namespace = COALESCE($3, namespace), \
@@ -336,7 +354,7 @@ impl FlowRepo {
         .bind(&input.plan)
         .bind(input.folder_id.is_some())
         .bind(input.folder_id.flatten())
-        .fetch_optional(&self.db.pool)
+        .fetch_optional(&mut *tx)
         .await;
         // Whole-branch review, IMPORTANT finding 3: same `UNIQUE
         // (workspace_id, namespace, flow_id)` this table's `create` can
@@ -350,12 +368,18 @@ impl FlowRepo {
         let row = match row {
             Ok(row) => row,
             Err(e) if is_namespace_conflict(&e) => {
+                // The failed statement aborted `tx`: roll it back first, and
+                // keep the two follow-up reads on the pool.
+                drop(tx);
                 let (namespace, flow_id) = self.effective_identity(ws, id, input).await;
                 return Err(self.namespace_conflict(ws, &namespace, &flow_id).await);
             }
             Err(e) => return Err(db_err(e)),
         };
-        row.ok_or_else(|| Error::NotFound("flow".into()))
+        let row = row.ok_or_else(|| Error::NotFound("flow".into()))?;
+        crate::scheduler::sync(&mut tx, &row, false).await?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(row)
     }
 
     /// The effective `(namespace, flow_id)` an update WOULD have written,
@@ -389,20 +413,28 @@ impl FlowRepo {
     /// already-trashed flow (or one that never existed in this workspace)
     /// still answers `NotFound` rather than silently doing nothing, so a
     /// caller cannot mistake "already gone" for "just deleted".
+    ///
+    /// W12: the delete and `scheduler::sync(.., gone = true)` commit together,
+    /// so a trashed flow keeps no trigger state. `ON DELETE CASCADE` does not
+    /// fire on a soft delete, and kept state would make a future restore
+    /// replay the whole time in the trash under `ALL`.
     pub async fn soft_delete(&self, ws: Uuid, id: Uuid) -> Result<()> {
-        let updated: Option<Uuid> = sqlx::query_scalar(
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        let updated: Option<FlowRow> = sqlx::query_as(concat!(
             "UPDATE workflow.flows SET deleted_at = now() \
              WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL \
-             RETURNING id",
-        )
+             RETURNING ",
+            flow_cols!()
+        ))
         .bind(id)
         .bind(ws)
-        .fetch_optional(&self.db.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(db_err)?;
-        updated
-            .map(|_| ())
-            .ok_or_else(|| Error::NotFound("flow".into()))
+        let row = updated.ok_or_else(|| Error::NotFound("flow".into()))?;
+        crate::scheduler::sync(&mut tx, &row, true).await?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
     }
 
     /// Freeze a new immutable version.
@@ -458,6 +490,9 @@ impl FlowRepo {
     /// Unscoped by workspace, like `EndpointStore::set_state` -- the caller
     /// (Task 6's publish) has already resolved and locked `flow` in its own
     /// workspace before calling this.
+    ///
+    /// Exempt from `scheduler::sync`: it changes neither `source` nor
+    /// `deleted_at`, and `state` is read at fire time (W12 spec §3.3).
     pub async fn set_live(&self, flow: Uuid, version: Uuid) -> Result<()> {
         sqlx::query(
             "UPDATE workflow.flows SET live_version_id = $2, state = 'live', updated_at = now() \

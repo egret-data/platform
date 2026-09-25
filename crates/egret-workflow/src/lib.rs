@@ -23,8 +23,11 @@
 //! - `sla`       — W8 Task 6 (`sla:` evaluation; `EXECUTION_ASSERTION` only)
 //! - `trigger`   — W6 (the schedule trigger, backfill, the injected clock, and
 //!   the flow trigger's window-free arm). W6 built the predicate as a pure
-//!   function and no table, so nothing here fires in production; **W12** builds
-//!   `workflow.triggers` and the loop that claims it (spec §9)
+//!   function and no table, so nothing here fired in production until **W12**
+//!   built `workflow.triggers` and the loop that claims it (`scheduler::fire_due`,
+//!   spec §9) -- behind `scheduler_enabled`, default `false`
+//! - `scheduler` — W12 (`workflow.triggers`, `sync`; the database half that
+//!   `trigger` must not contain)
 //! - `plugins`   — W5 (handler registry)
 //!
 //! `models`, `runners`, and `executor` must never touch the database or the
@@ -47,6 +50,12 @@ pub mod runners;
 /// `SKIP LOCKED` sentence does not cover. `pub` because `egret-bin` starts it
 /// and `tests/runtime.rs` drives it.
 pub mod runtime;
+/// W12: `workflow.triggers` and the code that keeps it (the trigger loop's
+/// I/O half; `trigger` stays pure). `pub` because `scheduler::sync` is the
+/// call `FlowRepo`'s three writers that can change what fires make (`create`,
+/// `update`, `soft_delete` -- `set_live` is exempt) and later W12 tasks drive
+/// it from integration tests.
+pub mod scheduler;
 /// W8 Task 6: `sla:` — `EXECUTION_ASSERTION` evaluated, `MAX_DURATION` refused
 /// by name with the measurement. `pub` so `tests/executor.rs` (an integration
 /// test) can drive the predicate, the same reason `executor` and `worker` are.

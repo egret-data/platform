@@ -1,5 +1,10 @@
-//! The two background loops that make this engine run, and a safety statement
-//! per statement they issue.
+//! The background loops that make this engine run, and a safety statement per
+//! statement they issue.
+//!
+//! **W12 added a third ticker, the schedule-trigger loop, behind its own gate
+//! (`scheduler_enabled`). Its per-statement safety section is
+//! [`scheduler`](crate::scheduler)'s module doc, not this one.** Everything
+//! below is about the claim loop and the reaper.
 //!
 //! Everything below this module works and, until W10 Task 2, **nothing ran it**:
 //! [`worker::tick`](crate::worker::tick) had no caller in any `crates/*/src`, so
@@ -247,6 +252,9 @@ pub struct RuntimeConfig {
     /// gate — the call site passes the flag and does not repeat the `if` — so
     /// the two cannot drift.
     ///
+    /// It gates the claim loop and the reaper **only**; the scheduler has its
+    /// own, [`scheduler_enabled`](Self::scheduler_enabled).
+    ///
     /// Defaults to `false` at `egret_config::WorkflowConfig::worker_enabled`.
     pub enabled: bool,
     /// Between claim ticks.
@@ -258,22 +266,124 @@ pub struct RuntimeConfig {
     pub reaper_interval: Duration,
     /// How long a lease may go unreleased before a reaper pass takes it back.
     pub working_timeout: Duration,
+    /// **The scheduler's own gate (W12), independent of [`enabled`](Self::enabled).**
+    ///
+    /// When true, [`spawn`] starts a third ticker that calls
+    /// [`scheduler::fire_due`](crate::scheduler::fire_due), whatever `enabled`
+    /// says. Defaults to `false` at
+    /// `egret_config::WorkflowConfig::scheduler_enabled`.
+    pub scheduler_enabled: bool,
+    /// Between scheduler passes.
+    pub trigger_interval: Duration,
 }
 
-/// Start the claim ticker and the reaper ticker; returns immediately.
+/// Start the claim ticker and the reaper ticker, and the scheduler ticker;
+/// returns immediately.
 ///
-/// **A no-op when `cfg.enabled` is false** — nothing is spawned, so the registry
-/// is never called and no statement is ever issued. That is the shipping default
-/// (`egret_config::WorkflowConfig::worker_enabled`).
+/// **Two gates, independent of each other.** With `cfg.enabled` false neither
+/// the claim loop nor the reaper is spawned, so the registry is never called
+/// and neither issues a statement. With `cfg.scheduler_enabled` false the
+/// scheduler ticker is not spawned. Both are the shipping default
+/// (`egret_config::WorkflowConfig::{worker_enabled, scheduler_enabled}`).
+/// Scheduler on with the worker off is allowed and warned about: executions
+/// are created and nothing runs them.
 ///
-/// Both tickers stop on `cancel`. One per replica and no leader election; see
-/// this module's doc for why that is safe **per statement** rather than once.
+/// Every ticker stops on `cancel`. One per replica and no leader election; see
+/// this module's doc, and [`scheduler`](crate::scheduler)'s, for why that is
+/// safe **per statement** rather than once.
 pub fn spawn(pool: PgPool, reg: Arc<dyn Registry>, cfg: RuntimeConfig, cancel: CancellationToken) {
-    if !cfg.enabled {
+    if cfg.enabled {
+        spawn_worker(pool.clone(), reg, cfg, cancel.clone());
+    } else {
         tracing::info!("workflow worker disabled by config; no claim loop, no reaper");
-        return;
     }
 
+    // ── Ticker 3: the schedule-trigger loop (W12), behind its OWN gate ──────
+    if cfg.scheduler_enabled {
+        if !cfg.enabled {
+            tracing::warn!(
+                "workflow scheduler on with the worker off: executions will be created \
+                 and nothing will run them"
+            );
+        }
+        spawn_scheduler(pool, cfg.trigger_interval, cancel);
+    } else {
+        tracing::info!("workflow scheduler disabled by config; no trigger loop");
+    }
+}
+
+/// The third ticker: one [`fire_due`](crate::scheduler::fire_due) pass per
+/// `every`. A pass fires every due trigger once and returns, so this is a
+/// fixed-interval loop for the same reason the claim loop is; a trigger that is
+/// behind catches up one tick per pass.
+///
+/// Before the first pass it runs [`reconcile`](crate::scheduler::reconcile)
+/// once, so a flow saved before migration 0156 gets its trigger rows (final
+/// review I1). A reconciliation that cannot even list the flows is logged and
+/// the ticker starts anyway: every flow saved since 0156 already has its rows.
+fn spawn_scheduler(pool: PgPool, every: Duration, cancel: CancellationToken) {
+    tracing::info!(
+        trigger_interval_secs = every.as_secs(),
+        "workflow scheduler started"
+    );
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!("workflow scheduler stopped");
+                return;
+            }
+            r = crate::scheduler::reconcile(&pool) => match r {
+                Ok(r) => tracing::info!(
+                    synced = r.synced,
+                    failed = r.failed,
+                    "workflow schedules reconciled"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "workflow schedule reconciliation failed; the ticker starts anyway"
+                ),
+            },
+        }
+        let mut tick = tokio::time::interval(every);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tick.tick() => {
+                    match crate::scheduler::fire_due(&pool).await {
+                        Ok(r) if r.fired > 0 || r.errored > 0 => tracing::info!(
+                            fired = r.fired,
+                            skipped = r.skipped,
+                            errored = r.errored,
+                            frozen = r.frozen,
+                            "workflow schedule pass"
+                        ),
+                        Ok(r) if r.skipped > 0 || r.frozen > 0 => tracing::debug!(
+                            skipped = r.skipped,
+                            frozen = r.frozen,
+                            "workflow schedule pass"
+                        ),
+                        Ok(_) => {}
+                        // A failed pass must not end the loop: its trigger's
+                        // transaction rolled back, so the next pass sees the
+                        // row exactly as this one found it and retries.
+                        Err(e) => tracing::warn!(error = %e, "workflow schedule pass failed"),
+                    }
+                }
+            }
+        }
+        tracing::info!("workflow scheduler stopped");
+    });
+}
+
+/// The claim ticker and the reaper ticker; `cfg.enabled` is checked by the
+/// caller.
+fn spawn_worker(
+    pool: PgPool,
+    reg: Arc<dyn Registry>,
+    cfg: RuntimeConfig,
+    cancel: CancellationToken,
+) {
     tracing::info!(
         tick_interval_secs = cfg.tick_interval.as_secs(),
         batch = cfg.batch,

@@ -60,6 +60,7 @@
 //!   was invisible for a whole package: the only caller `resume` had was one
 //!   that had already moved the clock itself.
 
+use chrono::{DateTime, Utc};
 use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
@@ -76,8 +77,11 @@ use crate::executor::{
     RunIx, RunState, TaskKind, TaskRun, Tick,
 };
 
+/// Keeps the `sqlx::Error` as the source rather than flattening it to text:
+/// the Display is unchanged, and `scheduler::fire` downcasts it to tell a
+/// duplicate schedule tick (a unique violation) from a transient failure.
 fn db_err(e: sqlx::Error) -> Error {
-    Error::Internal(anyhow::anyhow!("{e}"))
+    Error::Internal(anyhow::Error::new(e))
 }
 
 fn worker_err(e: WorkerError) -> Error {
@@ -1386,17 +1390,66 @@ pub async fn start_execution_with_trigger(
     inputs: serde_json::Value,
     trigger: Option<serde_json::Value>,
 ) -> Result<Uuid> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let id = start_execution_in(
+        &mut tx,
+        NewExecution {
+            workspace_id,
+            flow_id,
+            source,
+            inputs,
+            trigger,
+            // Only the scheduler (W12 Task 4) fires a `Schedule` tick, and it
+            // calls `start_execution_in` directly on the transaction that
+            // advances `next_evaluation_date` -- this wrapper is never that
+            // caller.
+            scheduled_date: None,
+        },
+    )
+    .await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(id)
+}
+
+/// Everything a caller supplies to create an execution. A struct because the
+/// alternative is a seventh positional argument, and a run of uniform `None`s
+/// is the shape that hid W6 Task 6's surviving mutant.
+pub struct NewExecution<'a> {
+    pub workspace_id: Uuid,
+    pub flow_id: Option<Uuid>,
+    pub source: &'a str,
+    pub inputs: serde_json::Value,
+    pub trigger: Option<serde_json::Value>,
+    pub scheduled_date: Option<DateTime<Utc>>,
+}
+
+/// [`start_execution_with_trigger`]'s body, taking the caller's own `conn`
+/// rather than a pool -- the point being that a caller already inside a
+/// transaction (W12 Task 4's scheduler, advancing a `Schedule` trigger's
+/// `next_evaluation_date`) can create the execution in that SAME transaction,
+/// so the trigger's advance and the execution it fires commit or roll back
+/// together. `start_execution_with_trigger` is now the thin wrapper: begin,
+/// call this, commit.
+pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) -> Result<Uuid> {
+    let NewExecution {
+        workspace_id,
+        flow_id,
+        source,
+        inputs,
+        trigger,
+        scheduled_date,
+    } = new;
+
     let flow = crate::spec::parse(source)
         .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
     let plan = build_plan(source)
         .map_err(|e| Error::InvalidInput(format!("the flow does not plan: {e}")))?;
 
-    let mut tx = pool.begin().await.map_err(db_err)?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
-            execution_trigger) \
-         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6, $7) RETURNING id",
+            execution_trigger, scheduled_date) \
+         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6, $7, $8) RETURNING id",
     )
     .bind(workspace_id)
     .bind(flow_id)
@@ -1409,7 +1462,8 @@ pub async fn start_execution_with_trigger(
         serde_json::json!({})
     })
     .bind(trigger)
-    .fetch_one(&mut *tx)
+    .bind(scheduled_date)
+    .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;
 
@@ -1428,8 +1482,7 @@ pub async fn start_execution_with_trigger(
     // `Tick(0)` is the execution's own origin — `Tick` is milliseconds since
     // the execution was created (`executor::state::Tick`), and this is that
     // instant.
-    settle(&mut tx, &ctx, &empty, &mut state, Tick(0), None).await?;
-    tx.commit().await.map_err(db_err)?;
+    settle(conn, &ctx, &empty, &mut state, Tick(0), None).await?;
     Ok(id)
 }
 

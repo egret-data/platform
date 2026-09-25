@@ -21,6 +21,14 @@
 //! Both live in `egret-kernel`'s `routes.rs`. Auditing this feature by reading
 //! the catalog alone would miss them, which is why they are named here. Anything
 //! else that mints a capability without a `WsContext` belongs on this list.
+//!
+//! One background consumer asserts an entitlement too, with no request at all:
+//!
+//! - the workflow scheduler (`egret_workflow::scheduler::fire_due`), whose claim
+//!   skips every `Schedule` trigger in a workspace with `workflows` OFF, reading
+//!   `workspace_features` with this module's rule (only `enabled = false` is
+//!   off) in SQL. A skipped trigger is frozen, not consumed, so turning the
+//!   module back on recovers the missed ticks (W12 final review I3).
 
 use std::collections::HashSet;
 
@@ -225,8 +233,12 @@ pub const FEATURES: &[Feature] = &[
         // and `//!`, not `//`, and they resolve Rust items, not env vars.)
         //
         // Turning this module off therefore stops flows being authored and
-        // published; stopping webhook traffic is `state = 'disabled'` on the
-        // flow, which `webhook_routes` answers with a 409.
+        // published, and -- since W12's final review (I3) -- freezes every
+        // `Schedule` trigger in the workspace: the scheduler's claim reads this
+        // key's `workspace_features` row directly (see the module doc). The
+        // webhook is now the only workflow surface this key does not stop;
+        // stopping webhook traffic is `state = 'disabled'` on the flow, which
+        // `webhook_routes` answers with a 409.
         rules: &[prefix("workflows")],
     },
 ];

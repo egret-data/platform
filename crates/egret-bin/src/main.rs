@@ -1729,6 +1729,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // exactly one thing decides and a test can reach it; `worker_enabled`
     // defaults to `false` (`egret_config::WorkflowConfig::worker_enabled`).
     //
+    // W12 adds a third ticker, the schedule-trigger loop, behind its OWN gate
+    // (`scheduler_enabled`, also `false` by default) — independent of the
+    // worker's, so the two are passed separately and never derived from each
+    // other. Its per-statement safety argument is `egret_workflow::scheduler`'s
+    // module doc.
+    //
     // **`Handlers::with_core_tasks()` only, and that is deliberate.** It
     // registers four handlers: `core.log.Log`, `core.debug.Return`,
     // `core.execution.Fail` and `core.flow.Sleep`. `egret.sql` is not here
@@ -1758,6 +1764,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             batch: config.workflow.batch,
             reaper_interval: std::time::Duration::from_secs(config.workflow.reaper_interval_secs),
             working_timeout: std::time::Duration::from_secs(config.workflow.working_timeout_s),
+            scheduler_enabled: config.workflow.scheduler_enabled,
+            trigger_interval: std::time::Duration::from_secs(config.workflow.trigger_interval_secs),
         },
         reaper_cancel.clone(),
     );

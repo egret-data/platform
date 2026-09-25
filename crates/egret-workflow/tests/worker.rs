@@ -56,7 +56,8 @@ use std::sync::Mutex;
 
 use egret_metastore::Db;
 use egret_workflow::worker::{
-    apply_outcome, claim, due_retries, reap, start_execution, wake, Outcome, Registry, TaskInput,
+    apply_outcome, claim, due_retries, reap, start_execution, start_execution_in, wake,
+    NewExecution, Outcome, Registry, TaskInput,
 };
 use uuid::Uuid;
 
@@ -7080,5 +7081,100 @@ async fn a_terminal_execution_hides_every_arm_except_the_replay(pool: sqlx::PgPo
          to named=false and also kills two of W6 Task 4's replay tests. \
          Neither moves the ratchet.\nNamed: {named:?}",
         wrong.join("\n  ")
+    );
+}
+
+/// **The reason `start_execution_in` takes `conn` and not `pool`**: W12 Task
+/// 4's scheduler creates the fired execution inside the SAME transaction that
+/// advances the `Schedule` trigger's `next_evaluation_date`, so a crash
+/// between the two can never leave one without the other. This is the
+/// property that makes that safe to rely on -- a caller that rolls back its
+/// own transaction leaves no execution behind, and a caller that commits
+/// leaves exactly one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn start_execution_in_commits_nothing_when_the_caller_rolls_back(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (db, ws) = seed(&pool).await;
+    let source = one_task("rollback-me");
+
+    let mut tx = pool.begin().await.expect("begin");
+    start_execution_in(
+        &mut tx,
+        NewExecution {
+            workspace_id: ws,
+            flow_id: None,
+            source: &source,
+            inputs: serde_json::json!({}),
+            trigger: None,
+            scheduled_date: None,
+        },
+    )
+    .await
+    .expect("start_execution_in");
+    // The rollback: dropped, never committed.
+    drop(tx);
+
+    assert_eq!(
+        common::execution_count(&db, ws).await,
+        0,
+        "a transaction the caller never committed must leave no row behind"
+    );
+
+    let mut tx = pool.begin().await.expect("begin");
+    start_execution_in(
+        &mut tx,
+        NewExecution {
+            workspace_id: ws,
+            flow_id: None,
+            source: &source,
+            inputs: serde_json::json!({}),
+            trigger: None,
+            scheduled_date: None,
+        },
+    )
+    .await
+    .expect("start_execution_in");
+    tx.commit().await.expect("commit");
+
+    assert_eq!(
+        common::execution_count(&db, ws).await,
+        1,
+        "and the same call, committed, leaves exactly one"
+    );
+}
+
+/// 0156's `workflow_executions_scheduled_date_iff_schedule` CHECK, from the
+/// caller's side: a `scheduled_date` with no `Schedule` trigger record must be
+/// refused as an error, not accepted and not a panic.
+#[sqlx::test(migrations = "../../migrations")]
+async fn scheduled_date_is_refused_without_a_schedule_trigger(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = one_task("scheduled-no-trigger");
+
+    let mut tx = pool.begin().await.expect("begin");
+    let err = start_execution_in(
+        &mut tx,
+        NewExecution {
+            workspace_id: ws,
+            flow_id: None,
+            source: &source,
+            inputs: serde_json::json!({}),
+            trigger: None,
+            scheduled_date: Some(chrono::Utc::now()),
+        },
+    )
+    .await
+    .expect_err(
+        "scheduled_date with no execution_trigger must violate the CHECK, \
+         not succeed",
+    );
+    // Named, not merely "some error": a NOT NULL, a typo'd column or a
+    // dropped constraint would all be `Err` here too, and each would make
+    // this test pass while testing nothing.
+    assert!(
+        err.to_string()
+            .contains("workflow_executions_scheduled_date_iff_schedule"),
+        "refused by the wrong thing: {err}"
     );
 }

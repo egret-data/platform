@@ -35,7 +35,8 @@ data:
   # With it off, a webhook or an API call creates an execution row and nothing
   # ever advances it: that is exactly how every release before W10 behaved, which
   # is what makes `false` the safe value rather than merely the cautious one. On,
-  # it starts two per-replica tickers — the claim loop and the lease reaper. No
+  # it starts two per-replica tickers — the claim loop and the lease reaper (the
+  # third, the schedule-trigger loop, has its own switch below). No
   # leader election is needed, but NOT for one reason repeated: see
   # `egret_workflow::runtime`'s module doc, which gives a separate safety
   # statement for each of the four statements those loops issue.
@@ -47,6 +48,21 @@ data:
   # when a deployment actually needs them, and a chart key nobody has a reason to
   # set is surface with no reader.
   EGRET_WORKFLOW__WORKER_ENABLED: "{{ .Values.workflow.workerEnabled }}"
+  # W12 — THE SWITCH THAT MAKES `cron:` SCHEDULE TRIGGERS FIRE. Off by default.
+  #
+  # With it off, flows' Schedule triggers are still recorded on every save and
+  # nothing fires them. On, it starts a third per-replica ticker that creates an
+  # execution for each due cron tick. No leader election: see
+  # `egret_workflow::scheduler`'s module doc for the safety statement per SQL
+  # statement a pass issues.
+  #
+  # It is independent of workerEnabled, and it ALSO NEEDS THE WORKER ON to be
+  # useful: with the scheduler on and the worker off, executions are created and
+  # nothing runs them (the server logs a warning at start).
+  #
+  # Its tuning knob, EGRET_WORKFLOW__TRIGGER_INTERVAL_SECS (1), is deliberately
+  # NOT a chart value, for the reason given above for the worker's.
+  EGRET_WORKFLOW__SCHEDULER_ENABLED: "{{ .Values.workflow.schedulerEnabled }}"
   EGRET_RANGER__AUTH_TOKEN: ""
   EGRET_ADMIN_EMAIL: "{{ .Values.admin.email }}"
   # Package 4 — HOW MANY OF ME THERE ARE. A pod cannot discover this: the count

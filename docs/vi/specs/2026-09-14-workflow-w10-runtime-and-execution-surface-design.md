@@ -41,10 +41,25 @@ xuất hiện trong **ba** file migration, nên phép tìm có chạm tới migr
 `TriggerState::initialise` có **đúng một** caller và đó là một helper `#[cfg(test)]`
 trong `trigger/mod.rs`; ngoài `crates/egret-workflow/src/trigger/` không có gì gọi
 `trigger::tick`; và `crates/egret-bin/src/main.rs` chứa chuỗi `trigger` **không lần
-nào** (control: `egret_workflow` xuất hiện **5** lần trong cùng file). **Nên một
-trigger `cron:` KHÔNG THỂ nổ trong production, và W10 với phạm vi hiện tại không
-đổi điều đó** — W10 nối vòng *worker*, vốn có bảng để claim; vòng trigger thì
-không có bảng nào.
+nào** (control: `egret_workflow` xuất hiện **5** lần trong cùng file). **Nên tại
+thời điểm đo (2026-09-14), một trigger `cron:` KHÔNG THỂ nổ trong production, và
+W10 với phạm vi lúc đó không đổi điều đó** — W10 nối vòng *worker*, vốn có bảng
+để claim; vòng trigger lúc đó không có bảng nào.
+
+> **RÚT LẠI — sai kể từ W12 Task 2 (`workflow.triggers`, migration 0156) và W12
+> Task 5 (ticker của scheduler), đính chính tại W12 Task 6, 2026-09-25.** Mọi số
+> 0 call-site trong mục này đã thay đổi: `scheduler::sync` và
+> `scheduler::fire_due` là caller không-phải-test của `trigger::tick` và
+> `TriggerState::initialise`; `crates/egret-workflow/src/runtime.rs` giờ gọi
+> `crate::scheduler::fire_due` từ ticker của chính nó, và ticker đó được khởi
+> động từ `crates/egret-bin/src/main.rs`. Một trigger `cron:` giờ **có thể** nổ
+> trong production, sau cần gạt `EGRET_WORKFLOW__SCHEDULER_ENABLED`
+> (`WorkflowConfig::scheduler_enabled`, mặc định `false` — cùng hình dạng với
+> `worker_enabled`, cần gạt của chính W10). Dòng bảng ở trên, *"một vòng kích
+> hoạt trigger `cron:` và lịch … không gói nào"*, cũng được rút lại như vậy: chủ
+> sở hữu là **W12**. Giữ nguyên tại chỗ như ghi chép của phát hiện đã cho W12
+> phạm vi của nó, không phải như một khẳng định hiện hành. Xem tuyên bố độ phủ
+> của `oracle-exec/README.md`, phần W12, và dòng W12 của spec chương trình (§9).
 
 **Đây là ảnh gương của một defect W8 đã đóng.** Ở đó `allowFailure` bị giao **hai
 lần** trong hai tài liệu và gói phải nói chủ nào sai. Ở đây bốn hạng mục được giao

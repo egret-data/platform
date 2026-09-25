@@ -93,6 +93,9 @@ workflow:
   # binary called them, so a deployment that says nothing keeps behaving exactly
   # as it did. Turn it on and executions actually advance.
   workerEnabled: false
+  # `cron:` schedule triggers. Off by default. Needs workerEnabled too: with the
+  # scheduler on and the worker off, executions are created and nothing runs them.
+  schedulerEnabled: false
 
 ranger:
   enabled: false
