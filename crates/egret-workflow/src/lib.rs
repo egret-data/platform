@@ -28,6 +28,8 @@
 //!   spec §9) -- behind `scheduler_enabled`, default `false`
 //! - `scheduler` — W12 (`workflow.triggers`, `sync`; the database half that
 //!   `trigger` must not contain)
+//! - `flow_trigger` — W13a (the outbox processor: the Flow trigger's database
+//!   half, run from the scheduler ticker)
 //! - `plugins`   — W5 (handler registry)
 //!
 //! `models`, `runners`, and `executor` must never touch the database or the
@@ -38,6 +40,9 @@
 // integration test, exactly as `tests/oracle.rs` is, and an integration test
 // sees only the public API.
 pub mod executor;
+/// W13a: `process_events`, the Flow-trigger outbox processor. `pub` because
+/// `tests/flow_trigger_fire.rs` drives it directly.
+pub mod flow_trigger;
 pub mod models;
 pub mod publish;
 pub mod refs;
