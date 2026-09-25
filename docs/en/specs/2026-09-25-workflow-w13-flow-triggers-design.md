@@ -60,6 +60,8 @@ CREATE TABLE workflow.flow_trigger_events (
   source_execution_id uuid        NOT NULL REFERENCES workflow.executions (id) ON DELETE CASCADE,
   workspace_id        uuid        NOT NULL,
   state               text        NOT NULL,
+  done                text[]      NOT NULL DEFAULT '{}', -- listeners already handled
+  attempts            integer     NOT NULL DEFAULT 0,
   created_at          timestamptz NOT NULL DEFAULT now()
 );
 
@@ -123,6 +125,9 @@ COMMIT
 **Why each line is the way it is:**
 
 1. **The event is deleted in the transaction that fires**, so an event is processed exactly once or not at all. A crash rolls back both the fire and the delete, and the next pass retries. The unique index is the backstop.
+   - **Retries are per listener, not per event.** A listener that hits a transient error rolls back only its own savepoint, and its siblings' fires commit.
+   - The event is then kept with those siblings recorded in `done` and `attempts + 1`. The next pass evaluates only the listeners not yet in `done`.
+   - After 5 attempts the event is dropped and the still-failing listeners are logged at `warn`. A failing listener can therefore neither undo nor block the others.
 2. **`SKIP LOCKED` partitions events across replicas**, as the W12 claim does. Two events for one listener can be processed concurrently. Only the window arm needs them serialised, and W13b does that with the window's row lock.
 3. **The source's render context is read at processing time, not at transition time.** For a terminal state they are the same. For `PAUSED`, a source that resumed before its event was processed renders a later context. This is a stated divergence from Kestra, which renders the execution it was handed. The alternative is snapshotting the whole render context into each event row. That is not worth the size for a divergence that exists only on non-terminal states.
 4. **Depth is data, not stack.** `evaluate` reads the source's persisted `execution_depth`, and a fired execution is written with depth + 1. A chain runs one hop per pass, so no stack grows, and the cap is Kestra's 100.

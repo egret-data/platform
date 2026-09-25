@@ -64,6 +64,8 @@ CREATE TABLE workflow.flow_trigger_events (
   source_execution_id uuid        NOT NULL REFERENCES workflow.executions (id) ON DELETE CASCADE,
   workspace_id        uuid        NOT NULL,
   state               text        NOT NULL,
+  done                text[]      NOT NULL DEFAULT '{}', -- các listener đã xử lý xong
+  attempts            integer     NOT NULL DEFAULT 0,
   created_at          timestamptz NOT NULL DEFAULT now()
 );
 
@@ -127,6 +129,9 @@ COMMIT
 **Vì sao từng dòng như vậy:**
 
 1. **Sự kiện bị xoá trong chính transaction bắn**, nên mỗi sự kiện được xử lý đúng một lần hoặc không lần nào. Nếu process chết, cả lần bắn lẫn lệnh xoá cùng rollback và pass sau thử lại. Unique index là chốt chặn.
+   - **Thử lại theo từng listener, không theo cả sự kiện.** Listener gặp lỗi tạm thời chỉ rollback savepoint của nó, còn lần bắn của các listener khác vẫn commit.
+   - Sự kiện được giữ lại, ghi các listener đã xong vào `done` và tăng `attempts`. Pass sau chỉ đánh giá những listener chưa có trong `done`.
+   - Sau 5 lần thử, sự kiện bị bỏ và các listener vẫn lỗi được log ở mức `warn`. Nhờ vậy một listener lỗi không thể làm hỏng cũng không thể chặn các listener khác.
 2. **`SKIP LOCKED` chia sự kiện giữa các replica**, như câu claim của W12. Hai sự kiện cho cùng một listener có thể được xử lý song song. Chỉ nhánh cửa sổ cần chúng xếp hàng, và W13b làm việc đó bằng row lock của cửa sổ.
 3. **Context của nguồn được đọc lúc xử lý, không phải lúc đổi trạng thái.**
    - Với trạng thái kết thúc, hai thời điểm này như nhau.
