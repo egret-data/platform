@@ -4,7 +4,7 @@
 
 **Goal:** A flow declaring an `io.kestra.plugin.core.trigger.Flow` trigger with no `dependsOn` starts when another execution in its workspace reaches one of the trigger's `states`.
 
-**Architecture:** `scheduler::sync` keeps an index `workflow.flow_listeners`. `settle` writes one outbox row per transition that some listener could hear. `flow_trigger::process_events` runs on the W12 scheduler ticker after `fire_due`. For each event it takes one transaction: claim with `SKIP LOCKED`, delete the event, evaluate each listener with W6's pure `trigger::flow::evaluate`, and fire through `start_execution_in`. The depth is persisted (`executions.execution_depth`), so chains run one hop per pass with no stack growth.
+**Architecture:** `scheduler::sync` keeps an index `workflow.flow_listeners`. `settle` writes one outbox row per transition that some listener could hear. `flow_trigger::process_events` runs on the W12 scheduler ticker after `fire_due`. For each event it takes one transaction: claim with `SKIP LOCKED`, delete the event, evaluate each listener with W6's pure `trigger::flow::evaluate`, and fire through `start_execution_in`. The depth is persisted (`executions.execution_depth`), so chains run at least one hop per pass with no stack growth (more when a fired execution's first settle already emits an event; spec §4.4 point 4).
 
 **Tech Stack:** Rust, sqlx runtime queries (no compile-time macros in this workspace), tokio, Postgres.
 
@@ -213,7 +213,7 @@ pub async fn process_events(pool: &PgPool) -> egret_core::Result<EventReport>;
   - The tests in this file share one DB per process and a pass is global. Serialise them with a static mutex and clear `flow_trigger_events` at the start of each, as `tests/scheduler_fire.rs` does.
 - [ ] **Step 2: Failing tests** in `tests/flow_trigger_fire.rs`, one per spec §7.1 row this task owns:
   - `a_success_fires_the_listener_once`: one execution. `trigger_execution_id` = the source, `execution_depth` = 1, `execution_trigger` equals Task 1's shape (loaded with `include_str!`), and `inputs` equal the listener's literal inputs. The event is gone afterwards.
-  - `inputs_referencing_trigger_refuse_the_fire`: **measured in Task 1** (`oracle-exec/w13-flow-trigger.json`, `listener_run1_FAILED_bad_inputs`): Kestra fails `inputs: {src: "{{ trigger.executionId }}"}` with `Unable to find \`trigger\`` and does not fire. egret's source render context has no `trigger` root, so the same input must refuse the fire. Assert zero executions for that listener, a sibling with literal inputs still fires, and the event is consumed.
+  - `inputs_that_fail_to_render_create_a_failed_execution` (**amended in Task 4 fix round 1**; this line first said the fire is refused, which misread the measurement): in Task 1 (`oracle-exec/w13-flow-trigger.json`, `listener_run1_FAILED_bad_inputs`) Kestra fails `inputs: {src: "{{ trigger.executionId }}"}` with `Unable to find \`trigger\`` and STILL creates the listener's execution, `CREATED -> FAILED`, no task run, no `inputs`. egret does the same (spec §4.5). Assert that execution, a sibling with literal inputs firing, and the event consumed.
   - `refusals`: same flow; other workspace; `kind` not normal (write the source's kind column by SQL); `when: "{{ false }}"`; `when` that cannot render. Each gives zero executions, and the event is consumed.
   - `every_off_switch`: all six, each with an unaffected sibling listener that does fire.
   - `a_chain_runs_one_hop_per_pass`: A→B→C. Pass 1 fires B at depth 1; pass 2 fires C at depth 2.
