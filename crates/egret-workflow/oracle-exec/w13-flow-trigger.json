@@ -1,0 +1,169 @@
+{
+  "artifact": "kestra/kestra@sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd",
+  "captured_at": "2026-09-25T03:22:55Z",
+  "flows": {
+    "producer": {
+      "id": "producer",
+      "namespace": "w13",
+      "tasks": [{"id": "a", "type": "io.kestra.plugin.core.log.Log", "message": "hi"}]
+    },
+    "listener": {
+      "id": "listener",
+      "namespace": "w13",
+      "triggers": [
+        {
+          "id": "on_done",
+          "type": "io.kestra.plugin.core.trigger.Flow",
+          "states": ["SUCCESS"],
+          "inputs": {"src": "{{ trigger.executionId }}"}
+        }
+      ],
+      "inputs": [{"id": "src", "type": "STRING"}],
+      "tasks": [{"id": "a", "type": "io.kestra.plugin.core.log.Log", "message": "{{ inputs.src }}"}],
+      "note": "revision 1 is the brief's exact YAML, used for the first (FAILED) fire below. revision 2 replaces `inputs.src` with a literal string so the chain could reach SUCCESS and produce a hop-2 measurement; see findings."
+    },
+    "listener2": {
+      "id": "listener2",
+      "namespace": "w13",
+      "triggers": [
+        {
+          "id": "on_done2",
+          "type": "io.kestra.plugin.core.trigger.Flow",
+          "states": ["SUCCESS"],
+          "inputs": {"src": "{{ trigger.executionId }}"}
+        }
+      ],
+      "inputs": [{"id": "src", "type": "STRING"}],
+      "tasks": [{"id": "a", "type": "io.kestra.plugin.core.log.Log", "message": "{{ inputs.src }}"}],
+      "note": "unrestricted Flow trigger (no namespace/flowId condition), same shape as `listener`. Because neither trigger restricts its source, it fires on ANY execution's SUCCESS in the workspace, not only `listener`'s -- this is what produced the two-hop chain (and also an unbounded ping-pong between listener and listener2 that had to be stopped by deleting both flows; see findings)."
+    }
+  },
+  "executions": {
+    "producer_run1": {
+      "id": "2uwAxCkInfv1nFFDny6WqF",
+      "flowId": "producer",
+      "state": {"current": "SUCCESS"},
+      "labels": [
+        {"key": "system.from", "value": "api"},
+        {"key": "system.correlationId", "value": "2uwAxCkInfv1nFFDny6WqF"}
+      ]
+    },
+    "listener_run1_FAILED_bad_inputs": {
+      "id": "3Js6T4sHvgFhm2bgXkKAmM",
+      "flowId": "listener",
+      "flowRevision": 1,
+      "taskRunList": [],
+      "labels": [{"key": "system.correlationId", "value": "2uwAxCkInfv1nFFDny6WqF"}],
+      "state": {
+        "current": "FAILED",
+        "histories": [
+          {"state": "CREATED", "date": "2026-09-25T03:14:59.360629Z"},
+          {"state": "FAILED", "date": "2026-09-25T03:14:59.399851Z"}
+        ]
+      },
+      "trigger": {
+        "id": "on_done",
+        "type": "io.kestra.plugin.core.trigger.Flow",
+        "variables": {
+          "state": "SUCCESS",
+          "flowId": "producer",
+          "endDate": "2026-09-25T03:14:59.320438Z",
+          "namespace": "w13",
+          "startDate": "2026-09-25T03:14:58.799551Z",
+          "lastTaskId": "a",
+          "executionId": "2uwAxCkInfv1nFFDny6WqF",
+          "flowRevision": 1,
+          "executionLabels": {"system": {"from": "api"}}
+        }
+      },
+      "inputs_field_present": false,
+      "metadata": {"executionDepth": 1},
+      "log_at_failure": "WARN Failed to trigger flow w13.listener for trigger on_done, invalid inputs; DEBUG io.kestra.core.exceptions.IllegalVariableEvaluationException: Unable to find `trigger` used in the expression `{{ trigger.executionId }}` at line 1, at io.kestra.plugin.core.trigger.Flow.evaluate(Flow.java:353)"
+    },
+    "producer_run2": {
+      "id": "2sVbe2jtsuRuHS30oICal2",
+      "flowId": "producer",
+      "state": {"current": "SUCCESS"},
+      "labels": [
+        {"key": "system.from", "value": "api"},
+        {"key": "system.correlationId", "value": "2sVbe2jtsuRuHS30oICal2"}
+      ]
+    },
+    "listener_hop1_SUCCESS": {
+      "id": "QBI82sdiPStezk1byj0Yu",
+      "flowId": "listener",
+      "flowRevision": 2,
+      "labels": [{"key": "system.correlationId", "value": "2sVbe2jtsuRuHS30oICal2"}],
+      "state": {
+        "current": "SUCCESS",
+        "histories": [
+          {"state": "CREATED", "date": "2026-09-25T03:17:27.756363Z"},
+          {"state": "RUNNING", "date": "2026-09-25T03:17:28.082734Z"},
+          {"state": "SUCCESS", "date": "2026-09-25T03:17:28.177102Z"}
+        ]
+      },
+      "inputs": {"src": "producer-fired"},
+      "trigger": {
+        "id": "on_done",
+        "type": "io.kestra.plugin.core.trigger.Flow",
+        "variables": {
+          "state": "SUCCESS",
+          "flowId": "producer",
+          "endDate": "2026-09-25T03:17:27.743318Z",
+          "namespace": "w13",
+          "startDate": "2026-09-25T03:17:27.099830Z",
+          "lastTaskId": "a",
+          "executionId": "2sVbe2jtsuRuHS30oICal2",
+          "flowRevision": 1,
+          "executionLabels": {"system": {"from": "api"}}
+        }
+      },
+      "metadata": {"attemptNumber": 1, "executionDepth": 1}
+    },
+    "listener2_hop2_SUCCESS": {
+      "id": "7e2wsms80NZ9Zh2b3DWtfI",
+      "flowId": "listener2",
+      "flowRevision": 2,
+      "labels": [{"key": "system.correlationId", "value": "2sVbe2jtsuRuHS30oICal2"}],
+      "state": {
+        "current": "SUCCESS",
+        "histories": [
+          {"state": "CREATED", "date": "2026-09-25T03:17:28.196917Z"},
+          {"state": "RUNNING", "date": "2026-09-25T03:17:28.225153Z"},
+          {"state": "SUCCESS", "date": "2026-09-25T03:17:28.293286Z"}
+        ]
+      },
+      "inputs": {"src": "listener-fired"},
+      "trigger": {
+        "id": "on_done2",
+        "type": "io.kestra.plugin.core.trigger.Flow",
+        "variables": {
+          "state": "SUCCESS",
+          "flowId": "listener",
+          "endDate": "2026-09-25T03:17:28.177102Z",
+          "namespace": "w13",
+          "startDate": "2026-09-25T03:17:27.756363Z",
+          "lastTaskId": "a",
+          "executionId": "QBI82sdiPStezk1byj0Yu",
+          "flowRevision": 2,
+          "executionLabels": {}
+        }
+      },
+      "metadata": {"attemptNumber": 1, "executionDepth": 2}
+    }
+  },
+  "ping_pong_measurement": {
+    "note": "Because both `listener` and `listener2` declare unrestricted Flow triggers (no namespace/flowId filter, matching the brief's own YAML for `listener`), the second producer run's chain did not stop at two hops: listener and listener2 kept re-firing each other's SUCCESS. 204 total executions were created in namespace w13 before both flows were deleted to stop it. `metadata.executionDepth` was sampled across all 204: values ran 1..100 (two executions at every depth 1-100, one per branch of the ping-pong), and depth stopped climbing at exactly 100 -- the chain was refused past depth 100, confirming Kestra's own `DEFAULT_MAX_EXECUTION_DEPTH = 100` cap that the design spec's `trigger::flow::DEFAULT_MAX_EXECUTION_DEPTH` reproduces.",
+    "max_observed_execution_depth": 100,
+    "total_executions_before_cleanup": 204
+  },
+  "findings": [
+    "Full key set of `execution.trigger.variables` for a Flow-fired execution: exactly `state`, `flowId`, `endDate`, `namespace`, `startDate`, `lastTaskId`, `executionId`, `flowRevision`, `executionLabels`. Verified identical (same 9-key sorted tuple) across all 204 measured executions that carried a `trigger` object, including the FAILED first attempt, the hop-1 SUCCESS (`QBI82sdiPStezk1byj0Yu`), and the hop-2 SUCCESS (`7e2wsms80NZ9Zh2b3DWtfI`). No `id`/`type` duplication inside `variables` beyond what is already at `trigger.id`/`trigger.type` (those two live one level up, not inside `variables`).",
+    "`state` IS the bare enum name: quoted verbatim from `listener_hop1_SUCCESS.trigger.variables.state` = `\"SUCCESS\"` (and identically `\"SUCCESS\"` in the FAILED run and the hop-2 run -- no execution reached a non-SUCCESS terminal state in this measurement, but the field is unquestionably the raw enum, not a wrapped/qualified form like `io.kestra...SUCCESS` or an object). This directly supports spec §4.1's unique index keying on `execution_trigger->'variables'->>'state'` as written -- no typed-column fallback (the W12 `scheduled_date` pattern) is needed.",
+    "Execution depth lives at `metadata.executionDepth` (an integer, not a `system.*` label and not inside `trigger`). It is ABSENT (not present, not null) on executions with no trigger (both `producer` runs have no `metadata.executionDepth` key at all). Hop 1 (`listener_hop1_SUCCESS`, fired directly by `producer`): `metadata.executionDepth = 1`. Hop 2 (`listener2_hop2_SUCCESS`, fired by `listener`'s SUCCESS): `metadata.executionDepth = 2`. The runaway ping-pong chain (see `ping_pong_measurement`) additionally confirms the cap sits at exactly 100: no execution above `executionDepth = 100` was created, and the chain visibly stalled there before the flows were deleted -- this corroborates the spec's `DEFAULT_MAX_EXECUTION_DEPTH = 100` against the real artifact, not just against Kestra's Java source.",
+    "`parentId` is ABSENT (not present as a key, let alone null) on every one of the 204 measured executions, flow-fired or not -- consistent with W6's 210/210 measurement and the spec's ratchet note. A flow-fired execution carries only the `trigger`/`trigger_execution_id` link, never `parentId`.",
+    "`inputs` did NOT render `{{ trigger.executionId }}`, as literally written in the brief's YAML for `listener`/`listener2`. Firing `listener` (revision 1, exact brief YAML) against `producer`'s first run produced a FAILED execution with NO `inputs` field at all (key entirely absent, not an empty object) and a queue-level WARN/DEBUG log pair: `Failed to trigger flow w13.listener for trigger on_done, invalid inputs` followed by `io.kestra.core.exceptions.IllegalVariableEvaluationException: Unable to find \\`trigger\\` used in the expression \\`{{ trigger.executionId }}\\` at line 1`, thrown from `io.kestra.plugin.core.trigger.Flow.evaluate(Flow.java:353)`. The render context used to evaluate a Flow trigger's own `inputs`/`when` has NO `trigger` binding in this pinned artifact -- it is not merely that `trigger.executionId` resolves to something unexpected, `trigger` itself is unbound at that point. This directly corroborates spec §4.5's stated non-goal (\"Not done, and named: ... publishing `trigger.*` into the render context\"): the egret port's decision not to publish `trigger.*` into the render context matches real Kestra's own behavior on this build, it is not a divergence. After revision 2 replaced `inputs.src` with a literal string (`\"producer-fired\"` / `\"listener-fired\"`), both listener flows reached SUCCESS and `inputs` appeared verbatim, e.g. `listener_hop1_SUCCESS.inputs = {\"src\": \"producer-fired\"}`.",
+    "The corpus's own real-world example (`corpus/valids/trigger-flow-listener.yaml`) never references `trigger.*` in its trigger `inputs`; it uses `outputs.only.value` instead -- independent evidence, from a file the brief did not point at, that `trigger.*` is not the corpus's own convention for wiring inputs on a Flow trigger.",
+    "`system.correlationId` on a chained fire is inherited from the ROOT of the chain, not the immediate trigger source: `listener2_hop2_SUCCESS.labels` carries `system.correlationId = 2sVbe2jtsuRuHS30oICal2` (the original `producer` run), even though its immediate trigger source is `listener`'s execution `QBI82sdiPStezk1byj0Yu`. Not asked for by the brief, but relevant since spec §4.5 explicitly defers `system.correlationId` (egret has no labels column) -- recorded here in case a future task revisits labels."
+  ]
+}
