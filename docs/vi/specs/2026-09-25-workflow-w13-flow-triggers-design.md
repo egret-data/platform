@@ -93,16 +93,19 @@ Unique index lấy khoá theo sự kiện outbox, không theo trạng thái củ
 
 ### 4.3 Điểm nối trong `settle`
 
-Trong khối `was != is` ở cuối `settle`, với mọi trạng thái mới trừ `CREATED`, chạy một câu:
+Ở cuối `settle`, một câu lệnh ghi một sự kiện cho mỗi trạng thái mà settle đã **nối thêm** vào history của execution (`state.history[before.history.len()..]`), trừ `CREATED`, theo đúng thứ tự:
 
 ```sql
 INSERT INTO workflow.flow_trigger_events (source_execution_id, workspace_id, state)
-SELECT $1, $2, $3
-WHERE EXISTS (SELECT 1 FROM workflow.flow_listeners l
-               WHERE l.workspace_id = $2 AND NOT l.disabled AND $3 = ANY (l.states))
+SELECT $1, $2, t.s
+  FROM unnest($3::text[]) WITH ORDINALITY AS t(s, n)   -- các trạng thái được nối thêm
+ WHERE EXISTS (SELECT 1 FROM workflow.flow_listeners l
+                WHERE l.workspace_id = $2 AND NOT l.disabled AND t.s = ANY (l.states))
+ ORDER BY t.n
 ```
 
 - **Mọi lần đổi trạng thái, không chỉ lúc kết thúc.** `PAUSED` nằm trong `states` mặc định mà không phải trạng thái kết thúc. Hook báo cho execution cha hiện chỉ chạy ở trạng thái kết thúc, nên không dùng lại được.
+- **Mọi trạng thái được nối thêm, không chỉ trạng thái cuối.** Một settle có thể nối nhiều trạng thái: một lần start có `Pause` giới hạn đi `CREATED → RUNNING → PAUSED`, còn settle kết thúc một pause và vào pause kế tiếp đi `PAUSED → RESTARTED → RUNNING → PAUSED`, trạng thái đầu và cuối trùng nhau. Kestra chạy `processFlowTriggers` một lần cho mỗi lần chuyển, nên mỗi trạng thái nối thêm là một sự kiện. Lát cắt này đúng vì history của execution chỉ được nối thêm trong một settle.
 - **`EXISTS` giữ outbox rỗng** với workspace không có listener. Chi phí trên đường nóng chỉ là một lần dò index.
 - **Nguyên tử với việc đổi trạng thái.** Lần đổi trạng thái nào commit thì có sự kiện, lần nào rollback thì không.
 

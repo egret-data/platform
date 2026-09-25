@@ -1293,42 +1293,66 @@ pub(super) async fn settle(
     // delay can see it too, and refuses on `not_before > now`.
     replay::spawn_due(conn, ctx, state, now).await?;
 
+    // **The Flow-trigger outbox (W13 spec §4.3), and it is the ONE statement
+    // W13a adds to this transaction.** One event per state this settle
+    // APPENDED to the execution's history, except `CREATED`, in the order they
+    // were appended -- Kestra's `processFlowTriggers` runs once per
+    // transition. Not only the last state: a bounded `Pause` start goes
+    // `CREATED -> RUNNING -> PAUSED` inside one settle, and the settle that
+    // ends one pause and enters the next goes `PAUSED -> RESTARTED -> RUNNING
+    // -> PAUSED`, whose first and last states are equal. And not only terminal
+    // states, which is why this is not inside `notifies_parent`'s branch:
+    // `PAUSED` is in a Flow trigger's default `states` and is not terminal.
+    //
+    // The slice is sound because execution history is append-only across a
+    // settle: every caller builds `before` as a clone of `state` and then only
+    // `apply`s commands, and `Command::SetExecutionState` -- a `push` -- is the
+    // one writer of the execution's history. The `debug_assert` pins that.
+    //
+    // ONE statement whatever the count: `unnest ... WITH ORDINALITY` keeps the
+    // order, so the bigserial `id` carries it, and the `EXISTS` is evaluated
+    // per state, so the outbox stays empty for a workspace with no listener
+    // that could hear any of them. It runs on `conn`, inside the caller's
+    // transaction: a transition that rolls back leaves no event.
+    //
+    // `wire()` is the spelling `flow_listeners.states` holds;
+    // `run_state_wire_is_the_model_states_serde_spelling` pins it to
+    // `models::State`'s serde spelling.
+    debug_assert!(
+        state.history.starts_with(&before.history),
+        "execution history must be append-only across a settle: {:?} -> {:?}",
+        before.history,
+        state.history
+    );
+    let appended: Vec<&str> = state
+        .history
+        .get(before.history.len()..)
+        .unwrap_or_default()
+        .iter()
+        .filter(|s| **s != RunState::Created)
+        .map(|s| s.wire())
+        .collect();
+    if !appended.is_empty() {
+        sqlx::query(
+            "INSERT INTO workflow.flow_trigger_events (source_execution_id, workspace_id, state) \
+             SELECT $1, $2, t.s \
+               FROM unnest($3::text[]) WITH ORDINALITY AS t(s, n) \
+              WHERE EXISTS (SELECT 1 FROM workflow.flow_listeners l \
+                             WHERE l.workspace_id = $2 AND NOT l.disabled \
+                               AND t.s = ANY (l.states)) \
+              ORDER BY t.n",
+        )
+        .bind(ctx.id)
+        .bind(ctx.workspace_id)
+        .bind(&appended)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    }
+
     let was = before.history.last().copied();
     let is = state.history.last().copied();
     if was != is {
-        // **The Flow-trigger outbox (W13 spec §4.3), and it is the ONE
-        // statement W13a adds to this transaction.** Every new state except
-        // `CREATED` -- not only terminal ones, which is why it sits here and
-        // not inside `notifies_parent`'s branch below: `PAUSED` is in a Flow
-        // trigger's default `states` and is not terminal.
-        //
-        // The `EXISTS` keeps the outbox empty for a workspace with no
-        // listener that could hear this state, so the hot path costs one
-        // indexed probe there. It is written on `conn`, inside the caller's
-        // transaction, so a transition that rolls back leaves no event and
-        // one that commits always has its event. The listeners themselves are
-        // evaluated later, by the processor, never here.
-        //
-        // `wire()` is the spelling `flow_listeners.states` holds: `sync`
-        // writes `models::State`'s serde spelling, and
-        // `run_state_wire_is_the_model_states_serde_spelling` pins the two to
-        // each other for every `RunState`.
-        if let Some(new_state) = is.filter(|s| *s != RunState::Created) {
-            sqlx::query(
-                "INSERT INTO workflow.flow_trigger_events \
-                   (source_execution_id, workspace_id, state) \
-                 SELECT $1, $2, $3 \
-                  WHERE EXISTS (SELECT 1 FROM workflow.flow_listeners l \
-                                 WHERE l.workspace_id = $2 AND NOT l.disabled \
-                                   AND $3 = ANY (l.states))",
-            )
-            .bind(ctx.id)
-            .bind(ctx.workspace_id)
-            .bind(new_state.wire())
-            .execute(&mut *conn)
-            .await
-            .map_err(db_err)?;
-        }
         if let Some(terminal) = is.filter(|s| notifies_parent(*s)) {
             spawn::on_execution_terminal(conn, ctx.id, terminal, ctx.depth).await?;
             // The other kind of link. `on_execution_terminal` reads

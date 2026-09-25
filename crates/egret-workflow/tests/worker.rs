@@ -7448,10 +7448,11 @@ async fn a_transition_writes_one_event_when_a_listener_can_hear_it(pool: sqlx::P
 /// `PAUSED`. A hook placed inside `notifies_parent`'s terminal-only branch
 /// would write nothing here, which is the mutation this test is for.
 ///
-/// It also records what one `settle` boundary is: the start's settle takes the
-/// execution `CREATED -> RUNNING -> PAUSED` in one transaction, and the hook
-/// compares only the last state before and after it (spec §4.3's `was !=
-/// is`), so this start writes ONE event, `PAUSED`.
+/// The start's one settle appends `RUNNING` and `PAUSED`; the defaults do not
+/// include `RUNNING`, so this start writes ONE event, `PAUSED`. The
+/// per-state `EXISTS` is what drops the `RUNNING`, and
+/// `one_settle_that_appends_two_listenable_states_writes_both_in_order` is the
+/// same start heard by a listener that includes it.
 #[sqlx::test(migrations = "../../migrations")]
 async fn paused_writes_an_event_for_default_states(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
@@ -7635,5 +7636,97 @@ async fn execution_render_context_renders_the_sources_inputs_and_outputs(pool: s
     assert!(
         refused.is_err(),
         "`trigger` is not in the source's context, as on Kestra; got {refused:?}"
+    );
+}
+
+/// **A settle that appends two listenable states writes two events, in
+/// order** -- the fix to Task 3's concern (1). A bounded `Pause` start goes
+/// `CREATED -> RUNNING -> PAUSED` inside ONE settle; Kestra's
+/// `processFlowTriggers` runs once per transition, so a listener on
+/// `[RUNNING, PAUSED]` hears both. A hook that compared only the last state
+/// before and after the settle wrote `PAUSED` alone.
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_settle_that_appends_two_listenable_states_writes_both_in_order(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(
+        &db,
+        ws,
+        user,
+        &listener("hears-both", "    states: [RUNNING, PAUSED]\n"),
+    )
+    .await;
+
+    let source = start_execution(
+        &pool,
+        ws,
+        None,
+        &a_pause("src", Some("PT30S")),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the source");
+    assert_eq!(
+        execution_history(&pool, source).await,
+        serde_json::json!(["CREATED", "RUNNING", "PAUSED"]),
+        "control: RUNNING and PAUSED were both appended by the start's one settle"
+    );
+    assert_eq!(
+        events_of(&pool, source).await,
+        vec![(ws, "RUNNING".to_string()), (ws, "PAUSED".to_string())],
+        "one event per appended state, in the order they were appended"
+    );
+}
+
+/// **PAUSED, resumed, PAUSED again writes two `PAUSED` events** -- the
+/// re-entry case `workflow_executions_one_per_flow_trigger_event` is keyed on
+/// the event for. Two bounded pauses in sequence: the first comes due in real
+/// time, the waker resumes it, and the settle that ends it enters the second.
+/// That settle starts and ends at `PAUSED`, so a hook gated on "the last state
+/// changed" writes nothing for it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn paused_resumed_and_paused_again_writes_two_paused_events(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(&db, ws, user, &listener("hears-defaults", "")).await;
+    let two_pauses = "id: src\nnamespace: t\ntasks:\n\
+         \x20 - id: first\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n\
+         \x20 - id: second\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT30S\n\
+         \x20 - id: last\n    type: io.kestra.plugin.core.log.Log\n    message: after\n";
+
+    let source = start_execution(&pool, ws, None, two_pauses, serde_json::json!({}))
+        .await
+        .expect("start the source");
+    assert_eq!(
+        events_of(&pool, source).await,
+        vec![(ws, "PAUSED".to_string())],
+        "control: the first pause wrote one event"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(wake(&pool, 8).await.expect("wake"), vec![source]);
+    drain_with(&pool, &Recorder::default()).await;
+
+    assert_eq!(
+        (
+            run_state(&pool, source, "first").await.as_deref(),
+            run_state(&pool, source, "second").await.as_deref(),
+        ),
+        (Some("SUCCESS"), Some("PAUSED")),
+        "control: the first pause ended and the second one is waiting: {}",
+        execution_history(&pool, source).await
+    );
+    let history = execution_history(&pool, source).await;
+    assert_eq!(
+        history.as_array().and_then(|h| h.last()),
+        Some(&serde_json::json!("PAUSED")),
+        "control: the source is paused again: {history}"
+    );
+    assert_eq!(
+        events_of(&pool, source).await,
+        vec![(ws, "PAUSED".to_string()), (ws, "PAUSED".to_string())],
+        "re-entering PAUSED is a new transition and a new event; history {history}"
     );
 }

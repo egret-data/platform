@@ -89,16 +89,19 @@ The unique index keys on the outbox event, not on the source's state, because a 
 
 ### 4.3 The hook in `settle`
 
-In the `was != is` block at the end of `settle`, for every new state except `CREATED`, one statement:
+At the end of `settle`, one statement writes one event for every state the settle **appended** to the execution's history (`state.history[before.history.len()..]`), except `CREATED`, in order:
 
 ```sql
 INSERT INTO workflow.flow_trigger_events (source_execution_id, workspace_id, state)
-SELECT $1, $2, $3
-WHERE EXISTS (SELECT 1 FROM workflow.flow_listeners l
-               WHERE l.workspace_id = $2 AND NOT l.disabled AND $3 = ANY (l.states))
+SELECT $1, $2, t.s
+  FROM unnest($3::text[]) WITH ORDINALITY AS t(s, n)   -- the appended states
+ WHERE EXISTS (SELECT 1 FROM workflow.flow_listeners l
+                WHERE l.workspace_id = $2 AND NOT l.disabled AND t.s = ANY (l.states))
+ ORDER BY t.n
 ```
 
 - **Every transition, not only terminal ones.** `PAUSED` is in the default `states` and is not terminal. The existing parent-notification hook fires on terminal states only, so this cannot reuse it.
+- **Every appended state, not only the last one.** One settle can append several: a bounded `Pause` start goes `CREATED → RUNNING → PAUSED`, and the settle that ends one pause and enters the next goes `PAUSED → RESTARTED → RUNNING → PAUSED`, whose first and last states are equal. Kestra runs `processFlowTriggers` once per transition, so each appended state is an event. The slice is sound because execution history is append-only across a settle.
 - **The `EXISTS` keeps the outbox empty** for workspaces with no listener. The cost on the hot path is one indexed probe.
 - **Atomic with the transition.** A transition that commits has its event; one that rolls back has none.
 
