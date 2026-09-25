@@ -233,6 +233,7 @@ Every row names the mutation that must turn it red.
 | an event is processed once across two processors (counted by insert attempts, as W12 did) | drop `SKIP LOCKED` and the index |
 | a fault after the fire rolls back the fire and keeps the event | delete the event in its own transaction |
 | a draft listener fires | map draft to Kestra's `isDraft` |
+| an `inputs` render failure creates a born-FAILED execution, as Kestra does, not a refusal | refuse instead |
 
 ### 7.2 W13b
 

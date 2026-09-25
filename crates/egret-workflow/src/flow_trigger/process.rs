@@ -40,11 +40,22 @@ pub const DEPENDS_ON_IS_W13B: &str =
     "a dependsOn Flow trigger needs a multiple-condition window, which W13b ships; \
      W13a skips it";
 
-/// What `render_str_guarded` refuses to reach. The source's render context
-/// binds no `trigger` root, and Kestra fails such an expression with "Unable
-/// to find `trigger`" (W13a Task 1, `listener_run1_FAILED_bad_inputs`); the
-/// guard makes the refusal independent of HOW the expression names it --
-/// `{{ [trigger] }}` would otherwise render `[null]` (W6 Task 7 fix round 3).
+/// What `render_str_guarded` refuses to reach, for `when`. The source's
+/// render context binds no `trigger` root, and this is the artifact's
+/// evidence that Kestra itself has none either -- **not, as the name once
+/// implied, evidence that a `trigger`-naming expression here refuses.**
+/// `listener_run1_FAILED_bad_inputs` (W13a Task 1) is the measured Kestra
+/// throw, "Unable to find `trigger`" -- but it is `inputs`, not `when`, that
+/// the fixture names, and `inputs` is the *other* fire below: a render
+/// failure there is NOT a refusal, it is the born-FAILED execution
+/// (`inputs_that_fail_to_render_create_a_failed_execution`). This guard's own
+/// refusal path is [`WhenVerdict::Unrenderable`] ->
+/// [`crate::trigger::flow::Refusal::WhenUnrenderable`], which no corpus
+/// `when` reaches `trigger` to exercise; the citation stays
+/// because it is still the only measured "Unable to find `trigger`" this
+/// package has, corrected to say what it is evidence of. The guard makes
+/// the refusal independent of HOW the expression names it -- `{{ [trigger] }}`
+/// would otherwise render `[null]` (W6 Task 7 fix round 3).
 const FORBIDDEN_ROOTS: &[&str] = &["trigger"];
 
 /// What one pass did.

@@ -243,6 +243,7 @@ Mỗi dòng nêu mutation phải làm nó đỏ.
 | một sự kiện được xử lý đúng một lần dù có hai processor (đếm số lần insert như W12) | bỏ `SKIP LOCKED` và index |
 | lỗi tiêm vào sau khi bắn thì lần bắn bị rollback và sự kiện vẫn còn | xoá sự kiện trong transaction riêng |
 | flow nghe là bản nháp vẫn bắn | ánh xạ draft sang `isDraft` của Kestra |
+| `inputs` render lỗi thì tạo execution born-FAILED, đúng như Kestra, chứ không phải một sự từ chối | từ chối thay vì vậy |
 
 ### 7.2 W13b
 

@@ -8161,6 +8161,197 @@ it describes than a spec is: *"so nothing here fired in production until
 (`scheduler::fire_due`, spec §9) -- behind `scheduler_enabled`, default
 `false`"*.
 
+### W13a — the flow trigger fires in production now, and the oracle still cannot see it
+
+**109 before W13a Task 1, 109 at this commit, and 109 with `process_events`
+deleted.** The same three-number method W10 and W12 used, for the reason
+W12's own section already names as the general shape: `oracle-exec/driver.rs`
+never calls `flow_trigger::process_events` or `trigger::flow::evaluate` --
+`flow_trigger::` and `process_events(` are each **0** occurrences in
+`oracle-exec/driver.rs` and `tests/executor.rs`, against `worker::` at **26**
+and **37** on the same command, the identical positive control W10 and W12
+used, unmoved because neither file has changed since. The oracle's driver
+builds and ticks executions through `worker::start_execution_with_trigger`
+and `worker::tick`; nothing in it claims a row of
+`workflow.flow_trigger_events`.
+
+This package inherits W12's second reason too, and it predates W13a rather
+than being introduced by it: `trigger::flow`'s own module doc measured, before
+Task 1 wrote a line of production code, that **zero baselined golden entries
+are reachable through a flow trigger at all** -- a `Flow`-fired execution
+carries `trigger_execution_id` and `parentId` NULL, `harvest.py`'s settle walks
+`parent_id`, and `baseline.txt` reads **127 before this module and 127
+after**. Wiring the seam in production cannot change what `harvest.py` walks,
+so this reason is unaffected by anything Task 1-4 shipped and is restated
+here rather than re-derived.
+
+| | ratchet | what the task shipped |
+|---|---|---|
+| package base `006563ee` (origin/main, W12's tip) | 109 mismatching, 109 baselined, 0 broken | -- |
+| Task 1 | 109 | Kestra measurement on the pinned artifact (`oracle-exec/w13-flow-trigger.json`) -- `execution_trigger`'s nine `variables`, the depth ping-pong to 100, and the born-FAILED `inputs` fact, corrected in fix round 1 after an initial reading had it as a refusal; the baseline gate re-measured (3835 unique test names) |
+| Task 2 | 109 | migration 0157, `workflow.flow_listeners`; `scheduler::sync` extended to keep it in step with `flow.source`, called from the same three `FlowRepo` writers W12's row names (`create`, `update`, `soft_delete`) |
+| Task 3 | 109 | `NewExecution`'s link and `execution_depth`, the source's render context, and the `settle` outbox hook -- one conditional `INSERT`, the only statement this PR adds to `settle`'s hot path (spec §4.3); a mid-task ruling corrected the hook to write one event per state a settle APPENDS, not only the last |
+| Task 4 | 109 | `flow_trigger::process_events` and its tests -- a per-listener savepoint, `MAX_ATTEMPTS` retry-then-give-up, the six off switches reused from `scheduler/fire.rs`; fix round 1 corrected a controller ruling that had a render failure in `inputs` REFUSE the fire, to match Kestra's own measured born-FAILED execution |
+| Task 5 | 109 | this section, and the sweep below |
+
+#### `process_events` deleted, measured rather than assumed
+
+Mutation, this task, on the working tree (reverted immediately after, never
+committed): `process_events` given an unconditional early `return
+Ok(EventReport::default())`, marked with the comment
+`TASK-5-RATCHET-MUTATION`, so the claim loop, every listener check and the
+fire itself are unreachable, kept in the file behind
+`#[allow(unreachable_code)]` only so the crate still compiles. Evidence the
+mutation landed, printed before the verdict was read: `git diff --stat`
+reported `crates/egret-workflow/src/flow_trigger/process.rs | 7 +++++++` (7
+insertions, 0 deletions -- the early return and its attributes; nothing
+deleted, for the same reason W12 Task 6 gave), and the marker comment
+occurred **1** time in the file. `executor_matches_golden` then read **294
+golden entries, 109 mismatching, 109 baselined, 0 broken** -- byte-identical
+to the unmutated control run immediately before it in the same session, same
+build (this test carries no randomness in its own corpus walk, so a second
+control run would print the same thing rather than add information).
+Reverted with `git checkout -- crates/egret-workflow/src/flow_trigger/process.rs`;
+the marker comment's count confirmed **0** and `git diff` against `HEAD`
+confirmed empty before continuing.
+
+#### The sweep: "nothing calls `trigger::flow::evaluate`" is retired, and where it actually lived
+
+W10 Task 7's and W12 Task 6's discipline, unchanged: every tracked file
+flattened to one line before matching, so a phrase wrapping a line break is
+not invisible, and every denominator computed over `git ls-files` so it is
+re-runnable. **Every figure below is taken at `1ec0f79f`**, Task 4's tip and
+this task's own base, over the population as it stood *before* this task
+edited anything.
+
+| # | population | examined | corrected |
+|---|---|---:|---:|
+| 1 | the proposition and its glosses -- `wiring seam` (owed or missing), `no production constructor`, `has no such guarantee` -- across the whole repository, flattened | **3822 files**, 3 matching, **6 occurrences** | **4** |
+| 1b | the born-FAILED citation family -- every occurrence of `listener_run1_FAILED_bad_inputs` | **6 occurrences, 4 files** | **1** |
+| 2 | ordinals and counts in the six regions populations 1 and 1b landed in | **6 regions** | **0** |
+| 3 | data that feeds a generator -- the 14 files under `oracle-exec/`: 10 data files (`baseline.txt`, `corpus.json`, `golden.json`, `handler-surface.txt`, `harvest-run.txt`, `probe.json`, `runnable.txt`, `stability.json`, `w12-schedule-trigger.json`, `w13-flow-trigger.json`) plus 4 generators (`driver.rs`, `harvest.py`, `normalise.py`, `handler_surface.py`) | **14 inputs** | **0** |
+| 4 | the other language -- every file under `docs/vi/`, flattened | **287 files**, 1 matching | **0** |
+
+**Population 1's four corrections are all in `trigger/flow.rs`, and all four
+are the same shape: a paragraph that said a bridge did not exist yet, written
+before Task 1-4 built it.**
+
+- The module doc (*"The fact the whole package's link design rests on"*) and
+  [`FiredExecution::correlation_id`]'s own doc both said egret's render walk
+  "will render the child's own id" until "the wiring seam" wired it. **The
+  seam now exists**: `crate::flow_trigger::process::listen` sets
+  `trigger_execution_id` on the fired child, and
+  `worker::render::Surface::load`'s causal walk -- corrected at **W6 Task 8**,
+  *before* W13a started, to follow whichever link a row carries rather than
+  `parent_execution_id` alone -- reaches through it exactly as it already did
+  for a `Subflow` child. A flow-trigger child now renders
+  `labels.system.correlationId` as the chain's root id, not its own. Both
+  doc comments are corrected in place, dated, rather than deleted, because
+  each is the record of a decision that was real when it was made.
+- The `PAUSED` bridge (`evaluate`'s own doc, next to `StateNotListed`) said
+  `SourceExecution` had **no production constructor** and nothing converted
+  an executor `RunState::Paused` into a `models::State::Paused` for the
+  predicate to see. **It does now**: `settle`'s outbox hook does not gate on
+  terminality -- `PAUSED` is in a Flow trigger's default `states` and is
+  written to the outbox like any other appended state (`worker/claim.rs`'s own
+  comment says so) -- and `flow_trigger::process::process_one` parses the
+  event's stored state back into `models::State` before calling `evaluate`,
+  pinned to `RunState::wire()`'s spelling by
+  `run_state_wire_is_the_model_states_serde_spelling`. Corrected in place.
+- [`Refusal::DifferentWorkspace`]'s doc said *"egret's caller has no such
+  guarantee yet"* that a listener and its source share a workspace, unlike
+  Kestra's `withFlowTriggersOnly`. **The caller now has it**:
+  `flow_trigger::process`'s listener query reads `WHERE l.workspace_id = $1`
+  bound to the event's own `workspace_id`, so a cross-workspace pair is
+  unrepresentable by the time `evaluate` sees it too -- the refusal is kept as
+  the second line of defence rather than the only one, the same shape
+  migration 0138's composite foreign keys already are. Corrected in place.
+
+**Two occurrences of `wiring seam` were examined and left, because they are a
+different, still-open gap and conflating them would have retired the wrong
+one.** This file's own *Instruments and defects handed on* table and
+`tests/executor.rs`'s `the_seeded_correlation_id_divergence_has_no_corpus_population`
+both name "the wiring seam" as the owner of the **SEEDED** `system.correlationId`
+divergence -- a root execution that declares an *explicit*
+`system.correlationId` label, which Kestra copies down its whole chain
+verbatim and egret's walk cannot, because egret has no column to carry a
+label rather than a derived id. That is spec §8's *"the `system.correlationId`
+label"*, listed there as deliberately not in W13 at all, and it is untouched
+by anything Task 1-4 built: the seam this task closes lets the walk *reach*
+the source through a flow-trigger link, not carry a seeded string instead of
+the id it derives. Both sites are correctly tensed and are left as the
+control that the sweep does not retire everything it matches.
+
+**Population 1b is a different shape of defect: not a stale tense, a
+citation that pointed at the wrong mechanism.** `flow_trigger::process`'s
+`FORBIDDEN_ROOTS` doc cited `listener_run1_FAILED_bad_inputs` -- the measured
+Kestra throw, *"Unable to find `trigger`"* -- as what its own guard,
+`render_str_guarded`, "refuses to reach". **The fixture is `inputs`, not
+`when`, and `inputs` is not this guard's surface at all**: it renders through
+`render_value`, a different function, a few lines below, and a failure there
+is **not** a refusal -- it is the born-FAILED execution
+(`inputs_that_fail_to_render_create_a_failed_execution`). The citation was
+accurate about the underlying Kestra fact and wrong about which egret
+mechanism it illustrated, which is why it reads, uncorrected, as evidence
+that naming `trigger` in a `when` refuses the same way. Five other citations
+of the same fixture -- `worker/claim.rs`'s `born_failed` field doc,
+`flow_trigger::process`'s own `inputs` comment, and
+`tests/flow_trigger_fire.rs`'s test doc and its VI twin -- were already
+correctly framed (*"NOT a refusal"*, stated in as many words in three of the
+five), which is the positive control: this package usually gets the
+distinction right, and the one site that did not is the one nobody had
+reread since Task 1's first, wrong draft of it. Corrected in place, the guard
+kept as `when`-only and the citation kept because it remains the only
+measured *"Unable to find `trigger`"* this package has -- reworded to say
+what it is evidence of rather than removed.
+
+**Population 2's zero is not vacuous**: the six regions above carry other
+numerals untouched by this correction -- *"five id columns"* in the
+`DifferentWorkspace` doc (a different, still-accurate historical fact about
+the STS cross-workspace incident), *"22 corpus flows... 3... 2 flows"* in the
+SEEDED-divergence table row, `DEFAULT_MAX_EXECUTION_DEPTH`'s **100** nearby --
+so the scan reads content rather than skipping past digits, and none of them
+described the wiring seam's own status.
+
+**Population 3's zero has positive controls the same way W10 Task 7's and
+W12 Task 6's did**: `why`, `runnable`, `schedule` and `trigger` are all
+present somewhere across the 14 inputs (`probe.json`'s `why` alone is **37**),
+so an instrument capable of matching text in these files was run and came
+back clean for the three wiring-seam patterns. `w13-flow-trigger.json` itself
+carries **2** occurrences of `listener_run1_FAILED_bad_inputs` -- the
+artifact's own measurement narrative, the source the population 1b citations
+quote from, not the mischaracterised copy -- left standing on purpose.
+
+**Population 4's zero is a found-and-already-right, not a not-found.** The
+one Vietnamese hit, the W13 design spec's own §4.4 walkthrough, reads *"Render
+lỗi KHÔNG làm lần bắn bị từ chối"* -- "a render failure does NOT refuse the
+fire" -- which already states the corrected fact population 1b's English
+citation had gotten backwards in one place. Nothing to change; recorded
+because a sweep that only reports corrections cannot be told apart from one
+that skipped this file.
+
+#### What this package could not settle
+
+**W13b has not started.** No `window` model, no `TimeWindow` port, no
+migration 0158, no `dependsOn` processing -- the W13 spec's §7.2 table is the
+plan for it, not a record of it, and the programme spec's own W13a/W13b
+correction says so in both languages. Twenty of the corpus's twenty-one flow
+trigger declarations carry a `dependsOn` and are refused at
+`WindowFreeFlowTrigger::resolve`, unmoved by anything in this package.
+
+**The SEEDED `system.correlationId` divergence stays open, by the same
+decision that scoped it out of W13 entirely** (spec §8). Closing it would
+need a column egret does not have, to carry a copied label rather than a
+derived id, and the corpus cannot even exercise it: zero of the 22
+label-declaring corpus flows declare `system.correlationId` itself.
+
+**Render-context correctness for a `PAUSED`-then-resumed source is a
+mechanism this file can point at, not a golden entry that can see it.** The
+bridge population 1 closes lets a `PAUSED` source fire a listener with the
+right `models::State`; whether the render CONTENT a resumed source's later
+settle produces still matches what the paused moment saw is the whole-branch
+review's question (globals.md item 4), not this ratchet's.
+
 ### What this ratchet does **not** prove
 
 Each of these has a section of its own above with the derivation; they are

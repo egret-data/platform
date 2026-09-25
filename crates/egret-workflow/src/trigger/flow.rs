@@ -123,12 +123,21 @@
 //! the row the previous fixture did not contain; **keep the mechanism, distrust
 //! every gloss over it.** See [`FiredExecution::correlation_id`].
 //!
-//! egret does not have this column. `render.rs` walks `parent_execution_id`
-//! only, so the seam that wires this module will render the child's own id
-//! where Kestra renders **the label the source carried**. **That is a forward-looking gap with an
-//! owner (the wiring seam), not a defect in this file** — but the sentence that
-//! claimed otherwise was a completeness claim nothing supported, which is why
-//! it is written down here rather than quietly corrected.
+//! egret does not have this column, so [`FiredExecution::correlation_id`]
+//! returns `None`. **Corrected, 2026-09-25 (W13a Task 5): this used to be a
+//! forward-looking gap "owned by the wiring seam", and the seam now exists and
+//! closes it.** `crate::flow_trigger::process::listen` sets
+//! `trigger_execution_id` on the fired child, and
+//! `worker::render::Surface::load`'s causal walk — corrected at W6 Task 8 to
+//! follow WHICHEVER link a row carries rather than `parent_execution_id`
+//! alone — reaches the source through it, the same way it already did for a
+//! `Subflow` child. A flow-trigger child therefore renders
+//! `labels.system.correlationId` as the chain's root id, not its own, closing
+//! the gap this paragraph used to describe. What is still open is the SEEDED
+//! case that walk was always going to miss: a root that declares an explicit
+//! `system.correlationId` label hands that value, not an id, to every
+//! descendant, and egret has no column to carry it — spec §8's "the
+//! `system.correlationId` label", deliberately deferred, not this bug.
 //!
 //! # The filter, in the artifact's own order
 //!
@@ -494,8 +503,14 @@ pub enum Refusal {
     /// never needs one.** `DefaultExecutor` feeds `computeFlowTriggers` from
     /// `withFlowTriggersOnly(…)` over one tenant's flow repository, so a
     /// cross-tenant pair is already unrepresentable by the time the filter
-    /// runs. egret's caller has no such guarantee yet, and this repository has
-    /// paid for the optimistic answer once: five id columns that could name a
+    /// runs. **Corrected, 2026-09-25 (W13a Task 5): egret's caller now has that
+    /// same guarantee, structurally, and this refusal is kept as the second
+    /// line rather than the only one.** `crate::flow_trigger::process`'s
+    /// listener query reads `WHERE l.workspace_id = $1` bound to the event's
+    /// own `workspace_id`, so a cross-workspace pair is unrepresentable by the
+    /// time this function sees it too — the same shape as `withFlowTriggersOnly`,
+    /// not an argument for deleting the check. This repository has paid for
+    /// the optimistic answer once already: five id columns that could name a
     /// row in another workspace, one of which allowed a cross-workspace read.
     /// Migration 0138's foreign keys are composite `(id, workspace_id)` for
     /// exactly that reason, so a writer that ignored this would be refused by
@@ -639,11 +654,16 @@ impl FiredExecution {
     /// three children `ZZZTESTROOT`, which is not an execution id. The label is
     /// copied, not derived — that is the whole rule.
     ///
-    /// It returns `None` because **egret has no such column**; the value is the
-    /// source's label, which this seam is not given. The wiring seam owns it,
-    /// and until it does, egret's `render.rs` (which walks
-    /// `parent_execution_id` only) will render the child's own id where Kestra
-    /// renders **the label the source carried**.
+    /// It returns `None` because **egret has no such column**; the source's
+    /// label is not this struct's to keep. **Corrected, 2026-09-25 (W13a Task
+    /// 5): the wiring seam this doc used to say did not exist yet now does.**
+    /// `crate::flow_trigger::process::listen` sets `trigger_execution_id` on
+    /// the fired child, and `worker::render::Surface::load`'s causal walk
+    /// (corrected at W6 Task 8 to follow whichever link a row carries) reaches
+    /// through it and renders `labels.system.correlationId` as the chain's
+    /// root id — the module doc's derivation, not the child's own id. The
+    /// SEEDED case is the one this still cannot answer, deliberately (spec
+    /// §8): see the module doc.
     pub const fn correlation_id(&self) -> Option<Uuid> {
         None
     }
@@ -729,15 +749,20 @@ pub fn evaluate(
     // file: they were gated on a state NAME or on a judgement FORM, and this
     // line carries neither an `is_terminal` nor a `State::` literal.
     //
-    // **No code change was needed and that is measured, not assumed.** This
-    // plane is `models::State`, which has held `Paused` since W1; adding
-    // `executor::RunState::Paused` does not reach it. What does not exist yet is
-    // the bridge: `SourceExecution` has **no production constructor** — every
-    // one is in this file's own tests — so nothing converts an executor
-    // `RunState::Paused` into a `models::State::Paused` for this predicate to
-    // see. Whoever builds that bridge owns the question of whether a paused
-    // EXECUTION should fire a listener before it resumes; Kestra's answer is
-    // yes, which is why `PAUSED` is in the default list at all.
+    // **No code change was needed here and that is measured, not assumed.**
+    // This plane is `models::State`, which has held `Paused` since W1; adding
+    // `executor::RunState::Paused` does not reach it. **Corrected, 2026-09-25
+    // (W13a Task 5): the bridge this paragraph said did not exist is built.**
+    // `SourceExecution` now has a production constructor,
+    // `crate::flow_trigger::process::load_source`, and `settle`'s outbox hook
+    // (spec §4.3) writes an event for a `PAUSED` transition same as any other
+    // -- it is not gated on terminality, because a Flow trigger's default
+    // `states` includes `PAUSED`. `process_one` converts the event's stored
+    // `RunState::wire()` string back into `models::State` before calling this
+    // predicate (`run_state_wire_is_the_model_states_serde_spelling` pins the
+    // spelling both sides trust), so a paused EXECUTION fires a listener
+    // before it resumes -- Kestra's answer, which is why `PAUSED` was in the
+    // default list at all, is the one egret gives too.
     if !listener.states.contains(&source.state) {
         return Outcome::Refused(Refusal::StateNotListed(source.state));
     }
