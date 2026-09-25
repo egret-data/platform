@@ -60,39 +60,42 @@
 //!    brief-literal entry point) is now a thin wrapper: open one transaction,
 //!    call `recompile_service_in_tx`, commit.
 //!
-//! **What this module does about `WorkspaceMembers` (Task 6's deferred
-//! expansion).** `compile_grant`/`compile_rule` both REFUSE a `WorkspaceMembers`
-//! principal (`CompileError::UnexpandedPrincipalKind`) rather than silently
-//! dropping it — and, per Task 6's report, EVERY catalog assigned to a
-//! workspace carries exactly one such grant (the implicit workspace-assignment
-//! grant), so that refusal is not a corner case here: it is the FIRST grant
-//! this driver's very first real recompile will see on any catalog anyone
-//! has ever assigned. Propagating that refusal as `recompile_service`'s own
-//! `Err` would mean every tag write on every assigned catalog fails outright
-//! — the StarRocks masking recompile this module exists for would never run
-//! on the one class of catalog SP4a's own workspace-assignment feature
-//! creates automatically. That is strictly worse than the staleness this
-//! module is built to close.
+//! **What this module does about `WorkspaceMembers` (SP4a D3, delivered).**
+//! Every catalog assigned to a workspace carries exactly one implicit
+//! `origin = 'workspace_assignment'` grant whose only principal is
+//! `workspace_members` (`egret_perm::assignment`). D7 measured that a Ranger
+//! GROUP item matches nobody on any engine egret provisions, so that principal
+//! compiles to **the member list enumerated at compile time**, as bare
+//! usernames — [`crate::members::expand_workspace_members`], run here on the
+//! caller's own connection before anything is compiled, so `compile_grant`
+//! and `compile_rule` stay free of I/O and keep refusing the unexpanded kind
+//! as a defence in depth.
 //!
-//! So: `recompile_service`/`recompile_service_in_tx` SKIP a grant or rule
-//! whose ONLY compile failure is `UnexpandedPrincipalKind`, recording it in
-//! [`CompileSummary::skipped`] with a reason AND logging it via
-//! `tracing::warn!` (fix round 1 — the summary alone was silently discarded
-//! by this module's only production caller, `egret-bi::catalog_tags`), and
-//! continue compiling everything else. This is not a silent drop — nothing is
-//! EMITTED for a skipped grant (fail-closed: a workspace-assignment grant
-//! this driver cannot yet express compiles to no policy, matching what a
-//! human reading Task 6's report already knows to be true, rather than a
-//! policy that grants nobody OR one that silently drops an exclusion). Every
-//! OTHER `CompileError` — `ExpansionCeiling`, `UnusableUserRef`,
+//! Two consequences worth stating where the driver lives:
+//!
+//! - **A membership write must recompile**, exactly as a tag write does — the
+//!   same staleness shape D5 gave the StarRocks tag expansion, with the same
+//!   answer, since egret owns the compile.
+//!   [`affected_services_for_workspace_members`] answers "which profiles" and
+//!   `egret_workspace::members::MemberRepo` is what asks it, inside its own
+//!   write transaction. The paths that are NOT covered, and why, are in
+//!   `crate::members`' module doc and in the design spec's D3 — they are
+//!   recorded, not silently absent.
+//! - **A grant whose principals expand to NOTHING compiles to no policy**,
+//!   recorded in [`CompileSummary::skipped`] and logged, rather than to a
+//!   Ranger item naming nobody. It is the same fail-closed outcome the
+//!   evaluator reaches for that grant (`matches_set` needs one `include`
+//!   match), and it keeps a meaningless item out of the profile.
+//!
+//! Every OTHER `CompileError` — `ExpansionCeiling`, `UnusableUserRef`,
 //! `UnsupportedMaskType`, an unparseable custom mask, an unexpressible
-//! exemption, a missing tag/tag service — is a genuine authoring or
-//! resolution bug and still ABORTS the whole recompile for this service:
-//! weakening those refusals to a skip would be exactly the "make something
-//! pass" the compiler exists to refuse. Expanding `WorkspaceMembers` for real
-//! (workspace-membership reads, recompiling on a membership WRITE the same
-//! way this module recompiles on a tag write) is Task 6's explicitly named
-//! follow-up and is NOT done here.
+//! exemption, a missing tag service — is a genuine authoring or resolution bug
+//! and ABORTS the whole recompile for this service: weakening those refusals
+//! to a skip would be exactly the "make something pass" the compiler exists to
+//! refuse. `UnexpandedPrincipalKind` is still caught and skipped rather than
+//! propagated, because it is now unreachable-by-construction and a driver that
+//! crashed a tag write over an internal invariant would be worse than one that
+//! records it.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -415,8 +418,12 @@ async fn compile_desired(
     sweep.sort_unstable();
     sweep.dedup();
 
-    let all_grants = list_grants_via(conn).await.map_err(db_err)?;
-    let all_rules = list_rules_via(conn).await.map_err(db_err)?;
+    let mut all_grants = list_grants_via(conn).await.map_err(db_err)?;
+    let mut all_rules = list_rules_via(conn).await.map_err(db_err)?;
+    // D3: turn every `workspace_members` principal into the members it stands
+    // for BEFORE anything is compiled, so the pure compilers below never see
+    // one. See `crate::members` for what a member is and what it costs.
+    crate::members::expand_workspace_members(conn, &mut all_grants, &mut all_rules).await?;
 
     let mut desired: BTreeMap<PolicyKey, DesiredPolicy> = BTreeMap::new();
     let mut skipped: Vec<SkippedItem> = Vec::new();
@@ -425,6 +432,28 @@ async fn compile_desired(
         let Some(catalog_name) = catalog_names.get(&g.scope.catalog_id) else {
             continue; // not reachable by this service — out of scope
         };
+        if g.principals.include.is_empty() {
+            // Nothing to name. Emitting the policy anyway would write a Ranger
+            // item with empty `users`/`groups`/`roles`, which matches nobody —
+            // the same answer, said less clearly, and one more policy against
+            // the profile total. Recorded so "my workspace has no members yet"
+            // is visible rather than inferred from a missing policy.
+            let reason = "the grant's principals name no engine principal (an empty include, or \
+                          a workspace_members reference that expands to no member)"
+                .to_string();
+            tracing::warn!(
+                service_id,
+                grant_id = %g.id,
+                reason = %reason,
+                "grant skipped during recompile"
+            );
+            skipped.push(SkippedItem {
+                source_kind: SourceKind::Grant,
+                id: g.id,
+                reason,
+            });
+            continue;
+        }
         match compile_grant(g, catalog_name, &svc.name, engine) {
             Ok(input) => {
                 let name = input.name.clone();
@@ -442,7 +471,8 @@ async fn compile_desired(
             }
             Err(CompileError::UnexpandedPrincipalKind { kind }) => {
                 let reason = format!(
-                    "principal kind {kind:?} is not expanded by this compiler yet (SP4a Task 6)"
+                    "principal kind {kind:?} reached the compiler unexpanded — a bug in \
+                     `crate::members::expand_workspace_members`, not in the grant"
                 );
                 tracing::warn!(
                     service_id,
@@ -604,7 +634,8 @@ async fn compile_one_rule(
         }
         Err(CompileError::UnexpandedPrincipalKind { kind }) => {
             let reason = format!(
-                "principal kind {kind:?} is not expanded by this compiler yet (SP4a Task 6)"
+                "principal kind {kind:?} reached the compiler unexpanded — a bug in \
+                 `crate::members::expand_workspace_members`, not in the rule"
             );
             tracing::warn!(
                 service_id,
@@ -1128,6 +1159,80 @@ pub async fn affected_services_for_tag_rename(
         return Ok(Vec::new());
     }
     let mut ids = compiler_targeted_services_via(conn).await.map_err(db_err)?;
+    normalize_service_order(&mut ids);
+    Ok(ids)
+}
+
+/// The services a WORKSPACE-MEMBERSHIP change in `workspace_id` can change the
+/// compiled output of (SP4a D3).
+///
+/// **Why a membership write changes compiled output at all.** D7 measured that
+/// a Ranger GROUP item matches nobody on any engine egret provisions, so a
+/// `workspace_members` principal compiles to the member list enumerated at
+/// compile time (`crate::members`). That enumeration is stale the moment
+/// someone joins or leaves — the same shape D5's StarRocks tag expansion has,
+/// and the same answer: egret owns the compile, so egret recompiles on the
+/// write. Leaving it stale is not symmetric: a missed JOIN denies someone who
+/// should have access (annoying), a missed LEAVE keeps granting someone who
+/// should not (a breach).
+///
+/// The set is derived from the MODEL, not from the workspace: every profile
+/// bound to a catalog carrying a grant that references this workspace, plus —
+/// if any rule's exemption references it — the tag-rule set, for the same
+/// installation-wide reason [`affected_services_for_rule`] gives. It is empty
+/// when nothing in the model references the workspace at all, which is the
+/// common case for a workspace with no catalogs assigned: then a membership
+/// write compiles nothing and costs one query.
+pub async fn affected_services_for_workspace_members(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+) -> Result<Vec<i64>, CompileError> {
+    let ws_ref = workspace_id.to_string();
+
+    // Grants: catalog-scoped, exactly like `affected_services_for_grant`.
+    let catalogs: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT g.catalog_id FROM perm.grants g            JOIN perm.grant_principals p ON p.grant_id = g.id           WHERE p.kind = 'workspace_members'::perm.principal_kind AND p.ref = $1",
+    )
+    .bind(&ws_ref)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+
+    // Rules: a PATH selector is catalog-scoped; a TAG selector is not (see this
+    // module's Task 9 section). `perm.rule_exemptions` cannot hold a
+    // `workspace_members` row through egret's own API — `validate_rule_shape`
+    // refuses that kind in an exemption — so this arm is normally empty; it is
+    // here so a future writer of those rows cannot reintroduce the staleness
+    // silently.
+    let rule_catalogs: Vec<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT DISTINCT r.catalog_id FROM perm.rules r            JOIN perm.rule_exemptions e ON e.rule_id = r.id           WHERE e.kind = 'workspace_members'::perm.principal_kind AND e.ref = $1             AND r.selector_kind = 'path'",
+    )
+    .bind(&ws_ref)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    let tag_rule_exempts: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM perm.rules r            JOIN perm.rule_exemptions e ON e.rule_id = r.id           WHERE e.kind = 'workspace_members'::perm.principal_kind AND e.ref = $1             AND r.selector_kind = 'tag')",
+    )
+    .bind(&ws_ref)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+
+    let mut ids: Vec<i64> = Vec::new();
+    if tag_rule_exempts {
+        ids.extend(compiler_targeted_services_via(conn).await.map_err(db_err)?);
+    }
+    for catalog_id in catalogs
+        .into_iter()
+        .chain(rule_catalogs.into_iter().flatten())
+    {
+        ids.extend(
+            services_for_catalog_via(conn, catalog_id)
+                .await
+                .map_err(db_err)?,
+        );
+    }
     normalize_service_order(&mut ids);
     Ok(ids)
 }

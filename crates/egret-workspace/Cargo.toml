@@ -11,6 +11,12 @@ egret-core = { workspace = true, features = ["http"] }
 egret-audit = { workspace = true }
 egret-metastore.workspace = true
 egret-auth.workspace = true
+# SP4a D3: a workspace-membership write recompiles the Ranger profiles whose
+# compiled policies enumerate that membership, in the SAME transaction as the
+# `access_grants` write (`members::MemberRepo`). Cycle-checked: nothing in
+# `egret-perm-compile`'s graph (egret-perm, egret-policy, egret-auth,
+# egret-core) depends on `egret-workspace`.
+egret-perm-compile.workspace = true
 axum.workspace = true
 # `cookie` feature: read the session cookie (`CookieJar`) in the ws_admin
 # impersonation start endpoint to key the overlay on the caller's own session.
@@ -39,3 +45,8 @@ egret-config.workspace = true
 # Real `CedarPdp` in the authz-gate tests needs an `EventBus` to build against
 # (the migrated `require()` gates resolve through `WorkspaceState.pdp`).
 egret-events.workspace = true
+# SP4a D3: `tests/member_recompile.rs` builds a real Ranger profile + engine +
+# assigned catalog and asserts a membership write updates the COMPILED policy.
+egret-perm.workspace = true
+egret-policy.workspace = true
+serde_json.workspace = true

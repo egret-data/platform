@@ -387,16 +387,18 @@ async fn recompiling_an_unchanged_model_writes_nothing_and_keeps_policy_ids() {
     );
 }
 
-/// SP4a Task 6 gave every workspace-assigned catalog an implicit grant whose
-/// ONLY principal is `WorkspaceMembers`, which `compile_grant` refuses
-/// (`CompileError::UnexpandedPrincipalKind`) rather than silently dropping.
-/// This driver's decision (see `trigger`'s module doc): skip that ONE grant,
-/// record why, and still recompile everything else for the service — proven
-/// here by asserting BOTH that the tag rule still compiles (the StarRocks
-/// masking policy from the fixture survives) AND that the skip is reported,
-/// not silently swallowed.
+/// SP4a **D3**: an implicit workspace grant whose workspace has NO members
+/// expands to no engine principal, and compiles to NO policy — recorded as a
+/// skip, never as a Ranger item naming nobody.
+///
+/// This is the same assertion the pre-D3 version of this test made (the grant
+/// contributes nothing and the rest of the service still recompiles); what
+/// changed is the REASON. Before D3 the compiler refused the principal kind
+/// outright; now it expands it, and this workspace's expansion is empty. The
+/// member-bearing half — a workspace WITH members compiling to a policy that
+/// names each one — is `tests/workspace_members.rs`.
 #[tokio::test]
-async fn an_unexpanded_workspace_members_grant_is_skipped_not_fatal() {
+async fn an_implicit_grant_for_an_empty_workspace_compiles_to_nothing() {
     let Some(db) = test_db().await else { return };
     let f = seed_starrocks_engine_with_tag_rule(&db).await;
 
@@ -456,8 +458,9 @@ async fn an_unexpanded_workspace_members_grant_is_skipped_not_fatal() {
     assert_eq!(skip.id, grant_id);
     assert_eq!(skip.source_kind, SourceKind::Grant);
     assert!(
-        skip.reason.contains("WorkspaceMembers"),
-        "the skip reason must name what was not expanded, not just that something was skipped: {:?}",
+        skip.reason.contains("no engine principal"),
+        "the skip reason must say WHY nothing was emitted — that the grant names nobody the \
+         engine could match — not merely that something was skipped: {:?}",
         skip.reason
     );
 

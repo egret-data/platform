@@ -215,67 +215,13 @@ impl UserRepo {
     /// Return the stable username for `user_id`, deriving and persisting one if
     /// not yet set.  The username is the email local-part slugified to
     /// `[a-z0-9_-]`; collisions are resolved by appending `-2`, `-3`, …
+    ///
+    /// A thin wrapper over [`ensure_username_via`] so there is ONE
+    /// implementation of what a username is — see that function's doc for why
+    /// a connection-generic form exists at all.
     pub async fn ensure_username(&self, user_id: UserId) -> Result<String> {
-        // 1. Fast path: username already set.
-        let existing: Option<Option<String>> =
-            sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
-                .bind(user_id.0)
-                .fetch_optional(&self.db.pool)
-                .await
-                .map_err(db_err)?;
-
-        match existing {
-            None => {
-                return Err(egret_core::Error::NotFound(format!("user {user_id:?}")));
-            }
-            Some(Some(u)) => return Ok(u),
-            Some(None) => {} // need to derive
-        }
-
-        // 2. Derive base slug from email local-part.
-        let email: String = sqlx::query_scalar("SELECT email::text FROM users WHERE id = $1")
-            .bind(user_id.0)
-            .fetch_one(&self.db.pool)
-            .await
-            .map_err(db_err)?;
-        let base = slugify_localpart(&email);
-
-        // 3. Try base, then base-2, base-3, … until the unique UPDATE sticks.
-        for n in 1..1000u32 {
-            let cand = if n == 1 {
-                base.clone()
-            } else {
-                format!("{base}-{n}")
-            };
-            let res =
-                sqlx::query("UPDATE users SET username = $2 WHERE id = $1 AND username IS NULL")
-                    .bind(user_id.0)
-                    .bind(&cand)
-                    .execute(&self.db.pool)
-                    .await;
-            match res {
-                Ok(r) if r.rows_affected() == 1 => return Ok(cand),
-                Ok(_) => {
-                    // Another concurrent caller set our username first — re-read.
-                    if let Some(u) = sqlx::query_scalar::<_, Option<String>>(
-                        "SELECT username::text FROM users WHERE id = $1",
-                    )
-                    .bind(user_id.0)
-                    .fetch_one(&self.db.pool)
-                    .await
-                    .map_err(db_err)?
-                    {
-                        return Ok(u);
-                    }
-                }
-                Err(sqlx::Error::Database(d)) if d.is_unique_violation() => continue,
-                Err(e) => return Err(db_err(e)),
-            }
-        }
-
-        Err(egret_core::Error::Internal(anyhow::anyhow!(
-            "could not allocate a unique username for user {user_id:?} after 999 attempts"
-        )))
+        let mut conn = self.db.pool.acquire().await.map_err(db_err)?;
+        ensure_username_via(&mut conn, user_id).await
     }
 
     /// Hard-delete `target` and dependents in one transaction. `target`'s notebooks
@@ -388,6 +334,104 @@ impl From<UserRow> for User {
 
 fn db_err(e: sqlx::Error) -> egret_core::Error {
     egret_core::Error::Internal(anyhow::anyhow!(e))
+}
+
+/// Connection-generic core of [`UserRepo::ensure_username`] — SP4a D3.
+///
+/// **Why this exists.** `egret-perm-compile`'s Ranger compiler expands a
+/// `workspace_members` principal into the member list enumerated at compile
+/// time (D7 §3: groups never reach the engine), and the name it must emit is
+/// the bare username the engine sees — `users.username`. That column is
+/// NULLable and **no user-insert path in egret sets it**: `insert_local`,
+/// the OIDC upsert and the kernel's user rows all leave it NULL, and it is
+/// minted lazily the first time someone runs a query, opens a notebook or is
+/// issued an engine token. A compiler that only READ the column would
+/// therefore omit every member who has not yet used an engine — including,
+/// on a fresh install, the bootstrap admin — and the omission is invisible:
+/// the policy compiles, deploys, is listed live, and denies that person.
+/// Minting here closes it, and is safe to do from a compile because the
+/// allocation is idempotent and stable: once a row has a username, every
+/// later call returns the same one.
+///
+/// Runs every statement on `conn`, so a caller inside its own open
+/// transaction both sees and keeps its own writes. **The collision retry is
+/// wrapped in a SAVEPOINT**, which the pool-based caller never needed: a
+/// unique violation aborts the *enclosing* transaction in Postgres, so the
+/// `continue` that tries `base-2` after `base` was taken would poison a
+/// caller's whole recompile instead of retrying inside it.
+pub async fn ensure_username_via(conn: &mut sqlx::PgConnection, user_id: UserId) -> Result<String> {
+    use sqlx::Connection as _;
+
+    // 1. Fast path: username already set.
+    let existing: Option<Option<String>> =
+        sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
+            .bind(user_id.0)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_err)?;
+
+    match existing {
+        None => {
+            return Err(egret_core::Error::NotFound(format!("user {user_id:?}")));
+        }
+        Some(Some(u)) => return Ok(u),
+        Some(None) => {} // need to derive
+    }
+
+    // 2. Derive base slug from email local-part.
+    let email: String = sqlx::query_scalar("SELECT email::text FROM users WHERE id = $1")
+        .bind(user_id.0)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    let base = slugify_localpart(&email);
+
+    // 3. Try base, then base-2, base-3, … until the unique UPDATE sticks.
+    for n in 1..1000u32 {
+        let cand = if n == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{n}")
+        };
+        let mut sp = conn.begin().await.map_err(db_err)?;
+        let res = sqlx::query("UPDATE users SET username = $2 WHERE id = $1 AND username IS NULL")
+            .bind(user_id.0)
+            .bind(&cand)
+            .execute(&mut *sp)
+            .await;
+        match res {
+            Ok(r) if r.rows_affected() == 1 => {
+                sp.commit().await.map_err(db_err)?;
+                return Ok(cand);
+            }
+            Ok(_) => {
+                // Another concurrent caller set our username first — re-read.
+                sp.commit().await.map_err(db_err)?;
+                if let Some(u) = sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT username::text FROM users WHERE id = $1",
+                )
+                .bind(user_id.0)
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(db_err)?
+                {
+                    return Ok(u);
+                }
+            }
+            Err(sqlx::Error::Database(d)) if d.is_unique_violation() => {
+                sp.rollback().await.map_err(db_err)?;
+                continue;
+            }
+            Err(e) => {
+                let _ = sp.rollback().await;
+                return Err(db_err(e));
+            }
+        }
+    }
+
+    Err(egret_core::Error::Internal(anyhow::anyhow!(
+        "could not allocate a unique username for user {user_id:?} after 999 attempts"
+    )))
 }
 
 /// Derive a username slug from an email address.
