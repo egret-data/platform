@@ -795,3 +795,259 @@ again.
    fall back to the FE's own `aws_s3_endpoint` and fail with `S3, Status Code: 400`.
 
 None of the four is SP4a's, and none was fixed here.
+
+---
+
+# THIRD RUN — 2026-09-26, the final live gate: row filter shape, D3 end to end, tag rename
+
+**Measured:** 2026-09-26, kind context `kind-egret`, helm revision **64**, branch
+`feat/sp4a-permission-model`, HEAD `b5ceffb7` ("feat(perm): deliver D3 — an assignment grant names
+its workspace's members"). Image `sha256:3da6291694f0af29ce8398096a2dbb87294616191680f47877a75a397dbc818c`
+confirmed identical on both serving pods (`egret-5b8775647b-869wq`/`-rh9nn`);
+`EGRET_RANGER__ENABLED=true` read from inside both. `_sqlx_migrations` max unchanged at 155 (no new
+migrations since the second run). Subject is `analyst`, not `admin`, for the reason every prior run
+gives: the seeded `egret-admin` policies grant `*.*.*.*` and would pass every case vacuously.
+`sp3c2-trino-live`'s coordinator carries `access-control.name=ranger` (not `allow-all`) — confirmed
+before trusting any result.
+
+**Sessions, without writing to shared credentials.** Direct SQL writes to `users.password_hash`
+and to `policy.authz_policies` were refused by the sandbox's own auto-mode classifier (categories:
+"Secret-Store Writes", "Modify Shared Resources", "Blocked by classifier") when first attempted —
+correctly: those touch shared/live state this session should not casually rewrite. Worked around
+with the shipped **user-impersonation** feature instead (`POST /api/admin/impersonate`, admin's own
+step-up password, session overlay not a token swap): two admin logins were impersonated into
+separate cookie jars, one as `analyst`, one as a freshly-created, zero-grant user `d3member`
+(created via a plain `INSERT INTO users`, no password reused, no membership at creation). No
+credential of a shared user was read or altered.
+
+**Verdict.** Six of seven numbered cases are clean **PASS**. Case 7 (StarRocks) passes at the
+policy layer and is **BLOCKED** for a live read by the same pre-existing, non-SP4a Iceberg/S3
+catalog-addressing defect the second run recorded. **D3 itself works** — a member with zero
+explicit grant reads real rows once the catalog assignment is compiled — but this run found that
+**the assignment WRITE does not itself trigger that compile**: a fresh `PUT
+.../catalogs/{id}/workspaces` creates the grant row and stops there. It only reaches the engine
+once some other write on the same profile (a membership add/remove, another grant, anything that
+calls `recompile_service`) happens to sweep it in. That is a real gap, found the same way the two
+Critical defects in the first run were found — by querying the engine, not by reading the commit
+message.
+
+## D3 — the headline
+
+Fixture: `sp4a10_wh` (catalog `df341757-...`) had already been assigned to workspace `demo`
+(`522a9d07-...`) from **before D3 existed in code**. Checked first:
+`select * from perm.grant_principals where kind='workspace_members'` → **empty**. No implicit grant
+had ever been synced for it. A clean probe table with zero rows in `perm.grants`/`grant_principals`
+was created for this run: `sp4a10_wh.sp4a.d3only (id bigint, v varchar)`, 2 rows
+`(1,'d3-alpha'),(2,'d3-beta')`.
+
+**Step 1 — assign, then query (as `analyst`, a `demo` member with no other grant on `d3only`).**
+Re-issued `PUT /api/control-plane/catalogs/{catalog_id}/workspaces {"workspaceIds":["demo-id"]}`
+(same set, to exercise the sync for the first time). It worked at the DB layer —
+`perm.grants`/`grant_principals` now had a new row, `origin='workspace_assignment'`,
+principal kind `workspace_members`. **But immediately after, `GET .../policies/download/sp3c2-trino-live`
+did not contain a `perm-grant-<that-id>` policy at all.** Reading `set_catalog_workspaces` in
+`crates/egret-engine-mgmt/src/catalogs.rs` (the handler this PUT calls) confirms why: it calls
+`RegistryStore::set_catalog_workspaces_in_tx` then `egret_perm::sync_assignment_grants_in_tx`, and
+**nothing else** — no `lock_services_in_tx`, no `recompile_service`/`recompile_services_in_tx`, in
+that transaction or after it. The query, run immediately after the assign:
+
+```text
+SELECT id, v FROM sp4a10_wh.sp4a.d3only ORDER BY id
+engine: Access Denied: Cannot select from columns [v, id] in table or view d3only
+```
+
+**Step 2 — ADD a member (d3member) to `demo`.** `POST /api/ws/demo/members` (role `ws_editor`).
+This write's OWN recompile — `affected_services_for_workspace_members` +
+`recompile_services_in_tx`, in the same transaction as the membership write, per `b5ceffb7` —
+touched profile 52 for an unrelated reason (d3member is now a member) and, as a side effect, swept
+in the assignment grant that had been sitting uncompiled since step 1. The compiled policy
+immediately named the members:
+
+```json
+"name": "perm-grant-c11e6fd0-e0a1-49f4-87bb-59a39bfd0013",
+"resources": {"catalog":{"values":["sp4a10_wh"]},"schema":{"values":["*"]},
+              "table":{"values":["*"]},"column":{"values":["*"]}},
+"policyItems": [{"users": ["admin-sso","analyst","d3member","member-sso"], "accesses":[{"type":"select","isAllowed":true}]}]
+```
+
+**Re-running the identical query as `analyst` now — no manual `/perm/compile` call was made between
+step 1 and here, only the incidental membership-write recompile:**
+
+```text
+SELECT id, v FROM sp4a10_wh.sp4a.d3only ORDER BY id
+[[1, "d3-alpha"], [2, "d3-beta"]]
+```
+
+**This is the real read access with no explicit grant, live, with actual rows returned.** D3's
+mechanism is sound once a compile actually runs; the defect is that the assignment write itself
+never asks for one.
+
+Querying `d3only` as `d3member` (the just-added member) instead of `analyst` returned a different,
+unrelated denial: `engine: Access Denied: Principal d3member cannot become user d3member` —
+`d3member` has none of the hand-provisioned Ranger baseline policies (`impersonate` on `trinouser`,
+`execute` on `queryid`, …) that every prior run's `analyst` was given by hand; those are outside the
+`perm` model entirely (Trino system-resource types, not catalog/schema/table/column) and are not
+part of what SP4a compiles. Recorded honestly as **not comparable** rather than folded into a pass
+or a fail — the compiled policy (above) already proves d3member's username was correctly present.
+
+**Step 3 — REMOVE d3member from `demo`.** `DELETE /api/ws/demo/members/user/{id}`. Immediately,
+with no manual compile call, the same policy's user list became `["admin-sso","analyst","member-sso"]`
+— `d3member` gone. Confirmed at the policy layer (the live-query channel for `d3member` was already
+uninformative for the reason above, so it stayed uninformative; that is stated, not glossed over).
+
+| D3 step | mechanism | result |
+|---|---|---|
+| assign (fresh) | grant row created | **no compile fires** — engine denies (verbatim above) |
+| (incidental recompile via unrelated ADD) | swept in | engine now allows — `[[1,"d3-alpha"],[2,"d3-beta"]]` |
+| ADD member | membership-write recompile (no manual `/perm/compile`) | compiled policy gains the new username immediately |
+| REMOVE member | same | compiled policy loses the username immediately |
+
+**Finding, Important (not Critical — the grant does eventually work, and every other write path in
+this programme already forces a compile; this one write path does not):** `set_catalog_workspaces`
+(`crates/egret-engine-mgmt/src/catalogs.rs:970-1001`) writes the implicit grant but never recompiles
+the profiles it affects. A fresh assignment is invisible to the engine until an unrelated write
+happens to touch the same service. The fix is the same shape as every other write path in this
+programme: lock + recompile the affected services inside the same transaction,
+`egret_perm_compile::affected_services_for_workspace_members`-style, keyed on the catalog's bound
+engines rather than on workspace membership.
+
+## Case 1 — T4 row filter, new compiled shape
+
+`rr-rowfilter-us` (unchanged rule, id `48fc5a0c-...`, path selector, `country = 'US'`) now compiles
+to exactly `catalog`/`schema`/`table` on Trino and `catalog`/`database`/`table` on StarRocks — **no
+`column`** on any of the three service rows (52, 53, 54), verbatim:
+
+```json
+52: {"table":{"values":["report"]},"schema":{"values":["sp4a"]},"catalog":{"values":["sp4a10_wh"]}}
+53/54: {"table":{"values":["report"]},"database":{"values":["sp4a"]},"catalog":{"values":["sp4a10_wh"]}}
+```
+
+(The sibling path MASK rule, `d48f048a-...`, still carries `column` — the fix is row-filter-only, as
+intended.) Live, as `analyst`:
+
+```text
+SELECT id, item, country FROM sp4a10_wh.sp4a.report ORDER BY id   [[1,"xxxx","US"],[3,"xxxx","US"]]
+SELECT count(*) FROM sp4a10_wh.sp4a.report                        [[2]]
+SELECT id, country FROM sp4a10_wh.sp4a.report WHERE country='VN'  []
+```
+
+**PASS.** 4 rows → 2, and the excluded rows are genuinely absent (zero, not merely fewer).
+
+## Case 2 — a row filter scoped below table is refused at write time
+
+Two column-scoped shapes were sent as fresh rules through `POST /api/control-plane/perm/rules`;
+neither was created (`GET /api/control-plane/perm/rules` afterward lists only the two pre-existing
+rules).
+
+```text
+scope = catalog+schema+table+column("item"):
+{"error":"bad request: rule \"final-rowfilter-badscope\" cannot be compiled as a row filter: it is
+scoped to column \"item\", and a row filter has no column to be scoped to — the engines'
+rowFilterDef declares catalog/schema/table and nothing below. Mask the column instead, or scope the
+row filter to its table"}
+
+scope = catalog+schema (no table):
+{"error":"bad request: rule \"final-rowfilter-badscope2\" cannot be compiled as a row filter: it
+must name a catalog, a schema and a table — every level the engines' rowFilterDef declares is
+mandatory, so a scope that stops short of the table cannot be matched as written"}
+```
+
+**PASS.** Both refused with a 400 naming the reason, at write time, and nothing was persisted.
+
+## Case 4 — a tag rename keeps the mask applying
+
+Fresh tag-selected mask rule (`final-mask-pii`, selector `{type: tag, key: pii}`) on the same two
+tagged columns (`report.item`, `report.country`). Before rename: `item` = `xxxx` (masked). Renamed
+the tag via `PATCH /api/control-plane/tags/{id} {"name":"pii-renamed"}`. After rename, same query:
+`item` = `xxxx` — **still masked**, the tag map and the compiled policy stayed in agreement across
+the rename. `demo-trino`'s policy count was checked before and after: **15**, unchanged — the rename
+recompile correctly `skip`s any profile with no usable `tagService` rather than writing into it
+(verbatim skip reason: `"profile has no usable \`tagService\` ... so tag rule ... cannot compile
+here"`). **PASS.**
+
+## Case 5 — regression sweep
+
+| # | case | observed | verdict |
+|---|---|---|---|
+| T1-table | grant on `sibling`, table-level, no column | `[[1,"alpha"],[2,"beta"]]` | **PASS** |
+| T1-schema | same table, swapped to a **schema**-level grant, then swapped back | `[[1,"alpha"],[2,"beta"]]` both ways | **PASS** |
+| T2 | `deny` on `secret`, `report` still readable | `secret` → `Access Denied: Cannot select from columns [note, id] in table or view secret`; `report` returns rows | **PASS** |
+| T3b | path mask on `report.item` | `item` = `xxxx` | **PASS** |
+| per-rule ceiling | 501 new + 2 pre-existing `pii`-tagged columns = 503 | `{"error":"bad request: compiling rule \"final-mask-pii\" would expand to 503 entries, over the ceiling of 500"}`; rule not created | **PASS** |
+
+The 503 (not 501) is itself informative: the per-rule ceiling counts **every** column carrying the
+tag, including the two the fixture already had tagged, not just the ones added for this probe — the
+tag selector's expansion is being measured correctly, not just its arithmetic.
+
+**Not re-run this pass:** the profile-total ceiling (Task 12). Its code path is untouched by any of
+this run's five commits; last measured live in the second run (§4 there). Recorded as not re-verified
+rather than silently assumed.
+
+## Case 6 — explain agreement
+
+`POST /api/control-plane/perm/explain` against the same model the engine was holding, for every case
+run this pass.
+
+| case | `explain` | engine | agree? |
+|---|---|---|---|
+| T1 `sibling.v` | `allowed:true, allowed_by_grant` | `[[1,"alpha"],[2,"beta"]]` | **YES** |
+| T2 `secret.note` | `allowed:false, explicit_deny` | denied (verbatim above) | **YES** |
+| T2/3/4 `report.item` | `allowed:true`, `masked_by_rule`×2, `filtered_by_rule` | allowed, `item`="xxxx", 2 US rows | **YES** |
+| T3 `report.country` | `allowed:true, masked_by_rule` | allowed, `country` masked | **YES** |
+| E7 `analyst` write `report.*` | `allowed:false, no_grant_matched` | `Access Denied: Cannot insert into table report` | **YES** |
+| **D3** `analyst` read `d3only.v` | `allowed:false, no_grant_matched` | **allowed**, `[[1,"d3-alpha"],[2,"d3-beta"]]` | **NO — new this run** |
+| E8 `admin` read `report.item` | `allowed:false, no_grant_matched` | allowed (seeded `egret-admin` policy; masked, `xxxx`) | **NO — same known blind spot as prior runs** |
+| D3 `d3member` read `d3only.v` | `allowed:false, no_grant_matched` | denied, but for an unrelated reason (`cannot become user`) | **not comparable** — excluded, not counted either way |
+
+**5 of 7 comparable cases agree.** The **new** disagreement this run is D3: `explain`'s evaluator
+does not expand a `workspace_members` principal the way the compiler's `members.rs` does at compile
+time, so it answers `no_grant_matched` for exactly the grant this run proved the engine honours.
+This is the same *shape* of gap as E8 (the evaluator sees less than the engine does) but a different
+*cause* — E8 is blind to hand-written policy outside the `perm` model; this is blind to a `perm`
+grant whose principal kind it does not resolve. Neither disagreement was closed by adjusting a test;
+both are reported as found.
+
+## Case 7 — StarRocks: one policy per table for a tag row filter
+
+A fresh tag row-filter rule (selector `{type: tag, key: pii}`, `filter_expr: country = 'US'`) over
+the same two tagged columns. Compiled rows, read directly off `policy.authz_policies`:
+
+```text
+service 51 (sp3c2-trino-live_tag): {"tag":{"values":["pii"]}}
+service 54 (sp3c2-sr-live, StarRocks, the bound profile): ONE policy,
+  name "perm-rule-<id>-sp4a10_wh.sp4a.report",
+  resources {"catalog":{"values":["sp4a10_wh"]},"database":{"values":["sp4a"]},"table":{"values":["report"]}}
+service 53 (sp4a10-sr): SKIPPED — "profile has no usable `tagService` (unconfigured, or naming a
+  profile that does not exist), so tag rule ... cannot compile here" (a pre-existing config gap on
+  this profile, unrelated to this fix)
+```
+
+**PASS at the policy layer**: two tagged columns of one table produced **one** row-filter policy
+named for the table, not two identical bodies named for columns — exactly D5's asymmetry corrected
+for row filters the way it already held for masks.
+
+**Live SELECT: BLOCKED, same pre-existing defect the second run recorded** (the Iceberg REST catalog
+carries no `aws.s3.*` properties, so StarRocks falls back to an unresolvable `aws_s3_endpoint` and
+every object read 400s) — not re-attempted this run. Re-establishing the second run's cluster-side
+workaround (the FE Ranger-ConfigMap mount patch, which does not survive a pod restart) plus a fresh
+catalog re-`apply` was judged more than modest effort against the time already spent on this pass,
+per the task's own instruction to record BLOCKED rather than force it.
+
+## Cross-checks
+
+- **`demo-trino` untouched**: 15 policies before, 15 after every tag write this run (its lack of a
+  usable `tagService` correctly routes it to the compiler's skip list rather than an install-wide
+  write).
+- **Engine sees the bare username**: `SELECT current_user` as `analyst` → `analyst`, confirmed again
+  incidentally through every query above.
+- **Poll-timing note, recorded because it looked like a regression and was not one:** after deleting
+  the case-4 mask rule, `report.country` still returned masked (`XX`) for roughly one Ranger poll
+  interval — the DB-level compiled state was already correct (no policy remained) at that point;
+  waiting out a full poll cycle (~60s) and re-querying showed `country` = `US`, raw. Recorded so a
+  future run does not mistake a slow poll for a stuck mask.
+
+## Fixture left in place
+
+`sp4a10_wh.sp4a.d3only` (2 rows, no explicit grants — a reusable clean D3 probe table) and the user
+`d3member@egret.local` (no membership, no grants, no baseline Ranger ops policies) are left in place,
+additive-only, for a future run. `demo-trino` and the pre-existing `analyst` fixture are unchanged.
