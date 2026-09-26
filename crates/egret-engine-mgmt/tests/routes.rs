@@ -10135,3 +10135,70 @@ async fn update_refuses_a_policy_profile_of_the_wrong_type() {
         "nothing is compiled for a refused bind"
     );
 }
+
+/// I2: a profile another engine already binds is refused with a 409, mirroring
+/// create's `count_engines_bound_to_authz_service` arm. Two engines sharing one
+/// profile silently share one policy set.
+#[tokio::test]
+async fn update_refuses_a_policy_profile_another_engine_already_binds() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_shared", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    // Two engines. The second one's auto-bind profile is what the first will
+    // be offered — a profile that is demonstrably bound elsewhere.
+    let a = format!("trino-{}", Uuid::new_v4().simple());
+    let (s, j) = create_engine_via_api(&f, &token, &a, wh_id, serde_json::json!({})).await;
+    assert_eq!(s, StatusCode::CREATED, "create a; body={j}");
+    let a_id = j["id"].as_str().unwrap().to_string();
+    let b = format!("trino-{}", Uuid::new_v4().simple());
+    let (s, j) = create_engine_via_api(&f, &token, &b, wh_id, serde_json::json!({})).await;
+    assert_eq!(s, StatusCode::CREATED, "create b; body={j}");
+
+    let b_profile = authz_service_of(&f, &b)
+        .await
+        .expect("engine b is auto-bound to a profile");
+    let a_before = authz_service_of(&f, &a).await;
+    assert_ne!(a_before, Some(b_profile));
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{a_id}"),
+            &token,
+            Some(rebind_body(&a, wh_id, serde_json::json!(b_profile))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
+    assert!(
+        j.to_string().contains(&b_profile.to_string()),
+        "the refusal must name the profile; body={j}"
+    );
+    assert_eq!(
+        authz_service_of(&f, &a).await,
+        a_before,
+        "engine a keeps its own profile"
+    );
+    assert_eq!(
+        authz_service_of(&f, &b).await,
+        Some(b_profile),
+        "engine b keeps its profile — a refused bind steals nothing"
+    );
+    assert!(compiler.in_tx_calls.lock().unwrap().is_empty());
+}

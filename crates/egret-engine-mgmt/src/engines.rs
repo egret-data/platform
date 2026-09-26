@@ -4694,6 +4694,24 @@ async fn apply_authz_service_update(
             svc.name, svc.r#type, engine.name, engine.r#type
         )));
     }
+    // I2: refuse a profile another engine already binds — again mirroring
+    // create (`plan_trino_profile`'s `count_engines_bound_to_authz_service`
+    // arm). Two engines sharing one profile silently share one policy set, so
+    // a grant written for one governs the other. This engine cannot be the
+    // one counted: the `== Some(sid)` early-return above already handled
+    // "already bound here", so any bound engine at this point is a different
+    // one.
+    let bound_elsewhere = st
+        .engine_mgmt
+        .count_engines_bound_to_authz_service(sid)
+        .await?;
+    if bound_elsewhere > 0 {
+        return Err(CpError::Conflict(format!(
+            "policy profile {sid} ({}) is already bound to {bound_elsewhere} other engine(s); \
+             one profile per engine",
+            svc.name
+        )));
+    }
     // The binding write and the compile of the profile it names share ONE
     // transaction, the same shape `catalogs::set_catalog_workspaces` keeps —
     // and, like it, `sqlx::Error` from `.begin()`/`.commit()` is mapped
@@ -4743,7 +4761,7 @@ async fn apply_authz_service_update(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a policy profile of the wrong type; retry", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a profile of the wrong type or one another engine already binds; retry", body = ErrorBody),
         (status = 502, description = "Kubernetes rejected the update; the previous spec was restored", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
