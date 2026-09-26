@@ -28,6 +28,7 @@ use egret_core::UserId;
 use egret_metastore::Db;
 use egret_workflow::flow_trigger::{
     process_events, process_events_with, sweep_expired_windows, EventReport, PassLimits,
+    MAX_ATTEMPTS,
 };
 use egret_workflow::models::TriggerKind;
 use tokio_util::sync::CancellationToken;
@@ -641,6 +642,100 @@ async fn two_processors_satisfying_all_together_fire_once() {
         !text.contains("duplicate key"),
         "a missing row was created twice (check-then-insert):\n{text}"
     );
+}
+
+/// **Contention is not a fault** (Task 4 fix round 1). A listener whose
+/// window row another transaction keeps changing loses the race on every
+/// pass -- `40001` at `REPEATABLE READ` -- more times than [`MAX_ATTEMPTS`].
+/// The event must survive every loss without spending an attempt or counting
+/// `errored`, and the listener must fire exactly once when the contention
+/// stops.
+///
+/// Each round holds the row `FOR UPDATE` on a side connection, starts a
+/// pass, waits until that pass is blocked on the lock, then touches the row
+/// and commits: the pass's snapshot predates that commit, so its lock wait
+/// ends in `40001`.
+#[tokio::test]
+async fn a_window_contended_for_more_than_max_attempts_passes_still_fires_once() {
+    let Some(fx) = fx().await else { return };
+    let p1 = fx.source("p1").await;
+    let p2 = fx.source("p2").await;
+    let listener = fx
+        .flow(&listener_yaml(
+            "listener",
+            "",
+            &depends_on(&["p1", "p2"], ""),
+        ))
+        .await;
+    fx.event(&p1).await;
+    assert!(window(&fx.db, listener).await.is_some(), "control: {{p1}}");
+    fx.run(&p2).await;
+    assert_eq!(common::events(&fx.db).await.len(), 1, "control: p2's event");
+
+    let rounds = MAX_ATTEMPTS + 2;
+    for round in 1..=rounds {
+        let mut side = fx.db.pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM workflow.flow_trigger_windows WHERE flow_id = $1 FOR UPDATE")
+            .bind(listener)
+            .execute(&mut *side)
+            .await
+            .unwrap();
+        let pool = fx.db.pool.clone();
+        let pass = tokio::spawn(async move { process_events(&pool).await.expect("a pass") });
+        let start = std::time::Instant::now();
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                  WHERE datname = current_database() AND wait_event_type = 'Lock'",
+            )
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "round {round}: the pass never waited on the window lock"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        sqlx::query(
+            "UPDATE workflow.flow_trigger_windows SET results = results WHERE flow_id = $1",
+        )
+        .bind(listener)
+        .execute(&mut *side)
+        .await
+        .unwrap();
+        side.commit().await.unwrap();
+        let r = pass.await.unwrap();
+        assert_eq!(
+            r,
+            EventReport {
+                events: 1,
+                contended: 1,
+                ..Default::default()
+            },
+            "round {round}"
+        );
+        let rows: Vec<(i32,)> = sqlx::query_as("SELECT attempts FROM workflow.flow_trigger_events")
+            .fetch_all(&fx.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![(0,)],
+            "round {round}: the event survives contention, and no attempt is spent"
+        );
+        assert_eq!(executions_of(&fx.db, listener).await, 0);
+    }
+
+    // The contention stops: the next pass reads {p1}, adds p2, fires once.
+    let r = fx.pass().await;
+    assert_eq!(r.fired, 1, "{r:?}");
+    assert_eq!(executions_of(&fx.db, listener).await, 1);
+    assert_eq!(window(&fx.db, listener).await, None);
+    assert_eq!(common::events(&fx.db).await, vec![]);
 }
 
 // ── The lifecycle (D1) ──────────────────────────────────────────────────────

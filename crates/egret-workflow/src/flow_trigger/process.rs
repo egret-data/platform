@@ -109,6 +109,11 @@ pub struct EventReport {
     /// `dependsOn` listeners whose window took this event without being
     /// satisfied: stored, not fired (W13b).
     pub accumulated: usize,
+    /// `dependsOn` listeners that lost a race for their window row to another
+    /// replica (`40001`, or `40P01`) and are retried on a later pass (W13b
+    /// Task 4 fix round 1). **Not an error, and not an attempt:** the loser's
+    /// failure means a competitor committed a change to that very row.
+    pub contended: usize,
 }
 
 /// The claimed event, as the claim read it under its row lock.
@@ -192,6 +197,10 @@ enum Fate {
     /// A `dependsOn` listener's window took the event and is not yet
     /// satisfied. Done with.
     Accumulated,
+    /// A `dependsOn` listener lost a race for its window row (`40001` or
+    /// `40P01`). Its savepoint rolled back; the event is kept for it, due at
+    /// once, **without** spending an attempt (see [`finish_event`]).
+    Contended(String),
 }
 
 /// How much one pass may do (final review I3). A pass runs on the scheduler's
@@ -234,14 +243,23 @@ impl Default for PassLimits {
 /// "Passed" is `window_end <= now()`, the processor's own test for an expired
 /// window. Nothing is lost by it: an expired window is one the next matching
 /// event would replace anyway. It is one autocommit statement at READ
-/// COMMITTED, so a window a processor holds `FOR UPDATE` is waited on and
-/// re-checked against its new version -- one the processor just replaced is
-/// no longer expired and is kept. See the module doc, statement 10.
+/// COMMITTED that takes its rows `FOR UPDATE SKIP LOCKED`: a window a
+/// processor holds is skipped, not waited on (the processor is replacing or
+/// deleting it anyway, and the next pass's sweep sees what it left), so the
+/// sweep never waits and cannot close a deadlock cycle with processors that
+/// hold one window and want the next (fix round 1). See the module doc,
+/// statement 10.
 pub async fn sweep_expired_windows(pool: &PgPool) -> Result<u64> {
-    let swept = sqlx::query("DELETE FROM workflow.flow_trigger_windows WHERE window_end <= now()")
-        .execute(pool)
-        .await
-        .map_err(db_err)?;
+    let swept = sqlx::query(
+        "DELETE FROM workflow.flow_trigger_windows \
+          WHERE (flow_id, trigger_id) IN ( \
+                SELECT flow_id, trigger_id FROM workflow.flow_trigger_windows \
+                 WHERE window_end <= now() \
+                   FOR UPDATE SKIP LOCKED)",
+    )
+    .execute(pool)
+    .await
+    .map_err(db_err)?;
     Ok(swept.rows_affected())
 }
 
@@ -329,7 +347,7 @@ pub async fn process_events_with(
 
         let body = match process_one(&mut tx, &ev, &mut report).await {
             Ok((done, pending)) => {
-                finish_event(&mut tx, &ev, &done, &pending, limits.retry_backoff).await
+                finish_event(&mut tx, &ev, done, pending, limits.retry_backoff).await
             }
             Err(e) => Err(e),
         };
@@ -439,6 +457,16 @@ fn is_serialization_failure(e: &sqlx::Error) -> bool {
         .is_some_and(|c| c == "40001")
 }
 
+/// The listener keys a later pass must retry, by why.
+#[derive(Default)]
+struct Pending {
+    /// Possibly transient failures ([`Fate::Retry`]): each pass that leaves
+    /// one spends an attempt.
+    failed: Vec<String>,
+    /// Lost window races ([`Fate::Contended`]): retried, free.
+    contended: Vec<String>,
+}
+
 /// Everything that happens to one claimed event before its row is deleted or
 /// kept. Returns `(done, pending)`: the listener keys the event is finished
 /// with, including the ones an earlier pass finished, and the ones a later
@@ -447,9 +475,9 @@ async fn process_one(
     tx: &mut PgConnection,
     ev: &Event,
     report: &mut EventReport,
-) -> Result<(Vec<String>, Vec<String>)> {
+) -> Result<(Vec<String>, Pending)> {
     let mut done = ev.done.clone();
-    let mut pending = Vec::new();
+    let mut pending = Pending::default();
 
     let Ok(state) = serde_json::from_value::<State>(Value::String(ev.state.clone())) else {
         // `settle` writes `RunState::wire()`, pinned to `State`'s serde
@@ -516,7 +544,7 @@ async fn process_one(
                 "the source of a flow-trigger event could not be read; kept for every listener"
             );
             report.errored += todo.len();
-            pending.extend(todo.iter().map(|l| l.key()));
+            pending.failed.extend(todo.iter().map(|l| l.key()));
             return Ok((done, pending));
         }
     };
@@ -585,53 +613,86 @@ async fn process_one(
                     reason = %why,
                     "a flow-trigger listener failed; the event is kept for it"
                 );
-                pending.push(key);
+                pending.failed.push(key);
+            }
+            Fate::Contended(why) => {
+                report.contended += 1;
+                tracing::debug!(
+                    event_id = ev.id,
+                    listener = %key,
+                    reason = %why,
+                    "a flow-trigger listener lost a race for its window; the event is kept for it"
+                );
+                pending.contended.push(key);
             }
         }
     }
     Ok((done, pending))
 }
 
-/// The event's last statement: gone when nothing is pending or it has had its
-/// [`MAX_ATTEMPTS`], otherwise kept with what is done and one more attempt.
-/// Under the claim's row lock, in the claim's transaction (statement 5).
+/// The event's last statement (statement 5), under the claim's row lock, in
+/// the claim's transaction.
+///
+/// - **Failed listeners spend attempts.** A pass that leaves one counts
+///   `attempts + 1` and sets the event one `backoff` ahead; the pass that
+///   would reach [`MAX_ATTEMPTS`] gives those listeners up -- logged at
+///   `warn`, recorded as done -- instead of keeping them.
+/// - **Contended listeners do not** (W13b Task 4 fix round 1). A `dependsOn`
+///   listener that lost a race for its window row is kept, the event due at
+///   once (`next_attempt_at = now()`, the pass's own start, so the NEXT pass
+///   claims it: this pass's cursor is already past it), and `attempts` is
+///   untouched. Losing is not a fault: the `40001` exists only because a
+///   competitor committed a change to that row, so every free retry is paired
+///   with another transaction's progress, and the next pass reads the
+///   winner's result (spec §5.3 *Concurrency*). Before this fix, five lost
+///   races gave the event up and the listener's dependency result was lost.
+///   A pass still claims an event at most once, so this cannot spin a pass
+///   or hold `fire_due` back (W13a's cursor and caps).
+/// - Nothing left: the event is deleted.
 async fn finish_event(
     tx: &mut PgConnection,
     ev: &Event,
-    done: &[String],
-    pending: &[String],
+    mut done: Vec<String>,
+    pending: Pending,
     backoff: Duration,
 ) -> Result<()> {
-    if !pending.is_empty() && ev.attempts + 1 < MAX_ATTEMPTS {
-        sqlx::query(
-            "UPDATE workflow.flow_trigger_events \
-                SET done = $2, attempts = attempts + 1, \
-                    next_attempt_at = now() + $3::bigint * interval '1 millisecond' \
-              WHERE id = $1",
-        )
-        .bind(ev.id)
-        .bind(done)
-        .bind(backoff_ms(backoff))
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
-        return Ok(());
-    }
-    if !pending.is_empty() {
+    let Pending { failed, contended } = pending;
+    let failing = !failed.is_empty();
+    let mut retry_failed = failing;
+    if failing && ev.attempts + 1 >= MAX_ATTEMPTS {
         tracing::warn!(
             event_id = ev.id,
             source_execution_id = %ev.source_execution_id,
             state = %ev.state,
             attempts = ev.attempts + 1,
-            listeners = ?pending,
+            listeners = ?failed,
             "gave up on a flow-trigger event after {MAX_ATTEMPTS} attempts; these listeners never fired"
         );
+        done.extend(failed);
+        retry_failed = false;
     }
-    sqlx::query("DELETE FROM workflow.flow_trigger_events WHERE id = $1")
-        .bind(ev.id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+    if !retry_failed && contended.is_empty() {
+        sqlx::query("DELETE FROM workflow.flow_trigger_events WHERE id = $1")
+            .bind(ev.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        return Ok(());
+    }
+    let delay = if retry_failed { backoff_ms(backoff) } else { 0 };
+    sqlx::query(
+        "UPDATE workflow.flow_trigger_events \
+            SET done = $2, attempts = attempts + $4, \
+                next_attempt_at = now() + $3::bigint * interval '1 millisecond' \
+          WHERE id = $1",
+    )
+    .bind(ev.id)
+    .bind(&done)
+    .bind(delay)
+    .bind(i32::from(failing))
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
     Ok(())
 }
 
@@ -966,7 +1027,11 @@ async fn listen_depends_on(
             sp.rollback().await.map_err(db_err)?;
             failed_start_fate(&err)
         }
-        Err(e) => {
+        Err(StepError::Contended(why)) => {
+            sp.rollback().await.map_err(db_err)?;
+            Fate::Contended(why)
+        }
+        Err(StepError::Failed(e)) => {
             sp.rollback().await.map_err(db_err)?;
             Fate::Retry(format!("the listener's window: {e}"))
         }
@@ -979,6 +1044,41 @@ enum WindowStep {
     Done(Fate),
     /// The fire's `start_execution_in` failed: roll everything back.
     StartFailed(Error),
+}
+
+/// Why [`window_step`] failed.
+enum StepError {
+    /// A serialization failure (`40001`) or a deadlock (`40P01`) on the
+    /// window: another transaction committed a change to the row after this
+    /// one's snapshot (or won the deadlock). See [`finish_event`].
+    Contended(String),
+    /// Anything else: possibly transient, retried against `attempts`.
+    Failed(Error),
+}
+
+impl From<Error> for StepError {
+    fn from(e: Error) -> Self {
+        StepError::Failed(e)
+    }
+}
+
+/// A window statement's error, classified.
+///
+/// **`40P01` is not reachable among the window statements** (derived, not
+/// staged): processors lock window rows in the listener `SELECT`'s order
+/// (`ORDER BY namespace, flow_id, trigger_id`), one row per listener, and the
+/// sweep takes its rows `SKIP LOCKED`, so it never waits and closes no cycle.
+/// It is classified as contention anyway -- a deadlock victim's competitor
+/// committed too -- so that a cycle through some other lock (the fire's
+/// foreign-key checks) cannot spend attempts either.
+fn step_err(e: sqlx::Error) -> StepError {
+    let code = e.as_database_error().and_then(|d| d.code());
+    match code.as_deref() {
+        Some("40001") | Some("40P01") => {
+            StepError::Contended(format!("the listener's window: {e}"))
+        }
+        _ => StepError::Failed(db_err(e)),
+    }
 }
 
 /// Spec §5.3 steps 2-5 on the listener's window row, inside the listener's
@@ -995,14 +1095,14 @@ async fn window_step(
     source: &Source,
     ctx: &RenderContext,
     fired: &FiredExecution,
-) -> Result<WindowStep> {
+) -> std::result::Result<WindowStep, StepError> {
     // The window's clock is the event transaction's `now()`, never the wall
     // clock (W13b global constraint). At `REPEATABLE READ` it is the
     // transaction's start, the same instant for every listener of the event.
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
         .fetch_one(&mut *conn)
         .await
-        .map_err(db_err)?;
+        .map_err(step_err)?;
     let (start, end) = match window.bounds(now) {
         Ok(b) => b,
         Err(e) => {
@@ -1025,7 +1125,7 @@ async fn window_step(
     .bind(end)
     .execute(&mut *conn)
     .await
-    .map_err(db_err)?;
+    .map_err(step_err)?;
 
     // Statement 7, the row lock: what makes "fire once" hold.
     let (mut w_start, mut w_end, Json(mut results)): (
@@ -1041,7 +1141,7 @@ async fn window_step(
     .bind(&l.trigger_id)
     .fetch_one(&mut *conn)
     .await
-    .map_err(db_err)?;
+    .map_err(step_err)?;
 
     // D1: an expired window is REPLACED -- fresh bounds, empty results -- and
     // the event is then evaluated against the fresh one (Kestra, measured,
@@ -1058,7 +1158,7 @@ async fn window_step(
         .bind(end)
         .execute(&mut *conn)
         .await
-        .map_err(db_err)?;
+        .map_err(step_err)?;
         (w_start, w_end) = (start, end);
         results.clear();
     }
@@ -1083,7 +1183,7 @@ async fn window_step(
         .bind(Json(&merged))
         .execute(&mut *conn)
         .await
-        .map_err(db_err)?;
+        .map_err(step_err)?;
         return Ok(WindowStep::Done(Fate::Accumulated));
     }
 
@@ -1100,7 +1200,7 @@ async fn window_step(
             .bind(&l.trigger_id)
             .execute(&mut *conn)
             .await
-            .map_err(db_err)?;
+            .map_err(step_err)?;
             Ok(WindowStep::Done(fired_fate(render_failure)))
         }
         Err(e) => Ok(WindowStep::StartFailed(e)),

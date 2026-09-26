@@ -397,6 +397,7 @@ fn spawn_scheduler(pool: PgPool, every: Duration, cancel: CancellationToken) {
                             fired = r.fired,
                             born_failed = r.born_failed,
                             accumulated = r.accumulated,
+                            contended = r.contended,
                             refused = r.refused,
                             errored = r.errored,
                             "workflow flow-trigger pass"
@@ -404,6 +405,7 @@ fn spawn_scheduler(pool: PgPool, every: Duration, cancel: CancellationToken) {
                         Ok(r) if r.events > 0 => tracing::debug!(
                             events = r.events,
                             accumulated = r.accumulated,
+                            contended = r.contended,
                             refused = r.refused,
                             errored = r.errored,
                             "workflow flow-trigger pass"

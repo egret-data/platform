@@ -219,13 +219,38 @@
 //! two passes at once (statement 2 partitions EVENTS, not listeners). The
 //! loser of any race below fails `40001` -- `could not serialize access due
 //! to concurrent update`, measured in both phases of the concurrency test --
-//! its savepoint rolls back (the window untouched by it), the listener is
-//! kept pending on its event (`Fate::Retry`), and a later pass, with a fresh
-//! snapshot, reads the winner's result. So "the second reads the first's
-//! result" (spec §5.3) happens one backoff later, not in the same pass, and
-//! a listener whose window is contended on every one of five passes is
-//! given up like any failing listener. Unmutated control, 3 runs: `rows ==
-//! attempts == 1` in both phases, the loser `errored: 1` each time.
+//! its savepoint rolls back (the window untouched by it), and a later pass,
+//! with a fresh snapshot, reads the winner's result. So "the second reads the
+//! first's result" (spec §5.3) happens on the next pass, not in the same one.
+//! Unmutated control, 3 runs: `rows == attempts == 1` in both phases.
+//!
+//! **A lost race is not a failure, and it spends no attempt** (fix round 1).
+//! Before the fix it was `Fate::Retry`: `errored`, a `warn`, and one of the
+//! event's [`MAX_ATTEMPTS`](process::MAX_ATTEMPTS) -- so five lost races gave
+//! the event up and the listener's dependency result was lost for good, a
+//! budget built for faults spent on an expected concurrency outcome (W13a's
+//! window-free arm never contends, so there `attempts` counts faults only).
+//! Now a `40001` (or `40P01`) inside the window step is `Fate::Contended`:
+//! counted `contended`, logged at `debug`, and the event is kept with
+//! `attempts` untouched and `next_attempt_at = now()`. **Retried on the NEXT
+//! pass, not this one**: this pass's cursor is already past the event, which
+//! is what keeps a pass bounded (W13a final review I3) -- an in-pass retry
+//! would have to wait on the winner's lock again and could repeat without a
+//! bound. An unbounded number of free retries is safe because a `40001`
+//! exists only after a competitor COMMITTED a change to that row, so each
+//! free retry is paired with another transaction's progress. `40P01` is not
+//! reachable among the window statements (derived): processors lock window
+//! rows in the listener `SELECT`'s order, and the sweep takes its rows `SKIP
+//! LOCKED` (statement 10) and never waits; it is classified as contention
+//! anyway. Proved by
+//! `a_window_contended_for_more_than_max_attempts_passes_still_fires_once`:
+//! a side connection holds the row, touches it and commits under a blocked
+//! pass, `MAX_ATTEMPTS + 2` = 7 times; every round is `contended: 1` with
+//! `attempts` 0, and the next pass fires exactly once. Unmutated: 2 of 2
+//! green. Mutation, 2 runs: **count a lost race as a failure** (route
+//! `Fate::Contended` into the failed list, so it spends attempts, backs off
+//! and is given up at five) -- dies 2 of 2 in round 1, `attempts` `[(1,)]`
+//! not `[(0,)]`.
 //!
 //! ## 6. The insert-if-absent -- a missing row cannot be created twice
 //!
@@ -284,11 +309,16 @@
 //!
 //! [`sweep_expired_windows`], once per scheduler pass after
 //! [`process_events_with`] (`runtime::spawn_scheduler`):
-//! `DELETE … WHERE window_end <= now()`. At READ COMMITTED it waits on a row a
-//! processor holds and re-checks the new version, so a window just replaced
-//! is kept; a processor whose row the sweep deleted first fails `40001` at
-//! statement 7 and is retried, like any race above (derived from the
-//! isolation rules, not staged). Nothing is lost either way: an expired
+//! `DELETE … WHERE (flow_id, trigger_id) IN (SELECT … WHERE window_end <=
+//! now() FOR UPDATE SKIP LOCKED)`. A row a processor holds is skipped, not
+//! waited on (fix round 1: the first version waited, and a sweep holding one
+//! expired row while waiting on another could close a deadlock cycle with a
+//! processor holding the second and wanting the first); the processor is
+//! replacing or deleting it anyway, and the next pass's sweep sees the
+//! result. `FOR UPDATE` re-checks `window_end` on the row's latest version,
+//! so a window just replaced is kept. A processor whose row the sweep deleted
+//! first fails `40001` at statement 7 and is retried as contention, like any
+//! race above (derived from the isolation rules, not staged). Nothing is lost either way: an expired
 //! window is one the next matching event replaces. Proved by
 //! `the_sweep_deletes_only_expired_windows` and, through the ticker,
 //! `tests/runtime.rs`'s `the_scheduler_ticker_sweeps_expired_windows`.
