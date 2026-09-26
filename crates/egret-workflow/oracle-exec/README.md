@@ -10042,6 +10042,11 @@ unlisted over-refusal, reported by name with its message.
 > `UNKNOWN_TYPE_REFUSED` went 301 → 296 → **68**; `VALIDATE_REFUSED` 19 → **20**;
 > the `SUBFLOW_TARGETS_{LIVE,DRAFT_ONLY}` split 2/17 → **18/1**; and the
 > `SUBFLOW_LOOKUPS_ON_{PUBLISHED,REFUSED}` pair 18/4 → 19/3 → **47/2**.
+> *W13b Task 2 (2026-09-26) moved three again, all for one flow:* `LIVE`
+> 248 → **247**, `PARSE_REFUSED` 5 → **6**, and `SUBFLOW_LOOKUPS_ON_PUBLISHED`
+> 47 → **45** — `valids/flow-trigger-fire-once-true-flow-listen` no longer
+> parses, because `models::Window` refuses `fireOnce` as the pinned artifact
+> does (422), and its two `dependsOn` lookups went with it.
 > **The current value of every one of them is a `const` in
 > `oracle-exec/driver.rs` that `driver::census`, `driver::target_census` and
 > `driver::lookup_census` compare on every run**, which is where a reader should

@@ -922,13 +922,26 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         345,
         "every corpus flow is parsed or named, never skipped"
     );
+    // W13b Task 2: exactly ONE flow that declares triggers no longer parses --
+    // `valids/flow-trigger-fire-once-true-flow-listen`, whose `window:
+    // {fireOnce: true}` `models::Window` refuses as the pinned artifact does
+    // (422). It is named, and its one flow-trigger declaration is added back
+    // to the census below by hand, rather than letting it silently shrink it.
+    const FIRE_ONCE: &str = "valids/flow-trigger-fire-once-true-flow-listen";
+    let unparsed_with_triggers: Vec<&(String, String)> = unparsed
+        .iter()
+        .filter(|(id, _)| corpus_source(id).contains("triggers:"))
+        .collect();
     assert!(
-        unparsed
-            .iter()
-            .all(|(id, _)| !corpus_source(id).contains("triggers:")),
+        unparsed_with_triggers.len() == 1
+            && unparsed_with_triggers[0].0 == FIRE_ONCE
+            && unparsed_with_triggers[0]
+                .1
+                .contains("unknown field `fireOnce`"),
         "a flow that does not parse AND declares a `triggers:` block would \
          shrink the census below and look exactly like a smaller corpus, so the \
-         census is only honest while this holds: {unparsed:?}"
+         census is only honest while the fireOnce flow is the only one, refused \
+         for `fireOnce`: {unparsed:?}"
     );
 
     const SCHEDULE: &str = "io.kestra.plugin.core.trigger.Schedule";
@@ -976,12 +989,17 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
             flows_and_declarations(FLOW_TRIGGER),
             flows_and_declarations(WEBHOOK),
         ),
-        ((7, 8), (17, 21), (15, 15)),
-        "(flows, declarations) per construct. The 17 flow-trigger flows and 21 \
-         declarations are the same two numbers \
+        ((7, 8), (16, 20), (15, 15)),
+        "(flows, declarations) per construct, over the flows that PARSE. The \
+         fireOnce flow above is the 17th flow-trigger flow and the 21st \
+         declaration; 17 and 21 are the same two numbers \
          `trigger::flow::tests::the_corpus_flow_triggers_split_twenty_to_one` \
          derives from the directory -- two independent routes to one census"
     );
+
+    // The fireOnce flow declares a flow trigger; it is counted here by hand,
+    // as promised above, so the figures below still describe all 345 flows.
+    declaring_flows.insert(FIRE_ONCE.to_string());
 
     let trigger_golden: BTreeSet<String> = declaring_flows.intersection(&ids).cloned().collect();
     let trigger_matching: BTreeSet<String> =
@@ -1324,9 +1342,10 @@ fn the_seeded_correlation_id_divergence_has_no_corpus_population() {
             model_system,
             unparsed_ids.contains("invalids/system-labels")
         ),
-        (4, 21, 1, true),
-        "the model-based census, beside the textual one: FOUR flows `models::Flow` \
-         refuses (all `invalids/`), so it sees 21 label-declaring flows of 22 and \
+        (5, 21, 1, true),
+        "the model-based census, beside the textual one: FIVE flows `models::Flow` \
+         refuses -- four `invalids/`, plus (since W13b Task 2) the fireOnce flow, \
+         which declares no label -- so it sees 21 label-declaring flows of 22 and \
          ONE `system.*` declaration of three -- because the flow holding the other \
          two is one of the four. 22 - 21 = 1 flow and 3 - 1 = 2 declarations, and \
          both differences are that one flow. Unparsed: {unparsed_ids:?}"
