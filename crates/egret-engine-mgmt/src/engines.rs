@@ -580,7 +580,7 @@ pub(crate) async fn build_provision_req_with(
     // timeout Ranger policies onto the bound Trino service. Guarded on auth being
     // enabled — without a `password.db` the delegator can't basic-auth, so
     // impersonate delegation is meaningless (and `inject_delegator_user` no-ops).
-    let ranger_service_name = authz_service_id.map(|_| engine.name.clone());
+    let ranger_service_name = resolve_ranger_service_name(st, authz_service_id).await?;
     if config.auth.is_some() && engine.is_impersonate_delegation() {
         let (_secret_id, pw) = ensure_delegator_secret(st, engine).await?;
         inject_delegator_user(&mut config.auth, &pw)?;
@@ -630,9 +630,10 @@ pub(crate) async fn build_provision_req_with(
             .env
             .insert("TRINO_INTERNAL_SECRET".into(), internal.internal.clone());
     }
-    // When the engine is bound to a Ranger profile (its trino profile is named
-    // after the engine), template the apache-ranger access-control config so the
-    // bundled plugin polls egret's Ranger-Admin download API (Access P3.2).
+    // When the engine is bound to a Ranger profile — named by
+    // `resolve_ranger_service_name` from the BOUND profile row, not assumed to
+    // match the engine — template the apache-ranger access-control config so
+    // the bundled plugin polls egret's Ranger-Admin download API (Access P3.2).
     let ranger =
         ranger_service_name
             .clone()
@@ -2445,6 +2446,49 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
     }
 }
 
+/// Resolve the Ranger service NAME an engine's `authz_service_id` actually
+/// names, by reading the bound profile row (`policy.authz_services`) — never
+/// by assuming it is spelled like the engine (SP4a Task 3b).
+///
+/// **Why this exists.** `PUT /engines/{id}` (and create's `authz_service_id`)
+/// let an operator bind an engine to a profile whose name differs from the
+/// engine's. Deriving the Ranger service name from `engine.name` instead of
+/// the bound row silently enforces whatever OTHER profile happens to be named
+/// after the engine (or 404s forever if none is), never the one the operator
+/// actually bound. That is the defect this closes; every call site that used
+/// to write `authz_service_id.map(|_| engine.name.clone())` calls this
+/// instead.
+///
+/// **A bound id with no matching row is a loud failure**, never a silent
+/// fall-back to the engine's name — that fallback IS the defect. Ranger
+/// profile rows are never deleted by bind/unbind (standing constraint), so
+/// this should only ever fire on genuine data corruption; when it does, the
+/// caller must see it rather than quietly enforce the wrong (or no) policy.
+async fn resolve_ranger_service_name(
+    st: &CpState,
+    authz_service_id: Option<i64>,
+) -> Result<Option<String>, CpError> {
+    let Some(sid) = authz_service_id else {
+        return Ok(None);
+    };
+    let services = st
+        .authz
+        .list_services()
+        .await
+        .map_err(|e| CpError::BadRequest(format!("list policy profiles: {e}")))?;
+    match services.into_iter().find(|s| s.id == sid) {
+        Some(svc) => Ok(Some(svc.name)),
+        None => {
+            tracing::error!(
+                service_id = sid,
+                "engine is bound to authz_service_id {sid} but no such policy profile row \
+                 exists; refusing to fall back to the engine's name"
+            );
+            Err(CpError::Internal)
+        }
+    }
+}
+
 /// How a new Trino engine gets its Ranger profile — decided before anything is
 /// minted, so a conflict is a clean 409.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3152,10 +3196,10 @@ async fn build_starrocks_provision_req(
         .filter(|s| !s.is_empty());
     let tls_enabled = sr_tls_enabled(&engine.spec);
 
-    // Ranger resolution — the SAME snippet `build_provision_req` uses for Trino:
-    // bound profile (authz_service_id set) → RangerBinding named after the
-    // engine; unbound → None.
-    let ranger_service_name = engine.authz_service_id.map(|_| engine.name.clone());
+    // Ranger resolution — the SAME helper `build_provision_req` uses for Trino:
+    // resolve the ACTUAL bound profile's name from `policy.authz_services`,
+    // never assume it matches the engine's; unbound → None.
+    let ranger_service_name = resolve_ranger_service_name(st, engine.authz_service_id).await?;
     let ranger =
         ranger_service_name
             .clone()
@@ -7121,6 +7165,183 @@ mod tests {
         assert_eq!(sr2.cn_replicas, 1);
         assert!(sr2.delegation.is_none());
         assert!(boot2.is_none());
+    }
+
+    /// SP4a Task 3b — the defect this closes: a bound Ranger profile was only
+    /// ever enforced if its NAME happened to equal the engine's, because both
+    /// `build_provision_req` and `build_starrocks_provision_req` derived the
+    /// Ranger service name as `authz_service_id.map(|_| engine.name.clone())`,
+    /// discarding the bound profile's own name. A test where the two names
+    /// coincide (the auto-bind shape every OTHER test in this file uses)
+    /// passes against the bug and proves nothing — this engine and its bound
+    /// profile are deliberately named DIFFERENTLY.
+    #[tokio::test]
+    async fn build_starrocks_provision_req_names_ranger_binding_after_the_bound_profile_not_the_engine(
+    ) {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping build_starrocks_provision_req_names_ranger_binding_after_the_bound_profile_not_the_engine: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = egret_test_db::url().await.unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+
+        let engine_name = format!("sr-engine-{}", Uuid::new_v4().simple());
+        let profile_name = format!("sr-profile-{}", Uuid::new_v4().simple());
+        assert_ne!(engine_name, profile_name, "test requires DIFFERING names");
+
+        // The service-def type is irrelevant to what this test asserts (name
+        // resolution, not enforcement), so seed only the "trino" def rather
+        // than reaching for `seed_starrocks` (not exposed on `PolicyPort`).
+        st.authz
+            .ensure_trino_def()
+            .await
+            .expect("seed trino service-def");
+        let svc = st
+            .authz
+            .create_service(&profile_name, "trino", &serde_json::json!({}))
+            .await
+            .expect("create policy profile");
+
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &engine_name,
+                "starrocks",
+                "egret-engines",
+                &serde_json::json!({ "starrocksConfig": { "feReplicas": 1 } }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        st.engine_mgmt
+            .set_engine_authz_service(engine.id, Some(svc.id))
+            .await
+            .expect("bind engine to the differently-named profile");
+        let engine = st
+            .engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .unwrap()
+            .expect("reloaded engine");
+
+        let (req, _boot) = build_starrocks_provision_req(&st, &engine, &wh)
+            .await
+            .expect("build_starrocks_provision_req");
+        let ranger = req
+            .ranger
+            .as_ref()
+            .expect("bound engine must carry a RangerBinding");
+        assert_eq!(
+            ranger.service_name, profile_name,
+            "must poll the BOUND profile's name, not the engine's"
+        );
+        assert_ne!(ranger.service_name, engine.name);
+    }
+
+    /// Trino counterpart of the StarRocks test above, through
+    /// `build_provision_req` (Task 3's other call site, `:583`).
+    #[tokio::test]
+    async fn build_provision_req_names_ranger_binding_after_the_bound_profile_not_the_engine() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping build_provision_req_names_ranger_binding_after_the_bound_profile_not_the_engine: DATABASE_URL not set"
+            );
+            return;
+        };
+        let engine_name = format!("trino-engine-{}", Uuid::new_v4().simple());
+        let profile_name = format!("trino-profile-{}", Uuid::new_v4().simple());
+        assert_ne!(engine_name, profile_name, "test requires DIFFERING names");
+
+        st.authz
+            .ensure_trino_def()
+            .await
+            .expect("seed trino service-def");
+        let svc = st
+            .authz
+            .create_service(&profile_name, "trino", &serde_json::json!({}))
+            .await
+            .expect("create policy profile");
+
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &engine_name,
+                "trino",
+                "egret-engines",
+                &serde_json::json!({ "trinoConfig": {} }),
+                None,
+            )
+            .await
+            .expect("create engine row");
+        st.engine_mgmt
+            .set_engine_authz_service(engine.id, Some(svc.id))
+            .await
+            .expect("bind engine to the differently-named profile");
+        let engine = st
+            .engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .unwrap()
+            .expect("reloaded engine");
+
+        let built = build_provision_req(&st, &engine)
+            .await
+            .expect("build_provision_req");
+        let ranger = built
+            .req
+            .ranger
+            .as_ref()
+            .expect("bound engine must carry a RangerBinding");
+        assert_eq!(
+            ranger.service_name, profile_name,
+            "must poll the BOUND profile's name, not the engine's"
+        );
+        assert_ne!(ranger.service_name, engine.name);
+    }
+
+    /// `resolve_ranger_service_name` must fail LOUDLY — never fall back to the
+    /// engine's name — when `authz_service_id` names no `policy.authz_services`
+    /// row. Bind/unbind never delete a profile row (standing constraint), and
+    /// the FK (`migration 0058`, `ON DELETE SET NULL`) means an engine row
+    /// itself can never end up pointing at a missing id in practice — but the
+    /// helper is the last line of defense against that invariant ever being
+    /// violated, and a silent fall-back to `engine.name` is exactly the defect
+    /// SP4a Task 3b closes. Exercised directly (no engine row needed) since the
+    /// FK makes the dangling state unreachable through the engine table.
+    #[tokio::test]
+    async fn resolve_ranger_service_name_fails_loudly_for_a_dangling_id() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping resolve_ranger_service_name_fails_loudly_for_a_dangling_id: DATABASE_URL not set"
+            );
+            return;
+        };
+        let err = resolve_ranger_service_name(&st, Some(i64::MAX))
+            .await
+            .expect_err("a dangling authz_service_id must be a loud failure");
+        assert!(matches!(err, CpError::Internal), "got {err:?}");
+    }
+
+    /// The happy path `resolve_ranger_service_name_fails_loudly_for_a_dangling_id`
+    /// is the mirror of: `None` stays `None` (unbound engines carry no
+    /// `RangerBinding`, unaffected by this fix).
+    #[tokio::test]
+    async fn resolve_ranger_service_name_is_none_when_unbound() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping resolve_ranger_service_name_is_none_when_unbound: DATABASE_URL not set"
+            );
+            return;
+        };
+        let name = resolve_ranger_service_name(&st, None)
+            .await
+            .expect("unbound must not error");
+        assert_eq!(name, None);
     }
 
     /// SP3c-2 Task 6. A StarRocks engine's builtin storage volume is derived
