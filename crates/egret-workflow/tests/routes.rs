@@ -704,3 +704,141 @@ async fn list_filters_narrow_within_the_workspace_and_never_leak_across_it() {
     .await;
     assert_eq!(foreign_list.as_array().unwrap().len(), 1);
 }
+
+// ---------- W13b Task 2: a flow trigger's `window`, refused at save ----------
+
+/// A flow listening on two flows of its own namespace, with `window_yaml`
+/// (already indented for the trigger's mapping) appended to its trigger.
+fn flow_with_window(ns: &str, window_yaml: &str) -> String {
+    format!(
+        "id: f\nnamespace: {ns}\ntasks:\n  - id: t\n    type: core.log\n\
+         triggers:\n  - id: listen\n    type: io.kestra.plugin.core.trigger.Flow\n\
+         \x20   dependsOn:\n\
+         \x20     - namespace: {ns}\n        flowId: p1\n\
+         \x20     - namespace: {ns}\n        flowId: p2\n\
+         {window_yaml}"
+    )
+}
+
+/// `fireOnce`, which the artifact refuses with 422 `Unrecognized field
+/// "fireOnce" (class io.kestra.core.models.triggers.Window)`, cannot be stored
+/// at all -- not by create and not by update -- because `models::Window`
+/// denies unknown fields. A draft that is never stored never reaches
+/// `scheduler::sync`, so no listener row can carry it either.
+#[tokio::test]
+async fn a_window_with_fire_once_cannot_be_saved() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+
+    let fire_once = flow_with_window(
+        "w13b.fireonce",
+        "    window:\n      every: PT1H\n      fireOnce: true\n",
+    );
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows"),
+        user,
+        serde_json::json!({ "source": fire_once }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = common::body_text(res).await;
+    assert!(
+        body.contains("fireOnce"),
+        "the refusal names the field: {body}"
+    );
+    let listed =
+        common::json(common::get(&app, &format!("/api/ws/{ws}/workflows/flows"), user).await).await;
+    assert!(
+        !listed.to_string().contains("w13b.fireonce"),
+        "a refused create stores nothing: {listed}"
+    );
+
+    // Control, and the update arm: the same flow without `fireOnce` is
+    // created; updating it to carry `fireOnce` is refused and leaves the
+    // stored source as it was.
+    let good = flow_with_window("w13b.fireonce", "    window:\n      every: PT1H\n");
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows"),
+        user,
+        serde_json::json!({ "source": good }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let id = common::json(res).await["id"].as_str().unwrap().to_string();
+    let res = common::put(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}"),
+        user,
+        serde_json::json!({ "source": fire_once }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let stored =
+        common::json(common::get(&app, &format!("/api/ws/{ws}/workflows/flows/{id}"), user).await)
+            .await;
+    assert_eq!(
+        stored["source"],
+        good.as_str(),
+        "the refused update wrote nothing"
+    );
+}
+
+/// A window shape egret does not implement -- here the artifact's own
+/// measured 422, `every` + `lookback` -- is reported by the draft's
+/// validation and blocks publish, so no live version can carry it.
+#[tokio::test]
+async fn a_window_egret_does_not_implement_cannot_be_published() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+
+    let mixed = flow_with_window(
+        "w13b.mixed",
+        "    window:\n      every: PT1H\n      lookback: PT2M\n",
+    );
+    let created = common::json(
+        common::post(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows"),
+            user,
+            serde_json::json!({ "source": mixed }),
+        )
+        .await,
+    )
+    .await;
+    let id = created["id"].as_str().unwrap();
+    let errors = created["validation"]["errors"].as_array().unwrap();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e["code"] == "window_conflicting_fields"
+                && e["path"] == "triggers.listen.window.every"),
+        "the draft reports the conflict: {created}"
+    );
+
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}/publish"),
+        user,
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = common::body_text(res).await;
+    assert!(
+        body.contains("Window of type `SLIDING_WINDOW` cannot have an every duration."),
+        "publish is refused for the window: {body}"
+    );
+    let after =
+        common::json(common::get(&app, &format!("/api/ws/{ws}/workflows/flows/{id}"), user).await)
+            .await;
+    assert!(
+        after["live_version_id"].is_null(),
+        "nothing went live: {after}"
+    );
+}

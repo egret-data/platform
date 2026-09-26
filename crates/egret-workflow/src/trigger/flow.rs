@@ -177,7 +177,9 @@
 //!    **`MultipleConditionWindow`** — persistent state, counted by
 //!    `MultipleCondition.test` under `mode` ALL/ANY/AT_LEAST, and made
 //!    fire-at-most-once by `window.fireOnce`. `valids/flow-trigger-fire-once-true-flow-listen`
-//!    declares exactly that. Firing once per matching execution, as a
+//!    declares exactly that. *(W13b Task 1: that is the sibling checkout's
+//!    `Window`; the pinned artifact has no `fireOnce` and refuses the flow with
+//!    422, and since W13b Task 2 egret refuses it at parse.)* Firing once per matching execution, as a
 //!    window-free implementation would, is over-acceptance in the direction
 //!    nothing here can catch. **Twenty of the twenty-one corpus declarations
 //!    carry a `dependsOn`**, so this refusal is most of the corpus — and
@@ -197,7 +199,14 @@
 //!    *does* declare a `when` is refused
 //!    ([`Refusal::WhenNotRendered`]) rather than accepted.
 //!
-//! # `window:` is NOT refused, and the analogy that says it should be fails
+//! # `window:` without `dependsOn` — W13b refuses it at save, and why this section argued otherwise
+//!
+//! **Superseded by W13b Task 2:** `spec::validate` now refuses a `window` on a
+//! trigger with no `dependsOn` (`window_without_depends_on`). The measurement
+//! below still stands — on the artifact such a window is inert — and that is
+//! exactly why it is refused: egret does not silently ignore a declaration.
+//! It is a chosen over-refusal, and no corpus flow declares one. The analysis
+//! is kept because it records what the artifact does.
 //!
 //! Fix round 1 considered refusing a declared `window:` by analogy with Task
 //! 5's `lateMaximumDelay` — a modelled-away field that silently changed the
@@ -1584,7 +1593,10 @@ mod tests {
     }
 
     /// The twenty corpus declarations that carry a `dependsOn` are refused,
-    /// and the one that does not is resolved.
+    /// and the one that does not is resolved. Since W13b Task 2 nineteen are
+    /// refused at [`WindowFreeFlowTrigger::resolve`] and one -- the `fireOnce`
+    /// flow -- at parse, because `models::Window` refuses a field the
+    /// artifact's `Window` does not have.
     ///
     /// This is the count the module doc states, compared by a running program
     /// rather than asserted in prose — and the prose said **nineteen** until
@@ -1616,10 +1628,23 @@ mod tests {
         let mut declaring_flows = 0usize;
         let mut resolved = Vec::new();
         let mut refused = Vec::new();
+        // W13b Task 2: a flow that no longer PARSES is not skipped silently --
+        // that is how this count would have dropped to sixteen without anyone
+        // being told. `models::Window` refuses unknown fields, so
+        // `fireOnce` (which the artifact refuses with 422 too) is a parse
+        // error now; it is counted here, by name and by reason.
+        let mut unparseable_declaring = Vec::new();
         for path in &files {
             let text = std::fs::read_to_string(path).expect("read flow");
-            let Ok(flow) = serde_norway::from_str::<crate::models::Flow>(&text) else {
-                continue;
+            let flow = match serde_norway::from_str::<crate::models::Flow>(&text) {
+                Ok(flow) => flow,
+                Err(e) => {
+                    if text.contains("io.kestra.plugin.core.trigger.Flow") {
+                        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+                        unparseable_declaring.push((name, e.to_string()));
+                    }
+                    continue;
+                }
             };
             let mut declares = false;
             for t in &flow.triggers {
@@ -1639,14 +1664,32 @@ mod tests {
             }
         }
 
-        assert_eq!(declaring_flows, 17, "corpus flows declaring a flow trigger");
+        assert_eq!(
+            unparseable_declaring.len(),
+            1,
+            "only the fireOnce flow fails to parse: {unparseable_declaring:?}"
+        );
+        let (name, why) = &unparseable_declaring[0];
+        assert_eq!(name, "flow-trigger-fire-once-true-flow-listen");
+        assert!(why.contains("unknown field `fireOnce`"), "{why}");
+
+        assert_eq!(
+            declaring_flows + unparseable_declaring.len(),
+            17,
+            "corpus flows declaring a flow trigger"
+        );
         assert_eq!(
             resolved,
             vec!["flow-trigger-when-condition-flow-listen/on_completion"],
             "the one declaration this module can evaluate"
         );
-        assert_eq!(refused.len(), 20, "declarations refused for `dependsOn`");
-        assert_eq!(resolved.len() + refused.len(), 21);
+        // Its one declaration carries a `dependsOn` too, so it is the
+        // twentieth: refused at parse now rather than at `resolve`.
+        assert_eq!(refused.len(), 19, "declarations refused for `dependsOn`");
+        assert_eq!(
+            resolved.len() + refused.len() + unparseable_declaring.len(),
+            21
+        );
     }
 
     /// A `core.schedule` is not a flow trigger and does not resolve as one.

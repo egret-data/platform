@@ -199,10 +199,13 @@ pub enum FetchType {
 /// hard-coding a shorter equivalent list, so a change to `State::is_terminated`
 /// (W0) cannot silently desync this default.
 ///
-/// Dropped: `window` (`Window`/`TimeWindow`, the dependsOn evaluation-window
-/// config -- a nested type this task does not port) and the
-/// `dependsOnAsMultipleCondition()`/`DependencyCondition` machinery, which is
-/// W3/W8 evaluation logic, not model.
+/// `window` is modelled since W13b Task 2 as [`Window`]; before that it was
+/// dropped, and because this struct has no `deny_unknown_fields` a declared
+/// window silently vanished from the parsed flow. The
+/// `dependsOnAsMultipleCondition()`/`DependencyCondition` machinery is still
+/// not here: it is evaluation logic (`trigger::window`, W13b Task 3), not
+/// model. Which window shapes egret accepts is decided at save, by
+/// `spec::validate`'s `validate_flow_trigger_window`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowTrigger {
@@ -216,6 +219,69 @@ pub struct FlowTrigger {
     pub mode: FlowTriggerMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_satisfied: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<Window>,
+}
+
+/// `io.kestra.core.models.triggers.Window` -- the `dependsOn` evaluation
+/// window, **as the pinned artifact declares it**, which is not the checkout's.
+///
+/// W13b Task 1 measured the image's class (`oracle-exec/w13b-windows.json`,
+/// finding `window_fields`): it has exactly seven properties -- `offset`,
+/// `lookback`, `deadline`, `timezone`, `from`, `to`, `every` -- and refuses
+/// anything else with 422 `Unrecognized field "fireOnce" (class
+/// io.kestra.core.models.triggers.Window), not marked as ignorable (7 known
+/// properties ...)`. The sibling checkout (`96893b589`) differs both ways: it
+/// has a `fireOnce` and no `timezone`. The measurement wins, so `timezone` is
+/// here and `fireOnce` is refused.
+///
+/// **`deny_unknown_fields`, and that is deliberate, unlike [`FlowTrigger`].**
+/// `FlowTrigger` and [`Schedule`] tolerate unknown keys because W1 dropped
+/// fields of theirs that real flows carry (see `late_maximum_delay` above for
+/// what that cost). `Window` drops nothing: the artifact's class has exactly
+/// these seven, and Jackson refuses an eighth. Refusing it at the model means
+/// no stored draft, and therefore no `flow_listeners` row
+/// (`scheduler::sync` builds those from the draft's source whenever it
+/// PARSES, validation errors or not), can ever carry a window field egret
+/// does not implement -- nothing downstream has to remember to refuse it.
+///
+/// Every value is kept as the author wrote it (`String`), not as a parsed
+/// `Duration`/`LocalTime`/`Tz`, for the same reason `late_maximum_delay` is a
+/// raw value: the round trip stays byte-honest, and parsing is one place --
+/// `trigger::duration` -- called by the validator at save and by the window
+/// computation at run time, so the two cannot disagree about what a value
+/// means. Which COMBINATIONS are accepted is `spec::validate`'s job.
+///
+/// Kind, per spec §5.1 and `Window.toTimeWindow()`: `deadline` gives
+/// `DAILY_TIME_DEADLINE`; `from` + `to` gives `DAILY_TIME_WINDOW`; `lookback`
+/// gives `SLIDING_WINDOW`; anything else gives `DURATION_WINDOW` with `every`
+/// (default one day) and `offset`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Window {
+    /// `LocalTime`, `HH:mm` or `HH:mm:ss`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<String>,
+    /// `LocalTime`, `HH:mm` or `HH:mm:ss`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// `LocalTime`, `HH:mm` or `HH:mm:ss`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// ISO-8601 `Duration`; see `trigger::duration::parse_duration`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every: Option<String>,
+    /// ISO-8601 `Duration`; see `trigger::duration::parse_duration`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<String>,
+    /// ISO-8601 `Duration`; see `trigger::duration::parse_duration`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback: Option<String>,
+    /// An IANA zone (`chrono_tz::Tz`). Absent means UTC -- chosen (user
+    /// decision D2): egret has no server zone, and UTC is what the artifact
+    /// aligned on with none set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
 }
 
 /// `Flow.Dependency` (inner class).
@@ -710,5 +776,75 @@ mod tests {
             "id: t\ntype: core.schedule\ncron: \"@daily\"\ndisabled: 1\n"
         )
         .is_err());
+    }
+
+    // ---------- W13b Task 2: `window` ----------
+
+    /// `window` survives a parse -> serialise -> parse round trip, all seven
+    /// fields of it. Before W13b it was not modelled, and `FlowTrigger` has no
+    /// `deny_unknown_fields`, so the key was silently DROPPED: the flow parsed,
+    /// and the window vanished from the plan and from any re-serialisation.
+    ///
+    /// Written against the wire (JSON) rather than the Rust field so that it
+    /// compiled, and failed, on the commit before `Window` existed.
+    #[test]
+    fn a_flow_triggers_window_round_trips_every_field() {
+        let yaml = "id: t\ntype: io.kestra.plugin.core.trigger.Flow\n\
+                    dependsOn:\n  - namespace: a.b\n    flowId: p1\n\
+                    window:\n  every: PT6H\n  offset: PT1H\n  timezone: Asia/Kolkata\n";
+        let t: Trigger = serde_norway::from_str(yaml).unwrap();
+        let json = serde_json::to_value(&t).unwrap();
+        assert_eq!(
+            json["window"],
+            serde_json::json!({"every": "PT6H", "offset": "PT1H", "timezone": "Asia/Kolkata"}),
+            "the window must be carried, and absent fields must stay absent: {json}"
+        );
+
+        // The other four, in the shapes that set them (they are mutually
+        // exclusive with the three above, so they cannot share one window).
+        for (yaml_window, expected) in [
+            (
+                "window:\n  deadline: \"09:00:00\"\n",
+                serde_json::json!({"deadline": "09:00:00"}),
+            ),
+            (
+                "window:\n  from: \"10:00:00\"\n  to: \"12:00:00\"\n",
+                serde_json::json!({"from": "10:00:00", "to": "12:00:00"}),
+            ),
+            (
+                "window:\n  lookback: PT2M\n",
+                serde_json::json!({"lookback": "PT2M"}),
+            ),
+        ] {
+            let yaml = format!(
+                "id: t\ntype: io.kestra.plugin.core.trigger.Flow\n\
+                 dependsOn:\n  - namespace: a.b\n    flowId: p1\n{yaml_window}"
+            );
+            let t: Trigger = serde_norway::from_str(&yaml).unwrap();
+            let json = serde_json::to_value(&t).unwrap();
+            assert_eq!(json["window"], expected, "{yaml_window}");
+
+            // And back: the re-serialised form parses to the same trigger.
+            let again: Trigger = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(again, t, "{yaml_window}");
+        }
+    }
+
+    /// An UNQUOTED `deadline: 09:00:00` reaches the model as the string the
+    /// author wrote. YAML 1.1 would read it as a base-60 integer (32400);
+    /// serde_norway does not, and this pins that, because a number here would
+    /// be a parse error the author could not see the reason for.
+    #[test]
+    fn an_unquoted_time_of_day_is_a_string() {
+        let yaml = "id: t\ntype: io.kestra.plugin.core.trigger.Flow\n\
+                    dependsOn:\n  - namespace: a.b\n    flowId: p1\n\
+                    window:\n  from: 09:00:00\n  to: 17:30\n";
+        let t: Trigger = serde_norway::from_str(yaml).unwrap();
+        let TriggerKind::Flow(f) = &t.kind else {
+            panic!("expected Flow, got {:?}", t.kind)
+        };
+        let w = f.window.as_ref().expect("window");
+        assert_eq!(w.from.as_deref(), Some("09:00:00"));
+        assert_eq!(w.to.as_deref(), Some("17:30"));
     }
 }

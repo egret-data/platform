@@ -107,6 +107,7 @@
 //! Getting 3 backwards would advance a backfill twice per tick and drop every
 //! other window date.
 
+pub mod duration;
 pub mod flow;
 pub mod schedule;
 pub mod webhook;
@@ -115,6 +116,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 
+pub use duration::{parse_duration, parse_local_time, DurationError, LocalTimeError};
 pub use flow::{
     evaluate as evaluate_flow_trigger, FiredExecution, FlowTriggerError, ListeningFlow,
     Outcome as FlowTriggerOutcome, Refusal, SourceExecution, WhenVerdict, WindowFreeFlowTrigger,
