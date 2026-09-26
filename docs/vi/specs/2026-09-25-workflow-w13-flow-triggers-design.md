@@ -21,6 +21,8 @@
 | độ sâu execution được lưu lại | **chưa có**. `ExecutionCtx::depth` đếm *số `settle` lồng nhau trên stack*, không phải `executionDepth` của Kestra |
 | nơi gọi `evaluate` | **chưa có** |
 
+*Bảng này là trạng thái tại `006563ee`, trước W13, và được giữ làm bản ghi đó. Từ W13b (2026-09-26): `window` đã được model với bảy trường, và một dạng chưa hiện thực thì bị từ chối chứ không bị bỏ; `WindowFreeFlowTrigger::resolve` vẫn từ chối `dependsOn` bằng `UnsupportedDependsOn`, có chủ ý, vì processor chuyển listener có `dependsOn` sang nhánh riêng của nó (`trigger::depends_on`, `trigger::window`, `flow_trigger::process::listen_depends_on`) trước khi `resolve` được gọi. Trong 20 khai báo `dependsOn` của corpus, 18 khai báo nay resolve được; xem `oracle-exec/README.md`, mục W13b.*
+
 ## 2. Cái gì chấm W13
 
 **Không phải ratchet: dự kiến 109 trước và 109 sau, cho cả hai PR.** W6 đã đo lý do:

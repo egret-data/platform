@@ -21,6 +21,8 @@
 | a persisted execution depth | **none**. `ExecutionCtx::depth` counts *nested `settle` frames on the stack*, not Kestra's `executionDepth` |
 | anything that calls `evaluate` | **nothing** |
 
+*This table is the state at `006563ee`, before W13, and is kept as that record. Since W13b (2026-09-26): `window` is modelled with seven fields and refused rather than dropped when it is not implemented; `WindowFreeFlowTrigger::resolve` still refuses `dependsOn` with `UnsupportedDependsOn`, by design, because the processor routes a `dependsOn` listener to its own arm (`trigger::depends_on`, `trigger::window`, `flow_trigger::process::listen_depends_on`) before `resolve` is called. Of the corpus's 20 `dependsOn` declarations, 18 now resolve; see `oracle-exec/README.md`, W13b.*
+
 ## 2. What judges W13
 
 **Not the ratchet: expected 109 before and after, for both PRs.** W6 measured why: `harvest.py`'s settle walks `parent_id`, and a flow-fired execution has `parentId = null` on 210 of 210 measured executions. It carries only the trigger link. The corpus has 17 listener flows (21 declarations, 20 with `dependsOn`) and **zero** reachable baselined entries. Teaching the oracle to follow `trigger_execution_id` would need a re-harvest. That is out of scope and recorded in §9.

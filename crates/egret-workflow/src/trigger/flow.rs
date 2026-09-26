@@ -20,8 +20,14 @@
 //! plugin: the limitation is then repeated at every call site instead of
 //! living in a doc nobody re-reads. **Twenty of the corpus's twenty-one
 //! declarations take the arm this module does not implement**, and
-//! `tests::the_corpus_flow_triggers_split_twenty_to_one` is the acceptance
-//! criterion that fails the day the window lands.
+//! `tests::the_corpus_flow_triggers_split_twenty_to_one` was written as the
+//! acceptance criterion that fails the day the window lands. *(W13b Task 5,
+//! 2026-09-26: the window landed and the test did not fail, because W13b built
+//! the other arm BESIDE this type -- [`super::depends_on`], [`super::window`]
+//! and `flow_trigger::process::listen_depends_on`, which the processor takes
+//! before [`WindowFreeFlowTrigger::resolve`] is called. The twenty still take
+//! that arm; `depends_on::tests::the_corpus_depends_on_declarations_resolve_eighteen_of_twenty`
+//! is the count that moved.)*
 //!
 //! # The ratchet did not move, and could not have
 //!
@@ -184,6 +190,10 @@
 //!    nothing here can catch. **Twenty of the twenty-one corpus declarations
 //!    carry a `dependsOn`**, so this refusal is most of the corpus — and
 //!    refusing most of an unreachable corpus is the cheap half of the trade.
+//!    *(Since W13b this refusal is routing, not a hole: the processor sends a
+//!    `dependsOn` listener to its own arm before `resolve` runs, and there it
+//!    fires inside a window. `resolve` still refuses it, so no caller can take
+//!    a `dependsOn` trigger down THIS arm by mistake.)*
 //! 2. **A `when` that the caller could not render refuses the trigger**
 //!    ([`Refusal::WhenUnrenderable`]), because `ConditionService.isNotValid`
 //!    catches `IllegalVariableEvaluationException` and returns `true`. Measured:
@@ -323,8 +333,9 @@ pub enum FlowTriggerError {
     /// Not an `io.kestra.plugin.core.trigger.Flow` at all.
     NotAFlowTrigger,
     /// The trigger declares `dependsOn`, whose evaluation needs a
-    /// `MultipleConditionWindow` this package does not model. See the module
-    /// doc, *Over-acceptance is the hazard*, item 1.
+    /// `MultipleConditionWindow` -- the other arm, which this type does not
+    /// model and [`super::depends_on`] / [`super::window`] do (W13b). See the
+    /// module doc, *Over-acceptance is the hazard*, item 1.
     UnsupportedDependsOn(usize),
     /// The trigger declares a `window` but no `dependsOn`. On the artifact
     /// the window is inert on this arm (it is read only through
@@ -343,8 +354,8 @@ impl fmt::Display for FlowTriggerError {
             Self::NotAFlowTrigger => write!(f, "trigger is not a core.trigger.Flow"),
             Self::UnsupportedDependsOn(n) => write!(
                 f,
-                "core.trigger.Flow `dependsOn` is not supported ({n} \
-                 condition(s)): it needs a multiple-condition window"
+                "core.trigger.Flow `dependsOn` ({n} condition(s)) is not the \
+                 window-free arm: it is evaluated over a window by the `dependsOn` arm"
             ),
             Self::WindowWithoutDependsOn => write!(
                 f,
@@ -1647,7 +1658,9 @@ mod tests {
         .is_ok());
     }
 
-    /// The twenty corpus declarations that carry a `dependsOn` are refused,
+    /// The twenty corpus declarations that carry a `dependsOn` are refused BY
+    /// THIS ARM (they take the `dependsOn` arm instead: see
+    /// `depends_on::tests::the_corpus_depends_on_declarations_resolve_eighteen_of_twenty`),
     /// and the one that does not is resolved. Since W13b Task 2 nineteen are
     /// refused at [`WindowFreeFlowTrigger::resolve`] and one -- the `fireOnce`
     /// flow -- at parse, because `models::Window` refuses a field the
