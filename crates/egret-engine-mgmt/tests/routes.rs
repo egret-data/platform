@@ -10202,3 +10202,170 @@ async fn update_refuses_a_policy_profile_another_engine_already_binds() {
     );
     assert!(compiler.in_tx_calls.lock().unwrap().is_empty());
 }
+
+/// I3, fail-open: a profile with no usable `tagService` is REFUSED.
+///
+/// Binding one compiles zero tag policies, so every tag-based column mask and
+/// row filter silently disappears and the columns are served raw —
+/// `recompile_service_in_tx` records the skip and carries on by design. The
+/// decision is to refuse: nothing is provisioned yet, the engine keeps its
+/// working binding, and this is the only moment a human is present to fix it.
+#[tokio::test]
+async fn update_refuses_a_policy_profile_with_no_usable_tag_service() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_notag", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let before = authz_service_of(&f, &name).await;
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    let tagless_name = format!("tagless-{}", Uuid::new_v4().simple());
+    let tagless = seed_profile_without_tag_service(&f, &tagless_name, "trino").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(rebind_body(&name, wh_id, serde_json::json!(tagless))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    let msg = j.to_string();
+    assert!(
+        msg.contains("tag service"),
+        "the refusal must say what is missing; body={j}"
+    );
+    assert!(
+        msg.contains(&tagless.to_string()),
+        "and name the profile; body={j}"
+    );
+    assert_eq!(
+        authz_service_of(&f, &name).await,
+        before,
+        "a refused bind must not move the binding"
+    );
+    assert!(compiler.in_tx_calls.lock().unwrap().is_empty());
+
+    // The SAME profile with a usable tag service is accepted — so the refusal
+    // is about the tag service and nothing else.
+    let wired_name = format!("wired-{}", Uuid::new_v4().simple());
+    let wired = seed_typed_profile(&f, &wired_name, "trino").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(rebind_body(&name, wh_id, serde_json::json!(wired))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a tag-wired profile binds; body={j}"
+    );
+    assert_eq!(authz_service_of(&f, &name).await, Some(wired));
+}
+
+/// I3's other half, and the one that keeps the guard from being over-strict: a
+/// STARROCKS profile with no tag service is ACCEPTED.
+///
+/// StarRocks' Ranger plugin has no tag policies at all (upstream
+/// starrocks#67458), so a StarRocks profile is not supposed to have a tag
+/// service — the compiler expands a tag-selector rule into per-column resource
+/// policies on the profile itself, and `MissingTagService` is raised only on
+/// the Trino branch. Without this test the I3 guard would refuse every
+/// legitimate StarRocks bind, including the one the live masking gate needs,
+/// and every other test here would still pass.
+#[tokio::test]
+async fn update_accepts_a_starrocks_profile_with_no_tag_service() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_sr_notag", true).await;
+    // `_with_secret`: provisioning StarRocks needs the warehouse storage
+    // connection's secret for the FE's builtin storage volume.
+    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
+    let sr_name = format!("sr-{}", Uuid::new_v4().simple());
+    // Created through the API so it gets a PRIMARY warehouse attachment — a
+    // bare store row 400s later in `build_starrocks_provision_req`, which would
+    // make this test fail for a reason that has nothing to do with tag services.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": sr_name, "warehouseId": wh_id, "kind": "starrocks",
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create starrocks; body={j}");
+    let sr_id = j["id"].as_str().unwrap().to_string();
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    // A starrocks-typed profile with NO `tagService` and no tag service row.
+    let p_name = format!("srp-{}", Uuid::new_v4().simple());
+    let profile = seed_profile_without_tag_service(&f, &p_name, "starrocks").await;
+
+    let mut body = rebind_body(&sr_name, wh_id, serde_json::json!(profile));
+    body["kind"] = serde_json::json!("starrocks");
+    body["starrocks"] = serde_json::json!({ "feReplicas": 1, "cnReplicas": 1 });
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("PUT", &format!("/engines/{sr_id}"), &token, Some(body)))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a StarRocks profile needs no tag service; body={j}"
+    );
+    assert_eq!(authz_service_of(&f, &sr_name).await, Some(profile));
+    assert_eq!(
+        compiler.in_tx_calls.lock().unwrap().clone(),
+        vec![profile],
+        "and it is still recompiled"
+    );
+}

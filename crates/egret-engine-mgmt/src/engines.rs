@@ -4712,6 +4712,53 @@ async fn apply_authz_service_update(
             svc.name
         )));
     }
+    // I3, fail-open: a TRINO profile with no USABLE `tagService` compiles zero
+    // tag policies, so every tag-selected mask and row filter silently
+    // disappears and the columns they protect are served raw —
+    // `recompile_service_in_tx` records each one in `CompileSummary::skipped`
+    // and carries on, by design (aborting there would stop every OTHER profile
+    // getting the mask too).
+    //
+    // DECIDED: REFUSE, rather than bind-and-warn. Three reasons.
+    //   1. It is the only moment a human is present. Nothing is provisioned
+    //      yet and the engine keeps its previous, working binding, so the cost
+    //      of being wrong is one rejected API call; the cost of proceeding is
+    //      unmasked columns that nothing will ever complain about.
+    //   2. "No tag rules exist right now, so a tagless profile is harmless" is
+    //      a time-of-check/time-of-use trap. The binding persists; the `perm`
+    //      model does not stand still, and a Trino tag rule is catalog-
+    //      UNSCOPED, so the next tag rule anyone writes anywhere would
+    //      silently fail to reach this engine. There would be nobody watching.
+    //   3. It blocks nothing legitimate. Auto-bind always creates `{name}_tag`
+    //      and wires `tagService`, so every Trino profile egret itself makes
+    //      passes this check; one that fails is hand-made or damaged.
+    //
+    // **TRINO ONLY, and that is not an oversight.** StarRocks' Ranger plugin
+    // has no tag policies at all (upstream starrocks#67458 — see
+    // `egret_policy::service_def::STARROCKS_SERVICE_DEF_JSON`), so a StarRocks
+    // profile is not supposed to have a tag service: the compiler EXPANDS a
+    // tag-selector rule into per-column resource policies on the profile
+    // itself, and `CompileError::MissingTagService` is raised only on the
+    // `(Selector::Tag, EngineType::Trino)` branch
+    // (`egret-perm-compile/src/rules.rs`). Applying this guard to StarRocks
+    // would refuse every legitimate StarRocks bind — including the one the
+    // live masking gate depends on — while protecting nothing.
+    if svc.r#type == "trino"
+        && st
+            .authz
+            .usable_tag_service(sid)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("resolve tag service: {e}")))?
+            .is_none()
+    {
+        return Err(CpError::BadRequest(format!(
+            "policy profile {sid} ({}) has no usable tag service (its `tagService` is \
+             unset, or names a profile that does not exist), so every tag-based column \
+             mask and row filter would silently compile to nothing; give the profile a \
+             tag service, or bind one created by engine provisioning",
+            svc.name
+        )));
+    }
     // The binding write and the compile of the profile it names share ONE
     // transaction, the same shape `catalogs::set_catalog_workspaces` keeps —
     // and, like it, `sqlx::Error` from `.begin()`/`.commit()` is mapped
@@ -4757,7 +4804,7 @@ async fn apply_authz_service_update(
     request_body = CreateEngineBody,
     responses(
         (status = 200, description = "Engine spec updated and pods rolled", body = EngineDto),
-        (status = 400, description = "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), `authz_service_id` naming no policy profile, or re-materializing workspace connections failed", body = ErrorBody),
+        (status = 400, description = "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), `authz_service_id` naming no policy profile or one with no usable tag service, or re-materializing workspace connections failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
