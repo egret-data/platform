@@ -455,3 +455,54 @@ async fn a_window_without_depends_on_gets_no_listener_row() {
         "control: without the window the same trigger gets its row"
     );
 }
+
+/// Final-review fix wave, I1: the same hole as the window test above, for the
+/// `mode`/`minSatisfied` shapes save refuses on a trigger with NO `dependsOn`
+/// (`min_satisfied_required`, `min_satisfied_exceeds_conditions` -- n = 0,
+/// "could never fire" -- and `min_satisfied_not_positive`). A draft carrying
+/// one must get no listener row, or the window-free arm would fire it on
+/// every matching execution. The control trigger in the same flow gets its
+/// row; the update that drops the `mode` lines gives all four theirs.
+#[tokio::test]
+async fn a_mode_shape_save_refuses_without_depends_on_gets_no_listener_row() {
+    let Some(fx) = fx().await else { return };
+    let flow_trigger = "    type: io.kestra.plugin.core.trigger.Flow\n";
+    let refused = flow_yaml(
+        "",
+        &format!(
+            "  - id: m_required\n{flow_trigger}    mode: AT_LEAST\n\
+             \x20 - id: m_exceeds\n{flow_trigger}    mode: AT_LEAST\n    minSatisfied: 1\n\
+             \x20 - id: m_zero\n{flow_trigger}    minSatisfied: 0\n\
+             \x20 - id: ok\n{flow_trigger}    mode: ANY\n"
+        ),
+        "hi",
+    );
+    let flow = fx.create(&refused).await;
+    assert_eq!(
+        listener_ids(&fx.db, flow.id).await,
+        vec!["ok".to_string()],
+        "a mode shape save refuses gets no row on the window-free arm"
+    );
+
+    let plain = flow_yaml(
+        "",
+        &format!(
+            "  - id: m_required\n{flow_trigger}\
+             \x20 - id: m_exceeds\n{flow_trigger}\
+             \x20 - id: m_zero\n{flow_trigger}\
+             \x20 - id: ok\n{flow_trigger}    mode: ANY\n"
+        ),
+        "hi",
+    );
+    fx.update(flow.id, &plain).await;
+    assert_eq!(
+        listener_ids(&fx.db, flow.id).await,
+        vec![
+            "m_exceeds".to_string(),
+            "m_required".to_string(),
+            "m_zero".to_string(),
+            "ok".to_string()
+        ],
+        "control: without the mode lines the same triggers get their rows"
+    );
+}

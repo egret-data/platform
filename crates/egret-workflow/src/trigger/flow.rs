@@ -337,15 +337,23 @@ pub enum FlowTriggerError {
     /// model and [`super::depends_on`] / [`super::window`] do (W13b). See the
     /// module doc, *Over-acceptance is the hazard*, item 1.
     UnsupportedDependsOn(usize),
-    /// The trigger declares a `window` but no `dependsOn`. On the artifact
-    /// the window is inert on this arm (it is read only through
-    /// `dependsOnAsMultipleCondition()`); egret refuses it rather than
-    /// silently ignoring a declaration -- the same rule `spec::validate`'s
-    /// `window_without_depends_on` applies at save. Refusing here as well is
-    /// what keeps a DRAFT (which saves with validation errors, and whose
-    /// listener rows `scheduler::sync` builds from whatever parses) from
-    /// firing with its window ignored. W13b Task 2 fix round 1.
-    WindowWithoutDependsOn,
+    /// The trigger has no `dependsOn` but carries a shape the save path
+    /// refuses: the codes of [`super::depends_on_refusals`], the ONE list
+    /// `spec::validate` reports about a flow trigger. On this arm that is
+    /// either a `window` (inert on the artifact, which reads it only through
+    /// `dependsOnAsMultipleCondition()`; `window_without_depends_on`, plus
+    /// whatever the window itself breaks) or a `mode`/`minSatisfied` shape
+    /// (`min_satisfied_required`, `min_satisfied_not_positive`,
+    /// `min_satisfied_exceeds_conditions` -- Kestra's `FlowTriggerValidator`
+    /// and `@Positive` do not look at `dependsOn` either).
+    ///
+    /// Refusing here as well is what keeps a DRAFT (which saves with
+    /// validation errors, and whose listener rows `scheduler::sync` builds
+    /// from whatever parses) from firing with a declaration save called
+    /// unfireable. W13b Task 2 fix round 1 did this for `window` alone; the
+    /// final-review fix wave (I1) widened it to the whole list, so the
+    /// window-free arm cannot drift from the save path by construction.
+    Refused(Vec<&'static str>),
 }
 
 impl fmt::Display for FlowTriggerError {
@@ -357,11 +365,11 @@ impl fmt::Display for FlowTriggerError {
                 "core.trigger.Flow `dependsOn` ({n} condition(s)) is not the \
                  window-free arm: it is evaluated over a window by the `dependsOn` arm"
             ),
-            Self::WindowWithoutDependsOn => write!(
+            Self::Refused(codes) => write!(
                 f,
-                "core.trigger.Flow declares a `window` but no `dependsOn`: a window is \
-                 only read on the `dependsOn` arm, and egret refuses rather than \
-                 silently ignoring it"
+                "core.trigger.Flow without `dependsOn` is refused at save ({}), so it \
+                 is never evaluated",
+                codes.join(", ")
             ),
         }
     }
@@ -437,10 +445,15 @@ impl WindowFreeFlowTrigger {
                 spec.depends_on.len(),
             ));
         }
-        // A window on the window-free arm: refused, never ignored. See
-        // [`FlowTriggerError::WindowWithoutDependsOn`].
-        if spec.window.is_some() {
-            return Err(FlowTriggerError::WindowWithoutDependsOn);
+        // Whatever save refuses about this trigger -- a `window`, or a
+        // `mode`/`minSatisfied` shape -- is refused here too, never ignored.
+        // The SAME list save reports, not a second copy. See
+        // [`FlowTriggerError::Refused`].
+        let refusals = super::depends_on_refusals(spec);
+        if !refusals.is_empty() {
+            return Err(FlowTriggerError::Refused(
+                refusals.iter().map(|r| r.code).collect(),
+            ));
         }
 
         Ok(Self::filter_of(trigger, spec))
@@ -1774,11 +1787,13 @@ mod tests {
             let t = trigger(&format!(
                 "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n{window}"
             ));
-            assert_eq!(
-                WindowFreeFlowTrigger::resolve(&t),
-                Err(FlowTriggerError::WindowWithoutDependsOn),
-                "{window}"
-            );
+            match WindowFreeFlowTrigger::resolve(&t) {
+                Err(FlowTriggerError::Refused(codes)) => assert!(
+                    codes.contains(&"window_without_depends_on"),
+                    "{window}: {codes:?}"
+                ),
+                other => panic!("{window}: {other:?}"),
+            }
         }
         let empty = trigger(
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\ndependsOn: []\n\
@@ -1786,7 +1801,7 @@ mod tests {
         );
         assert_eq!(
             WindowFreeFlowTrigger::resolve(&empty),
-            Err(FlowTriggerError::WindowWithoutDependsOn),
+            Err(FlowTriggerError::Refused(vec!["window_without_depends_on"])),
             "`dependsOn: []` is the window-free arm too"
         );
         // Control: the same trigger without the window resolves.
@@ -1794,6 +1809,41 @@ mod tests {
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n"
         ))
         .is_ok());
+    }
+
+    /// Final-review fix wave, I1: a `mode`/`minSatisfied` shape save refuses
+    /// is refused on the window-free arm too, by the same code, so a draft
+    /// carrying one gets no listener row and never fires. Before the fix
+    /// `resolve` read only `dependsOn` and `window`, and all three resolved.
+    #[test]
+    fn a_mode_shape_save_refuses_is_refused_without_depends_on() {
+        for (body, code) in [
+            ("mode: AT_LEAST\n", "min_satisfied_required"),
+            (
+                "mode: AT_LEAST\nminSatisfied: 1\n",
+                "min_satisfied_exceeds_conditions",
+            ),
+            ("minSatisfied: 0\n", "min_satisfied_not_positive"),
+        ] {
+            let t = trigger(&format!(
+                "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n{body}"
+            ));
+            assert_eq!(
+                WindowFreeFlowTrigger::resolve(&t),
+                Err(FlowTriggerError::Refused(vec![code])),
+                "{body}"
+            );
+        }
+        // Controls: the modes save accepts without `dependsOn` still resolve.
+        for body in ["mode: ANY\n", "mode: ALL\n", "minSatisfied: 1\n"] {
+            assert!(
+                WindowFreeFlowTrigger::resolve(&trigger(&format!(
+                    "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n{body}"
+                )))
+                .is_ok(),
+                "{body}"
+            );
+        }
     }
 
     /// A `core.schedule` is not a flow trigger and does not resolve as one.

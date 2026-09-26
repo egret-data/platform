@@ -386,7 +386,7 @@ fn resolve_local(
 /// A window on a trigger with no `dependsOn` is refused too, but that is a
 /// fact about the trigger, not the window: see
 /// `depends_on::depends_on_refusals` and
-/// `flow::FlowTriggerError::WindowWithoutDependsOn`.
+/// `flow::FlowTriggerError::Refused`.
 ///
 /// Every duration, time and zone present is parsed with the functions
 /// [`TimeWindow::from_model`] uses (`trigger::duration`), so a value that

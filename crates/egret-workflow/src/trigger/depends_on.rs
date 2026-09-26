@@ -928,9 +928,11 @@ mod tests {
     /// `spec::validate` refuses about a `dependsOn` trigger, the run-time
     /// functions refuse it too, with the same code: `TimeWindow::from_model`
     /// for window codes, `mode_refusal` (hence `satisfied`) for
-    /// `minSatisfied` codes, `condition_keys` for duplicates, and
-    /// `WindowFreeFlowTrigger::resolve` for a window with no `dependsOn`. And
-    /// for the accepted shapes, none of them refuses.
+    /// `minSatisfied` codes, `condition_keys` for duplicates, and -- for a
+    /// trigger with no `dependsOn` -- `WindowFreeFlowTrigger::resolve` ALONE,
+    /// because that is the only gate the window-free arm has (final review
+    /// I1: `window` and the `mode`/`minSatisfied` shapes). And for the
+    /// accepted shapes, none of them refuses.
     #[test]
     fn save_and_run_time_refuse_the_same_shapes() {
         const DEPS2: &str = "    dependsOn:\n      - {namespace: a.b, flowId: p0}\n      - {namespace: a.b, flowId: p1}\n";
@@ -1016,6 +1018,19 @@ mod tests {
         let run_time =
             |ft: &FlowTrigger, trigger: &crate::models::Trigger| -> BTreeSet<&'static str> {
                 let mut codes = BTreeSet::new();
+                // No `dependsOn`: the processor's window-free arm, whose ONLY
+                // gate is `WindowFreeFlowTrigger::resolve` (and `sync`'s, the
+                // same call). Measure that path, not a stand-in for it: the
+                // final review's I1 was a stand-in (`mode_refusal` called
+                // directly) agreeing while `resolve` did not.
+                if ft.depends_on.is_empty() {
+                    match WindowFreeFlowTrigger::resolve(trigger) {
+                        Ok(_) => {}
+                        Err(FlowTriggerError::Refused(c)) => codes.extend(c),
+                        Err(e) => panic!("unexpected window-free refusal: {e:?}"),
+                    }
+                    return codes;
+                }
                 if let Err(e) = TimeWindow::from_model(ft.window.as_ref()) {
                     codes.extend(e.0.iter().map(|r| r.code));
                 }
@@ -1024,12 +1039,6 @@ mod tests {
                 }
                 if condition_keys(&ft.depends_on).is_err() {
                     codes.insert("dependency_duplicate");
-                }
-                if ft.depends_on.is_empty()
-                    && WindowFreeFlowTrigger::resolve(trigger)
-                        == Err(FlowTriggerError::WindowWithoutDependsOn)
-                {
-                    codes.insert("window_without_depends_on");
                 }
                 // A missing `namespace`/`flowId` fails closed in the matcher:
                 // offer a source that matches every OTHER field.
@@ -1085,6 +1094,21 @@ mod tests {
             flow("", "    window:\n      every: PT1H\n"),
             "window_without_depends_on",
         ));
+        // The window-free arm's `mode`/`minSatisfied` shapes (final review
+        // I1): save refuses them with no `dependsOn` too, so `resolve` must.
+        for (body, code) in [
+            ("    mode: AT_LEAST\n", "min_satisfied_required"),
+            (
+                "    mode: AT_LEAST\n    minSatisfied: 1\n",
+                "min_satisfied_exceeds_conditions",
+            ),
+            ("    minSatisfied: 0\n", "min_satisfied_not_positive"),
+            ("    mode: ANY\n", ""),
+            ("    mode: ALL\n    minSatisfied: 1\n", ""),
+            ("", ""),
+        ] {
+            all.push((flow("", body), code));
+        }
         all.push((
             flow(
                 "    dependsOn:\n      - {namespace: a.b, flowId: p0}\n      - {namespace: a.b, flowId: p0}\n",
@@ -1129,7 +1153,7 @@ mod tests {
             };
             assert_eq!(saved, expected, "{src}");
         }
-        assert_eq!(refused, 22);
+        assert_eq!(refused, 25);
     }
 
     /// W13b Task 5: the corpus's twenty `dependsOn` declarations, put through
