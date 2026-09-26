@@ -1,6 +1,8 @@
-//! The Flow trigger's I/O half (W13a): the processor that drains
-//! `workflow.flow_trigger_events` and fires the window-free listeners that
-//! hear each event.
+//! The Flow trigger's I/O half: the processor that drains
+//! `workflow.flow_trigger_events` and fires the listeners that hear each
+//! event -- a window-free one at once (W13a), a `dependsOn` one once its
+//! window (`workflow.flow_trigger_windows`, migration 0158) is satisfied
+//! (W13b) -- and the scheduler pass's sweep of expired windows.
 //!
 //! [`trigger::flow`](crate::trigger::flow) holds the predicate and stays pure;
 //! this module is its only production caller. `settle` writes the outbox
@@ -9,7 +11,7 @@
 //! switch (`runtime::spawn_scheduler`).
 //!
 //! See `docs/en/specs/2026-09-25-workflow-w13-flow-triggers-design.md` §4.4,
-//! §4.5 and §6.
+//! §4.5, §5.3 and §6.
 //!
 //! # Safety with N replicas, per statement
 //!
@@ -198,10 +200,110 @@
 //! - **roll back the whole event on a retried error**: dies in the two retry
 //!   tests (the pass returns `Err`, and the healthy sibling's fire is undone).
 //! - **never give up**: dies in the give-up test only ("given up: deleted").
+//!
+//! # The `dependsOn` window (W13b), per statement
+//!
+//! A `dependsOn` listener reaches its window only after the run-time gate
+//! (`depends_on_refusals`, whole, then `TimeWindow::from_model` and
+//! `condition_keys`: a draft saves with validation errors and still has a
+//! listener row), the same filter as the window-free arm (`evaluate`: the six
+//! off switches' YAML half, depth, `states`, the trigger's own `when`), and
+//! only when the event meets at least one dependency (user decision D1).
+//! Then, in a savepoint of the listener's own, statements 6-9 run on its one
+//! window row, keyed `(flow_id, trigger_id)`. The clock is the event
+//! transaction's `now()`. Tests are in `tests/flow_trigger_windows.rs`; the
+//! mutation runs are W13b Task 4's, each restored and checked clean.
+//!
+//! **What serialises two replicas here is the row lock, and `REPEATABLE READ`
+//! turns every wait into a retry.** Two events of one listener are claimed by
+//! two passes at once (statement 2 partitions EVENTS, not listeners). The
+//! loser of any race below fails `40001` -- `could not serialize access due
+//! to concurrent update`, measured in both phases of the concurrency test --
+//! its savepoint rolls back (the window untouched by it), the listener is
+//! kept pending on its event (`Fate::Retry`), and a later pass, with a fresh
+//! snapshot, reads the winner's result. So "the second reads the first's
+//! result" (spec §5.3) happens one backoff later, not in the same pass, and
+//! a listener whose window is contended on every one of five passes is
+//! given up like any failing listener. Unmutated control, 3 runs: `rows ==
+//! attempts == 1` in both phases, the loser `errored: 1` each time.
+//!
+//! ## 6. The insert-if-absent -- a missing row cannot be created twice
+//!
+//! `INSERT … ON CONFLICT (flow_id, trigger_id) DO NOTHING`, with the bounds
+//! computed at `now()`. Two passes that both find no row: one inserts, the
+//! other waits on the key and then, at `REPEATABLE READ`, fails `40001`
+//! (measured, phase A of `two_processors_satisfying_all_together_fire_once`,
+//! with a `BEFORE INSERT` sleep making the overlap certain). Mutation, 3 runs:
+//! **check-then-insert** (`SELECT EXISTS`, then a plain `INSERT`) -- **dies
+//! 3 of 3, and not on the fire counts**: phase A still ends with one fire and
+//! one attempt, because the loser's `23505 duplicate key value violates unique
+//! constraint "flow_trigger_windows_pkey"` also rolls back its savepoint and
+//! is retried. It dies on the test's assertion that no `duplicate key` error
+//! surfaced in the log: the primary key is the backstop here, as 0157's
+//! unique index is for the fire.
+//!
+//! ## 7. The row lock -- **the serialisation that makes "fire once" hold**
+//!
+//! `SELECT … FOR UPDATE` on the row, then (D1) an expired row (`window_end <=
+//! now`) is replaced in place with fresh bounds and empty results. Phase B of
+//! the concurrency test: the window holds `p1`, and two `p2` events -- each
+//! completing `ALL` alone -- are processed at once, with a sleep on the fire's
+//! insert holding the first transaction open. The second pass waits on the
+//! lock and then fails `40001` (the row was deleted after its snapshot)
+//! before it fires anything. Mutation, 3 runs: **drop `FOR UPDATE`** -- dies
+//! 3 of 3 on the attempts assertion only (`2` fires attempted, `1` row): both
+//! passes read `{p1}`, both fire, and only the second's `DELETE` meets the
+//! conflict, after its insert. The rows stay right, which is why a rows-only
+//! test would pass. (With the merged results written BEFORE the fire, the
+//! `UPDATE` would have serialised the two instead and this mutant would have
+//! survived; the satisfied path therefore goes straight to the fire, and the
+//! lock is what orders it.)
+//!
+//! The expiry replacement: `an_expired_window_does_not_count`. Mutation, 1
+//! run: **drop the replacement** -- dies (the event finds the old row
+//! invalid and is ignored, Kestra's behaviour, so the window holds the stale
+//! `p1` instead of a fresh `p2`).
+//!
+//! ## 8. The update -- under the row lock
+//!
+//! `UPDATE … SET results = merge(stored, met)` when the mode is not yet
+//! satisfied; only `true` is written and a met condition stays met.
+//! `all_fires_once_both_are_met_and_resets`, `at_least_two_of_three`.
+//!
+//! ## 9. The delete on fire -- under the row lock, in the fire's savepoint
+//!
+//! Satisfied: fire through statement 4's path (`start_execution_in`), then
+//! `DELETE` the row, under every mode -- there is no `resetOnSuccess` (D1).
+//! A failed fire rolls the whole savepoint back, the window included, and the
+//! event is retried for the listener. Mutation, 1 run: **don't delete** --
+//! dies in `all_fires_once_both_are_met_and_resets` on "deleted on fire" (the
+//! later "a met condition does not carry into the next window" assertion is
+//! the one a weaker test would have needed).
+//!
+//! ## 10. The sweep -- one autocommit `DELETE`, no lock of its own
+//!
+//! [`sweep_expired_windows`], once per scheduler pass after
+//! [`process_events_with`] (`runtime::spawn_scheduler`):
+//! `DELETE … WHERE window_end <= now()`. At READ COMMITTED it waits on a row a
+//! processor holds and re-checks the new version, so a window just replaced
+//! is kept; a processor whose row the sweep deleted first fails `40001` at
+//! statement 7 and is retried, like any race above (derived from the
+//! isolation rules, not staged). Nothing is lost either way: an expired
+//! window is one the next matching event replaces. Proved by
+//! `the_sweep_deletes_only_expired_windows` and, through the ticker,
+//! `tests/runtime.rs`'s `the_scheduler_ticker_sweeps_expired_windows`.
+//!
+//! **Also mutated, 1 run each:** the run-time gate removed dies in
+//! `a_draft_with_an_invalid_window_or_dependency_never_fires` (`refused` 3,
+//! not 5: two drafts -- `AT_LEAST` with no `minSatisfied`, and a dependency
+//! with no `flowId` beside a valid one -- open windows, the other three are
+//! still stopped by `from_model`/`condition_keys`); an unmatched event let
+//! through to the window dies in `an_unrelated_execution_does_not_open_a_window`.
 
 mod process;
 
 pub use process::{
-    process_events, process_events_with, EventReport, PassLimits, DEFAULT_RETRY_BACKOFF,
-    DEPENDS_ON_IS_W13B, MAX_ATTEMPTS, MAX_EVENTS_PER_PASS, MAX_PASS_DURATION,
+    process_events, process_events_with, sweep_expired_windows, EventReport, PassLimits,
+    DEFAULT_RETRY_BACKOFF, DEPENDS_ON_REFUSED, MAX_ATTEMPTS, MAX_EVENTS_PER_PASS,
+    MAX_PASS_DURATION, NO_DEPENDENCY_MET,
 };

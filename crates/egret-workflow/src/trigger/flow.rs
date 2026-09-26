@@ -243,8 +243,11 @@
 //!    rather than folded into a `bool`. Kestra returns an empty list and, for
 //!    the depth case only, logs.
 //! 4. Refusing `dependsOn` at resolve time instead of modelling the window
-//!    (item 1 above). What the window would have to do is measured and written
-//!    down in this file's `dependsOn` section below; none of it is implemented.
+//!    (item 1 above). **W13b implements the window outside this type**
+//!    (`crate::flow_trigger::process`, with `super::depends_on` and
+//!    `super::window` as its pure half); it reaches [`evaluate`] only as the
+//!    listener filter both arms share, through
+//!    [`WindowFreeFlowTrigger::depends_on_filter`].
 //! 5. [`Refusal::EntryState`] — a defensive refusal of `CREATED` that Kestra
 //!    achieves upstream, by starting its transition loop at index 1.
 //! 6. [`FiredExecution`] carrying the source execution's *identity* rather than
@@ -429,7 +432,39 @@ impl WindowFreeFlowTrigger {
             return Err(FlowTriggerError::WindowWithoutDependsOn);
         }
 
-        Ok(Self {
+        Ok(Self::filter_of(trigger, spec))
+    }
+
+    /// The **listener filter** of a trigger that DOES declare `dependsOn`
+    /// (W13b), or `None` for any other trigger.
+    ///
+    /// `FlowTriggerService.computeFlowTriggers` (checkout `96893b589`, lines
+    /// 216-243) runs BEFORE the split into the two arms, so both arms apply
+    /// the same filter -- same flow, kind, flow disabled, draft, depth,
+    /// trigger disabled, `states`, and the trigger's own `when` -- and only
+    /// then does `computeExecutionsFromFlowTriggerDependsOn` touch a window.
+    /// [`evaluate`] IS that filter, so the `dependsOn` arm calls it with this
+    /// value rather than restating it; its [`Outcome::Fired`] is the fire's
+    /// identity (inputs, labels, depth, source) once the window is satisfied.
+    /// `evaluate`'s semantics are unchanged; what this adds is a way to reach
+    /// it that [`Self::resolve`]'s refusal of `dependsOn` does not open.
+    ///
+    /// **Not a resolution of the `dependsOn` machinery**: `dependsOn`, `mode`,
+    /// `minSatisfied` and `window` are the caller's
+    /// (`crate::flow_trigger::process`), gated by
+    /// [`super::depends_on_refusals`].
+    pub fn depends_on_filter(trigger: &Trigger) -> Option<Self> {
+        let TriggerKind::Flow(spec) = &trigger.kind else {
+            return None;
+        };
+        if spec.depends_on.is_empty() {
+            return None;
+        }
+        Some(Self::filter_of(trigger, spec))
+    }
+
+    fn filter_of(trigger: &Trigger, spec: &crate::models::FlowTrigger) -> Self {
+        Self {
             trigger_id: trigger.id.clone(),
             states: spec.states.clone(),
             when_source: trigger.when.as_ref().map(|w| w.source().to_string()),
@@ -440,7 +475,7 @@ impl WindowFreeFlowTrigger {
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                 .unwrap_or_default(),
             labels: trigger.labels.clone(),
-        })
+        }
     }
 
     /// The states this trigger fires on.

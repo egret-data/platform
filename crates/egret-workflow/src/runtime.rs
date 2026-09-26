@@ -324,7 +324,9 @@ pub fn spawn(pool: PgPool, reg: Arc<dyn Registry>, cfg: RuntimeConfig, cancel: C
 /// (W13a): the due Flow-trigger events in the outbox, each once, up to
 /// [`PassLimits`](crate::flow_trigger::PassLimits)' cap (500 events or about
 /// 1 s, final review I3) so a backlog cannot hold `fire_due` or shutdown back;
-/// the rest waits for the next tick. A chain therefore advances at least one
+/// the rest waits for the next tick. Then one
+/// [`sweep_expired_windows`](crate::flow_trigger::sweep_expired_windows)
+/// (W13b). A chain therefore advances at least one
 /// hop per tick, and more when a fired execution's first settle already writes
 /// an event its listeners hear (spec §4.4 points 4-5).
 ///
@@ -394,12 +396,14 @@ fn spawn_scheduler(pool: PgPool, every: Duration, cancel: CancellationToken) {
                             events = r.events,
                             fired = r.fired,
                             born_failed = r.born_failed,
+                            accumulated = r.accumulated,
                             refused = r.refused,
                             errored = r.errored,
                             "workflow flow-trigger pass"
                         ),
                         Ok(r) if r.events > 0 => tracing::debug!(
                             events = r.events,
+                            accumulated = r.accumulated,
                             refused = r.refused,
                             errored = r.errored,
                             "workflow flow-trigger pass"
@@ -408,6 +412,15 @@ fn spawn_scheduler(pool: PgPool, every: Duration, cancel: CancellationToken) {
                         // Never ends the loop: the failed event's transaction
                         // rolled back, so the next pass claims it again.
                         Err(e) => tracing::warn!(error = %e, "workflow flow-trigger pass failed"),
+                    }
+                    // W13b: the expired `dependsOn` windows, once per pass,
+                    // after the events (spec §5.3 step 6). A failure is
+                    // retried by the next pass; an expired window left
+                    // behind is replaced by its next matching event anyway.
+                    match crate::flow_trigger::sweep_expired_windows(&pool).await {
+                        Ok(0) => {}
+                        Ok(n) => tracing::debug!(swept = n, "workflow flow-trigger windows swept"),
+                        Err(e) => tracing::warn!(error = %e, "workflow flow-trigger window sweep failed"),
                     }
                 }
             }

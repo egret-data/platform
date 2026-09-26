@@ -1,17 +1,22 @@
 //! `process_events`: drain `workflow.flow_trigger_events`, one event per
-//! transaction, and fire every window-free `Flow` listener that hears it (W13
-//! spec §4.4, §4.5). The statement-by-statement argument is in the module doc
-//! of [`crate::flow_trigger`].
+//! transaction, and fire every `Flow` listener that hears it -- a window-free
+//! one at once (W13a, spec §4.4, §4.5), a `dependsOn` one once its window is
+//! satisfied (W13b, spec §5.3). `sweep_expired_windows` is the scheduler
+//! pass's cleanup of the windows. The statement-by-statement argument is in
+//! the module doc of [`crate::flow_trigger`].
+
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use egret_core::{Error, Result};
 use serde_json::{Map, Value};
+use sqlx::types::Json;
 use sqlx::{Connection, PgConnection, PgPool};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::models::{ExecutionKind, Label, State, TriggerKind};
+use crate::models::{ExecutionKind, Flow, FlowTrigger, Label, State, Trigger, TriggerKind};
 use crate::runners::{render_str_guarded, GuardedRender, RenderContext};
 use crate::scheduler::start::{classify, flow_is_on, Started, WORKFLOWS_FEATURE};
 use crate::trigger::flow::{
@@ -19,6 +24,10 @@ use crate::trigger::flow::{
     WindowFreeFlowTrigger, DEFAULT_MAX_EXECUTION_DEPTH,
 };
 use crate::trigger::webhook::{render_value, InputRefusal};
+use crate::trigger::{
+    condition_keys, dependency_matches, depends_on_refusals, merge, satisfied, DepSource,
+    ResolvedWindow, TimeWindow,
+};
 use crate::worker::{execution_render_context, start_execution_in, NewExecution};
 
 fn db_err(e: sqlx::Error) -> Error {
@@ -42,12 +51,20 @@ pub const MAX_ATTEMPTS: i32 = 5;
 /// replicas' passes inside one backoff find the event not due.
 pub const DEFAULT_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 
-/// The reason a `dependsOn` listener is skipped, logged and counted as
-/// `refused`. W13a's `settle` writes events such a listener hears, because the
-/// hook's `EXISTS` does not read `depends_on` (spec §4.2).
-pub const DEPENDS_ON_IS_W13B: &str =
-    "a dependsOn Flow trigger needs a multiple-condition window, which W13b ships; \
-     W13a skips it";
+/// The start of the reason a `dependsOn` listener is skipped with -- logged
+/// and counted `refused` -- when its trigger has anything
+/// [`depends_on_refusals`] or [`TimeWindow::from_model`] refuses. Drafts save
+/// despite validation errors and `scheduler::sync` gives any parseable draft
+/// a listener row, so the save-time refusals are applied again here, whole,
+/// before the listener's window is touched (W13b Task 4). The refusals
+/// follow, `[code] message`.
+pub const DEPENDS_ON_REFUSED: &str = "the dependsOn trigger is refused at run time as at save";
+
+/// The reason an event that meets none of a `dependsOn` listener's
+/// dependencies is skipped. It touches no window: only a matching event opens
+/// or replaces one (user decision D1, spec §5.3 step 1).
+pub const NO_DEPENDENCY_MET: &str =
+    "the event meets none of the listener's dependencies, so it touches no window";
 
 /// What `render_str_guarded` refuses to reach, for `when`. The source's
 /// render context binds no `trigger` root, and this is the artifact's
@@ -79,14 +96,19 @@ pub struct EventReport {
     /// `fired` so a pass that only produced failures does not read as success.
     pub born_failed: usize,
     /// Listeners that heard an event and did not fire, deliberately: a
-    /// `dependsOn` listener (W13b's), a refusal by
-    /// [`evaluate`](crate::trigger::flow::evaluate) (including a `when` that
-    /// does not render), or a fire the unique index says already happened.
+    /// refusal by [`evaluate`](crate::trigger::flow::evaluate) (including a
+    /// `when` that does not render), a fire the unique index says already
+    /// happened, or -- for a `dependsOn` listener -- a trigger refused at run
+    /// time as at save ([`DEPENDS_ON_REFUSED`]), an event that meets none of
+    /// its dependencies ([`NO_DEPENDENCY_MET`]), or one outside its window.
     pub refused: usize,
     /// Listeners that failed. Either deterministically -- the flow does not
     /// parse, resolve or plan -- and the event is done with them, or possibly
     /// transiently, and the event is kept for them (spec §4.4 point 1).
     pub errored: usize,
+    /// `dependsOn` listeners whose window took this event without being
+    /// satisfied: stored, not fired (W13b).
+    pub accumulated: usize,
 }
 
 /// The claimed event, as the claim read it under its row lock.
@@ -105,7 +127,6 @@ struct Event {
 struct Listener {
     flow_id: Uuid,
     trigger_id: String,
-    depends_on: bool,
     workspace_id: Uuid,
     source: String,
     namespace: String,
@@ -168,6 +189,9 @@ enum Fate {
     /// Possibly transient. The listener's savepoint rolled back and the event
     /// is kept for it.
     Retry(String),
+    /// A `dependsOn` listener's window took the event and is not yet
+    /// satisfied. Done with.
+    Accumulated,
 }
 
 /// How much one pass may do (final review I3). A pass runs on the scheduler's
@@ -201,6 +225,24 @@ impl Default for PassLimits {
             retry_backoff: DEFAULT_RETRY_BACKOFF,
         }
     }
+}
+
+/// Delete every `dependsOn` window whose end has passed (spec §5.3 step 6,
+/// user decision D1): the scheduler pass calls it once, after
+/// [`process_events_with`]. Returns how many it deleted.
+///
+/// "Passed" is `window_end <= now()`, the processor's own test for an expired
+/// window. Nothing is lost by it: an expired window is one the next matching
+/// event would replace anyway. It is one autocommit statement at READ
+/// COMMITTED, so a window a processor holds `FOR UPDATE` is waited on and
+/// re-checked against its new version -- one the processor just replaced is
+/// no longer expired and is kept. See the module doc, statement 10.
+pub async fn sweep_expired_windows(pool: &PgPool) -> Result<u64> {
+    let swept = sqlx::query("DELETE FROM workflow.flow_trigger_windows WHERE window_end <= now()")
+        .execute(pool)
+        .await
+        .map_err(db_err)?;
+    Ok(swept.rows_affected())
 }
 
 /// One pass with the default [`PassLimits`] and no cancellation: what a test
@@ -425,7 +467,7 @@ async fn process_one(
     // The listeners that are ON: same workspace, the event's state in their
     // `states`, and the six off switches (spec §6). No lock: see statement 3.
     let listeners: Vec<Listener> = sqlx::query_as(concat!(
-        "SELECT l.flow_id, l.trigger_id, l.depends_on, f.workspace_id, f.source, \
+        "SELECT l.flow_id, l.trigger_id, f.workspace_id, f.source, \
                 f.namespace, f.flow_id AS flow_key \
            FROM workflow.flow_listeners l JOIN workflow.flows f ON f.id = l.flow_id \
           WHERE l.workspace_id = $1 \
@@ -523,6 +565,15 @@ async fn process_one(
                     listener = %key,
                     reason = %why,
                     "a flow-trigger listener cannot fire until its flow is saved again"
+                );
+                done.push(key);
+            }
+            Fate::Accumulated => {
+                report.accumulated += 1;
+                tracing::debug!(
+                    event_id = ev.id,
+                    listener = %key,
+                    "a flow-trigger event met a dependsOn listener's dependency; stored in its window"
                 );
                 done.push(key);
             }
@@ -651,9 +702,6 @@ async fn listen(
     source: &Source,
     ctx: &RenderContext,
 ) -> Result<Fate> {
-    if l.depends_on {
-        return Ok(Fate::Refused(DEPENDS_ON_IS_W13B.to_string()));
-    }
     let flow = match crate::spec::parse(&l.source) {
         Ok(f) => f,
         Err(e) => {
@@ -663,29 +711,57 @@ async fn listen(
             )))
         }
     };
-    let Some(trigger) = flow
-        .triggers
-        .iter()
-        .find(|t| t.id == l.trigger_id && matches!(t.kind, TriggerKind::Flow(_)))
-    else {
+    let Some((trigger, spec)) = flow.triggers.iter().find_map(|t| match &t.kind {
+        TriggerKind::Flow(spec) if t.id == l.trigger_id => Some((t, spec)),
+        _ => None,
+    }) else {
         return Ok(Fate::Broken(
             "the listener row names a Flow trigger its flow does not declare".to_string(),
         ));
     };
+    // The arm is read off the YAML the listener is evaluated from, not off
+    // the row's `depends_on` copy: the two are written together by `sync`,
+    // and the YAML is what the rest of this function obeys.
+    if !spec.depends_on.is_empty() {
+        return listen_depends_on(tx, ev, l, &flow, trigger, spec, source, ctx).await;
+    }
     let listener = match WindowFreeFlowTrigger::resolve(trigger) {
         Ok(r) => r,
         Err(e) => return Ok(Fate::Broken(e.to_string())),
     };
-
-    // `when` renders against the SOURCE's context (spec §4.4; `trigger::flow`
-    // point 3). A render error is `Unrenderable`, which `evaluate` refuses.
-    let when = match listener.when_source() {
-        None => WhenVerdict::NotDeclared,
-        Some(w) => match render_str_guarded(w, ctx, FORBIDDEN_ROOTS) {
-            Ok(GuardedRender::Rendered(s)) => WhenVerdict::Rendered(s),
-            Ok(GuardedRender::Forbidden(_)) | Err(_) => WhenVerdict::Unrenderable,
-        },
+    let fired = match filter(&listener, l, &flow, source, ctx) {
+        Ok(f) => f,
+        Err(why) => return Ok(Fate::Refused(why)),
     };
+
+    // The listener's savepoint: whatever `start_execution_in` does -- its
+    // insert, the first settle, an aborted statement -- rolls back alone, so a
+    // sibling's fire in this transaction survives it (spec §4.4 point 1).
+    let mut sp = tx.begin().await.map_err(db_err)?;
+    let started = start_fire(&mut sp, ev, l, source, ctx, &fired).await?;
+    Ok(match started {
+        Ok(render_failure) => {
+            sp.commit().await.map_err(db_err)?;
+            fired_fate(render_failure)
+        }
+        Err(err) => {
+            sp.rollback().await.map_err(db_err)?;
+            failed_start_fate(&err)
+        }
+    })
+}
+
+/// `computeFlowTriggers`' filter, the same on both arms: `when` rendered
+/// against the SOURCE's context (spec §4.4; `trigger::flow` point 3), then
+/// [`evaluate`]. `Err` is the refusal, named.
+fn filter(
+    listener: &WindowFreeFlowTrigger,
+    l: &Listener,
+    flow: &Flow,
+    source: &Source,
+    ctx: &RenderContext,
+) -> std::result::Result<FiredExecution, String> {
+    let when = render_when(listener.when_source(), ctx);
     let listening = ListeningFlow {
         workspace_id: l.workspace_id,
         namespace: l.namespace.clone(),
@@ -696,17 +772,60 @@ async fn listen(
         // egret never reports a flow as Kestra's `isDraft`.
         draft: false,
     };
-    let fired = match evaluate(
-        &listener,
+    match evaluate(
+        listener,
         &listening,
         &source.execution,
         &when,
         DEFAULT_MAX_EXECUTION_DEPTH,
     ) {
-        Outcome::Refused(r) => return Ok(Fate::Refused(format!("{r:?}"))),
-        Outcome::Fired(f) => f,
-    };
+        Outcome::Refused(r) => Err(format!("{r:?}")),
+        Outcome::Fired(f) => Ok(*f),
+    }
+}
 
+/// A `when` -- the trigger's or a dependency's -- rendered against the
+/// source's context. A render error is `Unrenderable`, which both
+/// `evaluate` and `dependency_matches` refuse.
+fn render_when(source: Option<&str>, ctx: &RenderContext) -> WhenVerdict {
+    match source {
+        None => WhenVerdict::NotDeclared,
+        Some(w) => match render_str_guarded(w, ctx, FORBIDDEN_ROOTS) {
+            Ok(GuardedRender::Rendered(s)) => WhenVerdict::Rendered(s),
+            Ok(GuardedRender::Forbidden(_)) | Err(_) => WhenVerdict::Unrenderable,
+        },
+    }
+}
+
+fn fired_fate(render_failure: Option<String>) -> Fate {
+    match render_failure {
+        None => Fate::Fired,
+        Some(why) => Fate::FiredFailed(why),
+    }
+}
+
+fn failed_start_fate(err: &Error) -> Fate {
+    match classify(err) {
+        Started::Yes => Fate::Fired,
+        Started::Refused(why) => Fate::Broken(why),
+        Started::AlreadyFired(why) => Fate::AlreadyFired(why),
+        Started::Failed(why) => Fate::Retry(why),
+    }
+}
+
+/// Render the fire's `inputs` and start the listener's execution on `conn`,
+/// which the caller has made a savepoint. `Ok(Ok(render_failure))` started
+/// it (born FAILED when `render_failure` is `Some`); `Ok(Err(e))` is
+/// `start_execution_in`'s failure, for the caller to roll its savepoint back
+/// and [`failed_start_fate`] it.
+async fn start_fire(
+    conn: &mut PgConnection,
+    ev: &Event,
+    l: &Listener,
+    source: &Source,
+    ctx: &RenderContext,
+    fired: &FiredExecution,
+) -> Result<std::result::Result<Option<String>, Error>> {
     // `inputs` render against the same context, by the same
     // `runContext.render(Map)` the webhook uses. **A failure is NOT a
     // refusal**, unlike an unrenderable `when`: Kestra, measured, still creates
@@ -729,13 +848,8 @@ async fn listen(
             Some(format!("inputs.{key} does not render: {error}")),
         ),
     };
-
-    // The listener's savepoint: whatever `start_execution_in` does -- its
-    // insert, the first settle, an aborted statement -- rolls back alone, so a
-    // sibling's fire in this transaction survives it (spec §4.4 point 1).
-    let mut sp = tx.begin().await.map_err(db_err)?;
     let started = start_execution_in(
-        &mut sp,
+        conn,
         NewExecution {
             workspace_id: l.workspace_id,
             // Always the listener's uuid: the backstop index keys on it, and
@@ -743,7 +857,7 @@ async fn listen(
             flow_id: Some(l.flow_id),
             source: &l.source,
             inputs,
-            trigger: Some(flow_trigger_record(&fired, &source.record)),
+            trigger: Some(flow_trigger_record(fired, &source.record)),
             scheduled_date: None,
             trigger_execution_id: Some(fired.trigger_execution_id),
             execution_depth: i32::try_from(fired.execution_depth)
@@ -753,24 +867,244 @@ async fn listen(
         },
     )
     .await;
-    Ok(match started {
-        Ok(_) => {
+    Ok(started.map(|_| render_failure))
+}
+
+/// A `dependsOn` listener on one event (W13b, spec §5.3, user decision D1).
+/// In order:
+///
+/// 1. **The run-time gate**: [`depends_on_refusals`] (the whole list),
+///    [`TimeWindow::from_model`] and [`condition_keys`]. Anything refused is
+///    skipped with [`DEPENDS_ON_REFUSED`] and never touches a window.
+/// 2. **The filter**, [`filter`] -- the same as the window-free arm's, the
+///    trigger's own `when` included (`computeFlowTriggers` runs before the
+///    split). A refused event touches no window.
+/// 3. **The dependencies**, each `when` rendered on the SOURCE. None met:
+///    [`NO_DEPENDENCY_MET`], and no window is opened or replaced (D1).
+/// 4. **The window**, in a savepoint of its own ([`window_step`]), so a
+///    failure anywhere in it -- the row lock's `40001`, the fire -- rolls back
+///    the window's changes with it and the event is retried for this
+///    listener.
+#[allow(clippy::too_many_arguments)]
+async fn listen_depends_on(
+    tx: &mut PgConnection,
+    ev: &Event,
+    l: &Listener,
+    flow: &Flow,
+    trigger: &Trigger,
+    spec: &FlowTrigger,
+    source: &Source,
+    ctx: &RenderContext,
+) -> Result<Fate> {
+    let refusals = depends_on_refusals(spec);
+    if !refusals.is_empty() {
+        let each: Vec<String> = refusals
+            .iter()
+            .map(|r| format!("[{}] {}", r.code, r.message))
+            .collect();
+        return Ok(Fate::Refused(format!(
+            "{DEPENDS_ON_REFUSED}: {}",
+            each.join("; ")
+        )));
+    }
+    let window = match TimeWindow::from_model(spec.window.as_ref()) {
+        Ok(w) => w,
+        Err(e) => return Ok(Fate::Refused(format!("{DEPENDS_ON_REFUSED}: {e}"))),
+    };
+    let keys = match condition_keys(&spec.depends_on) {
+        Ok(k) => k,
+        Err(e) => return Ok(Fate::Refused(format!("{DEPENDS_ON_REFUSED}: {e}"))),
+    };
+    let Some(listener) = WindowFreeFlowTrigger::depends_on_filter(trigger) else {
+        return Ok(Fate::Broken(
+            "the dependsOn trigger has no listener filter".to_string(),
+        ));
+    };
+    let fired = match filter(&listener, l, flow, source, ctx) {
+        Ok(f) => f,
+        Err(why) => return Ok(Fate::Refused(why)),
+    };
+
+    // `Flow.DependencyCondition.test` per dependency. **Its `when` renders on
+    // the SOURCE** (`runContextFactory.of(null, execution)`), like the
+    // trigger's. `models::Dependency` fills an absent `when` with `"true"`, so
+    // this renders it and passes `Rendered`; only an explicit `when: null` is
+    // `NotDeclared` (which `dependency_matches` accepts for exactly that).
+    // Labels are the source FLOW's declared ones -- egret has no execution
+    // labels, the same stand-in `executionLabels` uses (spec §4.5).
+    let dep_source = DepSource {
+        namespace: &source.record.namespace,
+        flow_id: &source.record.flow_id,
+        state: source.execution.state,
+        labels: &source.record.labels,
+    };
+    let met: BTreeMap<String, bool> = spec
+        .depends_on
+        .iter()
+        .zip(&keys)
+        .filter(|(dep, _)| {
+            let when = render_when(dep.when.as_ref().map(|w| w.source()), ctx);
+            dependency_matches(dep, &dep_source, &when)
+        })
+        .map(|(_, key)| (key.clone(), true))
+        .collect();
+    if met.is_empty() {
+        return Ok(Fate::Refused(NO_DEPENDENCY_MET.to_string()));
+    }
+
+    let mut sp = tx.begin().await.map_err(db_err)?;
+    let step = window_step(
+        &mut sp, ev, l, spec, &window, &keys, &met, source, ctx, &fired,
+    )
+    .await;
+    Ok(match step {
+        Ok(WindowStep::Done(fate)) => {
             sp.commit().await.map_err(db_err)?;
-            match render_failure {
-                None => Fate::Fired,
-                Some(why) => Fate::FiredFailed(why),
-            }
+            fate
         }
-        Err(err) => {
+        Ok(WindowStep::StartFailed(err)) => {
             sp.rollback().await.map_err(db_err)?;
-            match classify(&err) {
-                Started::Yes => Fate::Fired,
-                Started::Refused(why) => Fate::Broken(why),
-                Started::AlreadyFired(why) => Fate::AlreadyFired(why),
-                Started::Failed(why) => Fate::Retry(why),
-            }
+            failed_start_fate(&err)
+        }
+        Err(e) => {
+            sp.rollback().await.map_err(db_err)?;
+            Fate::Retry(format!("the listener's window: {e}"))
         }
     })
+}
+
+/// What [`window_step`] did.
+enum WindowStep {
+    /// Commit the savepoint: this is the listener's fate.
+    Done(Fate),
+    /// The fire's `start_execution_in` failed: roll everything back.
+    StartFailed(Error),
+}
+
+/// Spec §5.3 steps 2-5 on the listener's window row, inside the listener's
+/// savepoint. Every statement is one of the module doc's statements 6-9.
+#[allow(clippy::too_many_arguments)]
+async fn window_step(
+    conn: &mut PgConnection,
+    ev: &Event,
+    l: &Listener,
+    spec: &FlowTrigger,
+    window: &ResolvedWindow,
+    keys: &[String],
+    met: &BTreeMap<String, bool>,
+    source: &Source,
+    ctx: &RenderContext,
+    fired: &FiredExecution,
+) -> Result<WindowStep> {
+    // The window's clock is the event transaction's `now()`, never the wall
+    // clock (W13b global constraint). At `REPEATABLE READ` it is the
+    // transaction's start, the same instant for every listener of the event.
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    let (start, end) = match window.bounds(now) {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(WindowStep::Done(Fate::Refused(format!(
+                "the listener's window has no bounds at {now}: {e}"
+            ))))
+        }
+    };
+
+    // Statement 6, insert-if-absent. A missing row cannot be created twice.
+    sqlx::query(
+        "INSERT INTO workflow.flow_trigger_windows \
+           (flow_id, trigger_id, window_start, window_end, results) \
+         VALUES ($1, $2, $3, $4, '{}'::jsonb) \
+         ON CONFLICT (flow_id, trigger_id) DO NOTHING",
+    )
+    .bind(l.flow_id)
+    .bind(&l.trigger_id)
+    .bind(start)
+    .bind(end)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+
+    // Statement 7, the row lock: what makes "fire once" hold.
+    let (mut w_start, mut w_end, Json(mut results)): (
+        DateTime<Utc>,
+        DateTime<Utc>,
+        Json<BTreeMap<String, bool>>,
+    ) = sqlx::query_as(
+        "SELECT window_start, window_end, results FROM workflow.flow_trigger_windows \
+          WHERE flow_id = $1 AND trigger_id = $2 \
+            FOR UPDATE",
+    )
+    .bind(l.flow_id)
+    .bind(&l.trigger_id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+
+    // D1: an expired window is REPLACED -- fresh bounds, empty results -- and
+    // the event is then evaluated against the fresh one (Kestra, measured,
+    // ignores the event instead; spec §5.3 "Kestra, as measured").
+    if w_end <= now {
+        sqlx::query(
+            "UPDATE workflow.flow_trigger_windows \
+                SET window_start = $3, window_end = $4, results = '{}'::jsonb, outputs = NULL \
+              WHERE flow_id = $1 AND trigger_id = $2",
+        )
+        .bind(l.flow_id)
+        .bind(&l.trigger_id)
+        .bind(start)
+        .bind(end)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        (w_start, w_end) = (start, end);
+        results.clear();
+    }
+
+    // Step 3: outside the window (a daily window's off-hours, a future
+    // `offset` start, a passed deadline), the event is ignored and not kept.
+    if !TimeWindow::is_valid(w_start, w_end, now) {
+        return Ok(WindowStep::Done(Fate::Refused(format!(
+            "the event at {now} is outside the listener's window ({w_start} .. {w_end})"
+        ))));
+    }
+
+    let merged = merge(&results, met);
+    if !satisfied(spec.mode, spec.min_satisfied, keys, &merged) {
+        // Statement 8, the update.
+        sqlx::query(
+            "UPDATE workflow.flow_trigger_windows SET results = $3 \
+              WHERE flow_id = $1 AND trigger_id = $2",
+        )
+        .bind(l.flow_id)
+        .bind(&l.trigger_id)
+        .bind(Json(&merged))
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        return Ok(WindowStep::Done(Fate::Accumulated));
+    }
+
+    // Satisfied: fire through the window-free arm's path, then delete the
+    // window (statement 9) under every mode -- no `resetOnSuccess` exists
+    // (D1; measured for ALL, ANY and AT_LEAST). The merged results are not
+    // written first: the row is deleted in this savepoint either way.
+    match start_fire(conn, ev, l, source, ctx, fired).await? {
+        Ok(render_failure) => {
+            sqlx::query(
+                "DELETE FROM workflow.flow_trigger_windows WHERE flow_id = $1 AND trigger_id = $2",
+            )
+            .bind(l.flow_id)
+            .bind(&l.trigger_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+            Ok(WindowStep::Done(fired_fate(render_failure)))
+        }
+        Err(e) => Ok(WindowStep::StartFailed(e)),
+    }
 }
 
 /// `execution.trigger` for a Flow-fired execution, in the shape W13a Task 1
