@@ -4624,6 +4624,48 @@ async fn rematerialize_or_400(st: &CpState, engine_id: Uuid) -> Result<(), CpErr
         })
 }
 
+/// Put `engine_id`'s policy-profile binding back to `previous` after a PUT that
+/// bound successfully but then failed further down.
+///
+/// **Why a compensation and not just ordering.** Hoisting the cheap guards
+/// above the bind (see [`update_engine`]) removes every refusal that can be
+/// decided from the body and the stored row alone. It cannot remove the ones
+/// derived from the BUILT spec — a missing primary warehouse, resource-group
+/// validation, an unresolvable TLS or image-pull secret, the provisioner
+/// itself. Those still 400/409/502 after the bind has committed, and a caller
+/// told "no" must not find their engine re-pointed anyway. So the binding is
+/// restored, the same way `restore_engine_spec` restores the spec.
+///
+/// Best-effort and loud: every failure logs at `error`, because the caller has
+/// already been told the update did not happen. Never deletes a profile row —
+/// `previous` may be `None` (the engine was unbound), which detaches, and
+/// detaching is not deletion (standing constraint).
+async fn restore_engine_authz_service(st: &CpState, engine_id: Uuid, previous: Option<i64>) {
+    if let Err(e) = st
+        .engine_mgmt
+        .set_engine_authz_service(engine_id, previous)
+        .await
+    {
+        tracing::error!(engine_id = %engine_id, previous = ?previous, error = %e,
+            "could not restore the engine's policy-profile binding after a failed update; \
+             the engine is bound to a profile the caller was told was not applied");
+        return;
+    }
+    // The profile the engine is back on must be current again: the failed
+    // attempt compiled the OTHER one, and nothing has recompiled this one
+    // since. Fire-and-forget, like every other post-hoc recompile on this
+    // path — the binding is already correct, and a stale compile is visible in
+    // the logs with a repair URL.
+    if let (Some(sid), Some(compiler)) = (previous, st.perm_compiler.clone()) {
+        if let Err(e) = compiler.recompile_profile(sid).await {
+            tracing::error!(engine_id = %engine_id, service_id = sid, error = %e,
+                "restored the engine's previous policy profile but could not recompile it; \
+                 it will serve a stale policy set until POST \
+                 /api/control-plane/perm/compile/{sid} succeeds");
+        }
+    }
+}
+
 /// Apply an update body's `authz_service_id` to `engine`, binding it to that
 /// policy profile and compiling the profile in the SAME transaction.
 ///
@@ -4770,9 +4812,19 @@ async fn apply_authz_service_update(
         .begin()
         .await
         .map_err(crate::http_error::db_error)?;
-    st.engine_mgmt
-        .set_engine_authz_service_in_tx(&mut tx, engine.id, Some(sid))
-        .await?;
+    if !st
+        .engine_mgmt
+        .set_engine_authz_service_in_tx(&mut tx, engine.id, Some(sid), &engine.status)
+        .await?
+    {
+        // The row moved since it was read — typically a concurrent delete
+        // flipping it to `deleting`. Same compare-and-set, and same 409, the
+        // spec write uses; the transaction is dropped, so nothing is bound and
+        // nothing is compiled.
+        return Err(CpError::Conflict(
+            "engine changed while the policy-profile binding was being applied; retry".into(),
+        ));
+    }
     if let Some(compiler) = st.perm_compiler.clone() {
         if let Err(e) = compiler.recompile_profile_in_tx(&mut tx, sid).await {
             tracing::error!(
@@ -4836,25 +4888,61 @@ async fn update_engine(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-    // `authz_service_id` is HONOURED here rather than refused the way
-    // `catalogs` is above, because there is no other route to send the caller
-    // to: until this landed, binding an engine to an existing policy profile
-    // after create was only reachable by a direct SQL `UPDATE` (which is what
-    // SP4a's live gate had to do). Applied BEFORE the type dispatch so the
-    // provision request the dispatch builds sees the new binding.
-    apply_authz_service_update(&st, &mut engine, b.authz_service_id).await?;
-    // StarRocks has its own spec builder + provision-req assembler (FE/CN roles,
-    // builtin storage volume) — dispatch to it rather than running the Trino
-    // spec/assembly below.
-    if engine.r#type == "starrocks" {
-        return update_starrocks_engine(st, engine, b).await;
-    }
-    if engine.r#type != "trino" {
+    // I4: EVERY cheap refusal runs BEFORE the profile binding is committed.
+    // The bind is a real write (and compiles policy), so a PUT that ends in a
+    // 400 or a 409 must not have performed it. These three guards used to sit
+    // downstream of the bind, inside the type-specific paths.
+    //
+    //   1. the engine kind — an unsupported kind is a 400 either way;
+    //   2. kubernetes configured — both paths refuse without a provisioner, so
+    //      hoisting the check changes no outcome, only its order (each path
+    //      keeps its own check, now unreachable but still correct);
+    //   3. the StarRocks body validators, which are pure functions of the body
+    //      (delegation mode, protected `feConfig` keys, autoscaling bounds) and
+    //      so are safe to evaluate twice.
+    //
+    // The bind's own write is additionally compare-and-set on the status read
+    // above, so the concurrent-delete 409 cannot land after it either.
+    if engine.r#type != "starrocks" && engine.r#type != "trino" {
         return Err(CpError::BadRequest(
             "update not supported for this engine kind".into(),
         ));
     }
-    update_trino_engine(st, engine, b).await
+    if st.engine_provisioner.is_none() {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    }
+    if engine.r#type == "starrocks" {
+        let sr_body = b.starrocks.clone().unwrap_or_default();
+        validate_sr_delegation_mode(&sr_body)?;
+        validate_sr_fe_config(&sr_body)?;
+        validate_sr_autoscaling(&sr_body)?;
+    }
+    // `authz_service_id` is HONOURED here rather than refused the way
+    // `catalogs` is above, because there is no other route to send the caller
+    // to: until this landed, binding an engine to an existing policy profile
+    // after create was only reachable by a direct SQL `UPDATE` (which is what
+    // SP4a's live gate had to do). Applied before the type dispatch so the
+    // provision request the dispatch builds — whose `RangerBinding` is derived
+    // from `engine.authz_service_id` — sees the new binding.
+    let previous_authz_service_id = engine.authz_service_id;
+    apply_authz_service_update(&st, &mut engine, b.authz_service_id).await?;
+    let rebound = engine.authz_service_id != previous_authz_service_id;
+    // StarRocks has its own spec builder + provision-req assembler (FE/CN roles,
+    // builtin storage volume) — dispatch to it rather than running the Trino
+    // spec/assembly below.
+    let engine_id = engine.id;
+    let out = if engine.r#type == "starrocks" {
+        update_starrocks_engine(st.clone(), engine, b).await
+    } else {
+        update_trino_engine(st.clone(), engine, b).await
+    };
+    // A refusal from further down — one decided from the BUILT spec, which the
+    // hoisted guards above cannot pre-empt — must not leave the engine
+    // re-pointed. See `restore_engine_authz_service`.
+    if out.is_err() && rebound {
+        restore_engine_authz_service(&st, engine_id, previous_authz_service_id).await;
+    }
+    out
 }
 
 /// Trino update path, split out from [`update_engine`] (which only does the

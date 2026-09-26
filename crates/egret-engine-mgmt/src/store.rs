@@ -313,18 +313,30 @@ impl EngineMgmtStore {
     ///
     /// `None` DETACHES the engine. It never touches `policy.authz_services` —
     /// unbinding must not delete a profile row.
+    ///
+    /// **Compare-and-set on `expect_status`**, and `false` when it missed —
+    /// the SAME guard [`update_engine`](Self::update_engine) puts on the spec
+    /// write, for the same reason. A PUT racing a concurrent DELETE could
+    /// otherwise read `running`, have DELETE flip the row to `deleting`, and
+    /// still bind (and compile) a profile onto an engine that is being torn
+    /// down — a write the caller is about to be told failed with a 409.
     pub async fn set_engine_authz_service_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         id: Uuid,
         authz_service_id: Option<i64>,
-    ) -> Result<(), EngineMgmtError> {
-        sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = $2 WHERE id = $1")
-            .bind(id)
-            .bind(authz_service_id)
-            .execute(&mut **tx)
-            .await?;
-        Ok(())
+        expect_status: &str,
+    ) -> Result<bool, EngineMgmtError> {
+        let res = sqlx::query(
+            "UPDATE engine_mgmt.engines SET authz_service_id = $2 \
+             WHERE id = $1 AND status = $3",
+        )
+        .bind(id)
+        .bind(authz_service_id)
+        .bind(expect_status)
+        .execute(&mut **tx)
+        .await?;
+        Ok(res.rows_affected() == 1)
     }
 
     /// How many engines are bound to a Ranger profile.

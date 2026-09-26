@@ -10289,6 +10289,73 @@ async fn update_refuses_a_policy_profile_with_no_usable_tag_service() {
     assert_eq!(authz_service_of(&f, &name).await, Some(wired));
 }
 
+/// I4: a PUT that ends in a 400 must NOT have bound. The engine-kind check, the
+/// kubernetes check and the StarRocks body validators all used to run
+/// downstream of the bind, so a refused PUT had already re-pointed the engine
+/// and recompiled the profile it named.
+///
+/// Driven through the StarRocks body validators, because those are the ones
+/// that produce a 400 from a body a caller can actually send.
+#[tokio::test]
+async fn a_refused_update_never_binds_the_profile_it_carried() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_order", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let sr_name = format!("sr-{}", Uuid::new_v4().simple());
+    let sr_id = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .create_engine(
+            &sr_name,
+            "starrocks",
+            "egret-engines",
+            &serde_json::json!({ "starrocksConfig": {} }),
+            None,
+        )
+        .await
+        .unwrap()
+        .id;
+    let before = authz_service_of(&f, &sr_name).await;
+
+    // A perfectly valid, tag-wired, starrocks-typed, unbound profile...
+    let profile_name = format!("srp-{}", Uuid::new_v4().simple());
+    let profile = seed_typed_profile(&f, &profile_name, "starrocks").await;
+    assert_ne!(before, Some(profile));
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    // ...carried on a body the StarRocks validators refuse (`delegationMode`).
+    let mut body = rebind_body(&sr_name, wh_id, serde_json::json!(profile));
+    body["kind"] = serde_json::json!("starrocks");
+    body["starrocks"] = serde_json::json!({ "delegationMode": "not-a-mode" });
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("PUT", &format!("/engines/{sr_id}"), &token, Some(body)))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert_eq!(
+        authz_service_of(&f, &sr_name).await,
+        before,
+        "a PUT that ends in a 400 must not have bound the profile it carried"
+    );
+    assert!(
+        compiler.in_tx_calls.lock().unwrap().is_empty(),
+        "nor compiled it"
+    );
+}
+
 /// I3's other half, and the one that keeps the guard from being over-strict: a
 /// STARROCKS profile with no tag service is ACCEPTED.
 ///
@@ -10368,4 +10435,77 @@ async fn update_accepts_a_starrocks_profile_with_no_tag_service() {
         vec![profile],
         "and it is still recompiled"
     );
+}
+
+/// I4's general half: a refusal decided from the BUILT spec — which no hoisted
+/// guard can pre-empt — still leaves the binding where it was.
+///
+/// A StarRocks engine row with no primary warehouse attachment 400s inside
+/// `build_starrocks_provision_req`, well after the bind has committed. The
+/// compensating restore is what keeps "the caller was told no" and "the engine
+/// was re-pointed anyway" from both being true.
+#[tokio::test]
+async fn a_late_refusal_restores_the_previous_binding() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_late", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let sr_name = format!("sr-{}", Uuid::new_v4().simple());
+    let sr_id = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .create_engine(
+            &sr_name,
+            "starrocks",
+            "egret-engines",
+            &serde_json::json!({ "starrocksConfig": {} }),
+            None,
+        )
+        .await
+        .unwrap()
+        .id;
+
+    // Give it a starting binding, so the restore has something to restore TO
+    // (and so this cannot pass merely because both values are NULL).
+    let start_name = format!("srstart-{}", Uuid::new_v4().simple());
+    let start = seed_profile_without_tag_service(&f, &start_name, "starrocks").await;
+    egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .set_engine_authz_service(sr_id, Some(start))
+        .await
+        .unwrap();
+
+    let target_name = format!("srtarget-{}", Uuid::new_v4().simple());
+    let target = seed_profile_without_tag_service(&f, &target_name, "starrocks").await;
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    // This engine has no primary warehouse attachment, so the StarRocks
+    // provision-req build 400s — after the bind.
+    let mut body = rebind_body(&sr_name, wh_id, serde_json::json!(target));
+    body["kind"] = serde_json::json!("starrocks");
+    body["starrocks"] = serde_json::json!({ "feReplicas": 1, "cnReplicas": 1 });
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("PUT", &format!("/engines/{sr_id}"), &token, Some(body)))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert!(!status.is_success(), "the late guard must refuse; body={j}");
+    assert_eq!(
+        authz_service_of(&f, &sr_name).await,
+        Some(start),
+        "a refused update must leave the engine on the profile it started on"
+    );
+    // Both profile rows survive — a restore unbinds, never deletes.
+    assert!(service_exists(&f, &start_name).await);
+    assert!(service_exists(&f, &target_name).await);
 }
