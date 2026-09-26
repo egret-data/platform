@@ -1000,3 +1000,131 @@ async fn warehouse_reads_come_from_the_attachments_not_the_engine_column() {
     );
     assert_eq!(by_engine.get(&bare), None, "absent, not an empty vec");
 }
+
+/// A `policy.authz_services` row this fixture's fake `perm.compiled` row
+/// claims, matching everything `compiled_service_ids_for_catalog_via` FKs
+/// through. Returns the service id.
+async fn fake_compiled_service(db: &Db) -> i64 {
+    let def_name = unique("wd9-def");
+    sqlx::query(
+        "INSERT INTO policy.authz_service_defs (id, name, def_jsonb) VALUES ($1,$2,'{}'::jsonb)",
+    )
+    .bind(rand_bigint())
+    .bind(&def_name)
+    .execute(&db.pool)
+    .await
+    .expect("service def");
+    sqlx::query_scalar(
+        "INSERT INTO policy.authz_services (name, type, config_jsonb) VALUES ($1,$2,'{}'::jsonb) RETURNING id",
+    )
+    .bind(unique("wd9-svc"))
+    .bind(&def_name)
+    .fetch_one(&db.pool)
+    .await
+    .expect("service")
+}
+
+fn rand_bigint() -> i64 {
+    (Uuid::new_v4().as_u128() % (i64::MAX as u128)) as i64
+}
+
+/// A `perm.grants`/`perm.compiled` pair standing in for a real compile: a
+/// grant on `catalog_id` and a `policy.authz_policies` row under
+/// `service_id`, linked by a `perm.compiled` provenance row — everything
+/// `RegistryStore::delete_catalog_with_compiler`'s historical read needs,
+/// without pulling in the real compiler crate this test's own crate is
+/// deliberately free of.
+async fn seed_stale_compiled_grant(db: &Db, catalog_id: Uuid, service_id: i64) {
+    let grant_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, origin) \
+         VALUES ('allow', ARRAY['read']::text[], $1, 'explicit') RETURNING id",
+    )
+    .bind(catalog_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("grant");
+    sqlx::query(
+        "INSERT INTO perm.grant_principals (grant_id, kind, ref, mode) \
+         VALUES ($1, 'user', $2, 'include')",
+    )
+    .bind(grant_id)
+    .bind(unique("wd9-user"))
+    .execute(&db.pool)
+    .await
+    .expect("grant principal");
+    let policy_id: i64 = sqlx::query_scalar(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb) \
+         VALUES ($1, $2, '{}'::jsonb) RETURNING id",
+    )
+    .bind(service_id)
+    .bind(format!("perm-grant-{grant_id}"))
+    .fetch_one(&db.pool)
+    .await
+    .expect("policy");
+    sqlx::query(
+        "INSERT INTO perm.compiled (service_id, policy_id, source_kind, grant_id) \
+         VALUES ($1, $2, 'grant', $3)",
+    )
+    .bind(service_id)
+    .bind(policy_id)
+    .bind(grant_id)
+    .execute(&db.pool)
+    .await
+    .expect("compiled provenance");
+}
+
+/// Deleting a catalog that carries an EXPLICIT `perm.grants` row (no
+/// workspace assignment at all — the production route's own guard only
+/// checks attachments and `catalog_workspaces`, so this is reachable) sweeps
+/// whichever profile that grant was last compiled into, in the SAME
+/// transaction as the delete (SP4a Task 16 re-enumeration: a ninth instance,
+/// same shape as D3 defect 3, found on a path Task 15 did not list).
+#[tokio::test]
+async fn delete_catalog_recompiles_the_service_its_grant_was_compiled_into() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let def = |id: Uuid| {
+        CatalogDef::parse(
+            "jdbc",
+            &json!({
+                "dialect": "postgresql", "host": "db", "port": 5432, "database": "d",
+                "user": "u", "password_secret_id": id, "ssl": { "mode": "require" }
+            }),
+            &json!(null),
+        )
+        .unwrap()
+    };
+    let vault = secrets(&db);
+    let pw = vault
+        .create(None, &unique("wd9-pw"), None, "hunter2")
+        .await
+        .unwrap();
+    let row = store
+        .create_catalog(&unique("wd9cat"), &def(pw), None)
+        .await
+        .unwrap();
+
+    let service_id = fake_compiled_service(&db).await;
+    seed_stale_compiled_grant(&db, row.id, service_id).await;
+
+    let compiler = FakeAssignmentCompiler::default();
+    let deleted = store
+        .delete_catalog_with_compiler(row.id, Some(&compiler))
+        .await
+        .unwrap();
+    assert!(deleted);
+    assert!(
+        compiler.catalog_calls.lock().unwrap().is_empty(),
+        "delete_catalog_with_compiler must call recompile_services_in_tx, \
+         not recompile_catalog_assignment_in_tx — the latter re-derives from \
+         CURRENT catalog reachability, which is empty the instant this catalog \
+         is gone"
+    );
+    assert_eq!(
+        compiler.service_calls.lock().unwrap().as_slice(),
+        &[vec![service_id]],
+        "must recompile exactly the service this catalog's grant was \
+         historically compiled into, sourced from perm.compiled before the \
+         cascade erased it"
+    );
+}

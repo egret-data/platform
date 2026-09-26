@@ -397,12 +397,54 @@ impl RegistryStore {
 
     /// `Conflict` while an attachment or assignment still references it.
     pub async fn delete_catalog(&self, id: Uuid) -> Result<bool, RegistryError> {
-        match sqlx::query("DELETE FROM registry.catalogs WHERE id = $1")
+        self.delete_catalog_with_compiler(id, None).await
+    }
+
+    /// [`Self::delete_catalog`], plus sweeping any compiled policy this
+    /// catalog's (about to be cascade-deleted) grants left behind (SP4a Task
+    /// 16 re-enumeration: found alongside D3 defect 3, same shape).
+    ///
+    /// **This is the SAME defect as `delete_warehouse_releasing_catalog`'s,
+    /// on a path Task 15 did not enumerate.** `perm.grants.catalog_id`
+    /// `ON DELETE CASCADE`s from `registry.catalogs`, so any grant scoped to
+    /// this catalog — including an EXPLICIT one, created directly through the
+    /// `perm/grants` API rather than through a workspace assignment — goes
+    /// with it, silently, with no recompile. The production caller
+    /// (`egret-engine-mgmt::catalogs::delete_registry_catalog`) already
+    /// refuses this call while any engine attachment or workspace assignment
+    /// exists, exactly like `delete_warehouse_releasing_catalog`'s own guard —
+    /// so "services this catalog reaches now" is always empty here too, and
+    /// the same `egret_perm::compiled_service_ids_for_catalog_via` historical
+    /// read is what can still find a profile that reached this catalog in the
+    /// past and was detached without a successful recompile.
+    pub async fn delete_catalog_with_compiler(
+        &self,
+        id: Uuid,
+        compiler: Option<&dyn crate::CatalogAssignmentCompiler>,
+    ) -> Result<bool, RegistryError> {
+        let mut tx = self.pool().begin().await?;
+        // Captured before the delete: `perm.grants`/`perm.compiled` for this
+        // catalog are about to cascade away.
+        let mut affected_services =
+            egret_perm::compiled_service_ids_for_catalog_via(&mut tx, id).await?;
+        affected_services.sort_unstable();
+        affected_services.dedup();
+        let result = sqlx::query("DELETE FROM registry.catalogs WHERE id = $1")
             .bind(id)
-            .execute(self.pool())
-            .await
-        {
-            Ok(r) => Ok(r.rows_affected() == 1),
+            .execute(&mut *tx)
+            .await;
+        match result {
+            Ok(r) => {
+                let deleted = r.rows_affected() == 1;
+                if deleted {
+                    if let (Some(c), false) = (compiler, affected_services.is_empty()) {
+                        c.recompile_services_in_tx(&mut tx, &affected_services)
+                            .await?;
+                    }
+                }
+                tx.commit().await?;
+                Ok(deleted)
+            }
             Err(e) if is_fk_violation(&e) => Err(RegistryError::Conflict(
                 "the catalog is still attached or assigned".into(),
             )),

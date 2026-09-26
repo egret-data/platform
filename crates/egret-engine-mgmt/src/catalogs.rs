@@ -465,7 +465,9 @@ async fn delete_registry_catalog(
                 .collect(),
         });
     }
-    registry.delete_catalog(id).await?;
+    registry
+        .delete_catalog_with_compiler(id, st.catalog_assignment_compiler.as_deref())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
