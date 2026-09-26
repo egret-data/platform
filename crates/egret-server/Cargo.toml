@@ -17,6 +17,10 @@ egret-machine-idp.workspace = true
 egret-dataapi.workspace = true
 egret-workflow.workspace = true
 egret-policy.workspace = true
+# SP4a Task 9: the data-permission model's HTTP surface (grants/rules/explain/
+# compile). Lives in `egret-perm-compile` because every mutating route
+# recompiles in the same transaction as its write.
+egret-perm-compile.workspace = true
 egret-query.workspace = true
 egret-bi.workspace = true
 egret-automation.workspace = true

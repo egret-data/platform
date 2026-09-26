@@ -37,6 +37,78 @@ struct Fixture {
     /// holding this handle doesn't have its recorded state silently
     /// discarded by a mid-test rebuild (fix round 1 review, F-8).
     starrocks_ddl: FakeStarRocksDdl,
+    /// The SP4a profile compiler `f.app` was built with (`None` for every test
+    /// that does not care), threaded through the rebuilds for the same reason
+    /// `starrocks_ddl` is.
+    perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
+}
+
+/// Records which profiles the engine seam asked to have recompiled. The
+/// compiler itself is covered by `egret-perm-compile`'s own suite; what is new
+/// here — and what this fake is for — is that an engine BIND reaches it at all,
+/// with the right `service_id`, and only once every catalog the engine attaches
+/// is attached.
+#[derive(Clone, Default)]
+struct RecordingProfileCompiler {
+    calls: Arc<std::sync::Mutex<Vec<i64>>>,
+}
+
+#[async_trait::async_trait]
+impl egret_engine_mgmt::ProfileCompilerPort for RecordingProfileCompiler {
+    async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        self.calls.lock().unwrap().push(service_id);
+        Ok(())
+    }
+
+    async fn recompile_catalog_assignment_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        _catalog_id: Uuid,
+    ) -> Result<(), egret_perm::CompileError> {
+        // Engine-bind tests only assert `recompile_profile` was reached with
+        // the right `service_id`; the assignment-recompile suite below uses
+        // `RealProfileCompiler` instead, which actually compiles.
+        Ok(())
+    }
+}
+
+/// A `ProfileCompilerPort` that really recompiles, against the fixture's own
+/// DB pool — the same construction `egret-bin`'s `ProfileCompilerImpl` wires
+/// in production. `RecordingProfileCompiler` above is enough for the
+/// engine-bind tests (they only assert a `service_id` was reached); SP4a Task
+/// 15's D3-assignment tests need the compiled effect itself, in
+/// `policy.authz_policies`, to actually exist.
+#[derive(Clone)]
+struct RealProfileCompiler {
+    perm: egret_perm::PermStore,
+    policy: egret_policy::PolicyStore,
+}
+
+#[async_trait::async_trait]
+impl egret_engine_mgmt::ProfileCompilerPort for RealProfileCompiler {
+    async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::recompile_service(&self.perm, &self.policy, service_id)
+            .await
+            .map(|_| ())
+    }
+
+    async fn recompile_catalog_assignment_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        catalog_id: Uuid,
+    ) -> Result<(), egret_perm::CompileError> {
+        let mut ids = egret_policy::services_for_catalog_via(&mut **tx, catalog_id)
+            .await
+            .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        egret_perm_compile::lock_services_in_tx(tx, &ids).await?;
+        egret_perm_compile::recompile_services_in_tx(tx, &ids).await?;
+        Ok(())
+    }
 }
 
 /// Incidental PDP for `EngineMgmtState`: every existing route test authenticates
@@ -77,6 +149,7 @@ fn build_app(
     pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     ranger_enabled: bool,
     starrocks_ddl: FakeStarRocksDdl,
+    perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
 ) -> axum::Router {
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
@@ -108,6 +181,12 @@ fn build_app(
             ranger_enabled,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(starrocks_ddl),
+            perm_compiler,
+            // SP4a Task 16: no test here exercises `ensure_warehouse_catalog`'s
+            // own recompile through this crate's create-engine callers (it is
+            // a proven no-op there — see `RegistryStore::ensure_warehouse_catalog_with_compiler`'s
+            // doc), so `None` for every fixture.
+            catalog_assignment_compiler: None,
         })
 }
 
@@ -129,6 +208,7 @@ async fn attach_real_pdp(f: &mut Fixture) {
         pdp,
         f.ranger_enabled,
         f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
     );
 }
 
@@ -155,6 +235,17 @@ async fn setup_with_ranger(
     kube: Option<Arc<dyn KubeClient>>,
     ranger_enabled: bool,
 ) -> Option<Fixture> {
+    setup_with_ranger_and_compiler(engine_provisioner, kube, ranger_enabled, None).await
+}
+
+/// `setup_with_ranger` with the SP4a profile compiler under the test's control.
+/// `None` — every existing caller — leaves the engine seam exactly as it was.
+async fn setup_with_ranger_and_compiler(
+    engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
+    kube: Option<Arc<dyn KubeClient>>,
+    ranger_enabled: bool,
+    perm_compiler: Option<Arc<dyn egret_engine_mgmt::ProfileCompilerPort>>,
+) -> Option<Fixture> {
     let dsn = egret_test_db::url().await?;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
@@ -178,6 +269,7 @@ async fn setup_with_ranger(
         std::sync::Arc::new(AllowAllPdp),
         ranger_enabled,
         starrocks_ddl.clone(),
+        perm_compiler.clone(),
     );
 
     Some(Fixture {
@@ -189,6 +281,7 @@ async fn setup_with_ranger(
         kube,
         ranger_enabled,
         starrocks_ddl,
+        perm_compiler,
     })
 }
 
@@ -4585,6 +4678,7 @@ async fn apply_late_binds_ranger_once_it_is_enabled_after_an_unbound_create() {
         std::sync::Arc::new(AllowAllPdp),
         true,
         f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
     );
     f.ranger_enabled = true;
 
@@ -5687,10 +5781,17 @@ async fn registry_catalog_not_found_warehouse_change_and_permission_checks() {
     assert_eq!(status, StatusCode::CREATED, "{j}");
     let cat2_id = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
     let ws_id = seed_workspace(&f).await;
-    registry(&f)
-        .set_catalog_workspaces(cat2_id, &[ws_id])
+    // `set_catalog_workspaces` (the pool-opening wrapper) was deleted in
+    // SP4a Task 6 fix round 2 — it was the third path writing
+    // `registry.catalog_workspaces` with no `perm` grant sync composed in.
+    // Only `_in_tx` remains; this test asserts a 409 conflict body, not
+    // `perm.grants`, so it composes no sync — the route-level assertions of
+    // that (`workspace_assignment_route_syncs_perm_grants`) live elsewhere.
+    let mut tx = f.db.pool.begin().await.unwrap();
+    egret_catalog_registry::RegistryStore::set_catalog_workspaces_in_tx(&mut tx, cat2_id, &[ws_id])
         .await
         .unwrap();
+    tx.commit().await.unwrap();
     let (status, j) = call(&f, "DELETE", &format!("/catalogs/{cat2_id}"), &admin, None).await;
     assert_eq!(status, StatusCode::CONFLICT, "{j}");
     assert_eq!(j["code"], "catalog_in_use");
@@ -7332,6 +7433,328 @@ async fn workspace_assignment() {
     let (status, j) = call(&f, "DELETE", &format!("/catalogs/{cid}"), &token, None).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(j["workspaces"][0]["id"], serde_json::json!(ws2));
+}
+
+/// The route side of D3 (SP4a Task 6 fix round 1, Important 2): the review
+/// found `workspace_assignment` above proves the `registry.catalog_workspaces`
+/// side but nothing ever asserted the `perm.grants` side — that the PUT
+/// route actually creates the implicit read grant, and that unassigning
+/// removes it, through the real HTTP handler rather than a direct call to
+/// `sync_assignment_grants`.
+#[tokio::test]
+async fn workspace_assignment_route_syncs_perm_grants() {
+    let Some(f) = setup_full(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_ws_perm_admin", true).await;
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(
+            serde_json::json!({ "name": unique_catalog_name("gp"), "kind": "tpch", "config": {} }),
+        ),
+    )
+    .await;
+    let cid = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let ws = seed_workspace(&f).await;
+    let perm = egret_perm::PermStore::new(f.db.pool.clone());
+    let implicit_for = |grants: &[egret_perm::Grant], catalog: Uuid| -> Vec<egret_perm::Grant> {
+        grants
+            .iter()
+            .filter(|g| {
+                g.scope.catalog_id == catalog
+                    && matches!(
+                        g.origin,
+                        egret_perm::GrantOrigin::WorkspaceAssignment { .. }
+                    )
+            })
+            .cloned()
+            .collect()
+    };
+
+    let (status, _) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &token,
+        Some(serde_json::json!({ "workspaceIds": [ws] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let after_assign = implicit_for(&perm.list_grants().await.unwrap(), cid);
+    assert_eq!(
+        after_assign.len(),
+        1,
+        "the route must create exactly one implicit grant"
+    );
+    assert_eq!(after_assign[0].actions, vec![egret_perm::Action::Read]);
+    assert!(matches!(
+        after_assign[0].origin,
+        egret_perm::GrantOrigin::WorkspaceAssignment { workspace_id } if workspace_id == ws
+    ));
+
+    let (status, _) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &token,
+        Some(serde_json::json!({ "workspaceIds": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let after_unassign = implicit_for(&perm.list_grants().await.unwrap(), cid);
+    assert!(
+        after_unassign.is_empty(),
+        "unassigning through the route must remove the implicit grant"
+    );
+}
+
+/// The rollback side of D3 (SP4a Task 6 fix round 1, Important 2). The
+/// review's own words: "a rollback nobody has ever observed is a
+/// hypothesis." This calls the exact two `_in_tx` functions the handler
+/// composes (`RegistryStore::set_catalog_workspaces_in_tx` then
+/// `egret_perm::sync_assignment_grants_in_tx`) inside one transaction opened
+/// the same way the handler opens it, deliberately making the SECOND write
+/// fail with a real constraint violation (a workspace id that satisfies no
+/// FK) after the FIRST write has already gone through inside the
+/// (uncommitted) transaction — then rolls back exactly as the handler does
+/// when the `?` on the second call returns before `tx.commit()`, and proves
+/// the first write did not survive.
+#[tokio::test]
+async fn a_failed_grant_sync_rolls_back_the_assignment_write() {
+    let Some(f) = setup_full(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cat_ws_rollback_admin", true).await;
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(
+            serde_json::json!({ "name": unique_catalog_name("rb"), "kind": "tpch", "config": {} }),
+        ),
+    )
+    .await;
+    let cid = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    let valid_ws = seed_workspace(&f).await;
+    // Never inserted into `workspaces` — `perm.grants.origin_workspace_id
+    // REFERENCES workspaces(id)` (migrations/0154_perm_model.sql) refuses it.
+    // `registry.catalog_workspaces` carries no such FK, so the first write
+    // below succeeds on its own before the second one fails — the scenario
+    // the handler's transaction exists to prevent from ever being observed
+    // as two independent facts.
+    let bogus_ws = Uuid::new_v4();
+
+    let mut tx = f.db.pool.begin().await.unwrap();
+    egret_catalog_registry::RegistryStore::set_catalog_workspaces_in_tx(&mut tx, cid, &[valid_ws])
+        .await
+        .expect("the registry write alone succeeds");
+    let grant_sync_result =
+        egret_perm::sync_assignment_grants_in_tx(&mut tx, cid, &[bogus_ws]).await;
+    assert!(
+        grant_sync_result.is_err(),
+        "the bogus workspace id must be refused by the FK, not silently accepted"
+    );
+    // What the handler does on `?`: never calls `tx.commit()`. Rolled back
+    // explicitly here for a deterministic assertion rather than relying on
+    // `Transaction::drop`'s background rollback racing the query below.
+    tx.rollback().await.unwrap();
+
+    let assigned = registry(&f).list_catalog_workspaces(cid).await.unwrap();
+    assert!(
+        assigned.is_empty(),
+        "the registry write must not survive a grant-sync failure in the same transaction, \
+         got: {assigned:?}"
+    );
+}
+
+/// SP4a Task 15, D3 defect 1 (measured on the live gate's THIRD RUN,
+/// `docs/en/plans/2026-09-24-permission-model-sp4a-live-result.md:801`):
+/// `set_catalog_workspaces` was writing the implicit grant row correctly
+/// (`workspace_assignment_route_syncs_perm_grants` above proves that) but
+/// never compiling it — the member's query was DENIED immediately after the
+/// assign committed, and only started passing once an UNRELATED membership
+/// write recompiled the profile and swept the stale assignment in.
+///
+/// With a REAL `ProfileCompilerPort` wired (`RealProfileCompiler`, not the
+/// recording fake the engine-bind tests use), this asserts against
+/// `policy.authz_policies` directly — the thing the engine actually reads —
+/// with NO call to `recompile_service`/`POST /perm/compile/{id}` anywhere in
+/// between the PUT and the read. It also proves the mirror direction:
+/// unassigning reaps the compiled policy in the same request.
+#[tokio::test]
+async fn assigning_a_catalog_compiles_its_implicit_grant_with_no_manual_step() {
+    let Some(mut f) = setup_full(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let compiler: Arc<dyn egret_engine_mgmt::ProfileCompilerPort> = Arc::new(RealProfileCompiler {
+        perm: egret_perm::PermStore::new(f.db.pool.clone()),
+        policy: egret_policy::PolicyStore::new(f.db.clone()),
+    });
+    f.perm_compiler = Some(compiler);
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        f.perm_compiler.clone(),
+    );
+    let token = session_for(&f, "d3_recompile_admin", true).await;
+
+    // A StarRocks profile with one engine bound to it — no tag service
+    // needed, D3 is about an access policy (same choice
+    // `egret-perm-compile/tests/workspace_members.rs` makes).
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    egret_policy::seed_starrocks(&policy)
+        .await
+        .expect("seed starrocks service-def");
+    let service = egret_policy_api::PolicyPort::create_service(
+        &policy,
+        &format!("d3sr_{}", Uuid::new_v4().simple()),
+        "starrocks",
+        &serde_json::json!({}),
+    )
+    .await
+    .expect("create service");
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+    )
+    .bind(format!("d3-eng-{}", Uuid::new_v4().simple()))
+    .bind(service.id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed engine bound to the profile");
+
+    let (_, j) = call(
+        &f,
+        "POST",
+        "/catalogs",
+        &token,
+        Some(
+            serde_json::json!({ "name": unique_catalog_name("d3c"), "kind": "tpch", "config": {} }),
+        ),
+    )
+    .await;
+    let cid = Uuid::parse_str(j["id"].as_str().unwrap()).unwrap();
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine_id)
+    .bind(cid)
+    .execute(&f.db.pool)
+    .await
+    .expect("attach catalog to the bound engine");
+
+    // A workspace with ONE real member — an empty-member workspace compiles
+    // its implicit grant to a SKIP, not a policy (`compile_desired`'s own
+    // "nothing to name" branch), which would make this test pass for the
+    // wrong reason.
+    let ws = seed_workspace(&f).await;
+    let username = format!("d3user_{}", Uuid::new_v4().simple());
+    let user_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name, username) VALUES ('local',$1,'D3 User',$2) \
+         RETURNING id",
+    )
+    .bind(format!("{username}@egret.local"))
+    .bind(&username)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed user");
+    let res = sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $1, r.id, 'workspace', $2 FROM roles r \
+          WHERE r.scope = 'workspace' AND r.name = 'ws_viewer'",
+    )
+    .bind(user_id)
+    .bind(ws)
+    .execute(&f.db.pool)
+    .await
+    .expect("seed membership");
+    assert_eq!(res.rows_affected(), 1, "the membership row must exist");
+
+    // THE ASSERTION. Assign, then read `policy.authz_policies` — nothing
+    // between the PUT and this read calls any recompile.
+    let (status, _) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &token,
+        Some(serde_json::json!({ "workspaceIds": [ws] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let grant_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment'",
+    )
+    .bind(cid)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the implicit grant row exists");
+    let policy_name = format!("{}{}", egret_policy::COMPILER_GRANT_PREFIX, grant_id);
+    let policy_row: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(service.id)
+    .bind(&policy_name)
+    .fetch_optional(&f.db.pool)
+    .await
+    .unwrap();
+    let policy_row = policy_row.expect(
+        "assigning the catalog through the route must compile the implicit grant into \
+         policy.authz_policies immediately, with no manual compile step",
+    );
+    let items = policy_row["policyItems"].as_array().expect("policyItems");
+    assert_eq!(
+        items.len(),
+        1,
+        "one expanded item, not one per user: {policy_row:#}"
+    );
+    let named_users: Vec<String> = items[0]["users"]
+        .as_array()
+        .expect("users")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        named_users,
+        vec![username.clone()],
+        "the compiled policy must name the member's stored username"
+    );
+
+    // The mirror direction: unassigning reaps the compiled policy too, with
+    // no manual step either.
+    let (status, _) = call(
+        &f,
+        "PUT",
+        &format!("/catalogs/{cid}/workspaces"),
+        &token,
+        Some(serde_json::json!({ "workspaceIds": [] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let reaped: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(service.id)
+    .bind(&policy_name)
+    .fetch_optional(&f.db.pool)
+    .await
+    .unwrap();
+    assert!(
+        reaped.is_none(),
+        "unassigning through the route must reap the compiled policy, not just the grant row"
+    );
 }
 
 #[tokio::test]
@@ -9234,5 +9657,75 @@ async fn saving_a_healthy_catalog_is_not_a_verdict_about_it() {
         row.apply_error, None,
         "and it must not carry the other catalog's message: {:?}",
         row.apply_error
+    );
+}
+
+/// SP4a Task 9 review: binding an engine to a policy profile changes which
+/// catalogs that profile reaches, but mutates no grant and no rule — so the
+/// `perm` compiler's affected-service sets, which are all derived from the
+/// MUTATED ROW, never fire for it. Before this the newly bound profile served
+/// a stale policy set until an operator happened to call
+/// `POST /api/control-plane/perm/compile/{service_id}` by hand.
+#[tokio::test]
+async fn creating_an_engine_bound_to_a_profile_recompiles_that_profile() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_sp4a_bind_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    let profile_name = format!("trino-{}", Uuid::new_v4().simple());
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    egret_policy_api::PolicyPort::ensure_trino_def(&policy)
+        .await
+        .unwrap();
+    let profile = egret_policy_api::PolicyPort::create_service(
+        &policy,
+        &profile_name,
+        "trino",
+        &serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        compiler.calls.lock().unwrap().is_empty(),
+        "nothing should have been recompiled before the engine exists"
+    );
+
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id, "authzServiceId": profile.id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(authz_service_of(&f, &name).await, Some(profile.id));
+
+    assert_eq!(
+        *compiler.calls.lock().unwrap(),
+        vec![profile.id],
+        "the create must have asked for exactly the profile it bound to be \
+         recompiled — otherwise that profile keeps serving a policy set that \
+         predates every catalog this engine just attached"
     );
 }

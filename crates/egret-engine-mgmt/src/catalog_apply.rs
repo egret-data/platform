@@ -898,6 +898,32 @@ pub(crate) async fn attach_to_engine(
     catalog: &CatalogRow,
     role_from_client: Option<Uuid>,
 ) -> Result<(), CatalogOpError> {
+    let out = attach_to_engine_inner(st, engine, catalog, role_from_client).await;
+    if out.is_ok() {
+        // **An attachment change is a recompile trigger** (whole-branch
+        // review, Important 7). `egret_perm_compile::affected_services_for_grant`
+        // derives which profiles a grant reaches from the CURRENT
+        // `registry.engine_catalog_attachments`, so attaching a catalog to an
+        // existing engine leaves that catalog's grants uncompiled in the
+        // profile that now reaches them — silent, and fail-closed only until
+        // someone notices a grant that grants nothing. Engine CREATE already
+        // recompiles for exactly this reason (`profile_compiler`'s own doc:
+        // binding mutates no grant and no rule yet changes the answer to
+        // "which profiles does this catalog reach"); an attach changes the
+        // same answer and had no hook. Placed on the shared seam rather than
+        // on the three routes that reach it, so a fourth caller cannot miss
+        // it, and it never fails its caller — the attach has happened.
+        crate::profile_compiler::recompile_bound_profile(st, engine.id, &engine.name).await;
+    }
+    out
+}
+
+async fn attach_to_engine_inner(
+    st: &CpState,
+    engine: &Engine,
+    catalog: &CatalogRow,
+    role_from_client: Option<Uuid>,
+) -> Result<(), CatalogOpError> {
     if engine.status == crate::engine_status::DELETING {
         return Err(CatalogOpError::Http(apply_conflict()));
     }
@@ -1148,6 +1174,14 @@ pub(crate) async fn detach_from_engine(
     registry.delete_attachment(engine.id, catalog.id).await?;
     // The cluster no longer uses these; failures are logged, the detach happened.
     retire_minted_credential(st, engine, &attachment).await;
+    // The mirror image of the attach hook above, and the one with teeth
+    // (whole-branch review, Important 7): with the catalog detached, this
+    // catalog's grants are no longer in ANY affected set, so deleting a grant
+    // while it is detached recompiles nothing and the compiled `perm-grant-*`
+    // policy stays in the profile — a revocation that does not revoke, until
+    // some unrelated recompile happens. Recompiling here is what makes the
+    // detached state the compiled state.
+    crate::profile_compiler::recompile_bound_profile(st, engine.id, &engine.name).await;
     Ok(())
 }
 

@@ -3018,6 +3018,9 @@ dependencies = [
  "egret-core",
  "egret-events",
  "egret-metastore",
+ "egret-perm",
+ "egret-perm-compile",
+ "egret-policy",
  "egret-query",
  "egret-query-api",
  "egret-secrets",
@@ -3066,6 +3069,8 @@ dependencies = [
  "egret-machine-idp",
  "egret-metastore",
  "egret-notebook",
+ "egret-perm",
+ "egret-perm-compile",
  "egret-policy",
  "egret-provisioner",
  "egret-query",
@@ -3123,6 +3128,9 @@ dependencies = [
  "egret-events",
  "egret-machine-idp",
  "egret-metastore",
+ "egret-perm",
+ "egret-perm-compile",
+ "egret-policy",
  "egret-secrets",
  "egret-storage",
  "egret-test-db",
@@ -3150,9 +3158,11 @@ dependencies = [
 name = "egret-catalog-registry"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "egret-config",
  "egret-metastore",
+ "egret-perm",
  "egret-secrets",
  "egret-test-db",
  "regex",
@@ -3307,6 +3317,8 @@ dependencies = [
  "egret-engine-mgmt-api",
  "egret-events",
  "egret-metastore",
+ "egret-perm",
+ "egret-perm-compile",
  "egret-policy",
  "egret-policy-api",
  "egret-provisioner",
@@ -3471,6 +3483,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-perm"
+version = "0.1.0"
+dependencies = [
+ "egret-metastore",
+ "egret-test-db",
+ "serde",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "egret-perm-compile"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "egret-auth",
+ "egret-core",
+ "egret-events",
+ "egret-metastore",
+ "egret-perm",
+ "egret-policy",
+ "egret-secrets",
+ "egret-test-db",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tower",
+ "tracing",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
 name = "egret-policy"
 version = "0.1.0"
 dependencies = [
@@ -3618,6 +3670,7 @@ dependencies = [
  "egret-machine-idp",
  "egret-metastore",
  "egret-notebook",
+ "egret-perm-compile",
  "egret-policy",
  "egret-query",
  "egret-query-api",
@@ -3747,6 +3800,9 @@ dependencies = [
  "egret-core",
  "egret-events",
  "egret-metastore",
+ "egret-perm",
+ "egret-perm-compile",
+ "egret-policy",
  "egret-test-db",
  "http-body-util",
  "serde",

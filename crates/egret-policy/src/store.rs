@@ -25,6 +25,26 @@ pub struct ServiceRow {
     /// Monotonic tag-assignment version; the Ranger tag-download plugin polls this
     /// (parallel to `policy_version`) to know when to re-pull catalog tags.
     pub tag_version: i64,
+    /// `"manual"` (hand-authored through the policy editor, the default — see
+    /// migration 0155) or `"generated"` (owned by SP4a's permission-model
+    /// compiler, `egret-perm-compile::trigger::apply_diff_in_tx`, which stamps
+    /// this the moment it first compiles a policy for the service).
+    ///
+    /// Task 8 fix round 2 (I-1): the guard this drives is scoped PER POLICY,
+    /// not per profile — `create_policy` and `seed_default_trino_policies`
+    /// refuse outright once a profile is `"generated"` (see
+    /// [`refuse_if_generated`]; adding brand-new content to a compiled
+    /// profile is the confusion Task 8 exists to prevent), but
+    /// `update_policy`/`delete_policy`/`set_policy_enabled` only refuse a
+    /// SPECIFIC policy whose own name is compiler-owned (see
+    /// [`refuse_if_compiler_owned`] and [`is_compiler_owned_policy_name`]) —
+    /// a policy the compiler's sweep never touches is not protected by
+    /// "read-only", since read-only-ness exists only to guard what the
+    /// compiler would otherwise silently overwrite. `delete_service` mirrors
+    /// that: refused only while a compiler-owned policy still exists under
+    /// it (see [`refuse_if_compiler_owned_policies_remain`]), not merely
+    /// because the profile is (or was ever) `"generated"`.
+    pub origin: String,
 }
 
 /// One catalog resource → tag pairing for a service's warehouse(s), the row
@@ -45,9 +65,208 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
 }
 
+/// Name prefix every ACCESS policy SP4a's permission-model compiler
+/// (`egret-perm-compile::grants::compile_grant`) produces —
+/// `format!("{COMPILER_GRANT_PREFIX}{}", grant.id)`.
+///
+/// Defined HERE, not in `egret-perm-compile`, even though that crate is the
+/// one that actually mints names with it: `egret-perm-compile` depends on
+/// `egret-policy` (for `PolicyStore` and the Ranger JSON renderers), never
+/// the reverse, so a constant only `egret-perm-compile` owned could not be
+/// consumed by this crate's own guards. `egret-perm-compile`'s
+/// `trigger::apply_diff_in_tx` (the sweep that reaps any
+/// `policy.authz_policies` row under this prefix that its current compile no
+/// longer produces) and `grants.rs`'s name-builder both import THIS constant
+/// rather than keeping their own copy — see that crate's `trigger.rs` module
+/// doc. Two independent copies of this string would drift, and a drift makes
+/// a policy the sweep reaps look editable to the guards below, or the
+/// reverse.
+pub const COMPILER_GRANT_PREFIX: &str = "perm-grant-";
+/// Name prefix every MASKING/ROW-FILTER policy the compiler
+/// (`egret-perm-compile::rules::compile_rule`) produces. Same rationale as
+/// [`COMPILER_GRANT_PREFIX`].
+pub const COMPILER_RULE_PREFIX: &str = "perm-rule-";
+
+/// Whether `name` identifies a policy the SP4a permission-model compiler
+/// owns (produced by `compile_grant`/`compile_rule` and reachable by
+/// `apply_diff_in_tx`'s existing-state sweep) — see [`COMPILER_GRANT_PREFIX`]
+/// / [`COMPILER_RULE_PREFIX`].
+pub fn is_compiler_owned_policy_name(name: &str) -> bool {
+    name.starts_with(COMPILER_GRANT_PREFIX) || name.starts_with(COMPILER_RULE_PREFIX)
+}
+
+/// SP4a Task 8 fix round 3: refuse a human write that would put (or leave) a
+/// policy NAME under the compiler's reserved prefix (`COMPILER_GRANT_PREFIX`/
+/// `COMPILER_RULE_PREFIX`) — in ANY profile, `manual` or `generated`. Pure
+/// (no DB access): the fact under test is the string alone.
+///
+/// This exists because the profile/policy-origin guards above cannot close
+/// the round-2 report's finding: a human names a policy `perm-grant-foo` in
+/// a still-`manual` profile (`create_policy`'s origin check does not yet
+/// fire — the profile isn't `generated` yet), and the FIRST real recompile
+/// that ever reaches this service silently deletes it in the same
+/// transaction that stamps the profile `generated` (`apply_diff_in_tx`'s
+/// existing-state sweep matches on name alone, with or without a
+/// `perm.compiled` provenance row — Task 7 fix round 1's own Critical fix,
+/// which this reservation deliberately does NOT try to re-litigate: making
+/// the collision UNREPRESENTABLE at the only human entry point is simpler
+/// and strictly stronger than teaching the sweep to defend against it).
+///
+/// Deliberately does not require `origin = 'generated'`: a `manual` profile
+/// is exactly the case the round-2 report showed getting silently
+/// steamrolled, so gating this on `origin` would reopen the same hole.
+fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
+    if is_compiler_owned_policy_name(name) {
+        return Err(PolicyStoreError::CompilerOwned(format!(
+            "policy name {name:?} starts with a prefix reserved for the SP4a permission model \
+             ({COMPILER_GRANT_PREFIX:?} / {COMPILER_RULE_PREFIX:?}) — only its compiler writes \
+             policies there; rename this policy instead of retrying"
+        )));
+    }
+    Ok(())
+}
+
+/// SP4a Task 8 (D4): refuse adding brand-new content to a profile the
+/// permission-model compiler has claimed (`origin = 'generated'`, migration
+/// 0155) — used only by `create_policy` and
+/// `default_policies::seed_default_trino_policies` (via the pooled wrapper
+/// below). Unlike [`refuse_if_compiler_owned`], this is deliberately
+/// profile-wide: a NEW policy cannot yet be "compiler-owned or not" (it
+/// doesn't exist), so the only question create-time can ask is whether this
+/// profile is one a human should be adding hand-written policies to at all —
+/// Task 8 fix round 2 (I-1) kept this refusal exactly where the original
+/// Task 8 left it; only the EDIT/DELETE guards below moved from profile
+/// scope to policy scope.
+///
+/// Connection-generic so every caller can run it on its OWN already-open
+/// transaction. `egret-perm-compile`'s recompile driver
+/// (`trigger::apply_diff_in_tx`) never calls this — it writes
+/// `policy.authz_policies` with its own raw `sqlx::query` calls directly
+/// against the transaction it owns — so this refusal can never block the
+/// compiler itself, only a human (or anything else) going through this
+/// store's public write API.
+///
+/// `None`/absent service (a nonexistent `service_id`) is deliberately NOT an
+/// error here — the caller's own existence check (a `NotFound` from a prior
+/// lookup, or the FK violation an insert against a missing service would
+/// raise) is what surfaces that, unchanged from before this guard existed.
+async fn refuse_if_generated(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<(), PolicyStoreError> {
+    let origin: Option<String> = sqlx::query_scalar::<_, String>(
+        r#"SELECT origin FROM policy.authz_services WHERE id = $1"#,
+    )
+    .bind(service_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if origin.as_deref() == Some("generated") {
+        return Err(PolicyStoreError::CompilerOwned(format!(
+            "profile {service_id} is compiled by the SP4a permission model — edit its grants \
+             and rules instead of writing a policy directly; the next recompile would silently \
+             overwrite this change"
+        )));
+    }
+    Ok(())
+}
+
+/// SP4a Task 8 fix round 2 (I-1): refuse an edit/delete/enable-toggle on a
+/// SPECIFIC policy only when it is itself compiler-owned (see
+/// [`is_compiler_owned_policy_name`]) AND its profile is currently
+/// `'generated'`. Read-only-ness protects what the compiler's sweep
+/// (`apply_diff_in_tx`) would otherwise silently overwrite or reap on the
+/// next recompile — a policy that sweep never looks at (a different name, no
+/// `perm-grant-`/`perm-rule-` prefix) is not protected by that reasoning, so
+/// it stays as editable/deletable as it would be in a `'manual'` profile.
+/// This is the "moves from profile level to policy level" the user ruled on
+/// for I-1: the old profile-wide refusal in `update_policy`/`delete_policy`/
+/// `set_policy_enabled` is what built the one-way door (an operator could
+/// never touch ANYTHING in a generated profile, including content the
+/// compiler had no opinion about).
+///
+/// The `origin` check still matters even though the name-prefix check runs
+/// first: a policy hand-named with this prefix in a still-`'manual'` profile
+/// is not YET at risk from a sweep that has never run against this service —
+/// see the fix-round-2 report's finding on whether that policy could later
+/// be silently reaped once the profile becomes `'generated'` (a Task 7
+/// property, tracked separately, not fixed by this guard).
+async fn refuse_if_compiler_owned(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    policy_name: &str,
+) -> Result<(), PolicyStoreError> {
+    if !is_compiler_owned_policy_name(policy_name) {
+        return Ok(());
+    }
+    let origin: Option<String> = sqlx::query_scalar::<_, String>(
+        r#"SELECT origin FROM policy.authz_services WHERE id = $1"#,
+    )
+    .bind(service_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if origin.as_deref() == Some("generated") {
+        return Err(PolicyStoreError::CompilerOwned(format!(
+            "policy {policy_name:?} is compiled by the SP4a permission model — it is produced \
+             by a grant or rule, not hand-authored; edit or delete that grant/rule instead of \
+             writing this policy directly, since the next recompile would otherwise silently \
+             overwrite this change"
+        )));
+    }
+    Ok(())
+}
+
+/// SP4a Task 8 fix round 2 (I-1): `delete_service`'s own guard — refuse only
+/// while at least one compiler-owned policy (see
+/// [`is_compiler_owned_policy_name`]) still exists under `service_id`,
+/// regardless of the profile's `origin`. A `'generated'` profile that the
+/// compiler has since reaped down to zero owned policies (every grant/rule
+/// reaching it was deleted) is deletable — `origin` is sticky (Task 8's
+/// original design) precisely so the EDIT guard above keeps distinguishing
+/// "this profile has been compiler-managed" from "this profile has never
+/// been touched", but that stickiness has no bearing on whether deleting the
+/// row right now would delete anything the compiler still owns.
+async fn refuse_if_compiler_owned_policies_remain(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<(), PolicyStoreError> {
+    let count: i64 = sqlx::query_scalar::<_, i64>(
+        r#"SELECT count(*) FROM policy.authz_policies
+           WHERE service_id = $1 AND (name LIKE $2 || '%' OR name LIKE $3 || '%')"#,
+    )
+    .bind(service_id)
+    .bind(COMPILER_GRANT_PREFIX)
+    .bind(COMPILER_RULE_PREFIX)
+    .fetch_one(&mut *conn)
+    .await?;
+    if count > 0 {
+        let noun = if count == 1 { "policy" } else { "policies" };
+        return Err(PolicyStoreError::CompilerOwned(format!(
+            "profile {service_id} still holds {count} {noun} compiled by the SP4a permission \
+             model (named with the perm-grant-/perm-rule- prefix) — delete the grants/rules \
+             that produce them first, or wait for the next recompile to reap them, before \
+             deleting the profile itself"
+        )));
+    }
+    Ok(())
+}
+
 impl PolicyStore {
     pub fn new(db: Db) -> Self {
         Self { db }
+    }
+
+    /// Pool-based [`refuse_if_generated`], for a write path that has no
+    /// transaction open yet at the point the check belongs
+    /// (`default_policies::seed_default_trino_policies`, which must refuse
+    /// BEFORE its own "already has policies" no-op check — a generated
+    /// profile always has policies, so that check would otherwise silently
+    /// swallow the refusal as a no-op `Ok(0)`).
+    pub(crate) async fn refuse_if_generated_pooled(
+        &self,
+        service_id: i64,
+    ) -> Result<(), PolicyStoreError> {
+        let mut conn = self.db.pool.acquire().await?;
+        refuse_if_generated(&mut conn, service_id).await
     }
 
     /// Idempotent upsert of a service-def by name (used to seed Trino).
@@ -117,7 +336,7 @@ impl PolicyStore {
     ) -> Result<ServiceRow, PolicyStoreError> {
         sqlx::query_as::<_, ServiceRow>(
             r#"INSERT INTO policy.authz_services (name, type, config_jsonb)
-               VALUES ($1,$2,$3) RETURNING id, name, type, config_jsonb, policy_version, tag_version"#,
+               VALUES ($1,$2,$3) RETURNING id, name, type, config_jsonb, policy_version, tag_version, origin"#,
         )
         .bind(name)
         .bind(typ)
@@ -132,9 +351,19 @@ impl PolicyStore {
         })
     }
 
+    /// Like [`get_service`], keyed by id instead of name — SP4a Task 7's
+    /// recompile driver is handed a `service_id` (the trigger's caller
+    /// already resolved which services a tag/grant write reaches; see
+    /// `egret_catalog_registry::services_bound_to_warehouse`) and has no
+    /// service name to look it up by until it reads this row.
+    pub async fn get_service_by_id(&self, id: i64) -> Result<ServiceRow, PolicyStoreError> {
+        let mut conn = self.db.pool.acquire().await?;
+        get_service_by_id_via(&mut conn, id).await
+    }
+
     pub async fn get_service(&self, name: &str) -> Result<ServiceRow, PolicyStoreError> {
         sqlx::query_as::<_, ServiceRow>(
-            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services WHERE name = $1"#,
+            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin FROM policy.authz_services WHERE name = $1"#,
         )
         .bind(name)
         .fetch_optional(&self.db.pool)
@@ -149,7 +378,7 @@ impl PolicyStore {
         name: &str,
     ) -> Result<Option<ServiceRow>, PolicyStoreError> {
         Ok(sqlx::query_as::<_, ServiceRow>(
-            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services WHERE name = $1"#,
+            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin FROM policy.authz_services WHERE name = $1"#,
         )
         .bind(name)
         .fetch_optional(&self.db.pool)
@@ -174,21 +403,49 @@ impl PolicyStore {
 
     pub async fn list_services(&self) -> Result<Vec<ServiceRow>, PolicyStoreError> {
         Ok(sqlx::query_as::<_, ServiceRow>(
-            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services ORDER BY name"#,
+            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin FROM policy.authz_services ORDER BY name"#,
         )
         .fetch_all(&self.db.pool)
         .await?)
     }
 
+    /// DELETE a profile outright — refused (Task 8) while it still holds any
+    /// compiler-owned policy (see [`refuse_if_compiler_owned_policies_remain`]):
+    /// a compiled profile's row (and the `perm.compiled` provenance `ON DELETE
+    /// CASCADE`s from it, migration 0154) stays owned by the compiler until
+    /// the perm model stops targeting it, not until an admin deletes it out
+    /// from under a still-live recompile. Fix round 2 (I-1): this is scoped to
+    /// the policies actually present, not the profile's `origin` — a
+    /// `'generated'` profile the compiler has since reaped down to zero owned
+    /// policies is deletable.
+    ///
+    /// Review fix (M-1): the check and the delete run on the SAME
+    /// transaction, not a pooled check followed by a separately-connected
+    /// delete (the shape Task 7's `recompile_service_in_tx` exists to avoid
+    /// for exactly this reason — see that function's own doc comment). Two
+    /// separate connections left a window: a compile writing a NEW
+    /// compiler-owned policy between the check and the delete would let a
+    /// profile be deleted anyway despite that write. One transaction closes
+    /// it — Postgres holds the relevant rows from the `SELECT count(*)`
+    /// through the `DELETE`, so a concurrent write from `apply_diff_in_tx`
+    /// either commits first (this delete then sees the new row and refuses)
+    /// or blocks until this transaction ends.
     pub async fn delete_service(&self, id: i64) -> Result<(), PolicyStoreError> {
+        let mut tx = self.db.pool.begin().await?;
+        if let Err(e) = refuse_if_compiler_owned_policies_remain(&mut tx, id).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
         let n = sqlx::query(r#"DELETE FROM policy.authz_services WHERE id = $1"#)
             .bind(id)
-            .execute(&self.db.pool)
+            .execute(&mut *tx)
             .await?
             .rows_affected();
         if n == 0 {
+            tx.rollback().await?;
             return Err(PolicyStoreError::NotFound(format!("service id {id}")));
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -261,6 +518,285 @@ impl PolicyStore {
         .fetch_all(&self.db.pool)
         .await?)
     }
+
+    /// Registry catalogs reachable by `service_id`'s engine(s), through
+    /// `registry.engine_catalog_attachments` (SP3 D5) — the DIRECT engine
+    /// bind (`e.authz_service_id = service_id`), not the tag-service
+    /// `COALESCE` `tag_assignments_for_service` resolves: a recompile always
+    /// targets the profile's own service id, never its paired tag service
+    /// (StarRocks has no tag service at all — D5).
+    pub async fn catalogs_for_service(
+        &self,
+        service_id: i64,
+    ) -> Result<Vec<CatalogRow>, PolicyStoreError> {
+        let mut conn = self.db.pool.acquire().await?;
+        catalogs_for_service_via(&mut conn, service_id).await
+    }
+
+    /// Columns carrying `tags.key = tag_key`, resolved to their Ranger-facing
+    /// NAMES, restricted to catalogs `service_id`'s engine(s) reach.
+    /// Table-level tags (`column_name = ''`, migration 0081) are excluded —
+    /// this feeds the StarRocks per-column expansion (D5), which masks a
+    /// COLUMN, never a whole table.
+    pub async fn tagged_columns_for_service(
+        &self,
+        service_id: i64,
+        tag_key: &str,
+    ) -> Result<Vec<TaggedColumnRow>, PolicyStoreError> {
+        let mut conn = self.db.pool.acquire().await?;
+        tagged_columns_for_service_via(&mut conn, service_id, tag_key).await
+    }
+
+    /// `tags.name` for a `tags.key` — D6: rules select by the stable `key`,
+    /// but every engine (and the Ranger tag plugin) matches on the mutable
+    /// `name`, so this is the resolution `ResolvedNames.tag_name` needs
+    /// before a tag-selector rule can compile. `None` when no such key
+    /// exists (a rule can outlive the tag it named, e.g. after a tag
+    /// deletion — the caller decides what that means for the compile, not
+    /// this lookup).
+    pub async fn tag_name_for_key(&self, key: &str) -> Result<Option<String>, PolicyStoreError> {
+        let mut conn = self.db.pool.acquire().await?;
+        tag_name_for_key_via(&mut conn, key).await
+    }
+}
+
+/// Connection-generic core of [`PolicyStore::get_service_by_id`] — SP4a
+/// Task 7 fix round 1: `egret-perm-compile`'s `recompile_service_in_tx`
+/// reads the service row from inside the caller's OWN open transaction
+/// (`egret-bi::catalog_tags`'s tag write), not a second pool-acquired
+/// connection — see `egret_perm::store::list_grants_via`'s doc comment for
+/// why that distinction matters (READ COMMITTED visibility of the caller's
+/// own uncommitted writes).
+pub async fn get_service_by_id_via(
+    conn: &mut sqlx::PgConnection,
+    id: i64,
+) -> Result<ServiceRow, PolicyStoreError> {
+    sqlx::query_as::<_, ServiceRow>(
+        r#"SELECT id, name, type, config_jsonb, policy_version, tag_version, origin FROM policy.authz_services WHERE id = $1"#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(|| PolicyStoreError::NotFound(format!("service id {id}")))
+}
+
+/// The id of the profile NAMED `name`, or `None` when no such row exists.
+///
+/// **SP4a Task 11, defect 2.** A compiled policy's Ranger body carries the
+/// name of the service it belongs to (`"service": "<name>"`), and for a
+/// tag-selected rule on Trino that name is the profile's TAG service, not the
+/// profile itself (`admin::ranger_json::tagify`). `egret-perm-compile`'s
+/// recompile driver stored every policy it produced under the profile's own
+/// `service_id` regardless, so the tag plugin's download
+/// (`/service/plugins/policies/download/<profile>_tag`) served ZERO policies
+/// while the resource profile carried a `serviceType: tag` policy it can never
+/// match — a mask that deployed, listed as live, and returned the real values
+/// (`docs/en/plans/2026-09-24-permission-model-sp4a-live-result.md` §3, case
+/// T3). This is the lookup that turns the body's own `service` name into the
+/// row's `service_id`, so the two can no longer disagree.
+///
+/// Connection-generic for the same reason as [`get_service_by_id_via`]: the
+/// driver runs inside the caller's own open transaction.
+pub async fn service_id_by_name_via(
+    conn: &mut sqlx::PgConnection,
+    name: &str,
+) -> Result<Option<i64>, PolicyStoreError> {
+    Ok(
+        sqlx::query_scalar::<_, i64>(r#"SELECT id FROM policy.authz_services WHERE name = $1"#)
+            .bind(name)
+            .fetch_optional(&mut *conn)
+            .await?,
+    )
+}
+
+/// Connection-generic core of [`PolicyStore::catalogs_for_service`] — same
+/// rationale as [`get_service_by_id_via`].
+pub async fn catalogs_for_service_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+) -> Result<Vec<CatalogRow>, PolicyStoreError> {
+    Ok(sqlx::query_as::<_, CatalogRow>(
+        r#"SELECT DISTINCT c.id, c.name
+           FROM registry.catalogs c
+           JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id
+           WHERE e.authz_service_id = $1"#,
+    )
+    .bind(service_id)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// Every service in `service_ids`, **plus each one's tag service**, ascending.
+///
+/// SP4a Task 11, defect 2: a recompile of a Trino profile now reads and writes
+/// `policy.authz_policies` rows under the profile's TAG service as well as
+/// under the profile itself, and takes a `FOR UPDATE` row lock on each. The
+/// lock ORDER is what keeps two overlapping recompiles queueing instead of
+/// deadlocking (`egret_perm_compile::trigger::lock_services_in_tx`), and a
+/// profile's tag service can perfectly well have a LOWER id than the profile —
+/// the live cluster's `sp3c2-trino-live` is profile 52 with tag service 51. So
+/// the set every caller locks has to be the EXPANDED one, sorted once, rather
+/// than profiles first and their tag services discovered later.
+///
+/// A `tagService` naming no row contributes nothing (the join drops it), which
+/// is the same treatment the compiler gives it.
+pub async fn services_and_tag_services_via(
+    conn: &mut sqlx::PgConnection,
+    service_ids: &[i64],
+) -> Result<Vec<i64>, PolicyStoreError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        r#"SELECT DISTINCT q.id FROM (
+               SELECT s.id
+                 FROM policy.authz_services s
+                WHERE s.id = ANY($1)
+               UNION
+               SELECT t.id
+                 FROM policy.authz_services s
+                 JOIN policy.authz_services t
+                   ON t.name = s.config_jsonb ->> 'tagService'
+                WHERE s.id = ANY($1)
+           ) q
+           ORDER BY 1"#,
+    )
+    .bind(service_ids)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// **The reverse of [`catalogs_for_service_via`]**: which policy profiles does
+/// a change to THIS catalog affect? SP4a Task 9 needs it — a grant names a
+/// catalog, so a grant write has to recompile exactly the profiles whose
+/// engines reach that catalog. Same join, walked the other way, and the same
+/// `authz_service_id` binding `egret_catalog_registry::services_bound_to_warehouse`
+/// uses for the tag-write trigger; this one is keyed by catalog rather than
+/// by warehouse because that is the level a `perm.grants.catalog_id` names.
+///
+/// Profiles NO engine binds are deliberately absent: nothing downloads them,
+/// so nothing enforces them. `POST /api/control-plane/perm/compile/{id}` is
+/// the repair trigger for a profile that later acquires a binding.
+pub async fn services_for_catalog_via(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: uuid::Uuid,
+) -> Result<Vec<i64>, PolicyStoreError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        r#"SELECT DISTINCT e.authz_service_id
+           FROM registry.engine_catalog_attachments ea
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id
+           WHERE ea.catalog_id = $1 AND e.authz_service_id IS NOT NULL
+           ORDER BY 1"#,
+    )
+    .bind(catalog_id)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// Every profile the SP4a compiler targets and an engine actually binds —
+/// i.e. every `trino`/`starrocks` service some `engine_mgmt.engines` row
+/// points at.
+///
+/// **This is deliberately installation-wide.** A tag-selected rule is
+/// catalog-UNSCOPED on Trino by design (D5: one tag policy, resolved by the
+/// Ranger tag plugin, covering whatever the tag is on), so creating or
+/// deleting one rule changes the compiled output of EVERY Trino profile in
+/// the installation — there is no narrower honest answer. StarRocks profiles
+/// are included for the same mutation because the same rule compiles there
+/// too, per tagged column. See `egret_perm_compile::trigger::affected_services_for_rule`.
+pub async fn compiler_targeted_services_via(
+    conn: &mut sqlx::PgConnection,
+) -> Result<Vec<i64>, PolicyStoreError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        r#"SELECT DISTINCT s.id
+           FROM policy.authz_services s
+           JOIN engine_mgmt.engines e ON e.authz_service_id = s.id
+           WHERE s.type IN ('trino', 'starrocks')
+           ORDER BY s.id"#,
+    )
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// The `tags.key`s carried by ONE exact resource (`column = ""` means the
+/// table itself), resolved through the catalog's warehouse. SP4a Task 9's
+/// `explain` needs it: `egret_perm::evaluate` takes the tags already resolved
+/// as present on the target (it does no I/O — see `eval::selector_hits`), and
+/// an `explain` that made the caller supply them would answer a question the
+/// caller had already decided the answer to.
+pub async fn tag_keys_for_resource_via(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: uuid::Uuid,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<Vec<String>, PolicyStoreError> {
+    Ok(sqlx::query_scalar::<_, String>(
+        r#"SELECT DISTINCT t.key
+           FROM registry.catalogs c
+           JOIN catalog_tag_assignments a ON a.warehouse_id = c.warehouse_id
+           JOIN tags t ON t.id = a.tag_id
+           WHERE c.id = $1 AND a.schema_name = $2 AND a.table_name = $3
+             AND a.column_name = $4
+           ORDER BY t.key"#,
+    )
+    .bind(catalog_id)
+    .bind(schema)
+    .bind(table)
+    .bind(column)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// Connection-generic core of [`PolicyStore::tagged_columns_for_service`] —
+/// same rationale as [`get_service_by_id_via`].
+pub async fn tagged_columns_for_service_via(
+    conn: &mut sqlx::PgConnection,
+    service_id: i64,
+    tag_key: &str,
+) -> Result<Vec<TaggedColumnRow>, PolicyStoreError> {
+    Ok(sqlx::query_as::<_, TaggedColumnRow>(
+        r#"SELECT DISTINCT c.name AS catalog, a.schema_name, a.table_name, a.column_name
+           FROM catalog_tag_assignments a
+           JOIN tags t ON t.id = a.tag_id
+           JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id
+           JOIN registry.engine_catalog_attachments ea ON ea.catalog_id = c.id
+           JOIN engine_mgmt.engines e ON e.id = ea.engine_id
+           WHERE e.authz_service_id = $1 AND t.key = $2 AND a.column_name <> ''
+           ORDER BY c.name, a.schema_name, a.table_name, a.column_name"#,
+    )
+    .bind(service_id)
+    .bind(tag_key)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// Connection-generic core of [`PolicyStore::tag_name_for_key`] — same
+/// rationale as [`get_service_by_id_via`].
+pub async fn tag_name_for_key_via(
+    conn: &mut sqlx::PgConnection,
+    key: &str,
+) -> Result<Option<String>, PolicyStoreError> {
+    Ok(
+        sqlx::query_scalar::<_, String>(r#"SELECT name FROM tags WHERE key = $1"#)
+            .bind(key)
+            .fetch_optional(&mut *conn)
+            .await?,
+    )
+}
+
+/// One registry catalog: `(id, name)`.
+#[derive(Debug, sqlx::FromRow)]
+pub struct CatalogRow {
+    pub id: uuid::Uuid,
+    pub name: String,
+}
+
+/// One tagged column, Ranger-facing names only (see `tagged_columns_for_service`).
+#[derive(Debug, sqlx::FromRow)]
+pub struct TaggedColumnRow {
+    pub catalog: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub column_name: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -281,7 +817,16 @@ impl PolicyStore {
         name: &str,
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
+        // Fix round 3: reserved-namespace check first — pure, no DB needed,
+        // and applies regardless of this service's `origin` (see
+        // `refuse_reserved_name`'s doc comment for why `manual` is not
+        // exempt).
+        refuse_reserved_name(name)?;
         let mut tx = self.db.pool.begin().await?;
+        if let Err(e) = refuse_if_generated(&mut tx, service_id).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
         let id: i64 = sqlx::query_scalar::<_, i64>(
             r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb)
                VALUES ($1,$2,$3) RETURNING id"#,
@@ -310,12 +855,27 @@ impl PolicyStore {
     /// Insert a policy, or update its body in place if `(service_id, name)`
     /// already exists, bumping the policy's `version` and the service's
     /// `policy_version` atomically. Returns the policy id.
+    ///
+    /// **Guarded by the reserved-name check and by nothing else, deliberately**
+    /// (whole-branch review, Important 6). [`refuse_if_generated`] must NOT be
+    /// added here: this method's only caller is
+    /// `default_policies::seed_default_trino_policies`, `engines.rs` propagates
+    /// a seed failure as a 400, and a profile the compiler has claimed is
+    /// exactly the one an engine update would then be unable to save — the
+    /// exemption is load-bearing, not an oversight. [`refuse_reserved_name`] is
+    /// pure and name-only, so it cannot fail that seed (its
+    /// `egret-admin-*` names collide with nothing), and it closes the one way
+    /// this path could drift: a future second caller passing a
+    /// `perm-grant-`/`perm-rule-` name would silently overwrite compiled
+    /// output, which the next recompile restores — an edit that appears to
+    /// work and then vanishes.
     pub async fn upsert_policy(
         &self,
         service_id: i64,
         name: &str,
         policy: &Value,
     ) -> Result<i64, PolicyStoreError> {
+        refuse_reserved_name(name)?;
         let mut tx = self.db.pool.begin().await?;
         let id: i64 = sqlx::query_scalar::<_, i64>(
             r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb)
@@ -349,16 +909,39 @@ impl PolicyStore {
         enabled: bool,
     ) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
-        let svc: Option<i64> = sqlx::query_scalar::<_, i64>(
-            r#"SELECT service_id FROM policy.authz_policies WHERE id = $1"#,
+        // Fetch the policy's CURRENT name — ownership (Task 8 fix round 2,
+        // I-1) is decided by what this policy IS today, not by the new name
+        // the caller is trying to write.
+        let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
+            r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(service_id) = svc else {
+        let Some((service_id, current_name)) = row else {
             tx.rollback().await?;
             return Err(PolicyStoreError::NotFound(format!("policy {id}")));
         };
+        if let Err(e) = refuse_if_compiler_owned(&mut tx, service_id, &current_name).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
+        // Fix round 3: reserved-namespace check on the NEW/target name, AFTER
+        // the ownership check above — an already-owned policy (caught above,
+        // whatever `name` the caller resent) gets the ownership-specific
+        // message ("this is compiler-owned, edit the grant/rule"), which is
+        // both more accurate and less confusing than "rename this" for a
+        // name the compiler itself is the one using legitimately. This check
+        // is what catches the round-2 finding's OTHER vector instead: a
+        // human renaming an ordinary (not-yet-owned) policy INTO the
+        // compiler's namespace, in ANY profile including `manual` — where
+        // the ownership check above does not fire at all (it requires
+        // `origin = 'generated'`, and the whole point of the round-2 finding
+        // was that a `manual` profile is not yet flagged as anything).
+        if let Err(e) = refuse_reserved_name(name) {
+            tx.rollback().await?;
+            return Err(e);
+        }
         sqlx::query(
             r#"UPDATE policy.authz_policies SET name=$2, policy_jsonb=$3, enabled=$4, version=version+1, updated_at=now() WHERE id=$1"#,
         )
@@ -381,16 +964,20 @@ impl PolicyStore {
     /// Flip a policy's enabled flag without rewriting its body; bumps versions.
     pub async fn set_policy_enabled(&self, id: i64, enabled: bool) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
-        let svc: Option<i64> = sqlx::query_scalar::<_, i64>(
-            r#"SELECT service_id FROM policy.authz_policies WHERE id = $1"#,
+        let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
+            r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(service_id) = svc else {
+        let Some((service_id, current_name)) = row else {
             tx.rollback().await?;
             return Err(PolicyStoreError::NotFound(format!("policy id {id}")));
         };
+        if let Err(e) = refuse_if_compiler_owned(&mut tx, service_id, &current_name).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
         sqlx::query(
             r#"UPDATE policy.authz_policies SET enabled=$2, version=version+1, updated_at=now() WHERE id=$1"#,
         )
@@ -410,16 +997,27 @@ impl PolicyStore {
 
     pub async fn delete_policy(&self, id: i64) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
-        let svc: Option<i64> = sqlx::query_scalar::<_, i64>(
-            r#"DELETE FROM policy.authz_policies WHERE id = $1 RETURNING service_id"#,
+        // Look the policy up BEFORE deleting — Task 8's guard must refuse the
+        // delete outright, not delete-then-refuse (which would leave the
+        // policy gone despite the 409).
+        let row: Option<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
+            r#"SELECT service_id, name FROM policy.authz_policies WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(service_id) = svc else {
+        let Some((service_id, current_name)) = row else {
             tx.rollback().await?;
             return Err(PolicyStoreError::NotFound(format!("policy {id}")));
         };
+        if let Err(e) = refuse_if_compiler_owned(&mut tx, service_id, &current_name).await {
+            tx.rollback().await?;
+            return Err(e);
+        }
+        sqlx::query(r#"DELETE FROM policy.authz_policies WHERE id = $1"#)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
         )

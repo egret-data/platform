@@ -465,7 +465,9 @@ async fn delete_registry_catalog(
                 .collect(),
         });
     }
-    registry.delete_catalog(id).await?;
+    registry
+        .delete_catalog_with_compiler(id, st.catalog_assignment_compiler.as_deref())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -981,10 +983,33 @@ async fn set_catalog_workspaces(
     if !st.engine_mgmt.missing_workspace_ids(&ids).await?.is_empty() {
         return Err(CpError::NotFound);
     }
-    st.engine_mgmt
-        .registry()
-        .set_catalog_workspaces(id, &ids)
-        .await?;
+    // The assignment write and `perm`'s implicit-grant sync share ONE
+    // transaction (SP4a Task 6, D3): an assignment that commits while its
+    // grant sync fails is exactly the split-brain this exists to remove.
+    // `sqlx::Error` from `.begin()`/`.commit()` is mapped explicitly here
+    // (not through a blanket `From<sqlx::Error>`, Task 6 fix round 1 Minor)
+    // so this is the one deliberate place this crate lets a raw sqlx error
+    // become an HTTP one.
+    let mut tx = st
+        .engine_mgmt
+        .pool()
+        .begin()
+        .await
+        .map_err(crate::http_error::db_error)?;
+    egret_catalog_registry::RegistryStore::set_catalog_workspaces_in_tx(&mut tx, id, &ids).await?;
+    egret_perm::sync_assignment_grants_in_tx(&mut tx, id, &ids).await?;
+    // SP4a Task 15 (D3 defect 1, live-gate measured): the grant row the sync
+    // above just wrote/removed is not what the engine enforces until it is
+    // compiled. Recompile every profile this catalog reaches in the SAME
+    // transaction, so the assignment (or its removal) is live the instant
+    // this commits — never a stale grant swept in only when some unrelated
+    // write next recompiles the profile.
+    if let Some(compiler) = &st.perm_compiler {
+        compiler
+            .recompile_catalog_assignment_in_tx(&mut tx, id)
+            .await?;
+    }
+    tx.commit().await.map_err(crate::http_error::db_error)?;
     Ok(Json(workspace_dtos(&st, id).await?))
 }
 

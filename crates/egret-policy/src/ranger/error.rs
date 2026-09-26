@@ -19,6 +19,13 @@ impl IntoResponse for RangerError {
             PolicyStoreError::NotFound(m) => (StatusCode::NOT_FOUND, m.clone()),
             PolicyStoreError::AlreadyExists(m) => (StatusCode::CONFLICT, m.clone()),
             PolicyStoreError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
+            // Unreachable in practice: the Ranger REST serving surface this
+            // error type belongs to is a read-only download surface for
+            // engine plugins (`enabled_policies_for_service` etc.), never a
+            // caller of the Task 8-guarded write paths. Mapped the same way
+            // as `AlreadyExists` for exhaustiveness, not because this path
+            // can actually produce it.
+            PolicyStoreError::CompilerOwned(m) => (StatusCode::CONFLICT, m.clone()),
             PolicyStoreError::Json(e) => (StatusCode::BAD_REQUEST, e.to_string()),
             PolicyStoreError::Db(e) => {
                 tracing::error!(error = %e, "ranger: database error");

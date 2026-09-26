@@ -83,6 +83,25 @@ pub struct EngineMgmtState {
     /// a fake in tests, which is what makes the bootstrap and the apply path
     /// testable at all (design D8).
     pub starrocks_ddl: Arc<dyn crate::starrocks_ddl::StarRocksDdl>,
+    /// Brings a newly bound policy profile's compiled `perm` policies up to
+    /// date (SP4a Task 9 review). `None` leaves the behaviour exactly as it was
+    /// — the profile stays stale until someone calls the manual compile
+    /// trigger — which is what every test that does not care about it wants.
+    /// The concrete implementation is wired in the composition root; see
+    /// [`crate::profile_compiler::ProfileCompilerPort`] for why it is a port
+    /// and not a direct call.
+    pub perm_compiler: Option<Arc<dyn crate::profile_compiler::ProfileCompilerPort>>,
+    /// `egret-catalog-registry`'s narrower port (SP4a Task 16, D3 defect 2):
+    /// `ensure_warehouse_catalog_with_compiler`'s recompile, threaded through
+    /// this crate's two production callers of it
+    /// (`create_trino_engine`/`create_starrocks_engine`). A DIFFERENT trait
+    /// object than `perm_compiler` above — `egret-catalog-registry` cannot
+    /// depend on this crate's own `ProfileCompilerPort` (this crate depends on
+    /// `egret-catalog-registry`, not the other way around) — backed by the
+    /// SAME concrete compiler in the composition root. `None` in every test
+    /// that does not wire one, same contract as `perm_compiler`.
+    pub catalog_assignment_compiler:
+        Option<Arc<dyn egret_catalog_registry::CatalogAssignmentCompiler>>,
 }
 
 impl FromRef<EngineMgmtState> for SessionService {

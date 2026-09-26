@@ -204,6 +204,34 @@ impl CatalogStore {
     /// (catalog-engine `warehouse_admin_routes` tests), which replaced the old
     /// FK-fallback test.
     pub async fn delete_warehouse_releasing_catalog(&self, id: Uuid) -> Result<(), CatalogError> {
+        self.delete_warehouse_releasing_catalog_with_compiler(id, None)
+            .await
+    }
+
+    /// [`Self::delete_warehouse_releasing_catalog`], plus sweeping any
+    /// compiled policy this catalog's (about to be cascade-deleted) grants
+    /// left behind (SP4a Task 16, D3 defect 3).
+    ///
+    /// **Why the affected set can't be "services this catalog reaches now."**
+    /// The guard just above refuses the whole delete while any engine is
+    /// still attached, so by the time this function does anything, ZERO
+    /// engines reach this catalog — `egret_policy::services_for_catalog_via`
+    /// would always answer empty here, exactly like
+    /// `RegistryStore::ensure_warehouse_catalog_with_compiler`'s own no-op
+    /// case. What is NOT guaranteed empty is `perm.compiled`: a profile that
+    /// reached this catalog in the PAST may still carry a `perm-grant-*`
+    /// policy for it if the detach that preceded this delete had its own
+    /// recompile fail silently (`recompile_bound_profile` is fire-and-forget
+    /// by contract). `egret_perm::compiled_service_ids_for_catalog_via` reads
+    /// exactly that provenance, so the affected set here is sourced from it —
+    /// captured BEFORE the deletes below, because `perm.grants` (and with it
+    /// `perm.compiled`, both `ON DELETE CASCADE`) is gone the moment the
+    /// warehouse row cascades away.
+    pub async fn delete_warehouse_releasing_catalog_with_compiler(
+        &self,
+        id: Uuid,
+        compiler: Option<&dyn egret_catalog_registry::CatalogAssignmentCompiler>,
+    ) -> Result<(), CatalogError> {
         let mut tx = self.pool().begin().await?;
         let catalog: Option<(Uuid, String)> = sqlx::query_as(
             "SELECT id, name FROM registry.catalogs WHERE warehouse_id = $1 FOR UPDATE",
@@ -211,6 +239,7 @@ impl CatalogStore {
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
+        let mut affected_services: Vec<i64> = Vec::new();
         if let Some((catalog_id, catalog_name)) = catalog {
             let engine_names: Vec<String> = sqlx::query_scalar(
                 "SELECT e.name FROM registry.engine_catalog_attachments a \
@@ -228,6 +257,13 @@ impl CatalogStore {
                     engine_names.join(", ")
                 )));
             }
+            // Captured before the deletes below: `perm.grants`/`perm.compiled`
+            // for this catalog are about to cascade away, and there is
+            // nothing left to join against once they do.
+            affected_services =
+                egret_perm::compiled_service_ids_for_catalog_via(&mut tx, catalog_id).await?;
+            affected_services.sort_unstable();
+            affected_services.dedup();
             sqlx::query("DELETE FROM registry.catalog_workspaces WHERE catalog_id = $1")
                 .bind(catalog_id)
                 .execute(&mut *tx)
@@ -239,6 +275,17 @@ impl CatalogStore {
             .await;
         match result {
             Ok(_) => {
+                // Runs AFTER the cascade above so the recompile's own "desired
+                // state" read no longer sees this catalog's (now-deleted)
+                // grants — otherwise a compiled policy that is genuinely still
+                // wanted elsewhere on the same profile would be indistinguishable
+                // from the stale one this sweep exists to remove.
+                if let Some(c) = compiler {
+                    if !affected_services.is_empty() {
+                        c.recompile_services_in_tx(&mut tx, &affected_services)
+                            .await?;
+                    }
+                }
                 tx.commit().await?;
                 Ok(())
             }

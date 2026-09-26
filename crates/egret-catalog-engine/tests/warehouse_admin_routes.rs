@@ -88,6 +88,7 @@ fn build_app(
         browser,
         sessions: sessions.clone(),
         pdp,
+        perm_compiler: None,
     })
 }
 
@@ -742,9 +743,22 @@ async fn warehouse_create_and_delete_keep_the_registry_in_step() {
         .warehouse_visible_to_workspace(wh_id, other_ws)
         .await
         .unwrap());
-    reg.set_catalog_workspaces(cat.id, &[other_ws])
-        .await
-        .unwrap();
+    // `set_catalog_workspaces` (the pool-opening wrapper) was deleted in
+    // SP4a Task 6 fix round 2 — it was the third path writing
+    // `registry.catalog_workspaces` with no `perm` grant sync, and unlike
+    // `ensure_warehouse_catalog` and `egret-engine-mgmt`'s assignment
+    // handler, nothing composed a sync into it. Only `_in_tx` remains, so a
+    // caller must hold its own transaction; this test doesn't assert
+    // `perm.grants`, so it composes none.
+    let mut tx = f.db.pool.begin().await.unwrap();
+    egret_catalog_registry::RegistryStore::set_catalog_workspaces_in_tx(
+        &mut tx,
+        cat.id,
+        &[other_ws],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
     assert!(store
         .warehouse_visible_to_workspace(wh_id, other_ws)
         .await

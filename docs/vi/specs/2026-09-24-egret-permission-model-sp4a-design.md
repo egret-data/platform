@@ -1,0 +1,340 @@
+# SP4a — mô hình quyền dữ liệu của egret, và trình biên dịch của nó
+
+**Trạng thái:** đã thiết kế
+**Ngày:** 2026-09-24
+**Mở rộng:** `2026-09-15-control-plane-dg-review-programme.md` §2.3 và §3 (SP4), trên nền SP3 (#587–#593)
+**Triển khai thành ba PR:** SP4a mô hình và compiler, SP4b UI, SP4c di trú.
+
+SP3 biến `registry.catalogs` thành nơi duy nhất định nghĩa một catalog. SP4 tạo ra nơi duy nhất định
+nghĩa *quyền truy cập vào nó*. Spec này là SP4a: mô hình, store, và trình biên dịch biến nó thành
+Ranger JSON mà các engine vốn đã thực thi.
+
+## 1. Những gì code nói mà spec chương trình thì không
+
+Đọc trước khi thiết kế; mỗi điều dưới đây đều làm đổi thiết kế.
+
+- **Không có mô hình permission nào để thay thế cả.** `policy.authz_policies` lưu **JSON Ranger
+  nguyên văn** trong một cột jsonb (`egret-policy/src/store.rs:286`), và "profile" chỉ là một dòng
+  `policy.authz_services` — không có bảng riêng, không có artefact nào được render. Editor hiện nay
+  (`PolicyEditorPage.tsx`, 954 dòng) là một cái form trên Ranger JSON. SP4a không phải là di trú giữa
+  hai mô hình; nó là mô hình **đầu tiên**, với Ranger JSON bị giáng xuống thành đầu ra.
+- **Tag truyền tới engine chỉ mang cái tên.** `ServiceTags::from_assignments`
+  (`egret-policy-api/src/dto.rs:142-205`) phát ra `{"type": <TÊN tag>}`; cái mask thực thi nó là một
+  policy *riêng* viết theo tên đó. Đó là lý do đổi tên tag làm gãy enforcement một cách âm thầm, và
+  là lý do mô hình phải trỏ bằng `tags.key`.
+- **Tag chỉ gắn được vào table và column.** `catalog_tag_assignments` khoá theo
+  `(tag_id, warehouse_id, schema_name, table_name, column_name)` (`migrations/0081`), với
+  `column_name = ''` nghĩa là mức table. Không có tag mức catalog hay schema, nên một selector theo
+  tag không thể mang nghĩa "mọi thứ trong catalog này".
+- **StarRocks mask và filter được; nó chỉ thiếu tag service.** Service-def của nó khai báo
+  `dataMaskDef` (6 kiểu mask) và `rowFilterDef`
+  (`egret-policy/src/service-defs/starrocks.json`), trong khi `service_def.rs:22-24` ghi rằng plugin
+  không hỗ trợ tag (upstream `starrocks#67458`) và `tag_service` chỉ được tính cho Trino
+  (`admin/mod.rs:543-553`). Khoảng trống hẹp hơn "StarRocks không được cưỡng chế" và rộng hơn
+  "StarRocks ổn rồi" — xem D5.
+- **Cấu trúc bốn tầng allow/deny/exception của Ranger tồn tại vì Ranger không có phép trừ tập hợp
+  trên principal.** Principal của một policy item là một tập user/group/role không có toán tử trừ,
+  nên "nhóm finance trừ contractor" không diễn đạt được cách nào khác
+  ([Ranger deny-conditions and excludes](https://cwiki.apache.org/confluence/display/RANGER/Deny-conditions+and+excludes+in+Ranger+policies)).
+  Cho mô hình một phép trừ là hai trong bốn tầng đó thôi làm khái niệm mà người dùng phải học.
+- **Mask và row-filter policy của Ranger không nhận wildcard và không nhận nhiều giá trị**: một cột
+  một policy item, item có thứ tự, cái đầu khớp thì thắng, không có deny
+  ([row-level filtering and column masking](https://cwiki.apache.org/confluence/display/RANGER/Row-level+filtering+and+column-masking+using+Apache+Ranger+policies+in+Apache+Hive)).
+  Có người báo đúng điều này với Trino trên dev@ranger: "chúng tôi chỉ chọn được một catalog, một
+  schema, một bảng và một cột mỗi lần"
+  ([thread](https://www.mail-archive.com/dev@ranger.apache.org/msg37731.html)). Đây là nguyên nhân
+  bùng nổ số policy, và là thứ mà rule-có-tên của D1 sinh ra để tránh.
+- **Audit của Ranger đứt đúng tại chỗ bị từ chối.** Tab Access liên kết một quyết định tới policy
+  tạo ra nó, nhưng khi không có gì khớp và request rơi xuống default-deny thì cột Policy ID hiện `-`.
+  Kiểu từ chối phổ biến nhất lại là kiểu không có gì để bấm vào.
+- **Biểu thức mask tuỳ biến là một chuỗi Ranger không bao giờ parse**; nó chết lúc chạy query, trong
+  engine ([Cloudera thread](https://community.cloudera.com/t5/Support-Questions/Custom-masking-expression-using-UDF-in-Apache-Ranger/m-p/170283)).
+
+Không dùng làm bằng chứng: con số "Ranger cần nhiều hơn 75 lần số thay đổi policy" được trích dẫn
+rộng rãi là do bên bán hàng tài trợ và đã có phản bác công khai có cơ sở (benchmark đó viết mỗi user
+một policy thay vì thêm user vào policy sẵn có, và bỏ qua `denyAllElse`). Phần còn đứng vững chỉ là:
+lối soạn thảo ngây thơ của Ranger dẫn tới mỗi cột một policy, và UI không hề lái người dùng ra khỏi
+lối đó.
+
+## 2. Các quyết định
+
+**D1 — Hai object và một toán tử.** Một **grant** nói principal nào được làm hành động nào trên phạm
+vi nào. Một **rule** là mask hoặc row filter *có tên, dùng lại được*, chọn dữ liệu theo tag hoặc theo
+đường dẫn, và nêu ai được miễn trừ. Cả hai nhận một **principal set** có phép trừ tường minh:
+
+```text
+PrincipalSet { include: [user|group|role|workspace-members …],
+               exclude: [user|group|role …] }
+```
+
+Phép trừ chính là toàn bộ lý do egret bỏ được allow-exception và deny-exception khỏi bề mặt soạn
+thảo. Rule có tên là hình dạng của Snowflake chứ không phải của Ranger: một rule `PII → hash` phủ mọi
+cột mang tag đó, thay vì mỗi cột một policy
+([Snowflake POLICY_REFERENCES](https://docs.snowflake.com/en/sql-reference/account-usage/policy_references)).
+
+**Hành động** của grant là bộ từ vựng nhỏ của riêng egret, không phải của engine nào. SP4a chỉ ship
+đúng hai: `read` và `write`. Compiler ánh xạ sang access type của engine đích:
+
+| hành động egret | Trino | StarRocks |
+|---|---|---|
+| `read` | `select` | `select` |
+| `write` | `insert`, `delete` | `insert`, `update`, `delete` |
+
+Hai service-def thật sự không trùng nhau, và chính việc đọc chúng đã định ra phạm vi này. **Trino
+không khai báo access type `update` nào cả**, nên `write` là hai access ở đó và ba ở StarRocks. DDL bị
+loại trừ có chủ ý: StarRocks không có `create` trần — nó khai báo mười cái theo từng mức
+(`create table`, `create view`, `create database`, `create materialized view`, …) trong khi Trino có
+một `create` duy nhất, nên một hành động `create` sẽ cần ánh xạ theo mức và một quyết định spec này
+chưa đưa ra. Grant trên DDL đợi tới khi có ca thật cần.
+
+Một steward không nên phải biết bên dưới là engine nào, và một hành động engine không diễn đạt được
+phải là lỗi biên dịch nêu đích danh engine, không bao giờ là im lặng bỏ qua.
+
+**Rule chọn theo tag có phạm vi toàn cài đặt, và đó vừa là bán kính ảnh hưởng vừa là bán kính thất
+bại.** Tag không bị giới hạn theo catalog (`tags.key` là toàn cài đặt, `catalog_tag_assignments` trải
+qua nhiều warehouse), và trên Trino một tag rule biên dịch thành đúng một tag policy không mang
+resource catalog nào — nên egret biên dịch lại **mọi profile Trino và StarRocks có engine bind**,
+trong toàn cài đặt, mỗi lần tạo hoặc xoá một rule như vậy. Đây là chủ ý: thu hẹp tập đó về "những
+profile mà catalog của chúng đang mang tag" sẽ khiến tập thay đổi theo từng lần ghi tag, và làm sai
+thì một cột mất mask — tức là hướng fail-open. Hệ quả phải tính trước là tập đó cũng chính là tập
+thất bại: chỉ cần một profile bất kỳ trong cài đặt không biên dịch được — mask type không được khai
+báo, user ref không phân giải được, profile vượt trần mở rộng — là cả lệnh ghi rule hỏng với 400 và bị
+rollback, còn người vận hành thì nhận về tên một profile họ có thể chưa từng nghe tới. Đổi grant và
+đổi rule chọn theo path thì hẹp hơn hẳn: chúng chỉ chạm tới các profile bind với catalog của chính
+chúng. Phản hồi của `POST /perm/rules` liệt kê mọi service nó đã biên dịch lại; không có dry-run.
+
+**D2 — Deny thắng, allow hợp, và tag không cấp quyền truy cập.** Một câu, đúng cho mọi engine:
+*thấy được nếu có grant nào cho phép, trừ khi có grant nào cấm; mask và row filter luôn áp dụng, bất
+kể quyền đến từ đâu.* Tập `exempt` của rule là cách một cá nhân thoát khỏi mask — không phải bằng một
+grant đối chọi.
+
+Tag chỉ chọn dữ liệu cho rule, không làm gì khác. Đây không phải đơn giản hoá cho vui: Ranger xét tag
+policy **trước và đoản mạch** — một tag ALLOW là kết thúc đánh giá, resource policy không bao giờ
+được xét tới
+([Cloudera, tags and policy evaluation](https://docs.cloudera.com/runtime/7.2.17/security-ranger-authorization/topics/security-ranger-tags-and-policy-evaluation.html)).
+Nếu egret không bao giờ phát ra tag *access* policy thì không có đoản mạch, và câu của D2 chính xác
+là thứ engine làm. Ngữ nghĩa của mô hình và ngữ nghĩa của bên thực thi khớp nhau **do cấu trúc**, chứ
+không phải do tài liệu dặn dò.
+
+**D3 — Gán catalog cho workspace là cấp quyền đọc cho workspace đó.** Hôm nay một lần gán chỉ đổi thứ
+egret hiển thị; engine vẫn từ chối query
+(`2026-09-19-catalog-registry-design.md:158`). SP4a biến lần gán đó thành một grant đọc ngầm, để một
+hành động có một ý nghĩa. **Đây là thay đổi hành vi và phải được phát hành như một thay đổi hành
+vi**: sau SP4a, gán catalog là cấp quyền thật. Grant tường minh vẫn còn, để siết lại (một deny) hoặc
+nới ra (quyền ghi, hoặc một principal set khác). Grant ngầm hiện ra trong UI như một grant người dùng
+không tự viết, có nêu nguồn gốc — không bao giờ vô hình.
+
+**D4 — Profile là generated hoặc manual; generated là chỉ đọc.** Engine do egret provision bind vào
+profile generated, biên dịch từ mô hình. Profile viết tay ở lại cho engine ngoài và giữ editor JSON
+hôm nay. Spec chương trình đã chốt vị trí này (`2026-09-15-…-programme.md:83`); SP4a biến
+`generated | manual` thành một cột tường minh thay vì một quy ước, vì một profile generated mà ai đó
+sửa tay sẽ bị ghi đè âm thầm ở lần biên dịch kế tiếp và phải được cảnh báo **trước khi** điều đó xảy ra.
+
+**D5 — egret biên dịch lại StarRocks khi tag đổi; trên Trino thì plugin lo.** Một rule chọn theo tag
+biên dịch thành một tag-masking policy trên Trino, và plugin áp nó lên bất cứ thứ gì đang mang tag.
+StarRocks không có tag service, nên cùng rule đó biên dịch thành **một resource-masking policy cho
+mỗi cột khớp**, liệt kê tại thời điểm biên dịch — và danh sách đó lỗi thời ngay khi có cột mới được
+gắn tag. egret vốn đã bump service bị ràng buộc ở mỗi lần ghi tag
+(`egret-catalog-registry/src/tag_version.rs:54`), nên egret biên dịch lại profile StarRocks theo đúng
+trigger đó. Việc `ranger-tagsync` làm cho Trino, egret làm cho StarRocks.
+
+Cái giá là có thật và phải chặn: một rule trên một tag được gắn rộng sẽ thành N policy trên StarRocks.
+SP4a áp **trần hai tầng tại thời điểm biên dịch**: một trần theo từng rule, **từ chối** biên dịch khi
+vượt trần kèm thông báo nêu tên rule và con số; và một trần theo TỔNG của cả profile (SP4a Task 12,
+xem dưới), **từ chối** một lần biên dịch lại nếu nó đẩy tổng số policy của profile vượt trần, kèm
+thông báo nêu tên PROFILE và con số tổng hiện tại — cả hai đều **không bao giờ cắt bớt âm thầm**. Cả
+hai giá trị đều được đặt từ một phép đo trên kind, không chọn trước.
+
+**Lỗ hổng phép đo này phơi bày, và cách vá (SP4a Task 12).** Một trần theo rule không chặn được đúng
+thứ gây tốn kém: nó tính theo rule, còn chi phí lại do TỔNG của profile quyết định. Live gate đã biên
+dịch bốn rule, mỗi rule 500 cột — từng rule đều ở mức hoặc dưới trần riêng — thành 2006 policy **mà
+không hề bị từ chối**, vượt qua điểm gãy, mất 2.2 giây mỗi lần biên dịch lại, và mỗi lần ghi tag đều
+kích hoạt một lần như vậy. SP4a áp thêm một **trần cấp-profile bằng 1000**, lấy từ cùng phép đo: 1000
+là điểm cuối cùng mà bảng đo ở trên vẫn cho thấy thời gian biên dịch còn tuyến tính (1006 → 2006 tốn
+gấp 3.4 lần thời gian cho gấp 2 lần số policy). Một lần biên dịch lại đẩy tổng số policy do compiler
+sở hữu của MỘT profile vượt quá 1000 sẽ bị từ chối, kèm thông báo nêu tên PROFILE và TỔNG hiện tại —
+không chỉ nêu tên một rule, vì một profile vượt trần tổng có thể đến từ nhiều rule mà rule nào cũng ở
+dưới trần riêng của nó, và một operator nghe "rule X vượt trần" trong khi không rule nào vượt sẽ đi
+sai hướng.
+
+**Hai trần cộng lại, và trần cấp-profile có lối thoát cố ý.** Nếu cứ từ chối mọi lần biên dịch lại khi
+tổng profile vượt 1000 thì một profile đã ở trên mức đó sẽ bị kẹt cứng — và điều này hoàn toàn có thể
+xảy ra, vì trần này không tồn tại trước Task 12. Cách duy nhất để operator quay lại dưới trần là xoá
+bớt grant hoặc rule, và mỗi lần xoá đều kéo theo một lần biên dịch lại cho profile bị ảnh hưởng
+(`recompile_service_in_tx`); nếu lần biên dịch lại đó luôn từ chối khi còn trên 1000, transaction của
+chính lần xoá đó sẽ bị cuốn theo, và operator sẽ không bao giờ xoá thoát được — đúng hình dạng
+"biên dịch lại bị đầu độc" mà Task 9's I-1 đã vá ở một tầng bên dưới ("một grant không biên dịch được
+sẽ đầu độc mọi lần biên dịch lại sau đó"). Vì vậy trần cấp-profile chỉ từ chối một thay đổi đẩy tổng
+số VƯỢT QUA 1000; một lần biên dịch lại mà tổng mới nhỏ hơn hoặc bằng tổng ĐANG LƯU của profile — co
+lại, hoặc giữ nguyên — luôn được cho phép, ngay cả khi cả hai con số vẫn còn trên 1000. "Tổng đang
+lưu" được đọc từ `policy.authz_policies` dưới một row lock mà lần biên dịch lại đã lấy sẵn (cùng câu
+truy vấn dùng để tìm ra cái cần so sánh), nên việc kiểm tra này không thêm lock mới và không thể deadlock
+với thứ tự khoá service tăng dần mà `lock_services_in_tx` đã thiết lập.
+
+**D6 — Rule trỏ `tags.key`, grant trỏ `registry.catalogs.id`.** Cả hai đều vá chỗ đã được ghi nhận là
+gãy: tag policy hôm nay lưu `tags.name` vốn thay đổi được và không duy nhất (`programme spec:43`), và
+danh tính catalog giờ nằm ở registry. Compiler phân giải key → name và id → name lúc biên dịch, nên
+một lần đổi tên dẫn tới biên dịch lại chứ không dẫn tới gãy.
+
+Hai kiểu đổi tên được đóng theo hai cách khác nhau, và sự khác nhau đó đáng ghi ra chứ không nên bắt
+người sau suy lại. Đổi tên **tag** là một sự kiện có thật — `TagRepo::update` ghi `tags.name` — nên nó
+là một trigger biên dịch lại: nó tăng `tag_version` trên mọi service phục vụ warehouse đang mang tag
+đó và biên dịch lại mọi profile mà một rule chọn tag đó chạm tới, ngay trên transaction của chính lần
+đổi tên. Thiếu nó thì policy đã biên dịch giữ tên cũ trong khi `download_tags` phục vụ tên mới, và
+mask ngừng tác dụng ngay lần plugin khởi động lại kế tiếp. Đổi tên **catalog** thì được đóng ngay từ
+cấu trúc: `registry.catalogs.name` không có chỗ nào ghi — đường cập nhật của registry chỉ thay
+config/advanced/description — nên ảnh phản chiếu fail-closed của nó, mọi grant gọi tên một catalog mà
+engine không còn, là không biểu diễn được. Nếu sau này có thêm đổi tên catalog thì nó cần đúng trigger
+mà đổi tên tag đang có; `crates/egret-bi/tests/tag_rename_recompiles.rs` phủ cả hai nửa.
+
+**D7 — Một dạng principal chuẩn duy nhất, và hỗ trợ nhóm phải được kiểm chứng chứ không giả định.**
+Principal hôm nay chỗ thì viết bằng email chỗ thì username (`programme spec:44`), và chính spec đó
+*suy đoán* — không kiểm chứng — rằng không có group provider hay usersync nào, nên rule theo nhóm có
+thể chưa bao giờ khớp bên trong engine. SP4a chọn một dạng, và **chứng minh bằng một query sống trên
+kind** xem grant theo nhóm có được cưỡng chế không. Nếu không, UI phải nói ra ngay chỗ chọn nhóm; một
+điều khiển im lặng không làm gì còn tệ hơn một điều khiển không tồn tại.
+
+Điều này quyết định luôn cách grant ngầm của D3 biên dịch, và hai thứ phải được chốt cùng nhau. Nếu
+nhóm phân giải được bên trong engine, `workspace-members` biên dịch thành một group và đổi thành viên
+không cần biên dịch lại. Nếu không, nó biên dịch thành **danh sách thành viên liệt kê lúc biên
+dịch**, và thêm một người vào workspace bắt buộc phải biên dịch lại profile — đúng hình dạng lỗi thời
+của D5, với cùng một lời giải: egret sở hữu phép biên dịch, nên egret biên dịch lại khi có lần ghi
+thành viên. Spec không thể chọn giữa hai phương án trước khi kiểm chứng, và plan của SP4a phải coi
+phép kiểm chứng đó là **việc mở khoá phần còn lại**, không phải một ô tick ở cuối.
+
+**D8 — Evaluator được xây trong SP4a, để giải thích, chưa để thực thi.** Câu "vì sao user này xem
+được?" của SP4b cần một quyết định *kèm xuất xứ*, và nguồn trung thực duy nhất cho điều đó là egret
+tự đánh giá mô hình của chính nó. Cũng chính evaluator đó là thứ SP5 cần để cưỡng chế trên engine
+không có plugin Ranger. Xây một lần ở đây còn cho compiler một oracle: một profile đã biên dịch có
+thể được đối chiếu với câu trả lời của chính mô hình, thay vì đối chiếu với một snapshot JSON.
+
+Đầu ra của nó nêu **lớp lý do**, không chỉ một policy id: `allowed_by_grant`, `explicit_deny`,
+`no_grant_matched`, `masked_by_rule`, `filtered_by_rule`. Đây là câu trả lời trực tiếp cho khoảng
+trống audit của Ranger, nơi một lần từ chối do rơi-xuyên-qua không có gì để liên kết tới.
+
+**D9 — Những gì cố ý không mô hình hoá.** Mỗi thứ kèm lý do, vì "Ranger có" không phải là một lý do:
+
+| Bỏ | Vì sao |
+|---|---|
+| Policy condition (biểu thức JavaScript) | Service-def của Trino không khai báo `policyConditions` nào cả, nên chúng không tồn tại trên engine chính của egret. Mở lại nếu có ca thật. |
+| Delegated admin (ô tick trên từng policy item) | egret đã có hệ thống permission riêng (Cedar) và mô hình quản trị ba tầng. Một mặt phẳng admin thứ hai, theo từng policy, không được hoà giải với cái thứ nhất — đó đúng là cách Ranger có tới ba mặt phẳng. |
+| Security zone | Chúng tồn tại để chia một bản cài Ranger giữa các nhóm. egret đã chia theo workspace. |
+| Lịch hiệu lực và điều kiện IP | Chưa có ca nào. Quyền có hạn thời gian nên được diễn đạt bằng một grant mà ai đó gỡ đi, hơn là một policy hết hạn một cách vô hình. |
+| Allow-exception / deny-exception như khái niệm **soạn thảo** | Đã được thay bằng toán tử trừ (D1). Chúng vẫn tồn tại như **đích biên dịch** — vô hình trong UI. |
+
+## 3. Lưu trữ
+
+Một schema `perm` mới, đặt cạnh `policy` (nơi tiếp tục phục vụ Ranger JSON thô cho profile manual).
+
+| Bảng | Chứa |
+|---|---|
+| `perm.grants` | `effect`, `actions[]`, phạm vi: `catalog_id` → `schema`, `table`, `column` (cho phép null và wildcard), `origin` (`explicit` \| `workspace_assignment`) |
+| `perm.grant_principals` | `(grant_id, kind, ref, mode)` với `mode ∈ {include, exclude}` |
+| `perm.rules` | `name` UNIQUE, `kind` (`mask` \| `row_filter`), `body`, `selector_kind` (`tag` \| `path`), `tag_key` hoặc các cột đường dẫn |
+| `perm.rule_exemptions` | principal set miễn trừ của rule, cùng hình dạng với `grant_principals` |
+| `perm.compiled` | chỉ mục ngược: object egret nào sinh ra policy nào trong profile nào |
+
+`perm.compiled` là mảnh Ranger không có thứ tương đương. Nó trả lời "rule này thực sự đang áp ở đâu",
+và từ đầu kia, "cái gì sinh ra policy này" — câu một người vận hành hỏi khi một profile generated làm
+họ bất ngờ. Nó cũng là cách một lần biên dịch biết phải xoá gì: biên dịch lại thì **diff** với bảng
+này thay vì xoá sạch rồi tạo lại profile, nên một policy id mà engine đang cache không bị xáo trộn.
+
+## 4. Biên dịch
+
+Một chiều duy nhất: mô hình → Ranger JSON. Không có gì đọc ngược Ranger JSON về mô hình.
+
+- **Grant** → resource access policy. Phần `exclude` của principal set biên dịch thành
+  `allowExceptions` của Ranger (hoặc `denyExceptions` với grant deny) — cấu trúc bốn tầng sống sót
+  như một chi tiết cài đặt và không xuất hiện ở bất kỳ đâu trong API hay UI của egret.
+- **Rule `kind = mask`** → trên Trino, một tag-masking policy cho mỗi rule khi selector là tag; một
+  resource-masking policy cho mỗi cột khi selector là đường dẫn. Trên StarRocks, luôn là theo cột (D5).
+- **Rule `kind = row_filter`** → row-filter policy, chia theo cùng cách.
+- **Thân mask** chọn từ `maskTypes` mà engine khai báo, không phải chuỗi tự do, ở mọi chỗ mà ý định
+  diễn đạt được như vậy. Biểu thức tuỳ biến vẫn được phép nhưng **được parse và bị từ chối ngay lúc
+  soạn thảo nếu không parse được** — điểm mấu chốt là Ranger không bao giờ parse nó và tác giả chỉ
+  phát hiện lúc chạy query.
+
+**Compiler là ranh giới an toàn.** Đầu ra của nó là thứ engine cưỡng chế, nên SP4a kiểm nó trên một
+engine sống chứ không chỉ trên JSON kỳ vọng: một mask mà Ranger chấp nhận vẫn có thể hỏng trong
+Trino, và một snapshot test sẽ báo xanh trong khi dữ liệu rò ra ngoài.
+
+**Hai giả định mục này từng mang đã bị chính phép kiểm sống đó bác bỏ, và được sửa ngay tại đây thay
+vì để lại cho người đọc sau** (Task 10, 2026-09-24, kind `kind-egret`, Trino + plugin Ranger thật;
+bằng chứng đầy đủ trong
+[`2026-09-24-permission-model-sp4a-live-result.md`](../../en/plans/2026-09-24-permission-model-sp4a-live-result.md)).
+
+1. **Access policy phải nêu ĐỦ mọi tầng resource, với `*` ở chỗ scope dừng lại.** Compiler được xây
+   dựa trên một cách đọc `RangerDefaultPolicyResourceMatcher.getMatchType()` của Apache Ranger —
+   rằng khi matcher hết các mục resource phía policy, những tầng sâu hơn mà *request* nêu sẽ phân
+   giải thành `MatchType.ANCESTOR` một cách vô điều kiện, nên một policy dừng ở `schema` hay `table`
+   sẽ phủ hết mọi thứ bên dưới. **Điều đó SAI với access policy.** Một grant `read` trên một schema,
+   biên dịch thành `{catalog, schema}`, cho ra `Access Denied: Cannot select from columns [v, id] in
+   table or view sibling`; grant ở mức table hỏng y hệt; cùng grant đó viết xuống tới `column: "*"`
+   trả về đủ hàng (§3, ca T1 và T1b). Phép khớp ancestor CÓ đúng cho kiểm tra *catalog* — lời từ
+   chối chuyển từ `Cannot access catalog` sang `Cannot select from columns` — và **không** đúng khi
+   đi xuống tới `select` theo cột mà Trino thực sự hỏi. Vì vậy một grant đã biên dịch giờ mang đủ
+   chuỗi mà service-def của engine đích khai báo (service-def Trino **id 203**:
+   `catalog`/`schema`/`table`/`column`, level 10/20/30/40, mọi tầng đều `mandatory: true`;
+   StarRocks: `catalog`/`database`/`table`/`column`), với `*` tường minh ở mọi tầng scope không nêu.
+   Một grant chỉ nêu schema rồi biên dịch thành policy không cho quyền gì còn tệ hơn một grant bị từ
+   chối: egret liệt nó là live còn engine cưỡng chế con số không.
+
+   Mask và row-filter policy **không** được nới rộng theo cách đó, và sự bất đối xứng này cũng là đo
+   được: cùng lần chạy ấy cho thấy mask theo đường dẫn che thật (`xxxx` thay cho giá trị) và row
+   filter theo đường dẫn cắt hàng thật (§3, T3b và T4), trong khi §1 ở trên đã ghi chính quy tắc của
+   Ranger rằng masking và row-filter policy không nhận wildcard và không nhận nhiều giá trị. Nới
+   rộng chúng là thay một giả định chưa kiểm bằng một giả định chưa kiểm khác, theo hướng cho nhiều
+   quyền hơn những gì mô hình nói.
+
+2. **Tag policy thuộc về TAG service, và egret phải lưu nó ở đó.** Thân tag đã biên dịch của một rule
+   nêu tag service của profile ngay trong trường `service` của chính nó, nhưng driver biên dịch lại
+   đã nộp mọi policy nó sinh ra dưới `service_id` của resource profile. Nguồn của tag plugin
+   (`/service/plugins/policies/download/<profile>_tag`) vì thế phục vụ **0 policy**, trong khi
+   resource profile lại mang một policy `serviceType: tag` mà nó không bao giờ khớp được — một mask
+   deploy sạch, được liệt là live, và trả về giá trị thật (§3, ca T3). Hàng của một policy đã biên
+   dịch giờ được định tuyến theo chính tên `service` trong thân nó, và phép quét xoá của một lần
+   biên dịch lại liệt kê tag service song song với profile, nên policy của một tag rule đã xoá vẫn
+   bị thu hồi.
+
+## 5. SP4b và SP4c thừa kế những gì
+
+SP4a cố ý không kèm UI mới. Nó để lại:
+
+- mô hình, store và API của nó;
+- compiler, và profile generated bind vào engine do egret provision;
+- evaluator, và một endpoint `explain` trả về quyết định + xuất xứ + lớp lý do;
+- `perm.compiled`, chỉ mục ngược mà cả hai pha sau đều đọc.
+
+**SP4b** xây UI hai tầng: mặc định là ngôn ngữ ý định (steward nói "email là PII; analyst thấy bản
+hash"), kèm một lối xem cấu trúc cho người vận hành cần nhìn grant và rule như object. Nó thêm hai
+động từ — *giải thích một quyết định* và *liệt kê toàn bộ* (ai thấy được cái này / user này thấy được
+gì) — vốn là hai câu hỏi khác nhau và là hai màn hình khác nhau
+([GCP Policy Intelligence](https://cloud.google.com/bigquery/docs/troubleshoot-access-control)).
+
+**SP4c** di trú: policy viết tay đang có trên engine do egret provision được đọc lên và **đề xuất**
+thành object của mô hình (không bao giờ tự chuyển đổi âm thầm); Cedar classification clearance — hôm
+nay là hệ thống thứ ba, chỉ chặn được object BI và không mask nổi một cột catalog
+(`programme spec §2.3`) — gộp vào rule; và notebook role cùng namespace theo workspace mà SP3 hoãn lại
+(`2026-09-19-catalog-registry-design.md:158`) hạ cánh ở đây.
+
+## 6. Kiểm thử
+
+- Một golden test cho compiler theo từng loại rule và từng engine — cần, nhưng chưa đủ.
+- **Sống trên kind, cả hai engine**: một grant, một deny, một tag mask và một row filter, mỗi cái
+  được kiểm bằng cách chạy query với một principal thật và xem thứ trả về. Một mask sinh ra JSON đúng
+  mà không mask chính là lỗi mà phép kiểm này bắt được.
+- **Evaluator và engine phải đồng ý với nhau.** Với mỗi ca sống, `explain` phải trả về đúng quyết
+  định mà engine đã đưa ra. Bất đồng là lỗi ở compiler hoặc ở evaluator, và muốn tìm ra thì cần cả
+  hai — đó là lý do thứ hai khiến D8 đặt evaluator vào SP4a.
+- Một test rằng trần bung policy của StarRocks **từ chối** chứ không cắt bớt, và assert rằng thông
+  báo nêu tên rule cùng con số.
+- Một test rằng đổi tên tag không làm đổi enforcement (D6), và đổi tên catalog thì biên dịch lại.
+- Phép kiểm chứng hỗ trợ nhóm của D7, ghi lại như một kết quả sống kèm ngày — không phải như một lời
+  khẳng định.
+
+## 7. Ngoài phạm vi
+
+UI (SP4b). Di trú policy đang có, gộp Cedar clearance, và notebook role (SP4c). Cưỡng chế trên engine
+không có plugin Ranger (SP5) — evaluator xây ở đây là nền của việc đó, nhưng không có gì trong SP4a
+viết lại SQL. Nạp audit của Ranger; log truy cập dữ liệu của riêng egret được nêu tên cho SP4/SP5
+trong spec tách app governance và không được thử ở đây.

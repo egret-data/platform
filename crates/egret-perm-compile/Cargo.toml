@@ -1,0 +1,57 @@
+[package]
+name = "egret-perm-compile"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# SP4a Task 6 fix round 1 (Important 3): split out of `egret-perm` so that
+# crate's model/store half — the half `egret-engine-mgmt` actually needs
+# (`sync_assignment_grants`, which touches only `perm.*` tables) — carries no
+# `egret-policy` dependency. Before the split, `egret-perm` depended on
+# `egret-policy` directly for this compiler alone, so any production
+# consumer of the model/store half pulled `egret-policy`'s internals into
+# its production graph too — the exact thing `egret-policy-api::PolicyPort`
+# exists to prevent elsewhere (`egret-policy` is a dev-only dependency of
+# `egret-engine-mgmt`). Nothing outside this crate's own tests depends on it
+# yet; a later task's compile-profile driver is its first real consumer.
+#
+# SP4a Task 7: that consumer has landed (`trigger::recompile_service`), so
+# `uuid` (grant/rule ids) and `sqlx` (one transaction spanning `perm.compiled`
+# and `policy.authz_policies`/`policy.authz_services` — see
+# `egret_perm::store::PermStore::pool`'s doc comment) move from dev- to
+# regular dependencies.
+[dependencies]
+egret-perm.workspace = true
+egret-policy.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+sqlx.workspace = true
+# SP4a Task 7 fix round 1: a skipped grant/rule (WorkspaceMembers, not yet
+# expanded) must not vanish silently — the only production caller
+# (`egret-bi::catalog_tags`) never inspected `CompileSummary::skipped`, so
+# the recompile driver itself logs every skip.
+tracing.workspace = true
+# SP4a Task 9: the `perm` HTTP surface (`routes`) lives here and not in
+# `egret-perm`, because every mutating route recompiles in the SAME
+# transaction as its write — and `egret-perm` depending on this crate would
+# be a dependency cycle. Same shape `egret-policy` already has (store plus
+# admin router in one crate).
+axum.workspace = true
+egret-auth.workspace = true
+egret-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+utoipa.workspace = true
+
+[dev-dependencies]
+egret-metastore.workspace = true
+egret-test-db.workspace = true
+tokio.workspace = true
+# `tests/routes.rs` drives the composed router with `oneshot` and a real
+# session cookie, and builds a real `CedarPdp` for the 403 assertions.
+tower.workspace = true
+http-body-util = "0.1"
+egret-events.workspace = true
+egret-secrets.workspace = true
+chrono.workspace = true
+serde_json.workspace = true

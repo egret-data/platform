@@ -6066,6 +6066,510 @@
         }
       }
     },
+    "/api/control-plane/perm/compile/{service_id}": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "The manual/repair trigger. Unlike the mutating routes it has no write of\nits own to be atomic with, so it uses the pool-based `recompile_service`,\nwhich opens and commits its own transaction.",
+        "description": "It exists because the affected-service sets above are derived from the\nmutated ROW, and there are model-adjacent changes no row mutation covers —\nan engine newly bound to a profile, a profile that had no binding when a\ngrant was written, a tag renamed out from under a rule. This is how an\noperator brings one profile current without editing the model.",
+        "operationId": "compile",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "description": "policy.authz_services id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What the recompile wrote",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompileResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The model cannot be compiled for this profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/explain": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "POST because the request carries a subject, an action and a whole target\nscope — a body, not a query string. **It is nonetheless read-only**: it\nopens no transaction and issues no write. It gates on `policy:read`, not\n`policy:update`, precisely so the method does not decide the permission.",
+        "operationId": "explain",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The decision and the reasons behind it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplainResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/grants": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "list_grants",
+        "responses": {
+          "200": {
+            "description": "Every grant in the model, with its principal subtract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Grant"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "create_grant",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewGrant"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Grant created AND the profiles it affects recompiled, in one transaction"
+          },
+          "400": {
+            "description": "The grant cannot be compiled for a profile it affects",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/grants/{id}": {
+      "delete": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "delete_grant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Grant id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Grant deleted AND its compiled policies reaped, in one transaction"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/rules": {
+      "get": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "list_rules",
+        "responses": {
+          "200": {
+            "description": "Every named rule in the model, with its exemption set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Rule"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "description": "Create a named mask or row-filter rule and recompile the profiles it affects, in one transaction. A tag-selected rule is installation-wide: it recompiles every Trino and StarRocks profile an engine binds, and a compile failure on any one of them fails this request and rolls the rule back.",
+        "operationId": "create_rule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewRule"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Rule created AND the profiles it affects recompiled, in one transaction"
+          },
+          "400": {
+            "description": "The rule cannot be compiled for a profile it affects",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/rules/{id}": {
+      "delete": {
+        "tags": [
+          "perm"
+        ],
+        "operationId": "delete_rule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Rule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rule deleted AND its compiled policies reaped, in one transaction"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/permissions": {
       "get": {
         "tags": [
@@ -6281,7 +6785,7 @@
             }
           },
           "409": {
-            "description": "A policy with this name already exists",
+            "description": "A policy with this name already exists, or the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
             "content": {
               "application/json": {
                 "schema": {
@@ -6682,7 +7186,7 @@
             }
           },
           "409": {
-            "description": "Profile is still enforced by an engine",
+            "description": "Profile is still enforced by an engine, or is compiled by the SP4a permission model (generated) and cannot be deleted through the editor",
             "content": {
               "application/json": {
                 "schema": {
@@ -6755,6 +7259,16 @@
           },
           "404": {
             "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
             "content": {
               "application/json": {
                 "schema": {
@@ -7002,6 +7516,16 @@
               }
             }
           },
+          "409": {
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error",
             "content": {
@@ -7058,6 +7582,16 @@
           },
           "404": {
             "description": "No such policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
             "content": {
               "application/json": {
                 "schema": {
@@ -7134,6 +7668,16 @@
           },
           "404": {
             "description": "No such policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited",
             "content": {
               "application/json": {
                 "schema": {
@@ -29052,6 +29596,14 @@
           }
         }
       },
+      "Action": {
+        "type": "string",
+        "description": "The two actions SP4a knows. `read` compiles to `select` on every engine;\n`write` compiles to `insert,delete` on Trino (no `update` access type\nexists there) and `insert,update,delete` on StarRocks. DDL is out of\nscope for SP4a — see the programme's global constraints.",
+        "enum": [
+          "read",
+          "write"
+        ]
+      },
       "ActivityCallDto": {
         "type": "object",
         "required": [
@@ -30281,6 +30833,50 @@
           }
         }
       },
+      "CompileResponse": {
+        "type": "object",
+        "description": "What a mutation's (or `compile`'s) recompile pass did, aggregated over\nevery service it touched.",
+        "required": [
+          "services",
+          "created",
+          "updated",
+          "deleted",
+          "unchanged",
+          "skipped"
+        ],
+        "properties": {
+          "services": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "The services this pass recompiled."
+          },
+          "created": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "updated": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "deleted": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unchanged": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkipReport"
+            }
+          }
+        }
+      },
       "ConfigFile": {
         "type": "object",
         "required": [
@@ -31382,6 +31978,23 @@
           },
           "type": {
             "type": "string"
+          }
+        }
+      },
+      "CreatedResponse": {
+        "type": "object",
+        "description": "A create's response: the id the database minted, and what the recompile\nthat committed with it did.",
+        "required": [
+          "id",
+          "compile"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "compile": {
+            "$ref": "#/components/schemas/CompileResponse"
           }
         }
       },
@@ -32728,6 +33341,14 @@
           }
         }
       },
+      "Effect": {
+        "type": "string",
+        "description": "`perm.effect`.",
+        "enum": [
+          "allow",
+          "deny"
+        ]
+      },
       "EffectiveAccess": {
         "type": "object",
         "required": [
@@ -33412,6 +34033,114 @@
           }
         }
       },
+      "ExplainReason": {
+        "type": "object",
+        "description": "One reason, with its CLASS on the wire.\n\nThe class is the deliverable. Ranger's own Access audit shows `-` for the\nmost common denial — nothing matched — so a response that carried only\n`allowed: false` would reproduce exactly the blindness `explain` exists to\nremove. `no_grant_matched` and `explicit_deny` are different facts about\nthe model and stay different here: a subject a grant's `exclude` subtracted\nmatched no grant at all, which is not the same as being denied by one.",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`allowed_by_grant` | `explicit_deny` | `no_grant_matched` |\n`masked_by_rule` | `filtered_by_rule`."
+          },
+          "grant_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "rule_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "mask_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "filter_expr": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ExplainRequest": {
+        "type": "object",
+        "required": [
+          "subject",
+          "action",
+          "target"
+        ],
+        "properties": {
+          "subject": {
+            "$ref": "#/components/schemas/ExplainSubject"
+          },
+          "action": {
+            "$ref": "#/components/schemas/Action"
+          },
+          "target": {
+            "$ref": "#/components/schemas/Scope"
+          }
+        }
+      },
+      "ExplainResponse": {
+        "type": "object",
+        "required": [
+          "allowed",
+          "reasons",
+          "tags"
+        ],
+        "properties": {
+          "allowed": {
+            "type": "boolean"
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExplainReason"
+            }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The tag keys egret resolved as present on `target` — the input the\nrule selectors were matched against. Returned so a steward can see\nWHY a mask did or did not apply, rather than having to guess whether\nthe tag resolution or the rule was at fault."
+          }
+        }
+      },
+      "ExplainSubject": {
+        "type": "object",
+        "description": "The caller `explain` decides about.\n\n**No `workspaces` field (SP4a Task 15, D3 defect 2 — removed, not just\nignored).** It used to be caller-supplied, `#[serde(default)]` to\n`vec![]`, and the evaluator trusted it verbatim — so a caller naming just\na `user` (the natural way to call this endpoint) silently got `denied`\nfor every `workspace_members` grant, however real the compiled Ranger\npolicy made that access: the live gate measured exactly that. `explain`\nnow resolves `user`'s CURRENT workspace memberships itself\n(`crate::members::workspaces_for_username`), off the same\n`access_grants`/`users.username` truth the compiler's own expansion reads\n— a caller-supplied list is a second, driftable copy of a fact the\ndatabase already answers, and keeping the field would let a caller\noverride that fact when what it should be describing is the caller's\nprincipal, not a value only egret can verify.",
+        "required": [
+          "user"
+        ],
+        "properties": {
+          "user": {
+            "type": "string"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "FeatureDto": {
         "type": "object",
         "description": "One module and whether this workspace has it switched on.",
@@ -33690,6 +34419,42 @@
           }
         }
       },
+      "Grant": {
+        "type": "object",
+        "description": "One row of `perm.grants` plus its principal subtract (`perm.grant_principals`).",
+        "required": [
+          "id",
+          "effect",
+          "actions",
+          "scope",
+          "principals",
+          "origin"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "effect": {
+            "$ref": "#/components/schemas/Effect"
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Action"
+            }
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "principals": {
+            "$ref": "#/components/schemas/PrincipalSet"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/GrantOrigin"
+          }
+        }
+      },
       "GrantDto": {
         "type": "object",
         "required": [
@@ -33737,6 +34502,44 @@
             "description": "The service account to grant. Must live in this workspace."
           }
         }
+      },
+      "GrantOrigin": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "explicit"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "workspace_id",
+              "type"
+            ],
+            "properties": {
+              "workspace_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "workspace_assignment"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Why a grant exists. `WorkspaceAssignment` rows are written by the\nassignment path, not by a human, and are recreated from the assignment on\ndemand (D3) — `perm.grants` enforces at most one such row per\n`(catalog_id, workspace_id)` via `grants_one_per_assignment`."
       },
       "GroupDto": {
         "type": "object",
@@ -34261,6 +35064,55 @@
           "primary": {
             "type": "boolean",
             "description": "Exactly one catalog in the list carries this, and it must be an egret\nwarehouse catalog: the engine's Ranger role and (for StarRocks) its\nbuiltin storage are derived from that warehouse, and since SP3c-2 they\nare read back through this attachment rather than off the engine row.\nA primary naming a catalog with no warehouse is refused, with the\nreason, before anything is created."
+          }
+        }
+      },
+      "NewGrant": {
+        "type": "object",
+        "description": "A grant as authored over HTTP.\n\n**There is no `origin` field, and that is deliberate.** `perm.grants.origin`\ndistinguishes a human's `explicit` grant from a `workspace_assignment` row\nthe assignment path owns and recreates from the assignment on demand (D3),\nand `grants_one_per_assignment` allows at most one of the latter per\n`(catalog_id, workspace_id)`. A human-authored grant is always `explicit`;\nletting a request claim `workspace_assignment` would let the HTTP surface\nmint rows the assignment sync believes it owns, which it would then\nsilently delete or refuse to recreate.",
+        "required": [
+          "effect",
+          "actions",
+          "scope"
+        ],
+        "properties": {
+          "effect": {
+            "$ref": "#/components/schemas/Effect"
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Action"
+            }
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "principals": {
+            "$ref": "#/components/schemas/PrincipalSet"
+          }
+        }
+      },
+      "NewRule": {
+        "type": "object",
+        "description": "A named rule as authored over HTTP. `id` is minted by the database.",
+        "required": [
+          "name",
+          "kind",
+          "selector"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RuleKind"
+          },
+          "selector": {
+            "$ref": "#/components/schemas/Selector"
+          },
+          "exempt": {
+            "$ref": "#/components/schemas/PrincipalSet"
           }
         }
       },
@@ -34945,6 +35797,22 @@
           }
         }
       },
+      "PermPrincipal": {
+        "type": "object",
+        "description": "One principal reference. `r#ref` is the bare identifier egret's D7\nmeasurement settled on for users (a username, never an email) — the store\nwrites it through unchanged for every kind.\n\n**The OpenAPI name is `PermPrincipal`, not `Principal`, and that is a\nbug fix** (SP4a Task 10, finding 2). `egret-policy`'s admin surface\nalready exports a DIFFERENT `Principal` — the policy picker's\n`{kind, name, label}` row (`egret-policy/src/admin/mod.rs`). Two distinct\nRust types deriving `ToSchema` under one schema name collapse into one\nentry in the merged document, and the picker's won: every `$ref` from\n`PrincipalSet` — and so every `NewGrant.principals` — resolved to\n`{kind, name, label}`, a shape this type cannot deserialize. A client\ngenerated from the committed `openapi.json` could not construct a grant at\nall. The two names are now distinct, and each DTO refs its own.",
+        "required": [
+          "kind",
+          "ref"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/PrincipalKind"
+          },
+          "ref": {
+            "type": "string"
+          }
+        }
+      },
       "PermVia": {
         "type": "object",
         "required": [
@@ -35177,6 +36045,38 @@
           }
         }
       },
+      "PrincipalKind": {
+        "type": "string",
+        "description": "`perm.principal_kind`. `WorkspaceMembers` is measured, not assumed (D7):\nTrino has no group provider and egret never pushes one, so a `group`\nprincipal matches nobody inside the engine today. `WorkspaceMembers`\nexists here for a later task to expand into the member list enumerated at\ncompile time; nothing compiles it yet.",
+        "enum": [
+          "user",
+          "group",
+          "role",
+          "workspace_members"
+        ]
+      },
+      "PrincipalSet": {
+        "type": "object",
+        "description": "A principal subtract: `include` minus `exclude`. This is what lets egret\ndrop Ranger's allow-exception/deny-exception blocks from the authoring\nsurface (see `crates/egret-perm/tests/store.rs`) — both `Grant.principals`\nand `Rule.exempt` use it, and both round-trip through a `(kind, ref, mode)`\ntable (`perm.grant_principals`, `perm.rule_exemptions`).",
+        "required": [
+          "include",
+          "exclude"
+        ],
+        "properties": {
+          "include": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermPrincipal"
+            }
+          },
+          "exclude": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermPrincipal"
+            }
+          }
+        }
+      },
       "ProfileDto": {
         "type": "object",
         "description": "A profile (Ranger service) + the engine(s) that link to it.",
@@ -35186,7 +36086,8 @@
           "type",
           "policy_version",
           "policy_count",
-          "engines"
+          "engines",
+          "origin"
         ],
         "properties": {
           "id": {
@@ -35219,6 +36120,10 @@
               "null"
             ],
             "description": "The classification-tag policy service this Trino profile carries its\ntag-based masking/row-filters in (the configured `tagService` or the\n`<name>_tag` convention), if such a service exists. `None` otherwise — the\nFE shows a \"Tags\" tab only when this is set."
+          },
+          "origin": {
+            "type": "string",
+            "description": "`\"manual\"` (hand-authored, fully editable) or `\"generated\"` (compiled\nby the SP4a permission model from its grants and rules).\n\n**Exposed because D4's requirement is that the profile says so BEFORE\nan edit is overwritten, not after** (whole-branch review, Important 4).\nThe raw-JSON policy editor still ships in SP4a and is still the only\npolicy UI, and a `'generated'` profile is now only PARTLY frozen — its\n`perm-*` policies are compiler-owned and refuse an edit with a 409,\nwhile foreign policies in the same profile stay editable. Without this\nfield the editor cannot tell an operator which half they are looking\nat, and the first thing they learn is the 409 on save."
           }
         }
       },
@@ -36305,6 +37210,82 @@
           }
         }
       },
+      "Rule": {
+        "type": "object",
+        "description": "One row of `perm.rules` plus its exemption set (`perm.rule_exemptions`).\n\n**`exempt` is a full `PrincipalSet`, including `exclude`, but the\ncompiler cannot express `exclude` here.** The model, the store, and the\nOpenAPI schema all accept it — `perm.rule_exemptions` has the same\n`mode` column `perm.grant_principals` does, precisely so \"exempt this\nwhole group except these people\" round-trips the way a grant's subtract\ndoes. But `egret-perm-compile`'s `rules::compile_rule` refuses any `Rule` whose\n`exempt.exclude` is non-empty (`CompileError::UnexpressibleExemption`):\nunlike an access-policy item, a Ranger masking/row-filter item\n(`MaskItemInput`/`RowFilterItemInput`) has no allow/deny-exception block\nto put a subtract in, so there is no correct Ranger shape for it. The\nsame is true of a `Role` principal in `exempt` (those item types have no\n`roles` bucket at all). This makes `exempt.exclude`/`Role` an authorable,\nstorable shape that can never compile — a limitation an authoring UI\nshould surface when the rule is written, not one a steward discovers as\na 500 the first time the rule is compiled.",
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "selector",
+          "exempt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RuleKind"
+          },
+          "selector": {
+            "$ref": "#/components/schemas/Selector"
+          },
+          "exempt": {
+            "$ref": "#/components/schemas/PrincipalSet"
+          }
+        }
+      },
+      "RuleKind": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "mask_type",
+              "type"
+            ],
+            "properties": {
+              "mask_type": {
+                "type": "string"
+              },
+              "value_expr": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "mask"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "filter_expr",
+              "type"
+            ],
+            "properties": {
+              "filter_expr": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "row_filter"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "`perm.rule_kind` plus its type-dependent payload, CHECK-constrained in the\ndatabase (`(kind = 'mask') = (mask_type IS NOT NULL)`, etc.) and made\nunrepresentable here instead."
+      },
       "RunDto": {
         "type": "object",
         "description": "One entry in the run-log drawer.",
@@ -36857,6 +37838,37 @@
           }
         }
       },
+      "Scope": {
+        "type": "object",
+        "description": "A path into a catalog. `schema`/`table`/`column` narrow progressively —\n`perm.grants` and `perm.rules` both CHECK that a level cannot be skipped\n(a column implies a table implies a schema).",
+        "required": [
+          "catalog_id"
+        ],
+        "properties": {
+          "catalog_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "table": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "column": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "SearchHit": {
         "type": "object",
         "description": "A schema-object search hit (a table/view matched by the SQL Lab global\nobject search). `catalog` is empty for engines without a catalog level.",
@@ -36956,6 +37968,50 @@
             "description": "How many default policies were created (0 if the profile already had any)."
           }
         }
+      },
+      "Selector": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "key",
+              "type"
+            ],
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tag"
+                ]
+              }
+            }
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Scope"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "path"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "description": "What a rule's scope is selected by. `Tag` references `tags.key` — never\n`tags.name`, which is mutable and non-unique (D6) — and egret never emits\na tag *access* policy for it (D2); only masking/row-filter rules select by\ntag. `Path` is a `Scope`, same shape as a grant's."
       },
       "ServingErrorBody": {
         "type": "object",
@@ -37277,6 +38333,28 @@
               "type": "string",
               "format": "uuid"
             }
+          }
+        }
+      },
+      "SkipReport": {
+        "type": "object",
+        "description": "A grant or rule a recompile could not express and left uncompiled. Surfaced\non the response rather than only in the logs: a create that succeeded but\ncompiled nothing for a service is a fact the author needs at authoring\ntime, not one a steward discovers from a query that returns no rows.",
+        "required": [
+          "source_kind",
+          "id",
+          "reason"
+        ],
+        "properties": {
+          "source_kind": {
+            "type": "string",
+            "description": "`grant` | `rule`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason": {
+            "type": "string"
           }
         }
       },
@@ -39680,6 +40758,10 @@
     {
       "name": "ranger",
       "description": "Ranger Admin REST serving surface polled by engine plugins (read-only policy/service-def download)"
+    },
+    {
+      "name": "perm",
+      "description": "Data permission model (grants, rules, explain)"
     },
     {
       "name": "control-plane-engines",

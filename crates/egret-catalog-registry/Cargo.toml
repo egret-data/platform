@@ -20,9 +20,23 @@ url.workspace = true
 egret-config.workspace = true
 egret-metastore.workspace = true
 egret-secrets.workspace = true
+# `perm` seam (SP4a Task 6 fix round 1, Important 1): `ensure_warehouse_catalog`
+# writes a `catalog_workspaces` row too (the warehouse catalog assigned to its
+# owning workspace) and must sync the same implicit `perm.grants` row the PUT
+# .../workspaces handler does, in the SAME transaction — D3's invariant
+# ("assigning a catalog to a workspace grants it read") otherwise holds on
+# only one of its two write paths. Safe to add here post-split
+# (`egret-perm-compile` carries the `egret-policy` dependency now; this crate
+# gets none of it).
+egret-perm.workspace = true
 sqlx.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+# `CatalogAssignmentCompiler` (SP4a Task 16): an `#[async_trait]` port so
+# `ensure_warehouse_catalog` can recompile its implicit grant in the SAME
+# transaction without this crate depending on `egret-perm-compile`/`egret-policy`
+# (the composition root implements the trait; see `compiler_port.rs`).
+async-trait.workspace = true
 
 [dev-dependencies]
 egret-test-db.workspace = true

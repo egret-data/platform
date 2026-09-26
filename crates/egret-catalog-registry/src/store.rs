@@ -397,12 +397,54 @@ impl RegistryStore {
 
     /// `Conflict` while an attachment or assignment still references it.
     pub async fn delete_catalog(&self, id: Uuid) -> Result<bool, RegistryError> {
-        match sqlx::query("DELETE FROM registry.catalogs WHERE id = $1")
+        self.delete_catalog_with_compiler(id, None).await
+    }
+
+    /// [`Self::delete_catalog`], plus sweeping any compiled policy this
+    /// catalog's (about to be cascade-deleted) grants left behind (SP4a Task
+    /// 16 re-enumeration: found alongside D3 defect 3, same shape).
+    ///
+    /// **This is the SAME defect as `delete_warehouse_releasing_catalog`'s,
+    /// on a path Task 15 did not enumerate.** `perm.grants.catalog_id`
+    /// `ON DELETE CASCADE`s from `registry.catalogs`, so any grant scoped to
+    /// this catalog — including an EXPLICIT one, created directly through the
+    /// `perm/grants` API rather than through a workspace assignment — goes
+    /// with it, silently, with no recompile. The production caller
+    /// (`egret-engine-mgmt::catalogs::delete_registry_catalog`) already
+    /// refuses this call while any engine attachment or workspace assignment
+    /// exists, exactly like `delete_warehouse_releasing_catalog`'s own guard —
+    /// so "services this catalog reaches now" is always empty here too, and
+    /// the same `egret_perm::compiled_service_ids_for_catalog_via` historical
+    /// read is what can still find a profile that reached this catalog in the
+    /// past and was detached without a successful recompile.
+    pub async fn delete_catalog_with_compiler(
+        &self,
+        id: Uuid,
+        compiler: Option<&dyn crate::CatalogAssignmentCompiler>,
+    ) -> Result<bool, RegistryError> {
+        let mut tx = self.pool().begin().await?;
+        // Captured before the delete: `perm.grants`/`perm.compiled` for this
+        // catalog are about to cascade away.
+        let mut affected_services =
+            egret_perm::compiled_service_ids_for_catalog_via(&mut tx, id).await?;
+        affected_services.sort_unstable();
+        affected_services.dedup();
+        let result = sqlx::query("DELETE FROM registry.catalogs WHERE id = $1")
             .bind(id)
-            .execute(self.pool())
-            .await
-        {
-            Ok(r) => Ok(r.rows_affected() == 1),
+            .execute(&mut *tx)
+            .await;
+        match result {
+            Ok(r) => {
+                let deleted = r.rows_affected() == 1;
+                if deleted {
+                    if let (Some(c), false) = (compiler, affected_services.is_empty()) {
+                        c.recompile_services_in_tx(&mut tx, &affected_services)
+                            .await?;
+                    }
+                }
+                tx.commit().await?;
+                Ok(deleted)
+            }
             Err(e) if is_fk_violation(&e) => Err(RegistryError::Conflict(
                 "the catalog is still attached or assigned".into(),
             )),
@@ -497,10 +539,61 @@ impl RegistryStore {
     /// the catalog, so an admin's later un-assignment is never undone here.
     /// `preferred_name` is used verbatim when free (only a `#[cfg(test)]`
     /// helper passes one today).
+    ///
+    /// The `catalog_workspaces` write also syncs the implicit `perm.grants`
+    /// row for that (catalog, workspace) pair, in the SAME transaction (SP4a
+    /// Task 6 fix round 1, Important 1) — this is the OTHER path that
+    /// assigns a catalog to a workspace, alongside the PUT
+    /// `/catalogs/{id}/workspaces` handler
+    /// (`egret-engine-mgmt::catalogs::set_catalog_workspaces`), and D3's
+    /// invariant ("assigning a catalog to a workspace grants it read") must
+    /// hold on both or the review-caught defect shape repeats: true on one
+    /// write path, silently false on the other. `sync_assignment_grants_in_tx`
+    /// is safe to call unconditionally here even though it is a REPLACE (not
+    /// an upsert-only) operation — the catalog row was just created in this
+    /// same transaction, so it can carry no other implicit grant yet.
     pub async fn ensure_warehouse_catalog(
         &self,
         wh: &WarehouseIdentity<'_>,
         preferred_name: Option<&str>,
+    ) -> Result<(CatalogRow, bool), RegistryError> {
+        self.ensure_warehouse_catalog_with_compiler(wh, preferred_name, None)
+            .await
+    }
+
+    /// [`Self::ensure_warehouse_catalog`], plus recompiling the implicit
+    /// assignment grant's compiled policy in the SAME transaction as the
+    /// grant sync (SP4a Task 16, D3 defect 2 — Task 15 left this open: see
+    /// `crate::compiler_port` for why the port, not a direct call, is what
+    /// closes it without pulling `egret-perm-compile`/`egret-policy` into
+    /// this crate's production dependency graph).
+    ///
+    /// `compiler` is `None` for every caller that has none wired (every test
+    /// in this crate, and any production caller that predates this task) —
+    /// behaviour is then byte-identical to the old `ensure_warehouse_catalog`,
+    /// exactly as `egret_engine_mgmt::EngineMgmtState::perm_compiler`'s own
+    /// `None` case works for `set_catalog_workspaces`.
+    ///
+    /// **Why this is a no-op for every caller today, and why it is still
+    /// correct to add.** `registry.catalogs` is the row `perm.grants.catalog_id`
+    /// and `registry.engine_catalog_attachments.catalog_id` both FK to, and
+    /// this branch only runs once — the FIRST time a warehouse's catalog is
+    /// created (the `get_catalog_for_warehouse` guard above returns early on
+    /// every later call). No attachment can reference a catalog row that does
+    /// not exist yet, so at the exact moment this grant is written, ZERO
+    /// engines can already reach it — `egret_policy::services_for_catalog_via`
+    /// is provably empty here for every caller in this codebase today. The
+    /// call is still correct to make: it closes the invariant ("every
+    /// perm.grants write recompiles in the same transaction, unconditionally")
+    /// rather than leaving it true only by an ordering argument a future
+    /// caller (a backfill, a different attach order) could invalidate
+    /// silently, exactly the "true on one path, false on another" shape this
+    /// task exists to close everywhere it appears.
+    pub async fn ensure_warehouse_catalog_with_compiler(
+        &self,
+        wh: &WarehouseIdentity<'_>,
+        preferred_name: Option<&str>,
+        compiler: Option<&dyn crate::CatalogAssignmentCompiler>,
     ) -> Result<(CatalogRow, bool), RegistryError> {
         if let Some(c) = self.get_catalog_for_warehouse(wh.id).await? {
             return Ok((c, false));
@@ -523,6 +616,12 @@ impl RegistryStore {
                     .bind(wh.workspace_id)
                     .execute(&mut *tx)
                     .await?;
+                    egret_perm::sync_assignment_grants_in_tx(&mut tx, row.id, &[wh.workspace_id])
+                        .await?;
+                    if let Some(c) = compiler {
+                        c.recompile_catalog_assignment_in_tx(&mut tx, row.id)
+                            .await?;
+                    }
                     tx.commit().await?;
                     return Ok((row, true));
                 }
@@ -890,18 +989,36 @@ impl RegistryStore {
         .await?)
     }
 
-    /// Replace the full assignment set.
-    pub async fn set_catalog_workspaces(
-        &self,
+    /// Replace the full assignment set. This is the ONLY way to write
+    /// `registry.catalog_workspaces` in this crate — deliberately, since
+    /// SP4a Task 6 fix round 2 found two production paths writing this table
+    /// (this and `ensure_warehouse_catalog`), but only one of them syncing
+    /// the `perm` implicit-grant row D3 requires: a self-committing,
+    /// pool-opening `set_catalog_workspaces` wrapper existed alongside this
+    /// `_in_tx` core (used only by `ensure_warehouse_catalog` and the real
+    /// production caller, `egret-engine-mgmt`'s assignment handler), and
+    /// nothing stopped a THIRD caller from reaching for the convenient
+    /// wrapper and reintroducing the same gap with no grant sync at all —
+    /// exactly the "true in one place, false in another" shape D3 already
+    /// broke twice. The wrapper is gone; every caller (including this
+    /// crate's own tests, `egret-catalog-engine`'s and
+    /// `egret-engine-mgmt`'s) must now open its own transaction and, in
+    /// production, compose `egret_perm::sync_assignment_grants_in_tx` into
+    /// it — there is no entry point left that writes this table without a
+    /// transaction the caller controls. "Unrepresentable beats
+    /// unforgettable": the invariant now lives in the type signature
+    /// (no owned-pool method exists to reach for) rather than in a
+    /// reviewer's memory of which callers need the sync.
+    pub async fn set_catalog_workspaces_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         catalog_id: Uuid,
         workspace_ids: &[Uuid],
     ) -> Result<(), RegistryError> {
         let ids = workspace_ids.to_vec();
-        let mut tx = self.pool().begin().await?;
         sqlx::query("DELETE FROM registry.catalog_workspaces WHERE catalog_id = $1 AND NOT (workspace_id = ANY($2))")
             .bind(catalog_id)
             .bind(ids.clone())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         sqlx::query(
             "INSERT INTO registry.catalog_workspaces (catalog_id, workspace_id) \
@@ -909,9 +1026,8 @@ impl RegistryStore {
         )
         .bind(catalog_id)
         .bind(ids)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
         Ok(())
     }
 

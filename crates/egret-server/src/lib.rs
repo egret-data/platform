@@ -50,6 +50,9 @@ pub struct AppState {
     pub catalog_admin: Option<egret_catalog_engine::CatalogAdminState>,
     /// Present once the Policy/Ranger admin router is wired (E2d); `None` in unit tests.
     pub policy_admin: Option<egret_policy::PolicyAdminState>,
+    /// Data-permission model surface (SP4a Task 9): grants, rules, `explain`,
+    /// and the manual compile trigger. `None` in unit tests.
+    pub perm: Option<egret_perm_compile::PermState>,
     /// Present once the engine-mgmt seam is wired (in `egret-bin`); `None` in unit tests.
     pub engine_mgmt: Option<egret_engine_mgmt::EngineMgmtState>,
     /// Embedded lakekeeper Iceberg REST catalog router, mounted at `/catalog/v1`
@@ -108,6 +111,7 @@ impl AppState {
             control_plane: None,
             catalog_admin: None,
             policy_admin: None,
+            perm: None,
             engine_mgmt: None,
             catalog_engine: None,
             idp: None,
@@ -214,6 +218,7 @@ pub fn openapi_doc() -> utoipa::openapi::OpenApi {
     doc.merge(egret_controlplane::openapi());
     doc.merge(egret_catalog_engine::openapi());
     doc.merge(egret_policy::openapi());
+    doc.merge(egret_perm_compile::openapi());
     doc.merge(egret_engine_mgmt::openapi());
     doc.merge(egret_machine_idp::openapi());
     doc.merge(egret_dataapi::openapi());
@@ -397,6 +402,17 @@ pub fn build_router(state: AppState) -> Router {
             .nest("/api/control-plane", egret_policy::policy_admin_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(pa);
+        router = router.merge(group);
+    }
+
+    if let Some(pm) = state.perm.clone() {
+        // The data-permission model (SP4a Task 9). Same /api/control-plane
+        // prefix and CSRF layer as the policy console it will eventually
+        // replace; gated on the SAME `policy:read`/`policy:update` keys.
+        let group = Router::new()
+            .nest("/api/control-plane", egret_perm_compile::perm_router())
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(pm);
         router = router.merge(group);
     }
 

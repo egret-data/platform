@@ -1,4 +1,22 @@
 //! Postgres-backed workspace membership.
+//!
+//! **Every membership write recompiles the permission model** (SP4a D3). A
+//! catalog assigned to a workspace carries an implicit `read` grant whose
+//! principal is that workspace's members, and D7 measured that a Ranger GROUP
+//! item matches nobody on any engine egret provisions — so that grant compiles
+//! to the member list **enumerated at compile time**
+//! (`egret_perm_compile::members`). The enumeration is stale the instant
+//! someone joins or leaves, and the two directions are not symmetric: a missed
+//! JOIN denies someone who should have access, a missed LEAVE keeps granting
+//! someone who should not. So `add_with_expiry` and `remove` — the two
+//! functions every membership path in egret funnels through — recompile the
+//! affected profiles in the SAME transaction as the `access_grants` write,
+//! the shape `egret_perm::sync_assignment_grants_in_tx` and
+//! `egret-bi::catalog_tags` already established.
+//!
+//! The profile locks are taken FIRST, ascending, before any row this function
+//! writes — `egret_perm_compile::lock_services_in_tx`'s own invariant, checked
+//! by a `debug_assert!` at that gate.
 
 use egret_core::{Error, Result, UserId, WorkspaceId};
 use egret_metastore::Db;
@@ -58,6 +76,19 @@ impl MemberRepo {
         // One workspace role per member: replace any existing workspace grant for
         // this principal in this workspace, then insert the new role.
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        // Which Ranger profiles enumerate this workspace's membership, and
+        // their locks, BEFORE the write — the affected set is derived from the
+        // `perm` model, which this write does not change, so reading it first
+        // is correct and keeps every lock this request needs acquired in one
+        // ascending pass (see the module doc).
+        let services = egret_perm_compile::affected_services_for_workspace_members(&mut *tx, ws.0)
+            .await
+            .map_err(compile_err)?;
+        if !services.is_empty() {
+            egret_perm_compile::lock_services_in_tx(&mut tx, &services)
+                .await
+                .map_err(compile_err)?;
+        }
         sqlx::query(
             "DELETE FROM access_grants \
              WHERE principal_type = $1 AND principal_id = $2 AND scope_type = 'workspace' AND scope_id = $3",
@@ -84,11 +115,34 @@ impl MemberRepo {
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
+        if !services.is_empty() {
+            egret_perm_compile::recompile_services_in_tx(&mut tx, &services)
+                .await
+                .map_err(compile_err)?;
+        }
         tx.commit().await.map_err(db_err)?;
         Ok(())
     }
 
+    /// Remove a principal's workspace grant — and recompile, in the same
+    /// transaction, every Ranger profile whose compiled policies enumerate
+    /// this workspace's membership.
+    ///
+    /// **This is the direction that fails OPEN when it is missed.** A removed
+    /// member whose username is still named in a live access policy keeps
+    /// reading the workspace's catalogs through the engine, with egret's own
+    /// member list showing them gone. That is why the recompile shares the
+    /// transaction rather than following it.
     pub async fn remove(&self, ws: WorkspaceId, ptype: &str, pid: Uuid) -> Result<()> {
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        let services = egret_perm_compile::affected_services_for_workspace_members(&mut *tx, ws.0)
+            .await
+            .map_err(compile_err)?;
+        if !services.is_empty() {
+            egret_perm_compile::lock_services_in_tx(&mut tx, &services)
+                .await
+                .map_err(compile_err)?;
+        }
         sqlx::query(
             "DELETE FROM access_grants \
              WHERE principal_type = $1 AND principal_id = $2 AND scope_type = 'workspace' AND scope_id = $3",
@@ -96,9 +150,15 @@ impl MemberRepo {
         .bind(ptype)
         .bind(pid)
         .bind(ws.0)
-        .execute(&self.db.pool)
+        .execute(&mut *tx)
         .await
         .map_err(db_err)?;
+        if !services.is_empty() {
+            egret_perm_compile::recompile_services_in_tx(&mut tx, &services)
+                .await
+                .map_err(compile_err)?;
+        }
+        tx.commit().await.map_err(db_err)?;
         Ok(())
     }
 
@@ -194,4 +254,14 @@ impl From<MemberRow> for WorkspaceMember {
             is_platform_admin: r.is_platform_admin,
         }
     }
+}
+
+/// A recompile failure is a downstream policy failure, not a bad request: the
+/// membership the caller asked for is perfectly valid, and the `?` that
+/// carries this rolls the membership write back with it rather than leaving
+/// egret and the engine disagreeing. Rendered with the underlying message so
+/// an operator sees WHICH profile refused (a ceiling, a missing tag service)
+/// rather than an opaque 500.
+fn compile_err(e: impl std::fmt::Display) -> Error {
+    Error::Internal(anyhow::anyhow!("permission recompile failed: {e}"))
 }

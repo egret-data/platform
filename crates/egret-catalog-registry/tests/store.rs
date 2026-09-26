@@ -36,6 +36,22 @@ async fn workspace(db: &Db) -> Uuid {
     .expect("workspace")
 }
 
+/// `RegistryStore::set_catalog_workspaces_in_tx` composed the way this
+/// crate's own tests need it: no production caller left exists that skips
+/// opening a transaction (SP4a Task 6 fix round 2 — the pool-opening
+/// `set_catalog_workspaces` wrapper this helper replaced was deleted for
+/// exactly that reason). Deliberately does NOT sync a `perm` implicit grant
+/// the way `egret-engine-mgmt`'s production handler does — these tests
+/// exercise `registry.catalog_workspaces` in isolation and assert nothing
+/// about `perm.grants`.
+async fn set_catalog_workspaces(db: &Db, catalog_id: Uuid, workspace_ids: &[Uuid]) {
+    let mut tx = db.pool.begin().await.expect("begin");
+    RegistryStore::set_catalog_workspaces_in_tx(&mut tx, catalog_id, workspace_ids)
+        .await
+        .expect("set_catalog_workspaces_in_tx");
+    tx.commit().await.expect("commit");
+}
+
 async fn warehouse(db: &Db, name: &str, ws: Uuid) -> Uuid {
     let sc: Uuid = sqlx::query_scalar(
         "INSERT INTO storage.storage_connections (name, provider, region, bucket, access_key, path_style) \
@@ -221,7 +237,7 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
     );
 
     // Removing the assignment is not undone by ensuring again.
-    store.set_catalog_workspaces(c1.id, &[]).await.unwrap();
+    set_catalog_workspaces(&db, c1.id, &[]).await;
     store
         .ensure_warehouse_catalog(
             &WarehouseIdentity {
@@ -239,8 +255,157 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
         .unwrap()
         .is_empty());
     assert!(!store.warehouse_visible_to_workspace(wh1, ws).await.unwrap());
-    store.set_catalog_workspaces(c1.id, &[ws]).await.unwrap();
+    set_catalog_workspaces(&db, c1.id, &[ws]).await;
     assert!(store.warehouse_visible_to_workspace(wh1, ws).await.unwrap());
+}
+
+/// A [`egret_catalog_registry::CatalogAssignmentCompiler`] test double:
+/// records every call the port receives — catalog ids through
+/// `recompile_catalog_assignment_in_tx`, service-id sets through
+/// `recompile_services_in_tx` — SEPARATELY (the two methods answer different
+/// questions — "what does this catalog reach NOW" vs "recompile exactly
+/// these services" — so a test asserting on the wrong list would pass for
+/// the wrong reason), and can be told to fail. This crate carries no
+/// `egret-perm-compile`/`egret-policy` dependency (deliberately — see
+/// `compiler_port`'s module doc), so this fake exercises the WIRING
+/// (`ensure_warehouse_catalog_with_compiler`/`delete_catalog_with_compiler`
+/// call the right port method, in the same transaction, and a failure rolls
+/// the whole write back) rather than real compilation; the real compiler is
+/// `egret-bin`'s `ProfileCompilerImpl`, covered by `egret-engine-mgmt`'s own
+/// suite and by `egret-catalog-engine`'s `warehouse_delete_recompile` suite.
+#[derive(Clone, Default)]
+struct FakeAssignmentCompiler {
+    catalog_calls: std::sync::Arc<std::sync::Mutex<Vec<Uuid>>>,
+    service_calls: std::sync::Arc<std::sync::Mutex<Vec<Vec<i64>>>>,
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl egret_catalog_registry::CatalogAssignmentCompiler for FakeAssignmentCompiler {
+    async fn recompile_catalog_assignment_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        catalog_id: Uuid,
+    ) -> Result<(), egret_perm::CompileError> {
+        self.catalog_calls.lock().unwrap().push(catalog_id);
+        if self.fail {
+            return Err(egret_perm::CompileError::Db(
+                "synthetic compile failure".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn recompile_services_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
+        self.service_calls
+            .lock()
+            .unwrap()
+            .push(service_ids.to_vec());
+        if self.fail {
+            return Err(egret_perm::CompileError::Db(
+                "synthetic compile failure".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The FIRST creation of a warehouse's catalog recompiles the implicit
+/// assignment grant in the SAME transaction as the grant sync, with no
+/// second write and no manual compile step (SP4a Task 16, D3 defect 2). The
+/// idempotent re-ensure that follows (no new catalog, no new grant) must NOT
+/// recompile again — there is nothing new to compile.
+#[tokio::test]
+async fn ensure_warehouse_catalog_recompiles_the_implicit_grant_in_the_same_transaction() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let ws = workspace(&db).await;
+    let name = unique("Recompile-Wh");
+    let wh = warehouse(&db, &name, ws).await;
+    let compiler = FakeAssignmentCompiler::default();
+
+    let (c1, created) = store
+        .ensure_warehouse_catalog_with_compiler(
+            &WarehouseIdentity {
+                id: wh,
+                name: &name,
+                workspace_id: ws,
+            },
+            None,
+            Some(&compiler),
+        )
+        .await
+        .unwrap();
+    assert!(created);
+    assert_eq!(
+        compiler.catalog_calls.lock().unwrap().as_slice(),
+        &[c1.id],
+        "the grant sync's own transaction must recompile exactly this catalog, once"
+    );
+
+    let (again, created) = store
+        .ensure_warehouse_catalog_with_compiler(
+            &WarehouseIdentity {
+                id: wh,
+                name: &name,
+                workspace_id: ws,
+            },
+            None,
+            Some(&compiler),
+        )
+        .await
+        .unwrap();
+    assert!(!created);
+    assert_eq!(again.id, c1.id);
+    assert_eq!(
+        compiler.catalog_calls.lock().unwrap().len(),
+        1,
+        "the idempotent re-ensure syncs no grant, so it must not recompile again"
+    );
+}
+
+/// A compile failure inside `ensure_warehouse_catalog_with_compiler` rolls
+/// back the WHOLE write — the catalog row, its `catalog_workspaces` row, and
+/// its implicit grant all go with it — because a grant stored but never
+/// compiled is worse than a rejected write (SP4a Task 16, D3 defect 2, same
+/// reasoning `ProfileCompilerPort::recompile_catalog_assignment_in_tx`
+/// documents for path 1).
+#[tokio::test]
+async fn ensure_warehouse_catalog_rolls_back_the_whole_write_when_the_compile_fails() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let ws = workspace(&db).await;
+    let name = unique("Recompile-Fail-Wh");
+    let wh = warehouse(&db, &name, ws).await;
+    let compiler = FakeAssignmentCompiler {
+        fail: true,
+        ..Default::default()
+    };
+
+    let err = store
+        .ensure_warehouse_catalog_with_compiler(
+            &WarehouseIdentity {
+                id: wh,
+                name: &name,
+                workspace_id: ws,
+            },
+            None,
+            Some(&compiler),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, RegistryError::Compile(_)),
+        "expected a Compile error, got {err:?}"
+    );
+    assert!(
+        store.get_catalog_for_warehouse(wh).await.unwrap().is_none(),
+        "the failed compile must roll the catalog-creation write back entirely"
+    );
 }
 
 #[tokio::test]
@@ -632,7 +797,7 @@ async fn create_replacing_orphan_replaces_only_an_unused_catalog() {
     assert_ne!(again.id, row.id);
     assert!(store.get_catalog(row.id).await.unwrap().is_none());
 
-    store.set_catalog_workspaces(again.id, &[ws]).await.unwrap();
+    set_catalog_workspaces(&db, again.id, &[ws]).await;
     assert!(matches!(
         store
             .create_catalog_replacing_orphan(&fresh, &sample_def(), None)
@@ -656,7 +821,7 @@ async fn create_replacing_orphan_replaces_only_an_unused_catalog() {
         )
         .await
         .unwrap();
-    store.set_catalog_workspaces(wh_cat.id, &[]).await.unwrap();
+    set_catalog_workspaces(&db, wh_cat.id, &[]).await;
     assert!(
         matches!(
             store
@@ -837,4 +1002,132 @@ async fn warehouse_reads_come_from_the_attachments_not_the_engine_column() {
         "no primary attachment"
     );
     assert_eq!(by_engine.get(&bare), None, "absent, not an empty vec");
+}
+
+/// A `policy.authz_services` row this fixture's fake `perm.compiled` row
+/// claims, matching everything `compiled_service_ids_for_catalog_via` FKs
+/// through. Returns the service id.
+async fn fake_compiled_service(db: &Db) -> i64 {
+    let def_name = unique("wd9-def");
+    sqlx::query(
+        "INSERT INTO policy.authz_service_defs (id, name, def_jsonb) VALUES ($1,$2,'{}'::jsonb)",
+    )
+    .bind(rand_bigint())
+    .bind(&def_name)
+    .execute(&db.pool)
+    .await
+    .expect("service def");
+    sqlx::query_scalar(
+        "INSERT INTO policy.authz_services (name, type, config_jsonb) VALUES ($1,$2,'{}'::jsonb) RETURNING id",
+    )
+    .bind(unique("wd9-svc"))
+    .bind(&def_name)
+    .fetch_one(&db.pool)
+    .await
+    .expect("service")
+}
+
+fn rand_bigint() -> i64 {
+    (Uuid::new_v4().as_u128() % (i64::MAX as u128)) as i64
+}
+
+/// A `perm.grants`/`perm.compiled` pair standing in for a real compile: a
+/// grant on `catalog_id` and a `policy.authz_policies` row under
+/// `service_id`, linked by a `perm.compiled` provenance row — everything
+/// `RegistryStore::delete_catalog_with_compiler`'s historical read needs,
+/// without pulling in the real compiler crate this test's own crate is
+/// deliberately free of.
+async fn seed_stale_compiled_grant(db: &Db, catalog_id: Uuid, service_id: i64) {
+    let grant_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, origin) \
+         VALUES ('allow', ARRAY['read']::text[], $1, 'explicit') RETURNING id",
+    )
+    .bind(catalog_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("grant");
+    sqlx::query(
+        "INSERT INTO perm.grant_principals (grant_id, kind, ref, mode) \
+         VALUES ($1, 'user', $2, 'include')",
+    )
+    .bind(grant_id)
+    .bind(unique("wd9-user"))
+    .execute(&db.pool)
+    .await
+    .expect("grant principal");
+    let policy_id: i64 = sqlx::query_scalar(
+        "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb) \
+         VALUES ($1, $2, '{}'::jsonb) RETURNING id",
+    )
+    .bind(service_id)
+    .bind(format!("perm-grant-{grant_id}"))
+    .fetch_one(&db.pool)
+    .await
+    .expect("policy");
+    sqlx::query(
+        "INSERT INTO perm.compiled (service_id, policy_id, source_kind, grant_id) \
+         VALUES ($1, $2, 'grant', $3)",
+    )
+    .bind(service_id)
+    .bind(policy_id)
+    .bind(grant_id)
+    .execute(&db.pool)
+    .await
+    .expect("compiled provenance");
+}
+
+/// Deleting a catalog that carries an EXPLICIT `perm.grants` row (no
+/// workspace assignment at all — the production route's own guard only
+/// checks attachments and `catalog_workspaces`, so this is reachable) sweeps
+/// whichever profile that grant was last compiled into, in the SAME
+/// transaction as the delete (SP4a Task 16 re-enumeration: a ninth instance,
+/// same shape as D3 defect 3, found on a path Task 15 did not list).
+#[tokio::test]
+async fn delete_catalog_recompiles_the_service_its_grant_was_compiled_into() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let def = |id: Uuid| {
+        CatalogDef::parse(
+            "jdbc",
+            &json!({
+                "dialect": "postgresql", "host": "db", "port": 5432, "database": "d",
+                "user": "u", "password_secret_id": id, "ssl": { "mode": "require" }
+            }),
+            &json!(null),
+        )
+        .unwrap()
+    };
+    let vault = secrets(&db);
+    let pw = vault
+        .create(None, &unique("wd9-pw"), None, "hunter2")
+        .await
+        .unwrap();
+    let row = store
+        .create_catalog(&unique("wd9cat"), &def(pw), None)
+        .await
+        .unwrap();
+
+    let service_id = fake_compiled_service(&db).await;
+    seed_stale_compiled_grant(&db, row.id, service_id).await;
+
+    let compiler = FakeAssignmentCompiler::default();
+    let deleted = store
+        .delete_catalog_with_compiler(row.id, Some(&compiler))
+        .await
+        .unwrap();
+    assert!(deleted);
+    assert!(
+        compiler.catalog_calls.lock().unwrap().is_empty(),
+        "delete_catalog_with_compiler must call recompile_services_in_tx, \
+         not recompile_catalog_assignment_in_tx — the latter re-derives from \
+         CURRENT catalog reachability, which is empty the instant this catalog \
+         is gone"
+    );
+    assert_eq!(
+        compiler.service_calls.lock().unwrap().as_slice(),
+        &[vec![service_id]],
+        "must recompile exactly the service this catalog's grant was \
+         historically compiled into, sourced from perm.compiled before the \
+         cascade erased it"
+    );
 }

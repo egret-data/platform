@@ -39,6 +39,18 @@ impl From<egret_query::EngineError> for BiError {
     }
 }
 
+/// SP4a Task 7: a catalog-tag write recompiles every StarRocks profile it can
+/// stale (D5), and a genuine `CompileError` (an authoring/resolution bug —
+/// `WorkspaceMembers` is skipped, not surfaced as an error; see
+/// `egret-perm-compile::trigger`'s module doc) must not disappear into an
+/// opaque 500. `Engine` already means "a downstream policy/engine operation
+/// failed" and renders the message, not just a generic label.
+impl From<egret_perm::CompileError> for BiError {
+    fn from(e: egret_perm::CompileError) -> Self {
+        BiError::Engine(format!("permission recompile failed: {e}"))
+    }
+}
+
 /// Domain arm only — the shared `Auth` arm is in `egret_core::ApiError`.
 impl IntoResponse for BiError {
     fn into_response(self) -> Response {

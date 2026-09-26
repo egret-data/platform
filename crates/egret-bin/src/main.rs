@@ -239,6 +239,99 @@ impl egret_kernel::engine_conn::EngineConnResolver for EngineConnResolverImpl {
 /// names. Backed by `EngineMgmtStore`; the composition root is the only place the
 /// two seams meet (the Policies module depends on `EngineBindingReader`, not on
 /// `egret-engine-mgmt`).
+/// The engine seam's `ProfileCompilerPort`, implemented here in the
+/// composition root (SP4a Task 9 review).
+///
+/// It cannot live in `egret-engine-mgmt`: the compiler is `egret-perm-compile`,
+/// which depends on `egret-policy`, and keeping `egret-policy`'s internals out
+/// of the engine seam's production graph is the whole reason
+/// `egret-policy-api::PolicyPort` exists there. Same shape, opposite direction,
+/// as `EngineBindingReaderImpl` below.
+struct ProfileCompilerImpl {
+    perm: egret_perm::PermStore,
+    policy: egret_policy::PolicyStore,
+}
+
+/// Shared body for both ports' `recompile_catalog_assignment_in_tx`
+/// (`egret_engine_mgmt::ProfileCompilerPort` and
+/// `egret_catalog_registry::CatalogAssignmentCompiler` — SP4a Task 16): one
+/// implementation of "recompile every profile this catalog reaches," not two
+/// that can drift, since `ProfileCompilerImpl` implements both ports and
+/// neither method touches `self`.
+///
+/// The same affected-service derivation `affected_services_for_grant` uses
+/// for a grant scoped to this catalog: every profile an engine currently
+/// binds that also attaches this catalog. `services_for_catalog_via` already
+/// emits `SELECT DISTINCT ... ORDER BY 1`, but the sort/dedup is redone here
+/// explicitly rather than trusted to the query, matching
+/// `egret_perm_compile::trigger::normalize_service_order`'s own reasoning:
+/// `lock_services_in_tx`'s ascending-order invariant is load-bearing (it is
+/// what turns two overlapping recompiles into a queue instead of a
+/// deadlock), so the guarantee lives at this call site too.
+async fn recompile_catalog_assignment(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    catalog_id: uuid::Uuid,
+) -> Result<(), egret_perm::CompileError> {
+    let mut ids = egret_policy::services_for_catalog_via(&mut **tx, catalog_id)
+        .await
+        .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    egret_perm_compile::lock_services_in_tx(tx, &ids).await?;
+    egret_perm_compile::recompile_services_in_tx(tx, &ids).await?;
+    Ok(())
+}
+
+#[async_trait::async_trait]
+impl egret_engine_mgmt::ProfileCompilerPort for ProfileCompilerImpl {
+    async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::recompile_service(&self.perm, &self.policy, service_id)
+            .await
+            .map(|_| ())
+    }
+
+    async fn recompile_catalog_assignment_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        catalog_id: uuid::Uuid,
+    ) -> Result<(), egret_perm::CompileError> {
+        recompile_catalog_assignment(tx, catalog_id).await
+    }
+}
+
+/// `egret-catalog-registry`'s narrower port (SP4a Task 16, D3 defects 2 and
+/// 3): that crate deliberately carries no `egret-perm-compile`/`egret-policy`
+/// dependency (see `egret_catalog_registry::compiler_port`'s module doc), so
+/// this is a SEPARATE `impl` block on the same concrete struct rather than a
+/// supertrait — `ProfileCompilerImpl` satisfies both ports, and each caller
+/// (`egret-engine-mgmt`, `egret-catalog-registry`/`egret-catalog-engine`)
+/// only ever sees the one its own crate is allowed to depend on.
+#[async_trait::async_trait]
+impl egret_catalog_registry::CatalogAssignmentCompiler for ProfileCompilerImpl {
+    async fn recompile_catalog_assignment_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        catalog_id: uuid::Uuid,
+    ) -> Result<(), egret_perm::CompileError> {
+        recompile_catalog_assignment(tx, catalog_id).await
+    }
+
+    async fn recompile_services_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
+        if service_ids.is_empty() {
+            return Ok(());
+        }
+        egret_perm_compile::recompile_services_in_tx(tx, service_ids).await?;
+        Ok(())
+    }
+}
+
 struct EngineBindingReaderImpl {
     store: egret_engine_mgmt::EngineMgmtStore,
     /// Resolves a warehouse's lakekeeper id + browses its catalog metadata
@@ -1922,6 +2015,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         classification_policies: egret_bi::ClassificationPolicyRepo::new(db.clone(), bus.clone()),
     });
 
+    // Recompiles a catalog's implicit assignment grant (SP4a Task 16, D3
+    // defects 2 and 3) — built once here, shared (as two DIFFERENT trait
+    // objects, one per port) with the identical instance `perm_compiler`
+    // below constructs for engine-mgmt. `PermStore`/`PolicyStore` are cheap
+    // pool handles, so cloning the concrete struct instead of the `Arc` would
+    // cost nothing extra either; sharing the `Arc` is simplest.
+    let profile_compiler = std::sync::Arc::new(ProfileCompilerImpl {
+        perm: egret_perm::PermStore::new(db.pool.clone()),
+        policy: egret_policy::PolicyStore::new(db.clone()),
+    });
+
     // Catalog seam admin router (E3d-3): warehouses / catalog-roles / grants /
     // Catalog Clients / warehouse browse+admin. Moved out of egret-controlplane
     // into egret-catalog-engine; still nested at `/api/control-plane`. The
@@ -1934,6 +2038,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         browser: catalog_browser.clone(),
         sessions: sessions.clone(),
         pdp: pdp.clone(),
+        perm_compiler: Some(profile_compiler.clone()
+            as std::sync::Arc<dyn egret_catalog_registry::CatalogAssignmentCompiler>),
     });
 
     // Policy/Ranger seam admin router (E2d): the Policies console. Owns the
@@ -1953,6 +2059,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         sessions: sessions.clone(),
         engine_egret_url: engine_egret_url.clone(),
+        pdp: pdp.clone(),
+    });
+
+    // Data-permission model surface (SP4a Task 9): grants/rules/explain, plus
+    // the manual compile trigger. Both stores are built over the SAME `db`,
+    // which is what lets a grant write and its recompile share one
+    // transaction across the `perm.*` and `policy.*` schemas.
+    let perm = Some(egret_perm_compile::PermState {
+        perm: egret_perm::PermStore::new(db.pool.clone()),
+        policy: egret_policy::PolicyStore::new(db.clone()),
+        sessions: sessions.clone(),
         pdp: pdp.clone(),
     });
 
@@ -2012,6 +2129,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // The real DDL runner (design D8): a live `mysql_async` connection per
         // statement. Tests substitute `FakeStarRocksDdl`.
         starrocks_ddl: std::sync::Arc::new(egret_engine_mgmt::MysqlDdlRunner),
+        // Binding an engine to a profile changes which catalogs that profile
+        // reaches, and no grant/rule mutation covers it — so the bind brings
+        // the profile's compiled policies up to date itself rather than
+        // leaving it stale until someone calls the manual trigger.
+        perm_compiler: Some(
+            profile_compiler.clone() as std::sync::Arc<dyn egret_engine_mgmt::ProfileCompilerPort>
+        ),
+        catalog_assignment_compiler: Some(profile_compiler.clone()
+            as std::sync::Arc<dyn egret_catalog_registry::CatalogAssignmentCompiler>),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).
@@ -2144,6 +2270,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         control_plane,
         catalog_admin,
         policy_admin,
+        perm,
         engine_mgmt,
         catalog_engine,
         idp,

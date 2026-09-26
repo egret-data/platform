@@ -1,0 +1,58 @@
+//! Compiles the `perm` model (`egret-perm`) into Ranger access-policy JSON —
+//! the security boundary: this output is what Trino/StarRocks actually
+//! enforce, so a wrong grant here is not a wrong screen, it is data reaching
+//! someone it should not with nothing in egret showing it.
+//!
+//! **Split out of `egret-perm` itself (SP4a Task 6 fix round 1, Important 3).**
+//! `egret-perm`'s model/store half (grants, rules, `sync_assignment_grants`)
+//! touches only `perm.*` tables and no Ranger JSON at all; only this half
+//! ever needed `egret_policy`. Before the split, `egret-perm` carried
+//! `egret_policy` as a plain dependency, so anything that only wanted
+//! `sync_assignment_grants` (`egret-engine-mgmt`, wired in this same fix
+//! round) pulled `egret-policy`'s internals into its PRODUCTION dependency
+//! graph — exactly what `egret-policy-api::PolicyPort` exists to prevent
+//! (`egret-policy` is a *dev*-only dependency of `egret-engine-mgmt`
+//! everywhere else). This crate is the seam: it depends on `egret-perm`
+//! (for the model types and `CompileError`/`EngineType`/`engine_accesses`,
+//! none of which need Ranger) and on `egret-policy`. `egret-perm` itself
+//! carries no `egret-policy` dependency at all.
+//!
+//! This module builds typed `egret_policy::admin::{AccessPolicyInput,
+//! AccessItemInput, ResourceLevel, MaskingPolicyInput, RowFilterPolicyInput,
+//! ...}` values and leaves RENDERING those to JSON to that existing code —
+//! nothing here hand-writes a Ranger policy body from scratch. `rules.rs`'s
+//! `stamp_service_type` is the one place this module touches an already-
+//! rendered `Value` after the fact, fixing a `serviceType` the renderer
+//! itself hardcodes to `"trino"` — that is a targeted correction of one
+//! field, not hand-written JSON. See `grants.rs` for `compile_grant` (grants
+//! → access policies) and `rules.rs` for `compile_rule` (named rules →
+//! masking/row-filter policies, with the StarRocks tag expansion), and
+//! `egret_perm::actions` for the `Action` → Ranger access-type map the
+//! former consumes.
+//!
+//! **`trigger::recompile_service` (SP4a Task 7)** is this crate's first real
+//! caller of `compile_grant`/`compile_rule` outside their own tests — nothing
+//! else in the codebase called either before this. It loads a profile's
+//! model, resolves the registry/tag reads `compile_grant`/`compile_rule`
+//! themselves stay free of (see those modules' doc comments), and diffs the
+//! result against `perm.compiled` so a recompile writes only what changed.
+//! `egret-bi::catalog_tags` calls it on every catalog-tag write, alongside
+//! the `tag_version` bump already there — see `trigger`'s own module doc for
+//! why a `WorkspaceMembers`-only refusal is skipped rather than aborting the
+//! whole recompile.
+
+pub mod grants;
+pub(crate) mod members;
+pub mod routes;
+pub mod rules;
+pub mod trigger;
+
+pub use grants::{compile_grant, validate_grant_shape};
+pub use routes::{openapi, perm_router, PermHttpError, PermState};
+pub use rules::{compile_rule, validate_rule_shape, ResolvedNames, TaggedColumn};
+pub use trigger::{
+    affected_services_for_grant, affected_services_for_rule, affected_services_for_tag_rename,
+    affected_services_for_workspace_members, lock_services_in_tx, recompile_service,
+    recompile_service_in_tx, recompile_services_in_tx, CompileSummary, SkippedItem, SourceKind,
+    DEFAULT_EXPANSION_CEILING, PROFILE_EXPANSION_CEILING,
+};

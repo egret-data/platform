@@ -60,6 +60,16 @@ pub struct CatalogAdminState {
     /// Policy decision point: every route gates on `egret_core::authz::require`
     /// (B1b-2). `platform_admin` still bypasses inside the PDP.
     pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+    /// Recompiles a catalog's implicit assignment grant / sweeps its stale
+    /// compiled policy on teardown, in the SAME transaction as the write
+    /// (SP4a Task 16, D3 defects 2 and 3). `None` leaves both call sites
+    /// behaved exactly as before this task (every test in this crate, and any
+    /// deployment that predates it) — same contract
+    /// `egret_engine_mgmt::EngineMgmtState::perm_compiler` already has. The
+    /// concrete implementation is wired in the composition root; see
+    /// `egret_catalog_registry::CatalogAssignmentCompiler` for why it is a
+    /// port and not a direct call.
+    pub perm_compiler: Option<Arc<dyn egret_catalog_registry::CatalogAssignmentCompiler>>,
 }
 
 impl FromRef<CatalogAdminState> for SessionService {
@@ -418,13 +428,14 @@ async fn create_warehouse(
     if let Err(e) = st
         .store
         .registry()
-        .ensure_warehouse_catalog(
+        .ensure_warehouse_catalog_with_compiler(
             &egret_catalog_registry::WarehouseIdentity {
                 id: w.id,
                 name: &w.name,
                 workspace_id: w.workspace_id,
             },
             None,
+            st.perm_compiler.as_deref(),
         )
         .await
     {
@@ -522,7 +533,9 @@ async fn delete_warehouse(
     // "still its primary" arm went with `engines.warehouse_id` in SP3c-2 Task
     // 6: primacy is now a flag on an attachment, so the attachment check is
     // the whole of it.
-    st.store.delete_warehouse_releasing_catalog(id).await?;
+    st.store
+        .delete_warehouse_releasing_catalog_with_compiler(id, st.perm_compiler.as_deref())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

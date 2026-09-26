@@ -25,8 +25,35 @@ use crate::PolicyStore;
 pub use error::PolicyHttpError;
 pub use ranger_json::{
     editor_to_ranger_json, is_tag_kind, masking_to_ranger_json, rowfilter_to_ranger_json,
-    tag_editor_to_ranger_json, MaskingPolicyInput, RangerPolicy, RowFilterPolicyInput,
+    tag_editor_to_ranger_json, MaskItemInput, MaskingPolicyInput, RangerPolicy, RowFilterItemInput,
+    RowFilterPolicyInput,
 };
+// SP4a Task 4 (egret-perm's compiler) builds these three directly rather
+// than hand-writing Ranger JSON, then leaves rendering to
+// `access_to_ranger_json`.
+pub use ranger_json::{AccessItemInput, AccessPolicyInput, ResourceLevel};
+// SP4a Task 7: `egret-perm-compile`'s recompile driver (`trigger::recompile_service`)
+// is the first real caller of `compile_grant` outside this crate's own
+// tests, and `compile_grant` returns a typed `AccessPolicyInput`, never
+// rendered JSON (the compiler stays free of `serde_json` rendering choices —
+// see `egret-perm-compile/src/grants.rs`'s module doc). Something outside
+// `egret-policy` has to render it before it can be written to
+// `policy.authz_policies.policy_jsonb`, so `access_to_ranger_json` (the plain,
+// resource-addressed renderer) is re-exported here too. `tag_access_to_ranger_json`
+// stays crate-private and unreachable — D2 forbids egret ever emitting a tag
+// *access* policy, and that is the one Ranger tag-first short-circuit hazard
+// this boundary still has to hold the line on; a plain resource-addressed
+// access policy carries no such hazard, the same distinction Task 5 already
+// drew for `tag_masking_to_ranger_json`/`tag_rowfilter_to_ranger_json` below.
+pub use ranger_json::access_to_ranger_json;
+// SP4a Task 5 (egret-perm's rule compiler) also needs the tag MASKING and
+// ROW-FILTER builders. D2 forbids only `tag_access_to_ranger_json` — a tag
+// ACCESS policy reintroduces Ranger's tag-first short-circuit; a tag
+// masking/row-filter policy carries no such hazard, and egret already emits
+// both through the hand-authored editor path (`tag_editor_to_ranger_json`,
+// above). `tag_access_to_ranger_json` itself stays unreachable outside this
+// module.
+pub use ranger_json::{tag_masking_to_ranger_json, tag_rowfilter_to_ranger_json};
 pub use reader::{EngineBinding, EngineBindingReader, EngineReadError};
 use std::sync::Arc;
 
@@ -243,6 +270,18 @@ pub struct ProfileDto {
     /// `<name>_tag` convention), if such a service exists. `None` otherwise — the
     /// FE shows a "Tags" tab only when this is set.
     pub tag_service: Option<String>,
+    /// `"manual"` (hand-authored, fully editable) or `"generated"` (compiled
+    /// by the SP4a permission model from its grants and rules).
+    ///
+    /// **Exposed because D4's requirement is that the profile says so BEFORE
+    /// an edit is overwritten, not after** (whole-branch review, Important 4).
+    /// The raw-JSON policy editor still ships in SP4a and is still the only
+    /// policy UI, and a `'generated'` profile is now only PARTLY frozen — its
+    /// `perm-*` policies are compiler-owned and refuse an edit with a 409,
+    /// while foreign policies in the same profile stay editable. Without this
+    /// field the editor cannot tell an operator which half they are looking
+    /// at, and the first thing they learn is the 409 on save.
+    pub origin: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -567,6 +606,7 @@ async fn list_profiles(
                 r#type: s.r#type,
                 policy_version: s.policy_version,
                 tag_service,
+                origin: s.origin,
             }
         })
         .collect();
@@ -655,7 +695,7 @@ async fn create_profile(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:delete permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
-        (status = 409, description = "Profile is still enforced by an engine", body = ErrorBody),
+        (status = 409, description = "Profile is still enforced by an engine, or is compiled by the SP4a permission model (generated) and cannot be deleted through the editor", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -764,6 +804,7 @@ async fn trino_config(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:seed permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 409, description = "The profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -975,7 +1016,7 @@ fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:create permission", body = ErrorBody),
         (status = 404, description = "No such policy profile", body = ErrorBody),
-        (status = 409, description = "A policy with this name already exists", body = ErrorBody),
+        (status = 409, description = "A policy with this name already exists, or the target profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1037,6 +1078,7 @@ async fn create_policy(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
+        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1074,6 +1116,7 @@ async fn update_policy(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:delete permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
+        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1104,6 +1147,7 @@ pub struct EnabledBody {
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such policy", body = ErrorBody),
+        (status = 409, description = "The policy's profile is compiled by the SP4a permission model (generated) and cannot be hand-edited", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

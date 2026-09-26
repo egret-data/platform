@@ -553,7 +553,18 @@ pub(crate) async fn build_provision_req_with(
                             ProfilePlan::Existing(id) => Some(id),
                             ProfilePlan::Create => undo.created_profile_id,
                             ProfilePlan::Unbound => None,
-                        }
+                        };
+                        // The profile is newly reachable from this engine's
+                        // catalogs, which are already attached on this path —
+                        // compile the `perm` model into it now rather than
+                        // leaving it stale until someone calls the manual
+                        // trigger (SP4a Task 9 review).
+                        crate::profile_compiler::recompile_bound_profile(
+                            st,
+                            engine.id,
+                            &engine.name,
+                        )
+                        .await;
                     }
                     Err(e) => tracing::warn!(engine = %engine.name, error = %e,
                         "late Ranger bind failed; engine stays unbound"),
@@ -2883,13 +2894,14 @@ async fn create_engine(
     let (wh_catalog, _) = st
         .engine_mgmt
         .registry()
-        .ensure_warehouse_catalog(
+        .ensure_warehouse_catalog_with_compiler(
             &WarehouseIdentity {
                 id: wh.id,
                 name: &wh.name,
                 workspace_id: wh.workspace_id,
             },
             None,
+            st.catalog_assignment_compiler.as_deref(),
         )
         .await?;
     let role_id = ensure_engine_role(&st, wh.id).await?;
@@ -2999,6 +3011,17 @@ async fn create_engine(
     //     cluster is up. Past the rollback: a failure here is that catalog's,
     //     not the engine's.
     let catalog_attach_errors = attach_extra_catalogs(&st, &engine, &extra_catalogs).await;
+
+    // 11. Bring the bound profile's compiled `perm` policies up to date
+    //     (SP4a Task 9 review). Here, at the END, and not next to
+    //     `bind_trino_profile` in step 8: the compiler's desired set is derived
+    //     from the catalogs the profile's engines REACH, and the non-primary
+    //     ones are not attached until step 10. A recompile at bind time would
+    //     see the primary catalog (step 7, before the bind) but none of the
+    //     others, and would compile an INCOMPLETE set — a subtler form of the
+    //     staleness it exists to remove. Never fails the create; see
+    //     `profile_compiler::recompile_bound_profile`.
+    crate::profile_compiler::recompile_bound_profile(&st, engine.id, &engine.name).await;
 
     Ok((
         StatusCode::CREATED,
@@ -3602,13 +3625,14 @@ async fn create_starrocks_engine(
     let (wh_catalog, _) = st
         .engine_mgmt
         .registry()
-        .ensure_warehouse_catalog(
+        .ensure_warehouse_catalog_with_compiler(
             &WarehouseIdentity {
                 id: wh.id,
                 name: &wh.name,
                 workspace_id: wh.workspace_id,
             },
             None,
+            st.catalog_assignment_compiler.as_deref(),
         )
         .await?;
     let role_id = ensure_engine_role(&st, wh.id).await?;
@@ -3807,6 +3831,10 @@ async fn create_starrocks_engine(
     // failed.) The wire step above, or `POST …/catalogs/{cid}/apply`, converges
     // it once the FE answers.
     let catalog_attach_errors = attach_extra_catalogs(&st, &engine, &extra_catalogs).await;
+
+    // Same as the Trino create's step 11: recompile the bound profile once
+    // every catalog this engine reaches is attached.
+    crate::profile_compiler::recompile_bound_profile(&st, engine.id, &engine.name).await;
 
     Ok((
         StatusCode::CREATED,
@@ -6619,6 +6647,8 @@ mod tests {
             ranger_enabled: false,
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(crate::starrocks_ddl::FakeStarRocksDdl::default()),
+            perm_compiler: None,
+            catalog_assignment_compiler: None,
         })
     }
 

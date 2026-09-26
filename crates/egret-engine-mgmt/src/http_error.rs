@@ -71,7 +71,15 @@ pub enum EngineHttpError {
 /// The one place a `sqlx::Error` becomes an HTTP error. It is logged here because
 /// this is the last point the error still exists: `Internal` has no payload, and
 /// "internal error with nothing in the logs" was the reported defect.
-fn db_error(e: sqlx::Error) -> EngineHttpError {
+/// `pub(crate)`: `catalogs::set_catalog_workspaces` maps `sqlx::Error` from
+/// its own `.begin()`/`.commit()` through this explicitly rather than
+/// through a blanket `From<sqlx::Error> for EngineHttpError` (Task 6 fix
+/// round 1, Minor) — a crate-wide `impl From` would make every OTHER raw
+/// sqlx `?` in this crate compile through the same mapping with no
+/// deliberate decision at the call site, which is not a promise this crate
+/// makes anywhere else (every other `sqlx::Error` here is wrapped in a
+/// seam-specific error type first).
+pub(crate) fn db_error(e: sqlx::Error) -> EngineHttpError {
     let (sqlstate, constraint) = match e.as_database_error() {
         Some(d) => (
             d.code().map(|c| c.into_owned()),
@@ -138,7 +146,43 @@ impl From<egret_catalog_registry::RegistryError> for EngineHttpError {
             E::Invalid(v) => EngineHttpError::BadRequest(v.to_string()),
             E::Secrets(s) => s.into(),
             E::Db(e) => db_error(e),
+            // `ensure_warehouse_catalog`'s implicit-grant sync (Task 6 fix
+            // round 1, Important 1) failing inside its own transaction.
+            E::Perm(e) => e.into(),
+            // `ensure_warehouse_catalog_with_compiler`'s in-transaction
+            // recompile (SP4a Task 16, D3 defect 2) failing — same treatment
+            // as `E::Perm` above, through the same `CompileError` mapping
+            // `catalogs::set_catalog_workspaces` already uses.
+            E::Compile(e) => e.into(),
         }
+    }
+}
+
+impl From<egret_perm::PermError> for EngineHttpError {
+    fn from(e: egret_perm::PermError) -> Self {
+        use egret_perm::PermError as E;
+        match e {
+            E::NotFound(_) => EngineHttpError::NotFound,
+            E::Invalid(s) => EngineHttpError::BadRequest(s),
+            E::Db(e) => db_error(e),
+        }
+    }
+}
+
+/// `catalogs::set_catalog_workspaces`'s in-transaction recompile (SP4a Task
+/// 15, D3 defect 1) failing. Mapped to `Internal` rather than surfaced
+/// verbatim, the same treatment `db_error` gives a raw `sqlx::Error` here —
+/// but, unlike `ProfileCompilerPort::recompile_profile`'s fire-and-forget
+/// callers, this one is reached through `?` and DOES fail (and roll back)
+/// the request: a grant written but not compiled is worse than a rejected
+/// write.
+impl From<egret_perm::CompileError> for EngineHttpError {
+    fn from(e: egret_perm::CompileError) -> Self {
+        tracing::error!(
+            error = %e,
+            "perm-model recompile failed inside a catalog-workspace assignment write"
+        );
+        EngineHttpError::Internal
     }
 }
 

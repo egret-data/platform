@@ -135,3 +135,62 @@ async fn list_policies_returns_all_for_service() {
 
     s.delete_service(svc.id).await.unwrap();
 }
+
+/// Whole-branch review, Important 6: `upsert_policy` was the one write path
+/// with no guard at all. It keeps its exemption from `refuse_if_generated` —
+/// its only caller is the admin-defaults seed, and `engines.rs` turns a seed
+/// failure into a 400, so a profile-wide refusal there would break every
+/// engine update against a claimed profile — but the reserved-NAME guard is
+/// pure, name-only, and closes the drift: a second caller passing a
+/// `perm-grant-`/`perm-rule-` name would overwrite compiled output, which the
+/// next recompile silently restores.
+#[tokio::test]
+async fn upsert_policy_refuses_the_compilers_reserved_names_and_allows_every_other() {
+    let Some(s) = store().await else {
+        eprintln!("skip");
+        return;
+    };
+    let defname = uniq("trino_upsert");
+    let def_id = def_id_from_name(&defname);
+    s.upsert_service_def(def_id, &defname, &json!({"name": defname}))
+        .await
+        .unwrap();
+    let svc = s
+        .create_service(&uniq("svc"), &defname, &json!({}))
+        .await
+        .unwrap();
+    let pol = json!({"name": "x", "service": svc.name.clone()});
+
+    for reserved in ["perm-grant-0001", "perm-rule-0001"] {
+        let err = s
+            .upsert_policy(svc.id, reserved, &pol)
+            .await
+            .expect_err("a compiler-owned name must be refused here as it is everywhere else");
+        assert!(
+            matches!(err, egret_policy::PolicyStoreError::CompilerOwned(_)),
+            "{reserved}: expected CompilerOwned, got {err:?}"
+        );
+        assert!(
+            s.list_policies(svc.id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|p| p.name != reserved),
+            "{reserved}: the refusal must write nothing"
+        );
+    }
+
+    // The seed's own names — the caller whose exemption is load-bearing —
+    // must still go through, twice (upsert, not insert).
+    let id1 = s
+        .upsert_policy(svc.id, "egret-admin-all", &pol)
+        .await
+        .expect("the admin seed's names collide with no reserved prefix");
+    let id2 = s
+        .upsert_policy(svc.id, "egret-admin-all", &pol)
+        .await
+        .expect("upsert must still update in place");
+    assert_eq!(id1, id2);
+
+    s.delete_service(svc.id).await.unwrap();
+}

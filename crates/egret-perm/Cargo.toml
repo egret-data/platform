@@ -1,0 +1,29 @@
+[package]
+name = "egret-perm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# SP4a Task 2: the `perm` schema and its store. Grants and named rules over
+# registry catalogs — the model a later task compiles into Ranger JSON.
+# Model + store live in one crate (unlike the seam "api"/impl split elsewhere)
+# because nothing outside SP4a depends on this yet; a later task can split a
+# leaf `egret-perm-api` out if a second seam needs the DTOs without sqlx.
+#
+# Deliberately carries NO `egret-policy` dependency (Task 6 fix round 1,
+# Important 3): the grant/rule -> Ranger-JSON compiler that needs it lives in
+# the sibling crate `egret-perm-compile` instead, so a production consumer of
+# this crate's model/store half (e.g. `egret-engine-mgmt`'s
+# `sync_assignment_grants` call) never pulls `egret-policy`'s internals into
+# its dependency graph.
+[dependencies]
+serde.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+utoipa.workspace = true
+sqlx.workspace = true
+
+[dev-dependencies]
+egret-metastore.workspace = true
+egret-test-db.workspace = true
+tokio.workspace = true

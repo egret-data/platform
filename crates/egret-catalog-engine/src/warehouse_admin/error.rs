@@ -48,8 +48,49 @@ impl From<CatalogError> for CatalogHttpError {
             CatalogError::BadRequest(s) => CatalogHttpError::BadRequest(s),
             CatalogError::Conflict(s) => CatalogHttpError::Conflict(s),
             CatalogError::Db(_) => CatalogHttpError::Internal,
+            // `delete_warehouse_releasing_catalog`'s in-transaction recompile
+            // (SP4a Task 16, D3 defect 3) failing — same `Internal` treatment
+            // as `Db`, logged as its own condition.
+            CatalogError::Compile(e) => {
+                tracing::error!(error = %e, "warehouse-delete recompile failed inside its own transaction");
+                CatalogHttpError::Internal
+            }
+            CatalogError::Perm(e) => {
+                tracing::error!(error = %e, "warehouse-delete: reading which services this catalog's grants compiled into failed");
+                CatalogHttpError::Internal
+            }
         }
     }
+}
+
+/// Logs a raw `sqlx::Error` before it becomes an opaque `Internal` 500 —
+/// without this, `E::Db`/`E::Perm` below dropped the error entirely, so an
+/// admin could tell from the response ONLY that "something broke", never
+/// which write or why (SP4a Task 6 fix round 2 review). `perm_grant_sync`
+/// names the finer distinction that review asked this mapping to consider:
+/// a warehouse's registry write succeeding while its `perm` grant sync
+/// fails in the SAME transaction (`ensure_warehouse_catalog`, Important 1 of
+/// round 1) is a materially different operator story than the database
+/// itself being unreachable — even though both are equally un-actionable to
+/// the CALLER, so the HTTP status/body stay the same `Internal` 500. This
+/// crate's other silent `Db(_) => Internal` arms (`CatalogError`,
+/// `StorageRegistryError`, `SecretsError` below) are a separate, larger
+/// observability gap this fix does not attempt to close.
+fn log_registry_db_error(e: &sqlx::Error, perm_grant_sync: bool) {
+    let (sqlstate, constraint) = match e.as_database_error() {
+        Some(d) => (
+            d.code().map(|c| c.into_owned()),
+            d.constraint().map(str::to_owned),
+        ),
+        None => (None, None),
+    };
+    tracing::error!(
+        error = %e,
+        sqlstate = sqlstate.as_deref().unwrap_or("-"),
+        constraint = constraint.as_deref().unwrap_or("-"),
+        perm_grant_sync,
+        "catalog registry database error"
+    );
 }
 
 /// The registry store error (SP3): a warehouse's registry catalog (creation,
@@ -63,7 +104,34 @@ impl From<egret_catalog_registry::RegistryError> for CatalogHttpError {
             E::Conflict(s) => CatalogHttpError::Conflict(s),
             E::Invalid(v) => CatalogHttpError::BadRequest(v.to_string()),
             E::Secrets(s) => s.into(),
-            E::Db(_) => CatalogHttpError::Internal,
+            E::Db(e) => {
+                log_registry_db_error(&e, false);
+                CatalogHttpError::Internal
+            }
+            // `ensure_warehouse_catalog`'s implicit-grant sync (SP4a Task 6
+            // fix round 1, Important 1) failing inside its own transaction —
+            // same HTTP treatment as `Db` (still `Internal`, not something
+            // the caller's request was wrong about), but logged as its own
+            // condition rather than silently folded into a generic database
+            // failure (fix round 2 review).
+            E::Perm(e) => {
+                match e {
+                    egret_perm::PermError::Db(inner) => log_registry_db_error(&inner, true),
+                    other => tracing::error!(
+                        error = %other,
+                        "catalog registry: perm grant-sync error (non-db)"
+                    ),
+                }
+                CatalogHttpError::Internal
+            }
+            // `ensure_warehouse_catalog_with_compiler`'s in-transaction
+            // recompile (SP4a Task 16, D3 defect 2) failing — same
+            // `Internal` treatment as `Perm` above, logged as its own
+            // condition.
+            E::Compile(e) => {
+                tracing::error!(error = %e, "catalog registry: assignment-grant recompile failed");
+                CatalogHttpError::Internal
+            }
         }
     }
 }
