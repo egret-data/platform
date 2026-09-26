@@ -1131,4 +1131,133 @@ mod tests {
         }
         assert_eq!(refused, 22);
     }
+
+    /// W13b Task 5: the corpus's twenty `dependsOn` declarations, put through
+    /// the run-time gate the processor applies (`depends_on_refusals`, then
+    /// `TimeWindow::from_model`, then `condition_keys`) and through
+    /// `spec::validate`. Eighteen pass both and would open a window; one flow
+    /// is refused at save, and one does not parse. Compared here by a running
+    /// program, like `trigger::flow`'s twenty-to-one split, so the coverage
+    /// statement's count (`oracle-exec/README.md`, *W13b*) cannot drift.
+    ///
+    /// None of the twenty declares a `window:`, so every one that resolves
+    /// takes the default one-day `DURATION_WINDOW`: the four window kinds are
+    /// judged by Task 1's measurements and this crate's own tests, never by
+    /// the corpus.
+    #[test]
+    fn the_corpus_depends_on_declarations_resolve_eighteen_of_twenty() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oracle-exec/corpus");
+        assert!(dir.is_dir(), "corpus not found at {}", dir.display());
+        let mut files = Vec::new();
+        let mut stack = vec![dir];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).expect("read corpus dir") {
+                let p = e.expect("dir entry").path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "yaml" || x == "yml") {
+                    files.push(p);
+                }
+            }
+        }
+        files.sort();
+        assert!(files.len() > 300, "expected the 345-flow corpus");
+
+        let mut resolved = Vec::new();
+        let mut refused_at_save = Vec::new();
+        let mut unparseable = Vec::new();
+        let mut window_free = 0usize;
+        let mut with_window = 0usize;
+        for path in &files {
+            let text = std::fs::read_to_string(path).expect("read flow");
+            if !text.contains("io.kestra.plugin.core.trigger.Flow") {
+                continue;
+            }
+            let flow: Flow = match serde_norway::from_str(&text) {
+                Ok(flow) => flow,
+                Err(e) => {
+                    let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+                    unparseable.push((stem, e.to_string()));
+                    continue;
+                }
+            };
+            let report = crate::spec::validate::validate(&flow);
+            for t in &flow.triggers {
+                let TriggerKind::Flow(ft) = &t.kind else {
+                    continue;
+                };
+                if ft.depends_on.is_empty() {
+                    window_free += 1;
+                    continue;
+                }
+                with_window += usize::from(ft.window.is_some());
+                let name = format!("{}/{}", flow.id, t.id);
+                let codes: Vec<&str> = depends_on_refusals(ft).iter().map(|r| r.code).collect();
+                let path_prefix = format!("triggers.{}.", t.id);
+                let at_save: Vec<&str> = report
+                    .errors
+                    .iter()
+                    .filter(|f| f.path.starts_with(&path_prefix))
+                    .map(|f| f.code)
+                    .collect();
+                // Save and run time refuse the same shapes (the module doc,
+                // *One refusal list*), declaration by declaration.
+                assert_eq!(at_save, codes, "{name}: save vs run-time gate");
+                let passes = codes.is_empty()
+                    && TimeWindow::from_model(ft.window.as_ref()).is_ok()
+                    && condition_keys(&ft.depends_on).is_ok();
+                if passes {
+                    resolved.push(name);
+                } else {
+                    refused_at_save.push((name, codes));
+                }
+            }
+        }
+
+        assert_eq!(window_free, 1, "the one window-free declaration");
+        assert_eq!(with_window, 0, "no corpus declaration names a `window:`");
+        assert_eq!(
+            refused_at_save,
+            vec![(
+                "trigger-flow-listener-namespace-condition/listen-flow".to_string(),
+                vec![
+                    "dependency_flow_id_required",
+                    "dependency_namespace_required",
+                    "dependency_flow_id_required",
+                ],
+            )],
+            "W1's namespace-only over-refusal, `executor::PUBLISHED_BUT_REFUSED`"
+        );
+        assert_eq!(unparseable.len(), 1, "{unparseable:?}");
+        assert_eq!(unparseable[0].0, "flow-trigger-fire-once-true-flow-listen");
+        assert!(unparseable[0].1.contains("unknown field `fireOnce`"));
+        assert_eq!(
+            resolved,
+            vec![
+                "flow-trigger-any-mode-flow-listen/flow",
+                "flow-trigger-at-least-mode-flow-listen/flow",
+                "flow-trigger-depends-on-flow-listen/flow",
+                "flow-trigger-invalid-inputs-flow-listen/flow",
+                "flow-trigger-mixed-conditions-flow-listen/on_completion",
+                "flow-trigger-mixed-conditions-flow-listen/on_failure",
+                "flow-trigger-multiple-conditions-flow-listen/on_completion",
+                "flow-trigger-multiple-conditions-flow-listen/on_failure",
+                "flow-trigger-multiple-depends-on-flow-listen/flow1",
+                "flow-trigger-multiple-depends-on-flow-listen/flow2",
+                "flow-trigger-paused-listen/flow",
+                "flow-trigger-stable-condition-id-flow-listen/flow",
+                "trigger-flow-listener-invalid/listen-flow-invalid",
+                "trigger-flow-listener-no-inputs/listen-flow",
+                "trigger-flow-listener-no-inputs/listen-flow-failed",
+                "trigger-flow-listener-with-concurrency-limit/flow",
+                "trigger-flow-listener-with-pause/listen-flow",
+                "trigger-flow-listener/listen-flow",
+            ]
+        );
+        // 18 + 1 + 1 = 20 `dependsOn` declarations; + 1 window-free = 21.
+        assert_eq!(
+            resolved.len() + refused_at_save.len() + unparseable.len(),
+            20
+        );
+    }
 }
