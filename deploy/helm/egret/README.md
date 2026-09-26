@@ -57,6 +57,62 @@ To use an **external Postgres/MinIO** instead of the bundled ones, set
 `deps.enabled=false` and point the `EGRET_*` connection values at your
 services.
 
+## Upgrade notes
+
+### StarRocks engines lose their FE metadata ONCE on this upgrade
+
+Before this release egret rendered no `storageVolumes` entry for the StarRocks FE's metadata
+directory, so the kube-starrocks operator applied its own default — `fe-meta: {emptyDir: {}}`.
+Metadata therefore lived and died with the pod. This release gives **every** StarRocks engine, new
+and existing alike, a PersistentVolumeClaim at `/opt/starrocks/fe/meta`.
+
+Changing the volume replaces the FE pod, and the pod being replaced is what discards the old
+`emptyDir`. So **each existing StarRocks engine loses its FE metadata exactly once**, on its first
+FE roll after the upgrade. From then on the metadata survives pod replacement. New engines never
+see this.
+
+**What is lost**, observed on PR #597's live gate when a pod replacement wiped an `emptyDir`
+(`first start fe with meta not exist` in `fe.log`):
+
+- **every catalog on that engine** — `SHOW CATALOGS` came back with `default_catalog` alone,
+  including the `egret-warehouse` Iceberg catalog egret wires up at create time;
+- **every StarRocks-side user, role and grant** — the `analyst` user was simply gone;
+- **the `root` password** — `root` came back with no password at all. The initpwd Job that sets it
+  has already `Completed` and does **not** re-run by itself;
+- **anything created directly on the FE** — databases, views, materialized views. Table DATA in the
+  object store is untouched; what is lost is the FE's record of it.
+
+**What recovers it, and what does not:**
+
+| lost | recovered by |
+|---|---|
+| catalogs | `POST /api/control-plane/catalogs/{id}/reapply` per registry catalog (needs `catalog_registry:update`), which re-applies the stored configuration to every attached engine |
+| StarRocks users, roles, grants | **nothing automatic — recreate them by hand.** egret does not keep a copy of StarRocks-side principals to replay |
+| the `root` password | **not restored by reapply.** Update the engine so the initpwd resources are re-applied, or set it on the FE yourself |
+| databases / views created directly on the FE | **nothing — recreate them.** Only the object-store data survives |
+
+**So before upgrading:** write down the StarRocks-side users, roles and grants of every existing
+StarRocks engine (`SHOW GRANTS`), and expect to re-run `reapply` for its catalogs afterwards. If an
+engine's FE state matters and cannot be rebuilt, snapshot
+`/opt/starrocks/fe/meta` out of the running pod first (`kubectl cp`).
+
+Per-engine knobs, both optional, on the engine create/update body under `starrocks`:
+
+| field | default | meaning |
+|---|---|---|
+| `feMetaStorageClass` | absent ⇒ the cluster's **default** StorageClass (`standard` on kind) | StorageClass backing the claim |
+| `feMetaStorageSize` | `20Gi` | claim size; FE metadata is small, so this is generous |
+
+### Logs still do not survive a pod replacement
+
+Only the FE metadata volume was made persistent. `fe-log` (`/opt/starrocks/fe/log`) and `cn-log`
+(`/opt/starrocks/cn/log`) stay on `emptyDir` **by design**, and the CN's shared-data block cache has
+no volume at all (it is rebuilt from the object store). The consequence is deliberate and worth
+knowing: **a replaced pod starts with empty logs, and the previous pod's `fe.log` / `fe.audit.log`
+are gone.** Read them with `kubectl logs` while the pod lives, or ship them off the pod, if you need
+them after a restart. Governed-access audit does not depend on this: that is Ranger's, written by
+the plugin.
+
 ## Teardown
 
 ```bash
