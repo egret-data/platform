@@ -301,7 +301,10 @@ impl egret_catalog_registry::CatalogAssignmentCompiler for FakeAssignmentCompile
         _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         service_ids: &[i64],
     ) -> Result<(), egret_perm::CompileError> {
-        self.service_calls.lock().unwrap().push(service_ids.to_vec());
+        self.service_calls
+            .lock()
+            .unwrap()
+            .push(service_ids.to_vec());
         if self.fail {
             return Err(egret_perm::CompileError::Db(
                 "synthetic compile failure".into(),
