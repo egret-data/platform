@@ -71,6 +71,7 @@ use std::fmt;
 
 use crate::executor::is_truthy;
 use crate::models::{Dependency, FlowTrigger, FlowTriggerMode, Label, State};
+use crate::spec::validate::{is_valid_flow_id, is_valid_namespace};
 
 use super::flow::WhenVerdict;
 use super::window::window_refusals;
@@ -241,32 +242,38 @@ fn duplicates(keys: &[String]) -> Vec<DuplicateCondition> {
 
 /// `Flow.DependencyCondition.test`, with `when` rendered by the caller.
 ///
-/// In Kestra's order, each an early `false`: `namespace` then `flowId` (a
-/// `null` one does not constrain), `states` (a `null` list accepts any
-/// state), `labels` (each declared `(key, String.valueOf(value))` must be on
+/// In Kestra's order, each an early `false`: `namespace` then `flowId`,
+/// `states` (a `null` list accepts any state), `labels` (each declared `(key, String.valueOf(value))` must be on
 /// the execution), then `when`. Not modelled: the `SIMULATED_EXECUTION`
 /// short-circuit between `flowId` and `states` — egret has no simulated
 /// executions.
+///
+/// **A missing `namespace` or `flowId` matches NOTHING, which is a
+/// divergence, chosen.** Kestra's `dependency.namespace != null && ...`
+/// leaves a null one unconstrained. egret refuses that shape at save
+/// (`dependency_namespace_required` / `dependency_flow_id_required`, via
+/// [`depends_on_refusals`]), but a draft saves anyway and still gets a
+/// listener row, so this function fails closed rather than letting a
+/// half-written `- namespace: company` fire on every execution in the
+/// namespace. The gate Task 4 applies ([`depends_on_refusals`] empty) makes
+/// this unreachable in production; failing closed here as well means the
+/// two would have to be broken together.
 ///
 /// `when` follows `trigger::flow::evaluate`'s three-way rule: `Unrenderable`
 /// is `false` (`ConditionService.isValid` catches the render exception), a
 /// rendered string is `TruthUtils.isTruthy`, and `NotDeclared` is accepted
 /// only when the dependency declares no `when` (`render(null)` ...
 /// `orElse("true")`); a declared `when` the caller did not render is refused
-/// rather than obeyed.
+/// rather than obeyed. **Callers always render `dep.when` when it is
+/// `Some`:** `models::Dependency` fills an absent `when` with `"true"`, so
+/// `NotDeclared` is only right for an explicit `when: null`, and passing it
+/// otherwise makes the dependency silently never match.
 pub fn dependency_matches(dep: &Dependency, source: &DepSource<'_>, when: &WhenVerdict) -> bool {
-    if dep
-        .namespace
-        .as_deref()
-        .is_some_and(|ns| ns != source.namespace)
-    {
+    // Fail closed on a missing field: see above.
+    if dep.namespace.as_deref() != Some(source.namespace) {
         return false;
     }
-    if dep
-        .flow_id
-        .as_deref()
-        .is_some_and(|id| id != source.flow_id)
-    {
+    if dep.flow_id.as_deref() != Some(source.flow_id) {
         return false;
     }
     if dep
@@ -383,6 +390,8 @@ pub enum RefusalAt {
     MinSatisfied,
     /// `dependsOn[i]`.
     Dependency(usize),
+    /// `dependsOn[i].<field>`.
+    DependencyField(usize, &'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -392,11 +401,59 @@ pub struct TriggerRefusal {
     pub message: String,
 }
 
-/// Every refusal of a flow trigger's `dependsOn` machinery — `minSatisfied`,
-/// `window`, duplicate conditions — in the order `spec::validate` reports
-/// them. See the module doc, *One refusal list*.
+/// Every refusal of a flow trigger's `dependsOn` machinery — each
+/// dependency's `namespace`/`flowId`, `minSatisfied`, `window`, duplicate
+/// conditions — in the order `spec::validate` reports them. See the module
+/// doc, *One refusal list*.
+///
+/// **This is the run-time gate as well:** a listener whose trigger has any
+/// refusal here must be skipped (with a named reason), never evaluated.
+/// `spec::validate` reports nothing about a flow trigger that is not in this
+/// list (`tests::save_and_run_time_refuse_the_same_shapes` asserts it).
 pub fn depends_on_refusals(ft: &FlowTrigger) -> Vec<TriggerRefusal> {
     let mut out = Vec::new();
+    // W1's `(namespace, flowId)` checks (whole-branch review finding 2): the
+    // SAME grammar `Subflow` is held to, because `publish::subflow_ref_name`
+    // encodes the pair into one `"{namespace}/{flowId}"` string. Moved here
+    // from `spec::validate` unchanged (W13b Task 3 fix round 1) so a draft
+    // with a half-written dependency is refused at run time too.
+    for (i, dep) in ft.depends_on.iter().enumerate() {
+        match &dep.namespace {
+            None => out.push(TriggerRefusal {
+                code: "dependency_namespace_required",
+                at: RefusalAt::DependencyField(i, "namespace"),
+                message: format!("dependsOn[{i}] is missing a required namespace"),
+            }),
+            Some(ns) if !is_valid_namespace(ns) => out.push(TriggerRefusal {
+                code: "dependency_namespace_invalid",
+                at: RefusalAt::DependencyField(i, "namespace"),
+                message: format!(
+                    "dependsOn[{i}] namespace '{ns}' must match ^[a-z0-9][a-z0-9._-]* and be \
+                     1-150 characters long -- the same grammar `namespace:` itself uses, so a \
+                     dependency can never encode a `/` into `publish::subflow_ref_name`'s \
+                     namespace half"
+                ),
+            }),
+            Some(_) => {}
+        }
+        match &dep.flow_id {
+            None => out.push(TriggerRefusal {
+                code: "dependency_flow_id_required",
+                at: RefusalAt::DependencyField(i, "flowId"),
+                message: format!("dependsOn[{i}] is missing a required flowId"),
+            }),
+            Some(fid) if !is_valid_flow_id(fid) => out.push(TriggerRefusal {
+                code: "dependency_flow_id_invalid",
+                at: RefusalAt::DependencyField(i, "flowId"),
+                message: format!(
+                    "dependsOn[{i}] flowId '{fid}' must match ^[a-zA-Z0-9][a-zA-Z0-9._-]* and \
+                     be 1-100 characters long -- Kestra's own flow id pattern, so a dependency \
+                     can never encode a `/` into `publish::subflow_ref_name`'s flowId half"
+                ),
+            }),
+            Some(_) => {}
+        }
+    }
     if let Some(r) = mode_refusal(ft.mode, ft.min_satisfied, ft.depends_on.len()) {
         out.push(TriggerRefusal {
             code: r.code,
@@ -617,9 +674,23 @@ mod tests {
             &source("p1", State::Killed, &[]),
             &yes
         ));
-        // namespace/flowId absent: not constrained.
+        // namespace/flowId absent: matches NOTHING (fail closed; refused at
+        // save as `dependency_*_required`). Each source below matches every
+        // other field of its dependency, so only the missing one refuses.
+        let no_namespace = dep("flowId: p1\nstates: [FAILED]");
+        assert!(!dependency_matches(
+            &no_namespace,
+            &source("p1", State::Failed, &[]),
+            &yes
+        ));
+        let no_flow_id = dep("namespace: w13b\nstates: [FAILED]");
+        assert!(!dependency_matches(
+            &no_flow_id,
+            &source("p1", State::Failed, &[]),
+            &yes
+        ));
         let only_state = dep("states: [FAILED]");
-        assert!(dependency_matches(
+        assert!(!dependency_matches(
             &only_state,
             &source("zz", State::Failed, &[]),
             &yes
@@ -938,11 +1009,10 @@ mod tests {
                  triggers:\n  - id: listen\n    type: io.kestra.plugin.core.trigger.Flow\n{deps}{body}"
             )
         };
-        let relevant = |c: &str| {
-            c.starts_with("window_")
-                || c.starts_with("min_satisfied_")
-                || c == "dependency_duplicate"
-        };
+        // EVERY error `spec::validate` reports about the trigger, by path --
+        // not a list of codes, which is how the first version of this test
+        // could not see `dependency_*` (fix round 1).
+        let about_the_trigger = |path: &str| path.starts_with("triggers.listen");
         let run_time =
             |ft: &FlowTrigger, trigger: &crate::models::Trigger| -> BTreeSet<&'static str> {
                 let mut codes = BTreeSet::new();
@@ -961,14 +1031,56 @@ mod tests {
                 {
                     codes.insert("window_without_depends_on");
                 }
+                // A missing `namespace`/`flowId` fails closed in the matcher:
+                // offer a source that matches every OTHER field.
+                let yes = WhenVerdict::Rendered("true".into());
+                for d in &ft.depends_on {
+                    let s = DepSource {
+                        namespace: d.namespace.as_deref().unwrap_or("a.b"),
+                        flow_id: d.flow_id.as_deref().unwrap_or("p0"),
+                        state: State::Success,
+                        labels: &[],
+                    };
+                    let matches = dependency_matches(d, &s, &yes);
+                    if d.namespace.is_none() && !matches {
+                        codes.insert("dependency_namespace_required");
+                    }
+                    if d.flow_id.is_none() && !matches {
+                        codes.insert("dependency_flow_id_required");
+                    }
+                }
                 codes
             };
+        // Gate-only: a grammar-invalid name is refused by the gate
+        // (`depends_on_refusals`); no real source execution can carry one, so
+        // the matcher has nothing to refuse.
+        const GATE_ONLY: [&str; 2] = ["dependency_namespace_invalid", "dependency_flow_id_invalid"];
 
         let mut all: Vec<(String, &str)> = cases
             .iter()
             .map(|(body, code)| (flow(DEPS2, body), *code))
             .collect();
-        // The two shapes that are not window-local.
+        // The shapes that are not window-local.
+        for (deps, code) in [
+            (
+                "    dependsOn:\n      - {flowId: p0}\n      - {namespace: a.b, flowId: p1}\n",
+                "dependency_namespace_required",
+            ),
+            (
+                "    dependsOn:\n      - {namespace: a.b}\n      - {namespace: a.b, flowId: p1}\n",
+                "dependency_flow_id_required",
+            ),
+            (
+                "    dependsOn:\n      - {namespace: \"A/B\", flowId: p0}\n",
+                "dependency_namespace_invalid",
+            ),
+            (
+                "    dependsOn:\n      - {namespace: a.b, flowId: \"p/0\"}\n",
+                "dependency_flow_id_invalid",
+            ),
+        ] {
+            all.push((flow(deps, ""), code));
+        }
         all.push((
             flow("", "    window:\n      every: PT1H\n"),
             "window_without_depends_on",
@@ -987,15 +1099,28 @@ mod tests {
             let saved: BTreeSet<&'static str> = crate::spec::validate(&parsed)
                 .errors
                 .iter()
+                .filter(|f| about_the_trigger(&f.path))
                 .map(|f| f.code)
-                .filter(|c| relevant(c))
                 .collect();
             let trigger = &parsed.triggers[0];
             let TriggerKind::Flow(ft) = &trigger.kind else {
                 unreachable!()
             };
+            // The gate Task 4 applies covers everything saved says.
+            let gate: BTreeSet<&'static str> =
+                depends_on_refusals(ft).iter().map(|r| r.code).collect();
+            assert_eq!(saved, gate, "save and the run-time gate disagree on\n{src}");
+            // And each run-time function refuses its own shapes by itself.
             let at_run_time = run_time(ft, trigger);
-            assert_eq!(saved, at_run_time, "save and run time disagree on\n{src}");
+            let expected_run_time: BTreeSet<&'static str> = saved
+                .iter()
+                .copied()
+                .filter(|c| !GATE_ONLY.contains(c))
+                .collect();
+            assert_eq!(
+                expected_run_time, at_run_time,
+                "save and the run-time functions disagree on\n{src}"
+            );
             let expected: BTreeSet<&str> = if code.is_empty() {
                 BTreeSet::new()
             } else {
@@ -1004,6 +1129,6 @@ mod tests {
             };
             assert_eq!(saved, expected, "{src}");
         }
-        assert_eq!(refused, 18);
+        assert_eq!(refused, 22);
     }
 }

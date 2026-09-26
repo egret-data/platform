@@ -409,7 +409,7 @@ fn validate_flow_id(flow: &Flow, report: &mut ValidationReport) {
     }
 }
 
-fn is_valid_namespace(ns: &str) -> bool {
+pub(crate) fn is_valid_namespace(ns: &str) -> bool {
     if ns.is_empty() || ns.chars().count() > 150 {
         return false;
     }
@@ -437,7 +437,7 @@ fn is_valid_namespace(ns: &str) -> bool {
 /// encodes into one `name_or_id` as `"{namespace}/{flowId}"` -- unable to
 /// carry a `/`. See `is_valid_namespace`'s use in the `TaskKind::Subflow`
 /// arm below for the other half.
-fn is_valid_flow_id(id: &str) -> bool {
+pub(crate) fn is_valid_flow_id(id: &str) -> bool {
     let len = id.chars().count();
     if len == 0 || len > 100 {
         return false;
@@ -1465,6 +1465,11 @@ fn check_retry(retry: &Option<Retry>, retry_path: &str, report: &mut ValidationR
 /// executions is a legitimate Kestra pattern (recursive/self-triggering),
 /// not a synchronous call that would deadlock the way a subflow calling
 /// itself would.
+///
+/// W13b Task 3 fix round 1: the `dependsOn` checks themselves now live in
+/// `trigger::depends_on::depends_on_refusals` (same codes, messages and
+/// paths), so the run-time gate a draft's listener passes through applies
+/// exactly them.
 fn validate_trigger(trigger: &Trigger, report: &mut ValidationReport) {
     match &trigger.kind {
         TriggerKind::Schedule(s) => {
@@ -1477,57 +1482,11 @@ fn validate_trigger(trigger: &Trigger, report: &mut ValidationReport) {
             }
         }
         TriggerKind::Flow(ft) => {
-            for (i, dep) in ft.depends_on.iter().enumerate() {
-                let path = format!("triggers.{}.dependsOn[{i}]", trigger.id);
-                match &dep.namespace {
-                    None => report.errors.push(Finding {
-                        code: "dependency_namespace_required",
-                        message: format!(
-                            "trigger '{}': dependsOn[{i}] is missing a required namespace",
-                            trigger.id
-                        ),
-                        path: format!("{path}.namespace"),
-                    }),
-                    Some(ns) if !is_valid_namespace(ns) => report.errors.push(Finding {
-                        code: "dependency_namespace_invalid",
-                        message: format!(
-                            "trigger '{}': dependsOn[{i}] namespace '{ns}' must match \
-                             ^[a-z0-9][a-z0-9._-]* and be 1-150 characters long -- the same \
-                             grammar `namespace:` itself uses, so a dependency can never encode \
-                             a `/` into `publish::subflow_ref_name`'s namespace half",
-                            trigger.id
-                        ),
-                        path: format!("{path}.namespace"),
-                    }),
-                    Some(_) => {}
-                }
-                match &dep.flow_id {
-                    None => report.errors.push(Finding {
-                        code: "dependency_flow_id_required",
-                        message: format!(
-                            "trigger '{}': dependsOn[{i}] is missing a required flowId",
-                            trigger.id
-                        ),
-                        path: format!("{path}.flowId"),
-                    }),
-                    Some(fid) if !is_valid_flow_id(fid) => report.errors.push(Finding {
-                        code: "dependency_flow_id_invalid",
-                        message: format!(
-                            "trigger '{}': dependsOn[{i}] flowId '{fid}' must match \
-                             ^[a-zA-Z0-9][a-zA-Z0-9._-]* and be 1-100 characters long -- \
-                             Kestra's own flow id pattern, so a dependency can never encode a \
-                             `/` into `publish::subflow_ref_name`'s flowId half",
-                            trigger.id
-                        ),
-                        path: format!("{path}.flowId"),
-                    }),
-                    Some(_) => {}
-                }
-            }
-            // `minSatisfied`, `window` and duplicate conditions: ONE list,
-            // shared with the run-time functions so a draft (which saves with
-            // these errors and still gets a listener row) is refused by them
-            // too. See `trigger::depends_on`, *One refusal list*.
+            // Each dependency's `namespace`/`flowId`, `minSatisfied`, `window`
+            // and duplicate conditions: ONE list, shared with the run-time
+            // gate so a draft (which saves with these errors and still gets a
+            // listener row) is refused there too. See `trigger::depends_on`,
+            // *One refusal list*.
             let base = format!("triggers.{}", trigger.id);
             for r in depends_on_refusals(ft) {
                 let path = match r.at {
@@ -1535,6 +1494,9 @@ fn validate_trigger(trigger: &Trigger, report: &mut ValidationReport) {
                     RefusalAt::Window(field) => format!("{base}.window.{field}"),
                     RefusalAt::MinSatisfied => format!("{base}.minSatisfied"),
                     RefusalAt::Dependency(i) => format!("{base}.dependsOn[{i}]"),
+                    RefusalAt::DependencyField(i, field) => {
+                        format!("{base}.dependsOn[{i}].{field}")
+                    }
                 };
                 report.errors.push(Finding {
                     code: r.code,
