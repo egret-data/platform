@@ -58,14 +58,12 @@ use std::collections::{HashMap, HashSet};
 use regex::Regex;
 use serde::Serialize;
 
-use chrono::{NaiveTime, TimeDelta};
-
 use crate::models::{
-    canonical_flow_type, Flow, FlowTrigger, FlowTriggerMode, Input, InputType, Retry, Sla,
-    SlaCommon, Task, TaskKind, Trigger, TriggerKind, Window,
+    canonical_flow_type, Flow, Input, InputType, Retry, Sla, SlaCommon, Task, TaskKind, Trigger,
+    TriggerKind,
 };
 use crate::spec::registry;
-use crate::trigger::duration::{parse_duration, parse_local_time};
+use crate::trigger::depends_on::{depends_on_refusals, RefusalAt};
 
 /// A single validation finding: a machine-checkable `code`, a human message,
 /// and a `path` locating it inside the flow.
@@ -1526,223 +1524,26 @@ fn validate_trigger(trigger: &Trigger, report: &mut ValidationReport) {
                     Some(_) => {}
                 }
             }
-            validate_min_satisfied(trigger, ft, report);
-            if let Some(window) = &ft.window {
-                validate_flow_trigger_window(trigger, ft, window, report);
+            // `minSatisfied`, `window` and duplicate conditions: ONE list,
+            // shared with the run-time functions so a draft (which saves with
+            // these errors and still gets a listener row) is refused by them
+            // too. See `trigger::depends_on`, *One refusal list*.
+            let base = format!("triggers.{}", trigger.id);
+            for r in depends_on_refusals(ft) {
+                let path = match r.at {
+                    RefusalAt::Window("") => format!("{base}.window"),
+                    RefusalAt::Window(field) => format!("{base}.window.{field}"),
+                    RefusalAt::MinSatisfied => format!("{base}.minSatisfied"),
+                    RefusalAt::Dependency(i) => format!("{base}.dependsOn[{i}]"),
+                };
+                report.errors.push(Finding {
+                    code: r.code,
+                    message: format!("trigger '{}': {}", trigger.id, r.message),
+                    path,
+                });
             }
         }
         _ => {}
-    }
-}
-
-/// `minSatisfied`, which only `AT_LEAST` reads.
-///
-/// Two of the three rules are Kestra's own: `@Positive private Integer
-/// minSatisfied` (`Flow.java:298`) refuses a value below 1 under any `mode`,
-/// and `FlowTriggerValidator` refuses `AT_LEAST` with no `minSatisfied` at all
-/// ("`minSatisfied` must be set when mode is AT_LEAST"). Neither was enforced
-/// before W13b Task 2 -- nothing read the field.
-///
-/// The third is egret's, **chosen**: `AT_LEAST` with `minSatisfied` greater
-/// than the number of `dependsOn` conditions. Kestra saves it; it can then
-/// never fire, which is a listener that looks armed and is not. Refusing it
-/// at save is the plan's decision (W13b Task 3 asserts the same bound).
-fn validate_min_satisfied(trigger: &Trigger, ft: &FlowTrigger, report: &mut ValidationReport) {
-    let path = format!("triggers.{}.minSatisfied", trigger.id);
-    match (ft.mode, ft.min_satisfied) {
-        (_, Some(n)) if n < 1 => report.errors.push(Finding {
-            code: "min_satisfied_not_positive",
-            message: format!(
-                "trigger '{}': minSatisfied must be greater than 0, got {n}",
-                trigger.id
-            ),
-            path,
-        }),
-        (FlowTriggerMode::AtLeast, None) => report.errors.push(Finding {
-            code: "min_satisfied_required",
-            message: format!(
-                "trigger '{}': `minSatisfied` must be set when mode is AT_LEAST",
-                trigger.id
-            ),
-            path,
-        }),
-        (FlowTriggerMode::AtLeast, Some(n)) if n as usize > ft.depends_on.len() => {
-            report.errors.push(Finding {
-                code: "min_satisfied_exceeds_conditions",
-                message: format!(
-                    "trigger '{}': minSatisfied is {n} but dependsOn declares only {} \
-                     condition(s), so the trigger could never fire",
-                    trigger.id,
-                    ft.depends_on.len()
-                ),
-                path,
-            })
-        }
-        _ => {}
-    }
-}
-
-/// A flow trigger's `window`, refused at save unless it is a shape egret
-/// implements (W13b spec §5.1; over-acceptance is the hazard).
-///
-/// **Kind and exclusivity follow Kestra's `WindowValidator`**, in its order
-/// and with its messages: `deadline` first, then `from` + `to`, then `from`
-/// or `to` alone, then `lookback`. The artifact refused `every` + `lookback`
-/// with exactly *Window of type `SLIDING_WINDOW` cannot have an every
-/// duration.* (measured, `w13b-windows.json` `save_validation`).
-///
-/// **egret refuses more than Kestra does, and each addition is chosen:**
-///
-/// - a `window` on a trigger with **no `dependsOn`**. Kestra reads the window
-///   only through `dependsOnAsMultipleCondition()`, so there it is inert; egret
-///   refuses it rather than silently ignoring a declaration (W13b brief);
-/// - `offset` without `every`. Kestra accepts it (a one-day window, shifted);
-///   Task 1 never measured it, so it is refused rather than approximated;
-/// - a zero `every` or `lookback`, and a daily window that is empty
-///   (`from` >= `to`, or `deadline` at midnight). Kestra saves these and then
-///   never fires them; egret's window row requires `start < end`
-///   (migration 0158), so they could not even be stored.
-///
-/// Every duration, time and zone present is parsed with the same functions
-/// the run-time window computation uses (`trigger::duration`), so a value
-/// that passes here is one the processor can read.
-fn validate_flow_trigger_window(
-    trigger: &Trigger,
-    ft: &FlowTrigger,
-    w: &Window,
-    report: &mut ValidationReport,
-) {
-    let base = format!("triggers.{}.window", trigger.id);
-    let mut refuse = |code: &'static str, field: &str, message: String| {
-        report.errors.push(Finding {
-            code,
-            message: format!("trigger '{}': window: {message}", trigger.id),
-            path: if field.is_empty() {
-                base.clone()
-            } else {
-                format!("{base}.{field}")
-            },
-        });
-    };
-
-    if ft.depends_on.is_empty() {
-        refuse(
-            "window_without_depends_on",
-            "",
-            "a window is only read by a trigger with `dependsOn`; this trigger has none, so \
-             the window would be silently ignored"
-                .to_string(),
-        );
-    }
-
-    // `WindowValidator.isValid`, arm for arm.
-    let set = |v: &Option<String>| v.is_some();
-    let conflicts: &[(&str, bool, &str)] = &[
-        ("deadline", set(&w.deadline), "a deadline"),
-        ("from", set(&w.from), "a from time"),
-        ("to", set(&w.to), "a to time"),
-        ("every", set(&w.every), "an every duration"),
-        ("offset", set(&w.offset), "an offset"),
-        ("lookback", set(&w.lookback), "a lookback duration"),
-    ];
-    let (kind, forbidden): (Option<&str>, &[&str]) = if set(&w.deadline) {
-        (
-            Some("DAILY_TIME_DEADLINE"),
-            &["every", "offset", "from", "to", "lookback"],
-        )
-    } else if set(&w.from) && set(&w.to) {
-        (Some("DAILY_TIME_WINDOW"), &["every", "offset", "lookback"])
-    } else if set(&w.from) || set(&w.to) {
-        let missing = if set(&w.from) { "to" } else { "from" };
-        refuse(
-            "window_daily_bound_missing",
-            missing,
-            format!("Window of type `DAILY_TIME_WINDOW` must have a {missing} time."),
-        );
-        (None, &[])
-    } else if set(&w.lookback) {
-        (Some("SLIDING_WINDOW"), &["offset", "every"])
-    } else {
-        (None, &[])
-    };
-    if let Some(kind) = kind {
-        for (field, present, noun) in conflicts {
-            if *present && forbidden.contains(field) {
-                refuse(
-                    "window_conflicting_fields",
-                    field,
-                    format!("Window of type `{kind}` cannot have {noun}."),
-                );
-            }
-        }
-    }
-
-    // DURATION_WINDOW: `offset` alone is refused (chosen; see above).
-    if set(&w.offset) && !set(&w.every) && kind.is_none() {
-        refuse(
-            "window_offset_without_every",
-            "offset",
-            "`offset` without `every` is not supported; write `every` as well (`every: P1D` \
-             is the default it would shift)"
-                .to_string(),
-        );
-    }
-
-    // Values: each one present must parse, whatever else is wrong.
-    for (field, value, positive) in [
-        ("every", &w.every, true),
-        ("offset", &w.offset, false),
-        ("lookback", &w.lookback, true),
-    ] {
-        let Some(value) = value else { continue };
-        match parse_duration(value) {
-            Err(e) => refuse("window_duration_invalid", field, format!("{field}: {e}")),
-            Ok(d) if positive && d <= TimeDelta::zero() => refuse(
-                "window_duration_not_positive",
-                field,
-                format!("{field} must be longer than zero, got `{value}`"),
-            ),
-            Ok(_) => {}
-        }
-    }
-    let mut times = HashMap::new();
-    for (field, value) in [("deadline", &w.deadline), ("from", &w.from), ("to", &w.to)] {
-        let Some(value) = value else { continue };
-        match parse_local_time(value) {
-            Err(e) => refuse("window_time_invalid", field, format!("{field}: {e}")),
-            Ok(t) => {
-                times.insert(field, t);
-            }
-        }
-    }
-    if let (Some(from), Some(to)) = (times.get("from"), times.get("to")) {
-        if from >= to {
-            refuse(
-                "window_daily_range_empty",
-                "to",
-                format!(
-                    "`from` ({from}) must be earlier than `to` ({to}); a daily window that \
-                     wraps past midnight or has no length is not supported"
-                ),
-            );
-        }
-    }
-    if times.get("deadline") == Some(&NaiveTime::MIN) {
-        refuse(
-            "window_daily_range_empty",
-            "deadline",
-            "a deadline at midnight gives a window with no length".to_string(),
-        );
-    }
-
-    if let Some(zone) = &w.timezone {
-        if zone.parse::<chrono_tz::Tz>().is_err() {
-            refuse(
-                "window_timezone_invalid",
-                "timezone",
-                format!("timezone `{zone}` is not an IANA time zone (for example `Europe/Paris`)"),
-            );
-        }
     }
 }
 

@@ -107,15 +107,21 @@
 //! Getting 3 backwards would advance a backfill twice per tick and drop every
 //! other window date.
 
+pub mod depends_on;
 pub mod duration;
 pub mod flow;
 pub mod schedule;
 pub mod webhook;
+pub mod window;
 
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 
+pub use depends_on::{
+    condition_key, condition_keys, dependency_matches, depends_on_refusals, merge, mode_refusal,
+    satisfied, DepSource, DuplicateCondition, ModeRefusal, RefusalAt, TriggerRefusal,
+};
 pub use duration::{parse_duration, parse_local_time, DurationError, LocalTimeError};
 pub use flow::{
     evaluate as evaluate_flow_trigger, FiredExecution, FlowTriggerError, ListeningFlow,
@@ -129,6 +135,9 @@ pub use webhook::{
     build_output as build_webhook_output, ct_eq, find as find_webhook, keys_match,
     render_inputs as render_webhook_inputs, ExecutionTrigger, InputContext, InputRefusal,
     KeyContext, Output as WebhookOutput, Unsupported as UnsupportedWebhook, WebhookRequest,
+};
+pub use window::{
+    window_refusals, Bounds, BoundsError, ResolvedWindow, TimeWindow, WindowError, WindowRefusal,
 };
 
 /// The scheduler's clock, injected everywhere.

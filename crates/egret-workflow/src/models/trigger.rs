@@ -203,9 +203,11 @@ pub enum FetchType {
 /// dropped, and because this struct has no `deny_unknown_fields` a declared
 /// window silently vanished from the parsed flow. The
 /// `dependsOnAsMultipleCondition()`/`DependencyCondition` machinery is still
-/// not here: it is evaluation logic (`trigger::window`, W13b Task 3), not
-/// model. Which window shapes egret accepts is decided at save, by
-/// `spec::validate`'s `validate_flow_trigger_window`.
+/// not here: it is evaluation logic (`trigger::window` and
+/// `trigger::depends_on`, W13b Task 3), not model. Which window shapes egret
+/// accepts is decided by `trigger::window::window_refusals`, which
+/// `spec::validate` reports at save and `TimeWindow::from_model` enforces at
+/// run time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FlowTrigger {
@@ -250,7 +252,7 @@ pub struct FlowTrigger {
 /// raw value: the round trip stays byte-honest, and parsing is one place --
 /// `trigger::duration` -- called by the validator at save and by the window
 /// computation at run time, so the two cannot disagree about what a value
-/// means. Which COMBINATIONS are accepted is `spec::validate`'s job.
+/// means. Which COMBINATIONS are accepted is `trigger::window::window_refusals`'s job.
 ///
 /// Kind, per spec §5.1 and `Window.toTimeWindow()`: `deadline` gives
 /// `DAILY_TIME_DEADLINE`; `from` + `to` gives `DAILY_TIME_WINDOW`; `lookback`
