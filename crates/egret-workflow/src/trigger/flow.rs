@@ -323,6 +323,15 @@ pub enum FlowTriggerError {
     /// `MultipleConditionWindow` this package does not model. See the module
     /// doc, *Over-acceptance is the hazard*, item 1.
     UnsupportedDependsOn(usize),
+    /// The trigger declares a `window` but no `dependsOn`. On the artifact
+    /// the window is inert on this arm (it is read only through
+    /// `dependsOnAsMultipleCondition()`); egret refuses it rather than
+    /// silently ignoring a declaration -- the same rule `spec::validate`'s
+    /// `window_without_depends_on` applies at save. Refusing here as well is
+    /// what keeps a DRAFT (which saves with validation errors, and whose
+    /// listener rows `scheduler::sync` builds from whatever parses) from
+    /// firing with its window ignored. W13b Task 2 fix round 1.
+    WindowWithoutDependsOn,
 }
 
 impl fmt::Display for FlowTriggerError {
@@ -333,6 +342,12 @@ impl fmt::Display for FlowTriggerError {
                 f,
                 "core.trigger.Flow `dependsOn` is not supported ({n} \
                  condition(s)): it needs a multiple-condition window"
+            ),
+            Self::WindowWithoutDependsOn => write!(
+                f,
+                "core.trigger.Flow declares a `window` but no `dependsOn`: a window is \
+                 only read on the `dependsOn` arm, and egret refuses rather than \
+                 silently ignoring it"
             ),
         }
     }
@@ -407,6 +422,11 @@ impl WindowFreeFlowTrigger {
             return Err(FlowTriggerError::UnsupportedDependsOn(
                 spec.depends_on.len(),
             ));
+        }
+        // A window on the window-free arm: refused, never ignored. See
+        // [`FlowTriggerError::WindowWithoutDependsOn`].
+        if spec.window.is_some() {
+            return Err(FlowTriggerError::WindowWithoutDependsOn);
         }
 
         Ok(Self {
@@ -1690,6 +1710,42 @@ mod tests {
             resolved.len() + refused.len() + unparseable_declaring.len(),
             21
         );
+    }
+
+    /// W13b Task 2 fix round 1: a `window` with no `dependsOn` is refused
+    /// by name, whatever the window says -- including a value the save-time
+    /// validator would also refuse (`P1M`), because `resolve` is what stands
+    /// between a draft that saved with validation errors and a fire.
+    #[test]
+    fn a_window_without_depends_on_is_refused_not_ignored() {
+        for window in [
+            "window:\n  every: PT1H\n",
+            "window:\n  every: P1M\n",
+            "window: {}\n",
+        ] {
+            let t = trigger(&format!(
+                "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n{window}"
+            ));
+            assert_eq!(
+                WindowFreeFlowTrigger::resolve(&t),
+                Err(FlowTriggerError::WindowWithoutDependsOn),
+                "{window}"
+            );
+        }
+        let empty = trigger(
+            "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\ndependsOn: []\n\
+             window:\n  every: PT1H\n",
+        );
+        assert_eq!(
+            WindowFreeFlowTrigger::resolve(&empty),
+            Err(FlowTriggerError::WindowWithoutDependsOn),
+            "`dependsOn: []` is the window-free arm too"
+        );
+        // Control: the same trigger without the window resolves.
+        assert!(WindowFreeFlowTrigger::resolve(&trigger(
+            "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n"
+        ))
+        .is_ok());
     }
 
     /// A `core.schedule` is not a flow trigger and does not resolve as one.

@@ -28,6 +28,15 @@
 //! | `pt1h` | refused | Java is case-insensitive; the subset is not -- chosen |
 //! | `P`, `PT`, `P1DT`, `PT1M1H`, `1H` | refused | not a duration at all |
 //!
+//! # The upper bound: [`MAX_WINDOW_DURATION`], 366 days
+//!
+//! A duration that merely fits `TimeDelta` is not one a window can use:
+//! `every: P100000000D` added to `now` either overflows `DateTime` (a panic on
+//! `+`) or lands past Postgres `timestamptz`'s upper bound (an `INSERT`
+//! failure at run time, long after the flow saved). So a value longer than
+//! [`MAX_WINDOW_DURATION`] is refused here, at save. See the constant for why
+//! 366 days.
+//!
 //! Zero (`PT0S`) parses: whether a zero is meaningful depends on the field,
 //! and that is the validator's call, not this parser's.
 //!
@@ -60,6 +69,11 @@ pub enum DurationError {
     Signed(String),
     #[error("`{0}`: too large to represent")]
     Overflow(String),
+    #[error(
+        "`{0}` is longer than the longest window egret accepts, 366 days (`P366D`); \
+         a window longer than a year is not supported"
+    )]
+    TooLong(String),
     #[error(
         "`{0}` is not an ISO-8601 duration of the form `P[nD][T[nH][nM][nS]]` \
          (for example `PT10M`, `PT6H`, `P1D`, `P1DT2H`)"
@@ -115,8 +129,35 @@ pub fn parse_duration(s: &str) -> Result<TimeDelta, DurationError> {
     if components == 0 {
         return Err(malformed());
     }
-    TimeDelta::try_seconds(total_secs).ok_or_else(|| DurationError::Overflow(s.to_string()))
+    let d =
+        TimeDelta::try_seconds(total_secs).ok_or_else(|| DurationError::Overflow(s.to_string()))?;
+    if d > MAX_WINDOW_DURATION {
+        return Err(DurationError::TooLong(s.to_string()));
+    }
+    Ok(d)
 }
+
+/// The longest `every`, `offset` or `lookback` egret accepts: **366 days**,
+/// the longest calendar year. **Chosen**, and the reasons are these:
+///
+/// - **What a window bound can mean.** A window is the span in which every
+///   `dependsOn` condition must be met. A `DURATION_WINDOW` of `every` >= 1
+///   day starts at today's midnight in its zone (the measured rule, D3), so a
+///   bound is `today + offset + every`; a `SLIDING_WINDOW` ends at the first
+///   matching event + `lookback`. A year covers every calendar-shaped intent
+///   ("within the year", a yearly `P365D`/`P366D` job), and a longer one can
+///   no longer be told apart from "no window at all".
+/// - **Kestra.** The measurements only ever used `every` up to `P1D`
+///   (`w13b-windows.json`); `java.time.Duration` itself goes to ~292 billion
+///   years and Kestra adds it to `ZonedDateTime` unchecked, so Kestra supplies
+///   no bound to copy -- only the evidence that real windows are small.
+/// - **Arithmetic.** At 366 days, `now + offset + every` (two maxima) stays
+///   ~2 years from `now`: nowhere near `DateTime<Utc>`'s year 262143 or
+///   `timestamptz`'s 294276 AD, so no bound computed from accepted values
+///   can overflow either. The run-time computation (W13b Task 3) should still
+///   use checked arithmetic: this cap is a save-time rule, and a row written
+///   before it existed is not re-validated.
+pub const MAX_WINDOW_DURATION: TimeDelta = TimeDelta::days(366);
 
 /// Split `1D` / `1H30M` into `(digits, unit)` pairs, or `None` if the text is
 /// not a run of `<digits><upper-case letter>` pairs.
@@ -281,6 +322,19 @@ mod tests {
                 "{s} -> {:?}",
                 parse_duration(s)
             );
+        }
+    }
+
+    /// The cap is inclusive: `P366D` (and the same length spelled in hours)
+    /// is accepted, one second more is refused as `TooLong`, not `Overflow`.
+    #[test]
+    fn a_duration_longer_than_366_days_is_refused_at_the_cap_plus_one() {
+        assert_eq!(parse_duration("P366D"), Ok(super::MAX_WINDOW_DURATION));
+        assert_eq!(parse_duration("PT8784H"), Ok(super::MAX_WINDOW_DURATION));
+        for s in ["P366DT1S", "PT8784H0M1S", "P367D", "P100000000D"] {
+            let e = parse_duration(s).unwrap_err();
+            assert_eq!(e, DurationError::TooLong(s.to_string()), "{s}");
+            assert!(e.to_string().contains("366 days"), "{e}");
         }
     }
 

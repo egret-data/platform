@@ -3606,6 +3606,21 @@ mod tests {
                 &format!("{W}.{field}"),
             );
         }
+        // W13b Task 2 fix round 1: the 366-day cap, at the cap and cap + 1
+        // second, in each of the three duration fields.
+        for (field, others) in [
+            ("every", ""),
+            ("offset", "      every: P1D\n"),
+            ("lookback", ""),
+        ] {
+            assert_refused(
+                2,
+                &format!("    window:\n{others}      {field}: P366DT1S\n"),
+                "window_duration_invalid",
+                &format!("{W}.{field}"),
+            );
+            assert_clean(2, &format!("    window:\n{others}      {field}: P366D\n"));
+        }
         // The message is the parser's, so "no fixed length" reaches the author.
         let src = flow_trigger_flow(2, "    window:\n      every: P1M\n");
         let r = validate(&parse(&src).unwrap());

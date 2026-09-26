@@ -422,3 +422,36 @@ async fn reconcile_fills_listener_rows_for_a_flow_inserted_by_raw_sql() {
         "reconcile must call sync for the raw-SQL-inserted flow"
     );
 }
+
+/// W13b Task 2 fix round 1: a draft saves with validation errors, and `sync`
+/// builds listener rows from any source that PARSES. A `window` with no
+/// `dependsOn` is refused at save (`window_without_depends_on`) but that only
+/// blocks publish -- so `WindowFreeFlowTrigger::resolve` must refuse it too,
+/// or the draft would get a `depends_on = false` row and fire with its window
+/// ignored. The control is the same trigger without the window.
+#[tokio::test]
+async fn a_window_without_depends_on_gets_no_listener_row() {
+    let Some(fx) = fx().await else { return };
+    let windowed = flow_yaml(
+        "",
+        "  - id: on_done\n    type: io.kestra.plugin.core.trigger.Flow\n    window:\n      every: P1M\n",
+        "hi",
+    );
+    let flow = fx.create(&windowed).await;
+    assert_eq!(
+        listener_row(&fx.db, flow.id, "on_done").await,
+        None,
+        "a window on the window-free arm is refused, not ignored"
+    );
+
+    let plain = flow_yaml(
+        "",
+        "  - id: on_done\n    type: io.kestra.plugin.core.trigger.Flow\n",
+        "hi",
+    );
+    fx.update(flow.id, &plain).await;
+    assert!(
+        listener_row(&fx.db, flow.id, "on_done").await.is_some(),
+        "control: without the window the same trigger gets its row"
+    );
+}
