@@ -872,6 +872,168 @@ async fn a_loop_iteration_fires_no_listener() {
     );
 }
 
+// ── A cycle that alternates a Flow trigger with a Subflow ──────────────────
+
+/// **`subflow::chain_holds` must catch a repeat reached through a Flow-trigger
+/// link, not only through a Subflow one.**
+///
+/// The walk is `COALESCE(trigger_execution_id, parent_execution_id)`, and a
+/// Flow-trigger fire populates the SAME `trigger_execution_id` column a
+/// `Subflow` spawn does (`trigger_run_ix` is the only thing that tells them
+/// apart -- see `trigger_of`'s doc comment). `tests/worker.rs`'s
+/// `a_cycle_of_subflows_stops_instead_of_crashing` and
+/// `a_cycle_whose_every_hop_crosses_a_loop_boundary_stops_too` prove the walk
+/// crosses a Subflow link and a Loop's `parent_execution_id` link respectively;
+/// neither ever manufactures a genuine Flow-trigger link in the chain a
+/// refusal has to cross, so that half of `COALESCE` was unexercised.
+///
+/// `b` has one task, a `Subflow` naming `a`, always started with
+/// `close_loop: "false"`. `a` carries the Flow trigger `on_done` (`when:
+/// flow.id == 'b'`), which fires with `close_loop: "true"`, and one task, an
+/// `If` gated on that input: `"false"` takes a no-op `Log`, `"true"` takes a
+/// `Subflow` back to `b`.
+///
+/// So starting `b` reaches the interesting branch exactly once. `b`'s direct
+/// Subflow child (`close_loop: "false"`) takes the no-op and never calls
+/// `chain_holds`. It is `b`'s own SUCCESS the trigger hears; firing it links
+/// the new `a` execution to `b` by `trigger_execution_id` ALONE -- a
+/// Flow-trigger link, with no Subflow anywhere between them.
+///
+/// **The whole thing resolves inside one `process_events` pass, not two.**
+/// Firing an execution drives its first settle inline, the same way
+/// `spawn_one` does for a `Subflow` child (spec §4.4 point 4): the
+/// Flow-trigger-fired execution's `If` takes the `Subflow` branch, `back`
+/// hits `chain_holds` and is refused, and `transmitFailed` carries that to
+/// the execution itself -- all before the pass returns. Its own FAILED settle
+/// then queues a THIRD event, which the SAME pass claims and refuses too
+/// (`on_done` cannot hear its own flow's executions, `SameFlow`) -- exactly
+/// the chaining `inputs_that_fail_to_render_create_a_failed_execution`
+/// documents, met here from the Subflow side instead of a bad render.
+#[tokio::test]
+async fn a_cycle_through_a_flow_trigger_and_a_subflow_stops_at_the_first_repeat() {
+    let Some(fx) = fx().await else { return };
+    let b_src = "id: b\nnamespace: w13\ntasks:\n  - id: sub\n    \
+                 type: io.kestra.plugin.core.flow.Subflow\n    namespace: w13\n    \
+                 flowId: a\n    inputs:\n      close_loop: \"false\"\n";
+    let a_src = format!(
+        "id: a\nnamespace: w13\ninputs:\n  - id: close_loop\n    type: STRING\n\
+         triggers:\n  - id: on_done\n    type: {FLOW}\n    \
+         when: \"{{{{ flow.id == 'b' }}}}\"\n    inputs:\n      close_loop: \"true\"\n\
+         tasks:\n  - id: gate\n    type: io.kestra.plugin.core.flow.If\n    \
+         condition: \"{{{{ inputs.close_loop == 'true' }}}}\"\n    then:\n      \
+         - id: back\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+         namespace: w13\n        flowId: b\n    else:\n      \
+         - id: noop\n        type: io.kestra.plugin.core.log.Log\n        message: leaf\n"
+    );
+    egret_workflow::spec::parse(&a_src)
+        .unwrap_or_else(|e| panic!("fixture must parse: {e:?}\n{a_src}"));
+    let b = fx.flow(b_src).await;
+    let a = fx.flow(&a_src).await;
+
+    let exec_b = fx.run(b, b_src, serde_json::json!({})).await;
+    assert_eq!(
+        executions_of(&fx.db, a).await,
+        1,
+        "control: b's direct Subflow child"
+    );
+    let direct_child: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE flow_id = $1 AND trigger_execution_id = $2",
+    )
+    .bind(a)
+    .bind(exec_b)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("the direct Subflow child");
+    let (direct_state, direct_depth): (String, i32) =
+        sqlx::query_as("SELECT state, execution_depth FROM workflow.executions WHERE id = $1")
+            .bind(direct_child)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (direct_state.as_str(), direct_depth),
+        ("SUCCESS", 1),
+        "control: the direct child took the no-op branch and never called chain_holds"
+    );
+
+    // events: direct_child's own SUCCESS (SameFlow-refused -- `on_done`
+    // belongs to `a` too), b's SUCCESS (fired), and the Flow-trigger-fired
+    // execution's own FAILED settle, queued and claimed within this same
+    // pass (SameFlow-refused again).
+    assert_eq!(
+        fx.pass().await,
+        EventReport {
+            events: 3,
+            fired: 1,
+            refused: 2,
+            ..Default::default()
+        },
+        "b's own SUCCESS fires a's Flow trigger, which resolves to FAILED inline"
+    );
+    assert_eq!(
+        common::events(&fx.db).await,
+        vec![],
+        "every event this pass touched is consumed"
+    );
+    let triggered: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE flow_id = $1 AND trigger_execution_id = $2 \
+           AND id != $3",
+    )
+    .bind(a)
+    .bind(exec_b)
+    .bind(direct_child)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("the Flow-trigger-fired execution");
+
+    let (state, depth): (String, i32) =
+        sqlx::query_as("SELECT state, execution_depth FROM workflow.executions WHERE id = $1")
+            .bind(triggered)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (state.as_str(), depth),
+        ("FAILED", 1),
+        "the Flow-trigger-fired execution resolved to FAILED already, inside the pass"
+    );
+    let message: Option<String> = sqlx::query_scalar(
+        "SELECT message FROM workflow.task_runs \
+          WHERE execution_id = $1 AND task_id = 'back'",
+    )
+    .bind(triggered)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("the refused Subflow hop's own task run");
+    assert_eq!(
+        message.as_deref(),
+        Some(
+            "subflow 'w13'.'b' is already running higher up this execution's \
+             own chain; starting it would loop"
+        ),
+        "the first Subflow hop whose target is already upstream refuses, crossing \
+         the Flow-trigger link that put 'b' there"
+    );
+
+    let all: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        all, 3,
+        "b, its direct Subflow child, and the Flow-trigger-fired execution -- \
+         the refused hop spawns nothing"
+    );
+    let max_depth: i32 = sqlx::query_scalar("SELECT max(execution_depth) FROM workflow.executions")
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
+    assert!(
+        max_depth <= 2,
+        "no execution went past depth 2: {max_depth}"
+    );
+}
+
 // ── Failure isolation ───────────────────────────────────────────────────────
 
 /// A listener whose YAML no longer parses (errored), and one whose fire the
