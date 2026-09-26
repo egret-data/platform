@@ -168,6 +168,16 @@ pub fn starrocks_cn_configmap(spec: &EngineSpec) -> Option<Value> {
     }))
 }
 
+/// The directory the StarRocks FE image ships its configuration in. The
+/// Ranger XML files are mounted as INDIVIDUAL files inside it (see
+/// [`starrocks_cluster_cr`]) — never as a directory mount, which would
+/// shadow `fe.conf` and stop the FE booting.
+const FE_CONF_DIR: &str = "/opt/starrocks/fe/conf";
+/// Key (and file name) of the Ranger plugin security config in `{name}-ranger-cm`.
+const RANGER_SECURITY_XML_KEY: &str = "ranger-starrocks-security.xml";
+/// Key (and file name) of the Ranger plugin audit config in `{name}-ranger-cm`.
+const RANGER_AUDIT_XML_KEY: &str = "ranger-starrocks-audit.xml";
+
 /// The Ranger plugin's `ranger-starrocks-security.xml` + audit ConfigMap
 /// (`{name}-ranger-cm`). `None` unless `spec.ranger` is bound.
 ///
@@ -197,8 +207,8 @@ pub fn starrocks_ranger_configmap(spec: &EngineSpec) -> Option<Value> {
         "metadata": { "name": format!("{}-ranger-cm", spec.name), "namespace": spec.namespace,
                       "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
         "data": {
-            "ranger-starrocks-security.xml": security_xml,
-            "ranger-starrocks-audit.xml": audit_xml,
+            RANGER_SECURITY_XML_KEY: security_xml,
+            RANGER_AUDIT_XML_KEY: audit_xml,
         }
     }))
 }
@@ -529,12 +539,29 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
     // private key. The cert-only `{name}-ssl-cm` ConfigMap is still applied
     // (public-cert reference) but is not needed for the keystore build, so it
     // is not mounted into the FE.
+    //
+    // Each XML gets its OWN mount with a `subPath`, so only that one file
+    // lands in `/opt/starrocks/fe/conf`. Mounting the ConfigMap at the bare
+    // conf directory replaces the WHOLE directory with the ConfigMap's two
+    // keys — `fe.conf` included — and the FE cannot boot (observed live as
+    // `ln: ...: Read-only file system`, then an FE that never started and
+    // lost its metadata).
+    //
+    // A `subPath` mount does NOT receive ConfigMap updates the way a
+    // directory mount does: the file is copied at container start and never
+    // refreshed. That is acceptable here because the Ranger plugin reads
+    // these files once at FE boot, and a rebind rolls the FE anyway (see the
+    // restart stamp below), so the new content arrives with the new pod.
     let mut extra_config_maps: Vec<Value> = Vec::new();
     if spec.ranger.is_some() {
-        extra_config_maps.push(json!({
-            "name": format!("{}-ranger-cm", spec.name),
-            "mountPath": "/opt/starrocks/fe/conf",
-        }));
+        let cm_name = format!("{}-ranger-cm", spec.name);
+        for key in [RANGER_SECURITY_XML_KEY, RANGER_AUDIT_XML_KEY] {
+            extra_config_maps.push(json!({
+                "name": cm_name,
+                "mountPath": format!("{FE_CONF_DIR}/{key}"),
+                "subPath": key,
+            }));
+        }
     }
     if !extra_config_maps.is_empty() {
         fe_spec["configMaps"] = json!(extra_config_maps);
@@ -1165,6 +1192,68 @@ mod tests {
             .any(|m| m["name"] == xml_cm["metadata"]["name"]));
     }
 
+    /// The Ranger XML ConfigMap is mounted as INDIVIDUAL FILES, never at the
+    /// bare `/opt/starrocks/fe/conf` directory.
+    ///
+    /// The discriminating half is the negative: a directory mount replaces
+    /// everything the image ships in that directory, `fe.conf` included, so
+    /// the FE cannot boot. Asserting only "the XML is mounted somewhere"
+    /// passes against that bug.
+    #[test]
+    fn ranger_xml_mounts_per_file_never_the_bare_conf_dir() {
+        let mut spec = sample_sr_spec();
+        spec.ranger = Some(RangerBinding {
+            service_name: "sr1".into(),
+            egret_url: "http://host.docker.internal:8080".into(),
+            poll_interval_ms: 30_000,
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        let mounts = cr["spec"]["starRocksFeSpec"]["configMaps"]
+            .as_array()
+            .unwrap()
+            .clone();
+
+        // Negative: nothing may target the conf directory itself.
+        for m in &mounts {
+            assert_ne!(
+                m["mountPath"].as_str().unwrap(),
+                "/opt/starrocks/fe/conf",
+                "a bare conf-directory mount shadows fe.conf and stops the FE booting: {m}"
+            );
+        }
+        // And every mount carries a non-empty `subPath`, which is what keeps
+        // a ConfigMap projection from replacing the directory.
+        for m in &mounts {
+            assert!(
+                m["subPath"].as_str().is_some_and(|p| !p.is_empty()),
+                "every conf-dir mount must be a subPath file mount: {m}"
+            );
+        }
+
+        // Positive: each ConfigMap key is mounted at its own full path, and
+        // the key mounted there is the key the ConfigMap actually carries.
+        let cm = starrocks_ranger_configmap(&spec).unwrap();
+        for key in [
+            "ranger-starrocks-security.xml",
+            "ranger-starrocks-audit.xml",
+        ] {
+            assert!(
+                cm["data"].get(key).is_some(),
+                "ConfigMap is missing key {key}"
+            );
+            let m = mounts
+                .iter()
+                .find(|m| m["subPath"] == key)
+                .unwrap_or_else(|| panic!("no subPath mount for {key}"));
+            assert_eq!(m["name"], "sr1-ranger-cm");
+            assert_eq!(
+                m["mountPath"].as_str().unwrap(),
+                format!("/opt/starrocks/fe/conf/{key}")
+            );
+        }
+        assert_eq!(mounts.len(), 2, "exactly one mount per ConfigMap key");
+    }
+
     #[test]
     fn no_ranger_binding_omits_xml_configmap() {
         assert!(starrocks_ranger_configmap(&sample_sr_spec()).is_none());
@@ -1376,8 +1465,9 @@ mod tests {
         let cm_mounts = cr["spec"]["starRocksFeSpec"]["configMaps"]
             .as_array()
             .unwrap();
-        assert_eq!(cm_mounts.len(), 1);
-        assert!(cm_mounts.iter().any(|m| m["name"] == "sr1-ranger-cm"));
+        // One mount per Ranger XML key (each a `subPath` file mount), nothing else.
+        assert_eq!(cm_mounts.len(), 2);
+        assert!(cm_mounts.iter().all(|m| m["name"] == "sr1-ranger-cm"));
         assert!(
             !cm_mounts.iter().any(|m| m["name"] == "sr1-ssl-cm"),
             "cert-only ssl-cm is not mounted into the FE"
