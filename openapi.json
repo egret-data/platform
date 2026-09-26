@@ -34119,7 +34119,7 @@
       },
       "ExplainSubject": {
         "type": "object",
-        "description": "The caller `explain` decides about.",
+        "description": "The caller `explain` decides about.\n\n**No `workspaces` field (SP4a Task 15, D3 defect 2 — removed, not just\nignored).** It used to be caller-supplied, `#[serde(default)]` to\n`vec![]`, and the evaluator trusted it verbatim — so a caller naming just\na `user` (the natural way to call this endpoint) silently got `denied`\nfor every `workspace_members` grant, however real the compiled Ranger\npolicy made that access: the live gate measured exactly that. `explain`\nnow resolves `user`'s CURRENT workspace memberships itself\n(`crate::members::workspaces_for_username`), off the same\n`access_grants`/`users.username` truth the compiler's own expansion reads\n— a caller-supplied list is a second, driftable copy of a fact the\ndatabase already answers, and keeping the field would let a caller\noverride that fact when what it should be describing is the caller's\nprincipal, not a value only egret can verify.",
         "required": [
           "user"
         ],
@@ -34137,13 +34137,6 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
-          },
-          "workspaces": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "format": "uuid"
             }
           }
         }

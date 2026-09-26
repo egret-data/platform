@@ -188,6 +188,20 @@ pub struct NewRule {
 }
 
 /// The caller `explain` decides about.
+///
+/// **No `workspaces` field (SP4a Task 15, D3 defect 2 — removed, not just
+/// ignored).** It used to be caller-supplied, `#[serde(default)]` to
+/// `vec![]`, and the evaluator trusted it verbatim — so a caller naming just
+/// a `user` (the natural way to call this endpoint) silently got `denied`
+/// for every `workspace_members` grant, however real the compiled Ranger
+/// policy made that access: the live gate measured exactly that. `explain`
+/// now resolves `user`'s CURRENT workspace memberships itself
+/// (`crate::members::workspaces_for_username`), off the same
+/// `access_grants`/`users.username` truth the compiler's own expansion reads
+/// — a caller-supplied list is a second, driftable copy of a fact the
+/// database already answers, and keeping the field would let a caller
+/// override that fact when what it should be describing is the caller's
+/// principal, not a value only egret can verify.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ExplainSubject {
     pub user: String,
@@ -195,8 +209,6 @@ pub struct ExplainSubject {
     pub groups: Vec<String>,
     #[serde(default)]
     pub roles: Vec<String>,
-    #[serde(default)]
-    pub workspaces: Vec<Uuid>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -634,11 +646,17 @@ async fn explain(
         _ => Vec::new(),
     };
 
+    // SP4a Task 15 (D3 defect 2): resolve the subject's CURRENT workspace
+    // memberships from the same table the compiler's own `workspace_members`
+    // expansion reads, rather than trusting a caller-supplied list — see
+    // `ExplainSubject`'s doc comment for what trusting one instead cost.
+    let workspaces = crate::members::workspaces_for_username(&mut conn, &body.subject.user).await?;
+
     let subject = Subject {
         user: body.subject.user,
         groups: body.subject.groups,
         roles: body.subject.roles,
-        workspaces: body.subject.workspaces,
+        workspaces,
     };
     let decision = evaluate(&subject, body.action, &body.target, &grants, &rules, &tags);
     let mut out = ExplainResponse::from(decision);

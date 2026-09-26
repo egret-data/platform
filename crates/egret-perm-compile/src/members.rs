@@ -57,6 +57,15 @@
 //!    stays in the compiled policy until the next recompile of that profile
 //!    for any other reason. Also fail-open, also recorded rather than papered
 //!    over; closing it needs a sweeper, which SP4a does not have.
+//!
+//! **[`workspaces_for_username`] (SP4a Task 15, D3 defect 2).** `explain`
+//! (`crate::routes`) needs the SAME fact this module resolves, in the OTHER
+//! direction: not "which usernames does this workspace's membership expand
+//! to" but "which workspaces is this username currently a member of." Both
+//! read the identical `access_grants` predicate off the identical
+//! `users.username` column — different query, same source of truth — so the
+//! evaluator (`egret_perm::eval`) and the compiler cannot silently disagree
+//! about who a `workspace_members` principal actually names.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -209,6 +218,45 @@ pub(crate) async fn expand_workspace_members(
         substitute(&mut r.exempt, &members);
     }
     Ok(())
+}
+
+/// The workspace ids `username` currently has a live, direct
+/// (`principal_type = 'user'`), `allow`, unexpired membership in — the exact
+/// predicate [`expand_workspace_members`] reads, in the OTHER direction
+/// (workspace -> members here reads member -> workspaces), off the SAME
+/// `access_grants` rows joined on the STORED `users.username`.
+///
+/// **SP4a Task 15 (D3 defect 2).** `/perm/explain` used to take its subject's
+/// workspace memberships from the REQUEST BODY (`ExplainSubject::workspaces`,
+/// caller-supplied) instead of resolving them here, so a caller naming just a
+/// `user` — the natural way to call the endpoint, and the only way that
+/// works at all once the compiled policy is what actually decides access —
+/// got `workspaces: []` by `#[serde(default)]` and therefore `denied` for
+/// every `workspace_members` grant, however real the compiled Ranger policy
+/// made that access. The evaluator and the compiler now read the same table
+/// through the same join on `users.username`: this function is that read for
+/// `explain`, called with `body.subject.user` in place of a caller-supplied
+/// list. A username with no `users` row (never minted, or simply wrong)
+/// resolves to no workspaces, which is correct — that identity does not
+/// exist on any engine either.
+pub(crate) async fn workspaces_for_username(
+    conn: &mut sqlx::PgConnection,
+    username: &str,
+) -> Result<Vec<Uuid>, CompileError> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT ag.scope_id FROM access_grants ag \
+           JOIN users u ON u.id = ag.principal_id \
+          WHERE u.username = $1 \
+            AND ag.principal_type = 'user' \
+            AND ag.scope_type = 'workspace' \
+            AND ag.effect = 'allow' \
+            AND (ag.expires_at IS NULL OR ag.expires_at > now())",
+    )
+    .bind(username)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(e.to_string()))?;
+    Ok(ids)
 }
 
 /// Rewrite one `PrincipalSet` in place: every `WorkspaceMembers` entry becomes

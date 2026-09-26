@@ -756,7 +756,7 @@ async fn a_grant_that_cannot_compile_is_refused_and_not_stored() {
 
 fn explain_body(catalog_id: Uuid, user: &str) -> Value {
     json!({
-        "subject": { "user": user, "groups": [], "roles": [], "workspaces": [] },
+        "subject": { "user": user, "groups": [], "roles": [] },
         "action": "read",
         "target": { "catalog_id": catalog_id, "schema": "sales", "table": "orders", "column": null }
     })
@@ -889,6 +889,156 @@ async fn explain_resolves_the_targets_tags_itself() {
         json!([f.tag_key]),
         "sales.orders.email carries this fixture's tag; body: {body}"
     );
+}
+
+/// SP4a Task 15, D3 defect 2: `explain` and the compiled policy must agree
+/// about an IMPLICIT (`workspace_members`) grant, for a member whose stored
+/// `users.username` carries an `ensure_username` collision suffix (`-2`) —
+/// the exact case a naive re-derivation from the email would get wrong (it
+/// would name the FIRST colliding person for the SECOND). Two users share one
+/// email local-part on purpose, so `collide` and `collide-2` are real,
+/// minted, distinguishable identities before this test ever calls `explain`.
+#[tokio::test]
+async fn explain_agrees_with_the_compiled_policy_for_a_collision_suffixed_member() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    let ws_id: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
+            .bind(unique("explain-collide-ws"))
+            .bind("Explain Collide WS")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("workspace");
+
+    // Two users whose email local-part slugifies to the SAME base — the
+    // second must mint `<base>-2`, never `<base>`, or the two people are
+    // indistinguishable to any engine policy.
+    let local = unique("collide");
+    let user_a = f
+        .users
+        .insert_local(&format!("{local}@one.example.com"), "Collide A", "x")
+        .await
+        .expect("insert user a")
+        .0;
+    let user_b = f
+        .users
+        .insert_local(&format!("{local}@two.example.com"), "Collide B", "x")
+        .await
+        .expect("insert user b")
+        .0;
+    let mut conn = f.db.pool.acquire().await.expect("acquire conn");
+    let username_a = egret_auth::users::ensure_username_via(&mut conn, egret_core::UserId(user_a))
+        .await
+        .expect("mint username a");
+    let username_b = egret_auth::users::ensure_username_via(&mut conn, egret_core::UserId(user_b))
+        .await
+        .expect("mint username b");
+    assert_eq!(
+        username_a, local,
+        "the first registrant keeps the bare slug"
+    );
+    assert_eq!(
+        username_b,
+        format!("{local}-2"),
+        "the second registrant must carry the collision suffix, not overwrite the first"
+    );
+
+    for uid in [user_a, user_b] {
+        let res = sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'user', $1, r.id, 'workspace', $2 FROM roles r \
+              WHERE r.scope = 'workspace' AND r.name = 'ws_viewer'",
+        )
+        .bind(uid)
+        .bind(ws_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("seed membership");
+        assert_eq!(res.rows_affected(), 1, "the membership row must exist");
+    }
+
+    egret_perm::sync_assignment_grants(&f.perm, f.catalog_id, &[ws_id])
+        .await
+        .expect("assign catalog to workspace");
+    let grant_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment'",
+    )
+    .bind(f.catalog_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("implicit grant");
+    egret_perm_compile::recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile the profile");
+
+    // Ground truth: the compiled policy names BOTH usernames.
+    let policy_jsonb: Value = sqlx::query_scalar(
+        "SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(f.service_id)
+    .bind(format!("{COMPILER_GRANT_PREFIX}{grant_id}"))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("compiled policy for the implicit grant");
+    let mut compiled_users: Vec<String> = policy_jsonb["policyItems"][0]["users"]
+        .as_array()
+        .expect("users")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    compiled_users.sort();
+    let mut expected_users = vec![username_a.clone(), username_b.clone()];
+    expected_users.sort();
+    assert_eq!(
+        compiled_users, expected_users,
+        "the compiled policy must name both real usernames, suffix included"
+    );
+
+    // `explain`, asked about the SUFFIXED user specifically, must agree —
+    // the assertion this defect existed to fail. `target` names no schema, so
+    // it matches the implicit grant's catalog-wide scope directly.
+    let mut body = explain_body(f.catalog_id, &username_b);
+    body["target"]["schema"] = Value::Null;
+    body["target"]["table"] = Value::Null;
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", &token, Some(body)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["allowed"], true,
+        "explain must allow the collision-suffixed member the compiled policy \
+         already serves; body: {body}"
+    );
+    assert_eq!(
+        body["reasons"][0]["kind"], "allowed_by_grant",
+        "body: {body}"
+    );
+    assert_eq!(
+        body["reasons"][0]["grant_id"],
+        grant_id.to_string(),
+        "must name the SAME implicit grant the compiler compiled; body: {body}"
+    );
+
+    // And the FIRST colliding user (bare slug) must independently agree too —
+    // proving explain distinguishes the two rather than matching on the
+    // shared base string.
+    let mut body_a = explain_body(f.catalog_id, &username_a);
+    body_a["target"]["schema"] = Value::Null;
+    body_a["target"]["table"] = Value::Null;
+    let (status, body_a) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", &token, Some(body_a)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body_a}");
+    assert_eq!(body_a["allowed"], true, "body: {body_a}");
 }
 
 // ---------------------------------------------------------------------------
