@@ -1,4 +1,7 @@
 target/
+# A per-worktree CARGO_TARGET_DIR (54 GB here) is NOT matched by `target/` and would be
+# sent as build context — measured: the whole directory, before anything compiled.
+target-check/
 node_modules/
 frontend/node_modules/
 frontend/dist/
