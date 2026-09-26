@@ -197,6 +197,13 @@ Phần này bám theo `FlowTriggerService.processMultipleConditionWindow` và `A
   - còn lại → `DURATION_WINDOW`, lấy `every` (mặc định 1 ngày) làm độ dài cửa sổ và `offset` làm độ lệch.
 - Khai báo trộn các nhóm loại trừ nhau bị từ chối khi lưu.
 - Giá trị `Duration` được parse theo tập con ISO-8601 mà corpus dùng. Ngoài tập con đó thì từ chối, không đoán.
+- **`timezone` là trường thứ bảy** (đã đo, W13b Task 1: `Window` của image liệt kê đúng `offset`, `lookback`, `deadline`, `timezone`, `from`, `to`, `every`). Nó được áp dụng cho mọi loại trừ `lookback`. Không có `timezone` thì Kestra dùng múi giờ của server, đo được là `Etc/UTC`. egret không có múi giờ server, nên mặc định là UTC (chọn, và trùng với artifact). Mọi trường khác, ví dụ `fireOnce`, bị từ chối khi lưu, như artifact trả 422. Flow trigger không có trường `resetOnSuccess`; bắn là luôn reset.
+- **Biên, đã đo** (`oracle-exec/w13b-windows.json`, `bounds_rule`, 26 ca). `now` lấy theo múi giờ, bỏ phần nano giây.
+  - `DURATION_WINDOW` **không** phải lưới tính từ nửa đêm. Nếu `every` ≥ 1 ngày thì đặt giờ về 0. Nếu ≥ 1 giờ thì đặt phút về 0. Nếu ≥ 1 phút thì đặt giây về 0 và làm tròn xuống phút theo bội số phút của `every`. Sau đó cộng `offset`, và `end = start + every − 1 ms`. Vì vậy `PT6H` lúc 04:51 cho 04:00–09:59:59.999, không phải 00:00/06:00. `PT2M` lúc 04:53 cho 04:52. `PT45S` thì không căn chỉnh gì cả.
+  - `offset` có thể đẩy `start` vào tương lai. Sự kiện đến trước đó bị bỏ qua, và cửa sổ rỗng được giữ đến khi hết hạn.
+  - `SLIDING_WINDOW` là `[now làm tròn tới giây, + lookback]`, `end` chính xác. Nó cố định từ lúc tạo và **không trượt**. Điều kiện đạt từ 3 phút trước không được tính. Điều kiện đạt từ 51 giây trước cũng không được tính nếu cửa sổ, neo vào một sự kiện sớm hơn, đã hết hạn.
+  - `DAILY_TIME_WINDOW` là `[nửa đêm + from, nửa đêm + to]`. `DAILY_TIME_DEADLINE` là `[nửa đêm, nửa đêm + deadline]`. Cả hai đầu đều chính xác.
+  - Một sự kiện chỉ được tính khi `start < now < end`. Cả hai đầu đều là bất đẳng thức chặt, như `isValid` của Java. Artifact không đặt được sự kiện đúng vào biên, nên phần này là **chọn** theo Java.
 
 ### 5.2 Schema (migration `0158`)
 
@@ -217,11 +224,11 @@ CREATE TABLE workflow.flow_trigger_windows (
 
 Chạy bên trong savepoint của từng listener ở §4.4:
 
-1. `INSERT … ON CONFLICT DO NOTHING` một cửa sổ mới, tính tại `now()` của Postgres, rồi `SELECT … FOR UPDATE`. Cửa sổ đã hết hạn thì bị thay bằng cửa sổ mới.
-2. Nếu `now` nằm ngoài cửa sổ (ví dụ `DAILY_TIME_WINDOW` nhận sự kiện ngoài khung giờ), sự kiện bị bỏ qua đối với listener này.
+1. `INSERT … ON CONFLICT DO NOTHING` một cửa sổ mới, tính tại `now()` của Postgres, rồi `SELECT … FOR UPDATE`. **Cửa sổ đã hết hạn không bị thay** (đã đo, trái với bản nháp trước). Sự kiện gặp nó bị bỏ qua đối với listener này, như mọi sự kiện nằm ngoài cửa sổ, và bước 5 xoá hàng đó. Chỉ sự kiện kế tiếp mới mở cửa sổ mới. Mọi sự kiện listener nghe thấy đều mở cửa sổ, kể cả sự kiện không khớp dependency nào: `results` của nó là `{}`, và với `SLIDING_WINDOW` nó chính là mốc neo của cửa sổ.
+2. Nếu `now` nằm ngoài cửa sổ (ví dụ `DAILY_TIME_WINDOW` ngoài khung giờ, `start` bị `offset` đẩy vào tương lai, hoặc đã qua `deadline`), sự kiện bị bỏ qua đối với listener này. Nó không được giữ lại để dùng sau.
 3. Đánh giá từng `Dependency`: namespace, flowId, `states`, `labels`, và `when` render trên nguồn. Các kết quả true được cộng dồn; điều kiện đã đạt thì giữ nguyên là đạt.
-4. Nếu `when` của trigger đạt và `mode` thoả (`ALL`, `ANY`, hoặc `AT_LEAST` ≥ `minSatisfied`), trigger bắn qua đúng đường của §4.4. Sau đó cửa sổ bị xoá nếu đã thoả (`resetOnSuccess`, mặc định bật).
-5. Ticker của scheduler cũng xoá các cửa sổ hết hạn, mỗi pass một lần.
+4. Nếu `when` của trigger đạt và `mode` thoả (`ALL`, `ANY`, hoặc `AT_LEAST` ≥ `minSatisfied`), trigger bắn qua đúng đường của §4.4. Sau đó cửa sổ bị xoá. Điều này đã đo, giống nhau ở `ALL`, `ANY` và `AT_LEAST`: vì vậy `ANY` bắn ở mọi sự kiện khớp, còn `AT_LEAST` đếm lại từ đầu.
+5. Sau khi xử lý xong các listener của một sự kiện, xoá **mọi cửa sổ đã hết hạn trong workspace**. Kestra dọn cả tenant ở cuối mỗi lần đánh giá `dependsOn`, và sự kiện kích hoạt lần dọn đó có thể không khớp gì cả. Vì vậy, sự kiện khớp đầu tiên sau khi cửa sổ hết hạn có bị mất hay không tuỳ vào việc giữa hai lần đó có một sự kiện khác được nghe hay không. Điều này đã đo (`q8_expired_unpurged_then_event` so với `q8_expired_purged_by_unrelated_execution`). Ticker **không** tự dọn. Đây là **chọn**: dọn theo giờ sẽ che mất hiện tượng mất sự kiện đã đo được. Điều kiện đã đạt không bao giờ được giữ sang cửa sổ sau (đã đo).
 
 **Đồng thời:**
 - Hai nguồn thoả hai điều kiện của cùng một listener, được xử lý trên hai replica, sẽ xếp hàng trên row của cửa sổ. Cái sau đọc thấy kết quả của cái trước và bắn đúng một lần.
@@ -229,7 +236,7 @@ Chạy bên trong savepoint của từng listener ở §4.4:
 
 ### 5.4 Đo trước khi viết code
 
-Task 1 của W13b bắn flow thật trên artifact và lưu kết quả nguyên văn. Mã Java ở trên chưa trả lời được các câu sau:
+Task 1 của W13b bắn flow thật trên artifact và lưu kết quả nguyên văn. Mã Java ở trên chưa trả lời được các câu sau. **Câu trả lời nằm trong `oracle-exec/w13b-windows.json`, và §5.1, §5.3 ở trên đã được sửa cho khớp.** `trigger.variables` của execution được bắn giữ nguyên dạng của nhánh không cửa sổ: đúng 9 khoá W13a đã đo, mô tả nguồn vừa làm điều kiện được thoả.
 - biên của `DURATION_WINDOW`: tính nửa đêm theo timezone nào, và `offset` ảnh hưởng ra sao;
 - mốc bắt đầu của `SLIDING_WINDOW` được đặt thế nào;
 - một điều kiện đã đạt mà trigger chưa bắn thì có được giữ sang cửa sổ sau không;
@@ -281,6 +288,7 @@ Mỗi dòng nêu mutation phải làm nó đỏ.
 | tính chất | mutation phải giết |
 |---|---|
 | `ALL` với hai dependency: chỉ A thì không bắn; A rồi B thì bắn một lần và reset cửa sổ | không cộng dồn kết quả |
+| sự kiện gặp cửa sổ đã hết hạn mà chưa bị dọn thì bị bỏ qua và hàng bị dọn; sự kiện kế tiếp mở cửa sổ mới | thay cửa sổ hết hạn ở bước 1 |
 | `ANY`; `AT_LEAST` với `minSatisfied` | đảo phép so sánh mode |
 | hai nguồn trên hai processor cùng thoả `ALL` thì bắn đúng một lần | bỏ `FOR UPDATE` của cửa sổ |
 | kết quả của cửa sổ đã hết hạn không được tính | bỏ kiểm `end` |

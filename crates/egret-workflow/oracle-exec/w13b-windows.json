@@ -1,0 +1,4920 @@
+{
+ "artifact": "kestra/kestra@sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd",
+ "artifact_note": "the image labels read version=nightly, revision=169ca7f25a1b3aeeaaab1206a89b2446a1335a46 (docker-compose.yml comment); the Java checkout 96893b589 does not contain that revision, and it has no `timezone` on TimeWindow while the image honours one. Where the two disagree the measurement is used.",
+ "captured_at": {
+  "prior_agent": "2026-09-26T04:02Z..04:21Z",
+  "this_agent": "2026-09-26T04:39Z..05:13Z"
+ },
+ "container_zone": {
+  "date +%Z %z": "UTC +0000",
+  "sh -c echo TZ=$TZ; cat /etc/timezone 2>/dev/null; ls -l /etc/localtime": "TZ=\nEtc/UTC\nlrwxrwxrwx 1 root root 27 Aug 21 18:26 /etc/localtime -> /usr/share/zoneinfo/Etc/UTC",
+  "sh -c java -XshowSettings:properties -version 2>&1 | grep -i 'user.timezone'": "",
+  "docker inspect image": "sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd kestra/kestra@sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd",
+  "host_utc": "2026-09-26T04:39:34.341701+00:00"
+ },
+ "method": {
+  "producers": "p1, p2, p3, other in namespace w13b, each one `io.kestra.plugin.core.log.Log` task, run by POST /api/v1/main/executions/w13b/<id>",
+  "listener_template": "id: <L>\\nnamespace: w13b\\ntasks: [Log 'fired']\\ntriggers:\\n  - id: t\\n    type: io.kestra.plugin.core.trigger.Flow\\n    dependsOn: [{namespace: w13b, flowId: pN, states: [SUCCESS]} ...]\\n    <mode/minSatisfied/window>",
+  "window_state": "read directly from Kestra's Postgres table `multipleconditions` (column `value`, JSON) ~7 s after each producer ended: `SELECT now() || ' | ' || json_agg(value ORDER BY key) FROM multipleconditions WHERE flow_id = <L>`. The text before `|` is Postgres now() at the read.",
+  "results_keys": "a window's `results` is keyed by a per-dependency hash; mapped here to producers by the first single-result rows: {\"2313c7a5d5e549765999105c11476db6\": \"p1\", \"16b5de595dead92845164b760baeb83b\": \"p2\", \"7269459c025246f6f8c86ff61e8f0188\": \"p3\"}",
+  "sequence": "one listener at a time, deleted after its scenario; steps are strictly serial; nothing else ran in the tenant (tutorial flows have Schedule triggers but produced no executions in the window: GET /executions/search?startDate=2026-09-26T03:30Z listed only w13b flows)",
+  "crash": "the prior agent read the table with `docker exec oracle-exec-postgres-1 psql ...`. Postgres is PID 1 in that container, so every exec'd psql is its child; at 04:22:25 one was killed by SIGPIPE and the postmaster logged `untracked child process (PID 1079) was terminated by signal 13: Broken pipe` / `terminating any other active server processes`, i.e. treated it as a crashed backend and restarted, and Kestra then shut down gracefully. Not a Kestra behaviour. This agent read the table from a separate `docker run --rm --network oracle-exec_default postgres:18 psql -h postgres` container instead; no crash recurred.",
+  "excluded": "prior log-q1a.json (its listener-execution filter counted producer executions; superseded by log-fast.json q1) and this agent's first bounds run + reset probe (contaminated: listener `q5_slide`, left deployed by the crash, fired on p1/p2 and its own execution then opened fresh {} windows in the listener under test). Both kept only in the .superpowers scratch, not here."
+ },
+ "save_validation": {
+  "fireOnce_true_POST": {
+   "flow_yaml": "id: fo_all\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT1H\n      fireOnce: true\n",
+   "status": 422,
+   "body": "{\"type\":\"https://kestra.io/docs/api-reference/problems/validation-failed\",\"title\":\"Validation failed\",\"status\":422,\"detail\":\"Unrecognized field \\\"fireOnce\\\" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: \\\"offset\\\", \\\"lookback\\\", \\\"deadline\\\", \\\"timezone\\\", \\\"from\\\", \\\"to\\\", \\\"every\\\")\",\"instance\":\"/api/v1/main/flows\",\"errors\":[{\"detail\":\"Unrecognized field \\\"fireOnce\\\" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: \\\"offset\\\", \\\"lookback\\\", \\\"deadline\\\", \\\"timezone\\\", \\\"from\\\", \\\"to\\\", \\\"every\\\")\",\"pointer\":\"/io/kestra/core/models/flows/FlowWithSource/\\\"triggers\\\"/->java/util/ArrayList/0/->io/kestra/plugin/core/trigger/Flow/\\\"window\\\"/->io/kestra/core/models/triggers/Window/\\\"fireOnce\\\"\",\"path\":\"io.kestra.core.models.flows.FlowWithSource[\\\"triggers\\\"]->java.util.ArrayList[0]->io.kestra.plugin.core.trigger.Flow[\\\"window\\\"]->io.kestra.core.models.triggers.Window[\\\"fireOnce\\\"]\"}]}"
+  },
+  "unknown_field_control_POST": {
+   "flow_yaml": "id: fo_all2\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT1H\n      bogusField: 1\n",
+   "status": 422,
+   "body": "{\"type\":\"https://kestra.io/docs/api-reference/problems/validation-failed\",\"title\":\"Validation failed\",\"status\":422,\"detail\":\"Unrecognized field \\\"bogusField\\\" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: \\\"offset\\\", \\\"lookback\\\", \\\"deadline\\\", \\\"timezone\\\", \\\"from\\\", \\\"to\\\", \\\"every\\\")\",\"instance\":\"/api/v1/main/flows\",\"errors\":[{\"detail\":\"Unrecognized field \\\"bogusField\\\" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: \\\"offset\\\", \\\"lookback\\\", \\\"deadline\\\", \\\"timezone\\\", \\\"from\\\", \\\"to\\\", \\\"every\\\")\",\"pointer\":\"/io/kestra/core/models/flows/FlowWithSource/\\\"triggers\\\"/->java/util/ArrayList/0/->io/kestra/plugin/core/trigger/Flow/\\\"window\\\"/->io/kestra/core/models/triggers/Window/\\\"bogusField\\\"\",\"path\":\"io.kestra.core.models.flows.FlowWithSource[\\\"triggers\\\"]->java.util.ArrayList[0]->io.kestra.plugin.core.trigger.Flow[\\\"window\\\"]->io.kestra.core.models.triggers.Window[\\\"bogusField\\\"]\"}]}"
+  },
+  "mixed_every_lookback_POST": {
+   "flow_yaml": "id: mix_all\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT1H\n      lookback: PT2M\n",
+   "status": 422,
+   "body": "{\"type\":\"https://kestra.io/docs/api-reference/problems/validation-failed\",\"title\":\"Validation failed\",\"status\":422,\"detail\":\"triggers[0].window: Window of type `SLIDING_WINDOW` cannot have an every duration.\\n\",\"instance\":\"/api/v1/main/flows\",\"errors\":[{\"detail\":\"Window of type `SLIDING_WINDOW` cannot have an every duration.\",\"pointer\":\"/triggers/window/0\",\"path\":\"triggers[0].window\"}]}"
+  }
+ },
+ "bounds_rule": {
+  "all_kinds": "now = the evaluating server's clock in `timezone` (default: server zone, measured UTC), nanoseconds dropped. The event is counted only if start < now < end (strict, Java isValid). Every bounds_case below satisfies this rule; build.py asserts it.",
+  "DURATION_WINDOW": "w = every (default P1D). if w >= 1 day: hour := 0. if w >= 1 hour: minute := 0. if w >= 1 minute: second := 0, minute := floor(minute / w_minutes) * w_minutes. start := that + offset (may be in the future). end := start + w - 1 ms.",
+  "SLIDING_WINDOW": "start := now (to the second); end := start + lookback (exact). Fixed once created; it does not slide.",
+  "DAILY_TIME_WINDOW": "start := local midnight + from; end := local midnight + to (exact).",
+  "DAILY_TIME_DEADLINE": "start := local midnight; end := local midnight + deadline (exact).",
+  "fields": "bounds_cases[].now is the producer's endDate; the server read its clock a few ms later while processing that end, which never crosses a bound in these cases. observed_start/observed_end are verbatim from the multipleconditions row; null when no row survived the evaluation (see note)."
+ },
+ "bounds_cases": [
+  {
+   "scenario": "q1_all_nowindow",
+   "source": "prior/log-fast.json[1]",
+   "window": {},
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:04:11.667118Z",
+   "observed_start": "2026-09-26T00:00:00.000000Z",
+   "observed_end": "2026-09-26T23:59:59.999000Z",
+   "event_counted": false,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "q1_all_window_every_PT1H_fireOnce_default",
+   "source": "prior/log-fast.json[10]",
+   "window": {
+    "every": "PT1H"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:04:52.719852Z",
+   "observed_start": "2026-09-26T04:00:00.000000Z",
+   "observed_end": "2026-09-26T04:59:59.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "q2_any_nowindow",
+   "source": "prior/log-fast.json[18]",
+   "window": {},
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:05:20.288667Z",
+   "observed_start": null,
+   "observed_end": null,
+   "event_counted": false,
+   "fired": 1,
+   "note": "no row after the event: the event fired and the reset deleted the window",
+   "derived_start": "2026-09-26T00:00:00.000000Z",
+   "derived_end": "2026-09-26T23:59:59.999000Z",
+   "now_in_window": true
+  },
+  {
+   "scenario": "q2_atleast2_nowindow",
+   "source": "prior/log-fast.json[24]",
+   "window": {},
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:05:41.567520Z",
+   "observed_start": "2026-09-26T00:00:00.000000Z",
+   "observed_end": "2026-09-26T23:59:59.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "q2_any_window_every_PT1H_fireOnce_default",
+   "source": "prior/log-fast.json[32]",
+   "window": {
+    "every": "PT1H"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:06:17.083167Z",
+   "observed_start": null,
+   "observed_end": null,
+   "event_counted": false,
+   "fired": 1,
+   "note": "no row after the event: the event fired and the reset deleted the window",
+   "derived_start": "2026-09-26T04:00:00.000000Z",
+   "derived_end": "2026-09-26T04:59:59.999000Z",
+   "now_in_window": true
+  },
+  {
+   "scenario": "q2_atleast2_window_every_PT1H_fireOnce_default",
+   "source": "prior/log-fast.json[38]",
+   "window": {
+    "every": "PT1H"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:06:38.080307Z",
+   "observed_start": "2026-09-26T04:00:00.000000Z",
+   "observed_end": "2026-09-26T04:59:59.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "q6_daily_time_window_brackets_now",
+   "source": "prior/log-fast2.json[1]",
+   "window": {
+    "from": "03:00:00",
+    "to": "05:00:00"
+   },
+   "kind": "DAILY_TIME_WINDOW",
+   "now": "2026-09-26T04:08:27.376998Z",
+   "observed_start": "2026-09-26T03:00:00.000000Z",
+   "observed_end": "2026-09-26T05:00:00.000000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "q6_daily_time_window_not_bracketing_now",
+   "source": "prior/log-fast2.json[7]",
+   "window": {
+    "from": "06:00:00",
+    "to": "07:00:00"
+   },
+   "kind": "DAILY_TIME_WINDOW",
+   "now": "2026-09-26T04:08:47.899118Z",
+   "observed_start": "2026-09-26T06:00:00.000000Z",
+   "observed_end": "2026-09-26T07:00:00.000000Z",
+   "event_counted": false,
+   "fired": 0,
+   "now_in_window": false
+  },
+  {
+   "scenario": "zone_daily_time_window_timezone_HCM_brackets_local_now_only",
+   "source": "prior/log-fast2.json[12]",
+   "window": {
+    "from": "10:00:00",
+    "to": "12:00:00",
+    "timezone": "Asia/Ho_Chi_Minh"
+   },
+   "kind": "DAILY_TIME_WINDOW",
+   "now": "2026-09-26T04:09:01.950471Z",
+   "observed_start": "2026-09-26T03:00:00.000000Z",
+   "observed_end": "2026-09-26T05:00:00.000000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "zone_duration_default_every_timezone_Kolkata",
+   "source": "prior/log-fast2.json[17]",
+   "window": {
+    "timezone": "Asia/Kolkata"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:09:15.851268Z",
+   "observed_start": "2026-09-25T18:30:00.000000Z",
+   "observed_end": "2026-09-26T18:29:59.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "zone_every_PT1H_timezone_Kolkata",
+   "source": "prior/log-fast2.json[21]",
+   "window": {
+    "every": "PT1H",
+    "timezone": "Asia/Kolkata"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:09:22.880024Z",
+   "observed_start": "2026-09-26T03:30:00.000000Z",
+   "observed_end": "2026-09-26T04:29:59.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "extra_every_PT90M_bounds",
+   "source": "prior/log-fast2.json[25]",
+   "window": {
+    "every": "PT90M"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:09:29.951210Z",
+   "observed_start": "2026-09-26T04:00:00.000000Z",
+   "observed_end": "2026-09-26T05:29:59.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "q3_q8_every_PT2M",
+   "source": "prior/log-q3q8.json[1]",
+   "window": {
+    "every": "PT2M"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:10:05.800804Z",
+   "observed_start": "2026-09-26T04:10:00.000000Z",
+   "observed_end": "2026-09-26T04:11:59.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "q4_every_PT2M_offset_PT1M",
+   "source": "prior/log-q4.json[2]",
+   "window": {
+    "every": "PT2M",
+    "offset": "PT1M"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:14:04.394799Z",
+   "observed_start": "2026-09-26T04:15:00.000000Z",
+   "observed_end": "2026-09-26T04:16:59.999000Z",
+   "event_counted": false,
+   "fired": 0,
+   "now_in_window": false
+  },
+  {
+   "scenario": "grid_every_PT6H",
+   "source": "new/log-bounds.json[1]",
+   "window": {
+    "every": "PT6H"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:51:01.375207Z",
+   "observed_start": "2026-09-26T04:00:00.000000Z",
+   "observed_end": "2026-09-26T09:59:59.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "grid_every_PT45S",
+   "source": "new/log-bounds.json[5]",
+   "window": {
+    "every": "PT45S"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:51:50.560775Z",
+   "observed_start": "2026-09-26T04:51:50.000000Z",
+   "observed_end": "2026-09-26T04:52:34.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "grid_every_P1D_offset_future_hour",
+   "source": "new/log-bounds.json[9]",
+   "window": {
+    "every": "P1D",
+    "offset": "PT6H"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:52:04.943978Z",
+   "observed_start": "2026-09-26T06:00:00.000000Z",
+   "observed_end": "2026-09-27T05:59:59.999000Z",
+   "event_counted": false,
+   "fired": 0,
+   "now_in_window": false
+  },
+  {
+   "scenario": "grid_every_P1D_offset_past_hour",
+   "source": "new/log-bounds.json[13]",
+   "window": {
+    "every": "P1D",
+    "offset": "PT3H"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:52:16.412841Z",
+   "observed_start": "2026-09-26T03:00:00.000000Z",
+   "observed_end": "2026-09-27T02:59:59.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "grid_every_PT2M_odd_minute",
+   "source": "new/log-bounds.json[19]",
+   "window": {
+    "every": "PT2M"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:53:03.632375Z",
+   "observed_start": "2026-09-26T04:52:00.000000Z",
+   "observed_end": "2026-09-26T04:53:59.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "q7_deadline_in_future",
+   "source": "new/log-bounds.json[23]",
+   "window": {
+    "deadline": "05:00:00"
+   },
+   "kind": "DAILY_TIME_DEADLINE",
+   "now": "2026-09-26T04:53:15.236951Z",
+   "observed_start": "2026-09-26T00:00:00.000000Z",
+   "observed_end": "2026-09-26T05:00:00.000000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "q7_deadline_in_past",
+   "source": "new/log-bounds.json[28]",
+   "window": {
+    "deadline": "03:00:00"
+   },
+   "kind": "DAILY_TIME_DEADLINE",
+   "now": "2026-09-26T04:53:34.887034Z",
+   "observed_start": null,
+   "observed_end": null,
+   "event_counted": false,
+   "fired": 0,
+   "note": "no row after the event: created already expired, the event ignored, and the expired row purged in the same evaluation",
+   "derived_start": "2026-09-26T00:00:00.000000Z",
+   "derived_end": "2026-09-26T03:00:00.000000Z",
+   "now_in_window": false
+  },
+  {
+   "scenario": "q7_deadline_timezone_HCM_future_local",
+   "source": "new/log-bounds.json[33]",
+   "window": {
+    "deadline": "12:00:00",
+    "timezone": "Asia/Ho_Chi_Minh"
+   },
+   "kind": "DAILY_TIME_DEADLINE",
+   "now": "2026-09-26T04:53:56.081976Z",
+   "observed_start": "2026-09-25T17:00:00.000000Z",
+   "observed_end": "2026-09-26T05:00:00.000000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "q8_expired_unpurged_then_event",
+   "source": "new/log-q8.json[1]",
+   "window": {
+    "every": "PT2M"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T04:54:15.256669Z",
+   "observed_start": "2026-09-26T04:54:00.000000Z",
+   "observed_end": "2026-09-26T04:55:59.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "q8_expired_purged_by_unrelated_execution",
+   "source": "new/log-q8.json[10]",
+   "window": {
+    "every": "PT2M"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T05:01:32.220112Z",
+   "observed_start": "2026-09-26T05:00:00.000000Z",
+   "observed_end": "2026-09-26T05:01:59.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "q8_carry_over_check",
+   "source": "new/log-q8.json[19]",
+   "window": {
+    "every": "PT2M"
+   },
+   "kind": "DURATION_WINDOW",
+   "now": "2026-09-26T05:02:31.908142Z",
+   "observed_start": "2026-09-26T05:02:00.000000Z",
+   "observed_end": "2026-09-26T05:03:59.999000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  },
+  {
+   "scenario": "q5_sliding_lookback_PT2M",
+   "source": "new/log-q5.json[1]",
+   "window": {
+    "lookback": "PT2M"
+   },
+   "kind": "SLIDING_WINDOW",
+   "now": "2026-09-26T05:04:21.721936Z",
+   "observed_start": "2026-09-26T05:04:21.000000Z",
+   "observed_end": "2026-09-26T05:06:21.000000Z",
+   "event_counted": true,
+   "fired": 0,
+   "now_in_window": true
+  }
+ ],
+ "sequences": [
+  {
+   "scenario": "q1_all_nowindow",
+   "listener": "q1a_all",
+   "declared": {},
+   "deploy_status": 200,
+   "source": "prior/log-fast.json[0]",
+   "steps": [
+    {
+     "source": "prior/log-fast.json[1]",
+     "step": "unrelated 'other' run",
+     "producer": "other",
+     "producer_end": "2026-09-26T04:04:11.667118Z",
+     "window_after": {
+      "start": "2026-09-26T00:00:00.000000Z",
+      "end": "2026-09-26T23:59:59.999000Z",
+      "met": []
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast.json[2]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:04:18.272421Z",
+     "window_after": {
+      "start": "2026-09-26T00:00:00.000000Z",
+      "end": "2026-09-26T23:59:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast.json[3]",
+     "step": "p2 #1",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:04:25.081515Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T04:04:25.081515Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:04:24.994104Z",
+       "lastTaskId": "a",
+       "executionId": "2t7rtQbF3dl8rxgY3H8TJi",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[4]",
+     "step": "p1 #2",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:04:31.922340Z",
+     "window_after": {
+      "start": "2026-09-26T00:00:00.000000Z",
+      "end": "2026-09-26T23:59:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast.json[5]",
+     "step": "p2 #2",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:04:38.814702Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T04:04:38.814702Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:04:38.708083Z",
+       "lastTaskId": "a",
+       "executionId": "50jxRtQkNr9SJ5tvL5gOQR",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[6]",
+     "step": "p2 #3 alone",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:04:45.653477Z",
+     "window_after": {
+      "start": "2026-09-26T00:00:00.000000Z",
+      "end": "2026-09-26T23:59:59.999000Z",
+      "met": [
+       "p2"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast.json[8]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:04:52.391574+00:00",
+     "window_now": {
+      "start": "2026-09-26T00:00:00.000000Z",
+      "end": "2026-09-26T23:59:59.999000Z",
+      "met": [
+       "p2"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "scenario": "q1_all_window_every_PT1H_fireOnce_default",
+   "listener": "q1b_all",
+   "declared": {
+    "window": {
+     "every": "PT1H"
+    }
+   },
+   "deploy_status": 200,
+   "source": "prior/log-fast.json[9]",
+   "steps": [
+    {
+     "source": "prior/log-fast.json[10]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:04:52.719852Z",
+     "window_after": {
+      "start": "2026-09-26T04:00:00.000000Z",
+      "end": "2026-09-26T04:59:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast.json[11]",
+     "step": "p2 #1",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:04:59.589381Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T04:04:59.589381Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:04:59.506769Z",
+       "lastTaskId": "a",
+       "executionId": "7HpIMaUyUhti6H2oGSaFGP",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[12]",
+     "step": "p1 #2",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:05:06.405803Z",
+     "window_after": {
+      "start": "2026-09-26T04:00:00.000000Z",
+      "end": "2026-09-26T04:59:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast.json[13]",
+     "step": "p2 #2",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:05:13.193110Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T04:05:13.193110Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:05:13.107556Z",
+       "lastTaskId": "a",
+       "executionId": "6BzRyKicTQueHLoOI6WfTP",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[15]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:05:19.915821+00:00",
+     "window_now": null
+    }
+   ]
+  },
+  {
+   "scenario": "q1_all_window_every_PT1H_fireOnce_true",
+   "listener": "q1c_all",
+   "declared": {
+    "window": {
+     "every": "PT1H",
+     "fireOnce": "true"
+    }
+   },
+   "deploy_status": 404,
+   "source": "prior/log-fast.json[16]",
+   "steps": []
+  },
+  {
+   "scenario": "q2_any_nowindow",
+   "listener": "q2a_any",
+   "declared": {
+    "mode": "ANY"
+   },
+   "deploy_status": 200,
+   "source": "prior/log-fast.json[17]",
+   "steps": [
+    {
+     "source": "prior/log-fast.json[18]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:05:20.288667Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p1",
+       "endDate": "2026-09-26T04:05:20.288667Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:05:20.192354Z",
+       "lastTaskId": "a",
+       "executionId": "143Z1SVIGoWWYYCD3TzFjh",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[19]",
+     "step": "p1 #2",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:05:27.083901Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p1",
+       "endDate": "2026-09-26T04:05:27.083901Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:05:26.999497Z",
+       "lastTaskId": "a",
+       "executionId": "4XbRONSNn1lALNG1LWAvR5",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[20]",
+     "step": "p2 #1",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:05:34.067466Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T04:05:34.067466Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:05:33.971968Z",
+       "lastTaskId": "a",
+       "executionId": "4CqvCcS5kmcP9WlDuNXEJ0",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[22]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:05:40.929508+00:00",
+     "window_now": null
+    }
+   ]
+  },
+  {
+   "scenario": "q2_atleast2_nowindow",
+   "listener": "q2b_atl",
+   "declared": {
+    "mode": "AT_LEAST",
+    "minSatisfied": 2
+   },
+   "deploy_status": 200,
+   "source": "prior/log-fast.json[23]",
+   "steps": [
+    {
+     "source": "prior/log-fast.json[24]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:05:41.567520Z",
+     "window_after": {
+      "start": "2026-09-26T00:00:00.000000Z",
+      "end": "2026-09-26T23:59:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast.json[25]",
+     "step": "p2 #1",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:05:48.547285Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T04:05:48.547285Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:05:48.447279Z",
+       "lastTaskId": "a",
+       "executionId": "2JcrswV7bE04SwRoWJUaYe",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[26]",
+     "step": "p3 #1",
+     "producer": "p3",
+     "producer_end": "2026-09-26T04:05:55.716904Z",
+     "window_after": {
+      "start": "2026-09-26T00:00:00.000000Z",
+      "end": "2026-09-26T23:59:59.999000Z",
+      "met": [
+       "p3"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast.json[27]",
+     "step": "p1 #2",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:06:02.983840Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p1",
+       "endDate": "2026-09-26T04:06:02.983840Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:06:02.815502Z",
+       "lastTaskId": "a",
+       "executionId": "6JDoIHYmx4qkC1gFOlP5E",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[28]",
+     "step": "p1 #3",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:06:09.960714Z",
+     "window_after": {
+      "start": "2026-09-26T00:00:00.000000Z",
+      "end": "2026-09-26T23:59:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast.json[30]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:06:16.696218+00:00",
+     "window_now": {
+      "start": "2026-09-26T00:00:00.000000Z",
+      "end": "2026-09-26T23:59:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "scenario": "q2_any_window_every_PT1H_fireOnce_default",
+   "listener": "q2c_any",
+   "declared": {
+    "mode": "ANY",
+    "window": {
+     "every": "PT1H"
+    }
+   },
+   "deploy_status": 200,
+   "source": "prior/log-fast.json[31]",
+   "steps": [
+    {
+     "source": "prior/log-fast.json[32]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:06:17.083167Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p1",
+       "endDate": "2026-09-26T04:06:17.083167Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:06:16.987818Z",
+       "lastTaskId": "a",
+       "executionId": "cssdOvCvZZgcOOkp4uWKd",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[33]",
+     "step": "p1 #2",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:06:23.943710Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p1",
+       "endDate": "2026-09-26T04:06:23.943710Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:06:23.865891Z",
+       "lastTaskId": "a",
+       "executionId": "6eJ9lpUnvWD28hqhi2fM37",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[34]",
+     "step": "p2 #1",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:06:30.847792Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T04:06:30.847792Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:06:30.746027Z",
+       "lastTaskId": "a",
+       "executionId": "IgnhoenmaizFS5KMhC4pR",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[36]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:06:37.633659+00:00",
+     "window_now": null
+    }
+   ]
+  },
+  {
+   "scenario": "q2_atleast2_window_every_PT1H_fireOnce_default",
+   "listener": "q2d_atl",
+   "declared": {
+    "mode": "AT_LEAST",
+    "minSatisfied": 2,
+    "window": {
+     "every": "PT1H"
+    }
+   },
+   "deploy_status": 200,
+   "source": "prior/log-fast.json[37]",
+   "steps": [
+    {
+     "source": "prior/log-fast.json[38]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:06:38.080307Z",
+     "window_after": {
+      "start": "2026-09-26T04:00:00.000000Z",
+      "end": "2026-09-26T04:59:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast.json[39]",
+     "step": "p2 #1",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:06:44.949525Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T04:06:44.949525Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:06:44.865892Z",
+       "lastTaskId": "a",
+       "executionId": "wprjRa6VgATIfsKmZFpgt",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[40]",
+     "step": "p3 #1",
+     "producer": "p3",
+     "producer_end": "2026-09-26T04:06:51.788724Z",
+     "window_after": {
+      "start": "2026-09-26T04:00:00.000000Z",
+      "end": "2026-09-26T04:59:59.999000Z",
+      "met": [
+       "p3"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast.json[41]",
+     "step": "p1 #2",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:06:58.580984Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p1",
+       "endDate": "2026-09-26T04:06:58.580984Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:06:58.486756Z",
+       "lastTaskId": "a",
+       "executionId": "2zPe8COYAlkRQEF8HmeMvR",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast.json[43]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:07:05.371883+00:00",
+     "window_now": null
+    }
+   ]
+  },
+  {
+   "scenario": "q6_daily_time_window_brackets_now",
+   "listener": "q6a_dtw",
+   "declared": {
+    "window": {
+     "from": "03:00:00",
+     "to": "05:00:00"
+    }
+   },
+   "deploy_status": 200,
+   "source": "prior/log-fast2.json[0]",
+   "steps": [
+    {
+     "source": "prior/log-fast2.json[1]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:08:27.376998Z",
+     "window_after": {
+      "start": "2026-09-26T03:00:00.000000Z",
+      "end": "2026-09-26T05:00:00.000000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast2.json[2]",
+     "step": "p2 #1",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:08:34.024917Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T04:08:34.024917Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:08:33.942707Z",
+       "lastTaskId": "a",
+       "executionId": "6OgtyiGoKDCSlc1IBT2Esr",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast2.json[3]",
+     "step": "p1 #2",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:08:40.887675Z",
+     "window_after": {
+      "start": "2026-09-26T03:00:00.000000Z",
+      "end": "2026-09-26T05:00:00.000000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast2.json[5]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:08:47.604482+00:00",
+     "window_now": {
+      "start": "2026-09-26T03:00:00.000000Z",
+      "end": "2026-09-26T05:00:00.000000Z",
+      "met": [
+       "p1"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "scenario": "q6_daily_time_window_not_bracketing_now",
+   "listener": "q6b_dtw",
+   "declared": {
+    "window": {
+     "from": "06:00:00",
+     "to": "07:00:00"
+    }
+   },
+   "deploy_status": 200,
+   "source": "prior/log-fast2.json[6]",
+   "steps": [
+    {
+     "source": "prior/log-fast2.json[7]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:08:47.899118Z",
+     "window_after": {
+      "start": "2026-09-26T06:00:00.000000Z",
+      "end": "2026-09-26T07:00:00.000000Z",
+      "met": []
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast2.json[8]",
+     "step": "p2 #1",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:08:54.755557Z",
+     "window_after": {
+      "start": "2026-09-26T06:00:00.000000Z",
+      "end": "2026-09-26T07:00:00.000000Z",
+      "met": []
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast2.json[10]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:09:01.501758+00:00",
+     "window_now": {
+      "start": "2026-09-26T06:00:00.000000Z",
+      "end": "2026-09-26T07:00:00.000000Z",
+      "met": []
+     }
+    }
+   ]
+  },
+  {
+   "scenario": "zone_daily_time_window_timezone_HCM_brackets_local_now_only",
+   "listener": "z1_dtw",
+   "declared": {
+    "window": {
+     "from": "10:00:00",
+     "to": "12:00:00",
+     "timezone": "Asia/Ho_Chi_Minh"
+    }
+   },
+   "deploy_status": 200,
+   "source": "prior/log-fast2.json[11]",
+   "steps": [
+    {
+     "source": "prior/log-fast2.json[12]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:09:01.950471Z",
+     "window_after": {
+      "start": "2026-09-26T03:00:00.000000Z",
+      "end": "2026-09-26T05:00:00.000000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast2.json[13]",
+     "step": "p2 #1",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:09:08.818054Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T04:09:08.818054Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:09:08.687734Z",
+       "lastTaskId": "a",
+       "executionId": "6QaiLvJjVTgXnRtMUZYp55",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "prior/log-fast2.json[15]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:09:15.504649+00:00",
+     "window_now": null
+    }
+   ]
+  },
+  {
+   "scenario": "zone_duration_default_every_timezone_Kolkata",
+   "listener": "z2_dur",
+   "declared": {
+    "window": {
+     "timezone": "Asia/Kolkata"
+    }
+   },
+   "deploy_status": 200,
+   "source": "prior/log-fast2.json[16]",
+   "steps": [
+    {
+     "source": "prior/log-fast2.json[17]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:09:15.851268Z",
+     "window_after": {
+      "start": "2026-09-25T18:30:00.000000Z",
+      "end": "2026-09-26T18:29:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast2.json[19]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:09:22.564799+00:00",
+     "window_now": {
+      "start": "2026-09-25T18:30:00.000000Z",
+      "end": "2026-09-26T18:29:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "scenario": "zone_every_PT1H_timezone_Kolkata",
+   "listener": "z3_dur",
+   "declared": {
+    "window": {
+     "every": "PT1H",
+     "timezone": "Asia/Kolkata"
+    }
+   },
+   "deploy_status": 200,
+   "source": "prior/log-fast2.json[20]",
+   "steps": [
+    {
+     "source": "prior/log-fast2.json[21]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:09:22.880024Z",
+     "window_after": {
+      "start": "2026-09-26T03:30:00.000000Z",
+      "end": "2026-09-26T04:29:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast2.json[23]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:09:29.615230+00:00",
+     "window_now": {
+      "start": "2026-09-26T03:30:00.000000Z",
+      "end": "2026-09-26T04:29:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "scenario": "extra_every_PT90M_bounds",
+   "listener": "x1_dur",
+   "declared": {
+    "window": {
+     "every": "PT90M"
+    }
+   },
+   "deploy_status": 200,
+   "source": "prior/log-fast2.json[24]",
+   "steps": [
+    {
+     "source": "prior/log-fast2.json[25]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:09:29.951210Z",
+     "window_after": {
+      "start": "2026-09-26T04:00:00.000000Z",
+      "end": "2026-09-26T05:29:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-fast2.json[27]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:09:36.653340+00:00",
+     "window_now": {
+      "start": "2026-09-26T04:00:00.000000Z",
+      "end": "2026-09-26T05:29:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "scenario": "q3_q8_every_PT2M",
+   "listener": "q3_dur2m",
+   "declared": {
+    "window": {
+     "every": "PT2M"
+    }
+   },
+   "deploy_status": 200,
+   "source": "prior/log-q3q8.json[0]",
+   "steps": [
+    {
+     "source": "prior/log-q3q8.json[1]",
+     "step": "p1 #1 (window W1 created)",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:10:05.800804Z",
+     "window_after": {
+      "start": "2026-09-26T04:10:00.000000Z",
+      "end": "2026-09-26T04:11:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-q3q8.json[2]",
+     "step": "host waits until W1.end + 5s with NO other executions",
+     "W1_end": "2026-09-26T04:11:59.999000Z"
+    },
+    {
+     "source": "prior/log-q3q8.json[3]",
+     "step": "after W1.end, before any event (expired row still present?)",
+     "host_utc": "2026-09-26T04:12:05.003412+00:00",
+     "window_now": {
+      "start": "2026-09-26T04:10:00.000000Z",
+      "end": "2026-09-26T04:11:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     }
+    },
+    {
+     "source": "prior/log-q3q8.json[4]",
+     "step": "p2 #1 (first event after W1 expired)",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:12:06.342239Z",
+     "window_after": null,
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-q3q8.json[5]",
+     "step": "p2 #2",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:12:13.422214Z",
+     "window_after": {
+      "start": "2026-09-26T04:12:00.000000Z",
+      "end": "2026-09-26T04:13:59.999000Z",
+      "met": [
+       "p2"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-q3q8.json[6]",
+     "step": "p1 #2",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:12:20.454742Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p1",
+       "endDate": "2026-09-26T04:12:20.454742Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:12:20.342513Z",
+       "lastTaskId": "a",
+       "executionId": "1atZfwxUu55Yle1jjOaXNt",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "scenario": "q4_every_PT2M_offset_PT1M",
+   "listener": "q4_off",
+   "declared": {
+    "window": {
+     "every": "PT2M",
+     "offset": "PT1M"
+    }
+   },
+   "deploy_status": 200,
+   "source": "prior/log-q4.json[0]",
+   "steps": [
+    {
+     "source": "prior/log-q4.json[1]",
+     "step": "wait for an EVEN minute",
+     "until": "2026-09-26T04:14:03+00:00"
+    },
+    {
+     "source": "prior/log-q4.json[2]",
+     "step": "p1 #1 at even minute",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:14:04.394799Z",
+     "window_after": {
+      "start": "2026-09-26T04:15:00.000000Z",
+      "end": "2026-09-26T04:16:59.999000Z",
+      "met": []
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-q4.json[3]",
+     "step": "wait for the next ODD minute",
+     "until": "2026-09-26T04:15:03+00:00"
+    },
+    {
+     "source": "prior/log-q4.json[4]",
+     "step": "p2 #1 at odd minute",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:15:03.573046Z",
+     "window_after": {
+      "start": "2026-09-26T04:15:00.000000Z",
+      "end": "2026-09-26T04:16:59.999000Z",
+      "met": [
+       "p2"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "prior/log-q4.json[5]",
+     "step": "p1 #2 at odd minute",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:15:10.953752Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p1",
+       "endDate": "2026-09-26T04:15:10.953752Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:15:10.761833Z",
+       "lastTaskId": "a",
+       "executionId": "2lQ3flNWeilMr2f33GJ0a4",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "scenario": "grid_every_PT6H",
+   "listener": "g1_6h",
+   "declared": {
+    "window": {
+     "every": "PT6H"
+    }
+   },
+   "deploy_status": 200,
+   "source": "new/log-bounds.json[0]",
+   "steps": [
+    {
+     "source": "new/log-bounds.json[1]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:51:01.375207Z",
+     "window_after": {
+      "start": "2026-09-26T04:00:00.000000Z",
+      "end": "2026-09-26T09:59:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-bounds.json[3]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:51:48.161413+00:00",
+     "window_now": {
+      "start": "2026-09-26T04:00:00.000000Z",
+      "end": "2026-09-26T09:59:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "scenario": "grid_every_PT45S",
+   "listener": "g2_45s",
+   "declared": {
+    "window": {
+     "every": "PT45S"
+    }
+   },
+   "deploy_status": 200,
+   "source": "new/log-bounds.json[4]",
+   "steps": [
+    {
+     "source": "new/log-bounds.json[5]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:51:50.560775Z",
+     "window_after": {
+      "start": "2026-09-26T04:51:50.000000Z",
+      "end": "2026-09-26T04:52:34.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-bounds.json[7]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:52:01.403861+00:00",
+     "window_now": {
+      "start": "2026-09-26T04:51:50.000000Z",
+      "end": "2026-09-26T04:52:34.999000Z",
+      "met": [
+       "p1"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "scenario": "grid_every_P1D_offset_future_hour",
+   "listener": "g3_off",
+   "declared": {
+    "window": {
+     "every": "P1D",
+     "offset": "PT6H"
+    }
+   },
+   "deploy_status": 200,
+   "source": "new/log-bounds.json[8]",
+   "steps": [
+    {
+     "source": "new/log-bounds.json[9]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:52:04.943978Z",
+     "window_after": {
+      "start": "2026-09-26T06:00:00.000000Z",
+      "end": "2026-09-27T05:59:59.999000Z",
+      "met": []
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-bounds.json[11]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:52:13.165595+00:00",
+     "window_now": {
+      "start": "2026-09-26T06:00:00.000000Z",
+      "end": "2026-09-27T05:59:59.999000Z",
+      "met": []
+     }
+    }
+   ]
+  },
+  {
+   "scenario": "grid_every_P1D_offset_past_hour",
+   "listener": "g4_off",
+   "declared": {
+    "window": {
+     "every": "P1D",
+     "offset": "PT3H"
+    }
+   },
+   "deploy_status": 200,
+   "source": "new/log-bounds.json[12]",
+   "steps": [
+    {
+     "source": "new/log-bounds.json[13]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:52:16.412841Z",
+     "window_after": {
+      "start": "2026-09-26T03:00:00.000000Z",
+      "end": "2026-09-27T02:59:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-bounds.json[14]",
+     "step": "p2 #1",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:52:25.102179Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T04:52:25.102179Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:52:24.779358Z",
+       "lastTaskId": "a",
+       "executionId": "6i3WkQX0fz5ZIhSg5FTVLY",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "new/log-bounds.json[16]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:52:33.124375+00:00",
+     "window_now": null
+    }
+   ]
+  },
+  {
+   "scenario": "grid_every_PT2M_odd_minute",
+   "listener": "g5_2m",
+   "declared": {
+    "window": {
+     "every": "PT2M"
+    }
+   },
+   "deploy_status": 200,
+   "source": "new/log-bounds.json[18]",
+   "steps": [
+    {
+     "source": "new/log-bounds.json[19]",
+     "step": "p1 #1 at odd minute",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:53:03.632375Z",
+     "window_after": {
+      "start": "2026-09-26T04:52:00.000000Z",
+      "end": "2026-09-26T04:53:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-bounds.json[21]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:53:12.188106+00:00",
+     "window_now": {
+      "start": "2026-09-26T04:52:00.000000Z",
+      "end": "2026-09-26T04:53:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "scenario": "q7_deadline_in_future",
+   "listener": "q7a_dl",
+   "declared": {
+    "window": {
+     "deadline": "05:00:00"
+    }
+   },
+   "deploy_status": 200,
+   "source": "new/log-bounds.json[22]",
+   "steps": [
+    {
+     "source": "new/log-bounds.json[23]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:53:15.236951Z",
+     "window_after": {
+      "start": "2026-09-26T00:00:00.000000Z",
+      "end": "2026-09-26T05:00:00.000000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-bounds.json[24]",
+     "step": "p2 #1",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:53:23.679614Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T04:53:23.679614Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T04:53:23.462774Z",
+       "lastTaskId": "a",
+       "executionId": "3pQXe0SBNDk5sMff2tOv32",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "new/log-bounds.json[26]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:53:32.235346+00:00",
+     "window_now": null
+    }
+   ]
+  },
+  {
+   "scenario": "q7_deadline_in_past",
+   "listener": "q7b_dl",
+   "declared": {
+    "window": {
+     "deadline": "03:00:00"
+    }
+   },
+   "deploy_status": 200,
+   "source": "new/log-bounds.json[27]",
+   "steps": [
+    {
+     "source": "new/log-bounds.json[28]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:53:34.887034Z",
+     "window_after": null,
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-bounds.json[29]",
+     "step": "p2 #1",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:53:44.372161Z",
+     "window_after": null,
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-bounds.json[31]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:53:53.080742+00:00",
+     "window_now": null
+    }
+   ]
+  },
+  {
+   "scenario": "q7_deadline_timezone_HCM_future_local",
+   "listener": "q7c_dl",
+   "declared": {
+    "window": {
+     "deadline": "12:00:00",
+     "timezone": "Asia/Ho_Chi_Minh"
+    }
+   },
+   "deploy_status": 200,
+   "source": "new/log-bounds.json[32]",
+   "steps": [
+    {
+     "source": "new/log-bounds.json[33]",
+     "step": "p1 #1",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:53:56.081976Z",
+     "window_after": {
+      "start": "2026-09-25T17:00:00.000000Z",
+      "end": "2026-09-26T05:00:00.000000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-bounds.json[35]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T04:54:04.600562+00:00",
+     "window_now": {
+      "start": "2026-09-25T17:00:00.000000Z",
+      "end": "2026-09-26T05:00:00.000000Z",
+      "met": [
+       "p1"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "scenario": "q8_expired_unpurged_then_event",
+   "listener": "q8a_2m",
+   "declared": {
+    "window": {
+     "every": "PT2M"
+    }
+   },
+   "deploy_status": 200,
+   "source": "new/log-q8.json[0]",
+   "steps": [
+    {
+     "source": "new/log-q8.json[1]",
+     "step": "p1 #1 (window W1 created)",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:54:15.256669Z",
+     "window_after": {
+      "start": "2026-09-26T04:54:00.000000Z",
+      "end": "2026-09-26T04:55:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q8.json[2]",
+     "step": "host waits until W1.end + 5s with NO other executions in the tenant",
+     "W1_end": "2026-09-26T04:55:59.999000Z"
+    },
+    {
+     "source": "new/log-q8.json[3]",
+     "step": "after W1.end, before any event",
+     "host_utc": "2026-09-26T04:56:05.005445+00:00",
+     "window_now": {
+      "start": "2026-09-26T04:54:00.000000Z",
+      "end": "2026-09-26T04:55:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     }
+    },
+    {
+     "source": "new/log-q8.json[4]",
+     "step": "p2 #1 (first event after W1 expired)",
+     "producer": "p2",
+     "producer_end": "2026-09-26T04:56:14.330933Z",
+     "window_after": null,
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q8.json[5]",
+     "step": "p1 #2 (fires iff p2 #1 was kept)",
+     "producer": "p1",
+     "producer_end": "2026-09-26T04:57:39.219180Z",
+     "window_after": {
+      "start": "2026-09-26T04:56:00.000000Z",
+      "end": "2026-09-26T04:57:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q8.json[6]",
+     "step": "p2 #2",
+     "producer": "p2",
+     "producer_end": "2026-09-26T05:01:20.383153Z",
+     "window_after": null,
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q8.json[8]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T05:01:29.727209+00:00",
+     "window_now": null
+    }
+   ]
+  },
+  {
+   "scenario": "q8_expired_purged_by_unrelated_execution",
+   "listener": "q8b_2m",
+   "declared": {
+    "window": {
+     "every": "PT2M"
+    }
+   },
+   "deploy_status": 200,
+   "source": "new/log-q8.json[9]",
+   "steps": [
+    {
+     "source": "new/log-q8.json[10]",
+     "step": "p1 #1 (window W1 created)",
+     "producer": "p1",
+     "producer_end": "2026-09-26T05:01:32.220112Z",
+     "window_after": {
+      "start": "2026-09-26T05:00:00.000000Z",
+      "end": "2026-09-26T05:01:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q8.json[11]",
+     "step": "host waits until W1.end + 5s with NO other executions in the tenant",
+     "W1_end": "2026-09-26T05:01:59.999000Z"
+    },
+    {
+     "source": "new/log-q8.json[12]",
+     "step": "after W1.end, before any event",
+     "host_utc": "2026-09-26T05:02:05.009106+00:00",
+     "window_now": {
+      "start": "2026-09-26T05:00:00.000000Z",
+      "end": "2026-09-26T05:01:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     }
+    },
+    {
+     "source": "new/log-q8.json[13]",
+     "step": "unrelated 'other' after expiry",
+     "producer": "other",
+     "producer_end": "2026-09-26T05:02:06.683405Z",
+     "window_after": null,
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q8.json[14]",
+     "step": "p2 #1",
+     "producer": "p2",
+     "producer_end": "2026-09-26T05:02:14.687130Z",
+     "window_after": {
+      "start": "2026-09-26T05:02:00.000000Z",
+      "end": "2026-09-26T05:03:59.999000Z",
+      "met": [
+       "p2"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q8.json[15]",
+     "step": "p1 #2 (fires iff p2 #1 was kept and p1 #1 was not carried... p1 #2 re-meets p1)",
+     "producer": "p1",
+     "producer_end": "2026-09-26T05:02:22.823344Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p1",
+       "endDate": "2026-09-26T05:02:22.823344Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T05:02:22.654187Z",
+       "lastTaskId": "a",
+       "executionId": "CBl0rY9JiQOgG8JdZ0EWY",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "new/log-q8.json[17]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T05:02:30.399359+00:00",
+     "window_now": null
+    }
+   ]
+  },
+  {
+   "scenario": "q8_carry_over_check",
+   "listener": "q8c_2m",
+   "declared": {
+    "window": {
+     "every": "PT2M"
+    }
+   },
+   "deploy_status": 200,
+   "source": "new/log-q8.json[18]",
+   "steps": [
+    {
+     "source": "new/log-q8.json[19]",
+     "step": "p1 #1 (window W1 created)",
+     "producer": "p1",
+     "producer_end": "2026-09-26T05:02:31.908142Z",
+     "window_after": {
+      "start": "2026-09-26T05:02:00.000000Z",
+      "end": "2026-09-26T05:03:59.999000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q8.json[20]",
+     "step": "unrelated 'other' after expiry (purges W1)",
+     "producer": "other",
+     "producer_end": "2026-09-26T05:04:05.272009Z",
+     "window_after": null,
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q8.json[21]",
+     "step": "p2 #1 (fires iff p1 #1 carried over)",
+     "producer": "p2",
+     "producer_end": "2026-09-26T05:04:12.620723Z",
+     "window_after": {
+      "start": "2026-09-26T05:04:00.000000Z",
+      "end": "2026-09-26T05:05:59.999000Z",
+      "met": [
+       "p2"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q8.json[23]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T05:04:20.021636+00:00",
+     "window_now": {
+      "start": "2026-09-26T05:04:00.000000Z",
+      "end": "2026-09-26T05:05:59.999000Z",
+      "met": [
+       "p2"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "scenario": "q5_sliding_lookback_PT2M",
+   "listener": "q5_slide",
+   "declared": {
+    "window": {
+     "lookback": "PT2M"
+    }
+   },
+   "deploy_status": 200,
+   "source": "new/log-q5.json[0]",
+   "steps": [
+    {
+     "source": "new/log-q5.json[1]",
+     "step": "A: p1 #1 at t0 (window created)",
+     "producer": "p1",
+     "producer_end": "2026-09-26T05:04:21.721936Z",
+     "window_after": {
+      "start": "2026-09-26T05:04:21.000000Z",
+      "end": "2026-09-26T05:06:21.000000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q5.json[2]",
+     "step": "A: host waits until p1 endDate + 180s, no other executions",
+     "until": "2026-09-26T05:07:21.721936+00:00"
+    },
+    {
+     "source": "new/log-q5.json[3]",
+     "step": "A: before next event",
+     "host_utc": "2026-09-26T05:07:21.722188+00:00",
+     "window_now": {
+      "start": "2026-09-26T05:04:21.000000Z",
+      "end": "2026-09-26T05:06:21.000000Z",
+      "met": [
+       "p1"
+      ]
+     }
+    },
+    {
+     "source": "new/log-q5.json[4]",
+     "step": "A: p2 #1 at t0+~3m",
+     "producer": "p2",
+     "producer_end": "2026-09-26T05:08:41.619262Z",
+     "window_after": null,
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q5.json[5]",
+     "step": "A: p1 #2 right after (would fire iff p2 #1 was kept)",
+     "producer": "p1",
+     "producer_end": "2026-09-26T05:08:51.268830Z",
+     "window_after": {
+      "start": "2026-09-26T05:08:51.000000Z",
+      "end": "2026-09-26T05:10:51.000000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q5.json[6]",
+     "step": "A: p2 #2 (within lookback of p1 #2)",
+     "producer": "p2",
+     "producer_end": "2026-09-26T05:09:02.996120Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T05:09:02.996120Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T05:09:02.848035Z",
+       "lastTaskId": "a",
+       "executionId": "6v5BgI3NsOlbZ9He6mDy8K",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "new/log-q5.json[7]",
+     "step": "B: unrelated 'other' at t1 (opens a window: nothing met)",
+     "producer": "other",
+     "producer_end": "2026-09-26T05:09:10.455929Z",
+     "window_after": {
+      "start": "2026-09-26T05:09:10.000000Z",
+      "end": "2026-09-26T05:11:10.000000Z",
+      "met": []
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q5.json[8]",
+     "step": "B: host waits until window start + 90s",
+     "until": "2026-09-26T05:10:40+00:00"
+    },
+    {
+     "source": "new/log-q5.json[9]",
+     "step": "B: p1 at start+~90s",
+     "producer": "p1",
+     "producer_end": "2026-09-26T05:10:40.809467Z",
+     "window_after": {
+      "start": "2026-09-26T05:09:10.000000Z",
+      "end": "2026-09-26T05:11:10.000000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q5.json[10]",
+     "step": "B: host waits until window start + 135s",
+     "until": "2026-09-26T05:11:25+00:00"
+    },
+    {
+     "source": "new/log-q5.json[11]",
+     "step": "B: p2 at start+~135s (~45s after p1; fires iff the window slides)",
+     "producer": "p2",
+     "producer_end": "2026-09-26T05:11:31.768375Z",
+     "window_after": null,
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q5.json[12]",
+     "step": "B: p1 again",
+     "producer": "p1",
+     "producer_end": "2026-09-26T05:11:39.685661Z",
+     "window_after": {
+      "start": "2026-09-26T05:11:39.000000Z",
+      "end": "2026-09-26T05:13:39.000000Z",
+      "met": [
+       "p1"
+      ]
+     },
+     "fired": 0,
+     "fired_trigger_variables": []
+    },
+    {
+     "source": "new/log-q5.json[13]",
+     "step": "B: p2 again (both inside the fresh window)",
+     "producer": "p2",
+     "producer_end": "2026-09-26T05:11:48.084620Z",
+     "window_after": null,
+     "fired": 1,
+     "fired_trigger_variables": [
+      {
+       "state": "SUCCESS",
+       "flowId": "p2",
+       "endDate": "2026-09-26T05:11:48.084620Z",
+       "namespace": "w13b",
+       "startDate": "2026-09-26T05:11:47.868689Z",
+       "lastTaskId": "a",
+       "executionId": "HDk055Ggaoqppsrk40Jrg",
+       "flowRevision": 1,
+       "executionLabels": {
+        "system": {
+         "from": "api"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "source": "new/log-q5.json[15]",
+     "step": "after listener delete",
+     "host_utc": "2026-09-26T05:11:55.376401+00:00",
+     "window_now": null
+    }
+   ]
+  }
+ ],
+ "findings": [
+  {
+   "id": "zone",
+   "finding": "The container's zone is UTC and it is the default window zone. `date +%Z %z` = `UTC +0000`; /etc/localtime -> `/usr/share/zoneinfo/Etc/UTC`; TZ unset. A window with no `timezone` aligned on UTC: q1 (no `window`) created `\"start\": \"2026-09-26T00:00:00.000000Z\"`, `\"end\": \"2026-09-26T23:59:59.999000Z\"` (prior/log-fast.json[1]). egret has no server zone: CHOSEN default = UTC, which is what the artifact did."
+  },
+  {
+   "id": "no_window_default",
+   "finding": "No `window:` = DURATION_WINDOW of one day in the default zone: q1 row `start 2026-09-26T00:00:00.000000Z`, `end 2026-09-26T23:59:59.999000Z` (prior/log-fast.json[1..6])."
+  },
+  {
+   "id": "duration_bounds",
+   "finding": "DURATION_WINDOW start is NOT a grid from midnight. Rule (matches MultipleConditionStateStore.create at 96893b589 and every measurement): take now in the zone with nanos dropped; if every >= 1 day set hour 0; if every >= 1 hour set minute 0; if every >= 1 minute set second 0 and minute = floor(minute / every_minutes) * every_minutes (a no-op once minute was zeroed); then start = that + offset; end = start + every - 1 ms. Quoted: PT1H at 04:04:52 -> `04:00:00.000000Z`..`04:59:59.999000Z` (prior/log-fast.json[10]); PT90M at 04:09:29 -> `04:00:00.000000Z`..`05:29:59.999000Z` (prior/log-fast2.json[23]); PT6H at 04:51:01 -> `04:00:00.000000Z`..`09:59:59.999000Z` (new/log-bounds.json, grid_every_PT6H) -- NOT the 00:00/06:00 grid the TimeWindow javadoc promises; PT2M at even minute 04:10:05 -> `04:10:00`..`04:11:59.999` (prior/log-q3q8.json[1]); PT2M at ODD minute 04:53:03 -> `04:52:00.000000Z`..`04:53:59.999000Z` (new/log-bounds.json, grid_every_PT2M_odd_minute) so minutes are floored to a multiple of 2; PT45S at 04:51:50.56 -> `04:51:50.000000Z`..`04:52:34.999000Z` (new/log-bounds.json, grid_every_PT45S) -- under a minute there is no alignment at all, start = now truncated to the second."
+  },
+  {
+   "id": "offset",
+   "finding": "`offset` is ADDED to the aligned start, so the window can open in the future and an event before it is ignored (results stay {}), the row kept until it expires. every P1D offset PT6H at 04:52:04 -> `\"start\": \"2026-09-26T06:00:00.000000Z\"`, `\"end\": \"2026-09-27T05:59:59.999000Z\"`, `results {}` (new/log-bounds.json grid_every_P1D_offset_future_hour); offset PT3H -> `2026-09-26T03:00:00.000000Z`..`2026-09-27T02:59:59.999000Z` and p1 counted, p2 fired (grid_every_P1D_offset_past_hour); PT2M offset PT1M at 04:14:04 -> `04:15:00.000000Z`..`04:16:59.999000Z` with `results {}`, then at 04:15:03 p2 counted and p1 at 04:15:10 fired (prior/log-q4.json[2..6])."
+  },
+  {
+   "id": "timezone",
+   "finding": "`timezone` is honoured for every kind but lookback. P1D + Asia/Kolkata -> `2026-09-25T18:30:00.000000Z`..`2026-09-26T18:29:59.999000Z`; PT1H + Asia/Kolkata -> `03:30:00.000000Z`..`04:29:59.999000Z` (hour aligned in the zone); from 10:00 to 12:00 Asia/Ho_Chi_Minh -> `03:00:00.000000Z`..`05:00:00.000000Z` (prior/log-fast2.json z1/z2/z3); deadline 12:00 Asia/Ho_Chi_Minh -> `2026-09-25T17:00:00.000000Z`..`2026-09-26T05:00:00.000000Z` (new/log-bounds.json q7_deadline_timezone_HCM_future_local). The Java checkout has no `timezone`; the image does. egret must implement it (chrono-tz is already a dependency) or refuse it at save."
+  },
+  {
+   "id": "window_fields",
+   "finding": "The image's Window has exactly 7 fields; anything else is refused at save with 422. `fireOnce: true` -> `Unrecognized field \"fireOnce\" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: \"offset\", \"lookback\", \"deadline\", \"timezone\", \"from\", \"to\", \"every\")` (save_validation.fireOnce_true_POST; the prior agent's `deploy_status 404` for q1c was its helper retrying a PUT after this 422). Mixed every + lookback -> 422 `Window of type \\`SLIDING_WINDOW\\` cannot have an every duration.` The Flow trigger itself has no `resetOnSuccess` (its properties: allowConcurrent, dependsOn, inputs, minSatisfied, mode, states, stopAfter, when, window)."
+  },
+  {
+   "id": "q1_all_reset",
+   "finding": "ALL over p1,p2: p1 alone does not fire (row `results {p1}`), p2 then fires once and the row is deleted (`windows_after ... | []`); a second p1 + p2 fires again (2 fires total), and p2 alone afterwards does not (prior/log-fast.json[2..6]). Same with every PT1H (prior/log-fast.json[10..13])."
+  },
+  {
+   "id": "q2_any_atleast",
+   "finding": "ANY fires on EVERY matching event (p1, p1, p2 -> 3 fires, `listener_execution_count_after` 1,2,3) and never leaves a row (prior/log-fast.json q2_any_nowindow, and with every PT1H q2_any_window...). AT_LEAST minSatisfied 2 over p1,p2,p3: p1 no fire; p2 fires and deletes the row; p3 no fire (row {p3}); p1 fires (p3 + p1); p1 again no fire (row {p1}) (prior/log-fast.json q2_atleast2_nowindow). The reset after a fire is a delete under every mode."
+  },
+  {
+   "id": "sliding",
+   "finding": "SLIDING_WINDOW does not slide. The first evaluated event opens a fixed window [now truncated to the second, + lookback] (end exact, no -1 ms): p1 ended 05:04:21.72 -> `05:04:21.000000Z`..`05:06:21.000000Z`. q5 answer: a condition met 3 minutes ago does NOT count -- p2 at 05:08:41 found the expired window, was dropped and the row purged (`[]`), and p1 at 05:08:51 opened a new window holding only p1. B: an unrelated `other` opened `05:09:10`..`05:11:10` with results {}; p1 at 05:10:40 was counted; p2 at 05:11:31, 51 s after p1, did NOT fire because the window anchored at `other` had expired -- a true lookback would have fired. Then p1 05:11:39 + p2 05:11:48 in the fresh window fired (new/log-q5.json). The prior partial run agrees up to the crash (start `04:15:45.000000Z` from an end at 04:15:45.528)."
+  },
+  {
+   "id": "daily_time_window",
+   "finding": "DAILY_TIME_WINDOW = [day start + from, day start + to], end exact. Bracketing now (03:00-05:00 at 04:08): p1 counted, p2 fired (prior/log-fast2.json q6a). Not bracketing (06:00-07:00 at 04:08): row `start 06:00:00.000000Z end 07:00:00.000000Z results {}` after BOTH p1 and p2, no fire -- the events are ignored, not stored for later (prior/log-fast2.json q6b)."
+  },
+  {
+   "id": "deadline",
+   "finding": "DAILY_TIME_DEADLINE = [day start, day start + deadline], end exact. Before the deadline (05:00 at 04:53): p1 counted in `00:00:00.000000Z`..`05:00:00.000000Z`, p2 fired. After the deadline (03:00 at 04:53): no row after p1 and none after p2 (`| []`), no fire -- the window is created already expired, the event ignored, and the expired row purged in the same evaluation (new/log-bounds.json q7_deadline_in_future / q7_deadline_in_past)."
+  },
+  {
+   "id": "expiry_drops_the_next_event",
+   "finding": "An expired window is NOT replaced by the event that finds it. That event is ignored for the listener, and the expired row is then purged; only the NEXT event opens a fresh window. q8a: W1 `04:54:00`..`04:55:59.999` {p1}; still present at 04:56:08; p2 at 04:56:14 -> `[]` no fire; p1 at 04:57:39 -> new window `04:56:00`..`04:57:59.999` holding ONLY p1 (p2 was lost). The host was slow and p2 #2 ended at 05:01:20, after that window too, and was dropped the same way (`[]`, no fire) (new/log-q8.json). The prior q3 run shows the same (p2 at 04:12:06 -> `[]`; p2 again -> `{p2}`; prior/log-q3q8.json)."
+  },
+  {
+   "id": "purge_is_tenant_wide_on_any_evaluation",
+   "finding": "The purge runs after ANY execution the listener hears, even one matching no dependency, and it removes expired rows tenant-wide (Java: `multipleConditionStorage.expired(tenant).forEach(delete)` at the end of computeExecutionsFromFlowTriggerDependsOn). q8b: W1 `05:00:00`..`05:01:59.999` {p1}; unrelated `other` at 05:02:06 -> `[]`; p2 05:02:14 -> fresh `05:02:00`..`05:03:59.999` {p2}; p1 05:02:22 -> fired on p1. So whether the first matching event after expiry is lost depends on whether some other heard execution ended in between (new/log-q8.json)."
+  },
+  {
+   "id": "q8_no_carry_over",
+   "finding": "A met condition that did not fire does not carry into the next window. q8c: p1 in `05:02:00`..`05:03:59.999`; `other` 05:04:05 purged it; p2 05:04:12 -> `05:04:00`..`05:05:59.999` holding only p2, no fire (new/log-q8.json)."
+  },
+  {
+   "id": "unrelated_event_opens_a_window",
+   "finding": "Any execution in a state the trigger listens to opens the listener's window if there is none, with `results {}`: q1 `other` -> row `results: {}` (prior/log-fast.json[1]); q5 B `other` -> `05:09:10`..`05:11:10` {} (new/log-q5.json). Only the trigger's own flow is excluded (FlowService.removeUnwanted). For SLIDING_WINDOW this anchors the window on an unrelated flow."
+  },
+  {
+   "id": "listener_delete_keeps_row",
+   "finding": "Deleting the listener flow does not delete its window row: after DELETE (204) q1a's row `results {p2}` is still there (prior/log-fast.json[8]). egret's ON DELETE CASCADE differs, CHOSEN: a re-created flow with the same id would otherwise inherit stale results."
+  },
+  {
+   "id": "q9_trigger_variables",
+   "finding": "A dependsOn fire's `trigger` is the window-free shape unchanged: id `t`, type `io.kestra.plugin.core.trigger.Flow`, variables with exactly the 9 keys endDate, executionId, executionLabels, flowId, flowRevision, lastTaskId, namespace, startDate, state -- the same tuple W13a measured (w13-flow-trigger.json findings[0]). Checked over all 23 fires in raw_records: in every one `variables.executionId`/`flowId` are the execution whose end COMPLETED the condition (e.g. q1: `\"flowId\": \"p2\"`, `\"executionId\": \"2t7rtQbF3dl8rxgY3H8TJi\"` = p2 #1), never the earlier ones; nothing about the window or the other results; `metadata.executionDepth` = 1; label `system.correlationId` = that same source id."
+  },
+  {
+   "id": "event_exactly_at_end",
+   "finding": "Not measurable (an event cannot be placed on a millisecond). The Java is `isValid(now) = now.isAfter(start) && now.isBefore(end)`, strict at BOTH ends. CHOSEN: egret uses the same strict test; the pure tests in this file never place now on a bound."
+  }
+ ],
+ "raw_records": {
+  "prior/log-fast.json": [
+   {
+    "scenario": "q1_all_nowindow",
+    "listener": "q1a_all",
+    "flow_yaml": "id: q1a_all\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q1_all_nowindow",
+    "step": "unrelated 'other' run",
+    "host_utc_before_run": "2026-09-26T04:04:10.445573+00:00",
+    "producer": "other",
+    "producer_execution": {
+     "id": "3Evps0AMXC4gIPhsWmjoUJ",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:04:10.850201Z",
+     "endDate": "2026-09-26T04:04:11.667118Z"
+    },
+    "windows_after": "2026-09-26 04:04:18.111085+00 | [{\"end\": \"2026-09-26T23:59:59.999000Z\", \"start\": \"2026-09-26T00:00:00.000000Z\", \"flowId\": \"q1a_all\", \"results\": {}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q1_all_nowindow",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:04:18.143580+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "2YIomfGbqBPvdNSkcrgTLr",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:04:18.182776Z",
+     "endDate": "2026-09-26T04:04:18.272421Z"
+    },
+    "windows_after": "2026-09-26 04:04:24.940883+00 | [{\"end\": \"2026-09-26T23:59:59.999000Z\", \"start\": \"2026-09-26T00:00:00.000000Z\", \"flowId\": \"q1a_all\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q1_all_nowindow",
+    "step": "p2 #1",
+    "host_utc_before_run": "2026-09-26T04:04:24.978494+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "2t7rtQbF3dl8rxgY3H8TJi",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:04:24.994104Z",
+     "endDate": "2026-09-26T04:04:25.081515Z"
+    },
+    "windows_after": "2026-09-26 04:04:31.755955+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "3XUV5v3EeOxVP1DfiTHgPy",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:04:25.145418Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T04:04:25.081515Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:04:24.994104Z",
+        "lastTaskId": "a",
+        "executionId": "2t7rtQbF3dl8rxgY3H8TJi",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:04:25.145423Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "2t7rtQbF3dl8rxgY3H8TJi"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q1_all_nowindow",
+    "step": "p1 #2",
+    "host_utc_before_run": "2026-09-26T04:04:31.792262+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "1ZYMu1G4NZaq89je4Lfnx",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:04:31.819807Z",
+     "endDate": "2026-09-26T04:04:31.922340Z"
+    },
+    "windows_after": "2026-09-26 04:04:38.624882+00 | [{\"end\": \"2026-09-26T23:59:59.999000Z\", \"start\": \"2026-09-26T00:00:00.000000Z\", \"flowId\": \"q1a_all\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q1_all_nowindow",
+    "step": "p2 #2",
+    "host_utc_before_run": "2026-09-26T04:04:38.663507+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "50jxRtQkNr9SJ5tvL5gOQR",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:04:38.708083Z",
+     "endDate": "2026-09-26T04:04:38.814702Z"
+    },
+    "windows_after": "2026-09-26 04:04:45.49317+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "2rmNpIqmZvQAVd2YecpCpv",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:04:38.859928Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T04:04:38.814702Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:04:38.708083Z",
+        "lastTaskId": "a",
+        "executionId": "50jxRtQkNr9SJ5tvL5gOQR",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:04:38.859939Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "50jxRtQkNr9SJ5tvL5gOQR"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 2
+   },
+   {
+    "scenario": "q1_all_nowindow",
+    "step": "p2 #3 alone",
+    "host_utc_before_run": "2026-09-26T04:04:45.525994+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "4krxeK74lqhJN4iD7eGtir",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:04:45.548294Z",
+     "endDate": "2026-09-26T04:04:45.653477Z"
+    },
+    "windows_after": "2026-09-26 04:04:52.341115+00 | [{\"end\": \"2026-09-26T23:59:59.999000Z\", \"start\": \"2026-09-26T00:00:00.000000Z\", \"flowId\": \"q1a_all\", \"results\": {\"16b5de595dead92845164b760baeb83b\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 2
+   },
+   {
+    "scenario": "q1_all_nowindow",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q1_all_nowindow",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:04:52.391574+00:00",
+    "windows": "2026-09-26 04:04:52.553296+00 | [{\"end\": \"2026-09-26T23:59:59.999000Z\", \"start\": \"2026-09-26T00:00:00.000000Z\", \"flowId\": \"q1a_all\", \"results\": {\"16b5de595dead92845164b760baeb83b\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "q1_all_window_every_PT1H_fireOnce_default",
+    "listener": "q1b_all",
+    "flow_yaml": "id: q1b_all\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT1H\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q1_all_window_every_PT1H_fireOnce_default",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:04:52.650029+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "3Cj9TZAZpTH4NeWHnuX9Wq",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:04:52.672802Z",
+     "endDate": "2026-09-26T04:04:52.719852Z"
+    },
+    "windows_after": "2026-09-26 04:04:59.435116+00 | [{\"end\": \"2026-09-26T04:59:59.999000Z\", \"start\": \"2026-09-26T04:00:00.000000Z\", \"flowId\": \"q1b_all\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q1_all_window_every_PT1H_fireOnce_default",
+    "step": "p2 #1",
+    "host_utc_before_run": "2026-09-26T04:04:59.473288+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "7HpIMaUyUhti6H2oGSaFGP",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:04:59.506769Z",
+     "endDate": "2026-09-26T04:04:59.589381Z"
+    },
+    "windows_after": "2026-09-26 04:05:06.265418+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "1LpY3gTiKWLpVKf4I24waL",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:04:59.628853Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T04:04:59.589381Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:04:59.506769Z",
+        "lastTaskId": "a",
+        "executionId": "7HpIMaUyUhti6H2oGSaFGP",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:04:59.628858Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "7HpIMaUyUhti6H2oGSaFGP"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q1_all_window_every_PT1H_fireOnce_default",
+    "step": "p1 #2",
+    "host_utc_before_run": "2026-09-26T04:05:06.301378+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "6EGOtZwDPYg8XjsaQdMWOj",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:05:06.336259Z",
+     "endDate": "2026-09-26T04:05:06.405803Z"
+    },
+    "windows_after": "2026-09-26 04:05:13.053279+00 | [{\"end\": \"2026-09-26T04:59:59.999000Z\", \"start\": \"2026-09-26T04:00:00.000000Z\", \"flowId\": \"q1b_all\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q1_all_window_every_PT1H_fireOnce_default",
+    "step": "p2 #2",
+    "host_utc_before_run": "2026-09-26T04:05:13.084833+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "6BzRyKicTQueHLoOI6WfTP",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:05:13.107556Z",
+     "endDate": "2026-09-26T04:05:13.193110Z"
+    },
+    "windows_after": "2026-09-26 04:05:19.867101+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "6TFTY2Rv4rU1YhlP2rytQ0",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:05:13.227195Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T04:05:13.193110Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:05:13.107556Z",
+        "lastTaskId": "a",
+        "executionId": "6BzRyKicTQueHLoOI6WfTP",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:05:13.227202Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "6BzRyKicTQueHLoOI6WfTP"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 2
+   },
+   {
+    "scenario": "q1_all_window_every_PT1H_fireOnce_default",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q1_all_window_every_PT1H_fireOnce_default",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:05:19.915821+00:00",
+    "windows": "2026-09-26 04:05:20.070686+00 | []"
+   },
+   {
+    "scenario": "q1_all_window_every_PT1H_fireOnce_true",
+    "listener": "q1c_all",
+    "flow_yaml": "id: q1c_all\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT1H\n      fireOnce: true\n",
+    "deploy_status": 404,
+    "deploy_error": "{\"type\":\"https://kestra.io/docs/api-reference/problems/not-found\",\"title\":\"Resource not found\",\"status\":404,\"detail\":\"Flow 'w13b.q1c_all' was not found.\",\"instance\":\"/api/v1/main/flows/w13b/q1c_all\"}"
+   },
+   {
+    "scenario": "q2_any_nowindow",
+    "listener": "q2a_any",
+    "flow_yaml": "id: q2a_any\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    mode: ANY\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q2_any_nowindow",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:05:20.178162+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "143Z1SVIGoWWYYCD3TzFjh",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:05:20.192354Z",
+     "endDate": "2026-09-26T04:05:20.288667Z"
+    },
+    "windows_after": "2026-09-26 04:05:26.945152+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "1JXWDK8tLnpeEwBiJEmFYI",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:05:20.346468Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p1",
+        "endDate": "2026-09-26T04:05:20.288667Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:05:20.192354Z",
+        "lastTaskId": "a",
+        "executionId": "143Z1SVIGoWWYYCD3TzFjh",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:05:20.346473Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "143Z1SVIGoWWYYCD3TzFjh"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q2_any_nowindow",
+    "step": "p1 #2",
+    "host_utc_before_run": "2026-09-26T04:05:26.981370+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "4XbRONSNn1lALNG1LWAvR5",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:05:26.999497Z",
+     "endDate": "2026-09-26T04:05:27.083901Z"
+    },
+    "windows_after": "2026-09-26 04:05:33.881172+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "2lVqctMCSmOKUSLei2iU0b",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:05:27.146799Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p1",
+        "endDate": "2026-09-26T04:05:27.083901Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:05:26.999497Z",
+        "lastTaskId": "a",
+        "executionId": "4XbRONSNn1lALNG1LWAvR5",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:05:27.146804Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "4XbRONSNn1lALNG1LWAvR5"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 2
+   },
+   {
+    "scenario": "q2_any_nowindow",
+    "step": "p2 #1",
+    "host_utc_before_run": "2026-09-26T04:05:33.932685+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "4CqvCcS5kmcP9WlDuNXEJ0",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:05:33.971968Z",
+     "endDate": "2026-09-26T04:05:34.067466Z"
+    },
+    "windows_after": "2026-09-26 04:05:40.861409+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "xlo1we0WrIaaYnSxrHZtl",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:05:34.137899Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T04:05:34.067466Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:05:33.971968Z",
+        "lastTaskId": "a",
+        "executionId": "4CqvCcS5kmcP9WlDuNXEJ0",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:05:34.137907Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "4CqvCcS5kmcP9WlDuNXEJ0"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 3
+   },
+   {
+    "scenario": "q2_any_nowindow",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q2_any_nowindow",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:05:40.929508+00:00",
+    "windows": "2026-09-26 04:05:41.274448+00 | []"
+   },
+   {
+    "scenario": "q2_atleast2_nowindow",
+    "listener": "q2b_atl",
+    "flow_yaml": "id: q2b_atl\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p3\n        states: [SUCCESS]\n    mode: AT_LEAST\n    minSatisfied: 2\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q2_atleast2_nowindow",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:05:41.405456+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "5He02LA2OjzllxfGAc1GL3",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:05:41.446471Z",
+     "endDate": "2026-09-26T04:05:41.567520Z"
+    },
+    "windows_after": "2026-09-26 04:05:48.3563+00 | [{\"end\": \"2026-09-26T23:59:59.999000Z\", \"start\": \"2026-09-26T00:00:00.000000Z\", \"flowId\": \"q2b_atl\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q2_atleast2_nowindow",
+    "step": "p2 #1",
+    "host_utc_before_run": "2026-09-26T04:05:48.409126+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "2JcrswV7bE04SwRoWJUaYe",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:05:48.447279Z",
+     "endDate": "2026-09-26T04:05:48.547285Z"
+    },
+    "windows_after": "2026-09-26 04:05:55.491659+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "7SJN17iWuMtD1UNmV8s8UI",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:05:48.609413Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T04:05:48.547285Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:05:48.447279Z",
+        "lastTaskId": "a",
+        "executionId": "2JcrswV7bE04SwRoWJUaYe",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:05:48.609424Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "2JcrswV7bE04SwRoWJUaYe"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q2_atleast2_nowindow",
+    "step": "p3 #1",
+    "host_utc_before_run": "2026-09-26T04:05:55.548793+00:00",
+    "producer": "p3",
+    "producer_execution": {
+     "id": "3r864ci7JkWd08wKuLMGvt",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:05:55.594524Z",
+     "endDate": "2026-09-26T04:05:55.716904Z"
+    },
+    "windows_after": "2026-09-26 04:06:02.701262+00 | [{\"end\": \"2026-09-26T23:59:59.999000Z\", \"start\": \"2026-09-26T00:00:00.000000Z\", \"flowId\": \"q2b_atl\", \"results\": {\"7269459c025246f6f8c86ff61e8f0188\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q2_atleast2_nowindow",
+    "step": "p1 #2",
+    "host_utc_before_run": "2026-09-26T04:06:02.768483+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "6JDoIHYmx4qkC1gFOlP5E",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:06:02.815502Z",
+     "endDate": "2026-09-26T04:06:02.983840Z"
+    },
+    "windows_after": "2026-09-26 04:06:09.797225+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "5n87hiWFMQD8TBS5U4IL5P",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:06:03.056259Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p1",
+        "endDate": "2026-09-26T04:06:02.983840Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:06:02.815502Z",
+        "lastTaskId": "a",
+        "executionId": "6JDoIHYmx4qkC1gFOlP5E",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:06:03.056267Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "6JDoIHYmx4qkC1gFOlP5E"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 2
+   },
+   {
+    "scenario": "q2_atleast2_nowindow",
+    "step": "p1 #3",
+    "host_utc_before_run": "2026-09-26T04:06:09.850704+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "36b7sENRyKDRnoGgjKAMNv",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:06:09.875244Z",
+     "endDate": "2026-09-26T04:06:09.960714Z"
+    },
+    "windows_after": "2026-09-26 04:06:16.644199+00 | [{\"end\": \"2026-09-26T23:59:59.999000Z\", \"start\": \"2026-09-26T00:00:00.000000Z\", \"flowId\": \"q2b_atl\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 2
+   },
+   {
+    "scenario": "q2_atleast2_nowindow",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q2_atleast2_nowindow",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:06:16.696218+00:00",
+    "windows": "2026-09-26 04:06:16.877982+00 | [{\"end\": \"2026-09-26T23:59:59.999000Z\", \"start\": \"2026-09-26T00:00:00.000000Z\", \"flowId\": \"q2b_atl\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "q2_any_window_every_PT1H_fireOnce_default",
+    "listener": "q2c_any",
+    "flow_yaml": "id: q2c_any\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    mode: ANY\n    window:\n      every: PT1H\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q2_any_window_every_PT1H_fireOnce_default",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:06:16.949112+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "cssdOvCvZZgcOOkp4uWKd",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:06:16.987818Z",
+     "endDate": "2026-09-26T04:06:17.083167Z"
+    },
+    "windows_after": "2026-09-26 04:06:23.783005+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "277i6lRYc3xoQnZUJQTKTy",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:06:17.142377Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p1",
+        "endDate": "2026-09-26T04:06:17.083167Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:06:16.987818Z",
+        "lastTaskId": "a",
+        "executionId": "cssdOvCvZZgcOOkp4uWKd",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:06:17.142389Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "cssdOvCvZZgcOOkp4uWKd"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q2_any_window_every_PT1H_fireOnce_default",
+    "step": "p1 #2",
+    "host_utc_before_run": "2026-09-26T04:06:23.826621+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "6eJ9lpUnvWD28hqhi2fM37",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:06:23.865891Z",
+     "endDate": "2026-09-26T04:06:23.943710Z"
+    },
+    "windows_after": "2026-09-26 04:06:30.658689+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "1yGYwQVjvOclwmiXFAn9Zq",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:06:23.990830Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p1",
+        "endDate": "2026-09-26T04:06:23.943710Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:06:23.865891Z",
+        "lastTaskId": "a",
+        "executionId": "6eJ9lpUnvWD28hqhi2fM37",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:06:23.990841Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "6eJ9lpUnvWD28hqhi2fM37"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 2
+   },
+   {
+    "scenario": "q2_any_window_every_PT1H_fireOnce_default",
+    "step": "p2 #1",
+    "host_utc_before_run": "2026-09-26T04:06:30.712171+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "IgnhoenmaizFS5KMhC4pR",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:06:30.746027Z",
+     "endDate": "2026-09-26T04:06:30.847792Z"
+    },
+    "windows_after": "2026-09-26 04:06:37.574662+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "5xPjTWoy8vUblwEI8u7TGd",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:06:30.901354Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T04:06:30.847792Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:06:30.746027Z",
+        "lastTaskId": "a",
+        "executionId": "IgnhoenmaizFS5KMhC4pR",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:06:30.901403Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "IgnhoenmaizFS5KMhC4pR"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 3
+   },
+   {
+    "scenario": "q2_any_window_every_PT1H_fireOnce_default",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q2_any_window_every_PT1H_fireOnce_default",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:06:37.633659+00:00",
+    "windows": "2026-09-26 04:06:37.846069+00 | []"
+   },
+   {
+    "scenario": "q2_atleast2_window_every_PT1H_fireOnce_default",
+    "listener": "q2d_atl",
+    "flow_yaml": "id: q2d_atl\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p3\n        states: [SUCCESS]\n    mode: AT_LEAST\n    minSatisfied: 2\n    window:\n      every: PT1H\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q2_atleast2_window_every_PT1H_fireOnce_default",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:06:37.929256+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "2TdgZ5SbJUNsGYpnaERYFb",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:06:37.975134Z",
+     "endDate": "2026-09-26T04:06:38.080307Z"
+    },
+    "windows_after": "2026-09-26 04:06:44.791119+00 | [{\"end\": \"2026-09-26T04:59:59.999000Z\", \"start\": \"2026-09-26T04:00:00.000000Z\", \"flowId\": \"q2d_atl\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q2_atleast2_window_every_PT1H_fireOnce_default",
+    "step": "p2 #1",
+    "host_utc_before_run": "2026-09-26T04:06:44.832881+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "wprjRa6VgATIfsKmZFpgt",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:06:44.865892Z",
+     "endDate": "2026-09-26T04:06:44.949525Z"
+    },
+    "windows_after": "2026-09-26 04:06:51.619643+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "3wnzmp9meJn1d0vrztaDUS",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:06:44.993318Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T04:06:44.949525Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:06:44.865892Z",
+        "lastTaskId": "a",
+        "executionId": "wprjRa6VgATIfsKmZFpgt",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:06:44.993324Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "wprjRa6VgATIfsKmZFpgt"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q2_atleast2_window_every_PT1H_fireOnce_default",
+    "step": "p3 #1",
+    "host_utc_before_run": "2026-09-26T04:06:51.651977+00:00",
+    "producer": "p3",
+    "producer_execution": {
+     "id": "4tlymj3qqVfTCxT5G3ZLRq",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:06:51.676076Z",
+     "endDate": "2026-09-26T04:06:51.788724Z"
+    },
+    "windows_after": "2026-09-26 04:06:58.411446+00 | [{\"end\": \"2026-09-26T04:59:59.999000Z\", \"start\": \"2026-09-26T04:00:00.000000Z\", \"flowId\": \"q2d_atl\", \"results\": {\"7269459c025246f6f8c86ff61e8f0188\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q2_atleast2_window_every_PT1H_fireOnce_default",
+    "step": "p1 #2",
+    "host_utc_before_run": "2026-09-26T04:06:58.449984+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "2zPe8COYAlkRQEF8HmeMvR",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:06:58.486756Z",
+     "endDate": "2026-09-26T04:06:58.580984Z"
+    },
+    "windows_after": "2026-09-26 04:07:05.307942+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "7Zr4jNHJ1ylIfIshgxDxpK",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:06:58.635384Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p1",
+        "endDate": "2026-09-26T04:06:58.580984Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:06:58.486756Z",
+        "lastTaskId": "a",
+        "executionId": "2zPe8COYAlkRQEF8HmeMvR",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:06:58.635391Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "2zPe8COYAlkRQEF8HmeMvR"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 2
+   },
+   {
+    "scenario": "q2_atleast2_window_every_PT1H_fireOnce_default",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q2_atleast2_window_every_PT1H_fireOnce_default",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:07:05.371883+00:00",
+    "windows": "2026-09-26 04:07:05.589724+00 | []"
+   }
+  ],
+  "prior/log-fast2.json": [
+   {
+    "scenario": "q6_daily_time_window_brackets_now",
+    "listener": "q6a_dtw",
+    "flow_yaml": "id: q6a_dtw\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      from: \"03:00:00\"\n      to: \"05:00:00\"\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q6_daily_time_window_brackets_now",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:08:26.763235+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "41yJUdenDMzTANI7iFDY4w",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:08:26.824645Z",
+     "endDate": "2026-09-26T04:08:27.376998Z"
+    },
+    "windows_after": "2026-09-26 04:08:33.873874+00 | [{\"end\": \"2026-09-26T05:00:00.000000Z\", \"start\": \"2026-09-26T03:00:00.000000Z\", \"flowId\": \"q6a_dtw\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q6_daily_time_window_brackets_now",
+    "step": "p2 #1",
+    "host_utc_before_run": "2026-09-26T04:08:33.913708+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "6OgtyiGoKDCSlc1IBT2Esr",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:08:33.942707Z",
+     "endDate": "2026-09-26T04:08:34.024917Z"
+    },
+    "windows_after": "2026-09-26 04:08:40.754878+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "2U5TRel8n15UGep8tl8C5S",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:08:34.067321Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T04:08:34.024917Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:08:33.942707Z",
+        "lastTaskId": "a",
+        "executionId": "6OgtyiGoKDCSlc1IBT2Esr",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:08:34.067327Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "6OgtyiGoKDCSlc1IBT2Esr"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q6_daily_time_window_brackets_now",
+    "step": "p1 #2",
+    "host_utc_before_run": "2026-09-26T04:08:40.793287+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "3amfxp9ajFRmIX38L5Bvnr",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:08:40.808542Z",
+     "endDate": "2026-09-26T04:08:40.887675Z"
+    },
+    "windows_after": "2026-09-26 04:08:47.564798+00 | [{\"end\": \"2026-09-26T05:00:00.000000Z\", \"start\": \"2026-09-26T03:00:00.000000Z\", \"flowId\": \"q6a_dtw\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q6_daily_time_window_brackets_now",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q6_daily_time_window_brackets_now",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:08:47.604482+00:00",
+    "windows": "2026-09-26 04:08:47.755751+00 | [{\"end\": \"2026-09-26T05:00:00.000000Z\", \"start\": \"2026-09-26T03:00:00.000000Z\", \"flowId\": \"q6a_dtw\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "q6_daily_time_window_not_bracketing_now",
+    "listener": "q6b_dtw",
+    "flow_yaml": "id: q6b_dtw\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      from: \"06:00:00\"\n      to: \"07:00:00\"\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q6_daily_time_window_not_bracketing_now",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:08:47.813409+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "6okQ5xNatRDGibb2PxTifa",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:08:47.830430Z",
+     "endDate": "2026-09-26T04:08:47.899118Z"
+    },
+    "windows_after": "2026-09-26 04:08:54.590459+00 | [{\"end\": \"2026-09-26T07:00:00.000000Z\", \"start\": \"2026-09-26T06:00:00.000000Z\", \"flowId\": \"q6b_dtw\", \"results\": {}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q6_daily_time_window_not_bracketing_now",
+    "step": "p2 #1",
+    "host_utc_before_run": "2026-09-26T04:08:54.626811+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "6fPMguz2yxe5MjU4Fk7kcx",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:08:54.656870Z",
+     "endDate": "2026-09-26T04:08:54.755557Z"
+    },
+    "windows_after": "2026-09-26 04:09:01.449229+00 | [{\"end\": \"2026-09-26T07:00:00.000000Z\", \"start\": \"2026-09-26T06:00:00.000000Z\", \"flowId\": \"q6b_dtw\", \"results\": {}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q6_daily_time_window_not_bracketing_now",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q6_daily_time_window_not_bracketing_now",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:09:01.501758+00:00",
+    "windows": "2026-09-26 04:09:01.690022+00 | [{\"end\": \"2026-09-26T07:00:00.000000Z\", \"start\": \"2026-09-26T06:00:00.000000Z\", \"flowId\": \"q6b_dtw\", \"results\": {}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "zone_daily_time_window_timezone_HCM_brackets_local_now_only",
+    "listener": "z1_dtw",
+    "flow_yaml": "id: z1_dtw\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      from: \"10:00:00\"\n      to: \"12:00:00\"\n      timezone: Asia/Ho_Chi_Minh\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "zone_daily_time_window_timezone_HCM_brackets_local_now_only",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:09:01.780021+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "LrNg2saO8WGZ8P3tX1kw4",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:09:01.815958Z",
+     "endDate": "2026-09-26T04:09:01.950471Z"
+    },
+    "windows_after": "2026-09-26 04:09:08.626284+00 | [{\"end\": \"2026-09-26T05:00:00.000000Z\", \"start\": \"2026-09-26T03:00:00.000000Z\", \"flowId\": \"z1_dtw\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "zone_daily_time_window_timezone_HCM_brackets_local_now_only",
+    "step": "p2 #1",
+    "host_utc_before_run": "2026-09-26T04:09:08.673276+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "6QaiLvJjVTgXnRtMUZYp55",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:09:08.687734Z",
+     "endDate": "2026-09-26T04:09:08.818054Z"
+    },
+    "windows_after": "2026-09-26 04:09:15.45839+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "qKonyfuAhmX5ZkqaAVrac",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:09:08.870527Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T04:09:08.818054Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:09:08.687734Z",
+        "lastTaskId": "a",
+        "executionId": "6QaiLvJjVTgXnRtMUZYp55",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:09:08.870539Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "6QaiLvJjVTgXnRtMUZYp55"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "zone_daily_time_window_timezone_HCM_brackets_local_now_only",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "zone_daily_time_window_timezone_HCM_brackets_local_now_only",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:09:15.504649+00:00",
+    "windows": "2026-09-26 04:09:15.661409+00 | []"
+   },
+   {
+    "scenario": "zone_duration_default_every_timezone_Kolkata",
+    "listener": "z2_dur",
+    "flow_yaml": "id: z2_dur\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      timezone: Asia/Kolkata\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "zone_duration_default_every_timezone_Kolkata",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:09:15.720910+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "5HWEHz88rjzGfHjQFo9mO6",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:09:15.751978Z",
+     "endDate": "2026-09-26T04:09:15.851268Z"
+    },
+    "windows_after": "2026-09-26 04:09:22.521106+00 | [{\"end\": \"2026-09-26T18:29:59.999000Z\", \"start\": \"2026-09-25T18:30:00.000000Z\", \"flowId\": \"z2_dur\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "zone_duration_default_every_timezone_Kolkata",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "zone_duration_default_every_timezone_Kolkata",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:09:22.564799+00:00",
+    "windows": "2026-09-26 04:09:22.714471+00 | [{\"end\": \"2026-09-26T18:29:59.999000Z\", \"start\": \"2026-09-25T18:30:00.000000Z\", \"flowId\": \"z2_dur\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "zone_every_PT1H_timezone_Kolkata",
+    "listener": "z3_dur",
+    "flow_yaml": "id: z3_dur\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT1H\n      timezone: Asia/Kolkata\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "zone_every_PT1H_timezone_Kolkata",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:09:22.776320+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "3KKOdMW02fPu3QjvANpdAr",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:09:22.803014Z",
+     "endDate": "2026-09-26T04:09:22.880024Z"
+    },
+    "windows_after": "2026-09-26 04:09:29.543565+00 | [{\"end\": \"2026-09-26T04:29:59.999000Z\", \"start\": \"2026-09-26T03:30:00.000000Z\", \"flowId\": \"z3_dur\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "zone_every_PT1H_timezone_Kolkata",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "zone_every_PT1H_timezone_Kolkata",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:09:29.615230+00:00",
+    "windows": "2026-09-26 04:09:29.76722+00 | [{\"end\": \"2026-09-26T04:29:59.999000Z\", \"start\": \"2026-09-26T03:30:00.000000Z\", \"flowId\": \"z3_dur\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "extra_every_PT90M_bounds",
+    "listener": "x1_dur",
+    "flow_yaml": "id: x1_dur\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT90M\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "extra_every_PT90M_bounds",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:09:29.830359+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "5K6Kg8Nnhbo68F2oYDSZSj",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:09:29.852144Z",
+     "endDate": "2026-09-26T04:09:29.951210Z"
+    },
+    "windows_after": "2026-09-26 04:09:36.615679+00 | [{\"end\": \"2026-09-26T05:29:59.999000Z\", \"start\": \"2026-09-26T04:00:00.000000Z\", \"flowId\": \"x1_dur\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "extra_every_PT90M_bounds",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "extra_every_PT90M_bounds",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:09:36.653340+00:00",
+    "windows": "2026-09-26 04:09:36.80621+00 | [{\"end\": \"2026-09-26T05:29:59.999000Z\", \"start\": \"2026-09-26T04:00:00.000000Z\", \"flowId\": \"x1_dur\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   }
+  ],
+  "prior/log-q3q8.json": [
+   {
+    "scenario": "q3_q8_every_PT2M",
+    "listener": "q3_dur2m",
+    "flow_yaml": "id: q3_dur2m\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT2M\n",
+    "deploy_status": 200
+   },
+   {
+    "scenario": "q3_q8_every_PT2M",
+    "step": "p1 #1 (window W1 created)",
+    "host_utc_before_run": "2026-09-26T04:10:05.520207+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "3e1gceUv9LFfPNmORhfyXe",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:10:05.678614Z",
+     "endDate": "2026-09-26T04:10:05.800804Z"
+    },
+    "windows_after": "2026-09-26 04:10:12.534611+00 | [{\"end\": \"2026-09-26T04:11:59.999000Z\", \"start\": \"2026-09-26T04:10:00.000000Z\", \"flowId\": \"q3_dur2m\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q3_q8_every_PT2M",
+    "step": "host waits until W1.end + 5s with NO other executions",
+    "W1_end": "2026-09-26T04:11:59.999000Z"
+   },
+   {
+    "scenario": "q3_q8_every_PT2M",
+    "step": "after W1.end, before any event (expired row still present?)",
+    "host_utc": "2026-09-26T04:12:05.003412+00:00",
+    "windows": "2026-09-26 04:12:05.324386+00 | [{\"end\": \"2026-09-26T04:11:59.999000Z\", \"start\": \"2026-09-26T04:10:00.000000Z\", \"flowId\": \"q3_dur2m\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "q3_q8_every_PT2M",
+    "step": "p2 #1 (first event after W1 expired)",
+    "host_utc_before_run": "2026-09-26T04:12:05.470338+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "2NmJg3iP1jp8plKlBQ8KPP",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:12:05.707337Z",
+     "endDate": "2026-09-26T04:12:06.342239Z"
+    },
+    "windows_after": "2026-09-26 04:12:13.214916+00 | []",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q3_q8_every_PT2M",
+    "step": "p2 #2",
+    "host_utc_before_run": "2026-09-26T04:12:13.278130+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "1j192f1H3u1AaQ6qRKjADn",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:12:13.303723Z",
+     "endDate": "2026-09-26T04:12:13.422214Z"
+    },
+    "windows_after": "2026-09-26 04:12:20.235775+00 | [{\"end\": \"2026-09-26T04:13:59.999000Z\", \"start\": \"2026-09-26T04:12:00.000000Z\", \"flowId\": \"q3_dur2m\", \"results\": {\"16b5de595dead92845164b760baeb83b\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q3_q8_every_PT2M",
+    "step": "p1 #2",
+    "host_utc_before_run": "2026-09-26T04:12:20.318313+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "1atZfwxUu55Yle1jjOaXNt",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:12:20.342513Z",
+     "endDate": "2026-09-26T04:12:20.454742Z"
+    },
+    "windows_after": "2026-09-26 04:12:27.403112+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "6NxJKBV6z2meOL83jnWjVa",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:12:20.526274Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p1",
+        "endDate": "2026-09-26T04:12:20.454742Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:12:20.342513Z",
+        "lastTaskId": "a",
+        "executionId": "1atZfwxUu55Yle1jjOaXNt",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:12:20.526281Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "1atZfwxUu55Yle1jjOaXNt"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q3_q8_every_PT2M",
+    "step": "delete listener",
+    "status": 204
+   }
+  ],
+  "prior/log-q4.json": [
+   {
+    "scenario": "q4_every_PT2M_offset_PT1M",
+    "listener": "q4_off",
+    "flow_yaml": "id: q4_off\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT2M\n      offset: PT1M\n",
+    "deploy_status": 200
+   },
+   {
+    "scenario": "q4_every_PT2M_offset_PT1M",
+    "step": "wait for an EVEN minute",
+    "until": "2026-09-26T04:14:03+00:00"
+   },
+   {
+    "scenario": "q4_every_PT2M_offset_PT1M",
+    "step": "p1 #1 at even minute",
+    "host_utc_before_run": "2026-09-26T04:14:03.066400+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "11EpEGjMFeRewrkFUWBG68",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:14:03.351049Z",
+     "endDate": "2026-09-26T04:14:04.394799Z"
+    },
+    "windows_after": "2026-09-26 04:14:11.464113+00 | [{\"end\": \"2026-09-26T04:16:59.999000Z\", \"start\": \"2026-09-26T04:15:00.000000Z\", \"flowId\": \"q4_off\", \"results\": {}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q4_every_PT2M_offset_PT1M",
+    "step": "wait for the next ODD minute",
+    "until": "2026-09-26T04:15:03+00:00"
+   },
+   {
+    "scenario": "q4_every_PT2M_offset_PT1M",
+    "step": "p2 #1 at odd minute",
+    "host_utc_before_run": "2026-09-26T04:15:03.106007+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "5wa7GjmPEzT2H1AyPvqNwf",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:15:03.336085Z",
+     "endDate": "2026-09-26T04:15:03.573046Z"
+    },
+    "windows_after": "2026-09-26 04:15:10.613731+00 | [{\"end\": \"2026-09-26T04:16:59.999000Z\", \"start\": \"2026-09-26T04:15:00.000000Z\", \"flowId\": \"q4_off\", \"results\": {\"16b5de595dead92845164b760baeb83b\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q4_every_PT2M_offset_PT1M",
+    "step": "p1 #2 at odd minute",
+    "host_utc_before_run": "2026-09-26T04:15:10.716968+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "2lQ3flNWeilMr2f33GJ0a4",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:15:10.761833Z",
+     "endDate": "2026-09-26T04:15:10.953752Z"
+    },
+    "windows_after": "2026-09-26 04:15:18.283734+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "4vWE4AFNGjl4Z3aHyEbYiK",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:15:11.043958Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p1",
+        "endDate": "2026-09-26T04:15:10.953752Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:15:10.761833Z",
+        "lastTaskId": "a",
+        "executionId": "2lQ3flNWeilMr2f33GJ0a4",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:15:11.043966Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "2lQ3flNWeilMr2f33GJ0a4"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q4_every_PT2M_offset_PT1M",
+    "step": "delete listener",
+    "status": 204
+   }
+  ],
+  "new/log-setup.json": [
+   {
+    "scenario": "setup_env",
+    "env": {
+     "date +%Z %z": "UTC +0000",
+     "sh -c echo TZ=$TZ; cat /etc/timezone 2>/dev/null; ls -l /etc/localtime": "TZ=\nEtc/UTC\nlrwxrwxrwx 1 root root 27 Aug 21 18:26 /etc/localtime -> /usr/share/zoneinfo/Etc/UTC",
+     "sh -c java -XshowSettings:properties -version 2>&1 | grep -i 'user.timezone'": "",
+     "docker inspect image": "sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd kestra/kestra@sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd",
+     "fireOnce_true_POST": {
+      "flow_yaml": "id: fo_all\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT1H\n      fireOnce: true\n",
+      "status": 422,
+      "body": "{\"type\":\"https://kestra.io/docs/api-reference/problems/validation-failed\",\"title\":\"Validation failed\",\"status\":422,\"detail\":\"Unrecognized field \\\"fireOnce\\\" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: \\\"offset\\\", \\\"lookback\\\", \\\"deadline\\\", \\\"timezone\\\", \\\"from\\\", \\\"to\\\", \\\"every\\\")\",\"instance\":\"/api/v1/main/flows\",\"errors\":[{\"detail\":\"Unrecognized field \\\"fireOnce\\\" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: \\\"offset\\\", \\\"lookback\\\", \\\"deadline\\\", \\\"timezone\\\", \\\"from\\\", \\\"to\\\", \\\"every\\\")\",\"pointer\":\"/io/kestra/core/models/flows/FlowWithSource/\\\"triggers\\\"/->java/util/ArrayList/0/->io/kestra/plugin/core/trigger/Flow/\\\"window\\\"/->io/kestra/core/models/triggers/Window/\\\"fireOnce\\\"\",\"path\":\"io.kestra.core.models.flows.FlowWithSource[\\\"triggers\\\"]->java.util.ArrayList[0]->io.kestra.plugin.core.trigger.Flow[\\\"window\\\"]->io.kestra.core.models.triggers.Window[\\\"fireOnce\\\"]\"}]}"
+     },
+     "unknown_field_control_POST": {
+      "flow_yaml": "id: fo_all2\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT1H\n      bogusField: 1\n",
+      "status": 422,
+      "body": "{\"type\":\"https://kestra.io/docs/api-reference/problems/validation-failed\",\"title\":\"Validation failed\",\"status\":422,\"detail\":\"Unrecognized field \\\"bogusField\\\" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: \\\"offset\\\", \\\"lookback\\\", \\\"deadline\\\", \\\"timezone\\\", \\\"from\\\", \\\"to\\\", \\\"every\\\")\",\"instance\":\"/api/v1/main/flows\",\"errors\":[{\"detail\":\"Unrecognized field \\\"bogusField\\\" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: \\\"offset\\\", \\\"lookback\\\", \\\"deadline\\\", \\\"timezone\\\", \\\"from\\\", \\\"to\\\", \\\"every\\\")\",\"pointer\":\"/io/kestra/core/models/flows/FlowWithSource/\\\"triggers\\\"/->java/util/ArrayList/0/->io/kestra/plugin/core/trigger/Flow/\\\"window\\\"/->io/kestra/core/models/triggers/Window/\\\"bogusField\\\"\",\"path\":\"io.kestra.core.models.flows.FlowWithSource[\\\"triggers\\\"]->java.util.ArrayList[0]->io.kestra.plugin.core.trigger.Flow[\\\"window\\\"]->io.kestra.core.models.triggers.Window[\\\"bogusField\\\"]\"}]}"
+     },
+     "mixed_every_lookback_POST": {
+      "flow_yaml": "id: mix_all\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT1H\n      lookback: PT2M\n",
+      "status": 422,
+      "body": "{\"type\":\"https://kestra.io/docs/api-reference/problems/validation-failed\",\"title\":\"Validation failed\",\"status\":422,\"detail\":\"triggers[0].window: Window of type `SLIDING_WINDOW` cannot have an every duration.\\n\",\"instance\":\"/api/v1/main/flows\",\"errors\":[{\"detail\":\"Window of type `SLIDING_WINDOW` cannot have an every duration.\",\"pointer\":\"/triggers/window/0\",\"path\":\"triggers[0].window\"}]}"
+     },
+     "host_utc": "2026-09-26T04:39:34.341701+00:00"
+    }
+   }
+  ],
+  "new/log-bounds.json": [
+   {
+    "scenario": "grid_every_PT6H",
+    "listener": "g1_6h",
+    "flow_yaml": "id: g1_6h\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT6H\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "grid_every_PT6H",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:51:00.134680+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "BY4TOpgzQ3VpdvVdvlDL0",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:51:00.424387Z",
+     "endDate": "2026-09-26T04:51:01.375207Z"
+    },
+    "windows_after": "2026-09-26 04:51:46.341042+00 | [{\"end\": \"2026-09-26T09:59:59.999000Z\", \"start\": \"2026-09-26T04:00:00.000000Z\", \"flowId\": \"g1_6h\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "grid_every_PT6H",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "grid_every_PT6H",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:51:48.161413+00:00",
+    "windows": "2026-09-26 04:51:49.098825+00 | [{\"end\": \"2026-09-26T09:59:59.999000Z\", \"start\": \"2026-09-26T04:00:00.000000Z\", \"flowId\": \"g1_6h\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "grid_every_PT45S",
+    "listener": "g2_45s",
+    "flow_yaml": "id: g2_45s\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT45S\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "grid_every_PT45S",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:51:50.813042+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "1mkn2xldAZZXVMRv1n8Zch",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:51:50.221820Z",
+     "endDate": "2026-09-26T04:51:50.560775Z"
+    },
+    "windows_after": "2026-09-26 04:51:59.481909+00 | [{\"end\": \"2026-09-26T04:52:34.999000Z\", \"start\": \"2026-09-26T04:51:50.000000Z\", \"flowId\": \"g2_45s\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "grid_every_PT45S",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "grid_every_PT45S",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:52:01.403861+00:00",
+    "windows": "2026-09-26 04:52:03.94979+00 | [{\"end\": \"2026-09-26T04:52:34.999000Z\", \"start\": \"2026-09-26T04:51:50.000000Z\", \"flowId\": \"g2_45s\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "grid_every_P1D_offset_future_hour",
+    "listener": "g3_off",
+    "flow_yaml": "id: g3_off\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: P1D\n      offset: PT6H\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "grid_every_P1D_offset_future_hour",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:52:04.672802+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "10zOl6VjeyRiLgLGFvZyVa",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:52:04.723803Z",
+     "endDate": "2026-09-26T04:52:04.943978Z"
+    },
+    "windows_after": "2026-09-26 04:52:12.628997+00 | [{\"end\": \"2026-09-27T05:59:59.999000Z\", \"start\": \"2026-09-26T06:00:00.000000Z\", \"flowId\": \"g3_off\", \"results\": {}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "grid_every_P1D_offset_future_hour",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "grid_every_P1D_offset_future_hour",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:52:13.165595+00:00",
+    "windows": "2026-09-26 04:52:15.130541+00 | [{\"end\": \"2026-09-27T05:59:59.999000Z\", \"start\": \"2026-09-26T06:00:00.000000Z\", \"flowId\": \"g3_off\", \"results\": {}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "grid_every_P1D_offset_past_hour",
+    "listener": "g4_off",
+    "flow_yaml": "id: g4_off\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: P1D\n      offset: PT3H\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "grid_every_P1D_offset_past_hour",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:52:16.085964+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "58vg6sKb3ciUNVhP31xPBy",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:52:16.164715Z",
+     "endDate": "2026-09-26T04:52:16.412841Z"
+    },
+    "windows_after": "2026-09-26 04:52:24.226507+00 | [{\"end\": \"2026-09-27T02:59:59.999000Z\", \"start\": \"2026-09-26T03:00:00.000000Z\", \"flowId\": \"g4_off\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "grid_every_P1D_offset_past_hour",
+    "step": "p2 #1",
+    "host_utc_before_run": "2026-09-26T04:52:24.723746+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "6i3WkQX0fz5ZIhSg5FTVLY",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:52:24.779358Z",
+     "endDate": "2026-09-26T04:52:25.102179Z"
+    },
+    "windows_after": "2026-09-26 04:52:32.648447+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "5N5hIlxPJoYNpAzGFSVuyj",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:52:25.230317Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T04:52:25.102179Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:52:24.779358Z",
+        "lastTaskId": "a",
+        "executionId": "6i3WkQX0fz5ZIhSg5FTVLY",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:52:25.230319Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "6i3WkQX0fz5ZIhSg5FTVLY"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 2
+   },
+   {
+    "scenario": "grid_every_P1D_offset_past_hour",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "grid_every_P1D_offset_past_hour",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:52:33.124375+00:00",
+    "windows": "2026-09-26 04:52:34.441537+00 | []"
+   },
+   {
+    "scenario": "grid_every_PT2M_odd_minute",
+    "step": "wait for an ODD minute",
+    "until": "2026-09-26T04:53:03+00:00"
+   },
+   {
+    "scenario": "grid_every_PT2M_odd_minute",
+    "listener": "g5_2m",
+    "flow_yaml": "id: g5_2m\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT2M\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "grid_every_PT2M_odd_minute",
+    "step": "p1 #1 at odd minute",
+    "host_utc_before_run": "2026-09-26T04:53:03.079109+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "4bMNIEeQhbKVhjXnJdxNuE",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:53:03.165737Z",
+     "endDate": "2026-09-26T04:53:03.632375Z"
+    },
+    "windows_after": "2026-09-26 04:53:11.590436+00 | [{\"end\": \"2026-09-26T04:53:59.999000Z\", \"start\": \"2026-09-26T04:52:00.000000Z\", \"flowId\": \"g5_2m\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "grid_every_PT2M_odd_minute",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "grid_every_PT2M_odd_minute",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:53:12.188106+00:00",
+    "windows": "2026-09-26 04:53:14.308997+00 | [{\"end\": \"2026-09-26T04:53:59.999000Z\", \"start\": \"2026-09-26T04:52:00.000000Z\", \"flowId\": \"g5_2m\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "q7_deadline_in_future",
+    "listener": "q7a_dl",
+    "flow_yaml": "id: q7a_dl\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      deadline: \"05:00:00\"\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q7_deadline_in_future",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:53:14.993041+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "7GpYsyRynwc0ZGJnzjbGFJ",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:53:15.039385Z",
+     "endDate": "2026-09-26T04:53:15.236951Z"
+    },
+    "windows_after": "2026-09-26 04:53:22.793702+00 | [{\"end\": \"2026-09-26T05:00:00.000000Z\", \"start\": \"2026-09-26T00:00:00.000000Z\", \"flowId\": \"q7a_dl\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q7_deadline_in_future",
+    "step": "p2 #1",
+    "host_utc_before_run": "2026-09-26T04:53:23.380001+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "3pQXe0SBNDk5sMff2tOv32",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:53:23.462774Z",
+     "endDate": "2026-09-26T04:53:23.679614Z"
+    },
+    "windows_after": "2026-09-26 04:53:31.789201+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "6JDszqBTMonzqIpUPdNC61",
+      "state": "SUCCESS",
+      "created": "2026-09-26T04:53:23.754670Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T04:53:23.679614Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T04:53:23.462774Z",
+        "lastTaskId": "a",
+        "executionId": "3pQXe0SBNDk5sMff2tOv32",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T04:53:23.754672Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "3pQXe0SBNDk5sMff2tOv32"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 2
+   },
+   {
+    "scenario": "q7_deadline_in_future",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q7_deadline_in_future",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:53:32.235346+00:00",
+    "windows": "2026-09-26 04:53:33.802445+00 | []"
+   },
+   {
+    "scenario": "q7_deadline_in_past",
+    "listener": "q7b_dl",
+    "flow_yaml": "id: q7b_dl\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      deadline: \"03:00:00\"\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q7_deadline_in_past",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:53:34.645548+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "6Hk0RV5DMCXJaZ1J1fBR3p",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:53:34.725234Z",
+     "endDate": "2026-09-26T04:53:34.887034Z"
+    },
+    "windows_after": "2026-09-26 04:53:43.428479+00 | []",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q7_deadline_in_past",
+    "step": "p2 #1",
+    "host_utc_before_run": "2026-09-26T04:53:44.079927+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "18ls6T1mIUfGZZRm1AkN4Q",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:53:44.211292Z",
+     "endDate": "2026-09-26T04:53:44.372161Z"
+    },
+    "windows_after": "2026-09-26 04:53:52.412112+00 | []",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q7_deadline_in_past",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q7_deadline_in_past",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:53:53.080742+00:00",
+    "windows": "2026-09-26 04:53:54.930912+00 | []"
+   },
+   {
+    "scenario": "q7_deadline_timezone_HCM_future_local",
+    "listener": "q7c_dl",
+    "flow_yaml": "id: q7c_dl\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      deadline: \"12:00:00\"\n      timezone: Asia/Ho_Chi_Minh\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q7_deadline_timezone_HCM_future_local",
+    "step": "p1 #1",
+    "host_utc_before_run": "2026-09-26T04:53:55.463511+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "4bUpibVLgHHiBAevbhEWMi",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:53:55.651509Z",
+     "endDate": "2026-09-26T04:53:56.081976Z"
+    },
+    "windows_after": "2026-09-26 04:54:04.181976+00 | [{\"end\": \"2026-09-26T05:00:00.000000Z\", \"start\": \"2026-09-25T17:00:00.000000Z\", \"flowId\": \"q7c_dl\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q7_deadline_timezone_HCM_future_local",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q7_deadline_timezone_HCM_future_local",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T04:54:04.600562+00:00",
+    "windows": "2026-09-26 04:54:05.979746+00 | [{\"end\": \"2026-09-26T05:00:00.000000Z\", \"start\": \"2026-09-25T17:00:00.000000Z\", \"flowId\": \"q7c_dl\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   }
+  ],
+  "new/log-q8.json": [
+   {
+    "scenario": "q8_expired_unpurged_then_event",
+    "listener": "q8a_2m",
+    "flow_yaml": "id: q8a_2m\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT2M\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q8_expired_unpurged_then_event",
+    "step": "p1 #1 (window W1 created)",
+    "host_utc_before_run": "2026-09-26T04:54:14.858604+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "1GTIG083TGsltruPhwj33S",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:54:14.996078Z",
+     "endDate": "2026-09-26T04:54:15.256669Z"
+    },
+    "windows_after": "2026-09-26 04:54:23.281415+00 | [{\"end\": \"2026-09-26T04:55:59.999000Z\", \"start\": \"2026-09-26T04:54:00.000000Z\", \"flowId\": \"q8a_2m\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q8_expired_unpurged_then_event",
+    "step": "host waits until W1.end + 5s with NO other executions in the tenant",
+    "W1_end": "2026-09-26T04:55:59.999000Z"
+   },
+   {
+    "scenario": "q8_expired_unpurged_then_event",
+    "step": "after W1.end, before any event",
+    "host_utc": "2026-09-26T04:56:05.005445+00:00",
+    "windows": "2026-09-26 04:56:08.383931+00 | [{\"end\": \"2026-09-26T04:55:59.999000Z\", \"start\": \"2026-09-26T04:54:00.000000Z\", \"flowId\": \"q8a_2m\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "q8_expired_unpurged_then_event",
+    "step": "p2 #1 (first event after W1 expired)",
+    "host_utc_before_run": "2026-09-26T04:56:12.118151+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "4AYRXJjoEcRHL8cIexWw0M",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:56:12.669881Z",
+     "endDate": "2026-09-26T04:56:14.330933Z"
+    },
+    "windows_after": "2026-09-26 04:56:55.172088+00 | []",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q8_expired_unpurged_then_event",
+    "step": "p1 #2 (fires iff p2 #1 was kept)",
+    "host_utc_before_run": "2026-09-26T04:57:33.650021+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "3yqNF0Eu8Lc0E9FRVD0G8J",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T04:57:34.365588Z",
+     "endDate": "2026-09-26T04:57:39.219180Z"
+    },
+    "windows_after": "2026-09-26 05:01:06.161311+00 | [{\"end\": \"2026-09-26T04:57:59.999000Z\", \"start\": \"2026-09-26T04:56:00.000000Z\", \"flowId\": \"q8a_2m\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q8_expired_unpurged_then_event",
+    "step": "p2 #2",
+    "host_utc_before_run": "2026-09-26T05:01:19.090748+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "7h6N73EsxstmCycWvY1SWI",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:01:19.391925Z",
+     "endDate": "2026-09-26T05:01:20.383153Z"
+    },
+    "windows_after": "2026-09-26 05:01:28.674549+00 | []",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q8_expired_unpurged_then_event",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q8_expired_unpurged_then_event",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T05:01:29.727209+00:00",
+    "windows": "2026-09-26 05:01:31.248636+00 | []"
+   },
+   {
+    "scenario": "q8_expired_purged_by_unrelated_execution",
+    "listener": "q8b_2m",
+    "flow_yaml": "id: q8b_2m\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT2M\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q8_expired_purged_by_unrelated_execution",
+    "step": "p1 #1 (window W1 created)",
+    "host_utc_before_run": "2026-09-26T05:01:32.144841+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "3oPVgrIAtRiuVFbxSeKfi3",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:01:32.025117Z",
+     "endDate": "2026-09-26T05:01:32.220112Z"
+    },
+    "windows_after": "2026-09-26 05:01:40.21592+00 | [{\"end\": \"2026-09-26T05:01:59.999000Z\", \"start\": \"2026-09-26T05:00:00.000000Z\", \"flowId\": \"q8b_2m\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q8_expired_purged_by_unrelated_execution",
+    "step": "host waits until W1.end + 5s with NO other executions in the tenant",
+    "W1_end": "2026-09-26T05:01:59.999000Z"
+   },
+   {
+    "scenario": "q8_expired_purged_by_unrelated_execution",
+    "step": "after W1.end, before any event",
+    "host_utc": "2026-09-26T05:02:05.009106+00:00",
+    "windows": "2026-09-26 05:02:05.810287+00 | [{\"end\": \"2026-09-26T05:01:59.999000Z\", \"start\": \"2026-09-26T05:00:00.000000Z\", \"flowId\": \"q8b_2m\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "q8_expired_purged_by_unrelated_execution",
+    "step": "unrelated 'other' after expiry",
+    "host_utc_before_run": "2026-09-26T05:02:06.196358+00:00",
+    "producer": "other",
+    "producer_execution": {
+     "id": "3WO5l80tX51V5etM3hQbsq",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:02:06.423083Z",
+     "endDate": "2026-09-26T05:02:06.683405Z"
+    },
+    "windows_after": "2026-09-26 05:02:14.042735+00 | []",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q8_expired_purged_by_unrelated_execution",
+    "step": "p2 #1",
+    "host_utc_before_run": "2026-09-26T05:02:14.484637+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "6bbLC97jyTIqmRIAt1GGmM",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:02:14.510257Z",
+     "endDate": "2026-09-26T05:02:14.687130Z"
+    },
+    "windows_after": "2026-09-26 05:02:22.135905+00 | [{\"end\": \"2026-09-26T05:03:59.999000Z\", \"start\": \"2026-09-26T05:02:00.000000Z\", \"flowId\": \"q8b_2m\", \"results\": {\"16b5de595dead92845164b760baeb83b\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q8_expired_purged_by_unrelated_execution",
+    "step": "p1 #2 (fires iff p2 #1 was kept and p1 #1 was not carried... p1 #2 re-meets p1)",
+    "host_utc_before_run": "2026-09-26T05:02:22.589670+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "CBl0rY9JiQOgG8JdZ0EWY",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:02:22.654187Z",
+     "endDate": "2026-09-26T05:02:22.823344Z"
+    },
+    "windows_after": "2026-09-26 05:02:30.086804+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "J9FL2Dw39NsYiGs728UkM",
+      "state": "SUCCESS",
+      "created": "2026-09-26T05:02:22.885661Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p1",
+        "endDate": "2026-09-26T05:02:22.823344Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T05:02:22.654187Z",
+        "lastTaskId": "a",
+        "executionId": "CBl0rY9JiQOgG8JdZ0EWY",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T05:02:22.885663Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "CBl0rY9JiQOgG8JdZ0EWY"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 1
+   },
+   {
+    "scenario": "q8_expired_purged_by_unrelated_execution",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q8_expired_purged_by_unrelated_execution",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T05:02:30.399359+00:00",
+    "windows": "2026-09-26 05:02:31.226575+00 | []"
+   },
+   {
+    "scenario": "q8_carry_over_check",
+    "listener": "q8c_2m",
+    "flow_yaml": "id: q8c_2m\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      every: PT2M\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q8_carry_over_check",
+    "step": "p1 #1 (window W1 created)",
+    "host_utc_before_run": "2026-09-26T05:02:31.683376+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "4EHqfI060tU5dDgHYES90h",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:02:31.743009Z",
+     "endDate": "2026-09-26T05:02:31.908142Z"
+    },
+    "windows_after": "2026-09-26 05:02:39.312073+00 | [{\"end\": \"2026-09-26T05:03:59.999000Z\", \"start\": \"2026-09-26T05:02:00.000000Z\", \"flowId\": \"q8c_2m\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q8_carry_over_check",
+    "step": "unrelated 'other' after expiry (purges W1)",
+    "host_utc_before_run": "2026-09-26T05:04:05.029949+00:00",
+    "producer": "other",
+    "producer_execution": {
+     "id": "2puQiHdraCzLzqy8cp3V3Z",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:04:05.052897Z",
+     "endDate": "2026-09-26T05:04:05.272009Z"
+    },
+    "windows_after": "2026-09-26 05:04:12.096874+00 | []",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q8_carry_over_check",
+    "step": "p2 #1 (fires iff p1 #1 carried over)",
+    "host_utc_before_run": "2026-09-26T05:04:12.503286+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "6vMPxxCbeUzlxeHBvCVf82",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:04:12.542103Z",
+     "endDate": "2026-09-26T05:04:12.620723Z"
+    },
+    "windows_after": "2026-09-26 05:04:19.720051+00 | [{\"end\": \"2026-09-26T05:05:59.999000Z\", \"start\": \"2026-09-26T05:04:00.000000Z\", \"flowId\": \"q8c_2m\", \"results\": {\"16b5de595dead92845164b760baeb83b\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 0
+   },
+   {
+    "scenario": "q8_carry_over_check",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q8_carry_over_check",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T05:04:20.021636+00:00",
+    "windows": "2026-09-26 05:04:20.74763+00 | [{\"end\": \"2026-09-26T05:05:59.999000Z\", \"start\": \"2026-09-26T05:04:00.000000Z\", \"flowId\": \"q8c_2m\", \"results\": {\"16b5de595dead92845164b760baeb83b\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   }
+  ],
+  "new/log-q5.json": [
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "listener": "q5_slide",
+    "flow_yaml": "id: q5_slide\nnamespace: w13b\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\ntriggers:\n  - id: t\n    type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n      - namespace: w13b\n        flowId: p1\n        states: [SUCCESS]\n      - namespace: w13b\n        flowId: p2\n        states: [SUCCESS]\n    window:\n      lookback: PT2M\n",
+    "deploy_status": 200,
+    "deploy_error": null
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "A: p1 #1 at t0 (window created)",
+    "host_utc_before_run": "2026-09-26T05:04:21.386243+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "dessbjNWHVibtr61qvBne",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:04:21.415678Z",
+     "endDate": "2026-09-26T05:04:21.721936Z"
+    },
+    "windows_after": "2026-09-26 05:04:28.767899+00 | [{\"end\": \"2026-09-26T05:06:21.000000Z\", \"start\": \"2026-09-26T05:04:21.000000Z\", \"flowId\": \"q5_slide\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 6
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "A: host waits until p1 endDate + 180s, no other executions",
+    "until": "2026-09-26T05:07:21.721936+00:00"
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "A: before next event",
+    "host_utc": "2026-09-26T05:07:21.722188+00:00",
+    "windows": "2026-09-26 05:08:39.018319+00 | [{\"end\": \"2026-09-26T05:06:21.000000Z\", \"start\": \"2026-09-26T05:04:21.000000Z\", \"flowId\": \"q5_slide\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]"
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "A: p2 #1 at t0+~3m",
+    "host_utc_before_run": "2026-09-26T05:08:44.211787+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "7ELL8vOF1zwS5kUFsbMtEK",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:08:40.815494Z",
+     "endDate": "2026-09-26T05:08:41.619262Z"
+    },
+    "windows_after": "2026-09-26 05:08:50.085468+00 | []",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 6
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "A: p1 #2 right after (would fire iff p2 #1 was kept)",
+    "host_utc_before_run": "2026-09-26T05:08:54.484746+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "5BMfYzz3kfI2S5fsM2jbiQ",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:08:51.004898Z",
+     "endDate": "2026-09-26T05:08:51.268830Z"
+    },
+    "windows_after": "2026-09-26 05:09:02.410391+00 | [{\"end\": \"2026-09-26T05:10:51.000000Z\", \"start\": \"2026-09-26T05:08:51.000000Z\", \"flowId\": \"q5_slide\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 6
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "A: p2 #2 (within lookback of p1 #2)",
+    "host_utc_before_run": "2026-09-26T05:09:02.737634+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "6v5BgI3NsOlbZ9He6mDy8K",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:09:02.848035Z",
+     "endDate": "2026-09-26T05:09:02.996120Z"
+    },
+    "windows_after": "2026-09-26 05:09:10.061859+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "38t2WfGoliWDNNG5ZsJMyu",
+      "state": "SUCCESS",
+      "created": "2026-09-26T05:09:03.053784Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T05:09:02.996120Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T05:09:02.848035Z",
+        "lastTaskId": "a",
+        "executionId": "6v5BgI3NsOlbZ9He6mDy8K",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T05:09:03.053786Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "6v5BgI3NsOlbZ9He6mDy8K"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 7
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "B: unrelated 'other' at t1 (opens a window: nothing met)",
+    "host_utc_before_run": "2026-09-26T05:09:10.331097+00:00",
+    "producer": "other",
+    "producer_execution": {
+     "id": "5GIvU6VhYAxNs1cu6GpS2d",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:09:10.357575Z",
+     "endDate": "2026-09-26T05:09:10.455929Z"
+    },
+    "windows_after": "2026-09-26 05:09:17.935403+00 | [{\"end\": \"2026-09-26T05:11:10.000000Z\", \"start\": \"2026-09-26T05:09:10.000000Z\", \"flowId\": \"q5_slide\", \"results\": {}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 7
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "B: host waits until window start + 90s",
+    "until": "2026-09-26T05:10:40+00:00"
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "B: p1 at start+~90s",
+    "host_utc_before_run": "2026-09-26T05:10:40.037598+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "61dellfuNIb4chvQutI4p4",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:10:40.232861Z",
+     "endDate": "2026-09-26T05:10:40.809467Z"
+    },
+    "windows_after": "2026-09-26 05:10:48.764284+00 | [{\"end\": \"2026-09-26T05:11:10.000000Z\", \"start\": \"2026-09-26T05:09:10.000000Z\", \"flowId\": \"q5_slide\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 7
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "B: host waits until window start + 135s",
+    "until": "2026-09-26T05:11:25+00:00"
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "B: p2 at start+~135s (~45s after p1; fires iff the window slides)",
+    "host_utc_before_run": "2026-09-26T05:11:26.943070+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "2KhXZ40HJLuibcjFJgSgz8",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:11:29.124811Z",
+     "endDate": "2026-09-26T05:11:31.768375Z"
+    },
+    "windows_after": "2026-09-26 05:11:38.855413+00 | []",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 7
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "B: p1 again",
+    "host_utc_before_run": "2026-09-26T05:11:39.516476+00:00",
+    "producer": "p1",
+    "producer_execution": {
+     "id": "1MLHVh7dbZXhtMm6VAk8wn",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:11:39.563920Z",
+     "endDate": "2026-09-26T05:11:39.685661Z"
+    },
+    "windows_after": "2026-09-26 05:11:47.412469+00 | [{\"end\": \"2026-09-26T05:13:39.000000Z\", \"start\": \"2026-09-26T05:11:39.000000Z\", \"flowId\": \"q5_slide\", \"results\": {\"2313c7a5d5e549765999105c11476db6\": true}, \"tenantId\": \"main\", \"namespace\": \"w13b\", \"conditionId\": \"depends_on_t\"}]",
+    "new_listener_executions": [],
+    "listener_execution_count_after": 7
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "B: p2 again (both inside the fresh window)",
+    "host_utc_before_run": "2026-09-26T05:11:47.795134+00:00",
+    "producer": "p2",
+    "producer_execution": {
+     "id": "HDk055Ggaoqppsrk40Jrg",
+     "state": "SUCCESS",
+     "startDate": "2026-09-26T05:11:47.868689Z",
+     "endDate": "2026-09-26T05:11:48.084620Z"
+    },
+    "windows_after": "2026-09-26 05:11:55.157441+00 | []",
+    "new_listener_executions": [
+     {
+      "id": "7MbsSge5oweYBJhTtr5kIe",
+      "state": "SUCCESS",
+      "created": "2026-09-26T05:11:48.151363Z",
+      "trigger": {
+       "id": "t",
+       "type": "io.kestra.plugin.core.trigger.Flow",
+       "variables": {
+        "state": "SUCCESS",
+        "flowId": "p2",
+        "endDate": "2026-09-26T05:11:48.084620Z",
+        "namespace": "w13b",
+        "startDate": "2026-09-26T05:11:47.868689Z",
+        "lastTaskId": "a",
+        "executionId": "HDk055Ggaoqppsrk40Jrg",
+        "flowRevision": 1,
+        "executionLabels": {
+         "system": {
+          "from": "api"
+         }
+        }
+       }
+      },
+      "metadata": {
+       "attemptNumber": 1,
+       "originalCreatedDate": "2026-09-26T05:11:48.151367Z",
+       "executionDepth": 1
+      },
+      "labels": [
+       {
+        "key": "system.correlationId",
+        "value": "HDk055Ggaoqppsrk40Jrg"
+       }
+      ]
+     }
+    ],
+    "listener_execution_count_after": 8
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "delete listener",
+    "status": 204
+   },
+   {
+    "scenario": "q5_sliding_lookback_PT2M",
+    "step": "after listener delete",
+    "host_utc": "2026-09-26T05:11:55.376401+00:00",
+    "windows": "2026-09-26 05:11:56.031662+00 | []"
+   }
+  ]
+ }
+}
