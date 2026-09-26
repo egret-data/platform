@@ -533,7 +533,9 @@ async fn delete_warehouse(
     // "still its primary" arm went with `engines.warehouse_id` in SP3c-2 Task
     // 6: primacy is now a flag on an attachment, so the attachment check is
     // the whole of it.
-    st.store.delete_warehouse_releasing_catalog(id).await?;
+    st.store
+        .delete_warehouse_releasing_catalog_with_compiler(id, st.perm_compiler.as_deref())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

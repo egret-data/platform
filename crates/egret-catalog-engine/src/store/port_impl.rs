@@ -122,6 +122,11 @@ impl From<CatalogError> for CatalogApiError {
             // exhaustiveness only.
             CatalogError::Conflict(m) => CatalogApiError::BadRequest(m),
             CatalogError::Db(e) => CatalogApiError::Backend(e.to_string()),
+            // `CatalogPort` exposes no warehouse-delete call either, so this
+            // is equally unreachable through this boundary today; mapped for
+            // exhaustiveness only, same treatment as `Conflict` above.
+            CatalogError::Compile(e) => CatalogApiError::Backend(e.to_string()),
+            CatalogError::Perm(e) => CatalogApiError::Backend(e.to_string()),
         }
     }
 }

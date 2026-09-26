@@ -680,6 +680,12 @@ fn cat_err(e: egret_catalog_engine::CatalogError) -> NotebookApiError {
         C::BadRequest(m) => Error::InvalidInput(m),
         C::Conflict(m) => Error::Conflict(m),
         C::Db(db) => Error::Internal(anyhow::anyhow!(db)),
+        // SP4a Task 16: `delete_warehouse_releasing_catalog`'s in-transaction
+        // recompile (defect 3) or its own service-lookup query failing —
+        // unreachable through this seam today (no notebook route deletes a
+        // warehouse), mapped for exhaustiveness only.
+        C::Compile(e) => Error::Internal(anyhow::anyhow!(e)),
+        C::Perm(e) => Error::Internal(anyhow::anyhow!(e)),
     })
 }
 

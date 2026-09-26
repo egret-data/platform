@@ -314,6 +314,43 @@ pub async fn list_rules_via(conn: &mut sqlx::PgConnection) -> Result<Vec<Rule>, 
         .collect()
 }
 
+/// Every `policy.authz_services` id that has EVER compiled a grant scoped to
+/// `catalog_id`, per this crate's own `perm.compiled` provenance table.
+///
+/// **SP4a Task 16 (D3 defects 2 and 3).** `egret_policy::services_for_catalog_via`
+/// answers "which profiles does this catalog reach RIGHT NOW" (current
+/// `registry.engine_catalog_attachments`); this answers a different question —
+/// "which profiles have a `policy.authz_policies` row for this catalog's
+/// grants that might now be stale" — from the provenance `perm.compiled`
+/// itself records, independent of whether an engine is attached today. A
+/// catalog can only be TORN DOWN (`delete_warehouse_releasing_catalog`) once
+/// every attachment is gone, so by then `services_for_catalog_via` is always
+/// empty; if an earlier detach's own recompile (`recompile_bound_profile`,
+/// fire-and-forget by contract) silently failed, this is the only remaining
+/// way to find the service that still carries the now-orphaned compiled
+/// policy and sweep it in the SAME transaction as the grant's cascade delete
+/// — the same shape Task 7 fixed for `perm.compiled`'s cascade-blind read,
+/// one level up (a deleted GRANT here, not a deleted grant's provenance row).
+///
+/// Must run BEFORE `perm.grants`/`perm.compiled` cascade away (both FK from
+/// `registry.catalogs`/`perm.grants` with `ON DELETE CASCADE`): once the
+/// cascade lands there is nothing left here to join against.
+pub async fn compiled_service_ids_for_catalog_via(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: Uuid,
+) -> Result<Vec<i64>, PermError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT DISTINCT c.service_id \
+           FROM perm.compiled c \
+           JOIN perm.grants g ON g.id = c.grant_id \
+          WHERE g.catalog_id = $1 \
+          ORDER BY 1",
+    )
+    .bind(catalog_id)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
 /// Insert `g` and its principal subtract on the CALLER's open transaction —
 /// SP4a Task 9. The HTTP create path (`egret_perm_compile::routes`) has to
 /// write the grant and RECOMPILE the services it affects inside ONE

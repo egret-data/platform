@@ -148,3 +148,10 @@ egret-metastore = { workspace = true }
 egret-events = { workspace = true }
 # (`chrono` — used by the browse tests' `SessionService::new` TTLs — is now a
 # regular dependency for the catalog-token DTO, so it's available to tests too.)
+# SP4a Task 16 (D3 defect 3): `warehouse_delete_recompile.rs` needs a REAL
+# `CatalogAssignmentCompiler` (not a recording fake) to assert the compiled
+# effect itself, in `policy.authz_policies` — dev-only, so this crate's own
+# production dependency graph stays free of the compiler (`egret-perm` alone
+# is a regular dependency, for the RBAC store's grant-sync error mapping).
+egret-perm-compile = { workspace = true }
+egret-policy = { workspace = true }

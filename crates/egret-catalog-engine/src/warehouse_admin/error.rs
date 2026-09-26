@@ -48,6 +48,17 @@ impl From<CatalogError> for CatalogHttpError {
             CatalogError::BadRequest(s) => CatalogHttpError::BadRequest(s),
             CatalogError::Conflict(s) => CatalogHttpError::Conflict(s),
             CatalogError::Db(_) => CatalogHttpError::Internal,
+            // `delete_warehouse_releasing_catalog`'s in-transaction recompile
+            // (SP4a Task 16, D3 defect 3) failing — same `Internal` treatment
+            // as `Db`, logged as its own condition.
+            CatalogError::Compile(e) => {
+                tracing::error!(error = %e, "warehouse-delete recompile failed inside its own transaction");
+                CatalogHttpError::Internal
+            }
+            CatalogError::Perm(e) => {
+                tracing::error!(error = %e, "warehouse-delete: reading which services this catalog's grants compiled into failed");
+                CatalogHttpError::Internal
+            }
         }
     }
 }

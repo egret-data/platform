@@ -30,6 +30,7 @@ pub use model::{
     Scope, Selector,
 };
 pub use store::{
-    create_grant_in_tx, create_rule_in_tx, delete_grant_in_tx, delete_rule_in_tx, get_grant_via,
-    get_rule_via, list_grants_via, list_rules_via, PermStore,
+    compiled_service_ids_for_catalog_via, create_grant_in_tx, create_rule_in_tx,
+    delete_grant_in_tx, delete_rule_in_tx, get_grant_via, get_rule_via, list_grants_via,
+    list_rules_via, PermStore,
 };

@@ -44,6 +44,11 @@ impl From<CatalogError> for CpError {
             CatalogError::BadRequest(s) => CpError::BadRequest(s),
             CatalogError::Conflict(s) => CpError::Conflict(s),
             CatalogError::Db(_) => CpError::Internal,
+            // `delete_warehouse_releasing_catalog`'s in-transaction recompile
+            // (SP4a Task 16, D3 defect 3) failing — same `Internal` treatment
+            // as `Db`.
+            CatalogError::Compile(_) => CpError::Internal,
+            CatalogError::Perm(_) => CpError::Internal,
         }
     }
 }
