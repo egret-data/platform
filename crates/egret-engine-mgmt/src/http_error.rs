@@ -164,6 +164,23 @@ impl From<egret_perm::PermError> for EngineHttpError {
     }
 }
 
+/// `catalogs::set_catalog_workspaces`'s in-transaction recompile (SP4a Task
+/// 15, D3 defect 1) failing. Mapped to `Internal` rather than surfaced
+/// verbatim, the same treatment `db_error` gives a raw `sqlx::Error` here —
+/// but, unlike `ProfileCompilerPort::recompile_profile`'s fire-and-forget
+/// callers, this one is reached through `?` and DOES fail (and roll back)
+/// the request: a grant written but not compiled is worse than a rejected
+/// write.
+impl From<egret_perm::CompileError> for EngineHttpError {
+    fn from(e: egret_perm::CompileError) -> Self {
+        tracing::error!(
+            error = %e,
+            "perm-model recompile failed inside a catalog-workspace assignment write"
+        );
+        EngineHttpError::Internal
+    }
+}
+
 impl From<SecretsError> for EngineHttpError {
     fn from(e: SecretsError) -> Self {
         match e {

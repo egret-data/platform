@@ -82,6 +82,11 @@ egret-test-db.workspace = true
 # Concrete Policy/Ranger store — only test state construction builds it directly
 # (production wires it in egret-bin behind `PolicyPort`).
 egret-policy.workspace = true
+# SP4a Task 15: `RealProfileCompiler` (tests/routes.rs) actually recompiles
+# against the fixture DB, the same construction egret-bin's `ProfileCompilerImpl`
+# wires in production behind `ProfileCompilerPort` — dev-only, for the same
+# reason `egret-policy` above is.
+egret-perm-compile.workspace = true
 # Concrete Catalog store — only test state construction builds it directly
 # (production wires it in egret-bin behind `CatalogPort`). The store now lives in
 # egret-catalog-engine (E3d-1); this dev-dep pulls the embedded lakekeeper engine

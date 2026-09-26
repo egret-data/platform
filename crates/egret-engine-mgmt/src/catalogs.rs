@@ -996,6 +996,17 @@ async fn set_catalog_workspaces(
         .map_err(crate::http_error::db_error)?;
     egret_catalog_registry::RegistryStore::set_catalog_workspaces_in_tx(&mut tx, id, &ids).await?;
     egret_perm::sync_assignment_grants_in_tx(&mut tx, id, &ids).await?;
+    // SP4a Task 15 (D3 defect 1, live-gate measured): the grant row the sync
+    // above just wrote/removed is not what the engine enforces until it is
+    // compiled. Recompile every profile this catalog reaches in the SAME
+    // transaction, so the assignment (or its removal) is live the instant
+    // this commits — never a stale grant swept in only when some unrelated
+    // write next recompiles the profile.
+    if let Some(compiler) = &st.perm_compiler {
+        compiler
+            .recompile_catalog_assignment_in_tx(&mut tx, id)
+            .await?;
+    }
     tx.commit().await.map_err(crate::http_error::db_error)?;
     Ok(Json(workspace_dtos(&st, id).await?))
 }

@@ -259,6 +259,33 @@ impl egret_engine_mgmt::ProfileCompilerPort for ProfileCompilerImpl {
             .await
             .map(|_| ())
     }
+
+    async fn recompile_catalog_assignment_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        catalog_id: uuid::Uuid,
+    ) -> Result<(), egret_perm::CompileError> {
+        // The same affected-service derivation `affected_services_for_grant`
+        // uses for a grant scoped to this catalog: every profile an engine
+        // currently binds that also attaches this catalog. `services_for_catalog_via`
+        // already emits `SELECT DISTINCT ... ORDER BY 1`, but the sort/dedup is
+        // redone here explicitly rather than trusted to the query, matching
+        // `egret_perm_compile::trigger::normalize_service_order`'s own reasoning:
+        // `lock_services_in_tx`'s ascending-order invariant is load-bearing
+        // (it is what turns two overlapping recompiles into a queue instead of
+        // a deadlock), so the guarantee lives at this call site too.
+        let mut ids = egret_policy::services_for_catalog_via(&mut **tx, catalog_id)
+            .await
+            .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        egret_perm_compile::lock_services_in_tx(tx, &ids).await?;
+        egret_perm_compile::recompile_services_in_tx(tx, &ids).await?;
+        Ok(())
+    }
 }
 
 struct EngineBindingReaderImpl {

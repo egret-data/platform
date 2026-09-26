@@ -30,6 +30,36 @@ use uuid::Uuid;
 pub trait ProfileCompilerPort: Send + Sync {
     /// `service_id` is a `policy.authz_services` id.
     async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError>;
+
+    /// Recompile, on the CALLER's own open transaction, every profile
+    /// `catalog_id` currently reaches — the same affected-service set a
+    /// grant scoped to that catalog would use
+    /// (`egret_perm_compile::affected_services_for_grant`).
+    ///
+    /// **SP4a Task 15 (D3 defect 1).** `catalogs::set_catalog_workspaces`
+    /// composes `RegistryStore::set_catalog_workspaces_in_tx` and
+    /// `egret_perm::sync_assignment_grants_in_tx` in one transaction, but
+    /// neither of those writes a compiled policy — the live gate measured
+    /// that an assignment's member was DENIED immediately after the write
+    /// committed, and only started passing once an UNRELATED membership
+    /// write recompiled the profile and swept the stale assignment in. This
+    /// method is what closes that: called in the SAME transaction as the two
+    /// writes above, so the compiled effect commits atomically with the
+    /// assignment itself, never leaving a window where the grant row exists
+    /// but the engine has not been told.
+    ///
+    /// Unlike [`recompile_profile`](Self::recompile_profile) — which is
+    /// fire-and-forget, logs, and never fails its caller because a bind has
+    /// already happened by the time it runs — a failure here MUST fail (and
+    /// roll back) the assignment write: a grant stored but never compiled is
+    /// worse than a rejected one (the same reasoning
+    /// `egret_workspace::members::MemberRepo` documents for its own
+    /// recompile call).
+    async fn recompile_catalog_assignment_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        catalog_id: Uuid,
+    ) -> Result<(), egret_perm::CompileError>;
 }
 
 /// Recompile whatever profile `engine_id` is currently bound to, if any and if
