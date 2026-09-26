@@ -197,13 +197,32 @@ Phần này bám theo `FlowTriggerService.processMultipleConditionWindow` và `A
   - còn lại → `DURATION_WINDOW`, lấy `every` (mặc định 1 ngày) làm độ dài cửa sổ và `offset` làm độ lệch.
 - Khai báo trộn các nhóm loại trừ nhau bị từ chối khi lưu.
 - Giá trị `Duration` được parse theo tập con ISO-8601 mà corpus dùng. Ngoài tập con đó thì từ chối, không đoán.
-- **`timezone` là trường thứ bảy** (đã đo, W13b Task 1: `Window` của image liệt kê đúng `offset`, `lookback`, `deadline`, `timezone`, `from`, `to`, `every`). Nó được áp dụng cho mọi loại trừ `lookback`. Không có `timezone` thì Kestra dùng múi giờ của server, đo được là `Etc/UTC`. egret không có múi giờ server, nên mặc định là UTC (chọn, và trùng với artifact). Mọi trường khác, ví dụ `fireOnce`, bị từ chối khi lưu, như artifact trả 422. Flow trigger không có trường `resetOnSuccess`; bắn là luôn reset.
-- **Biên, đã đo** (`oracle-exec/w13b-windows.json`, `bounds_rule`, 26 ca). `now` lấy theo múi giờ, bỏ phần nano giây.
-  - `DURATION_WINDOW` **không** phải lưới tính từ nửa đêm. Nếu `every` ≥ 1 ngày thì đặt giờ về 0. Nếu ≥ 1 giờ thì đặt phút về 0. Nếu ≥ 1 phút thì đặt giây về 0 và làm tròn xuống phút theo bội số phút của `every`. Sau đó cộng `offset`, và `end = start + every − 1 ms`. Vì vậy `PT6H` lúc 04:51 cho 04:00–09:59:59.999, không phải 00:00/06:00. `PT2M` lúc 04:53 cho 04:52. `PT45S` thì không căn chỉnh gì cả.
-  - `offset` có thể đẩy `start` vào tương lai. Sự kiện đến trước đó bị bỏ qua, và cửa sổ rỗng được giữ đến khi hết hạn.
-  - `SLIDING_WINDOW` là `[now làm tròn tới giây, + lookback]`, `end` chính xác. Nó cố định từ lúc tạo và **không trượt**. Điều kiện đạt từ 3 phút trước không được tính. Điều kiện đạt từ 51 giây trước cũng không được tính nếu cửa sổ, neo vào một sự kiện sớm hơn, đã hết hạn.
-  - `DAILY_TIME_WINDOW` là `[nửa đêm + from, nửa đêm + to]`. `DAILY_TIME_DEADLINE` là `[nửa đêm, nửa đêm + deadline]`. Cả hai đầu đều chính xác.
-  - Một sự kiện chỉ được tính khi `start < now < end`. Cả hai đầu đều là bất đẳng thức chặt, như `isValid` của Java. Artifact không đặt được sự kiện đúng vào biên, nên phần này là **chọn** theo Java.
+- **`timezone` là trường thứ bảy.** Điều này đã đo ở W13b Task 1: `Window` của image liệt kê đúng `offset`, `lookback`, `deadline`, `timezone`, `from`, `to` và `every`. Nó được áp dụng cho mọi loại trừ `lookback`.
+  - egret hỗ trợ trường này (quyết định D2 của người dùng). Giá trị là một múi giờ IANA; múi giờ không hợp lệ bị từ chối khi lưu.
+  - Không có `timezone` thì artifact căn theo UTC (đã đo). Múi giờ của container cũng là UTC, nên câu "Kestra dùng múi giờ của *server*" lấy từ Java và mô tả schema; nó chưa được đo.
+  - egret không có múi giờ server, nên mặc định là UTC. Đây là lựa chọn, và trùng với artifact.
+  - Mọi trường khác, ví dụ `fireOnce`, bị từ chối khi lưu, như artifact trả 422.
+  - Flow trigger không có trường `resetOnSuccess`, nên bắn là luôn reset.
+- **Biên** (`oracle-exec/w13b-windows.json`, `bounds_rule`, 26 ca). Có hai giá trị `now`, không được lẫn.
+  - **Biên** tính từ `now` theo múi giờ, **làm tròn xuống tới giây**.
+  - **Tính hợp lệ** dùng `now` **không làm tròn** (`now()` của Postgres, µs): sự kiện chỉ được tính khi `start < now < end`. Cả hai đầu đều là bất đẳng thức chặt, như `isValid` của Java.
+  - Vì vậy sự kiện mở một `SLIDING_WINDOW` hay một `DURATION_WINDOW` dưới một phút vẫn được tính. Ví dụ `PT45S` với `now` 04:51:50.560775 cho start 04:51:50.000000, và `event_counted` là true.
+  - Artifact không đặt được sự kiện đúng vào biên, nên tính chặt là **chọn** theo Java.
+- **`DURATION_WINDOW`** (quyết định D3 của người dùng). Quy tắc:
+  - Nếu `every` ≥ 1 ngày thì đặt giờ về 0.
+  - Nếu `every` ≥ 1 giờ thì đặt phút về 0.
+  - Nếu `every` ≥ 1 phút thì đặt giây về 0 và làm tròn xuống phút theo bội số số phút nguyên của `every`.
+  - Sau đó cộng `offset`, và `end = start + every − 1 ms`.
+
+  Quy tắc này **đã đo** với `every` ∈ {P1D, PT6H, PT90M, PT1H, PT2M, PT45S}, có và không có `offset`:
+  - `PT6H` lúc 04:51 cho 04:00–09:59:59.999. Đây **không** phải lưới nửa đêm 00:00/06:00 như javadoc mô tả.
+  - `PT2M` lúc 04:53 cho 04:52.
+  - `PT45S` thì không căn chỉnh gì cả.
+
+  Các độ dài khác dùng cùng quy tắc và là **chọn theo Java, nhất quán với các ca đã đo**; chúng không bị từ chối. Ví dụ `PT7M` (dưới một giờ, không chia hết 60, nên cửa sổ bắt đầu lại ở :00), `PT90S` (1 phút nguyên) và `P2D`.
+- **`offset`** có thể đẩy `start` vào tương lai (đã đo). Sự kiện đến trước `start` bị bỏ qua.
+- **`SLIDING_WINDOW`** là `[now làm tròn tới giây, + lookback]`, `end` chính xác. Nó cố định từ lúc tạo và **không trượt**, cả trên artifact (đã đo) lẫn trong egret.
+- **`DAILY_TIME_WINDOW`** là `[nửa đêm + from, nửa đêm + to]`, và **`DAILY_TIME_DEADLINE`** là `[nửa đêm, nửa đêm + deadline]`. Cả hai đầu đều chính xác (đã đo).
 
 ### 5.2 Schema (migration `0158`)
 
@@ -220,15 +239,31 @@ CREATE TABLE workflow.flow_trigger_windows (
 );
 ```
 
+**Xoá listener thì hàng cửa sổ bị xoá theo (cascade).** Kestra giữ hàng này sau khi flow listener bị xoá (đã đo: `prior/log-fast.json[8]`, finding `listener_delete_keeps_row`). `ON DELETE CASCADE` của egret là khác biệt có chủ ý (quyết định D1 của người dùng): theo cách của Kestra, một flow được tạo lại với cùng id sẽ thừa hưởng kết quả cũ.
+
 ### 5.3 Xử lý một listener `dependsOn`
 
 Chạy bên trong savepoint của từng listener ở §4.4:
 
-1. `INSERT … ON CONFLICT DO NOTHING` một cửa sổ mới, tính tại `now()` của Postgres, rồi `SELECT … FOR UPDATE`. **Cửa sổ đã hết hạn không bị thay** (đã đo, trái với bản nháp trước). Sự kiện gặp nó bị bỏ qua đối với listener này, như mọi sự kiện nằm ngoài cửa sổ, và bước 5 xoá hàng đó. Chỉ sự kiện kế tiếp mới mở cửa sổ mới. Mọi sự kiện listener nghe thấy đều mở cửa sổ, kể cả sự kiện không khớp dependency nào: `results` của nó là `{}`, và với `SLIDING_WINDOW` nó chính là mốc neo của cửa sổ.
-2. Nếu `now` nằm ngoài cửa sổ (ví dụ `DAILY_TIME_WINDOW` ngoài khung giờ, `start` bị `offset` đẩy vào tương lai, hoặc đã qua `deadline`), sự kiện bị bỏ qua đối với listener này. Nó không được giữ lại để dùng sau.
-3. Đánh giá từng `Dependency`: namespace, flowId, `states`, `labels`, và `when` render trên nguồn. Các kết quả true được cộng dồn; điều kiện đã đạt thì giữ nguyên là đạt.
-4. Nếu `when` của trigger đạt và `mode` thoả (`ALL`, `ANY`, hoặc `AT_LEAST` ≥ `minSatisfied`), trigger bắn qua đúng đường của §4.4. Sau đó cửa sổ bị xoá. Điều này đã đo, giống nhau ở `ALL`, `ANY` và `AT_LEAST`: vì vậy `ANY` bắn ở mọi sự kiện khớp, còn `AT_LEAST` đếm lại từ đầu.
-5. Sau khi xử lý xong các listener của một sự kiện, xoá **mọi cửa sổ đã hết hạn trong workspace**. Kestra dọn cả tenant ở cuối mỗi lần đánh giá `dependsOn`, và sự kiện kích hoạt lần dọn đó có thể không khớp gì cả. Vì vậy, sự kiện khớp đầu tiên sau khi cửa sổ hết hạn có bị mất hay không tuỳ vào việc giữa hai lần đó có một sự kiện khác được nghe hay không. Điều này đã đo (`q8_expired_unpurged_then_event` so với `q8_expired_purged_by_unrelated_execution`). Ticker **không** tự dọn. Đây là **chọn**: dọn theo giờ sẽ che mất hiện tượng mất sự kiện đã đo được. Điều kiện đã đạt không bao giờ được giữ sang cửa sổ sau (đã đo).
+1. **Chỉ sự kiện khớp ít nhất một dependency của listener mới động tới cửa sổ của nó.** Sự kiện không khớp dependency nào thì không mở cửa sổ và cũng không dọn cửa sổ nào.
+2. Tính một cửa sổ mới tại `now()` của Postgres, chạy `INSERT … ON CONFLICT DO NOTHING`, rồi `SELECT … FOR UPDATE`.
+   - Nếu hàng tìm được đã **hết hạn** (`end <= now`), thay nó bằng biên của cửa sổ mới và `results` rỗng, rồi đánh giá sự kiện trên cửa sổ mới. Sự kiện được tính.
+   - Với `SLIDING_WINDOW`, điều này nghĩa là cửa sổ neo vào sự kiện *khớp* đầu tiên.
+3. Nếu `now` nằm ngoài cửa sổ (có thể là cửa sổ vừa tạo), sự kiện bị bỏ qua đối với listener này và không được giữ lại để dùng sau. Ví dụ: `DAILY_TIME_WINDOW` ngoài khung giờ, `start` bị `offset` đẩy vào tương lai, hoặc đã qua `deadline`.
+4. Đánh giá từng `Dependency`: namespace, flowId, `states`, `labels`, và `when` render trên nguồn. Các kết quả true được cộng dồn. Điều kiện đã đạt thì giữ nguyên là đạt.
+5. Nếu `when` của trigger đạt và `mode` thoả (`ALL`, `ANY`, hoặc `AT_LEAST` ≥ `minSatisfied`), trigger bắn qua đường của §4.4, rồi cửa sổ bị xoá.
+   - Artifact xoá cửa sổ như nhau ở `ALL`, `ANY` và `AT_LEAST` (đã đo). Vì vậy `ANY` bắn ở mọi sự kiện khớp, còn `AT_LEAST` đếm lại từ đầu.
+6. Pass của scheduler xoá các cửa sổ hết hạn (`sweep_expired_windows`). Không có lần dọn nào chạy sau mỗi sự kiện.
+7. Điều kiện đã đạt không bao giờ được giữ sang cửa sổ sau (đã đo, và egret cũng vậy).
+
+**Kestra theo số đo: một khác biệt có chủ ý (quyết định D1 của người dùng).** Các bước 1, 2 và 6 khác artifact (`oracle-exec/w13b-windows.json`, các finding `expiry_drops_the_next_event`, `purge_is_tenant_wide_on_any_evaluation`, `unrelated_event_opens_a_window` và `listener_delete_keeps_row`).
+
+- **Trên artifact, cửa sổ hết hạn không bị thay.** Sự kiện gặp nó bị bỏ qua, và hàng bị dọn sau đó, nên chỉ sự kiện *kế tiếp* mới mở cửa sổ mới (`q8_expired_unpurged_then_event`).
+- **Mọi execution listener nghe thấy đều mở cửa sổ**, kể cả execution không khớp dependency nào. `results` của cửa sổ đó là `{}`, và với `SLIDING_WINDOW` chính execution đó trở thành mốc neo (`q5` phần B).
+- **Việc dọn chạy ở cuối mọi lần đánh giá `dependsOn`**, kể cả lần không khớp gì. Vì vậy sự kiện khớp đầu tiên sau khi hết hạn có bị mất hay không tuỳ vào việc có một execution không liên quan xen vào giữa hay không (`q8_expired_purged_by_unrelated_execution`).
+  - Đã đo: hàng hết hạn của chính listener bị một execution không liên quan dọn đi.
+  - Việc dọn phủ cả tenant thì lấy từ Java (`expired(tenant)`); điều này chưa được đo.
+- egret không tái tạo hành vi này, vì kết quả sẽ phụ thuộc vào lưu lượng không liên quan.
 
 **Đồng thời:**
 - Hai nguồn thoả hai điều kiện của cùng một listener, được xử lý trên hai replica, sẽ xếp hàng trên row của cửa sổ. Cái sau đọc thấy kết quả của cái trước và bắn đúng một lần.
@@ -236,7 +271,7 @@ Chạy bên trong savepoint của từng listener ở §4.4:
 
 ### 5.4 Đo trước khi viết code
 
-Task 1 của W13b bắn flow thật trên artifact và lưu kết quả nguyên văn. Mã Java ở trên chưa trả lời được các câu sau. **Câu trả lời nằm trong `oracle-exec/w13b-windows.json`, và §5.1, §5.3 ở trên đã được sửa cho khớp.** `trigger.variables` của execution được bắn giữ nguyên dạng của nhánh không cửa sổ: đúng 9 khoá W13a đã đo, mô tả nguồn vừa làm điều kiện được thoả.
+Task 1 của W13b bắn flow thật trên artifact và lưu kết quả nguyên văn. Mã Java ở trên chưa trả lời được các câu sau. **Câu trả lời nằm trong `oracle-exec/w13b-windows.json`.** §5.1 và §5.3 ở trên nêu hành vi của egret. Mỗi mục ghi rõ phần nào đã đo, phần nào là lựa chọn, và gọi tên các khác biệt có chủ ý so với vòng đời cửa sổ của artifact. `trigger.variables` của execution được bắn giữ nguyên dạng của nhánh không cửa sổ: đúng 9 khoá W13a đã đo, mô tả nguồn vừa làm điều kiện được thoả.
 - biên của `DURATION_WINDOW`: tính nửa đêm theo timezone nào, và `offset` ảnh hưởng ra sao;
 - mốc bắt đầu của `SLIDING_WINDOW` được đặt thế nào;
 - một điều kiện đã đạt mà trigger chưa bắn thì có được giữ sang cửa sổ sau không;
@@ -288,7 +323,10 @@ Mỗi dòng nêu mutation phải làm nó đỏ.
 | tính chất | mutation phải giết |
 |---|---|
 | `ALL` với hai dependency: chỉ A thì không bắn; A rồi B thì bắn một lần và reset cửa sổ | không cộng dồn kết quả |
-| sự kiện gặp cửa sổ đã hết hạn mà chưa bị dọn thì bị bỏ qua và hàng bị dọn; sự kiện kế tiếp mở cửa sổ mới | thay cửa sổ hết hạn ở bước 1 |
+| sự kiện gặp cửa sổ đã hết hạn thì thay nó (biên mới, kết quả rỗng) và được tính: khác biệt có chủ ý so với việc Kestra bỏ sự kiện | bỏ qua sự kiện, hoặc giữ kết quả cũ |
+| sự kiện không khớp dependency nào thì không mở cửa sổ và không dọn cửa sổ nào | mở cửa sổ trước khi so khớp |
+| sweep của scheduler xoá cửa sổ hết hạn; đường xử lý sự kiện thì không | bỏ sweep |
+| xoá listener thì hàng cửa sổ của nó bị xoá | bỏ cascade |
 | `ANY`; `AT_LEAST` với `minSatisfied` | đảo phép so sánh mode |
 | hai nguồn trên hai processor cùng thoả `ALL` thì bắn đúng một lần | bỏ `FOR UPDATE` của cửa sổ |
 | kết quả của cửa sổ đã hết hạn không được tính | bỏ kiểm `end` |

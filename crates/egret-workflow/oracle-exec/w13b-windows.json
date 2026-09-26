@@ -3,7 +3,7 @@
  "artifact_note": "the image labels read version=nightly, revision=169ca7f25a1b3aeeaaab1206a89b2446a1335a46 (docker-compose.yml comment); the Java checkout 96893b589 does not contain that revision, and it has no `timezone` on TimeWindow while the image honours one. Where the two disagree the measurement is used.",
  "captured_at": {
   "prior_agent": "2026-09-26T04:02Z..04:21Z",
-  "this_agent": "2026-09-26T04:39Z..05:13Z"
+  "this_agent": "2026-09-26T04:39Z..05:59Z"
  },
  "container_zone": {
   "date +%Z %z": "UTC +0000",
@@ -15,7 +15,7 @@
  "method": {
   "producers": "p1, p2, p3, other in namespace w13b, each one `io.kestra.plugin.core.log.Log` task, run by POST /api/v1/main/executions/w13b/<id>",
   "listener_template": "id: <L>\\nnamespace: w13b\\ntasks: [Log 'fired']\\ntriggers:\\n  - id: t\\n    type: io.kestra.plugin.core.trigger.Flow\\n    dependsOn: [{namespace: w13b, flowId: pN, states: [SUCCESS]} ...]\\n    <mode/minSatisfied/window>",
-  "window_state": "read directly from Kestra's Postgres table `multipleconditions` (column `value`, JSON) ~7 s after each producer ended: `SELECT now() || ' | ' || json_agg(value ORDER BY key) FROM multipleconditions WHERE flow_id = <L>`. The text before `|` is Postgres now() at the read.",
+  "window_state": "read directly from Kestra's Postgres table `multipleconditions` (column `value`, JSON; the REST API was not searched for a window endpoint, the table is the store itself) at least ~7 s after each producer ended, sometimes much later when the host stalled (e.g. new/log-q8.json[5]: 3.5 min) -- the Postgres now() prefix records the true read time: `SELECT now() || ' | ' || json_agg(value ORDER BY key) FROM multipleconditions WHERE flow_id = <L>`. The text before `|` is Postgres now() at the read.",
   "results_keys": "a window's `results` is keyed by a per-dependency hash; mapped here to producers by the first single-result rows: {\"2313c7a5d5e549765999105c11476db6\": \"p1\", \"16b5de595dead92845164b760baeb83b\": \"p2\", \"7269459c025246f6f8c86ff61e8f0188\": \"p3\"}",
   "sequence": "one listener at a time, deleted after its scenario; steps are strictly serial; nothing else ran in the tenant (tutorial flows have Schedule triggers but produced no executions in the window: GET /executions/search?startDate=2026-09-26T03:30Z listed only w13b flows)",
   "crash": "the prior agent read the table with `docker exec oracle-exec-postgres-1 psql ...`. Postgres is PID 1 in that container, so every exec'd psql is its child; at 04:22:25 one was killed by SIGPIPE and the postmaster logged `untracked child process (PID 1079) was terminated by signal 13: Broken pipe` / `terminating any other active server processes`, i.e. treated it as a crashed backend and restarted, and Kestra then shut down gracefully. Not a Kestra behaviour. This agent read the table from a separate `docker run --rm --network oracle-exec_default postgres:18 psql -h postgres` container instead; no crash recurred.",
@@ -39,13 +39,14 @@
   }
  },
  "bounds_rule": {
-  "all_kinds": "now = the evaluating server's clock in `timezone` (default: server zone, measured UTC), nanoseconds dropped. The event is counted only if start < now < end (strict, Java isValid). Every bounds_case below satisfies this rule; build.py asserts it.",
-  "DURATION_WINDOW": "w = every (default P1D). if w >= 1 day: hour := 0. if w >= 1 hour: minute := 0. if w >= 1 minute: second := 0, minute := floor(minute / w_minutes) * w_minutes. start := that + offset (may be in the future). end := start + w - 1 ms.",
+  "all_kinds": "Two nows. BOUNDS are computed from now in `timezone` (default UTC) TRUNCATED TO THE SECOND. VALIDITY uses the UNTRUNCATED now (egret: Postgres now(), microseconds): the event counts only if start < now < end, strict at both ends (Java isValid; chosen, a bound cannot be hit on the artifact). So the event that opens a SLIDING or sub-minute DURATION window counts (grid_every_PT45S, q5_sliding_lookback_PT2M). Every bounds_case satisfies this; build.py asserts it.",
+  "DURATION_WINDOW": "MEASURED for every in {P1D, PT6H, PT90M, PT1H, PT2M, PT45S} (with and without offset); any other every follows the same rule, CHOSEN from the Java and consistent with the measured cases (user decision D3). w = every (default P1D). if w >= 1 day: hour := 0. if w >= 1 hour: minute := 0. if w >= 1 minute: second := 0, minute := floor(minute / w_minutes) * w_minutes. start := that + offset (may be in the future). end := start + w - 1 ms.",
   "SLIDING_WINDOW": "start := now (to the second); end := start + lookback (exact). Fixed once created; it does not slide.",
   "DAILY_TIME_WINDOW": "start := local midnight + from; end := local midnight + to (exact).",
   "DAILY_TIME_DEADLINE": "start := local midnight; end := local midnight + deadline (exact).",
   "fields": "bounds_cases[].now is the producer's endDate; the server read its clock a few ms later while processing that end, which never crosses a bound in these cases. observed_start/observed_end are verbatim from the multipleconditions row; null when no row survived the evaluation (see note)."
  },
+ "how_to_read_for_egret": "This file is EVIDENCE of what Kestra did. Bounds (bounds_rule, bounds_cases.observed_*/derived_*) are what egret must compute too (D2, D3). The window LIFECYCLE differs by design (D1): each finding has `applies_to_egret`; each bounds case has `egret_expected`; each sequence has `lifecycle: kestra_measured` and must not be replayed as an egret expectation without applying D1 (expired window replaced and the event counted; only matching events open a window; expired windows deleted by the scheduler sweep only; listener delete cascades).",
  "bounds_cases": [
   {
    "scenario": "q1_all_nowindow",
@@ -57,7 +58,12 @@
    "observed_end": "2026-09-26T23:59:59.999000Z",
    "event_counted": false,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": false,
+    "event_counted": false,
+    "basis": "egret-chosen (D1): an execution matching no dependency opens no window. Kestra opened one ({} results); the bounds above are still what egret computes for a MATCHING event at this now"
+   }
   },
   {
    "scenario": "q1_all_window_every_PT1H_fireOnce_default",
@@ -71,7 +77,14 @@
    "observed_end": "2026-09-26T04:59:59.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T04:00:00.000000Z",
+    "end": "2026-09-26T04:59:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q2_any_nowindow",
@@ -86,7 +99,14 @@
    "note": "no row after the event: the event fired and the reset deleted the window",
    "derived_start": "2026-09-26T00:00:00.000000Z",
    "derived_end": "2026-09-26T23:59:59.999000Z",
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T00:00:00.000000Z",
+    "end": "2026-09-26T23:59:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q2_atleast2_nowindow",
@@ -98,7 +118,14 @@
    "observed_end": "2026-09-26T23:59:59.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T00:00:00.000000Z",
+    "end": "2026-09-26T23:59:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q2_any_window_every_PT1H_fireOnce_default",
@@ -115,7 +142,14 @@
    "note": "no row after the event: the event fired and the reset deleted the window",
    "derived_start": "2026-09-26T04:00:00.000000Z",
    "derived_end": "2026-09-26T04:59:59.999000Z",
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T04:00:00.000000Z",
+    "end": "2026-09-26T04:59:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q2_atleast2_window_every_PT1H_fireOnce_default",
@@ -129,7 +163,14 @@
    "observed_end": "2026-09-26T04:59:59.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T04:00:00.000000Z",
+    "end": "2026-09-26T04:59:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q6_daily_time_window_brackets_now",
@@ -144,7 +185,14 @@
    "observed_end": "2026-09-26T05:00:00.000000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T03:00:00.000000Z",
+    "end": "2026-09-26T05:00:00.000000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q6_daily_time_window_not_bracketing_now",
@@ -159,7 +207,14 @@
    "observed_end": "2026-09-26T07:00:00.000000Z",
    "event_counted": false,
    "fired": 0,
-   "now_in_window": false
+   "now_in_window": false,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T06:00:00.000000Z",
+    "end": "2026-09-26T07:00:00.000000Z",
+    "event_counted": false,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "zone_daily_time_window_timezone_HCM_brackets_local_now_only",
@@ -175,7 +230,14 @@
    "observed_end": "2026-09-26T05:00:00.000000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T03:00:00.000000Z",
+    "end": "2026-09-26T05:00:00.000000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "zone_duration_default_every_timezone_Kolkata",
@@ -189,7 +251,14 @@
    "observed_end": "2026-09-26T18:29:59.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-25T18:30:00.000000Z",
+    "end": "2026-09-26T18:29:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "zone_every_PT1H_timezone_Kolkata",
@@ -204,7 +273,14 @@
    "observed_end": "2026-09-26T04:29:59.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T03:30:00.000000Z",
+    "end": "2026-09-26T04:29:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "extra_every_PT90M_bounds",
@@ -218,7 +294,14 @@
    "observed_end": "2026-09-26T05:29:59.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T04:00:00.000000Z",
+    "end": "2026-09-26T05:29:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q3_q8_every_PT2M",
@@ -232,7 +315,14 @@
    "observed_end": "2026-09-26T04:11:59.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T04:10:00.000000Z",
+    "end": "2026-09-26T04:11:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q4_every_PT2M_offset_PT1M",
@@ -247,7 +337,14 @@
    "observed_end": "2026-09-26T04:16:59.999000Z",
    "event_counted": false,
    "fired": 0,
-   "now_in_window": false
+   "now_in_window": false,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T04:15:00.000000Z",
+    "end": "2026-09-26T04:16:59.999000Z",
+    "event_counted": false,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "grid_every_PT6H",
@@ -261,7 +358,14 @@
    "observed_end": "2026-09-26T09:59:59.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T04:00:00.000000Z",
+    "end": "2026-09-26T09:59:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "grid_every_PT45S",
@@ -275,7 +379,14 @@
    "observed_end": "2026-09-26T04:52:34.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T04:51:50.000000Z",
+    "end": "2026-09-26T04:52:34.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "grid_every_P1D_offset_future_hour",
@@ -290,7 +401,14 @@
    "observed_end": "2026-09-27T05:59:59.999000Z",
    "event_counted": false,
    "fired": 0,
-   "now_in_window": false
+   "now_in_window": false,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T06:00:00.000000Z",
+    "end": "2026-09-27T05:59:59.999000Z",
+    "event_counted": false,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "grid_every_P1D_offset_past_hour",
@@ -305,7 +423,14 @@
    "observed_end": "2026-09-27T02:59:59.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T03:00:00.000000Z",
+    "end": "2026-09-27T02:59:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "grid_every_PT2M_odd_minute",
@@ -319,7 +444,14 @@
    "observed_end": "2026-09-26T04:53:59.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T04:52:00.000000Z",
+    "end": "2026-09-26T04:53:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q7_deadline_in_future",
@@ -333,7 +465,14 @@
    "observed_end": "2026-09-26T05:00:00.000000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T00:00:00.000000Z",
+    "end": "2026-09-26T05:00:00.000000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q7_deadline_in_past",
@@ -350,7 +489,14 @@
    "note": "no row after the event: created already expired, the event ignored, and the expired row purged in the same evaluation",
    "derived_start": "2026-09-26T00:00:00.000000Z",
    "derived_end": "2026-09-26T03:00:00.000000Z",
-   "now_in_window": false
+   "now_in_window": false,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T00:00:00.000000Z",
+    "end": "2026-09-26T03:00:00.000000Z",
+    "event_counted": false,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q7_deadline_timezone_HCM_future_local",
@@ -365,7 +511,14 @@
    "observed_end": "2026-09-26T05:00:00.000000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-25T17:00:00.000000Z",
+    "end": "2026-09-26T05:00:00.000000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q8_expired_unpurged_then_event",
@@ -379,7 +532,14 @@
    "observed_end": "2026-09-26T04:55:59.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T04:54:00.000000Z",
+    "end": "2026-09-26T04:55:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q8_expired_purged_by_unrelated_execution",
@@ -393,7 +553,14 @@
    "observed_end": "2026-09-26T05:01:59.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T05:00:00.000000Z",
+    "end": "2026-09-26T05:01:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q8_carry_over_check",
@@ -407,7 +574,14 @@
    "observed_end": "2026-09-26T05:03:59.999000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T05:02:00.000000Z",
+    "end": "2026-09-26T05:03:59.999000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   },
   {
    "scenario": "q5_sliding_lookback_PT2M",
@@ -421,11 +595,19 @@
    "observed_end": "2026-09-26T05:06:21.000000Z",
    "event_counted": true,
    "fired": 0,
-   "now_in_window": true
+   "now_in_window": true,
+   "egret_expected": {
+    "opens_window": true,
+    "start": "2026-09-26T05:04:21.000000Z",
+    "end": "2026-09-26T05:06:21.000000Z",
+    "event_counted": true,
+    "basis": "bounds measured on the artifact (D2/D3); counted iff start < untruncated now < end"
+   }
   }
  ],
  "sequences": [
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q1_all_nowindow",
    "listener": "q1a_all",
    "declared": {},
@@ -555,6 +737,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q1_all_window_every_PT1H_fireOnce_default",
    "listener": "q1b_all",
    "declared": {
@@ -654,6 +837,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q1_all_window_every_PT1H_fireOnce_true",
    "listener": "q1c_all",
    "declared": {
@@ -664,9 +848,11 @@
    },
    "deploy_status": 404,
    "source": "prior/log-fast.json[16]",
-   "steps": []
+   "steps": [],
+   "note": "404 is the prior helper retrying a PUT after the real POST failed; the true response is 422 `Unrecognized field \"fireOnce\"` (save_validation.fireOnce_true_POST)"
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q2_any_nowindow",
    "listener": "q2a_any",
    "declared": {
@@ -759,6 +945,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q2_atleast2_nowindow",
    "listener": "q2b_atl",
    "declared": {
@@ -878,6 +1065,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q2_any_window_every_PT1H_fireOnce_default",
    "listener": "q2c_any",
    "declared": {
@@ -973,6 +1161,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q2_atleast2_window_every_PT1H_fireOnce_default",
    "listener": "q2d_atl",
    "declared": {
@@ -1074,6 +1263,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q6_daily_time_window_brackets_now",
    "listener": "q6a_dtw",
    "declared": {
@@ -1155,6 +1345,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q6_daily_time_window_not_bracketing_now",
    "listener": "q6b_dtw",
    "declared": {
@@ -1205,6 +1396,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "zone_daily_time_window_timezone_HCM_brackets_local_now_only",
    "listener": "z1_dtw",
    "declared": {
@@ -1266,6 +1458,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "zone_duration_default_every_timezone_Kolkata",
    "listener": "z2_dur",
    "declared": {
@@ -1306,6 +1499,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "zone_every_PT1H_timezone_Kolkata",
    "listener": "z3_dur",
    "declared": {
@@ -1347,6 +1541,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "extra_every_PT90M_bounds",
    "listener": "x1_dur",
    "declared": {
@@ -1387,6 +1582,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q3_q8_every_PT2M",
    "listener": "q3_dur2m",
    "declared": {
@@ -1481,6 +1677,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q4_every_PT2M_offset_PT1M",
    "listener": "q4_off",
    "declared": {
@@ -1558,6 +1755,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "grid_every_PT6H",
    "listener": "g1_6h",
    "declared": {
@@ -1598,6 +1796,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "grid_every_PT45S",
    "listener": "g2_45s",
    "declared": {
@@ -1638,6 +1837,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "grid_every_P1D_offset_future_hour",
    "listener": "g3_off",
    "declared": {
@@ -1675,6 +1875,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "grid_every_P1D_offset_past_hour",
    "listener": "g4_off",
    "declared": {
@@ -1735,6 +1936,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "grid_every_PT2M_odd_minute",
    "listener": "g5_2m",
    "declared": {
@@ -1775,6 +1977,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q7_deadline_in_future",
    "listener": "q7a_dl",
    "declared": {
@@ -1834,6 +2037,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q7_deadline_in_past",
    "listener": "q7b_dl",
    "declared": {
@@ -1871,6 +2075,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q7_deadline_timezone_HCM_future_local",
    "listener": "q7c_dl",
    "declared": {
@@ -1912,6 +2117,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q8_expired_unpurged_then_event",
    "listener": "q8a_2m",
    "declared": {
@@ -1996,6 +2202,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q8_expired_purged_by_unrelated_execution",
    "listener": "q8b_2m",
    "declared": {
@@ -2096,6 +2303,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q8_carry_over_check",
    "listener": "q8c_2m",
    "declared": {
@@ -2160,6 +2368,7 @@
    ]
   },
   {
+   "lifecycle": "kestra_measured",
    "scenario": "q5_sliding_lookback_PT2M",
    "listener": "q5_slide",
    "declared": {
@@ -2350,75 +2559,93 @@
  "findings": [
   {
    "id": "zone",
-   "finding": "The container's zone is UTC and it is the default window zone. `date +%Z %z` = `UTC +0000`; /etc/localtime -> `/usr/share/zoneinfo/Etc/UTC`; TZ unset. A window with no `timezone` aligned on UTC: q1 (no `window`) created `\"start\": \"2026-09-26T00:00:00.000000Z\"`, `\"end\": \"2026-09-26T23:59:59.999000Z\"` (prior/log-fast.json[1]). egret has no server zone: CHOSEN default = UTC, which is what the artifact did."
+   "finding": "With no `timezone` the artifact aligned on UTC (measured). The container zone is also UTC, so 'Kestra uses the SERVER zone' is from the Java/schema text, not measured. `date +%Z %z` = `UTC +0000`; /etc/localtime -> `/usr/share/zoneinfo/Etc/UTC`; TZ unset. A window with no `timezone` aligned on UTC: q1 (no `window`) created `\"start\": \"2026-09-26T00:00:00.000000Z\"`, `\"end\": \"2026-09-26T23:59:59.999000Z\"` (prior/log-fast.json[1]). egret has no server zone: CHOSEN default = UTC, which is what the artifact did.",
+   "applies_to_egret": "both: egret default UTC (chosen, D2)"
   },
   {
    "id": "no_window_default",
-   "finding": "No `window:` = DURATION_WINDOW of one day in the default zone: q1 row `start 2026-09-26T00:00:00.000000Z`, `end 2026-09-26T23:59:59.999000Z` (prior/log-fast.json[1..6])."
+   "finding": "No `window:` = DURATION_WINDOW of one day in the default zone: q1 row `start 2026-09-26T00:00:00.000000Z`, `end 2026-09-26T23:59:59.999000Z` (prior/log-fast.json[1..6]).",
+   "applies_to_egret": "both"
   },
   {
    "id": "duration_bounds",
-   "finding": "DURATION_WINDOW start is NOT a grid from midnight. Rule (matches MultipleConditionStateStore.create at 96893b589 and every measurement): take now in the zone with nanos dropped; if every >= 1 day set hour 0; if every >= 1 hour set minute 0; if every >= 1 minute set second 0 and minute = floor(minute / every_minutes) * every_minutes (a no-op once minute was zeroed); then start = that + offset; end = start + every - 1 ms. Quoted: PT1H at 04:04:52 -> `04:00:00.000000Z`..`04:59:59.999000Z` (prior/log-fast.json[10]); PT90M at 04:09:29 -> `04:00:00.000000Z`..`05:29:59.999000Z` (prior/log-fast2.json[23]); PT6H at 04:51:01 -> `04:00:00.000000Z`..`09:59:59.999000Z` (new/log-bounds.json, grid_every_PT6H) -- NOT the 00:00/06:00 grid the TimeWindow javadoc promises; PT2M at even minute 04:10:05 -> `04:10:00`..`04:11:59.999` (prior/log-q3q8.json[1]); PT2M at ODD minute 04:53:03 -> `04:52:00.000000Z`..`04:53:59.999000Z` (new/log-bounds.json, grid_every_PT2M_odd_minute) so minutes are floored to a multiple of 2; PT45S at 04:51:50.56 -> `04:51:50.000000Z`..`04:52:34.999000Z` (new/log-bounds.json, grid_every_PT45S) -- under a minute there is no alignment at all, start = now truncated to the second."
+   "finding": "DURATION_WINDOW start is NOT a grid from midnight. Rule (matches MultipleConditionStateStore.create at 96893b589 and every measurement): take now in the zone with nanos dropped; if every >= 1 day set hour 0; if every >= 1 hour set minute 0; if every >= 1 minute set second 0 and minute = floor(minute / every_minutes) * every_minutes (a no-op once minute was zeroed); then start = that + offset; end = start + every - 1 ms. Quoted: PT1H at 04:04:52 -> `04:00:00.000000Z`..`04:59:59.999000Z` (prior/log-fast.json[10]); PT90M at 04:09:29 -> `04:00:00.000000Z`..`05:29:59.999000Z` (prior/log-fast2.json[23]); PT6H at 04:51:01 -> `04:00:00.000000Z`..`09:59:59.999000Z` (new/log-bounds.json, grid_every_PT6H) -- NOT the 00:00/06:00 grid the TimeWindow javadoc promises; PT2M at even minute 04:10:05 -> `04:10:00`..`04:11:59.999` (prior/log-q3q8.json[1]); PT2M at ODD minute 04:53:03 -> `04:52:00.000000Z`..`04:53:59.999000Z` (new/log-bounds.json, grid_every_PT2M_odd_minute) so minutes are floored to a multiple of 2; PT45S at 04:51:50.56 -> `04:51:50.000000Z`..`04:52:34.999000Z` (new/log-bounds.json, grid_every_PT45S) -- under a minute there is no alignment at all, start = now truncated to the second. MEASURED only for every in {P1D, PT6H, PT90M, PT1H, PT2M, PT45S}; other shapes (PT7M: restarts at :00; PT90S: 1 whole minute; P2D) follow the same rule, CHOSEN from the Java and consistent with the measured cases (user decision D3).",
+   "applies_to_egret": "both: egret follows this rule (D3); every value not in {P1D,PT6H,PT90M,PT1H,PT2M,PT45S} is chosen from the Java, not measured"
   },
   {
    "id": "offset",
-   "finding": "`offset` is ADDED to the aligned start, so the window can open in the future and an event before it is ignored (results stay {}), the row kept until it expires. every P1D offset PT6H at 04:52:04 -> `\"start\": \"2026-09-26T06:00:00.000000Z\"`, `\"end\": \"2026-09-27T05:59:59.999000Z\"`, `results {}` (new/log-bounds.json grid_every_P1D_offset_future_hour); offset PT3H -> `2026-09-26T03:00:00.000000Z`..`2026-09-27T02:59:59.999000Z` and p1 counted, p2 fired (grid_every_P1D_offset_past_hour); PT2M offset PT1M at 04:14:04 -> `04:15:00.000000Z`..`04:16:59.999000Z` with `results {}`, then at 04:15:03 p2 counted and p1 at 04:15:10 fired (prior/log-q4.json[2..6])."
+   "finding": "`offset` is ADDED to the aligned start, so the window can open in the future and an event before it is ignored (results stay {}), the row kept until it expires. every P1D offset PT6H at 04:52:04 -> `\"start\": \"2026-09-26T06:00:00.000000Z\"`, `\"end\": \"2026-09-27T05:59:59.999000Z\"`, `results {}` (new/log-bounds.json grid_every_P1D_offset_future_hour); offset PT3H -> `2026-09-26T03:00:00.000000Z`..`2026-09-27T02:59:59.999000Z` and p1 counted, p2 fired (grid_every_P1D_offset_past_hour); PT2M offset PT1M at 04:14:04 -> `04:15:00.000000Z`..`04:16:59.999000Z` with `results {}`, then at 04:15:03 p2 counted and p1 at 04:15:10 fired (prior/log-q4.json[2..6]).",
+   "applies_to_egret": "both"
   },
   {
    "id": "timezone",
-   "finding": "`timezone` is honoured for every kind but lookback. P1D + Asia/Kolkata -> `2026-09-25T18:30:00.000000Z`..`2026-09-26T18:29:59.999000Z`; PT1H + Asia/Kolkata -> `03:30:00.000000Z`..`04:29:59.999000Z` (hour aligned in the zone); from 10:00 to 12:00 Asia/Ho_Chi_Minh -> `03:00:00.000000Z`..`05:00:00.000000Z` (prior/log-fast2.json z1/z2/z3); deadline 12:00 Asia/Ho_Chi_Minh -> `2026-09-25T17:00:00.000000Z`..`2026-09-26T05:00:00.000000Z` (new/log-bounds.json q7_deadline_timezone_HCM_future_local). The Java checkout has no `timezone`; the image does. egret must implement it (chrono-tz is already a dependency) or refuse it at save."
+   "finding": "`timezone` is honoured for every kind but lookback. P1D + Asia/Kolkata -> `2026-09-25T18:30:00.000000Z`..`2026-09-26T18:29:59.999000Z`; PT1H + Asia/Kolkata -> `03:30:00.000000Z`..`04:29:59.999000Z` (hour aligned in the zone); from 10:00 to 12:00 Asia/Ho_Chi_Minh -> `03:00:00.000000Z`..`05:00:00.000000Z` (prior/log-fast2.json z1/z2/z3); deadline 12:00 Asia/Ho_Chi_Minh -> `2026-09-25T17:00:00.000000Z`..`2026-09-26T05:00:00.000000Z` (new/log-bounds.json q7_deadline_timezone_HCM_future_local). The Java checkout has no `timezone`; the image does. egret must implement it (chrono-tz is already a dependency) or refuse it at save.",
+   "applies_to_egret": "both: egret supports timezone (D2)"
   },
   {
    "id": "window_fields",
-   "finding": "The image's Window has exactly 7 fields; anything else is refused at save with 422. `fireOnce: true` -> `Unrecognized field \"fireOnce\" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: \"offset\", \"lookback\", \"deadline\", \"timezone\", \"from\", \"to\", \"every\")` (save_validation.fireOnce_true_POST; the prior agent's `deploy_status 404` for q1c was its helper retrying a PUT after this 422). Mixed every + lookback -> 422 `Window of type \\`SLIDING_WINDOW\\` cannot have an every duration.` The Flow trigger itself has no `resetOnSuccess` (its properties: allowConcurrent, dependsOn, inputs, minSatisfied, mode, states, stopAfter, when, window)."
+   "finding": "The image's Window has exactly 7 fields; anything else is refused at save with 422. `fireOnce: true` -> `Unrecognized field \"fireOnce\" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: \"offset\", \"lookback\", \"deadline\", \"timezone\", \"from\", \"to\", \"every\")` (save_validation.fireOnce_true_POST; the prior agent's `deploy_status 404` for q1c was its helper retrying a PUT after this 422). Mixed every + lookback -> 422 `Window of type \\`SLIDING_WINDOW\\` cannot have an every duration.` The Flow trigger itself has no `resetOnSuccess` (its properties in the image's plugin schema, GET /api/v1/main/plugins/io.kestra.plugin.core.trigger.Flow, quoted: allowConcurrent, dependsOn, inputs, minSatisfied, mode, states, stopAfter, when, window).",
+   "applies_to_egret": "both: egret refuses unknown window fields at save"
   },
   {
    "id": "q1_all_reset",
-   "finding": "ALL over p1,p2: p1 alone does not fire (row `results {p1}`), p2 then fires once and the row is deleted (`windows_after ... | []`); a second p1 + p2 fires again (2 fires total), and p2 alone afterwards does not (prior/log-fast.json[2..6]). Same with every PT1H (prior/log-fast.json[10..13])."
+   "finding": "ALL over p1,p2: p1 alone does not fire (row `results {p1}`), p2 then fires once and the row is deleted (`windows_after ... | []`); a second p1 + p2 fires again (2 fires total), and p2 alone afterwards does not (prior/log-fast.json[2..6]). Same with every PT1H (prior/log-fast.json[10..13]).",
+   "applies_to_egret": "both"
   },
   {
    "id": "q2_any_atleast",
-   "finding": "ANY fires on EVERY matching event (p1, p1, p2 -> 3 fires, `listener_execution_count_after` 1,2,3) and never leaves a row (prior/log-fast.json q2_any_nowindow, and with every PT1H q2_any_window...). AT_LEAST minSatisfied 2 over p1,p2,p3: p1 no fire; p2 fires and deletes the row; p3 no fire (row {p3}); p1 fires (p3 + p1); p1 again no fire (row {p1}) (prior/log-fast.json q2_atleast2_nowindow). The reset after a fire is a delete under every mode."
+   "finding": "ANY fires on EVERY matching event (p1, p1, p2 -> 3 fires, `listener_execution_count_after` 1,2,3) and never leaves a row (prior/log-fast.json q2_any_nowindow, and with every PT1H q2_any_window...). AT_LEAST minSatisfied 2 over p1,p2,p3: p1 no fire; p2 fires and deletes the row; p3 no fire (row {p3}); p1 fires (p3 + p1); p1 again no fire (row {p1}) (prior/log-fast.json q2_atleast2_nowindow). The reset after a fire is a delete under every mode.",
+   "applies_to_egret": "both"
   },
   {
    "id": "sliding",
-   "finding": "SLIDING_WINDOW does not slide. The first evaluated event opens a fixed window [now truncated to the second, + lookback] (end exact, no -1 ms): p1 ended 05:04:21.72 -> `05:04:21.000000Z`..`05:06:21.000000Z`. q5 answer: a condition met 3 minutes ago does NOT count -- p2 at 05:08:41 found the expired window, was dropped and the row purged (`[]`), and p1 at 05:08:51 opened a new window holding only p1. B: an unrelated `other` opened `05:09:10`..`05:11:10` with results {}; p1 at 05:10:40 was counted; p2 at 05:11:31, 51 s after p1, did NOT fire because the window anchored at `other` had expired -- a true lookback would have fired. Then p1 05:11:39 + p2 05:11:48 in the fresh window fired (new/log-q5.json). The prior partial run agrees up to the crash (start `04:15:45.000000Z` from an end at 04:15:45.528)."
+   "finding": "SLIDING_WINDOW does not slide. The first evaluated event opens a fixed window [now truncated to the second, + lookback] (end exact, no -1 ms): p1 ended 05:04:21.72 -> `05:04:21.000000Z`..`05:06:21.000000Z`. q5 answer: a condition met 3 minutes ago does NOT count -- p2 at 05:08:41 found the expired window, was dropped and the row purged (`[]`), and p1 at 05:08:51 opened a new window holding only p1. B: an unrelated `other` opened `05:09:10`..`05:11:10` with results {}; p1 at 05:10:40 was counted; p2 at 05:11:31, 51 s after p1, did NOT fire because the window anchored at `other` had expired -- a true lookback would have fired. Then p1 05:11:39 + p2 05:11:48 in the fresh window fired (new/log-q5.json).",
+   "applies_to_egret": "bounds shape: both. Anchoring on an unrelated execution and dropping the event that finds an expired window: kestra_only (egret diverges, D1: a sliding window is anchored on the first MATCHING event, and an expired one is replaced)"
   },
   {
    "id": "daily_time_window",
-   "finding": "DAILY_TIME_WINDOW = [day start + from, day start + to], end exact. Bracketing now (03:00-05:00 at 04:08): p1 counted, p2 fired (prior/log-fast2.json q6a). Not bracketing (06:00-07:00 at 04:08): row `start 06:00:00.000000Z end 07:00:00.000000Z results {}` after BOTH p1 and p2, no fire -- the events are ignored, not stored for later (prior/log-fast2.json q6b)."
+   "finding": "DAILY_TIME_WINDOW = [day start + from, day start + to], end exact. Bracketing now (03:00-05:00 at 04:08): p1 counted, p2 fired (prior/log-fast2.json q6a). Not bracketing (06:00-07:00 at 04:08): row `start 06:00:00.000000Z end 07:00:00.000000Z results {}` after BOTH p1 and p2, no fire -- the events are ignored, not stored for later (prior/log-fast2.json q6b).",
+   "applies_to_egret": "both"
   },
   {
    "id": "deadline",
-   "finding": "DAILY_TIME_DEADLINE = [day start, day start + deadline], end exact. Before the deadline (05:00 at 04:53): p1 counted in `00:00:00.000000Z`..`05:00:00.000000Z`, p2 fired. After the deadline (03:00 at 04:53): no row after p1 and none after p2 (`| []`), no fire -- the window is created already expired, the event ignored, and the expired row purged in the same evaluation (new/log-bounds.json q7_deadline_in_future / q7_deadline_in_past)."
+   "finding": "DAILY_TIME_DEADLINE = [day start, day start + deadline], end exact. Before the deadline (05:00 at 04:53): p1 counted in `00:00:00.000000Z`..`05:00:00.000000Z`, p2 fired. After the deadline (03:00 at 04:53): no row after p1 and none after p2 (`| []`), no fire -- consistent with the Java: the window is created already expired, the event ignored, and the row purged in the same evaluation. This is INFERRED; on the artifact it cannot be told apart from 'never created' (new/log-bounds.json q7_deadline_in_future / q7_deadline_in_past).",
+   "applies_to_egret": "both (the event is ignored); how the row is disposed of differs (egret: sweep)"
   },
   {
    "id": "expiry_drops_the_next_event",
-   "finding": "An expired window is NOT replaced by the event that finds it. That event is ignored for the listener, and the expired row is then purged; only the NEXT event opens a fresh window. q8a: W1 `04:54:00`..`04:55:59.999` {p1}; still present at 04:56:08; p2 at 04:56:14 -> `[]` no fire; p1 at 04:57:39 -> new window `04:56:00`..`04:57:59.999` holding ONLY p1 (p2 was lost). The host was slow and p2 #2 ended at 05:01:20, after that window too, and was dropped the same way (`[]`, no fire) (new/log-q8.json). The prior q3 run shows the same (p2 at 04:12:06 -> `[]`; p2 again -> `{p2}`; prior/log-q3q8.json)."
+   "finding": "An expired window is NOT replaced by the event that finds it. That event is ignored for the listener, and the expired row is then purged; only the NEXT event opens a fresh window. q8a: W1 `04:54:00`..`04:55:59.999` {p1}; still present at 04:56:08; p2 at 04:56:14 -> `[]` no fire; p1 at 04:57:39 -> new window `04:56:00`..`04:57:59.999` holding ONLY p1 (p2 was lost). The host was slow and p2 #2 ended at 05:01:20, after that window too, and was dropped the same way (`[]`, no fire) (new/log-q8.json). The prior q3 run shows the same (p2 at 04:12:06 -> `[]`; p2 again -> `{p2}`; prior/log-q3q8.json).",
+   "applies_to_egret": "kestra_only: egret diverges (D1). egret replaces the expired window with fresh bounds and empty results, and counts the event"
   },
   {
    "id": "purge_is_tenant_wide_on_any_evaluation",
-   "finding": "The purge runs after ANY execution the listener hears, even one matching no dependency, and it removes expired rows tenant-wide (Java: `multipleConditionStorage.expired(tenant).forEach(delete)` at the end of computeExecutionsFromFlowTriggerDependsOn). q8b: W1 `05:00:00`..`05:01:59.999` {p1}; unrelated `other` at 05:02:06 -> `[]`; p2 05:02:14 -> fresh `05:02:00`..`05:03:59.999` {p2}; p1 05:02:22 -> fired on p1. So whether the first matching event after expiry is lost depends on whether some other heard execution ended in between (new/log-q8.json)."
+   "finding": "The purge runs after ANY execution the listener hears, even one matching no dependency, and it removes expired rows tenant-wide (Java: `multipleConditionStorage.expired(tenant).forEach(delete)` at the end of computeExecutionsFromFlowTriggerDependsOn). q8b: W1 `05:00:00`..`05:01:59.999` {p1}; unrelated `other` at 05:02:06 -> `[]`; p2 05:02:14 -> fresh `05:02:00`..`05:03:59.999` {p2}; p1 05:02:22 -> fired on p1. So whether the first matching event after expiry is lost depends on whether some other heard execution ended in between (new/log-q8.json).",
+   "applies_to_egret": "kestra_only: egret diverges (D1). egret deletes expired windows in the scheduler sweep only; an unrelated event purges nothing"
   },
   {
    "id": "q8_no_carry_over",
-   "finding": "A met condition that did not fire does not carry into the next window. q8c: p1 in `05:02:00`..`05:03:59.999`; `other` 05:04:05 purged it; p2 05:04:12 -> `05:04:00`..`05:05:59.999` holding only p2, no fire (new/log-q8.json)."
+   "finding": "A met condition that did not fire does not carry into the next window. q8c: p1 in `05:02:00`..`05:03:59.999`; `other` 05:04:05 purged it; p2 05:04:12 -> `05:04:00`..`05:05:59.999` holding only p2, no fire (new/log-q8.json).",
+   "applies_to_egret": "both"
   },
   {
    "id": "unrelated_event_opens_a_window",
-   "finding": "Any execution in a state the trigger listens to opens the listener's window if there is none, with `results {}`: q1 `other` -> row `results: {}` (prior/log-fast.json[1]); q5 B `other` -> `05:09:10`..`05:11:10` {} (new/log-q5.json). Only the trigger's own flow is excluded (FlowService.removeUnwanted). For SLIDING_WINDOW this anchors the window on an unrelated flow."
+   "finding": "Any execution in a state the trigger listens to opens the listener's window if there is none, with `results {}`: q1 `other` -> row `results: {}` (prior/log-fast.json[1]); q5 B `other` -> `05:09:10`..`05:11:10` {} (new/log-q5.json). Only the trigger's own flow is excluded (FlowService.removeUnwanted). For SLIDING_WINDOW this anchors the window on an unrelated flow.",
+   "applies_to_egret": "kestra_only: egret diverges (D1). Only an event matching at least one dependency opens a window"
   },
   {
    "id": "listener_delete_keeps_row",
-   "finding": "Deleting the listener flow does not delete its window row: after DELETE (204) q1a's row `results {p2}` is still there (prior/log-fast.json[8]). egret's ON DELETE CASCADE differs, CHOSEN: a re-created flow with the same id would otherwise inherit stale results."
+   "finding": "Deleting the listener flow does not delete its window row: after DELETE (204) q1a's row `results {p2}` is still there (prior/log-fast.json[8]). egret's ON DELETE CASCADE differs, CHOSEN: a re-created flow with the same id would otherwise inherit stale results.",
+   "applies_to_egret": "kestra_only: egret diverges (D1). ON DELETE CASCADE"
   },
   {
    "id": "q9_trigger_variables",
-   "finding": "A dependsOn fire's `trigger` is the window-free shape unchanged: id `t`, type `io.kestra.plugin.core.trigger.Flow`, variables with exactly the 9 keys endDate, executionId, executionLabels, flowId, flowRevision, lastTaskId, namespace, startDate, state -- the same tuple W13a measured (w13-flow-trigger.json findings[0]). Checked over all 23 fires in raw_records: in every one `variables.executionId`/`flowId` are the execution whose end COMPLETED the condition (e.g. q1: `\"flowId\": \"p2\"`, `\"executionId\": \"2t7rtQbF3dl8rxgY3H8TJi\"` = p2 #1), never the earlier ones; nothing about the window or the other results; `metadata.executionDepth` = 1; label `system.correlationId` = that same source id."
+   "finding": "A dependsOn fire's `trigger` is the window-free shape unchanged: id `t`, type `io.kestra.plugin.core.trigger.Flow`, variables with exactly the 9 keys endDate, executionId, executionLabels, flowId, flowRevision, lastTaskId, namespace, startDate, state -- the same tuple W13a measured (w13-flow-trigger.json findings[0]). Checked over all 23 fires in raw_records: in every one `variables.executionId`/`flowId` are the execution whose end COMPLETED the condition (e.g. q1: `\"flowId\": \"p2\"`, `\"executionId\": \"2t7rtQbF3dl8rxgY3H8TJi\"` = p2 #1), never the earlier ones; nothing about the window or the other results; `metadata.executionDepth` = 1; label `system.correlationId` = that same source id.",
+   "applies_to_egret": "both"
   },
   {
    "id": "event_exactly_at_end",
-   "finding": "Not measurable (an event cannot be placed on a millisecond). The Java is `isValid(now) = now.isAfter(start) && now.isBefore(end)`, strict at BOTH ends. CHOSEN: egret uses the same strict test; the pure tests in this file never place now on a bound."
+   "finding": "Not measurable (an event cannot be placed on a millisecond). The Java is `isValid(now) = now.isAfter(start) && now.isBefore(end)`, strict at BOTH ends. CHOSEN: egret uses the same strict test; the pure tests in this file never place now on a bound. The bounds use now truncated to the second; the validity check uses the UNTRUNCATED now, so the event opening a SLIDING or sub-minute window counts (grid_every_PT45S, q5).",
+   "applies_to_egret": "egret_chosen (from the Java)"
   }
  ],
  "raw_records": {

@@ -186,13 +186,32 @@ This follows `FlowTriggerService.processMultipleConditionWindow` and `AbstractJd
   - anything else gives `DURATION_WINDOW`, with `every` (default 1 day) as the window and `offset` as its advance.
 - A declaration that mixes exclusive groups is refused at save.
 - `Duration` values are parsed as the ISO-8601 subset the corpus uses. Anything else is refused, not guessed.
-- **`timezone` is a seventh field** (measured, W13b Task 1: the image's `Window` lists exactly `offset`, `lookback`, `deadline`, `timezone`, `from`, `to`, `every`). It is honoured for every kind except `lookback`. With no `timezone`, Kestra uses the server zone, measured `Etc/UTC`. egret has no server zone, so the default is UTC (chosen, and equal to what the artifact did). Any other field, such as `fireOnce`, is refused at save, as the artifact refuses it with 422. The Flow trigger has no `resetOnSuccess` field; a fire always resets.
-- **Bounds, measured** (`oracle-exec/w13b-windows.json`, `bounds_rule`, 26 cases). `now` is taken in the zone with nanoseconds dropped.
-  - `DURATION_WINDOW` is **not** a grid from midnight. If `every` ≥ 1 day, set the hour to 0. If ≥ 1 hour, set the minute to 0. If ≥ 1 minute, set the second to 0 and floor the minute to a multiple of `every`'s minutes. Then add `offset`, and `end = start + every − 1 ms`. So `PT6H` at 04:51 gives 04:00–09:59:59.999, not 00:00/06:00. `PT2M` at 04:53 gives 04:52. `PT45S` is not aligned at all.
-  - `offset` can put `start` in the future. An event before it is ignored, and the empty window is kept until it expires.
-  - `SLIDING_WINDOW` is `[now to the second, + lookback]`, with an exact end. It is fixed once created and **does not slide**. A condition met 3 minutes earlier does not count, and neither does one met 51 s earlier if the window, anchored on an earlier event, has expired.
-  - `DAILY_TIME_WINDOW` is `[midnight + from, midnight + to]`. `DAILY_TIME_DEADLINE` is `[midnight, midnight + deadline]`. Both ends are exact.
-  - An event counts only if `start < now < end`. Both ends are strict, as in Java's `isValid`. The artifact cannot place an event on a bound, so this part is **chosen** from the Java.
+- **`timezone` is a seventh field.** It was measured in W13b Task 1: the image's `Window` lists exactly `offset`, `lookback`, `deadline`, `timezone`, `from`, `to` and `every`. It is honoured for every kind except `lookback`.
+  - egret supports it (user decision D2). It takes an IANA zone, and an invalid zone is refused at save.
+  - With no `timezone`, the artifact aligned on UTC (measured). The container's zone is also UTC, so the claim that Kestra uses the *server* zone comes from the Java and its schema text; it is not measured.
+  - egret has no server zone, so the default is UTC. That is chosen, and it equals what the artifact did.
+  - Any other field, such as `fireOnce`, is refused at save, as the artifact refuses it with 422.
+  - The Flow trigger has no `resetOnSuccess` field, so a fire always resets.
+- **Bounds** (`oracle-exec/w13b-windows.json`, `bounds_rule`, 26 cases). There are two `now`s, and they must not be confused.
+  - The **bounds** are computed from `now` in the zone, **truncated to the second**.
+  - **Validity** uses the **untruncated** `now` (Postgres `now()`, µs): an event counts only if `start < now < end`. Both ends are strict, as in Java's `isValid`.
+  - So the event that opens a `SLIDING_WINDOW` or a sub-minute `DURATION_WINDOW` counts. For example, `PT45S` with `now` 04:51:50.560775 gives start 04:51:50.000000, and `event_counted` is true.
+  - The artifact cannot place an event on a bound, so strictness is **chosen** from the Java.
+- **`DURATION_WINDOW`** (user decision D3). The rule is:
+  - If `every` ≥ 1 day, set the hour to 0.
+  - If `every` ≥ 1 hour, set the minute to 0.
+  - If `every` ≥ 1 minute, set the second to 0 and floor the minute to a multiple of `every`'s whole minutes.
+  - Then add `offset`, and `end = start + every − 1 ms`.
+
+  This is **measured** for `every` ∈ {P1D, PT6H, PT90M, PT1H, PT2M, PT45S}, with and without `offset`:
+  - `PT6H` at 04:51 gives 04:00–09:59:59.999. It is **not** the midnight grid of 00:00/06:00 that the javadoc describes.
+  - `PT2M` at 04:53 gives 04:52.
+  - `PT45S` is not aligned at all.
+
+  Other durations use the same rule and are **chosen from the Java, consistent with the measured cases**; they are not refused. Examples are `PT7M` (sub-hour, not dividing 60, so the window restarts at :00), `PT90S` (1 whole minute) and `P2D`.
+- **`offset`** can put `start` in the future (measured). An event before `start` is ignored.
+- **`SLIDING_WINDOW`** is `[now truncated to the second, + lookback]`, with an exact end. It is fixed once created and **does not slide**, both on the artifact (measured) and in egret.
+- **`DAILY_TIME_WINDOW`** is `[midnight + from, midnight + to]` and **`DAILY_TIME_DEADLINE`** is `[midnight, midnight + deadline]`. Both ends are exact (measured).
 
 ### 5.2 Schema (migration `0158`)
 
@@ -209,21 +228,37 @@ CREATE TABLE workflow.flow_trigger_windows (
 );
 ```
 
+**Deleting a listener cascades its window row.** Kestra keeps the row after the listener flow is deleted (measured: `prior/log-fast.json[8]`, finding `listener_delete_keeps_row`). egret's `ON DELETE CASCADE` is a deliberate divergence (user decision D1): with Kestra's behaviour, a flow re-created with the same id would inherit stale results.
+
 ### 5.3 Processing a `dependsOn` listener
 
 This runs inside §4.4's per-listener savepoint:
 
-1. Run `INSERT … ON CONFLICT DO NOTHING` for a fresh window computed at Postgres `now()`, then `SELECT … FOR UPDATE`. **An expired window is not replaced** (measured, contradicting an earlier draft). The event that finds it is ignored for this listener, like any event outside its window, and step 5 deletes the row. Only the next event opens a fresh window. Every event the listener hears opens a window, even one that matches no dependency: its `results` are `{}`, and for `SLIDING_WINDOW` it anchors the window.
-2. If `now` is outside the window (for example `DAILY_TIME_WINDOW` off-hours, a future `offset` start, or a passed `deadline`), the event is ignored for this listener. It is not stored for later.
-3. Evaluate each `Dependency`: namespace, flowId, `states`, `labels`, and `when` rendered on the source. Merge the true results; a condition already met stays met.
-4. If the trigger's own `when` holds and `mode` is satisfied (`ALL`, `ANY`, or `AT_LEAST` ≥ `minSatisfied`), fire through §4.4's path. Then delete the window. This is measured under `ALL`, `ANY` and `AT_LEAST` alike: `ANY` therefore fires on every matching event, and `AT_LEAST` starts again from nothing.
-5. After each event's listeners are processed, delete **every expired window in the workspace**. Kestra purges tenant-wide at the end of every `dependsOn` evaluation, and the event that triggers the purge can be one that matches nothing. So whether the first matching event after an expiry is lost depends on whether another heard event came in between. That is measured (`q8_expired_unpurged_then_event` versus `q8_expired_purged_by_unrelated_execution`). The ticker does **not** purge on its own. That is **chosen**: a timed purge would hide the measured drop. A met condition never carries into the next window (measured).
+1. **Only an event that matches at least one of the listener's dependencies touches its window.** An event that matches none of them neither opens a window nor purges one.
+2. Compute a fresh window at Postgres `now()`, run `INSERT … ON CONFLICT DO NOTHING`, then run `SELECT … FOR UPDATE`.
+   - If the row found has **expired** (`end <= now`), replace it with the fresh window's bounds and empty `results`, and evaluate the event against the fresh window. The event counts.
+   - For `SLIDING_WINDOW`, this means the window is anchored on the first *matching* event.
+3. If `now` is outside the (possibly fresh) window, the event is ignored for this listener and is not stored for later. Examples are `DAILY_TIME_WINDOW` off-hours, a future `offset` start, and a passed `deadline`.
+4. Evaluate each `Dependency`: namespace, flowId, `states`, `labels`, and `when` rendered on the source. Merge the true results. A condition already met stays met.
+5. If the trigger's own `when` holds and `mode` is satisfied (`ALL`, `ANY`, or `AT_LEAST` ≥ `minSatisfied`), fire through §4.4's path, then delete the window.
+   - The artifact deletes it under `ALL`, `ANY` and `AT_LEAST` alike (measured). `ANY` therefore fires on every matching event, and `AT_LEAST` starts again from nothing.
+6. The scheduler pass deletes expired windows (`sweep_expired_windows`). No purge runs after each event.
+7. A met condition never carries into the next window (measured, and the same in egret).
+
+**Kestra, as measured: a deliberate divergence (user decision D1).** Steps 1, 2 and 6 differ from the artifact (`oracle-exec/w13b-windows.json`, findings `expiry_drops_the_next_event`, `purge_is_tenant_wide_on_any_evaluation`, `unrelated_event_opens_a_window` and `listener_delete_keeps_row`).
+
+- **An expired window is not replaced on the artifact.** The event that finds it is ignored, and the row is purged afterwards, so only the *next* event opens a fresh window (`q8_expired_unpurged_then_event`).
+- **Every execution the listener hears opens a window**, even one matching no dependency. Its `results` are `{}`, and for `SLIDING_WINDOW` that execution becomes the anchor (`q5` part B).
+- **The purge runs at the end of every `dependsOn` evaluation**, including one that matched nothing. So whether the first matching event after an expiry is lost depends on whether an unrelated execution came in between (`q8_expired_purged_by_unrelated_execution`).
+  - It is measured that the listener's own expired row is purged by an unrelated execution.
+  - That the purge covers the whole tenant comes from the Java (`expired(tenant)`); it was not measured.
+- egret does not reproduce this, because the outcome would depend on unrelated traffic.
 
 **Concurrency.** Two sources that satisfy two conditions of one listener, processed on two replicas, serialise on the window row. The second one reads the first one's result and fires once. `ON CONFLICT DO NOTHING` + `FOR UPDATE` means a missing row cannot be created twice.
 
 ### 5.4 Measured before coded
 
-W13b Task 1 fires real flows on the pinned artifact and saves the results verbatim. The Java above does not settle these questions. **The answers are in `oracle-exec/w13b-windows.json`, and §5.1 and §5.3 above are amended to match them.** A fired execution's `trigger.variables` are the window-free shape unchanged: the 9 keys W13a measured, describing the source that completed the condition.
+W13b Task 1 fires real flows on the pinned artifact and saves the results verbatim. The Java above does not settle these questions. **The answers are in `oracle-exec/w13b-windows.json`.** §5.1 and §5.3 above state egret's behaviour. Each marks what is measured and what is chosen, and names the deliberate divergences from the artifact's window lifecycle. A fired execution's `trigger.variables` are the window-free shape unchanged: the 9 keys W13a measured, describing the source that completed the condition.
 
 - `DURATION_WINDOW` bounds: midnight in which zone, and the effect of `offset`.
 - How `SLIDING_WINDOW`'s start is set.
@@ -277,7 +312,10 @@ Every row names the mutation that must turn it red.
 | property | mutation it must kill |
 |---|---|
 | `ALL` over two dependencies: A alone does not fire; A then B fires once and resets the window | do not merge results |
-| an event that finds an expired, unpurged window is ignored and the row is purged; the next event opens a fresh window | replace the expired window in step 1 |
+| an event that finds an expired window replaces it (fresh bounds, empty results) and counts: the deliberate divergence from Kestra's drop | ignore the event, or keep the expired results |
+| an event matching no dependency opens no window and purges none | open the window before matching |
+| the scheduler sweep deletes expired windows; the event path does not | drop the sweep |
+| deleting a listener deletes its window row | drop the cascade |
 | `ANY`; `AT_LEAST` with `minSatisfied` | swap the mode comparison |
 | two sources on two processors satisfying `ALL` together fire exactly once | drop the window's `FOR UPDATE` |
 | an expired window's results do not count | drop the `end` check |
