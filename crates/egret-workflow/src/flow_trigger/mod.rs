@@ -305,7 +305,7 @@
 //! later "a met condition does not carry into the next window" assertion is
 //! the one a weaker test would have needed).
 //!
-//! ## 10. The sweep -- one autocommit `DELETE`, no lock of its own
+//! ## 10. The sweep -- one autocommit `DELETE`, no lock wait of its own
 //!
 //! [`sweep_expired_windows`], once per scheduler pass after
 //! [`process_events_with`] (`runtime::spawn_scheduler`):

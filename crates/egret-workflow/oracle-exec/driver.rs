@@ -371,10 +371,15 @@ fn subflow_targets(flow: &egret_workflow::models::Flow, out: &mut BTreeSet<Strin
 /// **`RefKind::Subflow` resolutions `publish` made inside a publish that
 /// SUCCEEDED** — the size of the surface steps 4-7 were actually exercised on.
 ///
-/// One per `core.subflow` task in the [`LIVE`] flows that reach a live version,
-/// and zero from anywhere else: no corpus flow declares an `egret.*` type (so
-/// no other `RefKind` is reachable at all), and none of them declares a
-/// `core.trigger.flow` (so `resolve_trigger_dependencies` makes none either).
+/// Two sources, both through the `RefKind::Subflow` seam, in the [`LIVE`]
+/// flows that reach a live version: one per `core.subflow` task, **and** one
+/// per `dependsOn` entry of a `core.trigger.Flow` trigger, which
+/// `resolve_trigger_dependencies` (there since W1, `228173f9`) resolves the
+/// same way. No corpus flow declares an `egret.*` type, so no other `RefKind`
+/// is reachable at all. The split between the two sources is not measured
+/// here; the constant has counted both since it was set at W10 (`48f91c03`).
+/// (Corrected in the W13b final-review fix wave: this paragraph used to say
+/// no corpus flow declares a flow trigger, which was false when written.)
 ///
 /// **18 through W8 Task 2, 19 through W10 Task 6, 47 now**, and the pair must
 /// still be read as one measurement — but the arithmetic that held them
@@ -392,9 +397,8 @@ fn subflow_targets(flow: &egret_workflow::models::Flow, out: &mut BTreeSet<Strin
 /// **47 → 45 at W13b Task 2**, and this time nothing about `Subflow` moved:
 /// the two were the `dependsOn` pair of
 /// `valids/flow-trigger-fire-once-true-flow-listen`, resolved through the
-/// same `RefKind::Subflow` seam by `resolve_trigger_dependencies` (the
-/// sentence above saying no corpus flow declares a flow trigger predates
-/// W13a). That flow no longer parses -- `models::Window` refuses `fireOnce`,
+/// same `RefKind::Subflow` seam by `resolve_trigger_dependencies`. That flow
+/// no longer parses -- `models::Window` refuses `fireOnce`,
 /// as the pinned artifact does with 422 -- so it never reaches publish. See
 /// [`PARSE_REFUSED`] and [`LIVE`], which moved with it.
 const SUBFLOW_LOOKUPS_ON_PUBLISHED: usize = 45;

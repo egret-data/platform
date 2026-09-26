@@ -214,6 +214,13 @@ This follows `FlowTriggerService.processMultipleConditionWindow` and `AbstractJd
 - **`offset`** can put `start` in the future (measured). An event before `start` is ignored.
 - **`SLIDING_WINDOW`** is `[now truncated to the second, + lookback]`, with an exact end. It is fixed once created and **does not slide**, both on the artifact (measured) and in egret.
 - **`DAILY_TIME_WINDOW`** is `[midnight + from, midnight + to]` and **`DAILY_TIME_DEADLINE`** is `[midnight, midnight + deadline]`. Both ends are exact (measured).
+- **DST: chosen from the Java, not measured.** Task 1's container was UTC, and the only other zones it measured have no DST (Asia/Kolkata, Asia/Ho_Chi_Minh). egret follows `java.time` (controller ruling, consistent with D3):
+  - the local edits (truncate to the day, set the hour, minute or second) are re-resolved in the zone;
+  - every addition (`from`, `to`, `deadline`, `every`, `offset`, `lookback`) is a **fixed duration added to that instant from local midnight**, not a wall-clock reading. So "`midnight + from`" above means elapsed time.
+
+  On a DST change day this is visible to users:
+  - a daily `from: 10:00` window opens at **11:00 local on a spring-forward day** (and at 09:00 local on a fall-back day);
+  - a one-day window (`P1D`, the default) is always exactly 24 hours, so on a 23-hour day it **ends an hour into the next local day**.
 
 ### 5.2 Schema (migration `0158`)
 
@@ -242,6 +249,7 @@ This runs inside §4.4's per-listener savepoint:
    - For `SLIDING_WINDOW`, this means the window is anchored on the first *matching* event.
 3. If `now` is outside the (possibly fresh) window, the event is ignored for this listener and is not stored for later. Examples are `DAILY_TIME_WINDOW` off-hours, a future `offset` start, and a passed `deadline`.
 4. Evaluate each `Dependency`: namespace, flowId, `states`, `labels`, and `when` rendered on the source. Merge the true results. A condition already met stays met.
+   - **`labels` are matched against the source flow's declared `labels:`, not the source execution's.** egret has no execution labels (§4.5), so this is the same stand-in `executionLabels` uses. It is a divergence from Kestra, which matches the execution's labels, and it fails closed: a dependency that requires a label existing only at run time (`system.correlationId`, or a label an API start adds) never matches.
 5. If the trigger's own `when` holds and `mode` is satisfied (`ALL`, `ANY`, or `AT_LEAST` ≥ `minSatisfied`), fire through §4.4's path, then delete the window.
    - The artifact deletes it under `ALL`, `ANY` and `AT_LEAST` alike (measured). `ANY` therefore fires on every matching event, and `AT_LEAST` starts again from nothing.
 6. The scheduler pass deletes expired windows (`sweep_expired_windows`). No purge runs after each event.
@@ -256,7 +264,7 @@ This runs inside §4.4's per-listener savepoint:
   - That the purge covers the whole tenant comes from the Java (`expired(tenant)`); it was not measured.
 - egret does not reproduce this, because the outcome would depend on unrelated traffic.
 
-**Concurrency.** Two sources that satisfy two conditions of one listener, processed on two replicas, serialise on the window row. The second one reads the first one's result and fires once. `ON CONFLICT DO NOTHING` + `FOR UPDATE` means a missing row cannot be created twice.
+**Concurrency.** Two sources that satisfy two conditions of one listener, processed on two replicas, serialise on the window row, and the listener fires once. The loser of the race fails with a serialisation error (`40001`), rolls its savepoint back, and its event is evaluated again **on a later pass, at that pass's `now()`, without spending an attempt**. It then reads the first one's result. If the window expired meanwhile, the event opens the next one (and for a daily window it can fall outside the window and be ignored, as in step 3). `ON CONFLICT DO NOTHING` + `FOR UPDATE` means a missing row cannot be created twice.
 
 ### 5.4 Measured before coded
 

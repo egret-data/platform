@@ -992,7 +992,10 @@ async fn listen_depends_on(
     // this renders it and passes `Rendered`; only an explicit `when: null` is
     // `NotDeclared` (which `dependency_matches` accepts for exactly that).
     // Labels are the source FLOW's declared ones -- egret has no execution
-    // labels, the same stand-in `executionLabels` uses (spec §4.5).
+    // labels (spec §4.5), so this is the same stand-in `executionLabels` uses
+    // (the variables table below). It diverges from Kestra, which matches the
+    // source EXECUTION's labels, and fails closed: a label that exists only
+    // at run time never matches. Written down in spec §5.3 step 4.
     let dep_source = DepSource {
         namespace: &source.record.namespace,
         flow_id: &source.record.flow_id,
@@ -1069,8 +1072,17 @@ impl From<Error> for StepError {
 /// (`ORDER BY namespace, flow_id, trigger_id`), one row per listener, and the
 /// sweep takes its rows `SKIP LOCKED`, so it never waits and closes no cycle.
 /// It is classified as contention anyway -- a deadlock victim's competitor
-/// committed too -- so that a cycle through some other lock (the fire's
-/// foreign-key checks) cannot spend attempts either.
+/// committed too -- so that a cycle closed through some other lock by a
+/// WINDOW statement cannot spend attempts either.
+///
+/// **This does not cover the fire.** A fire's errors go through
+/// `start_fire(..)?`, `StartFailed` and [`failed_start_fate`], never through
+/// here, so a deadlock in the fire (for example a flow delete cascading into
+/// the window row while the fire's foreign-key check takes `KEY SHARE` on
+/// `workflow.flows`) is a failed start and spends an attempt. That is safe --
+/// the savepoint rolls the window back with it and the event is retried --
+/// but it is an attempt, not free contention. (Final review, RR-2: an
+/// earlier version of this comment said the opposite.)
 fn step_err(e: sqlx::Error) -> StepError {
     let code = e.as_database_error().and_then(|d| d.code());
     match code.as_deref() {

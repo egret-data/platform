@@ -225,6 +225,13 @@ Phần này bám theo `FlowTriggerService.processMultipleConditionWindow` và `A
 - **`offset`** có thể đẩy `start` vào tương lai (đã đo). Sự kiện đến trước `start` bị bỏ qua.
 - **`SLIDING_WINDOW`** là `[now làm tròn tới giây, + lookback]`, `end` chính xác. Nó cố định từ lúc tạo và **không trượt**, cả trên artifact (đã đo) lẫn trong egret.
 - **`DAILY_TIME_WINDOW`** là `[nửa đêm + from, nửa đêm + to]`, và **`DAILY_TIME_DEADLINE`** là `[nửa đêm, nửa đêm + deadline]`. Cả hai đầu đều chính xác (đã đo).
+- **DST: chọn theo Java, chưa đo.** Container của Task 1 chạy UTC, và các zone khác mà nó đo đều không có DST (Asia/Kolkata, Asia/Ho_Chi_Minh). egret làm theo `java.time` (phán quyết của controller, nhất quán với D3):
+  - các phép sửa cục bộ (cắt về đầu ngày, đặt giờ, phút hay giây) được giải lại trong zone;
+  - mọi phép cộng (`from`, `to`, `deadline`, `every`, `offset`, `lookback`) là **một khoảng thời lượng cố định cộng vào thời điểm đó tính từ nửa đêm địa phương**, không phải một số đọc trên đồng hồ treo tường. Vì vậy "`nửa đêm + from`" ở trên nghĩa là thời gian đã trôi qua.
+
+  Vào ngày đổi giờ, người dùng sẽ thấy điều này:
+  - một cửa sổ hằng ngày `from: 10:00` mở lúc **11:00 giờ địa phương vào ngày chỉnh giờ tiến (spring-forward)** (và 09:00 giờ địa phương vào ngày lùi giờ);
+  - một cửa sổ một ngày (`P1D`, mặc định) luôn dài đúng 24 giờ, nên vào ngày chỉ có 23 giờ nó **kết thúc sau một giờ của ngày địa phương kế tiếp**.
 
 ### 5.2 Schema (migration `0158`)
 
@@ -253,6 +260,7 @@ Chạy bên trong savepoint của từng listener ở §4.4:
    - Với `SLIDING_WINDOW`, điều này nghĩa là cửa sổ neo vào sự kiện *khớp* đầu tiên.
 3. Nếu `now` nằm ngoài cửa sổ (có thể là cửa sổ vừa tạo), sự kiện bị bỏ qua đối với listener này và không được giữ lại để dùng sau. Ví dụ: `DAILY_TIME_WINDOW` ngoài khung giờ, `start` bị `offset` đẩy vào tương lai, hoặc đã qua `deadline`.
 4. Đánh giá từng `Dependency`: namespace, flowId, `states`, `labels`, và `when` render trên nguồn. Các kết quả true được cộng dồn. Điều kiện đã đạt thì giữ nguyên là đạt.
+   - **`labels` được so với `labels:` khai báo trên flow nguồn, không phải label của execution nguồn.** egret chưa có label của execution (§4.5), nên đây là cùng cách thay thế mà `executionLabels` dùng. Đây là khác biệt so với Kestra (Kestra so với label của execution), và nó đóng về phía an toàn: một dependency đòi một label chỉ tồn tại lúc chạy (`system.correlationId`, hay label do lời gọi API start thêm vào) không bao giờ khớp.
 5. Nếu `when` của trigger đạt và `mode` thoả (`ALL`, `ANY`, hoặc `AT_LEAST` ≥ `minSatisfied`), trigger bắn qua đường của §4.4, rồi cửa sổ bị xoá.
    - Artifact xoá cửa sổ như nhau ở `ALL`, `ANY` và `AT_LEAST` (đã đo). Vì vậy `ANY` bắn ở mọi sự kiện khớp, còn `AT_LEAST` đếm lại từ đầu.
 6. Pass của scheduler xoá các cửa sổ hết hạn (`sweep_expired_windows`). Không có lần dọn nào chạy sau mỗi sự kiện.
@@ -268,7 +276,7 @@ Chạy bên trong savepoint của từng listener ở §4.4:
 - egret không tái tạo hành vi này, vì kết quả sẽ phụ thuộc vào lưu lượng không liên quan.
 
 **Đồng thời:**
-- Hai nguồn thoả hai điều kiện của cùng một listener, được xử lý trên hai replica, sẽ xếp hàng trên row của cửa sổ. Cái sau đọc thấy kết quả của cái trước và bắn đúng một lần.
+- Hai nguồn thoả hai điều kiện của cùng một listener, được xử lý trên hai replica, sẽ xếp hàng trên row của cửa sổ, và listener bắn đúng một lần. Bên thua cuộc đua gặp lỗi serialisation (`40001`), rollback savepoint của nó, và sự kiện của nó được đánh giá lại **ở một pass sau, tại `now()` của pass đó, không tốn một lần thử (attempt)**. Khi đó nó đọc thấy kết quả của bên thắng. Nếu cửa sổ đã hết hạn trong lúc đó, sự kiện mở cửa sổ kế tiếp (và với cửa sổ hằng ngày, nó có thể rơi ra ngoài cửa sổ và bị bỏ qua, như ở bước 3).
 - Cặp `ON CONFLICT DO NOTHING` + `FOR UPDATE` bảo đảm một hàng chưa tồn tại không thể bị tạo hai lần.
 
 ### 5.4 Đo trước khi viết code

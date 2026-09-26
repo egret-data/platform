@@ -8430,7 +8430,7 @@ reachable through any flow trigger, windowed or not.
 | | ratchet | what the task shipped |
 |---|---|---|
 | package base `741169f9` (origin/main, W13a's merge) | 109 mismatching, 109 baselined, 0 broken (`executor_matches_golden` ok in Task 1's baseline gate) | -- |
-| Task 1 | 109 | the window measured on the pinned artifact (`oracle-exec/w13b-windows.json`): bounds of the four `TimeWindow` kinds, DST and midnight, expiry, the mode sequences, the condition keys; user decisions D1-D3 (replace an expired window, only a matching event opens one, the ticker sweeps; `timezone` supported; the measured `DURATION_WINDOW` rule) |
+| Task 1 | 109 | the window measured on the pinned artifact (`oracle-exec/w13b-windows.json`): bounds of the four `TimeWindow` kinds and midnight (in UTC and two zones without DST, Asia/Kolkata and Asia/Ho_Chi_Minh; **DST was not measured** -- the container was UTC and no case crossed a transition -- so DST is derived from `java.time`, see `trigger::window`'s module doc), expiry, the mode sequences, the condition keys; user decisions D1-D3 (replace an expired window, only a matching event opens one, the ticker sweeps; `timezone` supported; the measured `DURATION_WINDOW` rule) |
 | Task 2 | 109 | `models::Window` (seven fields, `deny_unknown_fields`, so `fireOnce` is refused at parse as the artifact refuses it), ISO durations capped at 366 days, and the save-time refusals; three census constants moved for the one flow that no longer parses |
 | Task 3 | not measured (no execution path) | the pure `trigger::window` and `trigger::depends_on`: bounds, `merge`, `satisfied`, the murmur3 condition keys reproducing the artifact's three, and one refusal list shared by save and run time |
 | Task 4 | 109 | migration 0158 (`workflow.flow_trigger_windows`), the `dependsOn` arm of the processor (`FOR UPDATE` on the window row, fire then delete under every mode), the ticker's sweep; fix round 1 made a lost `40001` race free of `MAX_ATTEMPTS` |
@@ -8489,10 +8489,14 @@ with `dependsOn`:
   `window.fireOnce` the pinned artifact refuses with 422 too (Task 2).
 
 **Zero of the twenty declare a `window:`** -- beside the 18 that resolve, a
-number that could have disagreed. So the four window kinds, `timezone`, DST
-and the midnight grid are judged by Task 1's measurements and this crate's
-own tests, never by the corpus, and the corpus exercises exactly one window
-shape: the default.
+number that could have disagreed. So the four window kinds, `timezone` and
+the midnight grid are judged by Task 1's measurements and this crate's own
+tests, never by the corpus, and the corpus exercises exactly one window
+shape: the default. **DST is judged by neither a measurement nor the
+corpus**: it is derived from `java.time` (a fixed-duration add from local
+midnight; `trigger::window`, *DST -- chosen from the Java, never measured*)
+and pinned only by this crate's own tests. Spec §5.1 states its visible
+effect.
 
 #### §7.2, row by row
 
