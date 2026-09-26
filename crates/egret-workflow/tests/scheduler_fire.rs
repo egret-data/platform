@@ -181,6 +181,22 @@ async fn a_due_trigger_fires_once_and_moves_on() {
         })
     );
 
+    // W13a Task 3: every caller that is not the Flow-trigger processor starts
+    // at the bottom of a chain -- no source link, depth 0, no outbox event.
+    let chain: (Option<Uuid>, i32, Option<i64>) = sqlx::query_as(
+        "SELECT trigger_execution_id, execution_depth, flow_trigger_event_id \
+           FROM workflow.executions WHERE flow_id = $1",
+    )
+    .bind(flow)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("read the chain columns");
+    assert_eq!(
+        chain,
+        (None, 0, None),
+        "a Schedule start is not a Flow-trigger fire"
+    );
+
     let after = row(&fx.db, flow).await.unwrap();
     assert_eq!(after.next_evaluation_date, Some(due + Duration::minutes(1)));
     assert_eq!(after.evaluated_at, Some(due));

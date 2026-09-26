@@ -1,23 +1,30 @@
-//! `sync`: keep `workflow.triggers` in step with a flow's YAML (spec §3.3).
+//! `sync`: keep a flow's trigger rows in step with its YAML -- `workflow.triggers`
+//! for its `Schedule` triggers (W12 spec §3.3) and `workflow.flow_listeners` for
+//! its `Flow` triggers (W13 spec §4.2). A `Webhook` trigger has no row; the
+//! route resolves it from the flow's source on every request.
 
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::models::{Schedule, Trigger, TriggerKind};
+use crate::models::{Schedule, State, Trigger, TriggerKind};
 use crate::repo::{flow_cols, FlowRow};
-use crate::trigger::{FixedClock, ScheduleTrigger, TriggerState};
+use crate::trigger::{
+    FixedClock, FlowTriggerError, ScheduleTrigger, TriggerState, WindowFreeFlowTrigger,
+};
 
 fn db_err(e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))
 }
 
-/// Bring `workflow.triggers` in line with `flow.source`. Called inside the
-/// transaction that wrote `flow`; `gone = true` for a delete.
+/// Bring `workflow.triggers` and `workflow.flow_listeners` in line with
+/// `flow.source`. Called inside the transaction that wrote `flow`; `gone =
+/// true` for a delete.
 ///
-/// 1. The flow's `Schedule` triggers are collected -- none if `gone` or if the
-///    source does not parse. Webhook and flow triggers never get a row.
+/// 1. The flow's `Schedule` and `Flow` triggers are collected in one pass --
+///    none if `gone` or if the source does not parse. A `Webhook` trigger
+///    never gets a row.
 /// 2. Rows whose `trigger_id` is no longer declared are deleted.
 /// 3. Each declared schedule is upserted. A new row, or one whose `spec_key`
 ///    changed, is initialised to the **next** cron tick after the
@@ -29,7 +36,11 @@ fn db_err(e: sqlx::Error) -> Error {
 ///    *`) -- it is stored with `next_evaluation_date = NULL` and the reason in
 ///    `last_error`.
 ///
-/// Point 4 does not reach a row that keeps its dates. A refusal whose cause is
+/// 5. The `Flow` triggers go to [`sync_flow_listeners`], in the same
+///    transaction: one `workflow.flow_listeners` row per declaration, stale
+///    rows deleted, `states`/`depends_on`/`disabled` rewritten every time.
+///
+/// Points 2-4 are about `workflow.triggers`. Point 4 does not reach a row that keeps its dates. A refusal whose cause is
 /// not in `spec_key` (`lateMaximumDelay`, `when`), written onto a row that is
 /// already queued under an unchanged key, leaves the old date and the old
 /// `last_error` in place; `fire_due` meets the refusal when that date comes
@@ -46,10 +57,19 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
     } else {
         crate::spec::parse(&flow.source).ok()
     };
-    let schedules: Vec<&Trigger> = parsed
+    // One pass over `flow.triggers` (spec §4.2): `all_triggers` is built once
+    // and both `schedules` and `flow_triggers` filter it, rather than each
+    // re-walking `parsed` with its own `flat_map`.
+    let all_triggers: Vec<&Trigger> = parsed.iter().flat_map(|f| f.triggers.iter()).collect();
+    let schedules: Vec<&Trigger> = all_triggers
         .iter()
-        .flat_map(|f| f.triggers.iter())
+        .copied()
         .filter(|t| matches!(t.kind, TriggerKind::Schedule(_)))
+        .collect();
+    let flow_triggers: Vec<&Trigger> = all_triggers
+        .iter()
+        .copied()
+        .filter(|t| matches!(t.kind, TriggerKind::Flow(_)))
         .collect();
     let flow_disabled = parsed.as_ref().is_some_and(|f| f.disabled);
 
@@ -124,7 +144,116 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
         .await
         .map_err(db_err)?;
     }
+
+    sync_flow_listeners(conn, flow, &flow_triggers, flow_disabled).await?;
+
     Ok(())
+}
+
+/// Keep `workflow.flow_listeners` in step with the flow's declared `Flow`
+/// triggers (spec §4.2), in the same transaction as the schedule rows above.
+///
+/// - A `dependsOn` declaration gets a row with `depends_on = true` even though
+///   [`WindowFreeFlowTrigger::resolve`] refuses it -- W13a's processor skips
+///   depends-on rows, W13b's owns them, but `sync` must not wait for that:
+///   `depends_on` is read straight off `spec.depends_on` before `resolve` is
+///   ever called.
+/// - A declaration that is not `dependsOn` but still fails to resolve (for
+///   any reason `resolve` may one day report) gets **no row**, and the reason
+///   is logged rather than silently dropped.
+async fn sync_flow_listeners(
+    conn: &mut PgConnection,
+    flow: &FlowRow,
+    flow_triggers: &[&Trigger],
+    flow_disabled: bool,
+) -> Result<()> {
+    struct ListenerRow<'a> {
+        trigger_id: &'a str,
+        states: &'a [State],
+        depends_on: bool,
+        disabled: bool,
+    }
+
+    let mut rows: Vec<ListenerRow> = Vec::new();
+    for t in flow_triggers {
+        let TriggerKind::Flow(spec) = &t.kind else {
+            unreachable!("filtered to TriggerKind::Flow above")
+        };
+        let depends_on = !spec.depends_on.is_empty();
+        let disabled = flow_disabled || t.disabled;
+        if depends_on {
+            rows.push(ListenerRow {
+                trigger_id: &t.id,
+                states: &spec.states,
+                depends_on: true,
+                disabled,
+            });
+            continue;
+        }
+        match WindowFreeFlowTrigger::resolve(t) {
+            Ok(_) => rows.push(ListenerRow {
+                trigger_id: &t.id,
+                states: &spec.states,
+                depends_on: false,
+                disabled,
+            }),
+            Err(FlowTriggerError::UnsupportedDependsOn(_)) => {
+                unreachable!("depends_on is empty here, checked above")
+            }
+            Err(e) => {
+                tracing::warn!(
+                    flow_id = %flow.id,
+                    trigger_id = %t.id,
+                    error = %e,
+                    "flow trigger could not be resolved; no listener row written"
+                );
+            }
+        }
+    }
+
+    let keep: Vec<String> = rows.iter().map(|r| r.trigger_id.to_string()).collect();
+    sqlx::query(
+        "DELETE FROM workflow.flow_listeners WHERE flow_id = $1 AND NOT (trigger_id = ANY($2))",
+    )
+    .bind(flow.id)
+    .bind(&keep)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+
+    for r in rows {
+        let states: Vec<String> = r.states.iter().map(state_wire_name).collect();
+        sqlx::query(
+            "INSERT INTO workflow.flow_listeners \
+               (flow_id, trigger_id, workspace_id, states, depends_on, disabled) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (flow_id, trigger_id) DO UPDATE SET \
+               states = EXCLUDED.states, \
+               depends_on = EXCLUDED.depends_on, \
+               disabled = EXCLUDED.disabled",
+        )
+        .bind(flow.id)
+        .bind(r.trigger_id)
+        .bind(flow.workspace_id)
+        .bind(&states)
+        .bind(r.depends_on)
+        .bind(r.disabled)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    }
+    Ok(())
+}
+
+/// `State`'s Kestra spelling (`"SUCCESS"`, `"PAUSED"`, ...), the same
+/// `SCREAMING_SNAKE_CASE` [`State`]'s own `Serialize` produces -- reused
+/// rather than hand-written so a future variant added to the enum cannot
+/// silently desync the two spellings.
+fn state_wire_name(s: &State) -> String {
+    match serde_json::to_value(s).expect("State serialises to a JSON string") {
+        serde_json::Value::String(name) => name,
+        other => unreachable!("State must serialise to a JSON string, got {other:?}"),
+    }
 }
 
 /// What [`reconcile`] did.

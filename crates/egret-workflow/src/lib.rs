@@ -12,7 +12,7 @@
 //! - `repo`      — W1 (`workflow.flows` + `workflow.flow_versions`) and W10
 //!   Task 3 (`ExecutionRepo`, the READ layer over `workflow.executions` +
 //!   `workflow.task_runs`; the writes stay in `worker::claim`, which holds the
-//!   `FOR UPDATE` this one deliberately does not)
+//!   `FOR NO KEY UPDATE` this one deliberately does not)
 //! - `refs`      — W1 Task 7 (`WorkflowRefs`, the real `WorkflowRefPort`)
 //! - `routes`    — W1 Task 7 (the nine management routes, spec §10)
 //! - `runners`   — W2 (expression rendering)
@@ -28,6 +28,8 @@
 //!   spec §9) -- behind `scheduler_enabled`, default `false`
 //! - `scheduler` — W12 (`workflow.triggers`, `sync`; the database half that
 //!   `trigger` must not contain)
+//! - `flow_trigger` — W13a (the outbox processor: the Flow trigger's database
+//!   half, run from the scheduler ticker)
 //! - `plugins`   — W5 (handler registry)
 //!
 //! `models`, `runners`, and `executor` must never touch the database or the
@@ -38,6 +40,9 @@
 // integration test, exactly as `tests/oracle.rs` is, and an integration test
 // sees only the public API.
 pub mod executor;
+/// W13a: `process_events`, the Flow-trigger outbox processor. `pub` because
+/// `tests/flow_trigger_fire.rs` drives it directly.
+pub mod flow_trigger;
 pub mod models;
 pub mod publish;
 pub mod refs;

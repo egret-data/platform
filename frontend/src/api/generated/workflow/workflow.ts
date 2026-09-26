@@ -557,7 +557,7 @@ export const getWorkflowResumeExecutionUrl = (workspace: string,
  * # What this route can and cannot do, measured
  *
  * It calls [`worker::resume`](crate::worker::resume), which takes the same
- * `FOR UPDATE` and runs the same `settle` as every other writer. That drives
+ * `FOR NO KEY UPDATE` and runs the same `settle` as every other writer. That drives
  * `advance()` once more against the row as it now stands — which is exactly
  * what un-parks a pause whose **deadline** has passed.
  *

@@ -627,3 +627,80 @@ pub async fn scheduled_dates(db: &Db, flow: Uuid) -> Vec<chrono::DateTime<chrono
     .await
     .unwrap()
 }
+
+// ---------------------------------------------------------------------------
+// The Flow-trigger processor (W13a Task 4)
+// ---------------------------------------------------------------------------
+
+/// A registry that answers every task it is handed with one outcome, so a
+/// test can finish a one-task execution in the state it wants through the
+/// REAL worker tick (and so through the real `settle`, which is what writes
+/// the outbox). `tests/runtime.rs`'s `Recorder` is the pattern.
+pub struct Answering(pub bool);
+
+#[async_trait::async_trait]
+impl egret_workflow::worker::Registry for Answering {
+    async fn run(
+        &self,
+        _task: &egret_workflow::worker::TaskInput,
+    ) -> egret_core::Result<egret_workflow::worker::Outcome> {
+        Ok(if self.0 {
+            egret_workflow::worker::Outcome::success()
+        } else {
+            egret_workflow::worker::Outcome::failed()
+        })
+    }
+    async fn cancel(&self, task: &egret_workflow::worker::TaskInput) -> egret_core::Result<()> {
+        panic!(
+            "no fixture here declares a timeout, so nothing kills {}",
+            task.task_id
+        );
+    }
+}
+
+/// Finish `execution` in `state` (`"SUCCESS"` or `"FAILED"`) through the real
+/// worker tick, answering every task with that outcome.
+///
+/// **`tick` is global**: it claims every runnable run in the database, not
+/// only this execution's. Callers clear the database first (the processor's
+/// tests do, in their fixture), and nothing here asserts on the others.
+pub async fn drive_to(db: &Db, execution: Uuid, state: &str) {
+    let reg = Answering(state == "SUCCESS");
+    for _ in 0..50 {
+        egret_workflow::worker::tick(&db.pool, 64, &reg)
+            .await
+            .expect("a worker tick");
+        let now: String = sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
+            .bind(execution)
+            .fetch_one(&db.pool)
+            .await
+            .expect("read the execution's state");
+        if now == state {
+            return;
+        }
+    }
+    panic!("execution {execution} did not reach {state} in 50 ticks");
+}
+
+/// Every outbox event, oldest first: `(source execution, state)`.
+pub async fn events(db: &Db) -> Vec<(Uuid, String)> {
+    sqlx::query_as(
+        "SELECT source_execution_id, state FROM workflow.flow_trigger_events ORDER BY id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read the outbox")
+}
+
+/// Every execution a Flow trigger fired from `source`:
+/// `(listener flow, execution_depth, execution_trigger)`, by flow then id.
+pub async fn fired_by(db: &Db, source: Uuid) -> Vec<(Uuid, i32, serde_json::Value)> {
+    sqlx::query_as(
+        "SELECT flow_id, execution_depth, execution_trigger FROM workflow.executions \
+          WHERE trigger_execution_id = $1 ORDER BY flow_id, id",
+    )
+    .bind(source)
+    .fetch_all(&db.pool)
+    .await
+    .expect("read the fired executions")
+}

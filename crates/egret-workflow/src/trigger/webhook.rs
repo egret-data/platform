@@ -807,10 +807,18 @@ const FORBIDDEN_INPUT_ROOTS: &[&str] = &["trigger"];
 
 /// Render one declared value the way the artifact renders it.
 ///
+/// `pub(crate)` because a Flow trigger's `inputs:` are rendered by the same
+/// `runContext.render(Map)` (W13a Task 4, `flow_trigger::process`), against the
+/// SOURCE execution's context rather than an `InputContext`.
+///
 /// `VariableRenderer.renderObject(Object, Map, boolean)`, measured from the
 /// bytecode of the pinned image rather than from a signature — see
 /// [`render_inputs`] for the table and for the sentence this replaced.
-fn render_value(v: &Value, cx: &RenderContext, path: &str) -> Result<Value, InputRefusal> {
+pub(crate) fn render_value(
+    v: &Value,
+    cx: &RenderContext,
+    path: &str,
+) -> Result<Value, InputRefusal> {
     match v {
         // `instanceof String` -> render.
         Value::String(text) => match render_str_guarded(text, cx, FORBIDDEN_INPUT_ROOTS) {

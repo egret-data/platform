@@ -15,6 +15,10 @@ use crate::trigger::{
 };
 use crate::worker::{start_execution_in, NewExecution};
 
+// The off switches' SQL, the feature key and the start classification are
+// shared with the Flow-trigger processor (W13a Task 4); see `start.rs`.
+use super::start::{classify, flow_is_on, Started, WORKFLOWS_FEATURE};
+
 fn db_err(e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))
 }
@@ -22,13 +26,6 @@ fn db_err(e: sqlx::Error) -> Error {
 /// Kestra's `Schedule` type name, as stored in `execution_trigger.type` and
 /// matched by `workflow_executions_scheduled_date_iff_schedule`.
 const SCHEDULE_TYPE: &str = "io.kestra.plugin.core.trigger.Schedule";
-
-/// The per-workspace feature key whose OFF row freezes every schedule in the
-/// workspace (final review I3). Read from `workspace_features`, the table the
-/// route gate in `egret_workspace::context` (`WsContext`) reads through
-/// `WorkspaceRepo::disabled_features`, with the same rule: an absent row is ON,
-/// only `enabled = false` is OFF. Tied to the catalog by a unit test below.
-const WORKFLOWS_FEATURE: &str = "workflows";
 
 /// What one pass did, one count per claimed trigger.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -94,26 +91,21 @@ pub async fn fire_due(pool: &PgPool) -> Result<PassReport> {
     let mut seen_ids: Vec<String> = Vec::new();
     loop {
         let mut tx = pool.begin().await.map_err(db_err)?;
-        let claimed: Option<Claimed> = sqlx::query_as(
+        let claimed: Option<Claimed> = sqlx::query_as(concat!(
             "SELECT t.flow_id, t.trigger_id, t.spec_key, t.next_evaluation_date, t.evaluated_at, \
                     f.workspace_id, f.source, f.namespace, f.flow_id AS flow_key, \
                     now() AS db_now \
                FROM workflow.triggers t JOIN workflow.flows f ON f.id = t.flow_id \
               WHERE t.next_evaluation_date <= now() \
                 AND NOT t.disabled \
-                AND f.deleted_at IS NULL \
-                AND f.state <> 'disabled' \
-                AND EXISTS (SELECT 1 FROM workspaces w \
-                             WHERE w.id = f.workspace_id AND w.status = 'active') \
-                AND NOT EXISTS (SELECT 1 FROM workspace_features wf \
-                                 WHERE wf.workspace_id = f.workspace_id \
-                                   AND wf.feature = $3 AND NOT wf.enabled) \
-                AND (t.flow_id, t.trigger_id) NOT IN \
+                AND",
+            flow_is_on!("$3"),
+            "AND (t.flow_id, t.trigger_id) NOT IN \
                     (SELECT * FROM unnest($1::uuid[], $2::text[])) \
               ORDER BY t.next_evaluation_date \
               LIMIT 1 \
               FOR UPDATE OF t SKIP LOCKED",
-        )
+        ))
         .bind(&seen_flows)
         .bind(&seen_ids)
         .bind(WORKFLOWS_FEATURE)
@@ -256,39 +248,6 @@ async fn fire_one(conn: &mut PgConnection, c: &Claimed) -> Result<Fate> {
     Ok(fate)
 }
 
-/// The index that makes a second execution for one tick impossible
-/// (migration 0156).
-const ONE_PER_TICK: &str = "workflow_executions_one_per_schedule_tick";
-
-/// What starting a fired tick's execution came to.
-enum Started {
-    Yes,
-    /// `Error::InvalidInput`: the source does not parse or plan, or an input
-    /// is refused. Fixed only by a save, so the trigger leaves the queue.
-    Refused(String),
-    /// A unique violation on [`ONE_PER_TICK`]: the tick was already fired.
-    AlreadyFired(String),
-    /// Anything else. Possibly transient, so the tick is retried next pass.
-    Failed(String),
-}
-
-fn classify(err: &Error) -> Started {
-    let why = format!("the execution could not be started: {err}");
-    match err {
-        Error::InvalidInput(_) => Started::Refused(why),
-        Error::Internal(source)
-            if source
-                .downcast_ref::<sqlx::Error>()
-                .and_then(|e| e.as_database_error())
-                .and_then(|d| d.constraint())
-                == Some(ONE_PER_TICK) =>
-        {
-            Started::AlreadyFired(format!("this tick already has an execution: {err}"))
-        }
-        _ => Started::Failed(why),
-    }
-}
-
 /// Create the execution inside a savepoint, so that whatever goes wrong in it
 /// -- including a statement Postgres aborted -- can be rolled back while the
 /// claim's transaction lives on to record what happened. The outer `Err` is a
@@ -304,6 +263,11 @@ async fn start(conn: &mut PgConnection, c: &Claimed, e: &ScheduledExecution) -> 
             inputs: serde_json::to_value(&e.inputs).map_err(|e| Error::Internal(e.into()))?,
             trigger: Some(schedule_trigger_record(e)),
             scheduled_date: Some(e.scheduled_date),
+            // A `Schedule` fire has no source execution and starts a chain.
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
+            born_failed: false,
         },
     )
     .await;

@@ -1293,6 +1293,63 @@ pub(super) async fn settle(
     // delay can see it too, and refuses on `not_before > now`.
     replay::spawn_due(conn, ctx, state, now).await?;
 
+    // **The Flow-trigger outbox (W13 spec §4.3), and it is the ONE statement
+    // W13a adds to this transaction.** One event per state this settle
+    // APPENDED to the execution's history, except `CREATED`, in the order they
+    // were appended -- Kestra's `processFlowTriggers` runs once per
+    // transition. Not only the last state: a bounded `Pause` start goes
+    // `CREATED -> RUNNING -> PAUSED` inside one settle, and the settle that
+    // ends one pause and enters the next goes `PAUSED -> RESTARTED -> RUNNING
+    // -> PAUSED`, whose first and last states are equal. And not only terminal
+    // states, which is why this is not inside `notifies_parent`'s branch:
+    // `PAUSED` is in a Flow trigger's default `states` and is not terminal.
+    //
+    // The slice is sound because execution history is append-only across a
+    // settle: every caller builds `before` as a clone of `state` and then only
+    // `apply`s commands, and `Command::SetExecutionState` -- a `push` -- is the
+    // one writer of the execution's history. The `debug_assert` pins that.
+    //
+    // ONE statement whatever the count: `unnest ... WITH ORDINALITY` keeps the
+    // order, so the bigserial `id` carries it, and the `EXISTS` is evaluated
+    // per state, so the outbox stays empty for a workspace with no listener
+    // that could hear any of them. It runs on `conn`, inside the caller's
+    // transaction: a transition that rolls back leaves no event.
+    //
+    // `wire()` is the spelling `flow_listeners.states` holds;
+    // `run_state_wire_is_the_model_states_serde_spelling` pins it to
+    // `models::State`'s serde spelling.
+    debug_assert!(
+        state.history.starts_with(&before.history),
+        "execution history must be append-only across a settle: {:?} -> {:?}",
+        before.history,
+        state.history
+    );
+    let appended: Vec<&str> = state
+        .history
+        .get(before.history.len()..)
+        .unwrap_or_default()
+        .iter()
+        .filter(|s| **s != RunState::Created)
+        .map(|s| s.wire())
+        .collect();
+    if !appended.is_empty() {
+        sqlx::query(
+            "INSERT INTO workflow.flow_trigger_events (source_execution_id, workspace_id, state) \
+             SELECT $1, $2, t.s \
+               FROM unnest($3::text[]) WITH ORDINALITY AS t(s, n) \
+              WHERE EXISTS (SELECT 1 FROM workflow.flow_listeners l \
+                             WHERE l.workspace_id = $2 AND NOT l.disabled \
+                               AND t.s = ANY (l.states)) \
+              ORDER BY t.n",
+        )
+        .bind(ctx.id)
+        .bind(ctx.workspace_id)
+        .bind(&appended)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    }
+
     let was = before.history.last().copied();
     let is = state.history.last().copied();
     if was != is {
@@ -1404,6 +1461,13 @@ pub async fn start_execution_with_trigger(
             // advances `next_evaluation_date` -- this wrapper is never that
             // caller.
             scheduled_date: None,
+            // Likewise only the Flow-trigger processor (W13a Task 4) starts an
+            // execution because another one reached a state; this wrapper's
+            // callers -- the API, a webhook, the tests -- start at the bottom.
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
+            born_failed: false,
         },
     )
     .await?;
@@ -1421,6 +1485,33 @@ pub struct NewExecution<'a> {
     pub inputs: serde_json::Value,
     pub trigger: Option<serde_json::Value>,
     pub scheduled_date: Option<DateTime<Utc>>,
+    /// The SOURCE execution a Flow trigger fired on (W13 spec §4.5) -- the
+    /// same column a `Subflow` child's caller is written to, but with no
+    /// `trigger_run_ix`, which is what keeps `subflow::on_child_terminal`
+    /// (it zips the two) from reporting a flow-fired execution's terminal to
+    /// its source. `None` for every other start.
+    pub trigger_execution_id: Option<Uuid>,
+    /// Kestra's `metadata.executionDepth`: the source's own depth plus one
+    /// for a Flow-trigger fire, `0` for every other start. Persisted so a
+    /// chain's depth is data, not stack (spec §4.4 point 4).
+    pub execution_depth: i32,
+    /// The outbox event (`workflow.flow_trigger_events.id`) a Flow-trigger
+    /// fire consumed. Set iff `trigger` is a `Flow` record -- 0157's
+    /// `workflow_executions_flow_trigger_event_iff_flow` -- and keyed by
+    /// `workflow_executions_one_per_flow_trigger_event`, so one event fires
+    /// one listener at most once.
+    pub flow_trigger_event_id: Option<i64>,
+    /// **Start the execution already FAILED, with no task run** (W13a fix
+    /// round 1). A Flow trigger whose `inputs:` do not render against the
+    /// source's context is not a refusal on the artifact: Kestra creates the
+    /// listener's execution `CREATED -> FAILED`, `taskRunList: []`, no
+    /// `inputs` (W13a Task 1, `listener_run1_FAILED_bad_inputs`). `false`
+    /// for every other start.
+    ///
+    /// A `bool`, not the reason: `workflow.executions` has no
+    /// execution-level message column, so there is nowhere to keep it. The
+    /// processor logs the render error at `warn` instead.
+    pub born_failed: bool,
 }
 
 /// [`start_execution_with_trigger`]'s body, taking the caller's own `conn`
@@ -1438,6 +1529,10 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
         inputs,
         trigger,
         scheduled_date,
+        trigger_execution_id,
+        execution_depth,
+        flow_trigger_event_id,
+        born_failed,
     } = new;
 
     let flow = crate::spec::parse(source)
@@ -1448,8 +1543,10 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
-            execution_trigger, scheduled_date) \
-         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6, $7, $8) RETURNING id",
+            execution_trigger, scheduled_date, trigger_execution_id, execution_depth, \
+            flow_trigger_event_id) \
+         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, \
+                 $11) RETURNING id",
     )
     .bind(workspace_id)
     .bind(flow_id)
@@ -1463,6 +1560,9 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
     })
     .bind(trigger)
     .bind(scheduled_date)
+    .bind(trigger_execution_id)
+    .bind(execution_depth)
+    .bind(flow_trigger_event_id)
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;
@@ -1479,6 +1579,20 @@ pub async fn start_execution_in(conn: &mut PgConnection, new: NewExecution<'_>) 
     };
     let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();
+    // Born FAILED: the caller's own command, applied before the first settle
+    // exactly as `settle` applies an SLA's terminal before `drive` -- and for
+    // the same effect: `advance()` returns nothing for a terminal execution, so
+    // no run is created, the history is `[CREATED, FAILED]`, and the settle's
+    // outbox hook, parent notification and every other terminal path see an
+    // ordinary FAILED transition.
+    if born_failed {
+        apply(
+            &mut state,
+            &Command::SetExecutionState {
+                state: RunState::Failed,
+            },
+        );
+    }
     // `Tick(0)` is the execution's own origin — `Tick` is milliseconds since
     // the execution was created (`executor::state::Tick`), and this is that
     // instant.
@@ -1637,11 +1751,35 @@ impl Stack {
 
 /// Read the execution, **locking it**, and rebuild what `advance()` reads.
 ///
-/// `FOR UPDATE` is the serialisation two workers finishing two siblings of the
+/// The lock is the serialisation two workers finishing two siblings of the
 /// same `Parallel` need: without it both would read the same `ExecutionState`,
 /// both would compute the same successor, and both would try to create it. The
 /// `UNIQUE (execution_id, run_ix)` in migration 0134 is what happens if this
 /// lock is ever lost — a collision rather than a duplicate run.
+///
+/// # `FOR NO KEY UPDATE`, not `FOR UPDATE` (W13a final review I2)
+///
+/// Every writer of an execution comes through here, so the lock only has to
+/// exclude other writers, and `FOR NO KEY UPDATE` conflicts with itself exactly
+/// as `FOR UPDATE` does: two loads of one execution still queue, and `resume`'s
+/// lost-update argument (`runtime`'s statement 3) is unchanged. What the
+/// weaker mode stops blocking is `FOR KEY SHARE` -- the lock a foreign-key
+/// check takes on the row it references -- and nothing on this path changes a
+/// key: `settle` writes `state`, `history`, `seq` and `updated_at`, never `id`
+/// or `workspace_id`.
+///
+/// That matters to one reader. The Flow-trigger processor inserts an
+/// execution whose `trigger_execution_id` references the SOURCE, at
+/// `REPEATABLE READ`. Under `FOR UPDATE` a source that any worker settled
+/// after the processor's snapshot made that check fail `40001` (the reviewer
+/// measured it on Postgres 16), so a busy source's listeners failed and were
+/// given up. Every other `KEY SHARE` taker -- a task run, a loop iteration, a
+/// `Subflow` child, a replay, an outbox event -- is inserted by the writer that
+/// already holds this row, in its own transaction, where no lock conflicts
+/// with itself. So no serialisation anywhere relied on blocking one.
+/// `tests/flow_trigger_fire.rs`'s
+/// `a_source_settled_between_the_claim_and_the_fire_still_fires` is the
+/// reproduction.
 pub(super) async fn load(
     conn: &mut PgConnection,
     execution_id: Uuid,
@@ -1660,7 +1798,7 @@ pub(super) async fn load_with(
         "SELECT source, history, workspace_id, flow_id, seq, \
                 attempt_number, origin_offset_ms, \
                 (EXTRACT(EPOCH FROM (now() - created_at)) * 1000)::bigint AS now_ms \
-           FROM workflow.executions WHERE id = $1 FOR UPDATE"
+           FROM workflow.executions WHERE id = $1 FOR NO KEY UPDATE"
     } else {
         "SELECT source, history, workspace_id, flow_id, seq, \
                 attempt_number, origin_offset_ms, \
@@ -2074,7 +2212,7 @@ fn note_create_beside_a_created_sibling(state: &ExecutionState, cmds: &[Command]
 /// **The released run's UPDATE is fenced on that lease and every other run's is
 /// not**, which is the narrowest form of the rule: the only row this writer has
 /// a token for is the one it claimed. A sibling's row is written under the
-/// execution's `FOR UPDATE` lock, which is what serialises two workers there;
+/// execution's `FOR NO KEY UPDATE` lock, which is what serialises two workers there;
 /// fencing it on a token this writer does not hold would refuse every legitimate
 /// successor write.
 ///

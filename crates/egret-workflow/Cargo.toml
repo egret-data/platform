@@ -260,6 +260,13 @@ url.workspace = true
 # the same argument this file already makes for `egret-query`.
 egret-config.workspace = true
 
+# W13a Task 4, `tests/flow_trigger_fire.rs` ONLY: the processor gives up on an
+# event after five attempts and says which listeners at `warn`, and that log
+# line is the only place the give-up is visible. Captured the way
+# `egret-dataapi`'s `tests/serving_auth.rs` does. Already a workspace
+# dependency, so no new crate.
+tracing-subscriber.workspace = true
+
 # `tests/container_docker_live.rs` runs WITHOUT libtest, and that is fix round
 # 1's reviewer plan item 2 rather than a preference.
 #

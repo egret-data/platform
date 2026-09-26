@@ -828,7 +828,7 @@ async fn two_tickers_reopen_a_due_retry_exactly_once(pool: sqlx::PgPool) {
         "**the property**: exactly TWO attempts. Both tickers' `due_retries` \
          named this execution (see \
          due_retries_excludes_nothing_so_two_tickers_both_name_the_same_execution), \
-         and the second `resume` must find, under the execution's FOR UPDATE \
+         and the second `resume` must find, under the execution's FOR NO KEY UPDATE \
          lock, a run that is no longer RETRYING — so it opens nothing"
     );
     assert_eq!(
@@ -1571,5 +1571,358 @@ async fn flows_saved_before_the_trigger_table_are_reconciled_at_start(pool: sqlx
         rows_of(deleted).await,
         0,
         "a deleted flow is not reconciled"
+    );
+}
+
+// ── W13a Task 4: the Flow-trigger processor on the scheduler ticker ─────────
+//
+// `#[sqlx::test]` for the reason every test above gives: a pass is global, so
+// each of these needs a database of its own. Both drive the processor ONLY
+// through `spawn`.
+
+/// A one-task flow in namespace `w13` with no trigger.
+fn w13_source(id: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: w13\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n\
+         \x20   message: hi\n"
+    )
+}
+
+/// A one-task flow with one unconditioned Flow trigger `on_done` on SUCCESS.
+fn w13_listener(id: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: w13\ntriggers:\n  - id: on_done\n\
+         \x20   type: io.kestra.plugin.core.trigger.Flow\n    states: [SUCCESS]\ntasks:\n\
+         \x20 - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\n"
+    )
+}
+
+/// **The end to end: a Flow trigger runs its listener to SUCCESS with nothing
+/// in this test driving it.** No call to `tick`, `fire_due` or
+/// `process_events` below -- only `start_execution` for the producer, `spawn`,
+/// the production handlers, and the database.
+///
+/// The control runs first: the worker on and the scheduler off. The producer
+/// runs to SUCCESS and its event is written, and the listener gets no
+/// execution at all. Turning the scheduler on then processes that backlog
+/// (spec §4.4 point 6) -- the same event, not a new one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_flow_trigger_runs_to_success_with_nothing_driving_it(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let producer_src = w13_source("producer");
+    let producer = common::seed_flow(&db, ws, user, &producer_src, "draft").await;
+    let listener = common::seed_flow(&db, ws, user, &w13_listener("listener"), "draft").await;
+    let handlers = Arc::new(egret_workflow::worker::Handlers::with_core_tasks());
+    let cfg = |scheduler_enabled| RuntimeConfig {
+        scheduler_enabled,
+        trigger_interval: Duration::from_millis(50),
+        ..fast(50, 8)
+    };
+
+    // ── control: the scheduler off ──
+    let cancel = CancellationToken::new();
+    spawn(pool.clone(), handlers.clone(), cfg(false), cancel.clone());
+    let source = start_execution(
+        &pool,
+        ws,
+        Some(producer),
+        &producer_src,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the producer");
+    wait_until(
+        "the producer to reach SUCCESS",
+        Duration::from_secs(10),
+        || async {
+            match execution_state(&pool, source).await.as_str() {
+                "SUCCESS" => Ok(()),
+                s => Err(s.to_string()),
+            }
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    cancel.cancel();
+    assert_eq!(
+        executions_of_flow(&pool, listener).await,
+        0,
+        "the control: with the scheduler off, the listener never runs"
+    );
+    assert_eq!(
+        common::events(&db).await,
+        vec![(source, "SUCCESS".to_string())],
+        "and the event waits in the outbox"
+    );
+
+    // ── the real thing ──
+    let cancel = CancellationToken::new();
+    spawn(pool.clone(), handlers.clone(), cfg(true), cancel.clone());
+    wait_until(
+        "the listener's execution to reach SUCCESS",
+        Duration::from_secs(20),
+        || async {
+            let states: Vec<String> = sqlx::query_scalar(
+                "SELECT state FROM workflow.executions \
+                  WHERE flow_id = $1 AND trigger_execution_id = $2",
+            )
+            .bind(listener)
+            .bind(source)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            if states.iter().any(|s| s == "SUCCESS") {
+                Ok(())
+            } else {
+                Err(format!("listener executions: {states:?}"))
+            }
+        },
+    )
+    .await;
+    cancel.cancel();
+    assert_eq!(
+        executions_of_flow(&pool, listener).await,
+        1,
+        "exactly one fire"
+    );
+}
+
+/// **Two processors never fire one (event, listener) twice.** Ten producer
+/// executions have already reached SUCCESS -- ten events -- and three
+/// listeners hear each, so thirty fires are owed. Two scheduler tickers race
+/// for them.
+///
+/// Asserted on rows (no `(event, listener)` twice, exactly 30) **and** on
+/// insert *attempts*, counted by a non-transactional sequence as W12's
+/// `two_scheduler_tickers_never_fire_one_tick_twice` does: under the claim's
+/// lock no fire is even attempted twice, and a rows-only test would pass with
+/// the lock gone, because the unique index and `REPEATABLE READ`'s own
+/// conflict on the event row both roll the duplicate back.
+#[sqlx::test(migrations = "../../migrations")]
+async fn two_processors_never_fire_one_event_twice(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let producer_src = w13_source("producer");
+    let producer = common::seed_flow(&db, ws, user, &producer_src, "draft").await;
+    let mut listeners = Vec::new();
+    for i in 0..3 {
+        listeners
+            .push(common::seed_flow(&db, ws, user, &w13_listener(&format!("l{i}")), "draft").await);
+    }
+    for _ in 0..10 {
+        let id = start_execution(
+            &pool,
+            ws,
+            Some(producer),
+            &producer_src,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("start a producer");
+        common::drive_to(&db, id, "SUCCESS").await;
+    }
+    assert_eq!(common::events(&db).await.len(), 10, "control: ten events");
+
+    for ddl in [
+        "CREATE SEQUENCE public.w13_fire_attempts",
+        "CREATE FUNCTION public.w13_count_fire() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN IF NEW.flow_trigger_event_id IS NOT NULL THEN \
+           PERFORM nextval('public.w13_fire_attempts'); END IF; RETURN NEW; END $$",
+        "CREATE TRIGGER w13_count_fire BEFORE INSERT ON workflow.executions \
+         FOR EACH ROW EXECUTE FUNCTION public.w13_count_fire()",
+    ] {
+        sqlx::query(ddl)
+            .execute(&pool)
+            .await
+            .expect("install the attempt counter");
+    }
+
+    let cancel = CancellationToken::new();
+    let reg = Arc::new(Recorder::new());
+    spawn(pool.clone(), reg.clone(), scheduler_only(5), cancel.clone());
+    spawn(pool.clone(), reg.clone(), scheduler_only(5), cancel.clone());
+    let total = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.executions WHERE flow_trigger_event_id IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    wait_until("30 fired executions", Duration::from_secs(15), || async {
+        match total().await {
+            30.. => Ok(()),
+            n => Err(format!("{n} of 30")),
+        }
+    })
+    .await;
+    wait_until("the outbox to drain", Duration::from_secs(5), || async {
+        match common::events(&db).await.len() {
+            0 => Ok(()),
+            n => Err(format!("{n} events left")),
+        }
+    })
+    .await;
+    // Let an in-flight pass finish: nothing is left to claim, so a pass still
+    // running can only add a double fire.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    cancel.cancel();
+
+    let dup: Vec<(Option<i64>, Option<Uuid>, i64)> = sqlx::query_as(
+        "SELECT flow_trigger_event_id, flow_id, count(*) FROM workflow.executions \
+          WHERE flow_trigger_event_id IS NOT NULL \
+          GROUP BY flow_trigger_event_id, flow_id HAVING count(*) > 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let attempts: i64 = sqlx::query_scalar(
+        "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM public.w13_fire_attempts",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let rows = total().await;
+    eprintln!(
+        "two_processors: rows = {rows}, insert attempts = {attempts}, rolled back = {}",
+        attempts - rows
+    );
+
+    assert_eq!(dup, Vec::new(), "one (event, listener) fired twice");
+    assert_eq!(rows, 30, "ten events, three listeners each");
+    for l in &listeners {
+        assert_eq!(
+            executions_of_flow(&pool, *l).await,
+            10,
+            "each listener once per event"
+        );
+    }
+    assert_eq!(
+        attempts,
+        rows,
+        "the rows are right, but {} fire(s) were attempted and rolled back -- a \
+         double fire the claim's `FOR UPDATE SKIP LOCKED` should have excluded, \
+         absorbed by the unique index or by REPEATABLE READ's conflict on the \
+         event row. Those are the backstop, not the mechanism",
+        attempts - rows
+    );
+}
+
+/// **A flow-trigger backlog does not hold the schedule back** (W13a final
+/// review I3). The processor runs on the scheduler's ticker right after
+/// `fire_due`, so an unbounded pass delays every cron tick -- and shutdown --
+/// until the whole outbox is drained. A pass is capped instead
+/// (`MAX_EVENTS_PER_PASS` or `MAX_PASS_DURATION`, whichever first), and the
+/// rest waits for the next tick.
+///
+/// 200 events are waiting (written by SQL, as a backlog left by a scheduler
+/// that was off), and each fire is slowed to ~20 ms by a `BEFORE INSERT`
+/// sleep, so draining them takes several seconds. A cron is owed three ticks,
+/// and `fire_due` catches up one tick per pass. When the third tick has fired,
+/// the backlog must still be there: the schedule was served between capped
+/// passes, not after the drain. Then the backlog drains, every event once.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_flow_trigger_backlog_does_not_hold_the_schedule_back(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let cron = seed_cron_flow(&pool, "tick").await;
+    let (ws, user) = common::seed_workspace(&db).await;
+    let producer_src = w13_source("producer");
+    let producer = common::seed_flow(&db, ws, user, &producer_src, "draft").await;
+    let listener = common::seed_flow(&db, ws, user, &w13_listener("listener"), "draft").await;
+    let source = start_execution(
+        &pool,
+        ws,
+        Some(producer),
+        &producer_src,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the producer");
+    const BACKLOG: i64 = 200;
+    sqlx::query(
+        "INSERT INTO workflow.flow_trigger_events (source_execution_id, workspace_id, state) \
+         SELECT $1, $2, 'SUCCESS' FROM generate_series(1, $3)",
+    )
+    .bind(source)
+    .bind(ws)
+    .bind(BACKLOG)
+    .execute(&pool)
+    .await
+    .expect("seed the backlog");
+    for ddl in [
+        "CREATE FUNCTION public.w13_slow_fire() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN PERFORM pg_sleep(0.02); RETURN NEW; END $$"
+            .to_string(),
+        format!(
+            "CREATE TRIGGER w13_slow_fire BEFORE INSERT ON workflow.executions \
+             FOR EACH ROW WHEN (NEW.flow_id = '{listener}') EXECUTE FUNCTION public.w13_slow_fire()"
+        ),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(ddl))
+            .execute(&pool)
+            .await
+            .expect("slow the listener's fires down");
+    }
+    let sec: f64 = sqlx::query_scalar("SELECT extract(second FROM now())::float8")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    if sec >= 40.0 {
+        tokio::time::sleep(Duration::from_secs_f64(60.5 - sec)).await;
+    }
+    common::make_due(&db, cron, "s", 3).await;
+
+    let outbox = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM workflow.flow_trigger_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let cancel = CancellationToken::new();
+    spawn(
+        pool.clone(),
+        Arc::new(Recorder::new()),
+        scheduler_only(50),
+        cancel.clone(),
+    );
+    wait_until(
+        "the cron's three owed ticks",
+        Duration::from_secs(20),
+        || async {
+            match common::scheduled_dates(&db, cron).await.len() {
+                3.. => Ok(()),
+                n => Err(format!("{n} of 3")),
+            }
+        },
+    )
+    .await;
+    let left = outbox().await;
+    assert!(
+        left > 0,
+        "the third cron tick fired only after the whole backlog of {BACKLOG} was drained: \
+         the processor's pass held the ticker"
+    );
+    eprintln!("backlog left when the third tick fired: {left} of {BACKLOG}");
+
+    wait_until(
+        "the backlog to drain over later passes",
+        Duration::from_secs(60),
+        || async {
+            match outbox().await {
+                0 => Ok(()),
+                n => Err(format!("{n} events left")),
+            }
+        },
+    )
+    .await;
+    cancel.cancel();
+    assert_eq!(
+        executions_of_flow(&pool, listener).await,
+        BACKLOG,
+        "every event fired its listener once"
     );
 }

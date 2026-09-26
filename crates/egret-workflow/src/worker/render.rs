@@ -372,6 +372,15 @@ impl Surface {
         // and `workflow_executions_no_self_link` refuses the degenerate case,
         // so there is still no depth bound here, for the reason
         // `flowable::descend` gives for not having one either.
+        //
+        // **Finite is not the same as short, and W13a made it matter**: the
+        // walk crosses a Flow-trigger link too (`trigger_execution_id`), so a
+        // Flow-trigger chain is walked whole. What keeps that chain short is
+        // `execution_depth` (final review I1): a Flow-trigger fire and a
+        // `Subflow` child each add one and both refuse past 100, a replay and
+        // a `Loop` iteration keep their parent's, and an iteration never fires
+        // a Flow trigger. Before that fix a cycle through a `Loop` reset the
+        // count and this walk grew with it.
         let mut inheriting = true;
         // Nearest ancestor first, so a nearer scope wins where two ancestors
         // ran a task of the same id. The chain is a DAG by construction --
@@ -773,6 +782,42 @@ fn with_declared_defaults(posted: Value, flow: Option<&Flow>) -> Value {
         }
     }
     Value::Object(inputs)
+}
+
+/// The render context a Flow trigger's `when` and `inputs` are evaluated in:
+/// the **SOURCE** execution's -- Kestra's `runContextFactory.of(null,
+/// execution)`, a context over the execution with no task run of its own.
+///
+/// It is the context this worker renders the source's own tasks against, built
+/// by the same [`Surface::load`] and [`Surface::context`], with `run = None`.
+/// So it carries `inputs`, `vars`, `flow`, `labels`, `execution`, `outputs`
+/// and `tasks`, and it does **not** carry `trigger`: an expression reading
+/// `{{ trigger.executionId }}` fails to render against it, exactly as W13a
+/// Task 1 measured on the pinned artifact ("Unable to find `trigger`"). In a
+/// `when` that failure refuses the fire; in `inputs` the processor (W13a Task
+/// 4) still fires, and the execution is born FAILED, as Kestra's is.
+///
+/// **Reads without locking the execution** (`Lock::No`): the processor runs
+/// in its own transaction and must not serialise behind, or block, a source
+/// that is still running -- a `PAUSED` source can be resumed while its event
+/// waits. Spec §4.4 point 3 states what that costs.
+///
+/// `Stack::Fresh`, because the processor is entered from the scheduler ticker
+/// with nothing of this crate's below it; nothing `settle`-shaped runs on the
+/// context this returns.
+pub async fn execution_render_context(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+) -> Result<RenderContext> {
+    let (ctx, state, _now) = super::claim::load_with(
+        conn,
+        execution_id,
+        super::claim::Lock::No,
+        super::claim::Stack::Fresh,
+    )
+    .await?;
+    let surface = Surface::load(conn, &ctx).await?;
+    Ok(surface.context(&ctx.plan, &state, None))
 }
 
 #[cfg(test)]

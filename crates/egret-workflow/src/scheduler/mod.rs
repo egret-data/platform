@@ -148,6 +148,9 @@
 //! does not conflict with. Unproved: no test stages it.
 
 mod fire;
+/// Shared with `flow_trigger` (W13a Task 4): the off switches' SQL and the
+/// classification of a failed start.
+pub(crate) mod start;
 mod sync;
 
 pub use fire::{fire_due, PassReport};

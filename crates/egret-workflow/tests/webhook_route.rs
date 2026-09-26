@@ -942,6 +942,22 @@ async fn a_fired_webhook_stores_the_trigger_record() {
         "a repeated query parameter keeps both values, in URL order"
     );
     assert_eq!(stored["variables"]["parameters"]["x"], json!(["1"]));
+    // W13a Task 3: every caller that is not the Flow-trigger processor starts
+    // at the bottom of a chain -- no source link, depth 0, no outbox event.
+    let chain: (Option<Uuid>, i32, Option<i64>) = sqlx::query_as(
+        "SELECT trigger_execution_id, execution_depth, flow_trigger_event_id \
+           FROM workflow.executions WHERE workspace_id = $1",
+    )
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read the chain columns");
+    assert_eq!(
+        chain,
+        (None, 0, None),
+        "a webhook start is not a Flow-trigger fire"
+    );
+
     assert_eq!(
         stored["variables"]["headers"]["content-type"],
         json!(["application/json"])

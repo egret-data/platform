@@ -62,6 +62,23 @@ data:
   #
   # Its tuning knob, EGRET_WORKFLOW__TRIGGER_INTERVAL_SECS (1), is deliberately
   # NOT a chart value, for the reason given above for the worker's.
+  #
+  # The same ticker also processes Flow triggers (W13a: a flow that starts
+  # because another execution reached a state), at least one hop per tick. With the
+  # scheduler OFF, the flow-trigger outbox (workflow.flow_trigger_events) still
+  # GROWS: every execution transition that some flow's Flow trigger listens to
+  # writes one row, whatever this switch says. Turning the scheduler on then
+  # processes that backlog, oldest first, and fires what it hears -- the
+  # flow-trigger analogue of cron's catch-up -- at most 500 events or about one
+  # second per tick, so cron ticks keep firing while it drains. Keep this off
+  # only if no flow declares a Flow trigger, or expect the backlog to fire when
+  # it comes on.
+  #
+  # The backlog is also UNEVEN. A transition is recorded only if a listener row
+  # exists for it, and with the scheduler off the start-up reconciliation never
+  # runs: only flows saved after migration 0157 have listener rows. Transitions
+  # that an older flow's Flow trigger would hear are not recorded until the
+  # scheduler first starts (and reconciles) or that flow is saved again.
   EGRET_WORKFLOW__SCHEDULER_ENABLED: "{{ .Values.workflow.schedulerEnabled }}"
   EGRET_RANGER__AUTH_TOKEN: ""
   EGRET_ADMIN_EMAIL: "{{ .Values.admin.email }}"

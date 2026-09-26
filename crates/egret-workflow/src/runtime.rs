@@ -88,7 +88,9 @@
 //! [`wake`](crate::worker::wake) hands each id
 //! [`due_retries`](crate::worker::due_retries) named to
 //! [`resume`](crate::worker::resume), and `resume`'s
-//! `load` takes `SELECT … FROM workflow.executions WHERE id = $1 FOR UPDATE`
+//! `load` takes `SELECT … FROM workflow.executions WHERE id = $1 FOR NO KEY
+//! UPDATE` (`FOR UPDATE` until W13a final review I2; the weaker mode conflicts
+//! with itself exactly as `FOR UPDATE` does, so nothing below changes)
 //! (`worker/claim.rs:1521`). So the second replica's `resume` **blocks** behind
 //! the first's — it does not skip, and it must not: skipping would be a woken
 //! execution dropped. When it acquires the lock it re-reads the state the first
@@ -109,7 +111,7 @@
 //!
 //! ### The lock is load-bearing, and a surviving mutant does not say otherwise
 //!
-//! **Do not remove the `FOR UPDATE`.** W10 Task 2 mutation F flipped
+//! **Do not remove the `FOR NO KEY UPDATE`.** W10 Task 2 mutation F flipped
 //! `claim::load` from `Lock::Yes` to `Lock::No` — the whole of the
 //! serialisation this statement names — and
 //! `two_tickers_reopen_a_due_retry_exactly_once` stayed green, 3 runs of 3,
@@ -317,6 +319,15 @@ pub fn spawn(pool: PgPool, reg: Arc<dyn Registry>, cfg: RuntimeConfig, cancel: C
 /// fixed-interval loop for the same reason the claim loop is; a trigger that is
 /// behind catches up one tick per pass.
 ///
+/// After each `fire_due`, one
+/// [`process_events_with`](crate::flow_trigger::process_events_with) pass
+/// (W13a): the due Flow-trigger events in the outbox, each once, up to
+/// [`PassLimits`](crate::flow_trigger::PassLimits)' cap (500 events or about
+/// 1 s, final review I3) so a backlog cannot hold `fire_due` or shutdown back;
+/// the rest waits for the next tick. A chain therefore advances at least one
+/// hop per tick, and more when a fired execution's first settle already writes
+/// an event its listeners hear (spec §4.4 points 4-5).
+///
 /// Before the first pass it runs [`reconcile`](crate::scheduler::reconcile)
 /// once, so a flow saved before migration 0156 gets its trigger rows (final
 /// review I1). A reconciliation that cannot even list the flows is logged and
@@ -344,6 +355,12 @@ fn spawn_scheduler(pool: PgPool, every: Duration, cancel: CancellationToken) {
                 ),
             },
         }
+        // A capped pass (final review I3), its kept events due again one tick
+        // later (F2), and the shutdown token checked between its events.
+        let limits = crate::flow_trigger::PassLimits {
+            retry_backoff: every,
+            ..Default::default()
+        };
         let mut tick = tokio::time::interval(every);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -368,6 +385,29 @@ fn spawn_scheduler(pool: PgPool, every: Duration, cancel: CancellationToken) {
                         // transaction rolled back, so the next pass sees the
                         // row exactly as this one found it and retries.
                         Err(e) => tracing::warn!(error = %e, "workflow schedule pass failed"),
+                    }
+                    // W13a: the Flow-trigger outbox, after the schedules and
+                    // behind the same switch (spec §4.4). With the scheduler
+                    // off the outbox grows; turned on, this drains it.
+                    match crate::flow_trigger::process_events_with(&pool, &limits, &cancel).await {
+                        Ok(r) if r.fired > 0 || r.born_failed > 0 => tracing::info!(
+                            events = r.events,
+                            fired = r.fired,
+                            born_failed = r.born_failed,
+                            refused = r.refused,
+                            errored = r.errored,
+                            "workflow flow-trigger pass"
+                        ),
+                        Ok(r) if r.events > 0 => tracing::debug!(
+                            events = r.events,
+                            refused = r.refused,
+                            errored = r.errored,
+                            "workflow flow-trigger pass"
+                        ),
+                        Ok(_) => {}
+                        // Never ends the loop: the failed event's transaction
+                        // rolled back, so the next pass claims it again.
+                        Err(e) => tracing::warn!(error = %e, "workflow flow-trigger pass failed"),
                     }
                 }
             }

@@ -179,7 +179,7 @@ pub(super) async fn spawn_due(
 
     let row = sqlx::query(
         "SELECT flow_id, namespace, flow_key, inputs, parent_run_ix, \
-                attempt_number, origin_offset_ms \
+                attempt_number, origin_offset_ms, execution_depth \
            FROM workflow.executions WHERE id = $1",
     )
     .bind(ctx.id)
@@ -234,8 +234,8 @@ pub(super) async fn spawn_due(
     let child: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, \
-            parent_execution_id, attempt_number, origin_offset_ms, inputs) \
-         VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9) \
+            parent_execution_id, attempt_number, origin_offset_ms, inputs, execution_depth) \
+         VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9,$10) \
          RETURNING id",
     )
     .bind(ctx.workspace_id)
@@ -255,6 +255,12 @@ pub(super) async fn spawn_due(
     // rather than carried on the context for `spawn::spawn_one`'s reason: the
     // row is the one authority on what this execution was started with.
     .bind(row.get::<Value, _>("inputs"))
+    // **The original's depth, unchanged** (W13a final review I1):
+    // `ExecutionService.replay` keeps the execution's metadata
+    // (`metadata.nextAttempt()`, a `toBuilder` copy with only the attempt
+    // bumped), so `executionDepth` carries over. A replay is the same link in
+    // a chain, not a new one.
+    .bind(row.get::<i32, _>("execution_depth"))
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;

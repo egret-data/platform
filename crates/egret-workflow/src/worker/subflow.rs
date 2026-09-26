@@ -103,6 +103,7 @@ use crate::executor::{
 };
 use crate::models::{Flow, Subflow, Task, TaskKind as ModelTaskKind};
 use crate::runners::{render_str, RenderContext};
+use crate::trigger::flow::DEFAULT_MAX_EXECUTION_DEPTH;
 
 /// **How far down a chain of child executions this worker will spawn**, and the
 /// second half of the one answer this module gives that is NOT the artifact's.
@@ -450,6 +451,39 @@ async fn spawn_one(
         }
     };
 
+    // **The child's `metadata.executionDepth`, and the artifact's refusal on
+    // it** (W13a final review I1). `ExecutableUtils.subflowExecution` on the
+    // pinned artifact (javap, offsets 703-792 and 1092-1100) writes
+    // `executionDepthOrZero() + 1` on the child and, when that exceeds
+    // `maxDepth` (100), logs and throws "Cannot execute flow '%s'.'%s': the
+    // execution chain exceeded the maximum depth of %d" -- after the target is
+    // resolved, found enabled and found valid, which is where this sits. The
+    // throw fails the `Subflow` task, so here the run FAILS with that message
+    // (its config-property sentence dropped: egret has no such property).
+    //
+    // Until this, the child was inserted at 0, so a chain that crossed a
+    // `Subflow` restarted its count and a Flow-trigger cycle through one
+    // could only be stopped by `chain_holds`, never by the depth.
+    let parent_depth: i32 =
+        sqlx::query_scalar("SELECT execution_depth FROM workflow.executions WHERE id = $1")
+            .bind(ctx.id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    let child_depth = parent_depth.saturating_add(1);
+    if i64::from(child_depth) > i64::from(DEFAULT_MAX_EXECUTION_DEPTH) {
+        return fail_run(
+            conn,
+            ctx,
+            r.run,
+            &format!(
+                "cannot execute flow '{namespace}'.'{flow_id}': the execution chain exceeded \
+                 the maximum depth of {DEFAULT_MAX_EXECUTION_DEPTH}"
+            ),
+        )
+        .await;
+    }
+
     // **The child's inputs are the `Subflow`'s own `inputs:`, rendered — NOT
     // the parent's.** That is the difference from `spawn::spawn_one`, which
     // copies the parent's inputs down because a loop body is the same flow's
@@ -471,8 +505,8 @@ async fn spawn_one(
     let child_id: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, \
-            trigger_execution_id, trigger_run_ix, inputs) \
-         VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8) \
+            trigger_execution_id, trigger_run_ix, inputs, execution_depth) \
+         VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9) \
          RETURNING id",
     )
     .bind(ctx.workspace_id)
@@ -483,6 +517,7 @@ async fn spawn_one(
     .bind(ctx.id)
     .bind(r.run as i32)
     .bind(&inputs)
+    .bind(child_depth)
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;
@@ -835,7 +870,7 @@ fn guess_state(
 /// **No lease and no fence.** Nothing claimed this run — `persist` writes no
 /// `type_id` for a `TaskKind::Executable`, so `claim`'s `type_id IS NOT NULL`
 /// predicate cannot take it and there is no token to check. The serialisation
-/// is the execution's own `FOR UPDATE`, which `claim::load` takes here.
+/// is the execution's own `FOR NO KEY UPDATE`, which `claim::load` takes here.
 async fn complete(
     conn: &mut PgConnection,
     execution_id: Uuid,
