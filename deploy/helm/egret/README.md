@@ -59,26 +59,59 @@ services.
 
 ## Upgrade notes
 
-### StarRocks engines lose their FE metadata ONCE on this upgrade
+### EXISTING StarRocks engines need a manual step, and lose their FE metadata when you take it
 
 Before this release egret rendered no `storageVolumes` entry for the StarRocks FE's metadata
 directory, so the kube-starrocks operator applied its own default — `fe-meta: {emptyDir: {}}`.
-Metadata therefore lived and died with the pod. This release gives **every** StarRocks engine, new
-and existing alike, a PersistentVolumeClaim at `/opt/starrocks/fe/meta`.
+Metadata therefore lived and died with the pod. This release renders a PersistentVolumeClaim at
+`/opt/starrocks/fe/meta` for **every** StarRocks engine egret provisions.
 
-Changing the volume replaces the FE pod, and the pod being replaced is what discards the old
-`emptyDir`. So **each existing StarRocks engine loses its FE metadata exactly once**, on its first
-FE roll after the upgrade. From then on the metadata survives pod replacement. New engines never
-see this.
+**New engines get it automatically and need nothing from you** (measured:
+`docs/en/plans/2026-09-26-fe-meta-live-result.md` §4-§6 — a bound PVC, and a catalog, a user, its
+grant and the root password all surviving `kubectl delete pod` on the FE).
 
-**What is lost**, observed on PR #597's live gate when a pod replacement wiped an `emptyDir`
-(`first start fe with meta not exist` in `fe.log`):
+**Existing engines do NOT pick it up on their own.** A `storageSize` entry becomes a StatefulSet
+`spec.volumeClaimTemplates` entry, and `volumeClaimTemplates` is **immutable** on a StatefulSet that
+already exists. Measured on an engine created before this release (§7 of the same document): egret
+updates the `StarRocksCluster` correctly, then every operator reconcile is rejected by the API
+server —
+
+```text
+ERROR StarRocksClusterReconciler.feController deploy statefulset failed
+  error: failed to apply merge patch: StatefulSet.apps "<engine>-fe" is invalid:
+    spec: Forbidden: updates to statefulset spec for fields other than 'replicas', 'ordinals',
+    'template', 'updateStrategy', 'revisionHistoryLimit', 'persistentVolumeClaimRetentionPolicy'
+    and 'minReadySeconds' are forbidden
+```
+
+— and it keeps retrying. The engine's FE keeps its `emptyDir` (so it is no safer than before), and
+the `StarRocksCluster` sits in `phase=failed`, which means **no other change to that engine
+reconciles either** until this is cleared.
+
+**The step, per existing StarRocks engine.** Recreating the FE StatefulSet is what lets the operator
+build it with the claim template. It replaces the FE pod, and that is the moment the old `emptyDir`
+is discarded — so do the "before upgrading" work below first:
+
+```bash
+kubectl -n egret-engines delete statefulset <engine>-fe --cascade=orphan   # keeps the FE pod alive
+kubectl -n egret-engines delete pod <engine>-fe-0                          # FE metadata is lost here
+```
+
+Then confirm `kubectl -n egret-engines get pvc` shows `fe-meta-<engine>-fe-0` as `Bound`, and the new
+pod's log says `start fe with exist meta.` on its *next* replacement. From then on the metadata
+survives pod replacement.
+
+**What that step loses** — observed on PR #597's live gate when a pod replacement wiped an `emptyDir`
+(`first start fe with meta not exist` in `fe.log`). This list has not been re-measured through the
+StatefulSet recreation above; treat it as the expectation to plan around:
 
 - **every catalog on that engine** — `SHOW CATALOGS` came back with `default_catalog` alone,
   including the `egret-warehouse` Iceberg catalog egret wires up at create time;
 - **every StarRocks-side user, role and grant** — the `analyst` user was simply gone;
-- **the `root` password** — `root` came back with no password at all. The initpwd Job that sets it
-  has already `Completed` and does **not** re-run by itself;
+- **the `root` password** — `root` came back with no password at all when the pod was replaced
+  outside egret. Note, measured: an engine **update through egret** (`PUT /engines/{id}`) re-templates
+  the `initpwd` Job and it runs again within seconds, so the password is restored on that path — but a
+  bare `kubectl delete pod` does not go through egret and does not re-run it;
 - **anything created directly on the FE** — databases, views, materialized views. Table DATA in the
   object store is untouched; what is lost is the FE's record of it.
 
