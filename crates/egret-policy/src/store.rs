@@ -409,6 +409,35 @@ impl PolicyStore {
         .await?)
     }
 
+    /// The name of the tag service `service_id` can actually USE, or `None`.
+    ///
+    /// Both halves must hold: the profile carries a `tagService` in its
+    /// `config_jsonb`, AND that name resolves to a real
+    /// `policy.authz_services` row. The join is the same one
+    /// [`services_and_tag_services_via`] uses, so the two cannot disagree about
+    /// what "has a tag service" means — which matters, because that function
+    /// silently contributes nothing for a dangling `tagService`, and this is
+    /// the predicate callers use to refuse BEFORE reaching that silence.
+    ///
+    /// A profile with no usable tag service compiles ZERO tag policies, so
+    /// every mask and row filter vanishes and the columns are served raw.
+    /// `PUT /engines/{id}` refuses to bind an engine to such a profile.
+    pub async fn usable_tag_service(
+        &self,
+        service_id: i64,
+    ) -> Result<Option<String>, PolicyStoreError> {
+        Ok(sqlx::query_scalar::<_, String>(
+            r#"SELECT t.name
+                 FROM policy.authz_services s
+                 JOIN policy.authz_services t
+                   ON t.name = s.config_jsonb ->> 'tagService'
+                WHERE s.id = $1"#,
+        )
+        .bind(service_id)
+        .fetch_optional(&self.db.pool)
+        .await?)
+    }
+
     /// DELETE a profile outright — refused (Task 8) while it still holds any
     /// compiler-owned policy (see [`refuse_if_compiler_owned_policies_remain`]):
     /// a compiled profile's row (and the `perm.compiled` provenance `ON DELETE

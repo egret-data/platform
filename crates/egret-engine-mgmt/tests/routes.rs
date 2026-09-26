@@ -51,6 +51,10 @@ struct Fixture {
 #[derive(Clone, Default)]
 struct RecordingProfileCompiler {
     calls: Arc<std::sync::Mutex<Vec<i64>>>,
+    /// `recompile_profile_in_tx` calls, kept SEPARATE from `calls` so a test
+    /// asserting the update path's in-transaction recompile cannot be
+    /// satisfied by the create path's fire-and-forget one.
+    in_tx_calls: Arc<std::sync::Mutex<Vec<i64>>>,
 }
 
 #[async_trait::async_trait]
@@ -68,6 +72,15 @@ impl egret_engine_mgmt::ProfileCompilerPort for RecordingProfileCompiler {
         // Engine-bind tests only assert `recompile_profile` was reached with
         // the right `service_id`; the assignment-recompile suite below uses
         // `RealProfileCompiler` instead, which actually compiles.
+        Ok(())
+    }
+
+    async fn recompile_profile_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_id: i64,
+    ) -> Result<(), egret_perm::CompileError> {
+        self.in_tx_calls.lock().unwrap().push(service_id);
         Ok(())
     }
 }
@@ -107,6 +120,17 @@ impl egret_engine_mgmt::ProfileCompilerPort for RealProfileCompiler {
         }
         egret_perm_compile::lock_services_in_tx(tx, &ids).await?;
         egret_perm_compile::recompile_services_in_tx(tx, &ids).await?;
+        Ok(())
+    }
+
+    /// The same two calls `egret-bin`'s `recompile_one_profile` makes.
+    async fn recompile_profile_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_id: i64,
+    ) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::lock_services_in_tx(tx, &[service_id]).await?;
+        egret_perm_compile::recompile_service_in_tx(tx, service_id).await?;
         Ok(())
     }
 }
@@ -3472,6 +3496,59 @@ async fn seed_ranger_profile(f: &Fixture, name: &str, engines: &[Uuid]) -> i64 {
             .unwrap();
     }
     profile.id
+}
+
+/// Seed a profile of `type_` with NO `tagService`, and no tag service row —
+/// the shape the I3 guard refuses.
+async fn seed_profile_without_tag_service(f: &Fixture, name: &str, type_: &str) -> i64 {
+    use egret_policy_api::PolicyPort;
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    PolicyPort::ensure_trino_def(&policy)
+        .await
+        .expect("trino def");
+    egret_policy::service_def::seed_starrocks(&policy)
+        .await
+        .expect("starrocks def");
+    PolicyPort::create_service(&policy, name, type_, &serde_json::json!({}))
+        .await
+        .expect("profile")
+        .id
+}
+
+/// Seed a profile of `type_`, shaped the way egret's own provisioning shapes
+/// that type: a `trino` profile gets a `{name}_tag` tag service and a
+/// `tagService` config; a `starrocks` profile gets NEITHER, because the
+/// StarRocks Ranger plugin has no tag policies (upstream starrocks#67458) and
+/// the compiler expands tag rules into per-column resource policies instead.
+async fn seed_typed_profile(f: &Fixture, name: &str, type_: &str) -> i64 {
+    use egret_policy_api::PolicyPort;
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    PolicyPort::ensure_trino_def(&policy)
+        .await
+        .expect("trino def");
+    egret_policy::service_def::seed_starrocks(&policy)
+        .await
+        .expect("starrocks def");
+    if type_ != "trino" {
+        return PolicyPort::create_service(&policy, name, type_, &serde_json::json!({}))
+            .await
+            .expect("profile")
+            .id;
+    }
+    PolicyPort::ensure_tag_def(&policy).await.expect("tag def");
+    let tag = format!("{name}_tag");
+    PolicyPort::create_service(&policy, &tag, "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service");
+    PolicyPort::create_service(
+        &policy,
+        name,
+        type_,
+        &serde_json::json!({ "tagService": tag }),
+    )
+    .await
+    .expect("profile")
+    .id
 }
 
 async fn service_exists(f: &Fixture, name: &str) -> bool {
@@ -9728,4 +9805,707 @@ async fn creating_an_engine_bound_to_a_profile_recompiles_that_profile() {
          recompiled — otherwise that profile keeps serving a policy set that \
          predates every catalog this engine just attached"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `PUT /engines/{id}` honours `authz_service_id` (StarRocks/Ranger blockers,
+// Task 3)
+// ---------------------------------------------------------------------------
+//
+// `update_engine` takes `Json<CreateEngineBody>`, so `authz_service_id` was a
+// DECLARED field of the update body — accepted, then silently dropped. The
+// handler right beside it refuses `catalogs` for exactly that reason
+// ("accepting the field and dropping it would tell the caller their catalogs
+// were attached"), but `catalogs` has another route to be sent to and this had
+// none: SP4a's live gate had to bind a StarRocks engine to a profile with a
+// direct SQL `UPDATE`. So it is HONOURED rather than refused.
+
+/// PUT body that changes nothing but the profile binding.
+fn rebind_body(name: &str, wh_id: Uuid, authz_service_id: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "authzServiceId": authz_service_id,
+    })
+}
+
+/// An update carrying a valid `authz_service_id` binds the engine to that
+/// profile AND recompiles it, in one transaction.
+#[tokio::test]
+async fn update_with_authz_service_id_binds_and_recompiles() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_update", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    // A SECOND profile, not the one auto-bind created for this engine.
+    let other = format!("other-{}", Uuid::new_v4().simple());
+    let other_id = seed_ranger_profile(&f, &other, &[]).await;
+    let before = authz_service_of(&f, &name).await;
+    assert_ne!(
+        before,
+        Some(other_id),
+        "the engine must not already be bound to the profile under test"
+    );
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(rebind_body(&name, wh_id, serde_json::json!(other_id))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "update; body={j}");
+
+    assert_eq!(
+        authz_service_of(&f, &name).await,
+        Some(other_id),
+        "the engine row must record the profile the update named"
+    );
+    assert_eq!(
+        compiler.in_tx_calls.lock().unwrap().clone(),
+        vec![other_id],
+        "the newly bound profile must be recompiled, in the binding's own \
+         transaction — a bound-but-uncompiled profile serves a policy set that \
+         predates the binding"
+    );
+}
+
+/// **The discriminating test.** An `authz_service_id` naming no profile is
+/// REFUSED, and the refusal NAMES the id. Silence is the defect: before this,
+/// the field was accepted and dropped, so a caller who mistyped an id got a
+/// `200` and an engine still bound wherever it was.
+#[tokio::test]
+async fn update_with_unknown_authz_service_id_is_refused_naming_it() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_unknown", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let before = authz_service_of(&f, &name).await;
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    // An id no `policy.authz_services` row carries. Taken from MAX(id) so it
+    // cannot collide with a profile another concurrent test in this binary
+    // created.
+    let max: Option<i64> = sqlx::query_scalar("SELECT max(id) FROM policy.authz_services")
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    let unknown = max.unwrap_or(0) + 10_000;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(rebind_body(&name, wh_id, serde_json::json!(unknown))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    let msg = j.to_string();
+    assert!(
+        msg.contains(&unknown.to_string()),
+        "the refusal must name the id the caller sent; body={j}"
+    );
+    assert_eq!(
+        authz_service_of(&f, &name).await,
+        before,
+        "a refused bind must not move the engine's binding"
+    );
+    assert!(
+        compiler.in_tx_calls.lock().unwrap().is_empty(),
+        "nothing is compiled for a profile that does not exist"
+    );
+}
+
+/// Re-pointing an engine at a different profile leaves the PREVIOUS profile
+/// row intact. Standing constraint: binding and unbinding never delete a
+/// Ranger profile — a profile can hold admin-written policies and nothing
+/// records that egret created it.
+#[tokio::test]
+async fn update_rebind_leaves_the_previous_profile_row_intact() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_rebind", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let first = format!("first-{}", Uuid::new_v4().simple());
+    let first_id = seed_ranger_profile(&f, &first, &[]).await;
+    let second = format!("second-{}", Uuid::new_v4().simple());
+    let second_id = seed_ranger_profile(&f, &second, &[]).await;
+
+    for sid in [first_id, second_id] {
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req(
+                "PUT",
+                &format!("/engines/{engine_id}"),
+                &token,
+                Some(rebind_body(&name, wh_id, serde_json::json!(sid))),
+            ))
+            .await
+            .unwrap();
+        let (status, j) = into_json(resp).await;
+        assert_eq!(status, StatusCode::OK, "rebind to {sid}; body={j}");
+        assert_eq!(authz_service_of(&f, &name).await, Some(sid));
+    }
+
+    assert!(
+        service_exists(&f, &first).await,
+        "re-pointing the engine must NOT delete the profile it left"
+    );
+    assert!(
+        service_exists(&f, &format!("{first}_tag")).await,
+        "nor its tag service"
+    );
+}
+
+/// An update that omits `authz_service_id` leaves the binding ALONE. The wire
+/// shape cannot tell an absent field from an explicit `null`, and the update
+/// wizard sends the whole body — so treating `None` as a detach would silently
+/// unbind every engine on every unrelated spec edit, a worse silence than the
+/// one being fixed.
+#[tokio::test]
+async fn update_without_authz_service_id_leaves_the_binding_alone() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_absent", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let before = authz_service_of(&f, &name).await;
+    assert!(before.is_some(), "auto-bind gave this engine a profile");
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 2,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert_eq!(
+        authz_service_of(&f, &name).await,
+        before,
+        "an omitted authz_service_id must never unbind"
+    );
+    assert!(compiler.in_tx_calls.lock().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// The four guards the PUT bind was missing (whole-branch review I1-I4)
+// ---------------------------------------------------------------------------
+
+/// I1: a profile of the WRONG TYPE is refused with a 409, the same status the
+/// create path already raises for it — and the binding does not move.
+///
+/// Not cosmetic: the plugin downloads the service-def of the profile's own
+/// type, so a trino-typed profile on a starrocks engine evaluates trino-shaped
+/// definitions against starrocks-shaped compiled policies. Rules whose resource
+/// names no longer match are not denials, they are ABSENT — an unmasked read.
+#[tokio::test]
+async fn update_refuses_a_policy_profile_of_the_wrong_type() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_type", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let before = authz_service_of(&f, &name).await;
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    // A STARROCKS-typed profile, fully tag-wired, offered to a TRINO engine.
+    let sr_name = format!("srprofile-{}", Uuid::new_v4().simple());
+    let sr_profile = seed_typed_profile(&f, &sr_name, "starrocks").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(rebind_body(&name, wh_id, serde_json::json!(sr_profile))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
+    let msg = j.to_string();
+    assert!(
+        msg.contains("starrocks"),
+        "must name the profile's type; body={j}"
+    );
+    assert!(msg.contains("trino"), "and the engine's kind; body={j}");
+    assert_eq!(
+        authz_service_of(&f, &name).await,
+        before,
+        "a refused bind must not move the binding"
+    );
+    assert!(
+        compiler.in_tx_calls.lock().unwrap().is_empty(),
+        "nothing is compiled for a refused bind"
+    );
+}
+
+/// I2: a profile another engine already binds is refused with a 409, mirroring
+/// create's `count_engines_bound_to_authz_service` arm. Two engines sharing one
+/// profile silently share one policy set.
+#[tokio::test]
+async fn update_refuses_a_policy_profile_another_engine_already_binds() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_shared", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    // Two engines. The second one's auto-bind profile is what the first will
+    // be offered — a profile that is demonstrably bound elsewhere.
+    let a = format!("trino-{}", Uuid::new_v4().simple());
+    let (s, j) = create_engine_via_api(&f, &token, &a, wh_id, serde_json::json!({})).await;
+    assert_eq!(s, StatusCode::CREATED, "create a; body={j}");
+    let a_id = j["id"].as_str().unwrap().to_string();
+    let b = format!("trino-{}", Uuid::new_v4().simple());
+    let (s, j) = create_engine_via_api(&f, &token, &b, wh_id, serde_json::json!({})).await;
+    assert_eq!(s, StatusCode::CREATED, "create b; body={j}");
+
+    let b_profile = authz_service_of(&f, &b)
+        .await
+        .expect("engine b is auto-bound to a profile");
+    let a_before = authz_service_of(&f, &a).await;
+    assert_ne!(a_before, Some(b_profile));
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{a_id}"),
+            &token,
+            Some(rebind_body(&a, wh_id, serde_json::json!(b_profile))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
+    assert!(
+        j.to_string().contains(&b_profile.to_string()),
+        "the refusal must name the profile; body={j}"
+    );
+    assert_eq!(
+        authz_service_of(&f, &a).await,
+        a_before,
+        "engine a keeps its own profile"
+    );
+    assert_eq!(
+        authz_service_of(&f, &b).await,
+        Some(b_profile),
+        "engine b keeps its profile — a refused bind steals nothing"
+    );
+    assert!(compiler.in_tx_calls.lock().unwrap().is_empty());
+}
+
+/// I3, fail-open: a profile with no usable `tagService` is REFUSED.
+///
+/// Binding one compiles zero tag policies, so every tag-based column mask and
+/// row filter silently disappears and the columns are served raw —
+/// `recompile_service_in_tx` records the skip and carries on by design. The
+/// decision is to refuse: nothing is provisioned yet, the engine keeps its
+/// working binding, and this is the only moment a human is present to fix it.
+#[tokio::test]
+async fn update_refuses_a_policy_profile_with_no_usable_tag_service() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_notag", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let before = authz_service_of(&f, &name).await;
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    let tagless_name = format!("tagless-{}", Uuid::new_v4().simple());
+    let tagless = seed_profile_without_tag_service(&f, &tagless_name, "trino").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(rebind_body(&name, wh_id, serde_json::json!(tagless))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    let msg = j.to_string();
+    assert!(
+        msg.contains("tag service"),
+        "the refusal must say what is missing; body={j}"
+    );
+    assert!(
+        msg.contains(&tagless.to_string()),
+        "and name the profile; body={j}"
+    );
+    assert_eq!(
+        authz_service_of(&f, &name).await,
+        before,
+        "a refused bind must not move the binding"
+    );
+    assert!(compiler.in_tx_calls.lock().unwrap().is_empty());
+
+    // The SAME profile with a usable tag service is accepted — so the refusal
+    // is about the tag service and nothing else.
+    let wired_name = format!("wired-{}", Uuid::new_v4().simple());
+    let wired = seed_typed_profile(&f, &wired_name, "trino").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(rebind_body(&name, wh_id, serde_json::json!(wired))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a tag-wired profile binds; body={j}"
+    );
+    assert_eq!(authz_service_of(&f, &name).await, Some(wired));
+}
+
+/// I4: a PUT that ends in a 400 must NOT have bound. The engine-kind check, the
+/// kubernetes check and the StarRocks body validators all used to run
+/// downstream of the bind, so a refused PUT had already re-pointed the engine
+/// and recompiled the profile it named.
+///
+/// Driven through the StarRocks body validators, because those are the ones
+/// that produce a 400 from a body a caller can actually send.
+#[tokio::test]
+async fn a_refused_update_never_binds_the_profile_it_carried() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_order", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let sr_name = format!("sr-{}", Uuid::new_v4().simple());
+    let sr_id = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .create_engine(
+            &sr_name,
+            "starrocks",
+            "egret-engines",
+            &serde_json::json!({ "starrocksConfig": {} }),
+            None,
+        )
+        .await
+        .unwrap()
+        .id;
+    let before = authz_service_of(&f, &sr_name).await;
+
+    // A perfectly valid, tag-wired, starrocks-typed, unbound profile...
+    let profile_name = format!("srp-{}", Uuid::new_v4().simple());
+    let profile = seed_typed_profile(&f, &profile_name, "starrocks").await;
+    assert_ne!(before, Some(profile));
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    // ...carried on a body the StarRocks validators refuse (`delegationMode`).
+    let mut body = rebind_body(&sr_name, wh_id, serde_json::json!(profile));
+    body["kind"] = serde_json::json!("starrocks");
+    body["starrocks"] = serde_json::json!({ "delegationMode": "not-a-mode" });
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("PUT", &format!("/engines/{sr_id}"), &token, Some(body)))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert_eq!(
+        authz_service_of(&f, &sr_name).await,
+        before,
+        "a PUT that ends in a 400 must not have bound the profile it carried"
+    );
+    assert!(
+        compiler.in_tx_calls.lock().unwrap().is_empty(),
+        "nor compiled it"
+    );
+}
+
+/// I3's other half, and the one that keeps the guard from being over-strict: a
+/// STARROCKS profile with no tag service is ACCEPTED.
+///
+/// StarRocks' Ranger plugin has no tag policies at all (upstream
+/// starrocks#67458), so a StarRocks profile is not supposed to have a tag
+/// service — the compiler expands a tag-selector rule into per-column resource
+/// policies on the profile itself, and `MissingTagService` is raised only on
+/// the Trino branch. Without this test the I3 guard would refuse every
+/// legitimate StarRocks bind, including the one the live masking gate needs,
+/// and every other test here would still pass.
+#[tokio::test]
+async fn update_accepts_a_starrocks_profile_with_no_tag_service() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_sr_notag", true).await;
+    // `_with_secret`: provisioning StarRocks needs the warehouse storage
+    // connection's secret for the FE's builtin storage volume.
+    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
+    let sr_name = format!("sr-{}", Uuid::new_v4().simple());
+    // Created through the API so it gets a PRIMARY warehouse attachment — a
+    // bare store row 400s later in `build_starrocks_provision_req`, which would
+    // make this test fail for a reason that has nothing to do with tag services.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": sr_name, "warehouseId": wh_id, "kind": "starrocks",
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+                "starrocks": { "feReplicas": 1, "cnReplicas": 1 },
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create starrocks; body={j}");
+    let sr_id = j["id"].as_str().unwrap().to_string();
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    // A starrocks-typed profile with NO `tagService` and no tag service row.
+    let p_name = format!("srp-{}", Uuid::new_v4().simple());
+    let profile = seed_profile_without_tag_service(&f, &p_name, "starrocks").await;
+
+    let mut body = rebind_body(&sr_name, wh_id, serde_json::json!(profile));
+    body["kind"] = serde_json::json!("starrocks");
+    body["starrocks"] = serde_json::json!({ "feReplicas": 1, "cnReplicas": 1 });
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("PUT", &format!("/engines/{sr_id}"), &token, Some(body)))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a StarRocks profile needs no tag service; body={j}"
+    );
+    assert_eq!(authz_service_of(&f, &sr_name).await, Some(profile));
+    assert_eq!(
+        compiler.in_tx_calls.lock().unwrap().clone(),
+        vec![profile],
+        "and it is still recompiled"
+    );
+}
+
+/// I4's general half: a refusal decided from the BUILT spec — which no hoisted
+/// guard can pre-empt — still leaves the binding where it was.
+///
+/// A StarRocks engine row with no primary warehouse attachment 400s inside
+/// `build_starrocks_provision_req`, well after the bind has committed. The
+/// compensating restore is what keeps "the caller was told no" and "the engine
+/// was re-pointed anyway" from both being true.
+#[tokio::test]
+async fn a_late_refusal_restores_the_previous_binding() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_late", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let sr_name = format!("sr-{}", Uuid::new_v4().simple());
+    let sr_id = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .create_engine(
+            &sr_name,
+            "starrocks",
+            "egret-engines",
+            &serde_json::json!({ "starrocksConfig": {} }),
+            None,
+        )
+        .await
+        .unwrap()
+        .id;
+
+    // Give it a starting binding, so the restore has something to restore TO
+    // (and so this cannot pass merely because both values are NULL).
+    let start_name = format!("srstart-{}", Uuid::new_v4().simple());
+    let start = seed_profile_without_tag_service(&f, &start_name, "starrocks").await;
+    egret_engine_mgmt::EngineMgmtStore::new(f.db.clone())
+        .set_engine_authz_service(sr_id, Some(start))
+        .await
+        .unwrap();
+
+    let target_name = format!("srtarget-{}", Uuid::new_v4().simple());
+    let target = seed_profile_without_tag_service(&f, &target_name, "starrocks").await;
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    // This engine has no primary warehouse attachment, so the StarRocks
+    // provision-req build 400s — after the bind.
+    let mut body = rebind_body(&sr_name, wh_id, serde_json::json!(target));
+    body["kind"] = serde_json::json!("starrocks");
+    body["starrocks"] = serde_json::json!({ "feReplicas": 1, "cnReplicas": 1 });
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("PUT", &format!("/engines/{sr_id}"), &token, Some(body)))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert!(!status.is_success(), "the late guard must refuse; body={j}");
+    assert_eq!(
+        authz_service_of(&f, &sr_name).await,
+        Some(start),
+        "a refused update must leave the engine on the profile it started on"
+    );
+    // Both profile rows survive — a restore unbinds, never deletes.
+    assert!(service_exists(&f, &start_name).await);
+    assert!(service_exists(&f, &target_name).await);
 }

@@ -295,6 +295,11 @@ fn bool_str(b: bool) -> &'static str {
     }
 }
 
+/// The region an egret warehouse is addressed with. egret's own object store
+/// is S3-compatible rather than AWS, so the region is a required-but-unused
+/// signing input; Trino's `Egret` branch pins the same value.
+const EGRET_WAREHOUSE_S3_REGION: &str = "us-east-1";
+
 struct Out {
     props: BTreeMap<String, PropValue>,
 }
@@ -336,6 +341,55 @@ impl Out {
                 .ok_or(RenderError::MissingInput("storage secret"))?,
         );
         Ok(())
+    }
+
+    /// S3 configuration for an egret-warehouse (`IcebergMetastore::Egret`)
+    /// catalog, which has NO storage connection of its own: `validate` refuses
+    /// `storage_connection_id` on that variant ("an egret warehouse catalog
+    /// uses its warehouse's storage"), so `input.storage` is always `None`
+    /// here and [`Out::s3`] — which requires one, plus a
+    /// `secret_key_secret_id` — can never be used on this branch. The two
+    /// sources therefore cannot disagree; there is only one.
+    ///
+    /// No `aws.s3.access_key`/`aws.s3.secret_key`: the FE gets its object
+    /// credentials VENDED by egret's Iceberg REST catalog. It still has to be
+    /// told where to talk, exactly as Trino's own `Egret` branch is
+    /// (`render/trino.rs`) — without an endpoint the FE falls back to its
+    /// default AWS endpoint and every object read fails
+    /// `Bad Request (Service: S3, Status Code: 400)`.
+    ///
+    /// MEASURED on StarRocks 4.1.3-8a8e186 (kind `kind-egret`,
+    /// `egret-engines/sp3c2-sr-live-fe-0`, 2026-09-26): this exact property
+    /// map, with no static keys, reads real rows from an egret warehouse on
+    /// MinIO, while the same MinIO refuses anonymous GET/LIST with 403 — so
+    /// the read is genuinely served by vended credentials. The same catalog
+    /// without these properties reproduced the S3 400 above.
+    ///
+    /// `vended-credentials-enabled` already defaults to `true`
+    /// (`IcebergRESTCatalog.java`), but is set explicitly so a default flip
+    /// cannot silently break object reads — and so the rendered map states
+    /// which credential path this catalog depends on.
+    ///
+    /// `region` and path-style are fixed the way Trino's `Egret` branch fixes
+    /// them: the warehouse render carries only a name and an endpoint, and an
+    /// egret warehouse is always addressed path-style.
+    fn egret_warehouse_s3(&mut self, s3_endpoint: &str) {
+        self.set("iceberg.catalog.vended-credentials-enabled", "true");
+        self.set("aws.s3.endpoint", s3_endpoint);
+        // The FE defaults `enable_ssl` to `true` (`AwsCloudConfiguration.java:40`),
+        // so an http endpoint (MinIO, most in-cluster S3-compatible stores)
+        // needs it set explicitly to `false`.
+        self.set(
+            "aws.s3.enable_ssl",
+            if s3_endpoint.starts_with("https://") {
+                "true"
+            } else {
+                "false"
+            },
+        );
+        self.set("aws.s3.region", EGRET_WAREHOUSE_S3_REGION);
+        self.set("aws.s3.enable_path_style_access", "true");
+        self.set("aws.s3.use_instance_profile", "false");
     }
 
     fn glue(&mut self, region: &str, access_key: Option<&str>, secret: Option<Uuid>) {
@@ -407,6 +461,7 @@ pub fn render_starrocks(
                         "iceberg.catalog.oauth2-server-uri",
                         format!("{}/oauth/token", input.egret_url),
                     );
+                    out.egret_warehouse_s3(wh.s3_endpoint);
                 }
                 IcebergMetastore::Rest {
                     uri,
@@ -849,6 +904,30 @@ mod tests {
                     "iceberg.catalog.oauth2-server-uri".to_string(),
                     PropValue::Plain("http://egret:8080/oauth/token".into())
                 ),
+                (
+                    "iceberg.catalog.vended-credentials-enabled".to_string(),
+                    PropValue::Plain("true".into())
+                ),
+                (
+                    "aws.s3.endpoint".to_string(),
+                    PropValue::Plain("http://minio:9000".into())
+                ),
+                (
+                    "aws.s3.enable_ssl".to_string(),
+                    PropValue::Plain("false".into())
+                ),
+                (
+                    "aws.s3.region".to_string(),
+                    PropValue::Plain("us-east-1".into())
+                ),
+                (
+                    "aws.s3.enable_path_style_access".to_string(),
+                    PropValue::Plain("true".into())
+                ),
+                (
+                    "aws.s3.use_instance_profile".to_string(),
+                    PropValue::Plain("false".into())
+                ),
             ]
             .into_iter()
             .collect::<BTreeMap<_, _>>()
@@ -880,6 +959,94 @@ mod tests {
             "red={red}"
         );
         assert!(!red.contains("csecret"), "red={red}");
+    }
+
+    /// An egret-warehouse catalog carries its S3 configuration, and carries it
+    /// WITHOUT a storage connection.
+    ///
+    /// `CatalogDef::validate` refuses `storage_connection_id` on the `egret`
+    /// metastore, so `input.storage` is always `None` in production — this
+    /// fixture models that. Before the fix the branch emitted no `aws.s3.*` at
+    /// all, the FE fell back to its default AWS endpoint, and every object read
+    /// failed `Bad Request (Service: S3, Status Code: 400)` (reproduced live on
+    /// StarRocks 4.1.3, kind `kind-egret`).
+    ///
+    /// The assertions are on the rendered property MAP, not on the SQL string:
+    /// the broken render produced perfectly valid SQL, so a test that only
+    /// checked the statement parses would pass against the bug.
+    ///
+    /// The other discriminating half is the negative: NO static
+    /// `aws.s3.access_key`/`aws.s3.secret_key`. MEASURED on 4.1.3 that vended
+    /// credentials from the REST catalog serve the read (real rows returned)
+    /// while the same MinIO refuses anonymous access with 403 — and there is no
+    /// key to emit here anyway, since there is no storage connection.
+    #[test]
+    fn egret_warehouse_renders_s3_endpoint_region_and_path_style_without_storage() {
+        let mut inp = input();
+        inp.storage = None;
+        let d = CatalogDef::egret_warehouse(id(WH));
+        let ddl = render_starrocks("egret", &d, &inp).unwrap();
+        let props = &ddl.properties;
+
+        assert_eq!(
+            props.get("aws.s3.endpoint"),
+            Some(&PropValue::Plain("http://minio:9000".into())),
+            "the FE must be told where to talk; props={props:?}"
+        );
+        assert_eq!(
+            props.get("aws.s3.region"),
+            Some(&PropValue::Plain("us-east-1".into())),
+            "props={props:?}"
+        );
+        assert_eq!(
+            props.get("aws.s3.enable_path_style_access"),
+            Some(&PropValue::Plain("true".into())),
+            "props={props:?}"
+        );
+        // http endpoint -> ssl off, since the FE defaults it on.
+        assert_eq!(
+            props.get("aws.s3.enable_ssl"),
+            Some(&PropValue::Plain("false".into())),
+            "props={props:?}"
+        );
+        assert_eq!(
+            props.get("iceberg.catalog.vended-credentials-enabled"),
+            Some(&PropValue::Plain("true".into())),
+            "props={props:?}"
+        );
+
+        // Negative: no static object credentials on this branch.
+        assert!(
+            !props.contains_key("aws.s3.access_key"),
+            "an egret warehouse has no storage connection to take a key from; props={props:?}"
+        );
+        assert!(!props.contains_key("aws.s3.secret_key"), "props={props:?}");
+        assert_eq!(
+            props.get("aws.s3.use_instance_profile"),
+            Some(&PropValue::Plain("false".into())),
+            "props={props:?}"
+        );
+    }
+
+    /// An https warehouse endpoint leaves `aws.s3.enable_ssl` on.
+    #[test]
+    fn egret_warehouse_https_endpoint_keeps_ssl_enabled() {
+        let mut inp = input();
+        inp.storage = None;
+        inp.warehouse = Some(WarehouseRender {
+            name: "wh-a",
+            s3_endpoint: "https://s3.example.com",
+        });
+        let d = CatalogDef::egret_warehouse(id(WH));
+        let ddl = render_starrocks("egret", &d, &inp).unwrap();
+        assert_eq!(
+            ddl.properties.get("aws.s3.enable_ssl"),
+            Some(&PropValue::Plain("true".into()))
+        );
+        assert_eq!(
+            ddl.properties.get("aws.s3.endpoint"),
+            Some(&PropValue::Plain("https://s3.example.com".into()))
+        );
     }
 
     #[test]

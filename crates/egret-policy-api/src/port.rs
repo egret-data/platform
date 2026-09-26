@@ -44,6 +44,23 @@ pub trait PolicyPort: Send + Sync {
     /// minted before failing.
     async fn delete_service(&self, id: i64) -> Result<(), PolicyError>;
 
+    /// The name of the tag service `service_id`'s profile can actually use, or
+    /// `None` when it has none it can.
+    ///
+    /// "Usable" means BOTH halves hold: the profile's `config_jsonb` carries a
+    /// `tagService`, AND that name resolves to a real `authz_services` row.
+    /// Either half missing is the same outcome for the compiler — it is exactly
+    /// the condition `egret_perm_compile`'s `CompileError::MissingTagService`
+    /// reports ("unconfigured, or naming a profile that does not exist") — so
+    /// this collapses them into one answer rather than making every caller
+    /// re-derive the distinction.
+    ///
+    /// **Why the engine seam needs it.** Every tag-selector rule (mask, row
+    /// filter) compiles into the profile's TAG service. A profile with no
+    /// usable one silently compiles zero tag policies, so masked columns are
+    /// served raw. `PUT /engines/{id}` checks this before it binds.
+    async fn usable_tag_service(&self, service_id: i64) -> Result<Option<String>, PolicyError>;
+
     /// Look up a policy profile by name; `None` when it doesn't exist (unlike a
     /// hard-error lookup). Used by engine provisioning to seed delegator policies
     /// onto a bound Ranger service without failing when the engine is unbound.

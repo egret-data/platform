@@ -60,6 +60,30 @@ pub trait ProfileCompilerPort: Send + Sync {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         catalog_id: Uuid,
     ) -> Result<(), egret_perm::CompileError>;
+
+    /// Recompile ONE profile on the CALLER's own open transaction.
+    ///
+    /// The `PUT /engines/{id}` bind (Task 3) uses this: the engine row's
+    /// `authz_service_id` write and the compile of the profile it now names
+    /// commit together, so there is no window in which the engine claims a
+    /// profile the compiler has never filled. Like
+    /// [`recompile_catalog_assignment_in_tx`](Self::recompile_catalog_assignment_in_tx)
+    /// — and unlike the fire-and-forget
+    /// [`recompile_profile`](Self::recompile_profile), which runs after a
+    /// cluster has already been provisioned — a failure here MUST fail and
+    /// roll back the binding.
+    ///
+    /// The implementation takes the row locks through
+    /// `egret_perm_compile::lock_services_in_tx`, which expands the set with
+    /// `egret_policy::services_and_tag_services_via` (a profile's TAG service
+    /// can have a LOWER id than the profile) and locks it ascending. That is
+    /// the one ordering every recompile path shares; a second mechanism here
+    /// would be a deadlock.
+    async fn recompile_profile_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_id: i64,
+    ) -> Result<(), egret_perm::CompileError>;
 }
 
 /// Recompile whatever profile `engine_id` is currently bound to, if any and if

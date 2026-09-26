@@ -41,10 +41,13 @@ import {
  * follow-up, not part of the default-on delegation work.
  *
  * Scoped to per-user delegation + transport TLS. The Ranger/authz binding
- * (`authzServiceId`) is NOT editable here: the StarRocks update path
- * (`update_starrocks_engine` → `build_starrocks_spec`) never reads
- * `authz_service_id` from the PUT body, so it's fixed at creation. Surfacing an
- * editable control would fake a change the backend silently ignores.
+ * (`authzServiceId`) is still not editable here, but the reason has CHANGED:
+ * `PUT /engines/{id}` now honours the field (it binds the engine to that
+ * profile, recompiles the profile in the same transaction, and refuses an
+ * unknown id with a 400 naming it), so surfacing a control would no longer
+ * fake a change the backend ignores. What is missing is the control itself —
+ * a profile picker, plus copy for what re-pointing an engine at a different
+ * profile means — which is a deliberate follow-up, not a backend gap.
  */
 export function StarRocksSecuritySection({
   cfg,

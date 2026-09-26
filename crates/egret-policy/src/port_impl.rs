@@ -57,6 +57,10 @@ impl PolicyPort for PolicyStore {
         Ok(self.create_service(name, type_, config).await?.into())
     }
 
+    async fn usable_tag_service(&self, service_id: i64) -> Result<Option<String>, PolicyError> {
+        Ok(self.usable_tag_service(service_id).await?)
+    }
+
     async fn get_service_opt(&self, name: &str) -> Result<Option<PolicyService>, PolicyError> {
         Ok(self.get_service_opt(name).await?.map(Into::into))
     }
