@@ -285,6 +285,26 @@ async fn recompile_catalog_assignment(
     Ok(())
 }
 
+/// Lock + recompile exactly ONE profile on the caller's transaction.
+///
+/// `lock_services_in_tx` first, for the same reason
+/// [`recompile_catalog_assignment`] takes it: it is the single gate that
+/// expands the set with each profile's TAG service
+/// (`egret_policy::services_and_tag_services_via` — a tag service's id can be
+/// LOWER than its profile's, 51 vs 52 on the live cluster) and locks the
+/// expanded set ASCENDING, which is what keeps two overlapping recompiles
+/// queueing instead of deadlocking. A one-element slice is trivially sorted,
+/// so the `debug_assert!(service_ids.is_sorted())` inside that gate holds; the
+/// expansion it performs is the part that matters here.
+async fn recompile_one_profile(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    service_id: i64,
+) -> Result<(), egret_perm::CompileError> {
+    egret_perm_compile::lock_services_in_tx(tx, &[service_id]).await?;
+    egret_perm_compile::recompile_service_in_tx(tx, service_id).await?;
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl egret_engine_mgmt::ProfileCompilerPort for ProfileCompilerImpl {
     async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
@@ -299,6 +319,14 @@ impl egret_engine_mgmt::ProfileCompilerPort for ProfileCompilerImpl {
         catalog_id: uuid::Uuid,
     ) -> Result<(), egret_perm::CompileError> {
         recompile_catalog_assignment(tx, catalog_id).await
+    }
+
+    async fn recompile_profile_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_id: i64,
+    ) -> Result<(), egret_perm::CompileError> {
+        recompile_one_profile(tx, service_id).await
     }
 }
 

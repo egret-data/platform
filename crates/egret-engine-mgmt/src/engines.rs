@@ -4580,6 +4580,99 @@ async fn rematerialize_or_400(st: &CpState, engine_id: Uuid) -> Result<(), CpErr
         })
 }
 
+/// Apply an update body's `authz_service_id` to `engine`, binding it to that
+/// policy profile and compiling the profile in the SAME transaction.
+///
+/// **Why honoured and not refused.** `CreateEngineBody` is shared with create,
+/// and `update_engine` refuses its `catalogs` field outright because accepting
+/// and dropping it would tell the caller their catalogs were attached when
+/// they were not — and because `POST /engines/{id}/catalogs/{cid}` is a real
+/// route to send them to instead. `authz_service_id` had the same silence with
+/// no such route behind it: the field was declared, accepted and dropped, so
+/// the only way to bind an engine to an existing profile after create was a
+/// direct SQL `UPDATE`. This is that route.
+///
+/// **`None` means "unchanged", never "unbind".** The wire shape cannot tell an
+/// absent field from an explicit `null` (`#[serde(default)]` on an
+/// `Option<i64>`), and the update wizard sends the whole body — so treating
+/// `None` as a detach would silently unbind every engine on every unrelated
+/// spec edit. That is a worse silence than the one being fixed. Changing the
+/// binding from profile A to profile B is a plain re-point: A's row is
+/// untouched, because unbinding must never delete a profile.
+///
+/// **An unknown id is a 400 naming it.** Not a warning-and-carry-on the way
+/// create's `plan_trino_profile` treats a bad id (there, a fresh profile is
+/// created instead, so the engine still ends up governed). Here there is no
+/// fallback, and a silent no-op is precisely the defect.
+///
+/// **Bind and compile commit together.** A profile an engine newly binds is
+/// stale: the compiler's affected-service sets are all derived from the
+/// MUTATED model row, and a binding mutates no grant and no rule. SP4a fixed
+/// this at engine create (`680adea9`); this is the same fix on update, through
+/// the same seam — `ProfileCompilerPort::recompile_profile_in_tx`, which locks
+/// through `lock_services_in_tx` (expanded with each profile's tag service,
+/// ascending). Unlike create — where a cluster is already provisioned by the
+/// time the recompile runs, so a failure only logs — nothing has been applied
+/// here yet, so a compile failure rolls the binding back and refuses.
+async fn apply_authz_service_update(
+    st: &CpState,
+    engine: &mut Engine,
+    requested: Option<i64>,
+) -> Result<(), CpError> {
+    let Some(sid) = requested else {
+        return Ok(());
+    };
+    if engine.authz_service_id == Some(sid) {
+        return Ok(()); // already bound there; no write, nothing to recompile
+    }
+    let services = st
+        .authz
+        .list_services()
+        .await
+        .map_err(|e| CpError::BadRequest(format!("list policy profiles: {e}")))?;
+    if !services.iter().any(|s| s.id == sid) {
+        return Err(CpError::BadRequest(format!(
+            "authz_service_id {sid} is not a policy profile; \
+             list them with GET /api/control-plane/policy/services"
+        )));
+    }
+    // The binding write and the compile of the profile it names share ONE
+    // transaction, the same shape `catalogs::set_catalog_workspaces` keeps —
+    // and, like it, `sqlx::Error` from `.begin()`/`.commit()` is mapped
+    // through `db_error` explicitly at the call site rather than through a
+    // blanket `From`.
+    let mut tx = st
+        .engine_mgmt
+        .pool()
+        .begin()
+        .await
+        .map_err(crate::http_error::db_error)?;
+    st.engine_mgmt
+        .set_engine_authz_service_in_tx(&mut tx, engine.id, Some(sid))
+        .await?;
+    if let Some(compiler) = st.perm_compiler.clone() {
+        if let Err(e) = compiler.recompile_profile_in_tx(&mut tx, sid).await {
+            tracing::error!(
+                engine = %engine.name,
+                service_id = sid,
+                error = %e,
+                "compiling the policy profile this engine was being bound to failed; \
+                 the binding was rolled back rather than committed uncompiled"
+            );
+            return Err(CpError::Internal);
+        }
+    }
+    tx.commit().await.map_err(crate::http_error::db_error)?;
+    tracing::info!(
+        engine = %engine.name,
+        previous = ?engine.authz_service_id,
+        service_id = sid,
+        "engine re-pointed at a policy profile by update; the previous profile row is untouched"
+    );
+    engine.authz_service_id = Some(sid);
+    Ok(())
+}
+
 #[utoipa::path(
     put,
     path = "/api/control-plane/engines/{id}",
@@ -4588,7 +4681,7 @@ async fn rematerialize_or_400(st: &CpState, engine_id: Uuid) -> Result<(), CpErr
     request_body = CreateEngineBody,
     responses(
         (status = 200, description = "Engine spec updated and pods rolled", body = EngineDto),
-        (status = 400, description = "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), or re-materializing workspace connections failed", body = ErrorBody),
+        (status = 400, description = "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), `authz_service_id` naming no policy profile, or re-materializing workspace connections failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
@@ -4615,11 +4708,20 @@ async fn update_engine(
                 .into(),
         ));
     }
-    let engine = st
+    let mut engine = st
         .engine_mgmt
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    // `authz_service_id` is HONOURED here rather than refused the way
+    // `catalogs` is above, because there is no other route to send the caller
+    // to: until this landed, binding an engine to an existing policy profile
+    // after create was only reachable by a direct SQL `UPDATE` (which is what
+    // SP4a's live gate had to do). Applied BEFORE the type dispatch so the
+    // provision request the dispatch builds — whose `RangerBinding` is derived
+    // from `engine.authz_service_id` — sees the new binding, and so a refusal
+    // happens before anything touches the cluster.
+    apply_authz_service_update(&st, &mut engine, b.authz_service_id).await?;
     // StarRocks has its own spec builder + provision-req assembler (FE/CN roles,
     // builtin storage volume) — dispatch to it rather than running the Trino
     // spec/assembly below.

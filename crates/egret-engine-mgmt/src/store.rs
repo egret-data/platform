@@ -302,6 +302,31 @@ impl EngineMgmtStore {
         Ok(())
     }
 
+    /// [`set_engine_authz_service`](Self::set_engine_authz_service) on the
+    /// CALLER's open transaction.
+    ///
+    /// The update path binds and RECOMPILES atomically: a profile an engine
+    /// now binds but whose compiled policy set predates that binding is
+    /// exactly the staleness SP4a's engine-create recompile exists to remove,
+    /// and committing the binding without the compile would reintroduce it in
+    /// the one place a caller cannot see it. Does not commit; the caller does.
+    ///
+    /// `None` DETACHES the engine. It never touches `policy.authz_services` —
+    /// unbinding must not delete a profile row.
+    pub async fn set_engine_authz_service_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: Uuid,
+        authz_service_id: Option<i64>,
+    ) -> Result<(), EngineMgmtError> {
+        sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = $2 WHERE id = $1")
+            .bind(id)
+            .bind(authz_service_id)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
     /// How many engines are bound to a Ranger profile.
     pub async fn count_engines_bound_to_authz_service(
         &self,

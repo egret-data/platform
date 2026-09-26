@@ -51,6 +51,10 @@ struct Fixture {
 #[derive(Clone, Default)]
 struct RecordingProfileCompiler {
     calls: Arc<std::sync::Mutex<Vec<i64>>>,
+    /// `recompile_profile_in_tx` calls, kept SEPARATE from `calls` so a test
+    /// asserting the update path's in-transaction recompile cannot be
+    /// satisfied by the create path's fire-and-forget one.
+    in_tx_calls: Arc<std::sync::Mutex<Vec<i64>>>,
 }
 
 #[async_trait::async_trait]
@@ -68,6 +72,15 @@ impl egret_engine_mgmt::ProfileCompilerPort for RecordingProfileCompiler {
         // Engine-bind tests only assert `recompile_profile` was reached with
         // the right `service_id`; the assignment-recompile suite below uses
         // `RealProfileCompiler` instead, which actually compiles.
+        Ok(())
+    }
+
+    async fn recompile_profile_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_id: i64,
+    ) -> Result<(), egret_perm::CompileError> {
+        self.in_tx_calls.lock().unwrap().push(service_id);
         Ok(())
     }
 }
@@ -107,6 +120,17 @@ impl egret_engine_mgmt::ProfileCompilerPort for RealProfileCompiler {
         }
         egret_perm_compile::lock_services_in_tx(tx, &ids).await?;
         egret_perm_compile::recompile_services_in_tx(tx, &ids).await?;
+        Ok(())
+    }
+
+    /// The same two calls `egret-bin`'s `recompile_one_profile` makes.
+    async fn recompile_profile_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_id: i64,
+    ) -> Result<(), egret_perm::CompileError> {
+        egret_perm_compile::lock_services_in_tx(tx, &[service_id]).await?;
+        egret_perm_compile::recompile_service_in_tx(tx, service_id).await?;
         Ok(())
     }
 }
@@ -9728,4 +9752,265 @@ async fn creating_an_engine_bound_to_a_profile_recompiles_that_profile() {
          recompiled — otherwise that profile keeps serving a policy set that \
          predates every catalog this engine just attached"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `PUT /engines/{id}` honours `authz_service_id` (StarRocks/Ranger blockers,
+// Task 3)
+// ---------------------------------------------------------------------------
+//
+// `update_engine` takes `Json<CreateEngineBody>`, so `authz_service_id` was a
+// DECLARED field of the update body — accepted, then silently dropped. The
+// handler right beside it refuses `catalogs` for exactly that reason
+// ("accepting the field and dropping it would tell the caller their catalogs
+// were attached"), but `catalogs` has another route to be sent to and this had
+// none: SP4a's live gate had to bind a StarRocks engine to a profile with a
+// direct SQL `UPDATE`. So it is HONOURED rather than refused.
+
+/// PUT body that changes nothing but the profile binding.
+fn rebind_body(name: &str, wh_id: Uuid, authz_service_id: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "authzServiceId": authz_service_id,
+    })
+}
+
+/// An update carrying a valid `authz_service_id` binds the engine to that
+/// profile AND recompiles it, in one transaction.
+#[tokio::test]
+async fn update_with_authz_service_id_binds_and_recompiles() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_update", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    // A SECOND profile, not the one auto-bind created for this engine.
+    let other = format!("other-{}", Uuid::new_v4().simple());
+    let other_id = seed_ranger_profile(&f, &other, &[]).await;
+    let before = authz_service_of(&f, &name).await;
+    assert_ne!(
+        before,
+        Some(other_id),
+        "the engine must not already be bound to the profile under test"
+    );
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(rebind_body(&name, wh_id, serde_json::json!(other_id))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "update; body={j}");
+
+    assert_eq!(
+        authz_service_of(&f, &name).await,
+        Some(other_id),
+        "the engine row must record the profile the update named"
+    );
+    assert_eq!(
+        compiler.in_tx_calls.lock().unwrap().clone(),
+        vec![other_id],
+        "the newly bound profile must be recompiled, in the binding's own \
+         transaction — a bound-but-uncompiled profile serves a policy set that \
+         predates the binding"
+    );
+}
+
+/// **The discriminating test.** An `authz_service_id` naming no profile is
+/// REFUSED, and the refusal NAMES the id. Silence is the defect: before this,
+/// the field was accepted and dropped, so a caller who mistyped an id got a
+/// `200` and an engine still bound wherever it was.
+#[tokio::test]
+async fn update_with_unknown_authz_service_id_is_refused_naming_it() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_unknown", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let before = authz_service_of(&f, &name).await;
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    // An id no `policy.authz_services` row carries. Taken from MAX(id) so it
+    // cannot collide with a profile another concurrent test in this binary
+    // created.
+    let max: Option<i64> = sqlx::query_scalar("SELECT max(id) FROM policy.authz_services")
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    let unknown = max.unwrap_or(0) + 10_000;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(rebind_body(&name, wh_id, serde_json::json!(unknown))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    let msg = j.to_string();
+    assert!(
+        msg.contains(&unknown.to_string()),
+        "the refusal must name the id the caller sent; body={j}"
+    );
+    assert_eq!(
+        authz_service_of(&f, &name).await,
+        before,
+        "a refused bind must not move the engine's binding"
+    );
+    assert!(
+        compiler.in_tx_calls.lock().unwrap().is_empty(),
+        "nothing is compiled for a profile that does not exist"
+    );
+}
+
+/// Re-pointing an engine at a different profile leaves the PREVIOUS profile
+/// row intact. Standing constraint: binding and unbinding never delete a
+/// Ranger profile — a profile can hold admin-written policies and nothing
+/// records that egret created it.
+#[tokio::test]
+async fn update_rebind_leaves_the_previous_profile_row_intact() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_rebind", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+
+    let first = format!("first-{}", Uuid::new_v4().simple());
+    let first_id = seed_ranger_profile(&f, &first, &[]).await;
+    let second = format!("second-{}", Uuid::new_v4().simple());
+    let second_id = seed_ranger_profile(&f, &second, &[]).await;
+
+    for sid in [first_id, second_id] {
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req(
+                "PUT",
+                &format!("/engines/{engine_id}"),
+                &token,
+                Some(rebind_body(&name, wh_id, serde_json::json!(sid))),
+            ))
+            .await
+            .unwrap();
+        let (status, j) = into_json(resp).await;
+        assert_eq!(status, StatusCode::OK, "rebind to {sid}; body={j}");
+        assert_eq!(authz_service_of(&f, &name).await, Some(sid));
+    }
+
+    assert!(
+        service_exists(&f, &first).await,
+        "re-pointing the engine must NOT delete the profile it left"
+    );
+    assert!(
+        service_exists(&f, &format!("{first}_tag")).await,
+        "nor its tag service"
+    );
+}
+
+/// An update that omits `authz_service_id` leaves the binding ALONE. The wire
+/// shape cannot tell an absent field from an explicit `null`, and the update
+/// wizard sends the whole body — so treating `None` as a detach would silently
+/// unbind every engine on every unrelated spec edit, a worse silence than the
+/// one being fixed.
+#[tokio::test]
+async fn update_without_authz_service_id_leaves_the_binding_alone() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_absent", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let before = authz_service_of(&f, &name).await;
+    assert!(before.is_some(), "auto-bind gave this engine a profile");
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 2,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert_eq!(
+        authz_service_of(&f, &name).await,
+        before,
+        "an omitted authz_service_id must never unbind"
+    );
+    assert!(compiler.in_tx_calls.lock().unwrap().is_empty());
 }
