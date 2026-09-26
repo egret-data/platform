@@ -3498,6 +3498,59 @@ async fn seed_ranger_profile(f: &Fixture, name: &str, engines: &[Uuid]) -> i64 {
     profile.id
 }
 
+/// Seed a profile of `type_` with NO `tagService`, and no tag service row —
+/// the shape the I3 guard refuses.
+async fn seed_profile_without_tag_service(f: &Fixture, name: &str, type_: &str) -> i64 {
+    use egret_policy_api::PolicyPort;
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    PolicyPort::ensure_trino_def(&policy)
+        .await
+        .expect("trino def");
+    egret_policy::service_def::seed_starrocks(&policy)
+        .await
+        .expect("starrocks def");
+    PolicyPort::create_service(&policy, name, type_, &serde_json::json!({}))
+        .await
+        .expect("profile")
+        .id
+}
+
+/// Seed a profile of `type_`, shaped the way egret's own provisioning shapes
+/// that type: a `trino` profile gets a `{name}_tag` tag service and a
+/// `tagService` config; a `starrocks` profile gets NEITHER, because the
+/// StarRocks Ranger plugin has no tag policies (upstream starrocks#67458) and
+/// the compiler expands tag rules into per-column resource policies instead.
+async fn seed_typed_profile(f: &Fixture, name: &str, type_: &str) -> i64 {
+    use egret_policy_api::PolicyPort;
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    PolicyPort::ensure_trino_def(&policy)
+        .await
+        .expect("trino def");
+    egret_policy::service_def::seed_starrocks(&policy)
+        .await
+        .expect("starrocks def");
+    if type_ != "trino" {
+        return PolicyPort::create_service(&policy, name, type_, &serde_json::json!({}))
+            .await
+            .expect("profile")
+            .id;
+    }
+    PolicyPort::ensure_tag_def(&policy).await.expect("tag def");
+    let tag = format!("{name}_tag");
+    PolicyPort::create_service(&policy, &tag, "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service");
+    PolicyPort::create_service(
+        &policy,
+        name,
+        type_,
+        &serde_json::json!({ "tagService": tag }),
+    )
+    .await
+    .expect("profile")
+    .id
+}
+
 async fn service_exists(f: &Fixture, name: &str) -> bool {
     use egret_policy_api::PolicyPort;
     let policy = egret_policy::PolicyStore::new(f.db.clone());
@@ -10013,4 +10066,72 @@ async fn update_without_authz_service_id_leaves_the_binding_alone() {
         "an omitted authz_service_id must never unbind"
     );
     assert!(compiler.in_tx_calls.lock().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// The four guards the PUT bind was missing (whole-branch review I1-I4)
+// ---------------------------------------------------------------------------
+
+/// I1: a profile of the WRONG TYPE is refused with a 409, the same status the
+/// create path already raises for it — and the binding does not move.
+///
+/// Not cosmetic: the plugin downloads the service-def of the profile's own
+/// type, so a trino-typed profile on a starrocks engine evaluates trino-shaped
+/// definitions against starrocks-shaped compiled policies. Rules whose resource
+/// names no longer match are not denials, they are ABSENT — an unmasked read.
+#[tokio::test]
+async fn update_refuses_a_policy_profile_of_the_wrong_type() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_bind_type", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let before = authz_service_of(&f, &name).await;
+    compiler.in_tx_calls.lock().unwrap().clear();
+
+    // A STARROCKS-typed profile, fully tag-wired, offered to a TRINO engine.
+    let sr_name = format!("srprofile-{}", Uuid::new_v4().simple());
+    let sr_profile = seed_typed_profile(&f, &sr_name, "starrocks").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(rebind_body(&name, wh_id, serde_json::json!(sr_profile))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
+    let msg = j.to_string();
+    assert!(
+        msg.contains("starrocks"),
+        "must name the profile's type; body={j}"
+    );
+    assert!(msg.contains("trino"), "and the engine's kind; body={j}");
+    assert_eq!(
+        authz_service_of(&f, &name).await,
+        before,
+        "a refused bind must not move the binding"
+    );
+    assert!(
+        compiler.in_tx_calls.lock().unwrap().is_empty(),
+        "nothing is compiled for a refused bind"
+    );
 }

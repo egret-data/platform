@@ -3945,7 +3945,7 @@
             }
           },
           "409": {
-            "description": "The engine changed concurrently (e.g. a delete in progress); retry",
+            "description": "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a policy profile of the wrong type; retry",
             "content": {
               "application/json": {
                 "schema": {

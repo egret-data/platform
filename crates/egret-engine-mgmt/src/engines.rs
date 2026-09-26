@@ -4674,10 +4674,24 @@ async fn apply_authz_service_update(
         .list_services()
         .await
         .map_err(|e| CpError::BadRequest(format!("list policy profiles: {e}")))?;
-    if !services.iter().any(|s| s.id == sid) {
+    let Some(svc) = services.into_iter().find(|s| s.id == sid) else {
         return Err(CpError::BadRequest(format!(
             "authz_service_id {sid} is not a policy profile; \
              list them with GET /api/control-plane/policy/services"
+        )));
+    };
+    // I1: the profile's TYPE must match the engine's kind, the same 409 the
+    // create path already raises (`plan_trino_profile`). A cross-kind bind is
+    // a fail-open, not a cosmetic mismatch: the plugin downloads the
+    // service-def of the profile's own type, so a StarRocks engine bound to a
+    // `trino` profile evaluates trino-shaped policy definitions against
+    // starrocks-shaped compiled policies — and resource names that no longer
+    // match are not denials, they are absent rules, which is an unmasked read.
+    if svc.r#type != engine.r#type {
+        return Err(CpError::Conflict(format!(
+            "policy profile {sid} ({}) has type {}, but engine {} is a {} engine; \
+             bind a profile of the same type",
+            svc.name, svc.r#type, engine.name, engine.r#type
         )));
     }
     // The binding write and the compile of the profile it names share ONE
@@ -4729,7 +4743,7 @@ async fn apply_authz_service_update(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
-        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress); retry", body = ErrorBody),
+        (status = 409, description = "The engine changed concurrently (e.g. a delete in progress), or `authz_service_id` names a policy profile of the wrong type; retry", body = ErrorBody),
         (status = 502, description = "Kubernetes rejected the update; the previous spec was restored", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -4762,9 +4776,7 @@ async fn update_engine(
     // to: until this landed, binding an engine to an existing policy profile
     // after create was only reachable by a direct SQL `UPDATE` (which is what
     // SP4a's live gate had to do). Applied BEFORE the type dispatch so the
-    // provision request the dispatch builds — whose `RangerBinding` is derived
-    // from `engine.authz_service_id` — sees the new binding, and so a refusal
-    // happens before anything touches the cluster.
+    // provision request the dispatch builds sees the new binding.
     apply_authz_service_update(&st, &mut engine, b.authz_service_id).await?;
     // StarRocks has its own spec builder + provision-req assembler (FE/CN roles,
     // builtin storage volume) — dispatch to it rather than running the Trino
