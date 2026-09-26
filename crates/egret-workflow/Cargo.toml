@@ -56,6 +56,12 @@ chrono.workspace = true
 # Already a workspace dependency (schedules resolve their zone through it), so
 # this adds a direct edge and no new crate.
 chrono-tz.workspace = true
+# W13b Task 3: a `dependsOn` condition's key is Kestra's
+# `Hashing.hashToString` -- Guava `murmur3_128`, seed 0 -- over the
+# dependency's content (`trigger::depends_on::condition_key`). Pinned to the
+# version already in Cargo.lock through `iceberg`, so this adds a direct edge
+# and no new crate.
+murmur3 = "=0.5.2"
 anyhow.workspace = true
 
 # Task 6 (publish): `RefKind` and `WorkflowRefPort` -- the port trait publish

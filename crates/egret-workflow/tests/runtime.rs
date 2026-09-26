@@ -1926,3 +1926,71 @@ async fn a_flow_trigger_backlog_does_not_hold_the_schedule_back(pool: sqlx::PgPo
         "every event fired its listener once"
     );
 }
+
+/// **The scheduler ticker sweeps expired `dependsOn` windows** (W13b, spec
+/// §5.3 step 6): once per pass, after `process_events`. Two listener windows
+/// are written by SQL, one expired and one live; with nothing but `spawn`
+/// running, the expired one goes and the live one stays.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_scheduler_ticker_sweeps_expired_windows(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let depends_on = |id: &str| {
+        format!(
+            "id: {id}\nnamespace: w13\ntriggers:\n  - id: on_done\n\
+             \x20   type: io.kestra.plugin.core.trigger.Flow\n    dependsOn:\n\
+             \x20     - namespace: w13\n        flowId: producer\ntasks:\n\
+             \x20 - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: fired\n"
+        )
+    };
+    let expired = common::seed_flow(&db, ws, user, &depends_on("expired"), "draft").await;
+    let live = common::seed_flow(&db, ws, user, &depends_on("live"), "draft").await;
+    for (flow, start, end) in [
+        (
+            expired,
+            "now() - interval '2 days'",
+            "now() - interval '1 day'",
+        ),
+        (
+            live,
+            "now() - interval '1 hour'",
+            "now() + interval '1 day'",
+        ),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO workflow.flow_trigger_windows \
+               (flow_id, trigger_id, window_start, window_end, results) \
+             VALUES ($1, 'on_done', {start}, {end}, '{{}}')"
+        )))
+        .bind(flow)
+        .execute(&pool)
+        .await
+        .expect("seed a window");
+    }
+    let windows = || async {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT flow_id FROM workflow.flow_trigger_windows ORDER BY flow_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(windows().await.len(), 2, "control");
+
+    let cancel = CancellationToken::new();
+    let reg = Arc::new(Recorder::new());
+    spawn(pool.clone(), reg, scheduler_only(50), cancel.clone());
+    wait_until(
+        "the expired window to be swept",
+        Duration::from_secs(10),
+        || async {
+            match windows().await.as_slice() {
+                [only] if *only == live => Ok(()),
+                other => Err(format!("{other:?}")),
+            }
+        },
+    )
+    .await;
+    cancel.cancel();
+}

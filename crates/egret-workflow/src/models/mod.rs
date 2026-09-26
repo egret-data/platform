@@ -25,4 +25,5 @@ pub use task::{
 };
 pub use trigger::{
     Dependency, FetchType, FlowTrigger, FlowTriggerMode, Schedule, Trigger, TriggerKind, Webhook,
+    Window,
 };

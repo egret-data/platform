@@ -7,7 +7,7 @@
 
 mod parse;
 pub mod registry;
-mod validate;
+pub(crate) mod validate;
 
 pub use parse::{parse, ParseError};
 pub use validate::{validate, Finding, ValidationReport};

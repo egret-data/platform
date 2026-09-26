@@ -154,8 +154,9 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
 /// triggers (spec §4.2), in the same transaction as the schedule rows above.
 ///
 /// - A `dependsOn` declaration gets a row with `depends_on = true` even though
-///   [`WindowFreeFlowTrigger::resolve`] refuses it -- W13a's processor skips
-///   depends-on rows, W13b's owns them, but `sync` must not wait for that:
+///   [`WindowFreeFlowTrigger::resolve`] refuses it -- the processor's
+///   `dependsOn` arm owns such rows (W13b), gating them itself, and `sync`
+///   does not wait for validity:
 ///   `depends_on` is read straight off `spec.depends_on` before `resolve` is
 ///   ever called.
 /// - A declaration that is not `dependsOn` but still fails to resolve (for

@@ -6976,6 +6976,20 @@ mutation pair on an OPERATOR says nothing about where the OPERAND came from** �
 `max_depth` survived being replaced by the literal `100` across all 17 tests,
 and swept properly there were **nine** fields of that shape.
 
+> *W13b Task 5 (2026-09-26): the window landed, and this acceptance criterion
+> did **not** fail — which is the correct outcome, and the sentence above
+> predicted the wrong one.* W13b built the `dependsOn` arm **beside**
+> `WindowFreeFlowTrigger`, not inside it (`trigger::depends_on`,
+> `trigger::window`, and `flow_trigger::process::listen_depends_on`, which the
+> processor takes before `resolve` is ever called), so `resolve` still refuses
+> the twenty and `the_corpus_flow_triggers_split_twenty_to_one` still passes.
+> The count that moved lives in its own test now,
+> `trigger::depends_on::tests::the_corpus_depends_on_declarations_resolve_eighteen_of_twenty`:
+> of the twenty, **18 pass the run-time gate** and would open a window, **1 is
+> refused at save** (`trigger-flow-listener-namespace-condition`, W1's
+> namespace-only over-refusal) and **1 does not parse** (the `fireOnce` flow).
+> See *W13b* in the coverage statement.
+
 **The webhook trigger** is the one whose verdict is not "approved". It is
 **APPROVED and EXPOSURE NOT APPROVED**, and **the approval rests on the lever's
 default being OFF**: before `[workflow] webhooks_enabled` existed the router was
@@ -8377,6 +8391,13 @@ correction says so in both languages. Twenty of the corpus's twenty-one flow
 trigger declarations carry a `dependsOn` and are refused at
 `WindowFreeFlowTrigger::resolve`, unmoved by anything in this package.
 
+*Retired by W13b Task 5 (2026-09-26), kept as the record of when it was
+true:* W13b has shipped the `window` model, the `TimeWindow` port, migration
+0158 and the `dependsOn` processing, and §7.2's table is a record now -- every
+row's mutation was run and killed (see *W13b* below). `resolve` still refuses
+the twenty, by design: the processor routes a `dependsOn` listener to its own
+arm before `resolve` is called.
+
 **The SEEDED `system.correlationId` divergence stays open, by the same
 decision that scoped it out of W13 entirely** (spec §8). Closing it would
 need a column egret does not have, to carry a copied label rather than a
@@ -8389,6 +8410,222 @@ bridge population 1 closes lets a `PAUSED` source fire a listener with the
 right `models::State`; whether the render CONTENT a resumed source's later
 settle produces still matches what the paused moment saw is the whole-branch
 review's question (globals.md item 4), not this ratchet's.
+
+### W13b — `dependsOn` fires inside a window now, and the oracle still cannot see it
+
+**109 before W13b Task 1, 109 at this commit, and 109 with the `dependsOn`
+branch deleted.** The same three-number method W10, W12 and W13a used, and
+for the same structural reason: `oracle-exec/driver.rs` and
+`tests/executor.rs` name none of W13b's code. `flow_trigger::`,
+`process_events(`, `sweep_expired_windows`, `depends_on::` and
+`listen_depends_on` are each **0** occurrences in both files, against
+`worker::` at **26** and **38** occurrences on the same command (the positive
+control). The 38 is on 37 lines of `tests/executor.rs`, at `741169f9` and at
+this commit alike -- W13a's "37" is that line count, not a change this branch
+made; this branch's diff to the file adds or removes no `worker::`. W13a's second reason is unchanged too: a
+`Flow`-fired execution carries `trigger_execution_id` and no `parent_id`, so
+`harvest.py` cannot walk to it and zero baselined golden entries are
+reachable through any flow trigger, windowed or not.
+
+| | ratchet | what the task shipped |
+|---|---|---|
+| package base `741169f9` (origin/main, W13a's merge) | 109 mismatching, 109 baselined, 0 broken (`executor_matches_golden` ok in Task 1's baseline gate) | -- |
+| Task 1 | 109 | the window measured on the pinned artifact (`oracle-exec/w13b-windows.json`): bounds of the four `TimeWindow` kinds and midnight (in UTC and two zones without DST, Asia/Kolkata and Asia/Ho_Chi_Minh; **DST was not measured** -- the container was UTC and no case crossed a transition -- so DST is derived from `java.time`, see `trigger::window`'s module doc), expiry, the mode sequences, the condition keys; user decisions D1-D3 (replace an expired window, only a matching event opens one, the ticker sweeps; `timezone` supported; the measured `DURATION_WINDOW` rule) |
+| Task 2 | 109 | `models::Window` (seven fields, `deny_unknown_fields`, so `fireOnce` is refused at parse as the artifact refuses it), ISO durations capped at 366 days, and the save-time refusals; three census constants moved for the one flow that no longer parses |
+| Task 3 | not measured (no execution path) | the pure `trigger::window` and `trigger::depends_on`: bounds, `merge`, `satisfied`, the murmur3 condition keys reproducing the artifact's three, and one refusal list shared by save and run time |
+| Task 4 | 109 | migration 0158 (`workflow.flow_trigger_windows`), the `dependsOn` arm of the processor (`FOR UPDATE` on the window row, fire then delete under every mode), the ticker's sweep; fix round 1 made a lost `40001` race free of `MAX_ATTEMPTS` |
+| Task 5 | 109 | this section, the corpus count and its test, the four §7.2 mutations Task 4 had not run, and the sweep below |
+
+#### The `dependsOn` branch deleted, measured rather than assumed
+
+Mutation, on the working tree at `1e9d68b1` (reverted immediately after, never
+committed): in `flow_trigger::process::listen`, the `return
+listen_depends_on(..)` of the `dependsOn` branch replaced by `return
+Ok(Fate::Refused(..))`, with the marker `TASK-5-RATCHET-MUTATION` -- so no
+`dependsOn` listener reaches a window or a fire. Evidence it landed, printed
+before the verdict: `git diff --stat` reported `process.rs | 3 ++-` (2
+insertions, 1 deletion; 16 changed-line tokens). `executor_matches_golden`
+then read **294 golden entries, 109 mismatching, 109 baselined, 0 broken** --
+identical to the unmutated control run minutes earlier on the same tree
+(`1e9d68b1`, same line, byte for byte). Restored with `git checkout`, and
+`git status` / `git diff --stat` were empty before anything else ran.
+
+#### The corpus: eighteen of twenty resolve, and none names a window
+
+`trigger::depends_on::tests::the_corpus_depends_on_declarations_resolve_eighteen_of_twenty`
+puts every corpus `dependsOn` declaration through the gate the processor
+applies (`depends_on_refusals`, `TimeWindow::from_model`, `condition_keys`)
+and through `spec::validate`, and asserts the two agree declaration by
+declaration. Seventeen corpus flows declare a flow trigger, with 21
+declarations; one is window-free
+(`flow-trigger-when-condition-flow-listen/on_completion`), and of the **20**
+with `dependsOn`:
+
+- **18 resolve** and would open the default one-day `DURATION_WINDOW`:
+  `flow-trigger-any-mode-flow-listen/flow` (ANY),
+  `flow-trigger-at-least-mode-flow-listen/flow` (AT_LEAST, `minSatisfied: 2`
+  of 3), `flow-trigger-depends-on-flow-listen/flow`,
+  `flow-trigger-invalid-inputs-flow-listen/flow`,
+  `flow-trigger-mixed-conditions-flow-listen/{on_completion,on_failure}`,
+  `flow-trigger-multiple-conditions-flow-listen/{on_completion,on_failure}`,
+  `flow-trigger-multiple-depends-on-flow-listen/{flow1,flow2}`,
+  `flow-trigger-paused-listen/flow`,
+  `flow-trigger-stable-condition-id-flow-listen/flow`,
+  `trigger-flow-listener-invalid/listen-flow-invalid`,
+  `trigger-flow-listener-no-inputs/{listen-flow,listen-flow-failed}`,
+  `trigger-flow-listener-with-concurrency-limit/flow`,
+  `trigger-flow-listener-with-pause/listen-flow` and
+  `trigger-flow-listener/listen-flow`.
+- **1 is refused at save**:
+  `trigger-flow-listener-namespace-condition/listen-flow`, with
+  `dependency_flow_id_required` twice and `dependency_namespace_required`
+  once -- a dependency carrying only `namespace:` and another carrying only
+  `states:`. This is **W1's over-refusal, not W13b's**: Kestra's `Dependency`
+  puts no `@NotNull` on either field, the artifact published the flow with
+  200, and it is already a row of `executor::PUBLISHED_BUT_REFUSED`. W13b
+  moved the two checks into `depends_on_refusals` unchanged, so a draft of it
+  is refused at run time as well.
+- **1 does not parse**: `flow-trigger-fire-once-true-flow-listen`, whose
+  `window.fireOnce` the pinned artifact refuses with 422 too (Task 2).
+
+**Zero of the twenty declare a `window:`** -- beside the 18 that resolve, a
+number that could have disagreed. So the four window kinds, `timezone` and
+the midnight grid are judged by Task 1's measurements and this crate's own
+tests, never by the corpus, and the corpus exercises exactly one window
+shape: the default. **DST is judged by neither a measurement nor the
+corpus**: it is derived from `java.time` (a fixed-duration add from local
+midnight; `trigger::window`, *DST -- chosen from the Java, never measured*)
+and pinned only by this crate's own tests. Spec §5.1 states its visible
+effect.
+
+#### §7.2, row by row
+
+Every row's mutation has now been run. Ten of the eleven rows name one;
+Tasks 2-4 ran six (Task 3's mode swap for ALL/ANY only), Task 4's review found
+four not run, and this task ran those four plus AT_LEAST's comparison, each
+with `git diff
+--stat` and a changed-line token count printed before the first run, an
+unmutated control (`flow_trigger_windows` 14/14 twice, the ticker sweep test
+1/1, the golden reading above; and 14/14 again after the last restore), and
+the tree verified clean after each restore. Scripts and logs are the task's
+own; nothing was committed.
+
+| property | mutation | run by | result |
+|---|---|---|---|
+| `ALL` over two dependencies fires once and resets | **do not merge results**: `let merged = met.clone()` at the call site (1 line, 11 tokens) | Task 5 | **killed 2/2**, `all_fires_once_both_are_met_and_resets:316`, p2's pass reported `accumulated: 1` where `fired: 1` was expected; over the whole binary it killed 6 of 14 tests. The same mutation inside the pure `merge` (`BTreeMap::new()` for the stored results) was killed by the same assertion and by two lib tests (`merge_writes_only_true_and_never_unsets`, `the_measured_mode_sequences_replay`) |
+| an expired window is replaced and the event counts | ignore the event / keep the expired results | Task 4 | killed (`an_expired_window_does_not_count`) |
+| a non-matching event opens and purges nothing | open the window before matching | Task 4 | killed (`an_unrelated_execution_does_not_open_a_window`) |
+| the scheduler sweep deletes expired windows | **drop the sweep**, two ways: the sweep's `DELETE` matches nothing (`WHERE false AND ...`, 14 tokens), and the ticker never calls it (16 tokens) | Task 5 | **killed**: the first 2/2 by `the_sweep_deletes_only_expired_windows:1037` (swept 0, expected 1) and 1/1 by the ticker test; the second 2/2 by `the_scheduler_ticker_sweeps_expired_windows` ("timed out after 10s waiting for the expired window to be swept", both windows still present) |
+| deleting a listener deletes its window row | **drop the cascade**, two ways in migration 0158: the whole foreign key removed (13 tokens), and `ON DELETE CASCADE` alone removed (13 tokens) | Task 5 | **killed**: 2/2 by `deleting_a_listener_cascades_its_window:1076` ("cascaded", the window row still present with its result), and 1/1 by the same test's delete failing `23503` on `flow_trigger_windows_flow_id_trigger_id_fkey`. The test template was dropped before and after each, because sqlx refuses an edited migration's checksum |
+| `ANY`; `AT_LEAST` with `minSatisfied` | swap the mode comparison | Task 3 (ALL/ANY swapped, pure) and Task 5 (AT_LEAST's `>=` made `>`, 18 tokens) | killed: Task 3's by `modes_all_any_and_at_least`; this task's 2/2 by `at_least_two_of_three:410` ("two of three", 0 fires against 1) and 1/1 by two lib tests, `modes_all_any_and_at_least` and `the_measured_mode_sequences_replay` (`q2_atleast2_nowindow`) |
+| two processors satisfying `ALL` fire exactly once | drop the window's `FOR UPDATE` | Task 4 | killed 3/3 |
+| an expired window's results do not count | drop the `end` check | Task 4 | killed (the "drop the expiry replacement" mutant is this check) |
+| an off-hours event is ignored for `DAILY_TIME_WINDOW` | **drop the in-window check**: `if false && !TimeWindow::is_valid(..)` (14 tokens) | Task 5 | **killed 2/2**, `an_event_outside_a_daily_window_is_ignored:820` ("outside the window": the daily listener fired, 1 against 0) |
+| the four kinds' bounds match Task 1 | -- | Task 3 | pure tests fed from `w13b-windows.json` |
+| a conflicting `window:` is refused at save | drop validation | Task 2 | 17/17 killed |
+
+#### The sweep: "`dependsOn` is refused" is retired where it described W13b's absence
+
+Same discipline as W13a: every tracked file flattened to one line (comment
+markers stripped) before matching, denominators over `git ls-tree` at
+**`4549db67`**, Task 4's tip and this task's base, before this task edited
+anything, and `/usr/bin/grep` with file arguments.
+
+| # | population | examined | corrected |
+|---|---|---:|---:|
+| 1 | the brief's three phrases and their glosses -- `dependsOn` is/are refused, refuse(s) `dependsOn`, refused for `dependsOn`, `UnsupportedDependsOn`, `window` is dropped / drop the window, `DEPENDS_ON_IS_W13B`, "the day the window lands", "`MultipleConditionWindow` this package does not model", "`dependsOn` is not supported", "W13b has not started / is still pending" -- across the whole repository, flattened | **3828 files**, 10 matching, **34 occurrences** (33 by the pattern set, plus one "W13b ... has not started" the pattern's 60-character gap missed and reading the matched paragraph found) | **14** (and 20 left: 14 + 20 = 34) |
+| 2 | ordinals and counts inside the regions population 1 corrected (20 of 21, twenty, nineteen-at-`resolve` plus one-at-parse) | **10 regions** (README ×3, `flow.rs` ×3, the design spec EN/VI §1-§2, the programme spec EN/VI W13 row and correction) | **0** -- each re-derived from `the_corpus_depends_on_declarations_resolve_eighteen_of_twenty`: 20 = 18 + 1 + 1, and `resolve` still refuses 19 with the twentieth refused at parse |
+| 3 | data that feeds a generator -- the 20 files under `oracle-exec/` other than this README and the 345 corpus YAMLs | **20 files**, 7 matching, **517 lines**: 505 in `w13b-windows.json` (Task 1's own measurement fixture, whose keys and values are window data) and 12 in the other six (`baseline.txt` 2, `corpus.json` 1, `driver.rs` 4, `harvest-run.txt` 1, `harvest.py` 1, `runnable.txt` 3). Population 1's phrase set matches **0** of them | **0** -- every hit outside the fixture is the `fireOnce` 422, a task-level `dependsOn`, or the max-duration window. *(Fix round 1: this row first said "13 lines", a figure no command reproduces; the command is below.)* |
+| 4 | the other language -- every file under `docs/vi/`, flattened, for `Từ chối \`dependsOn\``, `` `window` bị bỏ``, "W13b vẫn còn treo", "CHƯA bắt đầu" and (từ chối / bị bỏ) near `dependsOn` | **287 files**, 2 matching, **4 occurrences**, 1 of them also population 1's (the design spec VI's `UnsupportedDependsOn`) | **4**, of which **3 are not counted in population 1** |
+
+**Corrected occurrences, without double counting: 14 (population 1) + 3
+(population 4 only) = 17**, plus one edit site no pattern matched (item 18
+below), so **18 edited sites**. "Corrected" means rewritten or retired in
+place by a dated note; the stale text is kept as the record. *(Fix round 1:
+the per-file figures below first read README 3 + `flow.rs` 5 + programme
+spec EN 2 / VI 2 + design spec EN 3 / VI 2 = 17 under a population-1 total of
+14. The VI programme-spec occurrences, and one of the two VI design-spec
+ones, are population 4's, not population 1's; the lists below assign every
+occurrence to exactly one population.)*
+
+**Population 1's fourteen corrections, by site** (3 + 5 + 2 + 3 + 1 = 14).
+Each was stale in the same way W13a's were: a sentence written before W13b,
+describing its absence.
+
+- `oracle-exec/README.md` (3): the W6 section's *Refusal 2* paragraph -- "is
+  refused" and "the acceptance criterion that fails the day the window
+  lands" -- gets a dated note: the window landed and the test correctly did
+  **not** fail, because the arm was built beside `WindowFreeFlowTrigger`;
+  W13a's *What this package could not settle* ("W13b has not started") is
+  retired in place. (Item 18 of *What this ratchet does not prove* also gets
+  a dated parenthesis; it is not a pattern hit, found by reading around one,
+  and is not in the 14.)
+- `src/trigger/flow.rs` (5): the module doc's "fails the day the window
+  lands"; item 1 of *Over-acceptance is the hazard*; the
+  `UnsupportedDependsOn` variant's "a `MultipleConditionWindow` this package
+  does not model"; its `Display` text, which said "`dependsOn` is not
+  supported" and now says the trigger "is not the window-free arm" (no
+  production path reaches it: `listen` branches first and `sync`'s arm is
+  `unreachable!`); the twenty-to-one test's doc, pointing at the new count.
+- `docs/en/specs/2026-09-01-workflow-programme-design.md` (2): W13a's
+  correction said "W13b is still pending" and "has not started"; a new dated
+  W13b correction retires both without deleting them.
+- `docs/en/specs/2026-09-25-workflow-w13-flow-triggers-design.md` (3): §1's
+  table is dated `006563ee` and correct as that snapshot, but its `resolve`
+  row ("Refuses `dependsOn` with `UnsupportedDependsOn`", 2 occurrences) and
+  "`window` is dropped" (1) read as current; a dated note under the table
+  says what is true since W13b. Its §7.2 "drop the window" is left (below).
+- `docs/vi/specs/2026-09-25-workflow-w13-flow-triggers-design.md` (1): the
+  `UnsupportedDependsOn` in its §1 `resolve` row, retired by the VI twin of
+  the same note.
+
+**Population 4's three further corrections** (4 occurrences − 1 shared = 3):
+`docs/vi/specs/2026-09-01-workflow-programme-design.md` (2: "W13b vẫn còn
+treo" and "CHƯA bắt đầu", retired by the VI twin of the programme-spec
+correction) and `docs/vi/specs/2026-09-25-workflow-w13-flow-triggers-design.md`
+(1: "`window` bị bỏ", retired by the same §1 note as population 1's VI site).
+
+**The commands, so every figure is re-runnable.** Flattening, per file at
+`4549db67` (`git archive 4549db67 | tar -x`): replace every
+`\n\s*(//[!/]?|#|\*|>|--)?\s*` with one space, then collapse whitespace
+(Python `re.sub`); each file is written under its path with `/` spelled
+`%2F`, and counted with `/usr/bin/grep -o -i -E -- "$P" * | wc -l` (8
+dotfiles checked separately, 0 hits). Population 1's `$P`:
+
+```text
+dependsOn`? (is|are|was|were) refused|refus(e|es|ed|ing) (a |the |every |any )?`?dependsOn|refused for `?dependsOn|UnsupportedDependsOn|`?window`? (is|was|gets|are) dropped|drop(s|ped)? the window|DEPENDS_ON_IS_W13B|the day the window lands|MultipleConditionWindow` this package does not model|dependsOn` is not supported|W13b (has not started|is still pending)|W13b —[^|]{0,60}has not started
+```
+
+Population 4's, over `docs%2Fvi%2F*` only:
+
+```text
+Từ chối `dependsOn`|`window` bị bỏ|W13b vẫn còn treo|CHƯA bắt đầu|(từ chối|bị bỏ)[^.]{0,40}dependsOn
+```
+
+Population 3, on the raw (unflattened) files, which are unchanged since
+`4549db67`:
+
+```bash
+git ls-tree -r --name-only 4549db67 -- crates/egret-workflow/oracle-exec \
+  | /usr/bin/grep -v -e oracle-exec/corpus/ -e oracle-exec/README.md > files.txt   # 20
+/usr/bin/grep -c -i -E 'dependsOn|UnsupportedDependsOn|window' $(cat files.txt)   # 7 files > 0, sum 517
+```
+
+**Twenty occurrences examined and left, each for a reason:** seven
+`UnsupportedDependsOn` identifiers in `trigger/flow.rs` (the variant, its
+`Display` arm, `resolve`'s return, item 1's doc link, two test assertions, the
+corpus test's match) and one in `scheduler/sync.rs` (an `unreachable!` arm) --
+the variant is still what the window-free arm returns, and renaming a public
+enum is not a doc sweep; `flow.rs`'s *Resolution* test comment, the
+twenty-to-one test's assertion message, and `tests/flow_trigger_sync.rs`'s
+"a row even though `resolve()` refuses `dependsOn`", all about `resolve`,
+which still refuses; `flow.rs` item 4, already dated by W13b Task 2;
+`flow.rs`'s, `window.rs`'s and `tests/flow_trigger_sync.rs`'s "a `window` with
+no `dependsOn` is refused" (3), a different proposition that stays true; the
+W13a plan (1) and this package's own plan (3, the brief quoting the phrases);
+the design spec's §7.2 "drop the window's `FOR UPDATE`" (1), a mutation's
+name. (7 + 1 + 3 + 1 + 3 + 1 + 3 + 1 = 20.) **Those left are the control that the sweep
+does not retire everything it matches.**
 
 ### What this ratchet does **not** prove
 
@@ -9391,7 +9628,11 @@ hangs off a column no arm reads, and backfill has no corpus population at all.
 The W6 section above derives all of it, names what each construct's own tests do
 and do not establish, and names the three refusals those tests rest on — one of
 which (`dependsOn`, 20 of 21 corpus declarations) is the only figure in that
-half a running program compares. **The webhook's verdict is EXPOSURE NOT
+half a running program compares. *(W13b Task 5, 2026-09-26: that refusal is
+now a routing fact rather than a hole -- the twenty take the `dependsOn` arm
+W13b built beside `WindowFreeFlowTrigger`, 18 of them pass its run-time gate,
+and the flow-fired execution still hangs off `trigger_execution_id`, so the
+zero-reachable-entries count above is unchanged.)* **The webhook's verdict is EXPOSURE NOT
 APPROVED, and that approval rests on `[workflow] webhooks_enabled` defaulting to
 `false`.**
 
@@ -10042,6 +10283,11 @@ unlisted over-refusal, reported by name with its message.
 > `UNKNOWN_TYPE_REFUSED` went 301 → 296 → **68**; `VALIDATE_REFUSED` 19 → **20**;
 > the `SUBFLOW_TARGETS_{LIVE,DRAFT_ONLY}` split 2/17 → **18/1**; and the
 > `SUBFLOW_LOOKUPS_ON_{PUBLISHED,REFUSED}` pair 18/4 → 19/3 → **47/2**.
+> *W13b Task 2 (2026-09-26) moved three again, all for one flow:* `LIVE`
+> 248 → **247**, `PARSE_REFUSED` 5 → **6**, and `SUBFLOW_LOOKUPS_ON_PUBLISHED`
+> 47 → **45** — `valids/flow-trigger-fire-once-true-flow-listen` no longer
+> parses, because `models::Window` refuses `fireOnce` as the pinned artifact
+> does (422), and its two `dependsOn` lookups went with it.
 > **The current value of every one of them is a `const` in
 > `oracle-exec/driver.rs` that `driver::census`, `driver::target_census` and
 > `driver::lookup_census` compare on every run**, which is where a reader should

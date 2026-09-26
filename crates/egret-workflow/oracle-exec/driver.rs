@@ -371,10 +371,15 @@ fn subflow_targets(flow: &egret_workflow::models::Flow, out: &mut BTreeSet<Strin
 /// **`RefKind::Subflow` resolutions `publish` made inside a publish that
 /// SUCCEEDED** — the size of the surface steps 4-7 were actually exercised on.
 ///
-/// One per `core.subflow` task in the [`LIVE`] flows that reach a live version,
-/// and zero from anywhere else: no corpus flow declares an `egret.*` type (so
-/// no other `RefKind` is reachable at all), and none of them declares a
-/// `core.trigger.flow` (so `resolve_trigger_dependencies` makes none either).
+/// Two sources, both through the `RefKind::Subflow` seam, in the [`LIVE`]
+/// flows that reach a live version: one per `core.subflow` task, **and** one
+/// per `dependsOn` entry of a `core.trigger.Flow` trigger, which
+/// `resolve_trigger_dependencies` (there since W1, `228173f9`) resolves the
+/// same way. No corpus flow declares an `egret.*` type, so no other `RefKind`
+/// is reachable at all. The split between the two sources is not measured
+/// here; the constant has counted both since it was set at W10 (`48f91c03`).
+/// (Corrected in the W13b final-review fix wave: this paragraph used to say
+/// no corpus flow declares a flow trigger, which was false when written.)
 ///
 /// **18 through W8 Task 2, 19 through W10 Task 6, 47 now**, and the pair must
 /// still be read as one measurement — but the arithmetic that held them
@@ -388,7 +393,15 @@ fn subflow_targets(flow: &egret_workflow::models::Flow, out: &mut BTreeSet<Strin
 /// flow and resolves every `Subflow` behind it. The lookups did not move — they
 /// had never been made at all. `resolve_all` reaching further is the surface
 /// this constant measures, and it is now more than twice the size it was.
-const SUBFLOW_LOOKUPS_ON_PUBLISHED: usize = 47;
+///
+/// **47 → 45 at W13b Task 2**, and this time nothing about `Subflow` moved:
+/// the two were the `dependsOn` pair of
+/// `valids/flow-trigger-fire-once-true-flow-listen`, resolved through the
+/// same `RefKind::Subflow` seam by `resolve_trigger_dependencies`. That flow
+/// no longer parses -- `models::Window` refuses `fireOnce`,
+/// as the pinned artifact does with 422 -- so it never reaches publish. See
+/// [`PARSE_REFUSED`] and [`LIVE`], which moved with it.
+const SUBFLOW_LOOKUPS_ON_PUBLISHED: usize = 45;
 
 /// `RefKind::Subflow` resolutions made inside a publish that then FAILED — a
 /// `Subflow` that `resolve_all` reached before it met the unported `Leaf` that
@@ -630,7 +643,12 @@ async fn name_contest_won_by_the_right_file(repo: &FlowRepo, drafts: &[(String, 
 /// A corpus flow whose YAML `spec::parse` refuses outright, so no draft row can
 /// exist for it at all: `namespace`/`flow_id` are `NOT NULL` columns and there
 /// is nothing to put in them. Kestra refused all of these too.
-const PARSE_REFUSED: usize = 5;
+///
+/// **5 → 6 at W13b Task 2**: `valids/flow-trigger-fire-once-true-flow-listen`,
+/// whose `window: {fireOnce: true}` the pinned artifact refuses with 422
+/// `Unrecognized field "fireOnce"` (`corpus.json`, `checkout-drift`) and
+/// `models::Window`'s `deny_unknown_fields` now refuses too.
+const PARSE_REFUSED: usize = 6;
 
 /// A corpus flow that parses but loses its `(namespace, flowId)` to an earlier
 /// file — the six losers of [`NAME_CONTESTED`]'s three groups.
@@ -670,7 +688,14 @@ const CREATE_REFUSED: usize = 4;
 /// what it was hiding is this constant: **227 corpus flows egret refused and
 /// the pinned artifact published.** [`UNKNOWN_TYPE_REFUSED`] fell 296 → 68 in
 /// the same change, and the two must be read together.
-const LIVE: usize = 248;
+///
+/// # 248 → **247** at W13b Task 2
+///
+/// The one that left is `valids/flow-trigger-fire-once-true-flow-listen`, now
+/// refused at parse ([`PARSE_REFUSED`]). It is an over-acceptance closing: the
+/// pinned artifact refused it (422, `checkout-drift`), so it has no golden
+/// entry and the ratchet cannot see it move.
+const LIVE: usize = 247;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the

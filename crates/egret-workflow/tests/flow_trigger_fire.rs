@@ -28,8 +28,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use egret_core::UserId;
 use egret_metastore::Db;
 use egret_workflow::flow_trigger::{
-    process_events, process_events_with, EventReport, PassLimits, DEPENDS_ON_IS_W13B,
-    MAX_EVENTS_PER_PASS,
+    process_events, process_events_with, EventReport, PassLimits, MAX_EVENTS_PER_PASS,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -1583,7 +1582,7 @@ async fn a_cancelled_pass_claims_nothing() {
     assert_eq!(executions_of(&fx.db, listener).await, 1);
 }
 
-// ── Draft and dependsOn ─────────────────────────────────────────────────────
+// ── Draft ──────────────────────────────────────────────────────────────────
 
 /// The user's decision (spec header): a draft listener fires, beside a live
 /// one.
@@ -1618,56 +1617,4 @@ async fn a_draft_listener_fires() {
     );
     assert_eq!(executions_of(&fx.db, draft).await, 1);
     assert_eq!(executions_of(&fx.db, live).await, 1);
-}
-
-/// `settle`'s `EXISTS` does not read `depends_on`, so a `dependsOn` listener's
-/// event reaches the processor. W13a skips it, counts it `refused`, and the
-/// log says W13b owns it.
-#[tokio::test]
-async fn a_depends_on_listener_is_skipped_with_a_named_reason() {
-    let Some(fx) = fx().await else { return };
-    let producer_src = source_yaml("producer");
-    let producer = fx.flow(&producer_src).await;
-    let window = fx
-        .flow(&listener_yaml(
-            "window",
-            "",
-            "    dependsOn:\n      - namespace: w13\n        flowId: producer\n",
-        ))
-        .await;
-    let depends_on: bool =
-        sqlx::query_scalar("SELECT depends_on FROM workflow.flow_listeners WHERE flow_id = $1")
-            .bind(window)
-            .fetch_one(&fx.db.pool)
-            .await
-            .unwrap();
-    assert!(depends_on, "control: sync marked the row");
-    fx.run(producer, &producer_src, serde_json::json!({})).await;
-    assert_eq!(
-        common::events(&fx.db).await.len(),
-        1,
-        "control: the event exists"
-    );
-
-    let logs = LogCapture::default();
-    let report = {
-        let _guard = logs.install();
-        fx.pass().await
-    };
-    assert_eq!(
-        report,
-        EventReport {
-            events: 1,
-            refused: 1,
-            ..Default::default()
-        }
-    );
-    assert_eq!(executions_of(&fx.db, window).await, 0);
-    assert_eq!(common::events(&fx.db).await, vec![]);
-    let text = logs.text();
-    assert!(DEPENDS_ON_IS_W13B.contains("W13b"));
-    assert!(
-        text.contains(DEPENDS_ON_IS_W13B) && text.contains(&key(window)),
-        "the skip names W13b and the listener:\n{text}"
-    );
 }

@@ -63,6 +63,7 @@ use crate::models::{
     TriggerKind,
 };
 use crate::spec::registry;
+use crate::trigger::depends_on::{depends_on_refusals, RefusalAt};
 
 /// A single validation finding: a machine-checkable `code`, a human message,
 /// and a `path` locating it inside the flow.
@@ -408,7 +409,7 @@ fn validate_flow_id(flow: &Flow, report: &mut ValidationReport) {
     }
 }
 
-fn is_valid_namespace(ns: &str) -> bool {
+pub(crate) fn is_valid_namespace(ns: &str) -> bool {
     if ns.is_empty() || ns.chars().count() > 150 {
         return false;
     }
@@ -436,7 +437,7 @@ fn is_valid_namespace(ns: &str) -> bool {
 /// encodes into one `name_or_id` as `"{namespace}/{flowId}"` -- unable to
 /// carry a `/`. See `is_valid_namespace`'s use in the `TaskKind::Subflow`
 /// arm below for the other half.
-fn is_valid_flow_id(id: &str) -> bool {
+pub(crate) fn is_valid_flow_id(id: &str) -> bool {
     let len = id.chars().count();
     if len == 0 || len > 100 {
         return false;
@@ -1464,6 +1465,11 @@ fn check_retry(retry: &Option<Retry>, retry_path: &str, report: &mut ValidationR
 /// executions is a legitimate Kestra pattern (recursive/self-triggering),
 /// not a synchronous call that would deadlock the way a subflow calling
 /// itself would.
+///
+/// W13b Task 3 fix round 1: the `dependsOn` checks themselves now live in
+/// `trigger::depends_on::depends_on_refusals` (same codes, messages and
+/// paths), so the run-time gate a draft's listener passes through applies
+/// exactly them.
 fn validate_trigger(trigger: &Trigger, report: &mut ValidationReport) {
     match &trigger.kind {
         TriggerKind::Schedule(s) => {
@@ -1476,52 +1482,27 @@ fn validate_trigger(trigger: &Trigger, report: &mut ValidationReport) {
             }
         }
         TriggerKind::Flow(ft) => {
-            for (i, dep) in ft.depends_on.iter().enumerate() {
-                let path = format!("triggers.{}.dependsOn[{i}]", trigger.id);
-                match &dep.namespace {
-                    None => report.errors.push(Finding {
-                        code: "dependency_namespace_required",
-                        message: format!(
-                            "trigger '{}': dependsOn[{i}] is missing a required namespace",
-                            trigger.id
-                        ),
-                        path: format!("{path}.namespace"),
-                    }),
-                    Some(ns) if !is_valid_namespace(ns) => report.errors.push(Finding {
-                        code: "dependency_namespace_invalid",
-                        message: format!(
-                            "trigger '{}': dependsOn[{i}] namespace '{ns}' must match \
-                             ^[a-z0-9][a-z0-9._-]* and be 1-150 characters long -- the same \
-                             grammar `namespace:` itself uses, so a dependency can never encode \
-                             a `/` into `publish::subflow_ref_name`'s namespace half",
-                            trigger.id
-                        ),
-                        path: format!("{path}.namespace"),
-                    }),
-                    Some(_) => {}
-                }
-                match &dep.flow_id {
-                    None => report.errors.push(Finding {
-                        code: "dependency_flow_id_required",
-                        message: format!(
-                            "trigger '{}': dependsOn[{i}] is missing a required flowId",
-                            trigger.id
-                        ),
-                        path: format!("{path}.flowId"),
-                    }),
-                    Some(fid) if !is_valid_flow_id(fid) => report.errors.push(Finding {
-                        code: "dependency_flow_id_invalid",
-                        message: format!(
-                            "trigger '{}': dependsOn[{i}] flowId '{fid}' must match \
-                             ^[a-zA-Z0-9][a-zA-Z0-9._-]* and be 1-100 characters long -- \
-                             Kestra's own flow id pattern, so a dependency can never encode a \
-                             `/` into `publish::subflow_ref_name`'s flowId half",
-                            trigger.id
-                        ),
-                        path: format!("{path}.flowId"),
-                    }),
-                    Some(_) => {}
-                }
+            // Each dependency's `namespace`/`flowId`, `minSatisfied`, `window`
+            // and duplicate conditions: ONE list, shared with the run-time
+            // gate so a draft (which saves with these errors and still gets a
+            // listener row) is refused there too. See `trigger::depends_on`,
+            // *One refusal list*.
+            let base = format!("triggers.{}", trigger.id);
+            for r in depends_on_refusals(ft) {
+                let path = match r.at {
+                    RefusalAt::Window("") => format!("{base}.window"),
+                    RefusalAt::Window(field) => format!("{base}.window.{field}"),
+                    RefusalAt::MinSatisfied => format!("{base}.minSatisfied"),
+                    RefusalAt::Dependency(i) => format!("{base}.dependsOn[{i}]"),
+                    RefusalAt::DependencyField(i, field) => {
+                        format!("{base}.dependsOn[{i}].{field}")
+                    }
+                };
+                report.errors.push(Finding {
+                    code: r.code,
+                    message: format!("trigger '{}': {}", trigger.id, r.message),
+                    path,
+                });
             }
         }
         _ => {}
@@ -3208,5 +3189,376 @@ mod tests {
             !r.errors.iter().any(|e| e.code.starts_with("dependency_")),
             "{r:?}"
         );
+    }
+
+    // ---------- W13b Task 2: a flow trigger's `window` and `minSatisfied` ----------
+    //
+    // Each refusal has its nearest accepted neighbour beside it: a rule that
+    // fires on both is an over-refusal, the mirror of what it closes.
+
+    /// A flow whose one trigger is a flow trigger with `body` appended (each
+    /// line of `body` already indented for the trigger's mapping), listening on
+    /// `deps` dependencies.
+    fn flow_trigger_flow(deps: usize, body: &str) -> String {
+        let mut depends_on = String::new();
+        if deps > 0 {
+            depends_on.push_str("    dependsOn:\n");
+            for i in 0..deps {
+                depends_on.push_str(&format!(
+                    "      - namespace: a.b\n        flowId: p{i}\n        states: [SUCCESS]\n"
+                ));
+            }
+        }
+        format!(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n\
+             triggers:\n  - id: listen\n    type: io.kestra.plugin.core.trigger.Flow\n\
+             {depends_on}{body}"
+        )
+    }
+
+    /// The error findings for a flow trigger, as `(code, path)`.
+    fn trigger_errors(deps: usize, body: &str) -> Vec<(&'static str, String)> {
+        let src = flow_trigger_flow(deps, body);
+        let f = parse(&src).unwrap_or_else(|e| panic!("{src}\ndoes not parse: {e:?}"));
+        validate(&f)
+            .errors
+            .into_iter()
+            .map(|e| (e.code, e.path))
+            .collect()
+    }
+
+    fn assert_refused(deps: usize, body: &str, code: &str, path: &str) {
+        let errors = trigger_errors(deps, body);
+        assert!(
+            errors.iter().any(|(c, p)| *c == code && p == path),
+            "expected {code} at {path} for\n{body}\ngot {errors:?}"
+        );
+    }
+
+    fn assert_clean(deps: usize, body: &str) {
+        let errors = trigger_errors(deps, body);
+        assert!(
+            errors.is_empty(),
+            "expected no errors for\n{body}\ngot {errors:?}"
+        );
+    }
+
+    const W: &str = "triggers.listen.window";
+
+    #[test]
+    fn every_measured_window_shape_is_accepted() {
+        // The shapes W13b Task 1 fired on the artifact, plus no window at all.
+        for body in [
+            "",
+            "    window:\n      every: P1D\n",
+            "    window:\n      every: PT6H\n",
+            "    window:\n      every: PT90M\n",
+            "    window:\n      every: PT45S\n",
+            "    window:\n      every: PT2M\n      offset: PT1M\n",
+            "    window:\n      every: P1D\n      offset: PT6H\n",
+            "    window:\n      lookback: PT2M\n",
+            "    window:\n      from: \"03:00:00\"\n      to: \"05:00:00\"\n",
+            "    window:\n      deadline: \"05:00:00\"\n",
+            "    window:\n      deadline: \"12:00:00\"\n      timezone: Asia/Ho_Chi_Minh\n",
+            "    window:\n      every: PT1H\n      timezone: Asia/Kolkata\n",
+            "    window:\n      from: \"10:00\"\n      to: \"12:00\"\n      timezone: Asia/Ho_Chi_Minh\n",
+            "    window: {}\n",
+        ] {
+            assert_clean(2, body);
+        }
+    }
+
+    #[test]
+    fn a_deadline_with_a_from_is_refused() {
+        assert_refused(
+            2,
+            "    window:\n      deadline: \"09:00\"\n      from: \"08:00\"\n",
+            "window_conflicting_fields",
+            &format!("{W}.from"),
+        );
+        // And with every other field of another kind.
+        for (field, value) in [
+            ("to", "\"10:00\""),
+            ("every", "PT1H"),
+            ("offset", "PT1H"),
+            ("lookback", "PT1H"),
+        ] {
+            assert_refused(
+                2,
+                &format!("    window:\n      deadline: \"09:00\"\n      {field}: {value}\n"),
+                "window_conflicting_fields",
+                &format!("{W}.{field}"),
+            );
+        }
+        assert_clean(2, "    window:\n      deadline: \"09:00\"\n");
+    }
+
+    #[test]
+    fn a_from_without_a_to_is_refused_and_so_is_the_reverse() {
+        assert_refused(
+            2,
+            "    window:\n      from: \"08:00\"\n",
+            "window_daily_bound_missing",
+            &format!("{W}.to"),
+        );
+        assert_refused(
+            2,
+            "    window:\n      to: \"08:00\"\n",
+            "window_daily_bound_missing",
+            &format!("{W}.from"),
+        );
+        assert_clean(
+            2,
+            "    window:\n      from: \"08:00\"\n      to: \"09:00\"\n",
+        );
+    }
+
+    #[test]
+    fn a_daily_window_with_a_duration_field_is_refused() {
+        for field in ["every", "offset", "lookback"] {
+            assert_refused(
+                2,
+                &format!("    window:\n      from: \"08:00\"\n      to: \"09:00\"\n      {field}: PT1H\n"),
+                "window_conflicting_fields",
+                &format!("{W}.{field}"),
+            );
+        }
+    }
+
+    /// The artifact's own 422, word for word.
+    #[test]
+    fn a_lookback_with_an_every_is_refused_with_kestras_message() {
+        let src = flow_trigger_flow(2, "    window:\n      every: PT1H\n      lookback: PT2M\n");
+        let r = validate(&parse(&src).unwrap());
+        let e = r
+            .errors
+            .iter()
+            .find(|e| e.code == "window_conflicting_fields")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert_eq!(e.path, format!("{W}.every"));
+        assert!(
+            e.message
+                .ends_with("Window of type `SLIDING_WINDOW` cannot have an every duration."),
+            "{}",
+            e.message
+        );
+        assert_refused(
+            2,
+            "    window:\n      lookback: PT2M\n      offset: PT1M\n",
+            "window_conflicting_fields",
+            &format!("{W}.offset"),
+        );
+        assert_clean(2, "    window:\n      lookback: PT2M\n");
+    }
+
+    #[test]
+    fn an_unparseable_duration_is_refused_in_every_field() {
+        for (field, value, others) in [
+            ("every", "P1M", ""),
+            ("every", "PT1.5S", ""),
+            ("every", "garbage", ""),
+            ("offset", "-PT1H", "      every: P1D\n"),
+            ("offset", "P1Y", "      every: P1D\n"),
+            ("lookback", "P1W", ""),
+            ("lookback", "pt2m", ""),
+        ] {
+            assert_refused(
+                2,
+                &format!("    window:\n{others}      {field}: {value}\n"),
+                "window_duration_invalid",
+                &format!("{W}.{field}"),
+            );
+        }
+        // W13b Task 2 fix round 1: the 366-day cap, at the cap and cap + 1
+        // second, in each of the three duration fields.
+        for (field, others) in [
+            ("every", ""),
+            ("offset", "      every: P1D\n"),
+            ("lookback", ""),
+        ] {
+            assert_refused(
+                2,
+                &format!("    window:\n{others}      {field}: P366DT1S\n"),
+                "window_duration_invalid",
+                &format!("{W}.{field}"),
+            );
+            assert_clean(2, &format!("    window:\n{others}      {field}: P366D\n"));
+        }
+        // The message is the parser's, so "no fixed length" reaches the author.
+        let src = flow_trigger_flow(2, "    window:\n      every: P1M\n");
+        let r = validate(&parse(&src).unwrap());
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.message.contains("no fixed length")),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn a_zero_every_or_lookback_is_refused_and_a_zero_offset_is_not() {
+        assert_refused(
+            2,
+            "    window:\n      every: PT0S\n",
+            "window_duration_not_positive",
+            &format!("{W}.every"),
+        );
+        assert_refused(
+            2,
+            "    window:\n      lookback: P0D\n",
+            "window_duration_not_positive",
+            &format!("{W}.lookback"),
+        );
+        assert_clean(2, "    window:\n      every: PT1H\n      offset: PT0S\n");
+    }
+
+    #[test]
+    fn an_offset_without_an_every_is_refused() {
+        assert_refused(
+            2,
+            "    window:\n      offset: PT6H\n",
+            "window_offset_without_every",
+            &format!("{W}.offset"),
+        );
+        assert_clean(2, "    window:\n      every: P1D\n      offset: PT6H\n");
+    }
+
+    /// Kestra reads a window only on the `dependsOn` arm, so there it is
+    /// inert; egret refuses rather than silently ignoring a declaration.
+    #[test]
+    fn a_window_on_a_trigger_with_no_depends_on_is_refused() {
+        assert_refused(
+            0,
+            "    window:\n      every: PT1H\n",
+            "window_without_depends_on",
+            W,
+        );
+        // `dependsOn: []` is the same arm as no `dependsOn` (`ListUtils.isEmpty`).
+        assert_refused(
+            0,
+            "    dependsOn: []\n    window:\n      every: PT1H\n",
+            "window_without_depends_on",
+            W,
+        );
+        assert_clean(0, "");
+        assert_clean(1, "    window:\n      every: PT1H\n");
+    }
+
+    #[test]
+    fn an_unparseable_time_of_day_is_refused() {
+        for (field, body) in [
+            ("deadline", "    window:\n      deadline: \"25:00\"\n"),
+            ("deadline", "    window:\n      deadline: \"9am\"\n"),
+            (
+                "from",
+                "    window:\n      from: \"08:00:00.5\"\n      to: \"09:00\"\n",
+            ),
+            (
+                "to",
+                "    window:\n      from: \"08:00\"\n      to: \"9:00\"\n",
+            ),
+        ] {
+            assert_refused(2, body, "window_time_invalid", &format!("{W}.{field}"));
+        }
+    }
+
+    #[test]
+    fn an_empty_daily_window_is_refused() {
+        for body in [
+            "    window:\n      from: \"12:00\"\n      to: \"10:00\"\n",
+            "    window:\n      from: \"10:00\"\n      to: \"10:00:00\"\n",
+        ] {
+            assert_refused(2, body, "window_daily_range_empty", &format!("{W}.to"));
+        }
+        assert_refused(
+            2,
+            "    window:\n      deadline: \"00:00\"\n",
+            "window_daily_range_empty",
+            &format!("{W}.deadline"),
+        );
+        assert_clean(
+            2,
+            "    window:\n      from: \"00:00\"\n      to: \"23:59:59\"\n",
+        );
+        assert_clean(2, "    window:\n      deadline: \"00:00:01\"\n");
+    }
+
+    #[test]
+    fn a_timezone_that_is_not_an_iana_zone_is_refused() {
+        for zone in ["Mars/Olympus_Mons", "\"+07:00\"", "asia/kolkata", "\"\""] {
+            assert_refused(
+                2,
+                &format!("    window:\n      every: PT1H\n      timezone: {zone}\n"),
+                "window_timezone_invalid",
+                &format!("{W}.timezone"),
+            );
+        }
+        for zone in ["UTC", "Europe/Paris", "Asia/Ho_Chi_Minh"] {
+            assert_clean(
+                2,
+                &format!("    window:\n      every: PT1H\n      timezone: {zone}\n"),
+            );
+        }
+    }
+
+    #[test]
+    fn min_satisfied_below_one_is_refused_under_any_mode() {
+        for mode in ["ALL", "ANY", "AT_LEAST"] {
+            for n in [0, -1] {
+                assert_refused(
+                    2,
+                    &format!("    mode: {mode}\n    minSatisfied: {n}\n"),
+                    "min_satisfied_not_positive",
+                    "triggers.listen.minSatisfied",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn at_least_without_min_satisfied_is_refused() {
+        assert_refused(
+            2,
+            "    mode: AT_LEAST\n",
+            "min_satisfied_required",
+            "triggers.listen.minSatisfied",
+        );
+        assert_clean(2, "    mode: AT_LEAST\n    minSatisfied: 1\n");
+    }
+
+    #[test]
+    fn at_least_asking_for_more_conditions_than_declared_is_refused() {
+        assert_refused(
+            2,
+            "    mode: AT_LEAST\n    minSatisfied: 3\n",
+            "min_satisfied_exceeds_conditions",
+            "triggers.listen.minSatisfied",
+        );
+        assert_clean(2, "    mode: AT_LEAST\n    minSatisfied: 2\n");
+        // Only AT_LEAST reads it; under ALL/ANY an oversized value is inert,
+        // as on Kestra, and is not refused.
+        assert_clean(2, "    mode: ALL\n    minSatisfied: 3\n");
+        assert_clean(2, "    mode: ANY\n    minSatisfied: 3\n");
+    }
+
+    /// The artifact refuses an eighth window field with 422 `Unrecognized
+    /// field "fireOnce"`; egret refuses it at PARSE (`Window` has
+    /// `deny_unknown_fields`), so no draft carrying it can be stored.
+    #[test]
+    fn fire_once_and_any_other_unknown_window_field_fail_to_parse() {
+        for field in ["fireOnce: true", "bogusField: 1", "resetOnSuccess: false"] {
+            let src = flow_trigger_flow(
+                2,
+                &format!("    window:\n      every: PT1H\n      {field}\n"),
+            );
+            let e = parse(&src).expect_err(field);
+            let name = field.split(':').next().unwrap();
+            assert!(
+                e.message.contains(&format!("unknown field `{name}`")),
+                "{field}: {}",
+                e.message
+            );
+        }
+        assert!(parse(&flow_trigger_flow(2, "    window:\n      every: PT1H\n")).is_ok());
     }
 }

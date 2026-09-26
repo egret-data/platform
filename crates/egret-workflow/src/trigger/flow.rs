@@ -20,8 +20,14 @@
 //! plugin: the limitation is then repeated at every call site instead of
 //! living in a doc nobody re-reads. **Twenty of the corpus's twenty-one
 //! declarations take the arm this module does not implement**, and
-//! `tests::the_corpus_flow_triggers_split_twenty_to_one` is the acceptance
-//! criterion that fails the day the window lands.
+//! `tests::the_corpus_flow_triggers_split_twenty_to_one` was written as the
+//! acceptance criterion that fails the day the window lands. *(W13b Task 5,
+//! 2026-09-26: the window landed and the test did not fail, because W13b built
+//! the other arm BESIDE this type -- [`super::depends_on`], [`super::window`]
+//! and `flow_trigger::process::listen_depends_on`, which the processor takes
+//! before [`WindowFreeFlowTrigger::resolve`] is called. The twenty still take
+//! that arm; `depends_on::tests::the_corpus_depends_on_declarations_resolve_eighteen_of_twenty`
+//! is the count that moved.)*
 //!
 //! # The ratchet did not move, and could not have
 //!
@@ -177,11 +183,17 @@
 //!    **`MultipleConditionWindow`** — persistent state, counted by
 //!    `MultipleCondition.test` under `mode` ALL/ANY/AT_LEAST, and made
 //!    fire-at-most-once by `window.fireOnce`. `valids/flow-trigger-fire-once-true-flow-listen`
-//!    declares exactly that. Firing once per matching execution, as a
+//!    declares exactly that. *(W13b Task 1: that is the sibling checkout's
+//!    `Window`; the pinned artifact has no `fireOnce` and refuses the flow with
+//!    422, and since W13b Task 2 egret refuses it at parse.)* Firing once per matching execution, as a
 //!    window-free implementation would, is over-acceptance in the direction
 //!    nothing here can catch. **Twenty of the twenty-one corpus declarations
 //!    carry a `dependsOn`**, so this refusal is most of the corpus — and
 //!    refusing most of an unreachable corpus is the cheap half of the trade.
+//!    *(Since W13b this refusal is routing, not a hole: the processor sends a
+//!    `dependsOn` listener to its own arm before `resolve` runs, and there it
+//!    fires inside a window. `resolve` still refuses it, so no caller can take
+//!    a `dependsOn` trigger down THIS arm by mistake.)*
 //! 2. **A `when` that the caller could not render refuses the trigger**
 //!    ([`Refusal::WhenUnrenderable`]), because `ConditionService.isNotValid`
 //!    catches `IllegalVariableEvaluationException` and returns `true`. Measured:
@@ -197,7 +209,14 @@
 //!    *does* declare a `when` is refused
 //!    ([`Refusal::WhenNotRendered`]) rather than accepted.
 //!
-//! # `window:` is NOT refused, and the analogy that says it should be fails
+//! # `window:` without `dependsOn` — W13b refuses it at save, and why this section argued otherwise
+//!
+//! **Superseded by W13b Task 2:** `spec::validate` now refuses a `window` on a
+//! trigger with no `dependsOn` (`window_without_depends_on`). The measurement
+//! below still stands — on the artifact such a window is inert — and that is
+//! exactly why it is refused: egret does not silently ignore a declaration.
+//! It is a chosen over-refusal, and no corpus flow declares one. The analysis
+//! is kept because it records what the artifact does.
 //!
 //! Fix round 1 considered refusing a declared `window:` by analogy with Task
 //! 5's `lateMaximumDelay` — a modelled-away field that silently changed the
@@ -234,8 +253,11 @@
 //!    rather than folded into a `bool`. Kestra returns an empty list and, for
 //!    the depth case only, logs.
 //! 4. Refusing `dependsOn` at resolve time instead of modelling the window
-//!    (item 1 above). What the window would have to do is measured and written
-//!    down in this file's `dependsOn` section below; none of it is implemented.
+//!    (item 1 above). **W13b implements the window outside this type**
+//!    (`crate::flow_trigger::process`, with `super::depends_on` and
+//!    `super::window` as its pure half); it reaches [`evaluate`] only as the
+//!    listener filter both arms share, through
+//!    [`WindowFreeFlowTrigger::depends_on_filter`].
 //! 5. [`Refusal::EntryState`] — a defensive refusal of `CREATED` that Kestra
 //!    achieves upstream, by starting its transition loop at index 1.
 //! 6. [`FiredExecution`] carrying the source execution's *identity* rather than
@@ -311,9 +333,27 @@ pub enum FlowTriggerError {
     /// Not an `io.kestra.plugin.core.trigger.Flow` at all.
     NotAFlowTrigger,
     /// The trigger declares `dependsOn`, whose evaluation needs a
-    /// `MultipleConditionWindow` this package does not model. See the module
-    /// doc, *Over-acceptance is the hazard*, item 1.
+    /// `MultipleConditionWindow` -- the other arm, which this type does not
+    /// model and [`super::depends_on`] / [`super::window`] do (W13b). See the
+    /// module doc, *Over-acceptance is the hazard*, item 1.
     UnsupportedDependsOn(usize),
+    /// The trigger has no `dependsOn` but carries a shape the save path
+    /// refuses: the codes of [`super::depends_on_refusals`], the ONE list
+    /// `spec::validate` reports about a flow trigger. On this arm that is
+    /// either a `window` (inert on the artifact, which reads it only through
+    /// `dependsOnAsMultipleCondition()`; `window_without_depends_on`, plus
+    /// whatever the window itself breaks) or a `mode`/`minSatisfied` shape
+    /// (`min_satisfied_required`, `min_satisfied_not_positive`,
+    /// `min_satisfied_exceeds_conditions` -- Kestra's `FlowTriggerValidator`
+    /// and `@Positive` do not look at `dependsOn` either).
+    ///
+    /// Refusing here as well is what keeps a DRAFT (which saves with
+    /// validation errors, and whose listener rows `scheduler::sync` builds
+    /// from whatever parses) from firing with a declaration save called
+    /// unfireable. W13b Task 2 fix round 1 did this for `window` alone; the
+    /// final-review fix wave (I1) widened it to the whole list, so the
+    /// window-free arm cannot drift from the save path by construction.
+    Refused(Vec<&'static str>),
 }
 
 impl fmt::Display for FlowTriggerError {
@@ -322,8 +362,14 @@ impl fmt::Display for FlowTriggerError {
             Self::NotAFlowTrigger => write!(f, "trigger is not a core.trigger.Flow"),
             Self::UnsupportedDependsOn(n) => write!(
                 f,
-                "core.trigger.Flow `dependsOn` is not supported ({n} \
-                 condition(s)): it needs a multiple-condition window"
+                "core.trigger.Flow `dependsOn` ({n} condition(s)) is not the \
+                 window-free arm: it is evaluated over a window by the `dependsOn` arm"
+            ),
+            Self::Refused(codes) => write!(
+                f,
+                "core.trigger.Flow without `dependsOn` is refused at save ({}), so it \
+                 is never evaluated",
+                codes.join(", ")
             ),
         }
     }
@@ -399,8 +445,50 @@ impl WindowFreeFlowTrigger {
                 spec.depends_on.len(),
             ));
         }
+        // Whatever save refuses about this trigger -- a `window`, or a
+        // `mode`/`minSatisfied` shape -- is refused here too, never ignored.
+        // The SAME list save reports, not a second copy. See
+        // [`FlowTriggerError::Refused`].
+        let refusals = super::depends_on_refusals(spec);
+        if !refusals.is_empty() {
+            return Err(FlowTriggerError::Refused(
+                refusals.iter().map(|r| r.code).collect(),
+            ));
+        }
 
-        Ok(Self {
+        Ok(Self::filter_of(trigger, spec))
+    }
+
+    /// The **listener filter** of a trigger that DOES declare `dependsOn`
+    /// (W13b), or `None` for any other trigger.
+    ///
+    /// `FlowTriggerService.computeFlowTriggers` (checkout `96893b589`, lines
+    /// 216-243) runs BEFORE the split into the two arms, so both arms apply
+    /// the same filter -- same flow, kind, flow disabled, draft, depth,
+    /// trigger disabled, `states`, and the trigger's own `when` -- and only
+    /// then does `computeExecutionsFromFlowTriggerDependsOn` touch a window.
+    /// [`evaluate`] IS that filter, so the `dependsOn` arm calls it with this
+    /// value rather than restating it; its [`Outcome::Fired`] is the fire's
+    /// identity (inputs, labels, depth, source) once the window is satisfied.
+    /// `evaluate`'s semantics are unchanged; what this adds is a way to reach
+    /// it that [`Self::resolve`]'s refusal of `dependsOn` does not open.
+    ///
+    /// **Not a resolution of the `dependsOn` machinery**: `dependsOn`, `mode`,
+    /// `minSatisfied` and `window` are the caller's
+    /// (`crate::flow_trigger::process`), gated by
+    /// [`super::depends_on_refusals`].
+    pub fn depends_on_filter(trigger: &Trigger) -> Option<Self> {
+        let TriggerKind::Flow(spec) = &trigger.kind else {
+            return None;
+        };
+        if spec.depends_on.is_empty() {
+            return None;
+        }
+        Some(Self::filter_of(trigger, spec))
+    }
+
+    fn filter_of(trigger: &Trigger, spec: &crate::models::FlowTrigger) -> Self {
+        Self {
             trigger_id: trigger.id.clone(),
             states: spec.states.clone(),
             when_source: trigger.when.as_ref().map(|w| w.source().to_string()),
@@ -411,7 +499,7 @@ impl WindowFreeFlowTrigger {
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                 .unwrap_or_default(),
             labels: trigger.labels.clone(),
-        })
+        }
     }
 
     /// The states this trigger fires on.
@@ -1583,8 +1671,13 @@ mod tests {
         .is_ok());
     }
 
-    /// The twenty corpus declarations that carry a `dependsOn` are refused,
-    /// and the one that does not is resolved.
+    /// The twenty corpus declarations that carry a `dependsOn` are refused BY
+    /// THIS ARM (they take the `dependsOn` arm instead: see
+    /// `depends_on::tests::the_corpus_depends_on_declarations_resolve_eighteen_of_twenty`),
+    /// and the one that does not is resolved. Since W13b Task 2 nineteen are
+    /// refused at [`WindowFreeFlowTrigger::resolve`] and one -- the `fireOnce`
+    /// flow -- at parse, because `models::Window` refuses a field the
+    /// artifact's `Window` does not have.
     ///
     /// This is the count the module doc states, compared by a running program
     /// rather than asserted in prose — and the prose said **nineteen** until
@@ -1616,10 +1709,23 @@ mod tests {
         let mut declaring_flows = 0usize;
         let mut resolved = Vec::new();
         let mut refused = Vec::new();
+        // W13b Task 2: a flow that no longer PARSES is not skipped silently --
+        // that is how this count would have dropped to sixteen without anyone
+        // being told. `models::Window` refuses unknown fields, so
+        // `fireOnce` (which the artifact refuses with 422 too) is a parse
+        // error now; it is counted here, by name and by reason.
+        let mut unparseable_declaring = Vec::new();
         for path in &files {
             let text = std::fs::read_to_string(path).expect("read flow");
-            let Ok(flow) = serde_norway::from_str::<crate::models::Flow>(&text) else {
-                continue;
+            let flow = match serde_norway::from_str::<crate::models::Flow>(&text) {
+                Ok(flow) => flow,
+                Err(e) => {
+                    if text.contains("io.kestra.plugin.core.trigger.Flow") {
+                        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+                        unparseable_declaring.push((name, e.to_string()));
+                    }
+                    continue;
+                }
             };
             let mut declares = false;
             for t in &flow.triggers {
@@ -1639,14 +1745,105 @@ mod tests {
             }
         }
 
-        assert_eq!(declaring_flows, 17, "corpus flows declaring a flow trigger");
+        assert_eq!(
+            unparseable_declaring.len(),
+            1,
+            "only the fireOnce flow fails to parse: {unparseable_declaring:?}"
+        );
+        let (name, why) = &unparseable_declaring[0];
+        assert_eq!(name, "flow-trigger-fire-once-true-flow-listen");
+        assert!(why.contains("unknown field `fireOnce`"), "{why}");
+
+        assert_eq!(
+            declaring_flows + unparseable_declaring.len(),
+            17,
+            "corpus flows declaring a flow trigger"
+        );
         assert_eq!(
             resolved,
             vec!["flow-trigger-when-condition-flow-listen/on_completion"],
             "the one declaration this module can evaluate"
         );
-        assert_eq!(refused.len(), 20, "declarations refused for `dependsOn`");
-        assert_eq!(resolved.len() + refused.len(), 21);
+        // Its one declaration carries a `dependsOn` too, so it is the
+        // twentieth: refused at parse now rather than at `resolve`.
+        assert_eq!(refused.len(), 19, "declarations refused for `dependsOn`");
+        assert_eq!(
+            resolved.len() + refused.len() + unparseable_declaring.len(),
+            21
+        );
+    }
+
+    /// W13b Task 2 fix round 1: a `window` with no `dependsOn` is refused
+    /// by name, whatever the window says -- including a value the save-time
+    /// validator would also refuse (`P1M`), because `resolve` is what stands
+    /// between a draft that saved with validation errors and a fire.
+    #[test]
+    fn a_window_without_depends_on_is_refused_not_ignored() {
+        for window in [
+            "window:\n  every: PT1H\n",
+            "window:\n  every: P1M\n",
+            "window: {}\n",
+        ] {
+            let t = trigger(&format!(
+                "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n{window}"
+            ));
+            match WindowFreeFlowTrigger::resolve(&t) {
+                Err(FlowTriggerError::Refused(codes)) => assert!(
+                    codes.contains(&"window_without_depends_on"),
+                    "{window}: {codes:?}"
+                ),
+                other => panic!("{window}: {other:?}"),
+            }
+        }
+        let empty = trigger(
+            "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\ndependsOn: []\n\
+             window:\n  every: PT1H\n",
+        );
+        assert_eq!(
+            WindowFreeFlowTrigger::resolve(&empty),
+            Err(FlowTriggerError::Refused(vec!["window_without_depends_on"])),
+            "`dependsOn: []` is the window-free arm too"
+        );
+        // Control: the same trigger without the window resolves.
+        assert!(WindowFreeFlowTrigger::resolve(&trigger(
+            "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n"
+        ))
+        .is_ok());
+    }
+
+    /// Final-review fix wave, I1: a `mode`/`minSatisfied` shape save refuses
+    /// is refused on the window-free arm too, by the same code, so a draft
+    /// carrying one gets no listener row and never fires. Before the fix
+    /// `resolve` read only `dependsOn` and `window`, and all three resolved.
+    #[test]
+    fn a_mode_shape_save_refuses_is_refused_without_depends_on() {
+        for (body, code) in [
+            ("mode: AT_LEAST\n", "min_satisfied_required"),
+            (
+                "mode: AT_LEAST\nminSatisfied: 1\n",
+                "min_satisfied_exceeds_conditions",
+            ),
+            ("minSatisfied: 0\n", "min_satisfied_not_positive"),
+        ] {
+            let t = trigger(&format!(
+                "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n{body}"
+            ));
+            assert_eq!(
+                WindowFreeFlowTrigger::resolve(&t),
+                Err(FlowTriggerError::Refused(vec![code])),
+                "{body}"
+            );
+        }
+        // Controls: the modes save accepts without `dependsOn` still resolve.
+        for body in ["mode: ANY\n", "mode: ALL\n", "minSatisfied: 1\n"] {
+            assert!(
+                WindowFreeFlowTrigger::resolve(&trigger(&format!(
+                    "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n{body}"
+                )))
+                .is_ok(),
+                "{body}"
+            );
+        }
     }
 
     /// A `core.schedule` is not a flow trigger and does not resolve as one.
