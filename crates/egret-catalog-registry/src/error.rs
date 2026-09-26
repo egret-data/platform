@@ -23,4 +23,11 @@ pub enum RegistryError {
     /// warehouse catalog with no grant.
     #[error(transparent)]
     Perm(#[from] egret_perm::PermError),
+    /// The [`crate::CatalogAssignmentCompiler`] recompile that follows
+    /// `ensure_warehouse_catalog`'s grant sync (SP4a Task 16, D3 defect 2),
+    /// or the same port's recompile inside a warehouse teardown, failing
+    /// inside the SAME transaction as the write it accompanies — rolls the
+    /// whole write back, same treatment `Perm` above gets.
+    #[error(transparent)]
+    Compile(#[from] egret_perm::CompileError),
 }

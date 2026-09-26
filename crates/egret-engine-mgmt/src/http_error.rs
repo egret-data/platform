@@ -149,6 +149,11 @@ impl From<egret_catalog_registry::RegistryError> for EngineHttpError {
             // `ensure_warehouse_catalog`'s implicit-grant sync (Task 6 fix
             // round 1, Important 1) failing inside its own transaction.
             E::Perm(e) => e.into(),
+            // `ensure_warehouse_catalog_with_compiler`'s in-transaction
+            // recompile (SP4a Task 16, D3 defect 2) failing — same treatment
+            // as `E::Perm` above, through the same `CompileError` mapping
+            // `catalogs::set_catalog_workspaces` already uses.
+            E::Compile(e) => e.into(),
         }
     }
 }

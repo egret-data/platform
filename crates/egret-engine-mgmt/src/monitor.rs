@@ -542,6 +542,7 @@ mod tests {
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(crate::starrocks_ddl::FakeStarRocksDdl::default()),
             perm_compiler: None,
+            catalog_assignment_compiler: None,
         })
     }
 

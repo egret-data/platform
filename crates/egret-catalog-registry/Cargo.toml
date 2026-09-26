@@ -32,6 +32,11 @@ egret-perm.workspace = true
 sqlx.workspace = true
 chrono.workspace = true
 tracing.workspace = true
+# `CatalogAssignmentCompiler` (SP4a Task 16): an `#[async_trait]` port so
+# `ensure_warehouse_catalog` can recompile its implicit grant in the SAME
+# transaction without this crate depending on `egret-perm-compile`/`egret-policy`
+# (the composition root implements the trait; see `compiler_port.rs`).
+async-trait.workspace = true
 
 [dev-dependencies]
 egret-test-db.workspace = true

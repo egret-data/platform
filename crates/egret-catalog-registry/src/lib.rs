@@ -4,6 +4,7 @@
 //! Engine-side effects (applying to Trino, StarRocks DDL) live
 //! in `egret-engine-mgmt`, which depends on this crate.
 
+pub mod compiler_port;
 pub mod config;
 pub mod error;
 pub mod name;
@@ -12,6 +13,7 @@ pub mod sensitive;
 pub mod store;
 pub mod tag_version;
 
+pub use compiler_port::CatalogAssignmentCompiler;
 pub use config::{
     Advanced, CatalogConfig, CatalogDef, CatalogKind, ElasticsearchConfig, EngineType,
     GenericConfig, HiveFamilyConfig, HiveMetastore, IcebergConfig, IcebergMetastore, JdbcConfig,

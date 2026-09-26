@@ -182,6 +182,11 @@ fn build_app(
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(starrocks_ddl),
             perm_compiler,
+            // SP4a Task 16: no test here exercises `ensure_warehouse_catalog`'s
+            // own recompile through this crate's create-engine callers (it is
+            // a proven no-op there — see `RegistryStore::ensure_warehouse_catalog_with_compiler`'s
+            // doc), so `None` for every fixture.
+            catalog_assignment_compiler: None,
         })
 }
 

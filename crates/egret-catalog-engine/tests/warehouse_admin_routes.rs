@@ -88,6 +88,7 @@ fn build_app(
         browser,
         sessions: sessions.clone(),
         pdp,
+        perm_compiler: None,
     })
 }
 

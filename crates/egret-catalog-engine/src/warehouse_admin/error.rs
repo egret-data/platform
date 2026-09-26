@@ -113,6 +113,14 @@ impl From<egret_catalog_registry::RegistryError> for CatalogHttpError {
                 }
                 CatalogHttpError::Internal
             }
+            // `ensure_warehouse_catalog_with_compiler`'s in-transaction
+            // recompile (SP4a Task 16, D3 defect 2) failing — same
+            // `Internal` treatment as `Perm` above, logged as its own
+            // condition.
+            E::Compile(e) => {
+                tracing::error!(error = %e, "catalog registry: assignment-grant recompile failed");
+                CatalogHttpError::Internal
+            }
         }
     }
 }

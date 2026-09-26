@@ -259,6 +259,152 @@ async fn warehouse_catalogs_are_created_once_with_their_workspace() {
     assert!(store.warehouse_visible_to_workspace(wh1, ws).await.unwrap());
 }
 
+/// A [`egret_catalog_registry::CatalogAssignmentCompiler`] test double:
+/// records every call the port receives — catalog ids through
+/// `recompile_catalog_assignment_in_tx`, service-id sets through
+/// `recompile_services_in_tx` — SEPARATELY (the two methods answer different
+/// questions — "what does this catalog reach NOW" vs "recompile exactly
+/// these services" — so a test asserting on the wrong list would pass for
+/// the wrong reason), and can be told to fail. This crate carries no
+/// `egret-perm-compile`/`egret-policy` dependency (deliberately — see
+/// `compiler_port`'s module doc), so this fake exercises the WIRING
+/// (`ensure_warehouse_catalog_with_compiler`/`delete_catalog_with_compiler`
+/// call the right port method, in the same transaction, and a failure rolls
+/// the whole write back) rather than real compilation; the real compiler is
+/// `egret-bin`'s `ProfileCompilerImpl`, covered by `egret-engine-mgmt`'s own
+/// suite and by `egret-catalog-engine`'s `warehouse_delete_recompile` suite.
+#[derive(Clone, Default)]
+struct FakeAssignmentCompiler {
+    catalog_calls: std::sync::Arc<std::sync::Mutex<Vec<Uuid>>>,
+    service_calls: std::sync::Arc<std::sync::Mutex<Vec<Vec<i64>>>>,
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl egret_catalog_registry::CatalogAssignmentCompiler for FakeAssignmentCompiler {
+    async fn recompile_catalog_assignment_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        catalog_id: Uuid,
+    ) -> Result<(), egret_perm::CompileError> {
+        self.catalog_calls.lock().unwrap().push(catalog_id);
+        if self.fail {
+            return Err(egret_perm::CompileError::Db(
+                "synthetic compile failure".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn recompile_services_in_tx(
+        &self,
+        _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
+        self.service_calls.lock().unwrap().push(service_ids.to_vec());
+        if self.fail {
+            return Err(egret_perm::CompileError::Db(
+                "synthetic compile failure".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The FIRST creation of a warehouse's catalog recompiles the implicit
+/// assignment grant in the SAME transaction as the grant sync, with no
+/// second write and no manual compile step (SP4a Task 16, D3 defect 2). The
+/// idempotent re-ensure that follows (no new catalog, no new grant) must NOT
+/// recompile again — there is nothing new to compile.
+#[tokio::test]
+async fn ensure_warehouse_catalog_recompiles_the_implicit_grant_in_the_same_transaction() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let ws = workspace(&db).await;
+    let name = unique("Recompile-Wh");
+    let wh = warehouse(&db, &name, ws).await;
+    let compiler = FakeAssignmentCompiler::default();
+
+    let (c1, created) = store
+        .ensure_warehouse_catalog_with_compiler(
+            &WarehouseIdentity {
+                id: wh,
+                name: &name,
+                workspace_id: ws,
+            },
+            None,
+            Some(&compiler),
+        )
+        .await
+        .unwrap();
+    assert!(created);
+    assert_eq!(
+        compiler.catalog_calls.lock().unwrap().as_slice(),
+        &[c1.id],
+        "the grant sync's own transaction must recompile exactly this catalog, once"
+    );
+
+    let (again, created) = store
+        .ensure_warehouse_catalog_with_compiler(
+            &WarehouseIdentity {
+                id: wh,
+                name: &name,
+                workspace_id: ws,
+            },
+            None,
+            Some(&compiler),
+        )
+        .await
+        .unwrap();
+    assert!(!created);
+    assert_eq!(again.id, c1.id);
+    assert_eq!(
+        compiler.catalog_calls.lock().unwrap().len(),
+        1,
+        "the idempotent re-ensure syncs no grant, so it must not recompile again"
+    );
+}
+
+/// A compile failure inside `ensure_warehouse_catalog_with_compiler` rolls
+/// back the WHOLE write — the catalog row, its `catalog_workspaces` row, and
+/// its implicit grant all go with it — because a grant stored but never
+/// compiled is worse than a rejected write (SP4a Task 16, D3 defect 2, same
+/// reasoning `ProfileCompilerPort::recompile_catalog_assignment_in_tx`
+/// documents for path 1).
+#[tokio::test]
+async fn ensure_warehouse_catalog_rolls_back_the_whole_write_when_the_compile_fails() {
+    let Some(db) = db().await else { return };
+    let store = RegistryStore::new(db.clone());
+    let ws = workspace(&db).await;
+    let name = unique("Recompile-Fail-Wh");
+    let wh = warehouse(&db, &name, ws).await;
+    let compiler = FakeAssignmentCompiler {
+        fail: true,
+        ..Default::default()
+    };
+
+    let err = store
+        .ensure_warehouse_catalog_with_compiler(
+            &WarehouseIdentity {
+                id: wh,
+                name: &name,
+                workspace_id: ws,
+            },
+            None,
+            Some(&compiler),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, RegistryError::Compile(_)),
+        "expected a Compile error, got {err:?}"
+    );
+    assert!(
+        store.get_catalog_for_warehouse(wh).await.unwrap().is_none(),
+        "the failed compile must roll the catalog-creation write back entirely"
+    );
+}
+
 #[tokio::test]
 async fn attachments_order_status_and_block_deletes() {
     let Some(db) = db().await else { return };

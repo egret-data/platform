@@ -515,6 +515,44 @@ impl RegistryStore {
         wh: &WarehouseIdentity<'_>,
         preferred_name: Option<&str>,
     ) -> Result<(CatalogRow, bool), RegistryError> {
+        self.ensure_warehouse_catalog_with_compiler(wh, preferred_name, None)
+            .await
+    }
+
+    /// [`Self::ensure_warehouse_catalog`], plus recompiling the implicit
+    /// assignment grant's compiled policy in the SAME transaction as the
+    /// grant sync (SP4a Task 16, D3 defect 2 — Task 15 left this open: see
+    /// `crate::compiler_port` for why the port, not a direct call, is what
+    /// closes it without pulling `egret-perm-compile`/`egret-policy` into
+    /// this crate's production dependency graph).
+    ///
+    /// `compiler` is `None` for every caller that has none wired (every test
+    /// in this crate, and any production caller that predates this task) —
+    /// behaviour is then byte-identical to the old `ensure_warehouse_catalog`,
+    /// exactly as `egret_engine_mgmt::EngineMgmtState::perm_compiler`'s own
+    /// `None` case works for `set_catalog_workspaces`.
+    ///
+    /// **Why this is a no-op for every caller today, and why it is still
+    /// correct to add.** `registry.catalogs` is the row `perm.grants.catalog_id`
+    /// and `registry.engine_catalog_attachments.catalog_id` both FK to, and
+    /// this branch only runs once — the FIRST time a warehouse's catalog is
+    /// created (the `get_catalog_for_warehouse` guard above returns early on
+    /// every later call). No attachment can reference a catalog row that does
+    /// not exist yet, so at the exact moment this grant is written, ZERO
+    /// engines can already reach it — `egret_policy::services_for_catalog_via`
+    /// is provably empty here for every caller in this codebase today. The
+    /// call is still correct to make: it closes the invariant ("every
+    /// perm.grants write recompiles in the same transaction, unconditionally")
+    /// rather than leaving it true only by an ordering argument a future
+    /// caller (a backfill, a different attach order) could invalidate
+    /// silently, exactly the "true on one path, false on another" shape this
+    /// task exists to close everywhere it appears.
+    pub async fn ensure_warehouse_catalog_with_compiler(
+        &self,
+        wh: &WarehouseIdentity<'_>,
+        preferred_name: Option<&str>,
+        compiler: Option<&dyn crate::CatalogAssignmentCompiler>,
+    ) -> Result<(CatalogRow, bool), RegistryError> {
         if let Some(c) = self.get_catalog_for_warehouse(wh.id).await? {
             return Ok((c, false));
         }
@@ -538,6 +576,10 @@ impl RegistryStore {
                     .await?;
                     egret_perm::sync_assignment_grants_in_tx(&mut tx, row.id, &[wh.workspace_id])
                         .await?;
+                    if let Some(c) = compiler {
+                        c.recompile_catalog_assignment_in_tx(&mut tx, row.id)
+                            .await?;
+                    }
                     tx.commit().await?;
                     return Ok((row, true));
                 }

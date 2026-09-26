@@ -2894,13 +2894,14 @@ async fn create_engine(
     let (wh_catalog, _) = st
         .engine_mgmt
         .registry()
-        .ensure_warehouse_catalog(
+        .ensure_warehouse_catalog_with_compiler(
             &WarehouseIdentity {
                 id: wh.id,
                 name: &wh.name,
                 workspace_id: wh.workspace_id,
             },
             None,
+            st.catalog_assignment_compiler.as_deref(),
         )
         .await?;
     let role_id = ensure_engine_role(&st, wh.id).await?;
@@ -3624,13 +3625,14 @@ async fn create_starrocks_engine(
     let (wh_catalog, _) = st
         .engine_mgmt
         .registry()
-        .ensure_warehouse_catalog(
+        .ensure_warehouse_catalog_with_compiler(
             &WarehouseIdentity {
                 id: wh.id,
                 name: &wh.name,
                 workspace_id: wh.workspace_id,
             },
             None,
+            st.catalog_assignment_compiler.as_deref(),
         )
         .await?;
     let role_id = ensure_engine_role(&st, wh.id).await?;
@@ -6646,6 +6648,7 @@ mod tests {
             sr_jdbc_drivers: egret_catalog_registry::JdbcDrivers::default(),
             starrocks_ddl: std::sync::Arc::new(crate::starrocks_ddl::FakeStarRocksDdl::default()),
             perm_compiler: None,
+            catalog_assignment_compiler: None,
         })
     }
 
