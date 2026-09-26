@@ -256,6 +256,14 @@ struct StarRocksConfigBody {
     /// `StarRocksPod` at provision-req assembly. Omitted ⇒ preserved on update.
     #[schema(value_type = Object)]
     pod: Option<serde_json::Value>,
+    /// StorageClass backing the FE metadata PVC (`/opt/starrocks/fe/meta`).
+    /// Omitted/blank ⇒ the cluster's DEFAULT StorageClass. Omitted ⇒ preserved
+    /// on update.
+    fe_meta_storage_class: Option<String>,
+    /// Size of the FE metadata PVC, as a k8s binary quantity (`"20Gi"`).
+    /// Omitted ⇒ preserved on update, then
+    /// `egret_engine_mgmt_api::DEFAULT_FE_META_STORAGE_SIZE`.
+    fe_meta_storage_size: Option<String>,
 }
 
 /// The provisioning parameters surfaced back to clients (subset of the stored
@@ -3185,6 +3193,19 @@ async fn build_starrocks_provision_req(
         .filter(|v| !v.is_null())
         .cloned()
         .and_then(|v| serde_json::from_value(v).ok());
+    // FE metadata PVC knobs. Absent/null ⇒ `None` ⇒ default StorageClass +
+    // `DEFAULT_FE_META_STORAGE_SIZE` in the provisioner, so an engine whose
+    // spec predates this surface still renders the PVC.
+    let fe_meta_storage_class = cfg
+        .and_then(|c| c.get("feMetaStorageClass"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty());
+    let fe_meta_storage_size = cfg
+        .and_then(|c| c.get("feMetaStorageSize"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty());
 
     // Delegation opt-in read back from the stored `{mode, tlsEnabled}` block.
     // `tls_enabled` mirrors create: on only when delegation is configured,
@@ -3340,6 +3361,8 @@ async fn build_starrocks_provision_req(
             cn_autoscaling,
             pod,
             root_password,
+            fe_meta_storage_class,
+            fe_meta_storage_size,
         }),
     };
     Ok((req, delegation_bootstrap))
@@ -3539,6 +3562,32 @@ fn build_starrocks_spec(
         .clone()
         .or_else(|| existing_cfg.and_then(|c| c.get("pod")).cloned())
         .unwrap_or(serde_json::Value::Null);
+    // FE metadata PVC class/size: same omit=preserve rule. Absent on both sides
+    // stores `null`, which the provisioner reads as "default StorageClass" and
+    // `DEFAULT_FE_META_STORAGE_SIZE` — so an engine created before this surface
+    // existed still gets a persistent meta volume, no edit required.
+    let fe_meta_storage_class = sr_body
+        .fe_meta_storage_class
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .map(serde_json::Value::from)
+        .or_else(|| {
+            existing_cfg
+                .and_then(|c| c.get("feMetaStorageClass"))
+                .cloned()
+        })
+        .unwrap_or(serde_json::Value::Null);
+    let fe_meta_storage_size = sr_body
+        .fe_meta_storage_size
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .map(serde_json::Value::from)
+        .or_else(|| {
+            existing_cfg
+                .and_then(|c| c.get("feMetaStorageSize"))
+                .cloned()
+        })
+        .unwrap_or(serde_json::Value::Null);
 
     serde_json::json!({
         "imageVersion": fe_image,
@@ -3554,6 +3603,8 @@ fn build_starrocks_spec(
             "cnConfig": cn_config,
             "cnAutoscaling": cn_autoscaling,
             "pod": pod,
+            "feMetaStorageClass": fe_meta_storage_class,
+            "feMetaStorageSize": fe_meta_storage_size,
         },
     })
 }
@@ -6658,6 +6709,38 @@ mod tests {
         assert!(!cert.contains("PRIVATE KEY"));
         // No cert block ⇒ None.
         assert!(extract_leading_cert("-----BEGIN PRIVATE KEY-----\nx\n").is_none());
+    }
+
+    /// The FE metadata PVC knobs follow the same omit=preserve rule as every
+    /// other field, and an engine created before the surface existed stores
+    /// `null` for both — which the provisioner reads as "default StorageClass
+    /// + default size", i.e. it still gets a persistent meta volume.
+    #[test]
+    fn build_starrocks_spec_carries_fe_meta_storage_knobs() {
+        let created = build_starrocks_spec(&StarRocksConfigBody::default(), None);
+        let ccfg = &created["starrocksConfig"];
+        assert!(ccfg["feMetaStorageClass"].is_null());
+        assert!(ccfg["feMetaStorageSize"].is_null());
+
+        let body = StarRocksConfigBody {
+            fe_meta_storage_class: Some("fast-ssd".into()),
+            fe_meta_storage_size: Some("50Gi".into()),
+            ..Default::default()
+        };
+        let set = build_starrocks_spec(&body, None);
+        assert_eq!(set["starrocksConfig"]["feMetaStorageClass"], "fast-ssd");
+        assert_eq!(set["starrocksConfig"]["feMetaStorageSize"], "50Gi");
+
+        // An unrelated edit preserves them.
+        let kept = build_starrocks_spec(
+            &StarRocksConfigBody {
+                fe_replicas: Some(3),
+                ..Default::default()
+            },
+            Some(&set),
+        );
+        assert_eq!(kept["starrocksConfig"]["feMetaStorageClass"], "fast-ssd");
+        assert_eq!(kept["starrocksConfig"]["feMetaStorageSize"], "50Gi");
     }
 
     // ── build_starrocks_spec: omitted-field-preserves + delegation rule ─────

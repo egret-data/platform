@@ -78,4 +78,18 @@ export interface StarRocksConfigBody {
      * `StarRocksPod` at provision-req assembly. Omitted ⇒ preserved on update.
      */
   pod?: StarRocksConfigBodyPod;
+  /**
+     * StorageClass backing the FE metadata PVC (`/opt/starrocks/fe/meta`).
+     * Omitted/blank ⇒ the cluster's DEFAULT StorageClass. Omitted ⇒ preserved
+     * on update.
+     * @nullable
+     */
+  feMetaStorageClass?: string | null;
+  /**
+     * Size of the FE metadata PVC, as a k8s binary quantity (`"20Gi"`).
+     * Omitted ⇒ preserved on update, then
+     * `egret_engine_mgmt_api::DEFAULT_FE_META_STORAGE_SIZE`.
+     * @nullable
+     */
+  feMetaStorageSize?: string | null;
 }

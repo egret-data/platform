@@ -535,7 +535,24 @@ pub struct StarRocksConfig {
     /// `starrocks_initpwd_*`). `None`/empty = legacy passwordless root (no
     /// initpwd resources templated). Minted by the create path (T3).
     pub root_password: Option<String>,
+    /// StorageClass backing the FE metadata PVC (`/opt/starrocks/fe/meta`).
+    /// `None`/blank ⇒ the field is omitted from the CR, so the cluster's
+    /// DEFAULT StorageClass binds the claim (on kind: `standard`,
+    /// `rancher.io/local-path`).
+    pub fe_meta_storage_class: Option<String>,
+    /// Size of the FE metadata PVC (a k8s quantity, e.g. `"20Gi"`). `None`
+    /// ⇒ [`DEFAULT_FE_META_STORAGE_SIZE`]. The CRD validates the string
+    /// against `(^0|([0-9]*l[.])?[0-9]+((M|G|T|E|P)i))$`, so only binary
+    /// suffixes are accepted.
+    pub fe_meta_storage_size: Option<String>,
 }
+
+/// Default size of the FE metadata PVC when
+/// [`StarRocksConfig::fe_meta_storage_size`] is `None`. FE metadata (the BDBJE
+/// journal + image) is small — single-digit GiB even for a large catalog — so
+/// this is deliberately modest; `local-path` on kind ignores the request
+/// anyway (it hands out a host directory).
+pub const DEFAULT_FE_META_STORAGE_SIZE: &str = "20Gi";
 
 /// Delegation/security wiring for a provisioned StarRocks. `None` on
 /// [`StarRocksConfig::delegation`] = no JWT/TLS templated.
@@ -599,6 +616,8 @@ impl std::fmt::Debug for StarRocksConfig {
                     &"None"
                 },
             )
+            .field("fe_meta_storage_class", &self.fe_meta_storage_class)
+            .field("fe_meta_storage_size", &self.fe_meta_storage_size)
             .finish()
     }
 }
@@ -680,6 +699,8 @@ mod tests {
             cn_autoscaling: None,
             pod: None,
             root_password: None,
+            fe_meta_storage_class: None,
+            fe_meta_storage_size: None,
         };
         assert_eq!(s.fe_replicas, 1);
     }
