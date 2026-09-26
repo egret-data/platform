@@ -8529,21 +8529,33 @@ anything, and `/usr/bin/grep` with file arguments.
 
 | # | population | examined | corrected |
 |---|---|---:|---:|
-| 1 | the brief's three phrases and their glosses -- `dependsOn` is/are refused, refuse(s) `dependsOn`, refused for `dependsOn`, `UnsupportedDependsOn`, `window` is dropped / drop the window, `DEPENDS_ON_IS_W13B`, "the day the window lands", "`MultipleConditionWindow` this package does not model", "`dependsOn` is not supported", "W13b has not started / is still pending" -- across the whole repository, flattened | **3828 files**, 10 matching, **34 occurrences** (33 by the pattern set, plus one "W13b ... has not started" the pattern's 60-character gap missed and reading the matched paragraph found) | **14** |
+| 1 | the brief's three phrases and their glosses -- `dependsOn` is/are refused, refuse(s) `dependsOn`, refused for `dependsOn`, `UnsupportedDependsOn`, `window` is dropped / drop the window, `DEPENDS_ON_IS_W13B`, "the day the window lands", "`MultipleConditionWindow` this package does not model", "`dependsOn` is not supported", "W13b has not started / is still pending" -- across the whole repository, flattened | **3828 files**, 10 matching, **34 occurrences** (33 by the pattern set, plus one "W13b ... has not started" the pattern's 60-character gap missed and reading the matched paragraph found) | **14** (and 20 left: 14 + 20 = 34) |
 | 2 | ordinals and counts inside the regions population 1 corrected (20 of 21, twenty, nineteen-at-`resolve` plus one-at-parse) | **10 regions** (README ×3, `flow.rs` ×3, the design spec EN/VI §1-§2, the programme spec EN/VI W13 row and correction) | **0** -- each re-derived from `the_corpus_depends_on_declarations_resolve_eighteen_of_twenty`: 20 = 18 + 1 + 1, and `resolve` still refuses 19 with the twentieth refused at parse |
-| 3 | data that feeds a generator -- the 20 files under `oracle-exec/` other than this README and the 345 corpus YAMLs | **20 files**, 7 matching (13 lines) | **0** -- every hit is the `fireOnce` 422 or an unrelated `window`/`dependsOn` (task `dependsOn`, the max-duration window) |
-| 4 | the other language -- every file under `docs/vi/`, flattened, for `Từ chối \`dependsOn\``, `` `window` bị bỏ``, "W13b vẫn còn treo", "CHƯA bắt đầu" and (từ chối / bị bỏ) near `dependsOn` | **287 files**, 2 matching, **4 occurrences** (1 shared with population 1) | **4** |
+| 3 | data that feeds a generator -- the 20 files under `oracle-exec/` other than this README and the 345 corpus YAMLs | **20 files**, 7 matching, **517 lines**: 505 in `w13b-windows.json` (Task 1's own measurement fixture, whose keys and values are window data) and 12 in the other six (`baseline.txt` 2, `corpus.json` 1, `driver.rs` 4, `harvest-run.txt` 1, `harvest.py` 1, `runnable.txt` 3). Population 1's phrase set matches **0** of them | **0** -- every hit outside the fixture is the `fireOnce` 422, a task-level `dependsOn`, or the max-duration window. *(Fix round 1: this row first said "13 lines", a figure no command reproduces; the command is below.)* |
+| 4 | the other language -- every file under `docs/vi/`, flattened, for `Từ chối \`dependsOn\``, `` `window` bị bỏ``, "W13b vẫn còn treo", "CHƯA bắt đầu" and (từ chối / bị bỏ) near `dependsOn` | **287 files**, 2 matching, **4 occurrences**, 1 of them also population 1's (the design spec VI's `UnsupportedDependsOn`) | **4**, of which **3 are not counted in population 1** |
 
-**Population 1's fourteen corrections, by site.** Each was stale in the same
-way W13a's were: a sentence written before W13b, describing its absence.
+**Corrected occurrences, without double counting: 14 (population 1) + 3
+(population 4 only) = 17**, plus one edit site no pattern matched (item 18
+below), so **18 edited sites**. "Corrected" means rewritten or retired in
+place by a dated note; the stale text is kept as the record. *(Fix round 1:
+the per-file figures below first read README 3 + `flow.rs` 5 + programme
+spec EN 2 / VI 2 + design spec EN 3 / VI 2 = 17 under a population-1 total of
+14. The VI programme-spec occurrences, and one of the two VI design-spec
+ones, are population 4's, not population 1's; the lists below assign every
+occurrence to exactly one population.)*
+
+**Population 1's fourteen corrections, by site** (3 + 5 + 2 + 3 + 1 = 14).
+Each was stale in the same way W13a's were: a sentence written before W13b,
+describing its absence.
 
 - `oracle-exec/README.md` (3): the W6 section's *Refusal 2* paragraph -- "is
   refused" and "the acceptance criterion that fails the day the window
   lands" -- gets a dated note: the window landed and the test correctly did
   **not** fail, because the arm was built beside `WindowFreeFlowTrigger`;
   W13a's *What this package could not settle* ("W13b has not started") is
-  retired in place. Item 18 of *What this ratchet does not prove* gets a
-  dated parenthesis (not a pattern hit; found by reading around one).
+  retired in place. (Item 18 of *What this ratchet does not prove* also gets
+  a dated parenthesis; it is not a pattern hit, found by reading around one,
+  and is not in the 14.)
 - `src/trigger/flow.rs` (5): the module doc's "fails the day the window
   lands"; item 1 of *Over-acceptance is the hazard*; the
   `UnsupportedDependsOn` variant's "a `MultipleConditionWindow` this package
@@ -8551,13 +8563,49 @@ way W13a's were: a sentence written before W13b, describing its absence.
   supported" and now says the trigger "is not the window-free arm" (no
   production path reaches it: `listen` branches first and `sync`'s arm is
   `unreachable!`); the twenty-to-one test's doc, pointing at the new count.
-- `docs/{en,vi}/specs/2026-09-01-workflow-programme-design.md` (EN 2, VI 2):
-  W13a's correction said "W13b is still pending ... has not started"; a new
-  dated W13b correction retires it, in both languages, without deleting it.
-- `docs/{en,vi}/specs/2026-09-25-workflow-w13-flow-triggers-design.md` (EN 3,
-  VI 2): §1's table is dated `006563ee` and correct as that snapshot, but its
-  `resolve` row and "`window` is dropped" read as current; a dated note under
-  the table says what is true since W13b.
+- `docs/en/specs/2026-09-01-workflow-programme-design.md` (2): W13a's
+  correction said "W13b is still pending" and "has not started"; a new dated
+  W13b correction retires both without deleting them.
+- `docs/en/specs/2026-09-25-workflow-w13-flow-triggers-design.md` (3): §1's
+  table is dated `006563ee` and correct as that snapshot, but its `resolve`
+  row ("Refuses `dependsOn` with `UnsupportedDependsOn`", 2 occurrences) and
+  "`window` is dropped" (1) read as current; a dated note under the table
+  says what is true since W13b. Its §7.2 "drop the window" is left (below).
+- `docs/vi/specs/2026-09-25-workflow-w13-flow-triggers-design.md` (1): the
+  `UnsupportedDependsOn` in its §1 `resolve` row, retired by the VI twin of
+  the same note.
+
+**Population 4's three further corrections** (4 occurrences − 1 shared = 3):
+`docs/vi/specs/2026-09-01-workflow-programme-design.md` (2: "W13b vẫn còn
+treo" and "CHƯA bắt đầu", retired by the VI twin of the programme-spec
+correction) and `docs/vi/specs/2026-09-25-workflow-w13-flow-triggers-design.md`
+(1: "`window` bị bỏ", retired by the same §1 note as population 1's VI site).
+
+**The commands, so every figure is re-runnable.** Flattening, per file at
+`4549db67` (`git archive 4549db67 | tar -x`): replace every
+`\n\s*(//[!/]?|#|\*|>|--)?\s*` with one space, then collapse whitespace
+(Python `re.sub`); each file is written under its path with `/` spelled
+`%2F`, and counted with `/usr/bin/grep -o -i -E -- "$P" * | wc -l` (8
+dotfiles checked separately, 0 hits). Population 1's `$P`:
+
+```text
+dependsOn`? (is|are|was|were) refused|refus(e|es|ed|ing) (a |the |every |any )?`?dependsOn|refused for `?dependsOn|UnsupportedDependsOn|`?window`? (is|was|gets|are) dropped|drop(s|ped)? the window|DEPENDS_ON_IS_W13B|the day the window lands|MultipleConditionWindow` this package does not model|dependsOn` is not supported|W13b (has not started|is still pending)|W13b —[^|]{0,60}has not started
+```
+
+Population 4's, over `docs%2Fvi%2F*` only:
+
+```text
+Từ chối `dependsOn`|`window` bị bỏ|W13b vẫn còn treo|CHƯA bắt đầu|(từ chối|bị bỏ)[^.]{0,40}dependsOn
+```
+
+Population 3, on the raw (unflattened) files, which are unchanged since
+`4549db67`:
+
+```bash
+git ls-tree -r --name-only 4549db67 -- crates/egret-workflow/oracle-exec \
+  | /usr/bin/grep -v -e oracle-exec/corpus/ -e oracle-exec/README.md > files.txt   # 20
+/usr/bin/grep -c -i -E 'dependsOn|UnsupportedDependsOn|window' $(cat files.txt)   # 7 files > 0, sum 517
+```
 
 **Twenty occurrences examined and left, each for a reason:** seven
 `UnsupportedDependsOn` identifiers in `trigger/flow.rs` (the variant, its
