@@ -3194,8 +3194,10 @@ async fn build_starrocks_provision_req(
         .cloned()
         .and_then(|v| serde_json::from_value(v).ok());
     // FE metadata PVC knobs. Absent/null ⇒ `None` ⇒ default StorageClass +
-    // `DEFAULT_FE_META_STORAGE_SIZE` in the provisioner, so an engine whose
-    // spec predates this surface still renders the PVC.
+    // `DEFAULT_FE_META_STORAGE_SIZE` in the provisioner. They only have an
+    // effect at all when `feMetaPersistent` below is true: an engine created
+    // before the PVC shipped renders NO meta volume whatever these say, and
+    // keeps the operator's `emptyDir`.
     let fe_meta_storage_class = cfg
         .and_then(|c| c.get("feMetaStorageClass"))
         .and_then(|v| v.as_str())
@@ -3574,8 +3576,13 @@ fn build_starrocks_spec(
         .unwrap_or(serde_json::Value::Null);
     // FE metadata PVC class/size: same omit=preserve rule. Absent on both sides
     // stores `null`, which the provisioner reads as "default StorageClass" and
-    // `DEFAULT_FE_META_STORAGE_SIZE` — so an engine created before this surface
-    // existed still gets a persistent meta volume, no edit required.
+    // `DEFAULT_FE_META_STORAGE_SIZE`.
+    //
+    // An engine created BEFORE the PVC shipped gets no persistent meta volume
+    // from these — it has no marker, so the renderer emits nothing at the meta
+    // path and the operator's `emptyDir` default applies. That is deliberate:
+    // adding the claim to a live StatefulSet wedges its whole cluster. Migrating
+    // such an engine is a manual operator action, never an edit.
     let fe_meta_storage_class = sr_body
         .fe_meta_storage_class
         .clone()
@@ -6753,7 +6760,10 @@ mod tests {
     /// The FE metadata PVC knobs follow the same omit=preserve rule as every
     /// other field, and an engine created before the surface existed stores
     /// `null` for both — which the provisioner reads as "default StorageClass
-    /// + default size", i.e. it still gets a persistent meta volume.
+    /// + default size". That says nothing about whether such an engine gets a
+    /// PVC: it does NOT, because it carries no `feMetaPersistent` marker (see
+    /// `build_starrocks_spec_marks_only_engines_it_creates`). These two fields
+    /// only choose the class and size of a volume the marker decides to render.
     #[test]
     fn build_starrocks_spec_carries_fe_meta_storage_knobs() {
         let created = build_starrocks_spec(&StarRocksConfigBody::default(), None);
