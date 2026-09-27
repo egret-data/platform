@@ -72,15 +72,38 @@ const TAG_FANOUT_LOCK: i64 = 0x5004_A009;
 /// A dedicated, NON-pooled connection: a session advisory lock is released
 /// when the session ends, and a pooled connection returned to the pool keeps
 /// its session — and its lock — alive.
+///
+/// **`pg_try_advisory_lock` in a bounded loop, never the blocking
+/// `pg_advisory_lock`** (SP4b-1 review, I-4). The helpers that mint a profile
+/// take this lock on a fresh session while three tests hold it for a whole body,
+/// so a future test that calls `setup`/`extra_profile`/`extra_trino_profile`
+/// while already holding it via `exclusive()` would wait on itself. With the
+/// blocking form that is a hang: the run is consumed and reports nothing, which
+/// is far worse than a failure, because a failure names its cause. Waiting is
+/// still correct in the normal case — those three tests legitimately hold the
+/// lock for seconds — so this waits, with a deadline, and then says what to look
+/// for.
 async fn advisory_lock(dsn: &str) -> sqlx::PgConnection {
     use sqlx::Connection as _;
     let mut conn = sqlx::PgConnection::connect(dsn).await.expect("lock conn");
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(TAG_FANOUT_LOCK)
-        .execute(&mut conn)
-        .await
-        .expect("acquire advisory lock");
-    conn
+    for _ in 0..1_200 {
+        let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(TAG_FANOUT_LOCK)
+            .fetch_one(&mut conn)
+            .await
+            .expect("try advisory lock");
+        if got {
+            return conn;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!(
+        "waited 60s for TAG_FANOUT_LOCK. The usual cause is a test calling `setup`, \
+         `extra_profile` or `extra_trino_profile` while already holding this lock \
+         through `exclusive()` — those helpers take it themselves, so that test is \
+         waiting on itself and would hang forever under the blocking \
+         `pg_advisory_lock`. Do the fixture setup BEFORE taking `exclusive()`."
+    );
 }
 
 /// Hold [`TAG_FANOUT_LOCK`] for the rest of the caller's test.
@@ -1027,6 +1050,17 @@ async fn patching_a_grants_catalog_reaps_the_policy_from_the_old_profile() {
 /// defect SP4a closed at create, so the patch path runs the SAME
 /// `validate_grant_shape` — and the refusal must leave both the row and its
 /// compiled policy exactly as they were.
+///
+/// **Over-determined on purpose, and no single mutation kills it.** Two
+/// independent guards refuse this input: `validate_grant_shape` before the write,
+/// and the recompile after it. Remove either and the other still returns the 400
+/// this asserts. It is kept as a regression guard, and each guard has its own
+/// test that DOES die alone — the pre-write check's is
+/// `patching_a_grant_that_affects_no_profile_still_validates_its_shape` (an empty
+/// affected set means the recompile validates nothing), and the rollback's is
+/// `a_patch_the_profile_cannot_compile_rolls_the_stored_row_back` (an
+/// `UnsupportedMaskType` is service-dependent, so only the recompile can see it).
+/// Do not read this test's passing as evidence about either guard on its own.
 #[tokio::test]
 async fn patching_a_grant_into_an_uncompilable_shape_is_refused_and_changes_nothing() {
     let Some(f) = setup().await else { return };
@@ -1572,6 +1606,13 @@ async fn a_patch_whose_row_moved_while_it_waited_is_a_409() {
     let token = admin_session(&f).await;
     let (service_b, catalog_b) = extra_profile(&f, "race-b").await;
     let (service_c, catalog_c) = extra_profile(&f, "race-c").await;
+    // **After the helpers above, never before** — they take this same lock.
+    // Held because a tag-rule fan-out in another test locks EVERY
+    // compiler-targeted profile, this fixture's included: it would then be the
+    // backend `wait_until_parked_on` sees, the grant would be moved before this
+    // test's PATCH had done its pre-lock read, and the PATCH would read the
+    // already-moved row and pass for the wrong reason. Observed once as a flake.
+    let _fanout = exclusive(&f).await;
     let grant_id = create_grant_returning_id(&f, &token, grant_body(f.catalog_id, "analyst")).await;
     let name = format!("{COMPILER_GRANT_PREFIX}{grant_id}");
     assert_eq!(f.compiled_policy_names().await, vec![name.clone()]);
@@ -1612,7 +1653,10 @@ async fn a_patch_whose_row_moved_while_it_waited_is_a_409() {
         StatusCode::CONFLICT,
         "the row moved out from under this request, so its union no longer covers the \
          profiles the grant affects — writing anyway would leave profile {service_c}'s \
-         compiled policy behind forever; body: {got}"
+         compiled policy behind forever; body: {got}. (If `services` in that body \
+         names {service_c}, this test's PREMISE broke rather than the guard: the PATCH \
+         read the row after it had already moved, so there was never a stale read to \
+         catch.)"
     );
     let catalog_now: Uuid = sqlx::query_scalar("SELECT catalog_id FROM perm.grants WHERE id = $1")
         .bind(Uuid::parse_str(&grant_id).unwrap())
@@ -1639,6 +1683,8 @@ async fn a_rule_patch_whose_row_moved_while_it_waited_is_a_409() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
     let (_, catalog_c) = extra_profile(&f, "race-rule-c").await;
+    // Same reason as the grant twin's — see its comment.
+    let _fanout = exclusive(&f).await;
     let rule_name = unique("race-rule");
     let path_rule = |catalog: Uuid, mask: &str| {
         json!({
@@ -1927,6 +1973,10 @@ async fn a_preview_of_a_tag_rule_reports_every_profile_it_would_reach() {
     let token = admin_session(&f).await;
     let trino_a = extra_trino_profile(&f, "preview-trino-a").await;
     let trino_b = extra_trino_profile(&f, "preview-trino-b").await;
+    // A tag-rule preview LOCKS every compiler-targeted profile before it rolls
+    // back, so it belongs under the same lock as the writes that fan out — it
+    // can otherwise be found parked on another test's profile lock.
+    let _lock = exclusive(&f).await;
 
     let (status, body) = into_json(
         f.app()
