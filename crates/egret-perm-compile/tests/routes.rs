@@ -52,25 +52,40 @@ const TAG_FANOUT_LOCK: i64 = 0x5004_A009;
 /// or deleting a tag-selected rule recompiles EVERY compiler-targeted profile
 /// in the database, other tests' fixtures included, and such a recompile will
 /// happily re-create a policy another test has just deleted on purpose. The
-/// two tests that care (`creating_a_tag_rule_over_http_compiles_its_policy`,
-/// which causes the fan-out, and `compile_restores_a_profile_that_drifted`,
-/// which is the one damaged by it) take this lock so neither has to weaken its
-/// assertion to a "either the endpoint repaired it or somebody else did" shape.
+/// tests that care (`creating_a_tag_rule_over_http_compiles_its_policy`, which
+/// causes the fan-out; `compile_restores_a_profile_that_drifted`, which is the
+/// one damaged by it; and `preview_and_write_agree_about_a_tag_rules_fan_out`)
+/// take this lock so none has to weaken its assertion to a "either the endpoint
+/// repaired it or somebody else did" shape.
+///
+/// **It also guards the UNIVERSE, not just the fan-out** (SP4b). The
+/// preview-equals-write test compares two installation-wide affected sets taken
+/// a moment apart, so a compiler-targeted profile appearing between them would
+/// make them differ for a reason that is not a defect. Every helper here that
+/// mints such a profile — `setup`, `extra_profile`, `extra_trino_profile` —
+/// therefore holds this lock while it inserts the `engine_mgmt.engines` row
+/// that makes the profile compiler-targeted, and releases it before returning.
+/// Weakening that comparison to "both contain my own profile" would have left
+/// the "cannot disagree" property untested, which is the one thing the
+/// rolled-back-write design needs a guard for.
 ///
 /// A dedicated, NON-pooled connection: a session advisory lock is released
 /// when the session ends, and a pooled connection returned to the pool keeps
 /// its session — and its lock — alive.
-async fn exclusive(f: &Fixture) -> sqlx::PgConnection {
+async fn advisory_lock(dsn: &str) -> sqlx::PgConnection {
     use sqlx::Connection as _;
-    let mut conn = sqlx::PgConnection::connect(&f.dsn)
-        .await
-        .expect("lock conn");
+    let mut conn = sqlx::PgConnection::connect(dsn).await.expect("lock conn");
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(TAG_FANOUT_LOCK)
         .execute(&mut conn)
         .await
         .expect("acquire advisory lock");
     conn
+}
+
+/// Hold [`TAG_FANOUT_LOCK`] for the rest of the caller's test.
+async fn exclusive(f: &Fixture) -> sqlx::PgConnection {
+    advisory_lock(&f.dsn).await
 }
 
 struct Fixture {
@@ -168,6 +183,10 @@ async fn setup() -> Option<Fixture> {
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let pool = db.pool.clone();
+    // Held until this function returns: everything below adds a
+    // compiler-targeted profile to the installation-wide universe a tag rule
+    // fans out over — see `TAG_FANOUT_LOCK`.
+    let _universe = advisory_lock(&dsn).await;
 
     let perm = PermStore::new(pool.clone());
     let policy = PolicyStore::new(db.clone());
@@ -786,6 +805,8 @@ async fn a_grant_that_cannot_compile_is_refused_and_not_stored() {
 /// catalogs: the defect it discriminates against (recompiling only the NEW
 /// affected set) is invisible when both catalogs land in the same profile.
 async fn extra_profile(f: &Fixture, tag: &str) -> (i64, Uuid) {
+    // Held until this function returns — see `TAG_FANOUT_LOCK`.
+    let _universe = advisory_lock(&f.dsn).await;
     let service = f
         .policy
         .create_service(&unique(tag), "starrocks", &json!({}))
@@ -1369,6 +1390,352 @@ async fn patching_a_rule_recompiles_and_keeps_the_id() {
 }
 
 // ---------------------------------------------------------------------------
+// preview: the dry run that cannot disagree with the write (SP4b D2)
+// ---------------------------------------------------------------------------
+
+/// A Trino profile with an engine bound to it and no catalogs at all — enough
+/// to be compiler-targeted, which is all a tag rule's fan-out needs. Holds the
+/// universe lock while it mints one; see [`TAG_FANOUT_LOCK`].
+async fn extra_trino_profile(f: &Fixture, tag: &str) -> i64 {
+    let _universe = advisory_lock(&f.dsn).await;
+    egret_policy::seed_trino(&f.policy)
+        .await
+        .expect("seed trino service-def");
+    let service = f
+        .policy
+        .create_service(&unique(tag), "trino", &json!({}))
+        .await
+        .expect("create trino service");
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2)",
+    )
+    .bind(unique(tag))
+    .bind(service.id)
+    .execute(&f.db.pool)
+    .await
+    .expect("engine");
+    service.id
+}
+
+/// The profile ids a preview reported, ascending.
+fn previewed_ids(body: &Value) -> Vec<i64> {
+    let mut ids: Vec<i64> = body["affected"]
+        .as_array()
+        .unwrap_or_else(|| panic!("affected in {body}"))
+        .iter()
+        .map(|p| p["id"].as_i64().expect("affected[].id"))
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// The profile ids a write reported recompiling, ascending.
+fn written_ids(services: &Value) -> Vec<i64> {
+    let mut ids: Vec<i64> = services
+        .as_array()
+        .unwrap_or_else(|| panic!("services in {services}"))
+        .iter()
+        .map(|v| v.as_i64().expect("services[]"))
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// The preview names the profile the grant would reach, WITH its name (a
+/// steward reads "Trino-prod", not a bare id) — and stores nothing: no policy,
+/// no `perm` row, no `policy_version` bump.
+#[tokio::test]
+async fn a_preview_of_a_grant_reports_its_profile_and_stores_nothing() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let grants_before = f.grant_count().await;
+    let version_before = f.policy_version().await;
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                Some(json!({ "grant": grant_body(f.catalog_id, "analyst") })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        previewed_ids(&body),
+        vec![f.service_id],
+        "the grant names this fixture's catalog, which exactly one profile reaches; body: {body}"
+    );
+    let named = body["affected"][0]["name"]
+        .as_str()
+        .unwrap_or_else(|| panic!("affected[0].name in {body}"));
+    assert!(
+        !named.is_empty(),
+        "the profile must be NAMED — the reason this endpoint returns more than ids; body: {body}"
+    );
+    assert_eq!(
+        body["compile"]["created"], 1,
+        "and it must report what the write would have written; body: {body}"
+    );
+
+    assert_eq!(
+        f.compiled_policy_names().await,
+        Vec::<String>::new(),
+        "a preview must not leave a compiled policy behind"
+    );
+    assert_eq!(
+        f.grant_count().await,
+        grants_before,
+        "a preview must not store the grant"
+    );
+    assert_eq!(
+        f.policy_version().await,
+        version_before,
+        "a preview must not bump the profile's policy_version — an engine would poll \
+         for a policy set that does not exist"
+    );
+}
+
+/// The compile error the write would have returned, verbatim, and still nothing
+/// stored. This is why the preview runs the real compiler: the refusal a steward
+/// needs to see is produced by the same code that would refuse the write.
+#[tokio::test]
+async fn a_preview_of_an_uncompilable_grant_returns_the_error_and_stores_nothing() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let grants_before = f.grant_count().await;
+    let version_before = f.policy_version().await;
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                // Ranger matches bare usernames, so an email can never compile.
+                Some(json!({ "grant": grant_body(f.catalog_id, "analyst@egret.local") })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("analyst@egret.local"),
+        "the preview must return the write's own refusal, which names the offending \
+         value; got {msg:?}"
+    );
+    assert_eq!(f.grant_count().await, grants_before);
+    assert_eq!(f.policy_version().await, version_before);
+    assert_eq!(f.compiled_policy_names().await, Vec::<String>::new());
+}
+
+/// **The test that protects the "cannot disagree" property.** The preview is
+/// implemented as the REAL write rolled back precisely so no second,
+/// read-only implementation of "which profiles does this touch" can drift from
+/// the first — and without this assertion that design has no guard. A tag rule
+/// is the case that matters: its affected set is the whole installation, so a
+/// divergence would be wide and would be trusted.
+///
+/// Takes the universe lock for its whole body, so the two sets are taken over
+/// the same set of compiler-targeted profiles; every helper that mints one
+/// holds the same lock (see `TAG_FANOUT_LOCK`).
+#[tokio::test]
+async fn preview_and_write_agree_about_a_tag_rules_fan_out() {
+    let Some(f) = setup().await else { return };
+    let _lock = exclusive(&f).await;
+    let token = admin_session(&f).await;
+    let rule = json!({
+        "name": unique("agree"),
+        "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+        "selector": { "type": "tag", "key": f.tag_key },
+        "exempt": { "include": [], "exclude": [] }
+    });
+
+    let (status, previewed) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                Some(json!({ "rule": rule })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {previewed}");
+
+    // The SAME body, now for real — the preview rolled its own attempt back, so
+    // the rule's UNIQUE name is free.
+    let (status, written) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/rules", &token, Some(rule)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {written}");
+
+    assert_eq!(
+        previewed_ids(&previewed),
+        written_ids(&written["compile"]["services"]),
+        "THE PREVIEW AND THE WRITE MUST AGREE. A preview that lies is worse than no \
+         preview, because the steward would trust it — preview {previewed}, write {written}"
+    );
+    assert!(
+        previewed_ids(&previewed).contains(&f.service_id),
+        "and the agreed set must be a real one, containing this fixture's own \
+         profile; preview {previewed}"
+    );
+    assert_eq!(
+        previewed["compile"]["created"], written["compile"]["created"],
+        "the preview's own compile summary must match the write's too; \
+         preview {previewed}, write {written}"
+    );
+}
+
+/// The installation-wide fan-out is the reason this endpoint exists, so it is
+/// asserted rather than assumed: with two more Trino profiles in the database,
+/// a tag rule's preview must name them. Scoped to the two ids this test minted
+/// — a length assertion over the shared database would be racy.
+#[tokio::test]
+async fn a_preview_of_a_tag_rule_reports_every_profile_it_would_reach() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let trino_a = extra_trino_profile(&f, "preview-trino-a").await;
+    let trino_b = extra_trino_profile(&f, "preview-trino-b").await;
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                Some(json!({ "rule": {
+                    "name": unique("fanout"),
+                    "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+                    "selector": { "type": "tag", "key": f.tag_key },
+                    "exempt": { "include": [], "exclude": [] }
+                }})),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let ids = previewed_ids(&body);
+    for expected in [trino_a, trino_b, f.service_id] {
+        assert!(
+            ids.contains(&expected),
+            "a tag rule is catalog-unscoped, so its preview must name profile \
+             {expected} too — that blast radius is the whole point of this endpoint; \
+             body: {body}"
+        );
+    }
+    assert_eq!(
+        f.compiled_policy_names().await,
+        Vec::<String>::new(),
+        "and it must still have stored nothing"
+    );
+}
+
+/// Previewing a PATCH reports the UNION the patch would recompile — including
+/// the profile the grant would be moved AWAY from, which is the profile whose
+/// policy gets reaped and therefore the one a steward most needs named.
+#[tokio::test]
+async fn a_preview_of_a_patch_reports_the_old_profile_too() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (other_service, other_catalog) = extra_profile(&f, "preview-patch-move").await;
+    let grant_id = create_grant_returning_id(&f, &token, grant_body(f.catalog_id, "analyst")).await;
+    let name = format!("{COMPILER_GRANT_PREFIX}{grant_id}");
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                Some(json!({ "id": grant_id, "grant": grant_body(other_catalog, "analyst") })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let mut expected = vec![f.service_id, other_service];
+    expected.sort_unstable();
+    assert_eq!(
+        previewed_ids(&body),
+        expected,
+        "both the profile the grant leaves and the one it arrives at; body: {body}"
+    );
+    assert_eq!(body["compile"]["deleted"], 1, "body: {body}");
+    assert_eq!(body["compile"]["created"], 1, "body: {body}");
+
+    assert_eq!(
+        f.compiled_policy_names().await,
+        vec![name],
+        "and the grant must still be compiled where it was — a preview writes nothing"
+    );
+    assert_eq!(
+        f.compiled_policy_names_under(other_service).await,
+        Vec::<String>::new()
+    );
+}
+
+/// Previewing a patch of an id that does not exist is the write's own 404, and
+/// a body naming neither a grant nor a rule is a 400 rather than a silent
+/// "nothing would happen".
+#[tokio::test]
+async fn a_preview_of_nothing_or_of_an_unknown_id_is_refused() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                Some(json!({ "id": Uuid::new_v4(), "grant": grant_body(f.catalog_id, "analyst") })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+
+    for payload in [
+        json!({}),
+        json!({
+            "grant": grant_body(f.catalog_id, "analyst"),
+            "rule": {
+                "name": unique("both"),
+                "kind": { "type": "row_filter", "filter_expr": "1=1" },
+                "selector": { "type": "tag", "key": f.tag_key },
+                "exempt": { "include": [], "exclude": [] }
+            }
+        }),
+    ] {
+        let (status, body) = into_json(
+            f.app()
+                .oneshot(req("POST", "/perm/preview", &token, Some(payload)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // explain
 // ---------------------------------------------------------------------------
 
@@ -1835,6 +2202,20 @@ async fn policy_read_permits_the_reads_and_refuses_the_writes() {
         ("DELETE", format!("/perm/grants/{}", Uuid::new_v4()), None),
         ("DELETE", format!("/perm/rules/{}", Uuid::new_v4()), None),
         ("POST", format!("/perm/compile/{}", f.service_id), None),
+        (
+            "PATCH",
+            format!("/perm/grants/{}", Uuid::new_v4()),
+            Some(grant_body(f.catalog_id, "analyst")),
+        ),
+        // The preview PREVIEWS A WRITE: it runs real compiler work under real
+        // locks and is useless to someone who cannot write, so it gates on
+        // `policy:update` like the mutations and not on `policy:read` like
+        // `explain`.
+        (
+            "POST",
+            "/perm/preview".to_string(),
+            Some(json!({ "grant": grant_body(f.catalog_id, "analyst") })),
+        ),
     ] {
         let (status, got) = into_json(
             f.app()

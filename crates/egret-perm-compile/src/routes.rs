@@ -105,6 +105,7 @@ pub fn perm_router() -> Router<PermState> {
             "/perm/rules/{id}",
             axum::routing::patch(patch_rule).delete(delete_rule),
         )
+        .route("/perm/preview", post(preview))
         .route("/perm/explain", post(explain))
         .route("/perm/compile/{service_id}", post(compile))
 }
@@ -128,12 +129,16 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         create_rule,
         patch_rule,
         delete_rule,
+        preview,
         explain,
         compile
     ),
     components(schemas(
         NewGrant,
         NewRule,
+        PreviewRequest,
+        PreviewResponse,
+        AffectedProfile,
         ExplainRequest,
         ExplainSubject,
         ExplainResponse,
@@ -306,6 +311,41 @@ impl From<Decision> for ExplainResponse {
             tags: Vec::new(),
         }
     }
+}
+
+/// What `preview` is asked to try — SP4b D2.
+///
+/// It is the create body plus an optional `id`, rather than a separate shape,
+/// because the preview runs the REAL write: anything the preview could accept
+/// and a write could not would be a lie by construction. Exactly one of `grant`
+/// and `rule` must be present; two optional fields rather than a tagged union
+/// so the generated client is one plain object with two optional members.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct PreviewRequest {
+    /// Present ⇒ preview a PATCH of this existing row. Absent ⇒ a create.
+    #[serde(default)]
+    pub id: Option<Uuid>,
+    #[serde(default)]
+    pub grant: Option<NewGrant>,
+    #[serde(default)]
+    pub rule: Option<NewRule>,
+}
+
+/// One policy profile a write would touch, named so a steward reads
+/// "Trino-prod" rather than a bare id.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AffectedProfile {
+    pub id: i64,
+    pub name: String,
+}
+
+/// What the write WOULD have done. `compile` is the same summary the write
+/// itself returns, produced by the same recompile — this endpoint rolls that
+/// work back rather than recomputing it.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PreviewResponse {
+    pub affected: Vec<AffectedProfile>,
+    pub compile: CompileResponse,
 }
 
 /// A grant or rule a recompile could not express and left uncompiled. Surfaced
@@ -811,6 +851,95 @@ async fn delete_rule(
     let compile = CompileResponse::from_summaries(services, &summaries);
     tx.commit().await.map_err(PermHttpError::db)?;
     Ok(Json(compile))
+}
+
+// ---------------------------------------------------------------------------
+// preview (the dry run)
+// ---------------------------------------------------------------------------
+
+/// Name the profiles in `service_ids`, in the order they were locked.
+async fn name_profiles(
+    tx: &mut Transaction<'_, Postgres>,
+    service_ids: &[i64],
+) -> Result<Vec<AffectedProfile>, PermHttpError> {
+    let rows: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, name FROM policy.authz_services WHERE id = ANY($1) ORDER BY id")
+            .bind(service_ids)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(PermHttpError::db)?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name)| AffectedProfile { id, name })
+        .collect())
+}
+
+/// **The dry run — SP4b D2. It runs the REAL write and rolls it back.**
+///
+/// The blast radius of a write to this model is not local: a tag rule is
+/// catalog-unscoped by design, so ONE rule mutation recompiles every Trino and
+/// StarRocks profile an engine binds in the installation — and because a
+/// compile failure anywhere rolls the whole write back, the blast radius is
+/// also a failure radius. A steward who cannot see that before pressing the
+/// button learns it from a 400 naming a profile they have never heard of.
+///
+/// **Why the real write and not a read-only computation of the affected set.**
+/// A second, read-only implementation of "which profiles does this touch" is a
+/// second answer to the same question, and two answers drift. A preview that
+/// lies is worse than no preview, because the steward would trust it. So this
+/// handler calls exactly the functions `create_grant`/`patch_grant` call, on a
+/// transaction it then ROLLS BACK: the affected set it reports is the set the
+/// write computes, the compile it reports is the compile the write runs, and
+/// the error it returns is the error the write returns, because in every case
+/// it is the same code. `preview_and_write_agree_about_a_tag_rules_fan_out` in
+/// `tests/routes.rs` is what keeps that property from being merely intended.
+///
+/// Gated `policy:update`, not `policy:read`: it previews a write, it runs real
+/// compiler work under real locks, and it is useless to someone who cannot
+/// write.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/preview",
+    tag = "perm",
+    request_body = PreviewRequest,
+    description = "Dry-run a grant or rule write: report the policy profiles it would recompile, \
+                   and the compile error it would fail with, without storing anything. Runs the \
+                   real write in a transaction that is rolled back, so the answer cannot differ \
+                   from what the write would do.",
+    responses(
+        (status = 200, description = "The profiles the write would touch, and what its recompile would do", body = PreviewResponse),
+        (status = 400, description = "The same refusal the write itself would have returned", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "Previewing a patch of an id that does not exist", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn preview(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Json(body): Json<PreviewRequest>,
+) -> Result<Json<PreviewResponse>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let PreviewRequest { id, grant, rule } = body;
+
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    // Every exit from here rolls back: the explicit `rollback()` on success, and
+    // dropping `tx` on any `?`. Nothing below commits.
+    let outcome = match (grant, rule) {
+        (Some(g), None) => write_grant(&mut tx, id, g).await?,
+        (None, Some(r)) => write_rule(&mut tx, id, r).await?,
+        _ => {
+            return Err(PermHttpError::BadRequest(
+                "a preview must name exactly one of `grant` or `rule`".into(),
+            ))
+        }
+    };
+    let affected = name_profiles(&mut tx, &outcome.services).await?;
+    let (_, compile) = outcome.into_compile_response();
+    tx.rollback().await.map_err(PermHttpError::db)?;
+
+    Ok(Json(PreviewResponse { affected, compile }))
 }
 
 // ---------------------------------------------------------------------------
