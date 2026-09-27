@@ -33,13 +33,24 @@
 //!
 //! A batch is one `INSERT` statement, so one short transaction: what
 //! [`SETTLE_LAG`](super::SETTLE_LAG)'s bound assumes.
+//!
+//! # The flush barrier
+//!
+//! [`PgLogSink::flush`] puts a marker in the channel behind every line the sink
+//! has accepted, and waits for the writer to reach it. The writer stores its
+//! current batch (with the retries and the 23503 re-run above) and then
+//! acknowledges. So when `flush` returns, every line sent before it has been
+//! inserted -- or its batch was dropped after its retries and reported. The
+//! wait is bounded by [`WriterConfig::flush_within`]; past it, or with the
+//! writer gone, `flush` logs and returns. `RunLog::finish` uses it so that a
+//! run's lines are in the table before its outcome commits (spec §4.3, §6).
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -68,10 +79,20 @@ impl Inserter for LogRepo {
     }
 }
 
+/// What travels the writer's channel: a line, or a flush barrier whose sender
+/// is acknowledged once every line before it is stored.
+#[derive(Debug)]
+enum Msg {
+    Line(LogLine),
+    Flush(oneshot::Sender<()>),
+}
+
 /// The durable [`LogSink`]: the sending half of the writer's channel.
 #[derive(Clone, Debug)]
 pub struct PgLogSink {
-    tx: mpsc::Sender<LogLine>,
+    tx: mpsc::Sender<Msg>,
+    /// [`WriterConfig::flush_within`].
+    flush_within: Duration,
     /// Set by the first write that found the writer gone, so the process
     /// stopping logs one line rather than one per dropped log line.
     closed_warned: Arc<AtomicBool>,
@@ -82,7 +103,7 @@ impl LogSink for PgLogSink {
     /// Waits while the channel is full (D3). Returns at once, dropping the
     /// line, only when the writer has stopped.
     async fn write(&self, line: LogLine) {
-        if let Err(mpsc::error::SendError(line)) = self.tx.send(line).await {
+        if let Err(mpsc::error::SendError(Msg::Line(line))) = self.tx.send(Msg::Line(line)).await {
             if !self.closed_warned.swap(true, Ordering::Relaxed) {
                 tracing::warn!(
                     execution = %line.execution_id,
@@ -90,6 +111,28 @@ impl LogSink for PgLogSink {
                      this log line and any written after it are dropped"
                 );
             }
+        }
+    }
+
+    /// The barrier (module doc). Bounded as a whole -- waiting for room in a
+    /// full channel included -- by [`WriterConfig::flush_within`].
+    async fn flush(&self) {
+        let (ack, acked) = oneshot::channel();
+        let wait = async {
+            if self.tx.send(Msg::Flush(ack)).await.is_err() {
+                return false;
+            }
+            acked.await.is_ok()
+        };
+        match tokio::time::timeout(self.flush_within, wait).await {
+            Ok(true) => {}
+            // The writer is gone: `write` has already said so, once.
+            Ok(false) => {}
+            Err(_) => tracing::warn!(
+                flush_within_ms = self.flush_within.as_millis() as u64,
+                "workflow log flush barrier timed out; the run's outcome is \
+                 committed without waiting for its last log lines to be stored"
+            ),
         }
     }
 }
@@ -108,10 +151,15 @@ pub struct WriterConfig {
     /// How long, after cancellation, the writer may spend storing what is
     /// already in the channel.
     pub drain_within: Duration,
+    /// The longest [`PgLogSink::flush`] waits for its barrier to be
+    /// acknowledged before the run carries on without it.
+    pub flush_within: Duration,
 }
 
 impl Default for WriterConfig {
-    /// 10,000 lines; 500 lines or 1 s; 30 s of retries; a 10 s drain.
+    /// 10,000 lines; 500 lines or 1 s; 30 s of retries; a 10 s drain; a 30 s
+    /// flush barrier (the retry window: a barrier behind a failing batch waits
+    /// out that batch's retries, and no longer).
     fn default() -> Self {
         Self {
             capacity: 10_000,
@@ -119,6 +167,7 @@ impl Default for WriterConfig {
             flush_every: Duration::from_secs(1),
             retry_for: Duration::from_secs(30),
             drain_within: Duration::from_secs(10),
+            flush_within: Duration::from_secs(30),
         }
     }
 }
@@ -139,6 +188,7 @@ pub fn spawn_writer<I: Inserter>(
     (
         PgLogSink {
             tx,
+            flush_within: cfg.flush_within,
             closed_warned: Arc::default(),
         },
         handle,
@@ -148,11 +198,14 @@ pub fn spawn_writer<I: Inserter>(
 async fn run<I: Inserter>(
     repo: I,
     cfg: WriterConfig,
-    mut rx: mpsc::Receiver<LogLine>,
+    mut rx: mpsc::Receiver<Msg>,
     cancel: CancellationToken,
 ) {
     let batch = cfg.batch.max(1);
     let mut buf: Vec<LogLine> = Vec::with_capacity(batch);
+    // Barriers reached but not yet acknowledged: acknowledged right after the
+    // batch that holds every line before them has been stored (or reported).
+    let mut acks: Vec<oneshot::Sender<()>> = Vec::new();
     // When the oldest unflushed line must be stored by.
     let mut due: Option<Instant> = None;
     loop {
@@ -161,12 +214,16 @@ async fn run<I: Inserter>(
             _ = cancel.cancelled() => break,
             _ = tokio::time::sleep_until(due.unwrap_or_else(Instant::now)), if due.is_some() => true,
             got = rx.recv() => match got {
-                Some(line) => {
+                Some(Msg::Line(line)) => {
                     if buf.is_empty() {
                         due = Some(Instant::now() + cfg.flush_every);
                     }
                     buf.push(line);
                     buf.len() >= batch
+                }
+                Some(Msg::Flush(ack)) => {
+                    acks.push(ack);
+                    true
                 }
                 // Every sink is gone: nothing more can arrive.
                 None => break,
@@ -187,9 +244,11 @@ async fn run<I: Inserter>(
             // Not fatal (spec §4.3): the batch is reported and gone, and the
             // writer carries on with the next one.
             Stored::Lost => due = None,
-            // Cancelled while backing off: `buf` is kept for the drain.
+            // Cancelled while backing off: `buf` is kept for the drain, and
+            // so are the barriers behind it.
             Stored::Interrupted => break,
         }
+        ack_all(&mut acks);
     }
 
     // ── Drain: stop accepting, store what is already queued, exit in time ──
@@ -197,20 +256,29 @@ async fn run<I: Inserter>(
     let deadline = Instant::now() + cfg.drain_within;
     loop {
         match tokio::time::timeout_at(deadline, rx.recv()).await {
-            Ok(Some(line)) => {
+            Ok(Some(Msg::Line(line))) => {
                 buf.push(line);
                 if buf.len() >= batch {
                     store(&repo, &mut buf, deadline, None).await;
                 }
+            }
+            Ok(Some(Msg::Flush(ack))) => {
+                store(&repo, &mut buf, deadline, None).await;
+                acks.push(ack);
+                ack_all(&mut acks);
             }
             Ok(None) => break,
             Err(_) => break,
         }
     }
     store(&repo, &mut buf, deadline, None).await;
+    ack_all(&mut acks);
     let mut unstored = buf.len();
-    while rx.try_recv().is_ok() {
-        unstored += 1;
+    while let Ok(msg) = rx.try_recv() {
+        // A barrier left in the channel is released by being dropped here.
+        if matches!(msg, Msg::Line(_)) {
+            unstored += 1;
+        }
     }
     if unstored > 0 {
         tracing::error!(
@@ -220,6 +288,14 @@ async fn run<I: Inserter>(
         );
     }
     tracing::info!("workflow log writer stopped");
+}
+
+/// Release every barrier waiting on the batch just stored.
+fn ack_all(acks: &mut Vec<oneshot::Sender<()>>) {
+    for ack in acks.drain(..) {
+        // The flusher may have timed out and gone; nothing to tell it then.
+        let _ = ack.send(());
+    }
 }
 
 /// What [`store`] did with the batch.

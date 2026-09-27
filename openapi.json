@@ -27633,7 +27633,7 @@
           "workflow"
         ],
         "summary": "An execution's log lines after a cursor, in `id` order.",
-        "description": "**Lines appear about 2 seconds after they are written (the settle lag,\n[`crate::logs::SETTLE_LAG`]).** Only lines whose `inserted_at` is more than\n2 s old are returned. The reason is out-of-order commits: `bigserial` ids\nare allocated at insert and committed later, so with two writers (two egret\nreplicas, or one writer's retry overlapping its next batch) id 100 can\ncommit after id 101. A client that had read 101 and moved its cursor past\nit would never see 100. Holding every line back until it has settled lets\nthe lower id commit first; a log batch is one short transaction, so 2 s\nbounds that window generously.\n\nAuthorisation is exactly `GET …/executions/{id}`'s: `WsContext` (session,\nmembership, the `workflows` feature gate), then `workflow:read`, then\n[`ExecutionRepo::get`] for existence and ownership -- **an execution in\nanother workspace is a 404, never a 403** -- and only then the page, which\nfilters on the workspace AND the execution again.",
+        "description": "**Lines appear about 2 seconds after they are written (the settle lag,\n[`crate::logs::SETTLE_LAG`]).** Only lines whose `inserted_at` is more than\n2 s old are returned. The reason is out-of-order commits: `bigserial` ids\nare allocated at insert and committed later, so with two writers (two egret\nreplicas, or one writer's retry overlapping its next batch) id 100 can\ncommit after id 101. A client that had read 101 and moved its cursor past\nit would never see 100. Holding every line back until it has settled lets\nthe lower id commit first; a log batch is one short transaction, so 2 s\nbounds that window generously.\n\n**When to stop polling: on `complete && items.is_empty()`, never on a\nterminal `execution_state` alone.** A run's lines are inserted before its\noutcome commits (`RunLog::finish` waits on the log writer's flush barrier),\nso once the execution has been terminal for longer than the settle lag,\nevery line it will ever have is visible; `complete` says exactly that,\ncomputed from the execution row itself. A terminal state seen earlier can\nstill have its last lines inside the lag. The exceptions are the process\ndying mid-run and a batch dropped after its retries (spec §11).\n\nAuthorisation is exactly `GET …/executions/{id}`'s: `WsContext` (session,\nmembership, the `workflows` feature gate), then `workflow:read`, then\n[`ExecutionRepo::log_status`] for existence and ownership (the same\ncontract as `ExecutionRepo::get`, one row, no source or task runs) -- **an\nexecution in another workspace is a 404, never a 403** -- and only then the\npage, which filters on the workspace AND the execution again.",
         "operationId": "get_execution_logs",
         "parameters": [
           {
@@ -27733,7 +27733,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Up to `limit` settled lines after `after`, in id order, with the next cursor and the execution's current state. Lines appear about 2 s after they are written (the settle lag guards against out-of-order commits).",
+            "description": "Up to `limit` settled lines after `after`, in id order, with the next cursor, the execution's current state, and `complete`. Lines appear about 2 s after they are written (the settle lag guards against out-of-order commits). Stop polling on `complete` with no `items`, not on a terminal state alone.",
             "content": {
               "application/json": {
                 "schema": {
@@ -35293,7 +35293,8 @@
         "description": "One page of an execution's log.",
         "required": [
           "items",
-          "execution_state"
+          "execution_state",
+          "complete"
         ],
         "properties": {
           "items": {
@@ -35313,7 +35314,11 @@
           },
           "execution_state": {
             "type": "string",
-            "description": "The execution's state (Kestra's wire spelling, `RUNNING`, `SUCCESS`,\n...), read on this call. **A terminal state together with an empty\n`items` means the client has every line and can stop polling.**"
+            "description": "The execution's state (Kestra's wire spelling, `RUNNING`, `SUCCESS`,\n...), read on this call. For display: **do not stop polling on a\nterminal state alone** -- see `complete`."
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "The execution is terminal AND became so more than the 2 s settle lag\nago. **Stop polling when `complete` is true and `items` is empty**:\nthen every stored line has been served. A terminal `execution_state`\nalone is not enough -- the run's last lines may be younger than the\nsettle lag and not served yet."
           }
         }
       },

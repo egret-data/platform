@@ -422,11 +422,21 @@ export const getWorkflowGetExecutionLogsUrl = (workspace: string,
  * the lower id commit first; a log batch is one short transaction, so 2 s
  * bounds that window generously.
  *
+ * **When to stop polling: on `complete && items.is_empty()`, never on a
+ * terminal `execution_state` alone.** A run's lines are inserted before its
+ * outcome commits (`RunLog::finish` waits on the log writer's flush barrier),
+ * so once the execution has been terminal for longer than the settle lag,
+ * every line it will ever have is visible; `complete` says exactly that,
+ * computed from the execution row itself. A terminal state seen earlier can
+ * still have its last lines inside the lag. The exceptions are the process
+ * dying mid-run and a batch dropped after its retries (spec §11).
+ *
  * Authorisation is exactly `GET …/executions/{id}`'s: `WsContext` (session,
  * membership, the `workflows` feature gate), then `workflow:read`, then
- * [`ExecutionRepo::get`] for existence and ownership -- **an execution in
- * another workspace is a 404, never a 403** -- and only then the page, which
- * filters on the workspace AND the execution again.
+ * [`ExecutionRepo::log_status`] for existence and ownership (the same
+ * contract as `ExecutionRepo::get`, one row, no source or task runs) -- **an
+ * execution in another workspace is a 404, never a 403** -- and only then the
+ * page, which filters on the workspace AND the execution again.
  * @summary An execution's log lines after a cursor, in `id` order.
  */
 export const workflowGetExecutionLogs = async (workspace: string,

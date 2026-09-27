@@ -24,7 +24,7 @@ use chrono::{DateTime, Duration as ChronoDuration, SubsecRound, Utc};
 use egret_metastore::Db;
 use egret_workflow::logs::{
     spawn_pruner, spawn_writer, InsertError, Inserter, LogLevel, LogLimits, LogLine, LogQuery,
-    LogRepo, PruneConfig, StoredLine, WriterConfig,
+    LogRepo, PruneConfig, RunIdentity, RunLog, StoredLine, WriterConfig,
 };
 use egret_workflow::runtime::{spawn_with_logs, RuntimeConfig};
 use egret_workflow::worker::handlers::LogSink;
@@ -1566,4 +1566,176 @@ async fn logs_route_rejects_limit_over_2000() {
         assert_eq!(status, 200, "{ok}: {body}");
         assert_eq!(item_messages(&body), ["one"]);
     }
+}
+
+// ── The flush barrier (W11 Task 5, fix round 1) ─────────────────────────────
+//
+// `RunLog::finish` waits until the writer has stored every line the attempt
+// wrote, so an execution's outcome commits after its lines are in the table.
+// That is what lets the route's `complete` tell a poller it may stop.
+
+impl Fx {
+    /// A `RunLog` for one attempt of a task run of `execution`, writing to
+    /// `sink`.
+    fn run_log(&self, execution: Uuid, sink: Arc<dyn LogSink>) -> RunLog {
+        RunLog::new(
+            RunIdentity {
+                workspace_id: self.ws,
+                execution_id: execution,
+                task_run_id: Uuid::new_v4(),
+                task_id: "t".into(),
+                attempt: 0,
+            },
+            sink,
+            LogLimits::default(),
+        )
+    }
+}
+
+#[tokio::test]
+async fn finish_waits_until_the_runs_lines_are_inserted() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    // The insert is held until `gate` opens: a slowed database.
+    let (rigged, gate) = Rigged::new(fx.repo.clone(), false);
+    let cancel = CancellationToken::new();
+    let (sink, handle) = spawn_writer(rigged.clone(), wcfg(), cancel.clone());
+    let log = fx.run_log(exec, Arc::new(sink));
+    for m in ["a", "b", "c"] {
+        log.info(m).await;
+    }
+
+    let finishing = tokio::spawn({
+        let log = log.clone();
+        async move { log.finish().await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !finishing.is_finished(),
+        "finish must not return while the attempt's lines are not inserted"
+    );
+    assert_eq!(fx.count(exec).await, 0, "control: the insert is still held");
+
+    gate.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), finishing)
+        .await
+        .expect("finish returns once the lines are inserted")
+        .unwrap();
+    // Read at once, not polled: the barrier's promise is that they are
+    // ALREADY in the table when `finish` returns. Without it the three lines
+    // would wait for the writer's 1 s timer.
+    assert_eq!(
+        fx.count(exec).await,
+        3,
+        "every line is stored when finish returns"
+    );
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_writer_that_never_acks_does_not_hang_the_run() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let (rigged, gate) = Rigged::new(fx.repo.clone(), false);
+    let cancel = CancellationToken::new();
+    let cfg = WriterConfig {
+        flush_within: Duration::from_millis(300),
+        ..wcfg()
+    };
+    let (sink, handle) = spawn_writer(rigged.clone(), cfg, cancel.clone());
+    let log = fx.run_log(exec, Arc::new(sink.clone()));
+    log.info("held").await;
+
+    // The insert never completes while the barrier waits: `finish` gives up
+    // after `flush_within` and returns, it does not hang the run.
+    let t0 = std::time::Instant::now();
+    tokio::time::timeout(Duration::from_secs(5), log.finish())
+        .await
+        .expect("finish must be bounded");
+    let took = t0.elapsed();
+    assert!(
+        took >= cfg.flush_within,
+        "control: finish did wait for the barrier ({took:?})"
+    );
+    assert!(
+        took < Duration::from_secs(2),
+        "bounded by flush_within ({took:?})"
+    );
+
+    // Release the insert and stop the writer. The line is still stored: the
+    // barrier timing out gives up waiting, not the line.
+    gate.send(true).unwrap();
+    cancel.cancel();
+    handle.await.unwrap();
+    assert_eq!(fx.count(exec).await, 1);
+
+    // A writer that is gone answers the barrier at once.
+    let after = fx.run_log(exec, Arc::new(sink));
+    let t0 = std::time::Instant::now();
+    after.finish().await;
+    assert!(
+        t0.elapsed() < Duration::from_millis(200),
+        "a stopped writer does not make finish wait ({:?})",
+        t0.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn logs_route_reports_complete_only_after_the_settle_lag() {
+    let Some(fx) = fx().await else { return };
+    common::grant(&fx.db, fx.ws, fx.user, &["workflow:read"]).await;
+    let exec = fx.execution().await;
+    let app = common::app(&fx.db).await;
+    // Set the state and when it was set, as `claim` does in one UPDATE.
+    let at = |state: &'static str, secs_ago: i32| {
+        let pool = fx.db.pool.clone();
+        async move {
+            sqlx::query(
+                "UPDATE workflow.executions \
+                    SET state = $2, updated_at = now() - make_interval(secs => $3) \
+                  WHERE id = $1",
+            )
+            .bind(exec)
+            .bind(state)
+            .bind(f64::from(secs_ago))
+            .execute(&pool)
+            .await
+            .expect("set state");
+        }
+    };
+    let complete = |body: &serde_json::Value| {
+        body["complete"]
+            .as_bool()
+            .unwrap_or_else(|| panic!("no boolean complete in {body}"))
+    };
+
+    at("RUNNING", 10).await;
+    let (s, body) = get_logs(&app, fx.ws, exec, fx.user, "").await;
+    assert_eq!(s, 200, "{body}");
+    assert!(
+        !complete(&body),
+        "running is never complete, however old: {body}"
+    );
+
+    at("SUCCESS", 0).await;
+    let (_, body) = get_logs(&app, fx.ws, exec, fx.user, "").await;
+    assert_eq!(body["execution_state"], "SUCCESS");
+    assert!(
+        !complete(&body),
+        "terminal, but inside the settle lag: its last lines may not be served yet: {body}"
+    );
+
+    at("SUCCESS", 3).await;
+    let (_, body) = get_logs(&app, fx.ws, exec, fx.user, "").await;
+    assert!(complete(&body), "terminal and past the settle lag: {body}");
+
+    for terminal in ["FAILED", "KILLED", "WARNING", "CANCELLED"] {
+        at(terminal, 3).await;
+        let (_, body) = get_logs(&app, fx.ws, exec, fx.user, "").await;
+        assert!(complete(&body), "{terminal}: {body}");
+    }
+    at("PAUSED", 3).await;
+    let (_, body) = get_logs(&app, fx.ws, exec, fx.user, "").await;
+    assert!(!complete(&body), "a pause is not an end: {body}");
 }

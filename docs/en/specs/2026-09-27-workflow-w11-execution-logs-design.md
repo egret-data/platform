@@ -104,6 +104,7 @@ Handlers write through it (`run_log.info(msg)`, `run_log.line(level, msg)`). `Na
 - A writer task, spawned in `egret-bin` next to the W10 tickers, drains the channel. It inserts a batch when it holds **500 lines** or when **1 s** has passed since the first unflushed line, whichever comes first. One statement per batch: `INSERT … SELECT * FROM unnest($1::uuid[], …)`.
 - **Write failure:** retry with backoff (100 ms doubling, capped at 5 s) for up to 30 s per batch. The channel fills during the retries, so handlers slow down rather than lines vanishing. If the batch still fails, `tracing::error!` names the execution ids and the line count lost, the batch is dropped, and the writer continues. **A log write never changes a run's outcome.**
 - **Shutdown:** on cancellation the writer stops accepting, drains what is in the channel, flushes, and exits within a bounded time (10 s). The runtime waits for it after the worker ticker has stopped.
+- **Flush barrier:** `LogSink::flush()` (a no-op by default, so `TracingSink` and test sinks return at once). `PgLogSink` sends a marker behind every line it has accepted. The channel carries `Line(LogLine) | Flush(oneshot)`. The writer stores its current batch, with its normal retries and 23503 re-run, and then acknowledges. `RunLog::finish()` awaits the barrier after the cap summary. `claim::run_one` calls `finish()` before it opens the outcome's transaction, so **a run's lines are inserted before its outcome, and so the execution's terminal state, commits**. The wait is bounded by **30 s** (`WriterConfig::flush_within`, the retry window). Past it, or with the writer gone, `finish()` logs and returns: the run's outcome never waits unboundedly on logging and never changes because of it.
 - **Wiring:** `Handlers` (the registry) holds the sink. Handler constructors take it instead of calling `default_sink()`. `TracingSink` stays for unit tests and for the case where the worker runs without a database.
 
 The writer runs whenever `worker_enabled` is true, because the worker is the only producer.
@@ -156,12 +157,12 @@ The code follows the measurement, and any disagreement with the Java is written 
 GET /api/ws/{workspace}/workflows/executions/{id}/logs
     ?after=<id>&limit=<n>&task_id=<s>&task_run_id=<uuid>&min_level=<TRACE..ERROR>
 → 200 { items: [ {id, task_id, task_run_id, attempt, level, ts, message} ],
-        next_after: <id|null>, execution_state: <State> }
+        next_after: <id|null>, execution_state: <State>, complete: <bool> }
 ```
 
 - **Authorisation:** identical to W10's `GET /executions/{id}`: `WsContext`, `authz::require`, and the `workflows` feature gate. The query filters on **both** `execution_id` and `workspace_id`, so another workspace's execution is a **404**. A test proves that.
 - **Paging:** `limit` defaults to 500, max 2,000. Rows come in `id` order. `next_after` is the last returned `id`, or `null` when nothing was returned.
-- **End of stream:** when `execution_state` is terminal and a call returns no items, the client has everything and stops polling.
+- **End of stream:** `complete` is true when the execution's state is terminal **and** `now() - executions.updated_at > 2 s` (the settle lag). Both are computed in SQL from the same row. **The client stops polling on `complete && items` empty, never on a terminal `execution_state` alone.** A terminal state is committed after the run's lines are inserted (§4.3's flush barrier). So once the settle lag has also passed since that commit, every line is visible. Without the barrier, a terminal state could be read while the last lines were still in the channel, in an unflushed batch (≤ 1 s) or being retried (≤ 30 s), and a client would stop and silently lose the tail. The route reads the execution through a one-row query (existence, ownership, state, `complete`). It does not load the frozen source or the task runs, because a panel polls it.
 - **Why a cursor, not W10's offset:** the log is append-only and grows while it is read. Offset paging over a growing set repeats or skips rows.
 
 **The out-of-order commit trap, and the settle lag.** `bigserial` ids are allocated at insert and committed later. With two writers (two egret replicas, or one writer's retry overlapping the next batch), id 100 can commit after id 101. A client that has already read 101 and moved its cursor past it would never see 100. So the query returns only rows with `inserted_at < now() - interval '2 seconds'`.
@@ -223,6 +224,7 @@ SSE / `follow`; `/download`; full-text search; manual log deletion; per-flow `lo
 ## 11. Known limits, stated
 
 - **Lines can be lost** if the process dies: those still in the channel, and those in a batch whose retries run out. Both are named in `tracing` where a write fails; a process kill cannot report its own loss.
+- **`complete` can be true with lines missing** in exactly those two cases, and in a third: a flush barrier that timed out after its **30 s** bound (a run waits at most that long for its lines, then commits its outcome anyway, with a `warn`).
 - **A run that executes twice** (reaped while its handler still ran, a hazard W4 documented) writes both runs' lines under the same attempt.
 - A line appears about **2 s** after it is written (§6).
 - **Production runs no container or python task yet.** `egret-bin` registers `Handlers::with_core_tasks()` (`Log`, `Return`, `Fail`, `Sleep`), and its own comment says nine of thirteen publishable types hang in production. W11 stores and tests stdout/stderr through test registries; in production today the stored lines come from `Log`/`Fail` and handler messages. Wiring container, python and sql into production is a separate package, because how the server may run containers is a security decision of its own (user decision, 2026-09-27).

@@ -21,8 +21,16 @@ export interface LogPageDto {
   next_after?: number | null;
   /**
      * The execution's state (Kestra's wire spelling, `RUNNING`, `SUCCESS`,
-     * ...), read on this call. **A terminal state together with an empty
-     * `items` means the client has every line and can stop polling.**
+     * ...), read on this call. For display: **do not stop polling on a
+     * terminal state alone** -- see `complete`.
      */
   execution_state: string;
+  /**
+     * The execution is terminal AND became so more than the 2 s settle lag
+     * ago. **Stop polling when `complete` is true and `items` is empty**:
+     * then every stored line has been served. A terminal `execution_state`
+     * alone is not enough -- the run's last lines may be younger than the
+     * settle lag and not served yet.
+     */
+  complete: boolean;
 }

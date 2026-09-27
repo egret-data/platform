@@ -88,8 +88,9 @@ pub mod worker;
 pub use publish::publish;
 pub use refs::WorkflowRefs;
 pub use repo::{
-    CreateFlowInput, ExecutionDetail, ExecutionFilter, ExecutionPage, ExecutionRepo, ExecutionRow,
-    FlowRepo, FlowRow, FlowVersionRow, ListFilter, Page, TaskRunRow, UpdateFlowInput,
+    CreateFlowInput, ExecutionDetail, ExecutionFilter, ExecutionLogStatus, ExecutionPage,
+    ExecutionRepo, ExecutionRow, FlowRepo, FlowRow, FlowVersionRow, ListFilter, Page, TaskRunRow,
+    UpdateFlowInput,
 };
 pub use routes::{management_router, openapi, WorkflowState};
 pub use runners::{render_str, rewrite, RenderContext, RenderError, RewriteError};

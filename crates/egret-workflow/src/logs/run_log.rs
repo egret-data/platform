@@ -155,17 +155,34 @@ impl RunLog {
         }
     }
 
-    /// Write the cap summary, once, if anything was withheld. WARN, outside
-    /// the cap. A second call is a no-op.
+    /// Write the cap summary, once, if anything was withheld (WARN, outside
+    /// the cap), then **wait for the sink's flush barrier**
+    /// ([`LogSink::flush`]): every line of this attempt is stored before
+    /// `finish` returns, or the sink's bound has passed. A second call is a
+    /// no-op.
+    ///
+    /// `claim::run_one` calls this before it commits the run's outcome, so an
+    /// execution that has become terminal has its lines in the table -- which
+    /// is what lets the logs API's `complete` tell a poller it may stop
+    /// (spec §6). The exceptions are the process dying and a batch dropped
+    /// after its retries (spec §11).
     pub async fn finish(&self) {
-        let mut c = self.counters.lock().await;
-        if c.finished {
-            return;
+        {
+            let mut c = self.counters.lock().await;
+            if c.finished {
+                return;
+            }
+            c.finished = true;
+            if c.withheld_lines > 0 {
+                self.write_summary(&c).await;
+            }
         }
-        c.finished = true;
-        if c.withheld_lines == 0 {
-            return;
-        }
+        // Outside the lock: the barrier can take up to the sink's bound, and
+        // nothing the counters guard is touched by it.
+        self.sink.flush().await;
+    }
+
+    async fn write_summary(&self, c: &Counters) {
         let message = format!(
             "{} lines ({} bytes) of this attempt were not stored: over the per-run log cap \
              ({} lines / {} bytes).",

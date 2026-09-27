@@ -1261,9 +1261,15 @@ pub struct LogPageDto {
     /// nothing was returned (keep the `after` you sent).
     pub next_after: Option<i64>,
     /// The execution's state (Kestra's wire spelling, `RUNNING`, `SUCCESS`,
-    /// ...), read on this call. **A terminal state together with an empty
-    /// `items` means the client has every line and can stop polling.**
+    /// ...), read on this call. For display: **do not stop polling on a
+    /// terminal state alone** -- see `complete`.
     pub execution_state: String,
+    /// The execution is terminal AND became so more than the 2 s settle lag
+    /// ago. **Stop polling when `complete` is true and `items` is empty**:
+    /// then every stored line has been served. A terminal `execution_state`
+    /// alone is not enough -- the run's last lines may be younger than the
+    /// settle lag and not served yet.
+    pub complete: bool,
 }
 
 /// An execution's log lines after a cursor, in `id` order.
@@ -1278,11 +1284,21 @@ pub struct LogPageDto {
 /// the lower id commit first; a log batch is one short transaction, so 2 s
 /// bounds that window generously.
 ///
+/// **When to stop polling: on `complete && items.is_empty()`, never on a
+/// terminal `execution_state` alone.** A run's lines are inserted before its
+/// outcome commits (`RunLog::finish` waits on the log writer's flush barrier),
+/// so once the execution has been terminal for longer than the settle lag,
+/// every line it will ever have is visible; `complete` says exactly that,
+/// computed from the execution row itself. A terminal state seen earlier can
+/// still have its last lines inside the lag. The exceptions are the process
+/// dying mid-run and a batch dropped after its retries (spec §11).
+///
 /// Authorisation is exactly `GET …/executions/{id}`'s: `WsContext` (session,
 /// membership, the `workflows` feature gate), then `workflow:read`, then
-/// [`ExecutionRepo::get`] for existence and ownership -- **an execution in
-/// another workspace is a 404, never a 403** -- and only then the page, which
-/// filters on the workspace AND the execution again.
+/// [`ExecutionRepo::log_status`] for existence and ownership (the same
+/// contract as `ExecutionRepo::get`, one row, no source or task runs) -- **an
+/// execution in another workspace is a 404, never a 403** -- and only then the
+/// page, which filters on the workspace AND the execution again.
 #[utoipa::path(
     get,
     path = "/api/ws/{workspace}/workflows/executions/{id}/logs",
@@ -1293,7 +1309,7 @@ pub struct LogPageDto {
         ExecutionLogsQuery,
     ),
     responses(
-        (status = 200, description = "Up to `limit` settled lines after `after`, in id order, with the next cursor and the execution's current state. Lines appear about 2 s after they are written (the settle lag guards against out-of-order commits).", body = LogPageDto),
+        (status = 200, description = "Up to `limit` settled lines after `after`, in id order, with the next cursor, the execution's current state, and `complete`. Lines appear about 2 s after they are written (the settle lag guards against out-of-order commits). Stop polling on `complete` with no `items`, not on a terminal state alone.", body = LogPageDto),
         (status = 400, description = "`limit` outside 1..=2000, a `min_level` that is not one of TRACE/DEBUG/INFO/WARN/ERROR, or a malformed `{id}`/`after`/`task_run_id`", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
@@ -1317,7 +1333,7 @@ async fn get_execution_logs(
     // Existence AND ownership: `NotFound` for a foreign id, before any line is
     // read. `LogRepo::page` also filters on the workspace, but an empty page
     // would be a 200 -- the existence check is what makes a foreign id a 404.
-    let execution = st.executions.get(ctx.workspace_id.0, id).await?;
+    let status = st.executions.log_status(ctx.workspace_id.0, id).await?;
     let lines = st
         .logs
         .page(
@@ -1336,7 +1352,8 @@ async fn get_execution_logs(
     Ok(Json(LogPageDto {
         items: lines.into_iter().map(LogLineDto::from).collect(),
         next_after,
-        execution_state: execution.execution.state,
+        execution_state: status.state,
+        complete: status.complete,
     }))
 }
 

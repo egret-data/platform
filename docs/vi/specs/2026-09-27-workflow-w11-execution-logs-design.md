@@ -106,6 +106,7 @@ Handler ghi qua nó (`run_log.info(msg)`, `run_log.line(level, msg)`). `NameHint
 - Một task writer, spawn trong `egret-bin` cạnh các ticker của W10, rút dòng khỏi kênh. Nó insert một lô khi đã giữ **500 dòng** hoặc khi đã qua **1 giây** kể từ dòng chưa ghi đầu tiên, cái nào tới trước. Mỗi lô là một câu lệnh: `INSERT … SELECT * FROM unnest($1::uuid[], …)`.
 - **Ghi lỗi:** thử lại kèm backoff (100 ms, gấp đôi, trần 5 giây) trong tối đa 30 giây cho mỗi lô. Kênh đầy dần trong lúc thử lại, nên handler chậm lại chứ dòng không biến mất. Nếu lô vẫn hỏng, `tracing::error!` ghi tên các execution id và số dòng mất, lô bị bỏ, và writer chạy tiếp. **Việc ghi log không bao giờ đổi kết quả của một run.**
 - **Tắt máy:** khi bị huỷ, writer ngừng nhận, rút hết những gì còn trong kênh, ghi xong, rồi thoát trong thời gian có giới hạn (10 giây). Runtime đợi nó sau khi ticker của worker đã dừng.
+- **Rào flush:** `LogSink::flush()` mặc định không làm gì, nên `TracingSink` và các sink của test trả về ngay. `PgLogSink` gửi một dấu mốc vào kênh, đứng sau mọi dòng nó đã nhận. Kênh chở `Line(LogLine) | Flush(oneshot)`. Writer ghi lô hiện tại, với cách thử lại và cách chạy lại khi gặp 23503 như thường lệ, rồi mới xác nhận. `RunLog::finish()` chờ rào sau khi đã ghi dòng tóm tắt vượt trần. `claim::run_one` gọi `finish()` trước khi mở transaction ghi kết quả, nên **các dòng của một run đã được insert trước khi kết quả của nó, tức trạng thái kết thúc của execution, được commit**. Thời gian chờ bị chặn ở **30 giây** (`WriterConfig::flush_within`, bằng cửa sổ thử lại). Quá hạn đó, hoặc khi writer đã dừng, `finish()` ghi log rồi trả về: kết quả của run không bao giờ phải chờ việc ghi log vô hạn, và không bao giờ đổi vì nó.
 - **Nối dây:** `Handlers` (registry) giữ sink. Constructor của handler nhận sink thay vì gọi `default_sink()`. `TracingSink` được giữ lại cho unit test và cho trường hợp worker chạy không có database.
 
 Writer chạy khi `worker_enabled` bật, vì worker là nơi duy nhất sinh dòng log.
@@ -158,12 +159,12 @@ Mã làm theo phép đo, và mọi chỗ bất đồng với mã Java đều đ�
 GET /api/ws/{workspace}/workflows/executions/{id}/logs
     ?after=<id>&limit=<n>&task_id=<s>&task_run_id=<uuid>&min_level=<TRACE..ERROR>
 → 200 { items: [ {id, task_id, task_run_id, attempt, level, ts, message} ],
-        next_after: <id|null>, execution_state: <State> }
+        next_after: <id|null>, execution_state: <State>, complete: <bool> }
 ```
 
 - **Phân quyền:** giống hệt `GET /executions/{id}` của W10: `WsContext`, `authz::require`, và cổng feature `workflows`. Câu query lọc **cả** `execution_id` lẫn `workspace_id`, nên execution của workspace khác là **404**. Có test chứng minh điều đó.
 - **Phân trang:** `limit` mặc định 500, tối đa 2.000. Các hàng trả theo thứ tự `id`. `next_after` là `id` cuối cùng được trả, hoặc `null` khi không trả gì.
-- **Hết dữ liệu:** khi `execution_state` đã kết thúc và một lần gọi không trả dòng nào, client đã có đủ và dừng polling.
+- **Hết dữ liệu:** `complete` đúng khi trạng thái execution đã kết thúc **và** `now() - executions.updated_at > 2 giây` (độ trễ lắng). Cả hai được tính bằng SQL trên cùng một hàng. **Client dừng polling khi `complete` đúng và `items` rỗng, không bao giờ chỉ dựa vào `execution_state` đã kết thúc.** Trạng thái kết thúc được commit sau khi các dòng của run đã được insert (rào flush ở §4.3). Vì vậy, khi độ trễ lắng cũng đã trôi qua kể từ lần commit đó, mọi dòng đều đã thấy được. Nếu không có rào, client có thể đọc được trạng thái kết thúc trong lúc các dòng cuối còn nằm trong kênh, trong một lô chưa flush (≤ 1 giây) hoặc đang được thử lại (≤ 30 giây). Client khi đó sẽ dừng và âm thầm mất phần đuôi. Route đọc execution bằng một query một hàng (tồn tại, quyền sở hữu, trạng thái, `complete`). Nó không nạp source đã đóng băng hay các task run, vì panel poll nó liên tục.
 - **Vì sao dùng con trỏ chứ không offset như W10:** log chỉ ghi thêm và lớn dần trong lúc đang được đọc. Phân trang offset trên một tập đang lớn sẽ lặp hoặc sót hàng.
 
 **Cái bẫy commit lệch thứ tự, và độ trễ lắng.** `bigserial` cấp id lúc insert rồi commit sau. Với hai writer (hai bản egret, hoặc lần thử lại của một writer chồng lên lô kế tiếp), id 100 có thể commit sau id 101. Một client đã đọc 101 và dời con trỏ qua đó sẽ không bao giờ thấy 100. Nên câu query chỉ trả các hàng có `inserted_at < now() - interval '2 seconds'`.
@@ -225,6 +226,7 @@ SSE / `follow`; `/download`; tìm kiếm toàn văn; xoá log thủ công; `logL
 ## 11. Giới hạn đã biết, nói rõ
 
 - **Có thể mất dòng** khi process chết: những dòng còn trong kênh, và những dòng thuộc một lô đã hết lượt thử lại. Cả hai được ghi tên trong `tracing` ở chỗ ghi hỏng; còn một process bị kill thì không tự báo được mình mất gì.
+- **`complete` có thể đúng trong khi thiếu dòng** ở đúng hai trường hợp đó, và ở trường hợp thứ ba: một rào flush quá hạn sau giới hạn **30 giây** của nó. Một run chờ các dòng của mình tối đa chừng đó, rồi vẫn commit kết quả, kèm một `warn`.
 - **Một run chạy hai lần** (bị reap trong khi handler vẫn chạy, mối nguy W4 đã ghi lại) ghi dòng của cả hai lần dưới cùng một attempt.
 - Một dòng hiện ra khoảng **2 giây** sau khi được ghi (§6).
 - **Production chưa chạy task container hay python nào.** `egret-bin` đăng ký `Handlers::with_core_tasks()` (`Log`, `Return`, `Fail`, `Sleep`), và chính comment của nó nói chín trên mười ba kiểu có thể publish bị treo trên production. W11 lưu và test stdout/stderr qua registry dựng trong test; trên production hiện nay, các dòng được lưu đến từ `Log`/`Fail` và thông báo của handler. Việc nối container, python và sql vào production là một gói riêng, vì cách server được phép chạy container là một quyết định bảo mật riêng (quyết định của người dùng, 2026-09-27).
