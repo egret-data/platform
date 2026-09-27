@@ -36,6 +36,13 @@ role `policy_reader` carries exactly one permission, `policy:read`.
 
 ---
 
+**Cases appear below in the order they were actually run, not in numerical order** (4 before 3;
+5 last, because 7 needs the grant 5 deletes). Each section was written when that case finished, so
+nothing here is a verdict written ahead of its measurement. The `Verdict` table at the end lists
+them by number.
+
+---
+
 ## Case 1 — sign in and reach all four pages · PASS
 
 Signed in as `admin@egret.local` on the dev login form. The **Governance** app's sidebar, in
@@ -418,3 +425,175 @@ Not inferred from an enabled-looking control. The same editor, one id over:
 So the guard is scoped to the **policy**, exactly as SP4a moved it, and the UI reflects that
 distinction rather than freezing the profile: one editor, two ids, 409 for the compiler's and
 200 for the operator's.
+
+---
+
+## Case 5 — delete the grant; the confirmation names the sentence · PASS
+
+Clicking the allow grant's `Delete` opened an `alertdialog` whose text, verbatim:
+
+```text
+Delete "role analyst can read wh.sales.orders except group contractors"?
+
+This grant is permanently removed and every profile it reaches recompiles.
+
+Type delete to confirm:
+```
+
+**It names the sentence, not the uuid** — `e615e686-215b-4513-85bd-15cbc7310cc0` appears nowhere in
+the dialog. It also requires typing `delete`: the confirm button stayed `disabled` until the word
+was typed, so a mis-aimed click on the wrong row cannot destroy a grant.
+
+After confirming: the list dropped to `1 grant · 0 allow · 1 deny · 0 from a workspace assignment`
+with only `role analyst cannot read wh.sales.orders` left, and `GET /perm/grants` returns only
+`b27a993f-… deny`.
+
+The compiled side was reaped rather than orphaned — the failure SP4a had once fixed and D1 warned
+could return through the edit/delete door. `policy.authz_policies` now holds exactly
+`zz-hand-written-admin` and `perm-grant-b27a993f-…`; the deleted grant's
+`perm-grant-e615e686-…` policy is **gone**, and `trino-alpha.policy_version` advanced to 8. No
+policy is left being served for a grant that no longer exists.
+
+---
+
+## The gate check — a `policy:read`-only user
+
+A whole run as `admin@egret.local` proves the pages render, not that the gates work: `platform_admin`
+bypasses inside the PDP. So everything above was re-measured as `reader@egret.local`, whose
+`/api/auth/me` returns exactly:
+
+```json
+{"email":"reader@egret.local","platform_roles":["policy_reader"],"permissions":["policy:read"]}
+```
+
+**A note on how this was set up, because it nearly produced a false result.** The role and grant
+were seeded with raw SQL, and the first attempt had the reader getting `403 {"error":"forbidden"}`
+on *every* route including the `policy:read` reads. The cause is not an authz bug: `CedarPdp`
+reloads its template set from a `RolesChanged` event on the `EventBus`, and a direct `INSERT`
+emits none, so the running PDP had never heard of `policy_reader`. Restarting `egret serve` fixed
+it. Had I stopped at the first measurement I would have reported the read gate as broken.
+
+### What the reader CAN do
+
+| | result |
+|---|---|
+| `GET /perm/grants` | 200, the grant list |
+| `GET /perm/rules` | 200, the rule list |
+| `GET /policies/services` | 200, both profiles with `origin` and engine bindings |
+| `GET /policies/1` | 200, the foreign policy's raw body |
+| `POST /perm/explain` | **200** — `{"allowed":false,"reasons":[{"kind":"explicit_deny",…}]}` |
+| reach all four pages | yes; the sidebar shows exactly `Data permissions`, `Mask & filter rules`, `Explain access`, `Policies` |
+
+`Classifications` (`tag:read`) and `Data Lineage` are correctly absent from the sidebar, and the
+top-level `Control Plane` app link is gone too — only `Explorer` and `Governance` remain.
+
+`explain` being a `POST` that a reader may call is right: it mutates nothing, and D9's whole point
+is that an administrator can ask why without being able to change the answer.
+
+### What the reader CANNOT do
+
+Every write refused with `403 {"error":"forbidden"}`, measured one by one:
+
+| attempt | result |
+|---|---|
+| `POST /perm/preview` | **403** |
+| `POST /perm/grants` | 403 |
+| `DELETE /perm/grants/{id}` | 403 |
+| `PUT /policies/1/enabled` | 403 |
+
+And the two steward pages hide the write affordances rather than offering them and failing:
+on `Data permissions` the only buttons left in `main` are the `Effect:` and `Action:` facet
+selects — **no `New grant`, and no per-row `Edit`/`Delete`**. Same on `Mask & filter rules`: only
+the `Kind:` facet, no `New rule`, no row actions. So `policy:update` really does gate the writes,
+and the gate is visible in the UI and enforced at the API.
+
+### Finding 3 (Important) — the sentence degrades to a raw UUID for exactly this user
+
+On `Data permissions`, as the reader, the grant row renders:
+
+```text
+role analyst cannot read 4a8fe34a-af58-4984-a1e7-12854fb9d496.sales.orders
+```
+
+instead of `role analyst cannot read wh.sales.orders`. `formatScope` falls back to
+`scope.catalog_id` when the name lookup is empty, and the catalog name comes from
+`GET /api/control-plane/catalogs`, which returns **403 Forbidden** for a `policy:read`-only user
+(it needs `catalog_registry:read`). D5's decision is that the sentence *is* the primary column;
+for the user class the page's own `perm` gate admits, that column is a uuid.
+
+`Mask & filter rules` has the milder version of the same problem: the rule's `Selects` column
+reads `tag pii` (the stored key) instead of `tag PII` (the display name), because `useTags` needs
+`tag:read`. Still readable, but it is the same missing-lookup fallback.
+
+### Finding 4 (Important) — `Explain access` is unusable with `policy:read` alone
+
+The page renders, `POST /perm/explain` is allowed, and yet the page cannot be operated: **the
+Catalog dropdown contains zero options** (`[role=listbox]` present, `optionCount: 0`) because it is
+fed by the same 403ing `/catalogs`. `Schema`/`Table`/`Column` stay disabled until a catalog is
+chosen, and `Explain` stays `disabled: true`. There is no message saying why the list is empty.
+
+So the admin-facing page of this feature is reachable but inert for the permission it gates on. It
+worked for the admin only because `platform_admin` also passes `catalog_registry:read`. Findings 3
+and 4 are one root cause with two severities: `policy:read` is not sufficient to read a catalog
+*name*, and three of the four pages need one.
+
+### Finding 5 (pre-existing SP4a page, not SP4b's four) — a write offered and then silently refused
+
+On the profile detail page the reader still sees `Seed default policies`, `Download Trino config`,
+`New policy`, and an **enabled** `Enabled` switch and `Delete` on the foreign policy. Clicking the
+switch was measured: `PUT /api/control-plane/policies/1/enabled` → **403 Forbidden**, and the page
+showed **nothing at all** — no toast, no alert; the switch just snapped back to `true`. Nothing was
+destroyed (the API held), but the operator gets no explanation. This is the SP4a raw-policy UI,
+which SP4b only touched to add the `Generated` marking and the 409 handling, so it is recorded as
+scope-adjacent rather than as a regression — and it is the contrast that shows SP4b's own two
+steward pages got this right.
+
+---
+
+## Verdict
+
+| # | case | result |
+|---|---|---|
+| 1 | Sign in, reach all four pages, no collision with Access → Permissions | **PASS** |
+| 2 | Create a grant; sentence and preview profiles recorded | **PASS** |
+| 3 | Edit it; `PATCH` pre-fills everything and blanks nothing | **PASS** |
+| 4 | The preview is binding; editing re-blocks Save | **PASS** |
+| 5 | Delete; the confirmation names the sentence, not a uuid | **PASS** |
+| 6 | Mask rule on a tag; preview names both Trino profiles | **PASS** (2 findings) |
+| 7 | Explain allowed and denied; both limits stated | **PASS** |
+| 8 | Generated profile marked, compiler policy 409s, foreign policy still editable | **PASS** |
+| — | gate check as a `policy:read`-only user | **PASS** for the gates; 3 findings |
+
+Nothing was BLOCKED. The stack ran locally with a seeded fixture in place of k8s-provisioned
+engines, which is the one substitution in this run and is described in full at the top.
+
+### The findings, in priority order
+
+| # | severity | what |
+|---|---|---|
+| 3 | Important | the grant sentence falls back to the raw catalog **uuid** for a `policy:read`-only user, because `/catalogs` needs `catalog_registry:read`; the rule page's tag falls back to the key |
+| 4 | Important | `Explain access` is **inert** with `policy:read` alone — the Catalog dropdown is empty, so `Explain` can never enable, with no message saying why |
+| 5 | Important, pre-existing | the SP4a profile page offers writes to a reader and shows **nothing** when the API 403s them |
+| 1 | Minor | React duplicate-key error on the preview's skip list — `${source_kind}-${id}` collides on exactly the tag-rule fan-out the panel exists for |
+| 2 | Minor | two byte-identical skip lines with no profile named; `SkipReport` has no profile field, so this needs an API change |
+
+Findings 3 and 4 share one root cause and are the two worth fixing before this ships to anyone who
+is not a platform admin: the four pages gate on `policy:read`, but three of them need
+`catalog_registry:read` to render a legible answer. Either the `policy_reader`-shaped role must
+carry `catalog_registry:read`, or these pages need a name source that `policy:read` can reach.
+
+### What was not run
+
+- **No real engine.** There is no Trino or Ranger in this run, so nothing here says a compiled
+  policy is *enforced* — only that it is produced, updated and reaped correctly in
+  `policy.authz_policies` and `perm.compiled`. SP4a's Task 10 live result is where enforcement was
+  measured; this document is about the UI.
+- **No tag actually assigned to a column**, so `explain`'s `tags` array was empty in all three
+  runs and the tag-resolution half of D9 is untested here. The tag *rule* path was exercised; the
+  tag *assignment* path was not.
+- **The row-filter rule kind and `mask_type: CUSTOM`** were not driven; only a `MASK`-type mask on
+  a tag selector.
+- **D6's third refusal** (a path-selected row filter that does not name exactly catalog, schema and
+  table) was not reached, since no row-filter rule was created.
+- **D8's two ceilings** were not provoked: the fixture is far too small to push a profile over
+  either cap, so the refusal messages were not seen on screen.
