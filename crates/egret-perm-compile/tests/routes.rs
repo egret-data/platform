@@ -2216,6 +2216,24 @@ async fn policy_read_permits_the_reads_and_refuses_the_writes() {
             "/perm/preview".to_string(),
             Some(json!({ "grant": grant_body(f.catalog_id, "analyst") })),
         ),
+        // **This tuple was missing and the gate was therefore untested** (SP4b-1
+        // review, I-1): downgrading `patch_rule`'s `require` to `policy:read`
+        // passed all 34 tests, which means a `policy:read` holder could rewrite
+        // a mask rule and drop a PII mask. Every route in this branch now
+        // appears in BOTH directions of this gate — here, and in
+        // `policy_update_alone_permits_a_write`, which is the direction a
+        // typo'd permission key shows up in.
+        (
+            "PATCH",
+            format!("/perm/rules/{}", Uuid::new_v4()),
+            Some(json!({
+                "name": unique("gate"),
+                "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+                "selector": { "type": "path", "catalog_id": f.catalog_id,
+                              "schema": "sales", "table": "orders", "column": "email" },
+                "exempt": { "include": [], "exclude": [] }
+            })),
+        ),
     ] {
         let (status, got) = into_json(
             f.app()
@@ -2272,19 +2290,103 @@ async fn policy_update_alone_permits_a_write() {
         "and the write must have compiled, same as it does for an admin"
     );
 
+    // **Every route this branch added, in the direction a typo'd key shows up
+    // in** (SP4b-1 review, I-1). The refusal test above cannot catch a typo:
+    // a handler gated on `policy:updat` refuses a `policy:read` holder exactly
+    // as it should and refuses everybody else too, so only a positive
+    // assertion by a non-admin holding precisely `policy:update` pins the key.
     let (status, body) = into_json(
         f.app()
             .oneshot(req(
-                "DELETE",
+                "PATCH",
                 &format!("/perm/grants/{grant_id}"),
                 &token,
-                None,
+                Some(grant_body(f.catalog_id, "auditor")),
             ))
             .await
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "policy:update alone must reach PATCH /perm/grants/{{id}}; body: {body}"
+    );
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                Some(json!({ "grant": grant_body(f.catalog_id, "analyst") })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "policy:update alone must reach POST /perm/preview; body: {body}"
+    );
+
+    let rule_body = |name: &str, mask: &str| {
+        json!({
+            "name": name,
+            "kind": { "type": "mask", "mask_type": mask, "value_expr": null },
+            "selector": { "type": "path", "catalog_id": f.catalog_id,
+                          "schema": "sales", "table": "orders", "column": "email" },
+            "exempt": { "include": [], "exclude": [] }
+        })
+    };
+    let name = unique("gate-rule");
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/rules",
+                &token,
+                Some(rule_body(&name, "MASK_HASH")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let rule_id = created["id"].as_str().expect("minted rule id").to_string();
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/rules/{rule_id}"),
+                &token,
+                Some(rule_body(&name, "MASK_NULL")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "policy:update alone must reach PATCH /perm/rules/{{id}} — the gate the review \
+         found untested in BOTH directions; body: {body}"
+    );
+
+    for uri in [
+        format!("/perm/rules/{rule_id}"),
+        format!("/perm/grants/{grant_id}"),
+    ] {
+        let (status, body) = into_json(
+            f.app()
+                .oneshot(req("DELETE", &uri, &token, None))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uri} -> {body}");
+    }
     assert_eq!(f.compiled_policy_names().await, Vec::<String>::new());
 }
 
