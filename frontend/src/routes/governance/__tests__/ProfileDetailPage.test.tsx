@@ -185,6 +185,34 @@ describe("ProfileDetailPage — D10, the guard is on the policy, not the profile
     expect(screen.getByRole("button", { name: "Delete allow-analysts" })).not.toBeDisabled();
   });
 
+  /**
+   * **THE OTHER HALF OF THE CONJUNCTION** (SP4b-2 review M-3: a mutation that
+   * dropped `profileOrigin === "generated"` from `compilerOwned` killed
+   * nothing, so this case was untested).
+   *
+   * A `perm-grant-`-named policy in a **manual** profile stays fully editable,
+   * because the backend permits exactly that: `refuse_if_compiler_owned`
+   * (`crates/egret-policy/src/store.rs`) returns `Ok` unless the profile's own
+   * `origin` is `'generated'` — a policy hand-named with the prefix in a
+   * profile no compile has ever swept is not at risk of being overwritten, and
+   * freezing it would be the same one-way door SP4a had to reopen. Marking it
+   * read-only here would make the UI refuse a write the API accepts, which is
+   * the opposite failure from the one the `Generated` badge exists to prevent.
+   */
+  it("leaves a perm-grant- named policy editable in a MANUAL profile", async () => {
+    profileOrigin = "manual";
+    wrap(<ProfileDetailPage />);
+
+    const link = await screen.findByRole("link", { name: "perm-grant-abc123" });
+    expect(link).toHaveAttribute("href", "/governance/policies/trino-prod/access/43");
+    expect(screen.getByRole("button", { name: "Delete perm-grant-abc123" })).not.toBeDisabled();
+    expect(screen.getByRole("switch", { name: /toggle perm-grant-abc123/i })).toBeEnabled();
+    // …and the same row IS frozen once the profile is generated, which is the
+    // assertion `does not offer a compiler-owned policy for edit inside a
+    // generated profile` above makes. Both halves, or the conjunction is
+    // half-tested.
+  });
+
   it("renders the 409 conflict explanation, not a bare error, on a refused write", async () => {
     profileOrigin = "generated";
     // Driven on "allow-analysts" (the FE believes it foreign, so its Switch
