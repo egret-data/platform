@@ -12,6 +12,7 @@ vi.mock("@/api/generated/control-plane-catalog-registry/control-plane-catalog-re
 
 import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import type { RegistryCatalogDto, Scope } from "@/api/generated/model";
+import { ApiError } from "@/api/client";
 import { ScopePicker } from "@/components/perm/ScopePicker";
 
 const CATALOGS: RegistryCatalogDto[] = [
@@ -106,5 +107,52 @@ describe("ScopePicker", () => {
       value: { catalog_id: "11111111-1111-1111-1111-111111111111" },
     });
     expect(screen.queryByRole("button", { name: "Apply" })).not.toBeInTheDocument();
+  });
+});
+
+describe("ScopePicker — a picker that cannot be operated says why (SP4b-2 finding 2)", () => {
+  /**
+   * **THE DISCRIMINATING CASE.** With `policy:read` alone the catalog list
+   * comes back 403, so the dropdown holds zero options, everything below it
+   * stays disabled and — before this — the page said nothing at all. The
+   * browser run measured exactly that on `Explain access`: `optionCount: 0`,
+   * `Explain disabled: true`, no message. The permission is NAMED, because
+   * "empty" alone tells an administrator nothing about what to fix.
+   */
+  test("names the missing permission when the catalog list is forbidden", () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: new ApiError(403, "forbidden"),
+    } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
+    renderPicker();
+
+    const note = screen.getByRole("alert");
+    expect(note).toHaveTextContent(/catalog_registry:read/);
+    expect(screen.getByLabelText("Catalog")).toHaveAttribute(
+      "aria-describedby",
+      "scope-catalog-unavailable",
+    );
+  });
+
+  /**
+   * The other empty case must NOT blame the account: an installation with no
+   * catalog registered is not a permission problem, and telling a platform
+   * admin to ask for a permission they already hold is worse than silence.
+   */
+  test("an empty registry says there is nothing to name, not that a permission is missing", () => {
+    mockCatalogs([]);
+    renderPicker();
+
+    const note = screen.getByRole("alert");
+    expect(note).toHaveTextContent(/No catalogs are registered yet/);
+    expect(note).not.toHaveTextContent(/catalog_registry:read/);
+  });
+
+  test("with catalogs to pick, no such note is rendered", () => {
+    mockCatalogs();
+    renderPicker();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

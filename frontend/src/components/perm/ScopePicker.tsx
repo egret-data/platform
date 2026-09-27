@@ -1,5 +1,6 @@
 import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import type { Scope } from "@/api/generated/model";
+import { ApiError } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -59,6 +60,20 @@ export function ScopePicker({
   });
   const catalogs = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
 
+  /**
+   * **A picker that cannot be operated has to say so (SP4b-2 finding 2).**
+   * `Explain access` is an admin-tier page by design (D4), so needing
+   * `catalog_registry:read` for its target picker is acceptable — failing
+   * SILENTLY is not. With `policy:read` alone the browser run found this
+   * dropdown holding zero options, `Schema`/`Table`/`Column` disabled behind
+   * it and `Explain` permanently disabled, with nothing on the page saying
+   * why. The two cases read differently on purpose: a missing permission is
+   * something an administrator can fix for this account, an empty registry is
+   * not about this account at all.
+   */
+  const forbidden = catalogsQ.error instanceof ApiError && catalogsQ.error.status === 403;
+  const nothingToPick = !catalogsQ.isLoading && catalogs.length === 0;
+
   function patch(next: Partial<Scope>) {
     onChange({ ...value, ...next });
   }
@@ -80,7 +95,11 @@ export function ScopePicker({
           onValueChange={(v) => onChange({ catalog_id: v })}
           disabled={disabled}
         >
-          <SelectTrigger id="scope-catalog" className="w-full">
+          <SelectTrigger
+            id="scope-catalog"
+            className="w-full"
+            aria-describedby={nothingToPick ? "scope-catalog-unavailable" : undefined}
+          >
             <SelectValue placeholder="Select a catalog" />
           </SelectTrigger>
           <SelectContent>
@@ -91,6 +110,27 @@ export function ScopePicker({
             ))}
           </SelectContent>
         </Select>
+        {nothingToPick && (
+          <p
+            id="scope-catalog-unavailable"
+            role="alert"
+            className={forbidden ? "text-xs text-destructive" : "text-xs text-muted-foreground"}
+          >
+            {forbidden ? (
+              <>
+                No catalogs to choose from: listing them needs the{" "}
+                <code>catalog_registry:read</code> permission, which this account does not
+                have. Nothing on this form can name a target until a platform admin grants
+                it.
+              </>
+            ) : (
+              <>
+                No catalogs are registered yet, so there is no target to name. Register one
+                under Control Plane → Catalogs first.
+              </>
+            )}
+          </p>
+        )}
       </div>
 
       <div className="space-y-1.5">

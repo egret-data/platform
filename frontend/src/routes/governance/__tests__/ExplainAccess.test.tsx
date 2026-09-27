@@ -147,3 +147,27 @@ describe("ExplainAccess — the reason class is the answer (D9)", () => {
     expect(await screen.findByText(/policy:read/)).toBeInTheDocument();
   });
 });
+
+describe("ExplainAccess — a disabled Explain button says what it is waiting for", () => {
+  /**
+   * SP4b-2 finding 2, the button half. `Explain` starts disabled and, with
+   * `policy:read` alone, can never enable — the target picker has no options
+   * (it names the missing `catalog_registry:read` itself; see
+   * `ScopePicker.test.tsx`). Either way the button must not sit there inert
+   * with nothing said.
+   */
+  test("names both missing inputs, then stops explaining once they are supplied", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(screen.getByRole("button", { name: /Explain/ })).toBeDisabled();
+    expect(screen.getByText("Explain needs a user and a target catalog.")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("User"), "alice-doe");
+    expect(screen.getByText("Explain needs a target catalog.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "set-scope" }));
+    expect(screen.getByRole("button", { name: /Explain/ })).toBeEnabled();
+    expect(screen.queryByText(/^Explain needs/)).not.toBeInTheDocument();
+  });
+});

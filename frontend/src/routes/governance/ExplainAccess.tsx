@@ -297,6 +297,20 @@ export default function ExplainAccess() {
   const explainMutation = usePermExplain<ApiError>();
 
   const canSubmit = user.trim().length > 0 && target.catalog_id.trim().length > 0;
+  /**
+   * Why `Explain` is disabled, in words (SP4b-2 finding 2). A disabled button
+   * with no explanation is the failure this finding is about: with
+   * `policy:read` alone the target picker holds zero options — it says so
+   * itself now, and needing `catalog_registry:read` for an admin-tier page's
+   * picker is acceptable (D4) — but the button must not simply sit there inert
+   * either way.
+   */
+  const missing = [
+    user.trim().length === 0 ? "a user" : null,
+    target.catalog_id.trim().length === 0 ? "a target catalog" : null,
+  ]
+    .filter(Boolean)
+    .join(" and ");
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -368,6 +382,9 @@ export default function ExplainAccess() {
             )}
             Explain
           </Button>
+          {!canSubmit && (
+            <p className="text-xs text-muted-foreground">Explain needs {missing}.</p>
+          )}
         </div>
       </form>
 
