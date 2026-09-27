@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
  * is mocked to a dumb controlled stand-in — its own behavior (progressive
  * narrowing, row-filter mode) is covered by `ScopePicker.test.tsx`; this file
  * is about D9: the reason CLASS renders distinguishably, a `grant_id`/`rule_id`
- * links to that row, and the two honest limits are stated on the result.
+ * links to that row, and the three honest limits are stated on the result.
  */
 vi.mock("@/api/generated/perm/perm");
 vi.mock("@/api/generated/policy-admin/policy-admin");
@@ -110,7 +110,7 @@ describe("ExplainAccess — the reason class is the answer (D9)", () => {
     expect(ruleLink).toHaveAttribute("href", "/governance/mask-filter-rules?rule=rule-1");
   });
 
-  test("the two honest limits are stated on the result, not tucked in a help page", async () => {
+  test("the three honest limits are stated on the result, not tucked in a help page", async () => {
     const user = userEvent.setup();
     renderPage();
 
@@ -123,6 +123,14 @@ describe("ExplainAccess — the reason class is the answer (D9)", () => {
     expect(result).toHaveTextContent(/cannot see hand-written Ranger policy/);
     expect(result).toHaveTextContent(/seeded admin policy/);
     expect(result).toHaveTextContent(/Tags populate only when the target names both a schema and a table/);
+    // SP4b-2 review I-2: the limit that makes this tool too PERMISSIVE, which
+    // matters most on the page whose whole job is to be truthful about the
+    // engine. Stated on EVERY result, not only when a group was named — this
+    // run named none.
+    expect(result).toHaveTextContent(
+      /A group in the subject is matched here but not by the engine/,
+    );
+    expect(result).toHaveTextContent(/no\s+group provider or usersync/);
   });
 
   test("tags populate only when the target names a schema and a table — none renders honestly", async () => {
@@ -169,5 +177,41 @@ describe("ExplainAccess — a disabled Explain button says what it is waiting fo
     await user.click(screen.getByRole("button", { name: "set-scope" }));
     expect(screen.getByRole("button", { name: /Explain/ })).toBeEnabled();
     expect(screen.queryByText(/^Explain needs/)).not.toBeInTheDocument();
+  });
+});
+
+describe("ExplainAccess — a group in the subject is a permissive-direction lie (D3, review I-2)", () => {
+  /**
+   * **THE DISCRIMINATING CASE.** `explain` evaluates the stored model, where a
+   * group principal matches; Trino has no group provider, egret writes none and
+   * there is no usersync, so the engine cannot see that membership. The page
+   * therefore answers `Allowed by grant` for access the engine refuses. The
+   * warning is at the point of choice — beside the field, the way
+   * `PrincipalPicker` carries the same fact — and appears only once a group is
+   * actually named, so an unused field is not nagging.
+   */
+  test("warns beside the Groups field, but only once a group is named", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(screen.queryByText(/no group provider or usersync/)).not.toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("Groups"), "contractors{Enter}");
+
+    expect(screen.getByText(/no group provider or usersync/)).toBeInTheDocument();
+    expect(screen.getByText(/can read Allowed while the engine refuses/)).toBeInTheDocument();
+  });
+
+  /** Roles must NOT carry it: Ranger's access items do have a roles bucket, so
+   *  a role-matched answer is not subject to this blind spot, and a warning
+   *  shown for everything teaches an operator to ignore it. */
+  test("does not warn about Roles", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.type(screen.getByLabelText("Roles"), "analyst{Enter}");
+
+    expect(screen.getByText("analyst")).toBeInTheDocument();
+    expect(screen.queryByText(/no group provider or usersync/)).not.toBeInTheDocument();
   });
 });

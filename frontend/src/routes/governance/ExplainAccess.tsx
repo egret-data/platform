@@ -1,7 +1,17 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Ban, EyeOff, Filter, HelpCircle, Loader2, Search, ShieldCheck, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Ban,
+  EyeOff,
+  Filter,
+  HelpCircle,
+  Loader2,
+  Search,
+  ShieldCheck,
+  X,
+} from "lucide-react";
 
 import { usePermExplain } from "@/api/generated/perm/perm";
 import { policyAdminListPrincipals } from "@/api/generated/policy-admin/policy-admin";
@@ -212,17 +222,21 @@ function SubjectUserField({
 
 /** Free-text chip list for `groups`/`roles` — unlike `user`, explain accepts any
  *  string a caller asserts the subject belongs to; there is no allocated ref to
- *  resolve. */
+ *  resolve. `warning` is rendered once at least one value is present: a hazard
+ *  belongs at the point of choice, which is how `PrincipalPicker` carries the
+ *  same fact. */
 function ChipListField({
   label,
   values,
   onChange,
   placeholder,
+  warning,
 }: {
   label: string;
   values: string[];
   onChange: (next: string[]) => void;
   placeholder: string;
+  warning?: React.ReactNode;
 }) {
   const [input, setInput] = useState("");
   const inputId = `explain-${label.toLowerCase()}`;
@@ -267,6 +281,7 @@ function ChipListField({
         }}
         placeholder={placeholder}
       />
+      {values.length > 0 && warning}
     </div>
   );
 }
@@ -354,7 +369,33 @@ export default function ExplainAccess() {
         <div className="space-y-4">
           <h2 className="text-sm font-semibold">Subject</h2>
           <SubjectUserField value={user} onChange={setUser} />
-          <ChipListField label="Groups" values={groups} onChange={setGroups} placeholder="Add a group…" />
+          <ChipListField
+            label="Groups"
+            values={groups}
+            onChange={setGroups}
+            placeholder="Add a group…"
+            warning={
+              /* Hardcoded fact 2/5 (design spec D3, SP4a D7 measured live),
+                 carried HERE because this page's answer is about the engine.
+                 `explain` evaluates the STORED model, where a group principal
+                 matches; Trino has no group provider, egret writes none and
+                 there is no usersync, so the engine cannot see that
+                 membership. A grant that matches only through a group
+                 therefore reads `Allowed by grant` here for access the engine
+                 refuses — wrong in the PERMISSIVE direction, on the one page
+                 built to explain the engine. REMOVE once egret ships a group
+                 provider; that is the only thing that would make it stale. */
+              <Badge
+                variant="warning"
+                className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal"
+              >
+                <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                Not enforced yet: no group provider or usersync, so the engine cannot see
+                this membership — an answer that depends on it can read Allowed while the
+                engine refuses.
+              </Badge>
+            }
+          />
           <ChipListField label="Roles" values={roles} onChange={setRoles} placeholder="Add a role…" />
 
           <div className="space-y-1.5">
@@ -437,9 +478,13 @@ export default function ExplainAccess() {
             )}
           </div>
 
-          {/* D9's two honest limits, stated where the answer is — not in a
-              help page. A tool that looks like a complete oracle while being
-              partial is worse than one that says what it does not know. */}
+          {/* D9's honest limits, stated where the answer is — not in a help
+              page. A tool that looks like a complete oracle while being
+              partial is worse than one that says what it does not know. The
+              first two are blind spots that make it too RESTRICTIVE; the third
+              (SP4b-2 review I-2) is the one that makes it too PERMISSIVE, and
+              is stated unconditionally for that reason — a limit shown only
+              when it has already bitten is not a stated limit. */}
           <Alert>
             <AlertDescription className="space-y-1 text-xs">
               <p>
@@ -450,6 +495,11 @@ export default function ExplainAccess() {
               <p>
                 Tags populate only when the target names both a schema and a table —
                 a catalog-only target always returns none.
+              </p>
+              <p>
+                A group in the subject is matched here but not by the engine: there is no
+                group provider or usersync, so an answer that depends on a group can read
+                &quot;allowed&quot; for access the engine refuses.
               </p>
             </AlertDescription>
           </Alert>
