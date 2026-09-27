@@ -32,7 +32,7 @@
   - API `limit` default **500**, max **2,000**;
   - settle lag **2 s**.
 - **Config keys** on `egret_config::WorkflowConfig`: `log_retention_days`, `log_run_max_lines`, `log_run_max_bytes`. There is no line-length key: the split length is a constant (D6). The writer and the pruner run when `worker_enabled` is true.
-- **A log write never changes a run's outcome.** A write that fails is reported through `tracing::error!`, never through the `Outcome`.
+- **A log write never changes a run's outcome.** A write that fails is reported through `tracing::error!`, never through the `Outcome`. (Final-review correction: it can DELAY an outcome by at most the flush barrier's bound, and a `write` that waits on a healthy but slow writer counts against the task's `timeout:`; spec §4.3.)
 - **No line is dropped silently.** A full channel makes the writer wait (`send().await`), never `try_send`. Only an exhausted retry drops a batch, and that is logged with its count.
 - **Handler registry scope is unchanged** (user decision, 2026-09-27). Production's `Handlers::with_core_tasks()` stays `Log`/`Return`/`Fail`/`Sleep`. Container and python are exercised through test registries, and the spec says production does not run them yet.
 - **Levels follow Task 1's measurement.** Where the measurement and Kestra's Java disagree, the measurement wins and the disagreement is written down.
