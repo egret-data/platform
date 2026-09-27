@@ -1107,6 +1107,27 @@ fn normalize_service_order(ids: &mut Vec<i64>) {
     ids.dedup();
 }
 
+/// The UNION of two affected-service sets, ascending and deduplicated — what a
+/// PATCH must recompile (SP4b D1).
+///
+/// **Why a patch needs the union and not just the new set.** A patch can move
+/// a grant from one catalog to another, or a rule from a path selector to a
+/// tag selector. Recompiling only the NEW affected set leaves the compiled
+/// policy sitting in the profile the row used to reach, still being served to
+/// that engine, with nothing in the model producing it any more and nothing
+/// that will ever sweep it again — which is exactly SP4a's "a deleted grant's
+/// policy is enforced forever" Critical, reintroduced through the edit door.
+/// The old set is therefore read from the row as it stands BEFORE the write
+/// and merged in here, so one recompile pass over the union reaps the old
+/// profile in the same transaction that creates the policy in the new one.
+pub fn merge_service_ids(a: &[i64], b: &[i64]) -> Vec<i64> {
+    let mut ids = Vec::with_capacity(a.len() + b.len());
+    ids.extend_from_slice(a);
+    ids.extend_from_slice(b);
+    normalize_service_order(&mut ids);
+    ids
+}
+
 /// The services a create/delete of `r` can change the compiled output of.
 /// A path selector is catalog-scoped like a grant; a **tag selector reaches
 /// every compiler-targeted profile in the installation** — see this module's

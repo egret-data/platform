@@ -18,6 +18,13 @@ pub enum PermHttpError {
     NotFound,
     #[error("bad request: {0}")]
     BadRequest(String),
+    /// The row a PATCH read changed under it before it held the profile locks,
+    /// and the profiles it locked no longer cover the ones the row now affects
+    /// — see `routes::write_grant`. A 409 rather than a 400 because the request
+    /// was well-formed and nothing about it needs fixing: it needs retrying
+    /// against the state that won.
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("internal error")]
     Internal,
 }
@@ -110,6 +117,7 @@ impl IntoResponse for PermHttpError {
             PermHttpError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
             PermHttpError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             PermHttpError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            PermHttpError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
             PermHttpError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error".to_string(),

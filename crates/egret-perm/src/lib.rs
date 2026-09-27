@@ -32,5 +32,5 @@ pub use model::{
 pub use store::{
     compiled_service_ids_for_catalog_via, create_grant_in_tx, create_rule_in_tx,
     delete_grant_in_tx, delete_rule_in_tx, get_grant_via, get_rule_via, list_grants_via,
-    list_rules_via, PermStore,
+    list_rules_via, update_grant_in_tx, update_rule_in_tx, PermStore,
 };

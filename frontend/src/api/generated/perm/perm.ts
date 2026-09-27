@@ -32,6 +32,8 @@ import type {
   Grant,
   NewGrant,
   NewRule,
+  PreviewRequest,
+  PreviewResponse,
   Rule
 } from '../model';
 
@@ -599,6 +601,249 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getPermDeleteGrantMutationOptions(options), queryClient);
     }
+    export type permPatchGrantResponse200 = {
+  data: CompileResponse
+  status: 200
+}
+
+export type permPatchGrantResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type permPatchGrantResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permPatchGrantResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permPatchGrantResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permPatchGrantResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permPatchGrantResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permPatchGrantResponseSuccess = (permPatchGrantResponse200) & {
+  headers: Headers;
+};
+export type permPatchGrantResponseError = (permPatchGrantResponse400 | permPatchGrantResponse401 | permPatchGrantResponse403 | permPatchGrantResponse404 | permPatchGrantResponse409 | permPatchGrantResponse500) & {
+  headers: Headers;
+};
+
+export type permPatchGrantResponse = (permPatchGrantResponseSuccess | permPatchGrantResponseError)
+
+export const getPermPatchGrantUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/grants/${encodeURIComponent(id)}`
+}
+
+/**
+ * Replace a grant's body, keeping its id, and recompile the UNION of the profiles it affected before and after the change — a patch that moves the grant to another catalog must reap the policy from the profile it used to reach, or that engine enforces it forever.
+ *
+ * **The body is the WHOLE grant, exactly the create route's shape.** This replaces the grant and keeps only its id; a field left out is cleared, not preserved. `principals.include` may not be empty — a grant that includes nobody compiles to nothing, so accepting one here would silently revoke the grant it replaces.
+ * @summary **Edit in place, keeping the id — SP4b D1.** The body is the whole grant,
+exactly the create route's shape: this replaces the grant's body and keeps
+its identity, which is what a UI "Edit" must mean. Before this route the
+only way to change a grant was delete-plus-create, i.e. a new id, two
+recompiles and a window with no row — and an `explain` reason carries the
+`grant_id` the UI deep-links from, so every such link broke on every edit.
+ */
+export const permPatchGrant = async (id: string,
+    newGrant: NewGrant, options?: Parameters<typeof customInstance>[1]): Promise<permPatchGrantResponse> => {
+
+  return customInstance<permPatchGrantResponse>(getPermPatchGrantUrl(id),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(newGrant)
+  }
+);}
+
+
+
+
+
+export const getPermPatchGrantMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permPatchGrant>>, TError,{id: string;data: NewGrant}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permPatchGrant>>, TError,{id: string;data: NewGrant}, TContext> => {
+
+const mutationKey = ['permPatchGrant'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permPatchGrant>>, {id: string;data: NewGrant}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  permPatchGrant(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermPatchGrantMutationResult = NonNullable<Awaited<ReturnType<typeof permPatchGrant>>>
+    export type PermPatchGrantMutationBody = NewGrant
+    export type PermPatchGrantMutationError = ErrorBody
+
+    /**
+ * @summary **Edit in place, keeping the id — SP4b D1.** The body is the whole grant,
+exactly the create route's shape: this replaces the grant's body and keeps
+its identity, which is what a UI "Edit" must mean. Before this route the
+only way to change a grant was delete-plus-create, i.e. a new id, two
+recompiles and a window with no row — and an `explain` reason carries the
+`grant_id` the UI deep-links from, so every such link broke on every edit.
+ */
+export const usePermPatchGrant = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permPatchGrant>>, TError,{id: string;data: NewGrant}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permPatchGrant>>,
+        TError,
+        {id: string;data: NewGrant},
+        TContext
+      > => {
+      return useMutation(getPermPatchGrantMutationOptions(options), queryClient);
+    }
+    export type permPreviewResponse200 = {
+  data: PreviewResponse
+  status: 200
+}
+
+export type permPreviewResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type permPreviewResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permPreviewResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permPreviewResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permPreviewResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permPreviewResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permPreviewResponseSuccess = (permPreviewResponse200) & {
+  headers: Headers;
+};
+export type permPreviewResponseError = (permPreviewResponse400 | permPreviewResponse401 | permPreviewResponse403 | permPreviewResponse404 | permPreviewResponse409 | permPreviewResponse500) & {
+  headers: Headers;
+};
+
+export type permPreviewResponse = (permPreviewResponseSuccess | permPreviewResponseError)
+
+export const getPermPreviewUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/preview`
+}
+
+/**
+ * Dry-run a grant or rule write: report the policy profiles it would recompile, and the compile error it would fail with, without storing anything. Runs the real write in a transaction that is rolled back, so the answer cannot differ from what the write would do.
+ * @summary **The dry run — SP4b D2. It runs the REAL write and rolls it back.**
+ */
+export const permPreview = async (previewRequest: PreviewRequest, options?: Parameters<typeof customInstance>[1]): Promise<permPreviewResponse> => {
+
+  return customInstance<permPreviewResponse>(getPermPreviewUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(previewRequest)
+  }
+);}
+
+
+
+
+
+export const getPermPreviewMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permPreview>>, TError,{data: PreviewRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permPreview>>, TError,{data: PreviewRequest}, TContext> => {
+
+const mutationKey = ['permPreview'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permPreview>>, {data: PreviewRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  permPreview(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermPreviewMutationResult = NonNullable<Awaited<ReturnType<typeof permPreview>>>
+    export type PermPreviewMutationBody = PreviewRequest
+    export type PermPreviewMutationError = ErrorBody
+
+    /**
+ * @summary **The dry run — SP4b D2. It runs the REAL write and rolls it back.**
+ */
+export const usePermPreview = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permPreview>>, TError,{data: PreviewRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permPreview>>,
+        TError,
+        {data: PreviewRequest},
+        TContext
+      > => {
+      return useMutation(getPermPreviewMutationOptions(options), queryClient);
+    }
     export type permListRulesResponse200 = {
   data: Rule[]
   status: 200
@@ -920,4 +1165,126 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getPermDeleteRuleMutationOptions(options), queryClient);
+    }
+    export type permPatchRuleResponse200 = {
+  data: CompileResponse
+  status: 200
+}
+
+export type permPatchRuleResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type permPatchRuleResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type permPatchRuleResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type permPatchRuleResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type permPatchRuleResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type permPatchRuleResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type permPatchRuleResponseSuccess = (permPatchRuleResponse200) & {
+  headers: Headers;
+};
+export type permPatchRuleResponseError = (permPatchRuleResponse400 | permPatchRuleResponse401 | permPatchRuleResponse403 | permPatchRuleResponse404 | permPatchRuleResponse409 | permPatchRuleResponse500) & {
+  headers: Headers;
+};
+
+export type permPatchRuleResponse = (permPatchRuleResponseSuccess | permPatchRuleResponseError)
+
+export const getPermPatchRuleUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/rules/${encodeURIComponent(id)}`
+}
+
+/**
+ * Replace a rule's body, keeping its id, and recompile the UNION of the profiles it affected before and after the change. A patch that turns a path selector into a tag selector (or back) changes that set by the whole installation, not by one profile.
+ *
+ * **The body is the WHOLE rule, exactly the create route's shape.** This replaces the rule and keeps only its id; a field left out is cleared, not preserved — including `exempt`, where an omitted set means no exemptions at all.
+ * @summary Edit a rule in place, keeping the id — the rule half of SP4b D1. Same
+old-plus-new union as [`patch_grant`], and the same reason: an `explain`
+reason carries the `rule_id` a UI links from.
+ */
+export const permPatchRule = async (id: string,
+    newRule: NewRule, options?: Parameters<typeof customInstance>[1]): Promise<permPatchRuleResponse> => {
+
+  return customInstance<permPatchRuleResponse>(getPermPatchRuleUrl(id),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(newRule)
+  }
+);}
+
+
+
+
+
+export const getPermPatchRuleMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permPatchRule>>, TError,{id: string;data: NewRule}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof permPatchRule>>, TError,{id: string;data: NewRule}, TContext> => {
+
+const mutationKey = ['permPatchRule'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof permPatchRule>>, {id: string;data: NewRule}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  permPatchRule(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PermPatchRuleMutationResult = NonNullable<Awaited<ReturnType<typeof permPatchRule>>>
+    export type PermPatchRuleMutationBody = NewRule
+    export type PermPatchRuleMutationError = ErrorBody
+
+    /**
+ * @summary Edit a rule in place, keeping the id — the rule half of SP4b D1. Same
+old-plus-new union as [`patch_grant`], and the same reason: an `explain`
+reason carries the `rule_id` a UI links from.
+ */
+export const usePermPatchRule = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof permPatchRule>>, TError,{id: string;data: NewRule}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof permPatchRule>>,
+        TError,
+        {id: string;data: NewRule},
+        TContext
+      > => {
+      return useMutation(getPermPatchRuleMutationOptions(options), queryClient);
     }

@@ -395,6 +395,108 @@ pub async fn create_grant_in_tx(
     Ok(id)
 }
 
+/// Replace grant `id`'s body in place, KEEPING the id, on the caller's open
+/// transaction — SP4b D1. `false` when no such grant exists.
+///
+/// **Why an in-place UPDATE and not delete-plus-create.** An `explain` reason
+/// carries the `grant_id` and the UI deep-links from that reason to the grant,
+/// so a new id on every edit breaks every such link; and delete-plus-create
+/// costs two recompiles with a window in which the row does not exist. The
+/// compiled policy is named after the grant id
+/// (`COMPILER_GRANT_PREFIX{id}`), so keeping the id also lets the recompile
+/// DIFF the policy in place instead of churning an id the engine has cached.
+///
+/// **`origin` and `origin_workspace_id` are deliberately not in the SET
+/// list.** They are the assignment path's own bookkeeping (D3), not part of
+/// the body a human authors — the same reason [`create_grant_in_tx`]'s
+/// `NewGrant` has no `origin` field. A patch therefore cannot move a grant
+/// between the two worlds in either direction; the HTTP layer refuses to
+/// patch a `workspace_assignment` row at all.
+///
+/// The principal subtract is REPLACED, not merged: `perm.grant_principals`
+/// has no identity of its own beyond `(grant_id, kind, ref, mode)`, so
+/// "remove a principal" has no other expression.
+pub async fn update_grant_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    g: &Grant,
+) -> Result<bool, PermError> {
+    let actions: Vec<&str> = g.actions.iter().map(|a| a.as_str()).collect();
+    let result = sqlx::query(
+        "UPDATE perm.grants \
+            SET effect = $2::perm.effect, actions = $3, catalog_id = $4, \
+                schema_name = $5, table_name = $6, column_name = $7 \
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(g.effect.as_str())
+    .bind(&actions)
+    .bind(g.scope.catalog_id)
+    .bind(&g.scope.schema)
+    .bind(&g.scope.table)
+    .bind(&g.scope.column)
+    .execute(&mut **tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM perm.grant_principals WHERE grant_id = $1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    insert_principals(tx, id, &g.principals).await?;
+    Ok(true)
+}
+
+/// Replace rule `id`'s body in place, keeping the id — same rationale as
+/// [`update_grant_in_tx`], including the REPLACED (not merged) exemption set.
+///
+/// Every selector and kind column is written on every patch, the inapplicable
+/// ones to `NULL`: `perm.rules` CHECKs tie `selector_kind` to exactly one of
+/// `tag_key`/`catalog_id` and `kind` to exactly one of
+/// `mask_type`/`filter_expr`, so a patch that changed a mask rule into a
+/// row-filter rule while leaving the old `mask_type` behind would be refused
+/// by the database rather than storing a contradiction.
+pub async fn update_rule_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    r: &Rule,
+) -> Result<bool, PermError> {
+    let (kind, mask_type, value_expr, filter_expr) = rule_kind_columns(&r.kind);
+    let (selector_kind, tag_key, catalog_id, schema_name, table_name, column_name) =
+        rule_selector_columns(&r.selector);
+    let result = sqlx::query(
+        "UPDATE perm.rules \
+            SET name = $2, kind = $3::perm.rule_kind, mask_type = $4, value_expr = $5, \
+                filter_expr = $6, selector_kind = $7::perm.selector_kind, tag_key = $8, \
+                catalog_id = $9, schema_name = $10, table_name = $11, column_name = $12 \
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(&r.name)
+    .bind(kind)
+    .bind(mask_type)
+    .bind(value_expr)
+    .bind(filter_expr)
+    .bind(selector_kind)
+    .bind(tag_key)
+    .bind(catalog_id)
+    .bind(schema_name)
+    .bind(table_name)
+    .bind(column_name)
+    .execute(&mut **tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM perm.rule_exemptions WHERE rule_id = $1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    insert_exemptions(tx, id, &r.exempt).await?;
+    Ok(true)
+}
+
 /// Delete one grant on the caller's open transaction — same rationale as
 /// [`create_grant_in_tx`]: the delete and the recompile that reaps the
 /// policies it produced must commit together, or the engine keeps enforcing
@@ -410,19 +512,13 @@ pub async fn delete_grant_in_tx(
     Ok(result.rows_affected() > 0)
 }
 
-/// Insert `r` and its exemption set on the caller's open transaction — same
-/// rationale as [`create_grant_in_tx`]. `r.id` is ignored in favor of the id
-/// `perm.rules.id DEFAULT gen_random_uuid()` mints.
-pub async fn create_rule_in_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    r: &Rule,
-) -> Result<Uuid, PermError> {
-    let (kind, mask_type, value_expr, filter_expr): (
-        &str,
-        Option<&str>,
-        Option<&str>,
-        Option<&str>,
-    ) = match &r.kind {
+/// `perm.rules`' kind columns for one [`RuleKind`] — `(kind, mask_type,
+/// value_expr, filter_expr)`, the inapplicable ones `None`. Shared by
+/// [`create_rule_in_tx`] and [`update_rule_in_tx`] so the two write paths
+/// cannot disagree about what a rule kind means in the table.
+#[allow(clippy::type_complexity)]
+fn rule_kind_columns(kind: &RuleKind) -> (&str, Option<&str>, Option<&str>, Option<&str>) {
+    match kind {
         RuleKind::Mask {
             mask_type,
             value_expr,
@@ -435,15 +531,23 @@ pub async fn create_rule_in_tx(
         RuleKind::RowFilter { filter_expr } => {
             ("row_filter", None, None, Some(filter_expr.as_str()))
         }
-    };
-    let (selector_kind, tag_key, catalog_id, schema_name, table_name, column_name): (
-        &str,
-        Option<&str>,
-        Option<Uuid>,
-        Option<&str>,
-        Option<&str>,
-        Option<&str>,
-    ) = match &r.selector {
+    }
+}
+
+/// `perm.rules`' selector columns for one [`Selector`] — same rationale as
+/// [`rule_kind_columns`].
+#[allow(clippy::type_complexity)]
+fn rule_selector_columns(
+    selector: &Selector,
+) -> (
+    &str,
+    Option<&str>,
+    Option<Uuid>,
+    Option<&str>,
+    Option<&str>,
+    Option<&str>,
+) {
+    match selector {
         Selector::Tag { key } => ("tag", Some(key.as_str()), None, None, None, None),
         Selector::Path(scope) => (
             "path",
@@ -453,7 +557,19 @@ pub async fn create_rule_in_tx(
             scope.table.as_deref(),
             scope.column.as_deref(),
         ),
-    };
+    }
+}
+
+/// Insert `r` and its exemption set on the caller's open transaction — same
+/// rationale as [`create_grant_in_tx`]. `r.id` is ignored in favor of the id
+/// `perm.rules.id DEFAULT gen_random_uuid()` mints.
+pub async fn create_rule_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    r: &Rule,
+) -> Result<Uuid, PermError> {
+    let (kind, mask_type, value_expr, filter_expr) = rule_kind_columns(&r.kind);
+    let (selector_kind, tag_key, catalog_id, schema_name, table_name, column_name) =
+        rule_selector_columns(&r.selector);
 
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO perm.rules \
