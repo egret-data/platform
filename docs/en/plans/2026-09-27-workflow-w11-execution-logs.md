@@ -5,7 +5,7 @@
 **Goal:** every log line a task produces is stored in `workflow.task_logs` and can be read back through a paginated cursor API while the execution runs. That includes `Log`/`Fail` lines, handler messages, and container/python stdout and stderr.
 
 **Architecture:**
-- `LogSink` becomes async. The worker builds one `RunLog` handle per task-run attempt and hands it to the handler on `TaskInput`. The handle carries the run's identity, the truncation rule and the per-attempt caps.
+- `LogSink` becomes async. The worker builds one `RunLog` handle per task-run attempt and hands it to the handler on `TaskInput`. The handle carries the run's identity, the long-line split (D6) and the per-attempt caps.
 - A `PgLogSink` sends lines into a bounded channel with `send().await`. A background writer in the runtime inserts them in batches.
 - An hourly ticker prunes lines older than the retention window.
 - A cursor route serves the lines, with a 2 s settle lag.
@@ -20,7 +20,7 @@
 
 - **Migration `0159`** (`migrations/0159_workflow_task_logs.sql`). `origin/main` ends at `0158`. Re-check `main` and every open PR branch before naming the file. **Never edit a migration that has already been applied anywhere shared.**
 - **Limits and defaults, verbatim from the spec:**
-  - line cut at **65,536 bytes** on a UTF-8 boundary, with `truncated = true`;
+  - a line longer than **15,360 characters** (Unicode scalar values) is **split** into consecutive pieces of 15,360, each its own stored line with the same `ts`, in order (D6: as Kestra's `RunContextLogger` splits; the constant `LOG_PIECE_CHARS`, not a setting);
   - per-attempt cap of **10,000 lines** or **10,485,760 bytes**;
   - exactly **one WARN summary** line, written outside the cap;
   - channel capacity **10,000**;
@@ -31,7 +31,7 @@
   - prune every **hour**, in batches of **10,000**, with a **30 s** pass budget;
   - API `limit` default **500**, max **2,000**;
   - settle lag **2 s**.
-- **Config keys** on `egret_config::WorkflowConfig`: `log_retention_days`, `log_line_max_bytes`, `log_run_max_lines`, `log_run_max_bytes`. The writer and the pruner run when `worker_enabled` is true.
+- **Config keys** on `egret_config::WorkflowConfig`: `log_retention_days`, `log_run_max_lines`, `log_run_max_bytes`. There is no line-length key: the split length is a constant (D6). The writer and the pruner run when `worker_enabled` is true.
 - **A log write never changes a run's outcome.** A write that fails is reported through `tracing::error!`, never through the `Outcome`.
 - **No line is dropped silently.** A full channel makes the writer wait (`send().await`), never `try_send`. Only an exhausted retry drops a batch, and that is logged with its count.
 - **Handler registry scope is unchanged** (user decision, 2026-09-27). Production's `Handlers::with_core_tasks()` stays `Log`/`Return`/`Fail`/`Sleep`. Container and python are exercised through test registries, and the spec says production does not run them yet.
@@ -63,7 +63,7 @@ migrations/0159_workflow_task_logs.sql                NEW   the table (§3)
 crates/egret-config/src/…                             MOD   four WorkflowConfig keys (§7)
 crates/egret-workflow/src/
   logs/mod.rs                                         NEW   LogLine, LogLevel, LogLimits; re-exports
-  logs/run_log.rs                                     NEW   RunLog: identity, truncation, caps, finish() (pure, no sqlx)
+  logs/run_log.rs                                     NEW   RunLog: identity, long-line split, caps, finish() (pure, no sqlx)
   logs/repo.rs                                        NEW   LogRepo: insert_batch, page (cursor + lag), prune_batch
   logs/writer.rs                                      NEW   PgLogSink + writer task (channel, batch, retry, drain)
   logs/prune.rs                                       NEW   the retention ticker
@@ -128,7 +128,7 @@ pub enum LogLevel { Trace = 0, Debug = 1, Info = 2, Warn = 3, Error = 4 }   // r
 pub struct LogLine {
     pub workspace_id: Uuid, pub execution_id: Uuid,
     pub task_run_id: Option<Uuid>, pub task_id: Option<String>, pub attempt: Option<i32>,
-    pub level: LogLevel, pub ts: DateTime<Utc>, pub message: String, pub truncated: bool,
+    pub level: LogLevel, pub ts: DateTime<Utc>, pub message: String,
 }
 
 // logs/repo.rs
@@ -151,7 +151,7 @@ pub struct StoredLine { pub id: i64, /* LogLine's public fields minus workspace/
   - whether an FK on `workspace_id` is the house pattern (look at `0157`/`0158`);
   - `task_run_id`: **no FK**. The worker holds `task_runs` rows `FOR UPDATE`/`FOR NO KEY UPDATE` while the writer inserts, and an FK check would take `FOR KEY SHARE` on them. W13a measured a `40001` from exactly that shape. Confirm the lock argument, or refute it with a measurement.
 - [ ] **Step 2: Failing tests**, using `egret_test_db` the way `tests/flow_trigger_windows.rs` does:
-  - `insert_batch_round_trips_every_field`: including `NULL` `task_run_id`/`task_id`/`attempt`, a multi-byte message, and `truncated = true`.
+  - `insert_batch_round_trips_every_field`: including `NULL` `task_run_id`/`task_id`/`attempt`, a multi-byte message, and a 15,360-character message (the longest a piece can be).
   - `page_returns_nothing_younger_than_the_settle_lag`: insert, read immediately, get 0 rows. Backdate `inserted_at` by 3 s with SQL, read again, get 1 row.
   - `page_is_ordered_by_id_and_honours_after_and_limit`.
   - `page_filters_by_task_id_task_run_id_and_min_level`.
@@ -197,8 +197,9 @@ pub struct TracingSink;            // unchanged role: writes to `tracing`
 
 // logs/mod.rs
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LogLimits { pub line_max_bytes: usize, pub run_max_lines: u64, pub run_max_bytes: u64 }
-impl Default for LogLimits { /* 65_536, 10_000, 10_485_760 */ }
+pub const LOG_PIECE_CHARS: usize = 15_360;   // Kestra's RunContextLogger.MAX_MESSAGE_LENGTH (1024 * 15), measured in Task 1
+pub struct LogLimits { pub run_max_lines: u64, pub run_max_bytes: u64 }
+impl Default for LogLimits { /* 10_000, 10_485_760 */ }
 
 // logs/run_log.rs
 #[derive(Clone)]
@@ -227,7 +228,7 @@ impl Handlers {
 
 **Decision taken here: the handle rides on `TaskInput`.** `cancel::guarded(reg, &input, budget)` and `Registry::run(&TaskInput)` then need no new parameter, and the `sink` field plus the `with_sink` test hook on each handler go away. A handler writes with `task.log.line(level, msg).await`. `NameHintSink` becomes a thin observer: python's runner passes each line to the observer and then to `task.log`. Keep its behaviour and its tests.
 
-**Truncation:** cut at the greatest `char` boundary ≤ `line_max_bytes` and set `truncated`. The cut line counts toward the byte cap at its **stored** length.
+**Long lines (D6):** a message of more than `LOG_PIECE_CHARS` `char`s is split into consecutive pieces of `LOG_PIECE_CHARS` `char`s, the last one shorter, before the cap is consulted. Each piece is one line with the same `ts`, written in order. Each counts as one line toward `run_max_lines` and at its own byte length toward `run_max_bytes`, so a split line can straddle the cap: the pieces before it are stored and the rest are withheld. Count `char`s, never bytes: a byte split can fall inside a character. The expected pieces are in the fixture's `long_line_split.egret_expected.cases`.
 
 **Cap:** the first line that would make `lines > run_max_lines` or `bytes > run_max_bytes` flips `withholding = true`. Later lines only increment `withheld_lines`/`withheld_bytes`. `finish()` writes, once, if `withheld_lines > 0`:
 
@@ -241,9 +242,12 @@ It is written at `WARN`, bypassing the cap. A second `finish()` is a no-op.
 
 **Levels:** apply Task 1's `egret_expected` table in `commands::ingest_line` (stderr level, debug bracket) and in the marker-line rule. Rewrite the `commands.rs` stderr comment to cite the measurement instead of `warningOnStdErr`.
 
+**Typed expectations:** load `oracle-exec/w11-logs.json` with `include_str!` and assert its `egret_expected` values, not a reading of the prose: marker `cases` (whole-line `::{json}::` not stored on either stream, including a `metrics`-only one; a line merely containing a marker stored), `invalid_marker_warning` (one WARN, prefix `Invalid outputs '`), the debug-bracket `sequence`, `log_task_cases`, `failed_attempt_line` (one ERROR line whose message is the failed `Outcome`'s message, written by `run_one`; this is the only line an unconditional `Fail` produces), and `long_line_split.cases`. Every `level_table` value is a member of `level_set`.
+
 - [ ] **Step 1: Failing unit tests** in `run_log.rs`, with `Recorder`:
   - `a_line_is_written_with_the_runs_identity`.
-  - `a_long_line_is_cut_on_a_char_boundary_and_marked` (a 4-byte char straddling the limit).
+  - `a_long_line_is_split_into_pieces_in_order`: a 40,000-`char` line with multi-byte characters (for example `é` and a 4-byte `𝄞`) at and around the 15,360th `char` gives 3 lines of 15,360 / 15,360 / 9,280 `char`s, in order, same `ts`, concatenation equal to the input. Also assert every `cases` entry of `long_line_split` in `oracle-exec/w11-logs.json`.
+  - `the_pieces_of_a_split_line_count_toward_the_cap`: `run_max_lines = 2` and one 40,000-`char` line gives 2 stored pieces plus a summary naming 1 line.
   - `the_cap_stops_storing_and_finish_writes_one_summary`: `run_max_lines = 3`, 5 lines, so 3 are stored plus 1 WARN summary naming 2 lines.
   - `the_byte_cap_counts_stored_length`.
   - `finish_is_idempotent_and_silent_under_the_cap`.
@@ -257,7 +261,8 @@ It is written at `WARN`, bypassing the cap. A second `finish()` is a no-op.
 
 | mutation | must kill |
 |---|---|
-| cut at `line_max_bytes` bytes, not a char boundary | `a_long_line_is_cut_on_a_char_boundary_and_marked` (panics or mismatches) |
+| split at `LOG_PIECE_CHARS` **bytes**, not `char`s | `a_long_line_is_split_into_pieces_in_order` (panics or mismatches) |
+| pieces not counted toward the cap (the split line counted once) | `the_pieces_of_a_split_line_count_toward_the_cap` |
 | summary counted inside the cap (written only if under cap) | `the_cap_stops_storing_…` |
 | `finish()` only on the `Ok` path of `run_one` | `run_one_finishes_the_log_on_error_timeout_and_cancel` |
 | container handler writes to `TracingSink` instead of `task.log` | the container wiring test |
@@ -313,7 +318,7 @@ pub fn spawn_pruner(repo: LogRepo, cfg: PruneConfig, cancel: CancellationToken) 
     - start it through the runtime (`worker_enabled`, no harness driving the tick), with the pattern `tests/runtime.rs` uses;
     - read the lines through `LogRepo::page` after the lag;
     - both tasks' lines are there with the right `task_id`, `attempt` and level.
-- [ ] **Step 2: Implement.** Add the four config keys with doc comments in the house style (see `worker_enabled`'s) and their defaults, and wire them in `egret-bin`.
+- [ ] **Step 2: Implement.** Add the three config keys with doc comments in the house style (see `worker_enabled`'s) and their defaults, and wire them in `egret-bin`.
 - [ ] **Step 3: Mutations:**
 
 | mutation | must kill |
@@ -342,7 +347,7 @@ pub fn spawn_pruner(repo: LogRepo, cfg: PruneConfig, cancel: CancellationToken) 
 ```
 GET /api/ws/{workspace}/workflows/executions/{id}/logs
     ?after=<i64>&limit=<1..=2000, default 500>&task_id=<str>&task_run_id=<uuid>&min_level=<TRACE|DEBUG|INFO|WARN|ERROR>
-200 { "items": [ {"id","task_id","task_run_id","attempt","level","ts","message","truncated"} ],
+200 { "items": [ {"id","task_id","task_run_id","attempt","level","ts","message"} ],
       "next_after": <i64|null>, "execution_state": <State> }
 404 unknown or foreign execution; 400 bad limit/min_level; 403/404 per W10's feature gate and authz
 ```
@@ -390,6 +395,6 @@ A whole-branch review on the most capable model. Point it at:
 2. Any path where logging changes a run's outcome or blocks the tokio runtime.
 3. The settle lag against out-of-order commits, including the writer's own retries overlapping a later batch.
 4. Cross-workspace reads through the route or `LogRepo::page`.
-5. Caps: truncation on UTF-8 boundaries, the summary outside the cap, per attempt.
+5. Caps: long lines split on `char` boundaries and in order, each piece counted, the summary outside the cap, per attempt.
 6. Levels and marker lines against Task 1's `egret_expected`.
 7. Pruning: batch size, pass budget, `0` days, and deletion of a live execution's recent lines.

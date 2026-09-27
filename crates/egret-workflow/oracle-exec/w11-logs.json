@@ -72,16 +72,29 @@
   }
  },
  "method": "Each flow in namespace w11 was published by POST /api/v1/main/flows (YAML), run by POST /api/v1/main/executions/w11/<id>, polled until terminal, then 3 s later its logs were read with GET /api/v1/main/logs/<executionId> (no filters) and the execution with GET /api/v1/main/executions/<id>. The artifact was brought up with `docker compose -p w3oracle up -d` and taken down with `down -v`.",
- "how_to_read_for_egret": "`findings[].egret_expected` is what W11 Task 3 asserts. Values marked `egret-chosen` are deliberate differences from the measured Kestra behaviour, stated in the spec. `raw_records` is evidence, not an egret expectation.",
+ "how_to_read_for_egret": "`findings[].egret_expected` is what W11 Task 3 asserts. A `basis` of `egret-chosen` marks a deliberate difference from the measured Kestra behaviour, stated in the spec. `raw_records` is evidence, not an egret expectation.",
+ "level_set": [
+  "TRACE",
+  "DEBUG",
+  "INFO",
+  "WARN",
+  "ERROR"
+ ],
  "level_table": {
   "stdout": "INFO",
   "stdout_inside_debug_bracket": "DEBUG",
   "stderr": "ERROR",
   "stderr_inside_debug_bracket": "ERROR",
-  "log_task": "declared level",
+  "log_task_default": "INFO",
   "fail_task": "ERROR",
+  "failed_attempt_line": "ERROR",
   "invalid_marker_warning": "WARN",
-  "cap_summary": "WARN (egret-only)"
+  "cap_summary": "WARN"
+ },
+ "level_table_notes": {
+  "log_task": "a Log task with `level:` stores at that level; `log_task_default` is the level with none declared",
+  "cap_summary": "egret-only: Kestra has no per-attempt cap",
+  "values": "every value is a member of `level_set`"
  },
  "findings": [
   {
@@ -102,13 +115,14 @@
     }
    ],
    "egret_expected": {
-    "stdout_level": "INFO"
+    "stdout_level": "INFO",
+    "basis": "measured"
    }
   },
   {
    "id": "stderr_level",
    "question": 1,
-   "finding": "A stderr line is logged at ERROR, not WARN, on both runners, and `warningOnStdErr` does not change the level: default, `false` and `true` all logged ERROR. The property exists on shell plugin 1.9.8 (each flow deployed 200) and in all three runs the task ended SUCCESS, so on this artifact it did not change the state either. This matches the Java (`PluginUtilsService.parseOut`: `else if (isStdErr) runContext.logger().error(line)`) and contradicts egret's `ingest_line`, which returns `Level::Warn`.",
+   "finding": "A stderr line is logged at ERROR, not WARN, on both runners, and `warningOnStdErr` does not change the level: default, `false` and `true` all logged ERROR. The property exists on shell plugin 1.9.8 (each flow deployed 200) and in all three runs the task ended SUCCESS, so on this artifact it did not change the state either. This matches the Java (`PluginUtilsService.parseOut`: `else if (isStdErr) runContext.logger().error(line)`) and contradicts egret's `ingest_line`, which returns `Level::Warn`. egret keeps not offering `warningOnStdErr`; that is a schema fact, not a log expectation, so it is not asserted here.",
    "quoted": [
     {
      "level": "ERROR",
@@ -138,14 +152,14 @@
    ],
    "egret_expected": {
     "stderr_level": "ERROR",
-    "warningOnStdErr_offered": false,
-    "basis": "measured; egret changes WARN -> ERROR"
+    "basis": "measured",
+    "note": "egret changes WARN to ERROR"
    }
   },
   {
    "id": "outputs_marker_consumed",
    "question": 2,
-   "finding": "A whole-line `::{\"outputs\":{...}}::` is NOT logged, on stdout and on stderr, and its values reach the task's outputs: a downstream Log rendered `k=v k2=v2`. Only the whole line counts: `x ::{...}::` and a marker with one trailing space are logged verbatim at INFO and not consumed. The execution API returns `outputs: null` on every task run on this artifact, so the value was read through a downstream Log, not off the execution. egret's comment in `ingest_line` (\"consumed as an output AND logged\") is wrong about Kestra.",
+   "finding": "A whole-line `::{\"outputs\":{...}}::` is NOT logged, on stdout and on stderr, and its values reach the task's outputs: a downstream Log rendered `k=v k2=v2`. Only a line that IS a marker counts: a line that merely contains one (`x ::{...}::`) or has a trailing space is logged verbatim at INFO and not consumed. The execution API returns `outputs: null` on every task run on this artifact, so the value was read through a downstream Log, not off the execution. egret's comment in `ingest_line` (\"consumed as an output AND logged\") is wrong about Kestra.",
    "quoted": [
     {
      "q2_marker.logs": [
@@ -181,10 +195,45 @@
     }
    ],
    "egret_expected": {
-    "marker_line_stored": false,
-    "marker_on_stderr_stored": false,
-    "marker_values_in_outputs": true,
-    "non_whole_line_marker": "stored verbatim at the stream's level"
+    "cases": [
+     {
+      "stream": "stdout",
+      "line": "::{\"outputs\":{\"k\":\"v\"}}::",
+      "stored": false,
+      "level": null,
+      "outputs": {
+       "k": "v"
+      },
+      "basis": "measured"
+     },
+     {
+      "stream": "stderr",
+      "line": "::{\"outputs\":{\"k2\":\"v2\"}}::",
+      "stored": false,
+      "level": null,
+      "outputs": {
+       "k2": "v2"
+      },
+      "basis": "measured"
+     },
+     {
+      "stream": "stdout",
+      "line": "x ::{\"outputs\":{\"k3\":\"v3\"}}::",
+      "stored": true,
+      "level": "INFO",
+      "outputs": {},
+      "basis": "measured"
+     },
+     {
+      "stream": "stdout",
+      "line": "::{\"outputs\":{\"k\":\"v\"}}:: ",
+      "stored": true,
+      "level": "INFO",
+      "outputs": {},
+      "basis": "measured"
+     }
+    ],
+    "note": "`stored: false` means no row at all; `level` is the stored row's level; `outputs` is what the line adds to the task's outputs"
    }
   },
   {
@@ -230,9 +279,33 @@
     }
    ],
    "egret_expected": {
-    "whole_line_json_marker_without_outputs_stored": false,
-    "whole_line_marker_with_invalid_json": "the line is not stored; one WARN line is stored whose message starts with `Invalid outputs '` (serde's error text, not Jackson's); no stack-trace line",
-    "basis": "measured shape; the error text and the absent stack trace are egret-chosen"
+    "cases": [
+     {
+      "stream": "stdout",
+      "line": "::{\"metrics\":[]}::",
+      "stored": false,
+      "level": null,
+      "outputs": {},
+      "basis": "measured"
+     },
+     {
+      "stream": "stdout",
+      "line": "::{not json}::",
+      "stored": false,
+      "level": null,
+      "outputs": {},
+      "basis": "measured"
+     }
+    ],
+    "invalid_marker_warning": {
+     "level": "WARN",
+     "count": 1,
+     "message_prefix": "Invalid outputs '",
+     "message_suffix": "'",
+     "stack_trace_line_count": 0,
+     "basis": "egret-chosen",
+     "note": "one WARN per invalid whole-line marker; between prefix and suffix is serde_json's error text, not Jackson's. Kestra's shape (WARN + DEBUG stack) is measured; the text and the absent stack line are chosen"
+    }
    }
   },
   {
@@ -350,18 +423,70 @@
     }
    ],
    "egret_expected": {
-    "bracketed_stdout_level": "DEBUG",
-    "bracketed_stderr_level": "ERROR",
+    "sequence": {
+     "input": [
+      [
+       "stdout",
+       "before"
+      ],
+      [
+       "stdout",
+       "##kestra:log:debug##"
+      ],
+      [
+       "stdout",
+       "dbg-out"
+      ],
+      [
+       "stderr",
+       "dbg-err"
+      ],
+      [
+       "stdout",
+       "##kestra:log:info##"
+      ],
+      [
+       "stdout",
+       "after"
+      ]
+     ],
+     "stored": [
+      [
+       "INFO",
+       "before"
+      ],
+      [
+       "DEBUG",
+       "dbg-out"
+      ],
+      [
+       "ERROR",
+       "dbg-err"
+      ],
+      [
+       "INFO",
+       "after"
+      ]
+     ],
+     "basis": "measured",
+     "note": "`stored` is in input order; Kestra reads the two streams on two threads, so its order across streams varies"
+    },
     "bracket_marker_lines_stored": false,
-    "after_info_marker": "INFO",
-    "mode_scope": "one mode per command, toggled by a marker on either stream"
+    "toggle_scope": "per_command",
+    "toggled_by_stderr_marker": true,
+    "toggled_by_stderr_marker_basis": "java-only"
    }
   },
   {
    "id": "no_worker_framing",
    "question": 4,
-   "finding": "The execution log holds no worker framing line. The worker's `Type {} started` / `Type {} with state {} completed in {}` (`WorkerTaskProcessor`) and the executor's `Flow completed with state {}` go through `Logs.logTaskRun`/`logExecution` to the server's slf4j logger, not the execution log. Every stored line carries a `taskId` and `taskRunId`; none is execution-level. A Log-only flow stores exactly one line. Log with a list `message` stores one line per element. Fail stores ERROR `<errorMessage>` and then a DEBUG Java stack trace.",
+   "finding": "The execution log holds no worker framing line. The worker's `Type {} started` / `Type {} with state {} completed in {}` (`WorkerTaskProcessor`) and the executor's `Flow completed with state {}` go through `Logs.logTaskRun`/`logExecution` to the server's slf4j logger, not the execution log. 0 of 127 lines across 17 executions have a null `taskId` (an execution-level line would). A Log-only flow stores exactly one line (with framing it would be 3). Log with a list `message` stores one line per element. Fail stores ERROR `<errorMessage>` and then a DEBUG Java stack trace.",
    "quoted": [
+    {
+     "lines_checked": 127,
+     "executions_checked": 17,
+     "null_taskId_lines": 0
+    },
     {
      "q4_log_only.logs": [
       {
@@ -419,17 +544,55 @@
     }
    ],
    "egret_expected": {
-    "framing_lines": false,
-    "framing_text": null,
-    "log_task": "one line per message at the declared level",
-    "fail_task": "one ERROR line, the errorMessage; no stack-trace line (egret has no Java stack)",
-    "execution_level_lines": 0
+    "framing_line_count": 0,
+    "execution_level_line_count": 0,
+    "log_task_cases": [
+     {
+      "level_declared": null,
+      "message": "hello-log",
+      "stored": [
+       [
+        "INFO",
+        "hello-log"
+       ]
+      ]
+     },
+     {
+      "level_declared": "WARN",
+      "message": [
+       "warn-a",
+       "warn-b"
+      ],
+      "stored": [
+       [
+        "WARN",
+        "warn-a"
+       ],
+       [
+        "WARN",
+        "warn-b"
+       ]
+      ]
+     }
+    ],
+    "fail_task_unconditional": {
+     "error_message": "boom-fail",
+     "stored": [
+      [
+       "ERROR",
+       "boom-fail"
+      ]
+     ],
+     "stack_trace_line_count": 0,
+     "basis": "egret-chosen",
+     "note": "the ERROR line is measured; Kestra's DEBUG stack-trace line is not replicated. egret's unconditional Fail writes no line today (`fail.rs` only fails the run); this line is `failed_attempt_line` from `script_runner_diagnostics`, whose message is the run's failure message, i.e. the errorMessage"
+    }
    }
   },
   {
    "id": "script_runner_diagnostics",
    "question": 4,
-   "finding": "Script tasks add their own lines around the output: DEBUG `Starting command with pid N [<cmd>]` (or `with container id ...`), DEBUG `Command succeed with exit code 0`, TRACE `Captured 0 output file(s).`, and on Docker TRACE `Container created/deleted` and `Volume created/deleted`. A failed attempt adds ERROR `io.kestra...TaskException: Command failed with exit code 1`, a DEBUG stack trace and ERROR `Command failed with exit code 1`. These are the runner's, not the worker's.",
+   "finding": "Script tasks add their own lines around the output: DEBUG `Starting command with pid N [<cmd>]` (or `with container id ...`), DEBUG `Command succeed with exit code 0`, TRACE `Captured 0 output file(s).`, and on Docker TRACE `Container created/deleted` and `Volume created/deleted`. A failed attempt adds ERROR `io.kestra...TaskException: Command failed with exit code 1`, a DEBUG stack trace and ERROR `Command failed with exit code 1`. These are the runner's and the worker's, not the task output.",
    "quoted": [
     {
      "q1_proc.logs": [
@@ -507,9 +670,17 @@
     }
    ],
    "egret_expected": {
-    "runner_diagnostic_lines": false,
-    "failure_line": "the handler's failure message as it is emitted through the sink today",
-    "basis": "egret-chosen: W11 stores output and handler messages; replicating Kestra's runner diagnostics (pids, container and volume ids) is out of W11's scope"
+    "runner_diagnostic_line_count": 0,
+    "failed_attempt_line": {
+     "level": "ERROR",
+     "count": 1,
+     "message_template": "{failure_message}",
+     "written_by": "run_one",
+     "when": "the attempt's Outcome is failed",
+     "stack_trace_line_count": 0
+    },
+    "basis": "egret-chosen",
+    "note": "`{failure_message}` is the failed Outcome's message, exactly. Kestra writes the exception message at ERROR for a failed attempt (measured for Fail and for a script); egret writes one such line and no pid/container/volume diagnostics"
    }
   },
   {
@@ -604,14 +775,15 @@
     "first_attempt": 0,
     "retry_attempt": 1,
     "same_task_run_id": true,
-    "mapping": "task_logs.attempt = TaskInput.attempt - 1 (the index into task_runs.attempts)",
-    "basis": "measured numbering; the conversion is egret-chosen"
+    "stored_attempt_minus_task_input_attempt": -1,
+    "basis": "measured",
+    "note": "numbering measured; the -1 conversion from egret's 1-based TaskInput.attempt is chosen"
    }
   },
   {
    "id": "long_line_split",
    "question": 6,
-   "finding": "Kestra does NOT store a 100,000-char line whole, and does not cut it either: it SPLITS it into 15,360-char pieces (`RunContextLogger.MAX_MESSAGE_LENGTH = 1024 * 15`, `Splitter.fixedLength`), each a separate INFO line with the same timestamp. 6 x 15,360 + 7,840 = 100,000, nothing lost. Because the pieces share a timestamp, the API returned them out of order: the 7,840-char remainder came back at position 5 of 7 (Process) and 3 of 7 (Docker), not last. There is no volume cap. The spec's section 2 statement \"there is no line or volume cap\" is half wrong.",
+   "finding": "Kestra does NOT store a 100,000-char line whole, and does not cut it either: it SPLITS it into 15,360-char pieces (`RunContextLogger.MAX_MESSAGE_LENGTH = 1024 * 15`, `Splitter.fixedLength`), each a separate INFO line with the same timestamp. 6 x 15,360 + 7,840 = 100,000, nothing lost. Because the pieces share a timestamp, the API returned them out of order: the 7,840-char remainder came back at position 5 of 7 (Process) and 3 of 7 (Docker), not last. There is no volume cap. The input was ASCII only, so whether Kestra counts UTF-16 code units (Java `String.length()`, which `Splitter.fixedLength` uses) or code points was not observable here; the Java counts UTF-16 code units.",
    "quoted": [
     {
      "q6_long.piece_lengths_in_api_order": [
@@ -636,12 +808,49 @@
     }
    ],
    "egret_expected": {
-    "line_100000_bytes": {
-     "rows": 1,
-     "message_bytes": 65536,
-     "truncated": true
-    },
-    "basis": "egret-chosen (user decision, spec section 5): cut at 65,536 bytes, not split; a deliberate difference from the measured split"
+    "piece_chars": 15360,
+    "char_unit": "unicode_scalar_value",
+    "cases": [
+     {
+      "input_chars": 100000,
+      "piece_chars": [
+       15360,
+       15360,
+       15360,
+       15360,
+       15360,
+       15360,
+       7840
+      ]
+     },
+     {
+      "input_chars": 40000,
+      "piece_chars": [
+       15360,
+       15360,
+       9280
+      ]
+     },
+     {
+      "input_chars": 15360,
+      "piece_chars": [
+       15360
+      ]
+     },
+     {
+      "input_chars": 15361,
+      "piece_chars": [
+       15360,
+       1
+      ]
+     }
+    ],
+    "pieces_in_input_order": true,
+    "pieces_share_ts": true,
+    "concatenation_equals_input": true,
+    "each_piece_counts_toward_run_cap": true,
+    "basis": "measured",
+    "note": "user decision D6: split as Kestra splits. The piece length and the equal timestamps are measured. Two chosen differences: egret counts Unicode scalar values (Rust `char`), Kestra's Java counts UTF-16 code units, so they differ only for text outside the Basic Multilingual Plane, where Java can also split a surrogate pair (unmeasured); and egret returns the pieces in input order (ascending id), where the artifact returned them out of order"
    }
   }
  ],
@@ -3023,7 +3232,7 @@
      "timestamp": "2026-09-27T07:08:27.897889Z",
      "level": "INFO",
      "thread": "virtual-6732",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 15360,
       "all_chars_are": "x",
@@ -3041,7 +3250,7 @@
      "timestamp": "2026-09-27T07:08:27.897889Z",
      "level": "INFO",
      "thread": "virtual-6732",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 15360,
       "all_chars_are": "x",
@@ -3059,7 +3268,7 @@
      "timestamp": "2026-09-27T07:08:27.897889Z",
      "level": "INFO",
      "thread": "virtual-6732",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 15360,
       "all_chars_are": "x",
@@ -3077,7 +3286,7 @@
      "timestamp": "2026-09-27T07:08:27.897889Z",
      "level": "INFO",
      "thread": "virtual-6732",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 15360,
       "all_chars_are": "x",
@@ -3095,7 +3304,7 @@
      "timestamp": "2026-09-27T07:08:27.897889Z",
      "level": "INFO",
      "thread": "virtual-6732",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 15360,
       "all_chars_are": "x",
@@ -3113,7 +3322,7 @@
      "timestamp": "2026-09-27T07:08:27.897889Z",
      "level": "INFO",
      "thread": "virtual-6732",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 7840,
       "all_chars_are": "x",
@@ -3131,7 +3340,7 @@
      "timestamp": "2026-09-27T07:08:27.897889Z",
      "level": "INFO",
      "thread": "virtual-6732",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 15360,
       "all_chars_are": "x",
@@ -3328,7 +3537,7 @@
      "timestamp": "2026-09-27T07:08:45.661800Z",
      "level": "INFO",
      "thread": "docker-java-stream-93765530",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 15360,
       "all_chars_are": "x",
@@ -3346,7 +3555,7 @@
      "timestamp": "2026-09-27T07:08:45.661800Z",
      "level": "INFO",
      "thread": "docker-java-stream-93765530",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 15360,
       "all_chars_are": "x",
@@ -3364,7 +3573,7 @@
      "timestamp": "2026-09-27T07:08:45.661800Z",
      "level": "INFO",
      "thread": "docker-java-stream-93765530",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 15360,
       "all_chars_are": "x",
@@ -3382,7 +3591,7 @@
      "timestamp": "2026-09-27T07:08:45.661800Z",
      "level": "INFO",
      "thread": "docker-java-stream-93765530",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 7840,
       "all_chars_are": "x",
@@ -3400,7 +3609,7 @@
      "timestamp": "2026-09-27T07:08:45.661800Z",
      "level": "INFO",
      "thread": "docker-java-stream-93765530",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 15360,
       "all_chars_are": "x",
@@ -3418,7 +3627,7 @@
      "timestamp": "2026-09-27T07:08:45.661800Z",
      "level": "INFO",
      "thread": "docker-java-stream-93765530",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 15360,
       "all_chars_are": "x",
@@ -3436,7 +3645,7 @@
      "timestamp": "2026-09-27T07:08:45.661800Z",
      "level": "INFO",
      "thread": "docker-java-stream-93765530",
-     "message": null,
+     "message": "<ELIDED: see message_elided>",
      "message_elided": {
       "chars": 15360,
       "all_chars_are": "x",

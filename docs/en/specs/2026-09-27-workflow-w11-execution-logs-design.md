@@ -7,7 +7,8 @@
 - **Scope:** persist every line: `Log`/`Fail` and handler messages, **and every stdout/stderr line of container and python tasks**. Read by **polling** a cursor API. **No SSE.**
 - **Retention:** **one global setting**, default 30 days, pruned by a background ticker.
 - **Write path:** a **background batch writer**. When its channel is full the handler **waits**; no line is dropped silently.
-- **Limits:** a line is **cut at 64 KiB**, and one task-run attempt keeps at most **10,000 lines or 10 MiB**. Over the cap, storing stops, the task keeps running, and **one WARN summary line** says how much was not stored. All three limits are global settings.
+- **Limits:** one task-run attempt keeps at most **10,000 lines or 10 MiB**. Over the cap, storing stops, the task keeps running, and **one WARN summary line** says how much was not stored. Both caps are global settings.
+- **Long lines (D6, decided after Task 1 measured Kestra):** a line longer than **15,360 characters is split** into several stored lines, as Kestra splits it; no text is lost. This replaces the first decision, a cut at 64 KiB. The piece length is a constant, not a setting.
 
 **Delivery:** one PR (docs + code), tasks in §8.
 
@@ -26,19 +27,19 @@
 
 ## 2. What Kestra does, and where egret differs
 
-Kestra (checkout `96893b589`, image `kestra/kestra:v2.0.0-rc13`):
+Kestra (Java checkout `96893b589`; the measured image is `kestra/kestra@sha256:28f59bf1…`, tagged `v2.0.0-rc13` but labelled `version=nightly`, revision `169ca7f2`):
 - **Model:** `LogEntry` holds tenant, namespace, flow, task, execution, task run, attempt, trigger, timestamp, level, thread, message, execution kind. On Postgres it is stored in a `logs` table as JSONB with generated columns, indexed on `(execution_id, task_id)`, `(execution_id, taskrun_id)` and time/level, plus a full-text GIN index.
 - **Read API:** `LogController` serves `GET /{executionId}` (every line, unpaginated), `/download` (plain text), `/follow` (SSE live tail), `/search` (paged) and deletes.
 - **Retention:** there is **no automatic retention**. A user writes a `PurgeLogs` task in a flow.
 - **Script output:** stdout and stderr lines become log lines through `AbstractLogConsumer`. `##kestra:log:debug##` markers bracket DEBUG output. The source reads stderr as **ERROR**, Task 1 measured **ERROR**, and egret today says **WARN** (§5).
-- **Limits:** there is **no volume cap**. A line longer than 15,360 characters is **split** into several lines with one shared timestamp (`RunContextLogger`, measured in Task 1), which the API then returns out of order.
+- **Limits:** there is **no volume cap**. A line longer than 15,360 characters is **split** into several lines with one shared timestamp (`RunContextLogger`, measured in Task 1), which the API may then return out of order (it did on 2 of 2 runs).
 
 Deliberate differences, all chosen with the user:
 
 | Kestra | egret W11 | why |
 |---|---|---|
 | no retention; a user-authored `PurgeLogs` | global retention, pruned by a ticker | a table that only grows is a Postgres outage deferred; egret has one shared database |
-| no volume cap; a line over 15,360 chars split into several | a line cut at 64 KiB (one row, `truncated`), 10,000 lines / 10 MiB per task-run attempt | a script printing in a loop must not fill the shared database |
+| no volume cap | 10,000 lines / 10 MiB per task-run attempt; long lines split exactly as Kestra splits them (§5) | a script printing in a loop must not fill the shared database |
 | SSE `follow` | cursor polling (§6) | egret has no SSE anywhere; polling reaches the same "see it while it runs" at a ~2 s delay |
 | `thread`, `triggerId`, `executionKind` | not stored | egret has no such concepts |
 | unpaginated `GET /{executionId}` | paginated by cursor | one execution may hold 10 MiB per attempt |
@@ -58,8 +59,7 @@ CREATE TABLE workflow.task_logs (
     level         smallint    NOT NULL CHECK (level BETWEEN 0 AND 4),  -- TRACE..ERROR
     ts            timestamptz NOT NULL,  -- when the line was produced
     inserted_at   timestamptz NOT NULL DEFAULT now(),
-    message       text        NOT NULL,
-    truncated     boolean     NOT NULL DEFAULT false
+    message       text        NOT NULL
 );
 CREATE INDEX task_logs_execution_id ON workflow.task_logs (execution_id, id);
 CREATE INDEX task_logs_ts ON workflow.task_logs (ts);
@@ -118,6 +118,7 @@ The writer runs whenever `worker_enabled` is true, because the worker is the onl
 | container / python stderr | **ERROR** (measured, §5), also inside a debug bracket |
 | invalid whole-line `::{…}::` marker | WARN `Invalid outputs '…'` (measured shape, §5) |
 | worker framing ("started"/"ended") | none (measured: Kestra stores none) |
+| a failed attempt | one ERROR line whose message is the failed `Outcome`'s message, written by `run_one` (chosen; Kestra writes the exception message at ERROR plus a DEBUG stack trace) |
 | handler messages already emitted through the sink | unchanged |
 | §5's cap summary | WARN |
 
@@ -125,7 +126,9 @@ Lines consumed as whole-line `::{…}::` markers are **not stored** (measured, �
 
 ## 5. Limits, and levels by measurement
 
-**Truncation.** A line longer than `log_line_max_bytes` (default 65,536) is cut at the last UTF-8 character boundary at or below the limit, and stored with `truncated = true`.
+**Long lines are split (D6).** `RunLog` splits every line longer than **15,360 characters** into consecutive pieces of 15,360 characters, the last one shorter, exactly as Kestra's `RunContextLogger` does (`MAX_MESSAGE_LENGTH = 1024 * 15`, `Splitter.fixedLength`; measured in Task 1: a 100,000-character line became 6 × 15,360 + 7,840). Each piece is its own stored line with the same `ts`, written in order, so the pieces get ascending ids and the API returns them in order. Their concatenation equals the input. Each piece counts toward the per-attempt cap as one line and at its own byte length. The piece length is the constant `LOG_PIECE_CHARS = 15_360`, not a setting.
+
+**What a character is.** egret counts **Unicode scalar values** (Rust `char`), so a split never falls inside a character and every piece is valid UTF-8. Kestra's Java counts **UTF-16 code units** (`String.length()`). The two agree on every character in the Basic Multilingual Plane. They differ for characters outside it (emoji, some CJK): such a character is 1 in egret's count and 2 in Kestra's, so egret's pieces can hold more of them, and Kestra can split a surrogate pair where egret cannot. This is a deliberate difference and it is **not measured**: Task 1's long line was ASCII only.
 
 **Per-attempt cap.** `RunLog` counts the lines and bytes it has sent. The first line that would exceed `log_run_max_lines` (default 10,000) or `log_run_max_bytes` (default 10 MiB) switches storing off for that attempt. Counting continues. At `finish()`, if any line was not stored, exactly one WARN line is written, **outside** the cap:
 
@@ -135,11 +138,11 @@ The task keeps running and its outcome is unchanged. The limits apply per attemp
 
 **Levels, measured.** Task 1 measured these on the artifact (fixture `crates/egret-workflow/oracle-exec/w11-logs.json`, shell plugin 1.9.8, Process and Docker runners). egret's comment in `commands.rs` read Kestra's `warningOnStdErr` as the knob for the stderr *log level*, and its own defence, *"nothing here reads a level back"*, stops being true in W11, because `min_level` reads it back. The measurement:
 1. **stderr is ERROR**, not WARN, whatever `warningOnStdErr` says (default, `false` and `true` all logged ERROR). egret changes WARN to ERROR and still does not offer `warningOnStdErr`.
-2. **A whole-line `::{json}::` marker is not stored**, on stdout or stderr, and its `outputs` still reach the task's outputs. This holds for any JSON object, not only one with `outputs` (a `::{"metrics":[]}::` line is not stored either). A line that only contains a marker (`x ::{…}::`, or a trailing space) is an ordinary line. A whole-line marker whose JSON does not parse is not stored; Kestra writes a WARN `Invalid outputs '<error>'` instead, and egret writes one WARN starting `Invalid outputs '` with serde's error text (chosen: no stack-trace line). egret's comment "consumed as an output AND logged" was wrong about Kestra.
+2. **A whole-line `::{json}::` marker is not stored**, on stdout or stderr, and its `outputs` still reach the task's outputs. This holds for any JSON object, not only one with `outputs` (a `::{"metrics":[]}::` line is not stored either). A line that merely contains a marker but is not exactly one (`x ::{…}::`, or a marker followed by a space) is an ordinary line and is stored. A whole-line marker whose JSON does not parse is not stored; Kestra writes a WARN `Invalid outputs '<error>'` instead, and egret writes one WARN starting `Invalid outputs '` with serde's error text (chosen: no stack-trace line). egret's comment "consumed as an output AND logged" was wrong about Kestra.
 3. **There are no worker framing lines** in an execution's log. `Type {} started` and `Flow completed with state {}` go to the server's own logger. Kestra's script runner adds its own DEBUG/TRACE diagnostics (`Starting command with pid …`, `Command succeed with exit code 0`, container and volume ids); egret does **not** replicate them (chosen).
 4. **`attemptNumber` is 0-based**: the first attempt's lines carry 0, the retry's 1, under the same task run id. It is the index into `task_runs.attempts`. egret's `TaskInput.attempt` is 1-based, so `task_logs.attempt = TaskInput.attempt - 1` (chosen mapping, measured numbering).
 5. **The `##kestra:log:debug##` bracket applies**, on both runners: stdout lines after it are DEBUG until `##kestra:log:info##`, and neither marker line is stored. A stderr line inside the bracket stays ERROR. One mode per command, toggled by a marker on either stream.
-6. **A long line is split, not cut:** Kestra stores a 100,000-character line as 15,360-character pieces with one shared timestamp, and read them back out of order. egret cuts at 65,536 bytes instead (above); this is a deliberate difference.
+6. **A long line is split, not cut:** Kestra stores a 100,000-character line as 15,360-character pieces with one shared timestamp, and read them back out of order. egret splits the same way (above, D6) and keeps the pieces in order.
 
 The code follows the measurement, and any disagreement with the Java is written down.
 
@@ -148,7 +151,7 @@ The code follows the measurement, and any disagreement with the Java is written 
 ```
 GET /api/ws/{workspace}/workflows/executions/{id}/logs
     ?after=<id>&limit=<n>&task_id=<s>&task_run_id=<uuid>&min_level=<TRACE..ERROR>
-→ 200 { items: [ {id, task_id, task_run_id, attempt, level, ts, message, truncated} ],
+→ 200 { items: [ {id, task_id, task_run_id, attempt, level, ts, message} ],
         next_after: <id|null>, execution_state: <State> }
 ```
 
@@ -175,14 +178,14 @@ utoipa-documented; the frontend client is regenerated with `npm run gen:api`. **
 - No single statement holds locks for long. Concurrent replicas are harmless, because deleting a row twice is a no-op.
 - `ON DELETE CASCADE` removes an execution's lines with the execution.
 
-Configuration (`egret_config::WorkflowConfig`, env `EGRET_WORKFLOW__…`): `log_retention_days` (30), `log_line_max_bytes` (65536), `log_run_max_lines` (10000), `log_run_max_bytes` (10485760).
+Configuration (`egret_config::WorkflowConfig`, env `EGRET_WORKFLOW__…`): `log_retention_days` (30), `log_run_max_lines` (10000), `log_run_max_bytes` (10485760).
 
 ## 8. Tasks
 
 1. **Measure on the artifact** (§5 questions 1–5); fixture `oracle-exec/w11-logs.json`.
 2. **Migration `0159` and `LogRepo`:** batch insert, cursor read with the settle lag, batch prune.
 3. **Pure logging:**
-   - async `LogSink`, `LogLine`, `RunLog` (truncation, caps, summary on `finish`);
+   - async `LogSink`, `LogLine`, `RunLog` (splitting long lines, caps, summary on `finish`);
    - the four handlers and `ingest_line` move onto `RunLog`;
    - the registry carries the sink;
    - levels per Task 1.
@@ -199,7 +202,7 @@ Against real Postgres, each with a mutation that must die:
 | end to end: publish and run a flow with `Log` + a container that prints stdout and stderr, with no harness driving the tick; read it back through the API in order and at the measured levels | the container handler not writing through `RunLog` |
 | a full channel with a slowed writer: the handler waits and **no line is lost** | `try_send` that drops instead of `send().await` |
 | over the cap: stored lines stop at the cap, exactly **one** WARN summary, the task succeeds | summary written inside the cap / not written on the `Err` path |
-| truncation at a multi-byte boundary | cutting at a byte count |
+| a 40,000-character line with multi-byte characters at and around the 15,360th character → 3 stored lines in order (15,360 / 15,360 / 9,280 characters), their concatenation equals the input | splitting at a byte count instead of a `char` count |
 | out-of-order commit: two transactions commit in reverse id order and a polling client reads both | removing the settle lag |
 | shutdown drains the channel | exit without draining |
 | retention deletes only lines older than the window; `0` deletes nothing | dropping the `ts` predicate |

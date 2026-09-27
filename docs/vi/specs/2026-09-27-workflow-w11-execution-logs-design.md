@@ -9,7 +9,8 @@
 - **Phạm vi:** lưu mọi dòng: `Log`/`Fail` và thông báo của handler, **và mọi dòng stdout/stderr của task container và python**. Đọc bằng **polling** một API có con trỏ. **Không SSE.**
 - **Thời hạn giữ:** **một cấu hình chung**, mặc định 30 ngày, một ticker nền xoá.
 - **Đường ghi:** **writer nền theo lô**. Khi kênh đầy, handler **chờ**; không dòng nào bị bỏ âm thầm.
-- **Giới hạn:** một dòng **cắt ở 64 KiB**, một lần thử của một task run giữ tối đa **10.000 dòng hoặc 10 MiB**. Vượt trần thì ngừng lưu, task vẫn chạy tiếp, và **một dòng WARN tóm tắt** nói bao nhiêu không được lưu. Cả ba giới hạn là cấu hình chung.
+- **Giới hạn:** một lần thử của một task run giữ tối đa **10.000 dòng hoặc 10 MiB**. Vượt trần thì ngừng lưu, task vẫn chạy tiếp, và **một dòng WARN tóm tắt** nói bao nhiêu không được lưu. Cả hai trần là cấu hình chung.
+- **Dòng dài (D6, quyết định sau khi Task 1 đo Kestra):** một dòng dài hơn **15.360 ký tự bị chia** thành nhiều dòng được lưu, đúng như Kestra chia; không mất chữ nào. Quyết định này thay cho quyết định đầu tiên là cắt ở 64 KiB. Độ dài mảnh là hằng số, không phải cấu hình.
 
 **Bàn giao:** một PR (tài liệu + mã), các task ở §8.
 
@@ -28,19 +29,19 @@
 
 ## 2. Kestra làm gì, và egret khác ở đâu
 
-Kestra (checkout `96893b589`, image `kestra/kestra:v2.0.0-rc13`):
+Kestra (checkout Java `96893b589`; image đã đo là `kestra/kestra@sha256:28f59bf1…`, gắn tag `v2.0.0-rc13` nhưng nhãn ghi `version=nightly`, revision `169ca7f2`):
 - **Model:** `LogEntry` gồm tenant, namespace, flow, task, execution, task run, attempt, trigger, timestamp, level, thread, message, execution kind. Trên Postgres nó nằm trong bảng `logs` dạng JSONB với các cột sinh sẵn, có index trên `(execution_id, task_id)`, `(execution_id, taskrun_id)` và thời gian/mức, cộng một index GIN toàn văn.
 - **API đọc:** `LogController` phục vụ `GET /{executionId}` (mọi dòng, không phân trang), `/download` (văn bản thô), `/follow` (SSE, xem trực tiếp), `/search` (có phân trang) và các lệnh xoá.
 - **Thời hạn giữ:** **không có** cơ chế tự xoá. Người dùng tự viết task `PurgeLogs` trong một flow.
 - **Output của script:** các dòng stdout và stderr thành dòng log qua `AbstractLogConsumer`. Marker `##kestra:log:debug##` đóng khung phần DEBUG. Đọc mã nguồn thì stderr ra **ERROR**, Task 1 đo được **ERROR**, còn egret hiện nói **WARN** (§5).
-- **Giới hạn:** **không có** trần theo tổng lượng. Một dòng dài hơn 15.360 ký tự bị **chia** thành nhiều dòng cùng một timestamp (`RunContextLogger`, Task 1 đã đo), và API trả chúng về không theo thứ tự.
+- **Giới hạn:** **không có** trần theo tổng lượng. Một dòng dài hơn 15.360 ký tự bị **chia** thành nhiều dòng cùng một timestamp (`RunContextLogger`, Task 1 đã đo), và API có thể trả chúng về không theo thứ tự (đã xảy ra ở 2 trên 2 lần chạy).
 
 Các chỗ khác có chủ đích, đều đã chọn cùng người dùng:
 
 | Kestra | egret W11 | lý do |
 |---|---|---|
 | không tự xoá; người dùng tự viết `PurgeLogs` | giữ theo cấu hình chung, ticker xoá | một bảng chỉ lớn lên là một sự cố Postgres bị hoãn lại; egret dùng chung một database |
-| không có trần tổng lượng; dòng quá 15.360 ký tự bị chia làm nhiều dòng | một dòng bị cắt ở 64 KiB (một hàng, `truncated`), 10.000 dòng / 10 MiB mỗi lần thử của task run | một script in vòng lặp không được làm đầy database dùng chung |
+| không có trần tổng lượng | 10.000 dòng / 10 MiB mỗi lần thử của task run; dòng dài được chia đúng như Kestra chia (§5) | một script in vòng lặp không được làm đầy database dùng chung |
 | SSE `follow` | polling bằng con trỏ (§6) | egret chưa có SSE ở đâu; polling đạt cùng mục tiêu "thấy log khi task đang chạy", trễ khoảng 2 giây |
 | `thread`, `triggerId`, `executionKind` | không lưu | egret không có các khái niệm này |
 | `GET /{executionId}` không phân trang | phân trang bằng con trỏ | một execution có thể chứa 10 MiB cho mỗi lần thử |
@@ -60,8 +61,7 @@ CREATE TABLE workflow.task_logs (
     level         smallint    NOT NULL CHECK (level BETWEEN 0 AND 4),  -- TRACE..ERROR
     ts            timestamptz NOT NULL,  -- lúc dòng được sinh ra
     inserted_at   timestamptz NOT NULL DEFAULT now(),
-    message       text        NOT NULL,
-    truncated     boolean     NOT NULL DEFAULT false
+    message       text        NOT NULL
 );
 CREATE INDEX task_logs_execution_id ON workflow.task_logs (execution_id, id);
 CREATE INDEX task_logs_ts ON workflow.task_logs (ts);
@@ -120,6 +120,7 @@ Writer chạy khi `worker_enabled` bật, vì worker là nơi duy nhất sinh d�
 | stderr của container / python | **ERROR** (đã đo, §5), kể cả bên trong khung debug |
 | marker `::{…}::` chiếm trọn dòng nhưng không hợp lệ | WARN `Invalid outputs '…'` (dạng đã đo, §5) |
 | dòng bao quanh của worker ("started"/"ended") | không có (đã đo: Kestra không lưu dòng nào như vậy) |
+| một lần thử thất bại | một dòng ERROR có nội dung là thông điệp của `Outcome` thất bại, do `run_one` ghi (đã chọn; Kestra ghi thông điệp exception ở ERROR cộng một stack trace DEBUG) |
 | thông báo handler đang gửi qua sink | giữ nguyên |
 | dòng tóm tắt vượt trần ở §5 | WARN |
 
@@ -127,7 +128,9 @@ Các dòng bị tiêu thụ làm marker `::{…}::` chiếm trọn dòng **khôn
 
 ## 5. Giới hạn, và mức log theo phép đo
 
-**Cắt dòng.** Một dòng dài hơn `log_line_max_bytes` (mặc định 65.536) bị cắt tại ranh giới ký tự UTF-8 cuối cùng không vượt giới hạn, và được lưu với `truncated = true`.
+**Dòng dài bị chia (D6).** `RunLog` chia mọi dòng dài hơn **15.360 ký tự** thành các mảnh liên tiếp 15.360 ký tự, mảnh cuối ngắn hơn, đúng như `RunContextLogger` của Kestra (`MAX_MESSAGE_LENGTH = 1024 * 15`, `Splitter.fixedLength`; Task 1 đã đo: một dòng 100.000 ký tự thành 6 × 15.360 + 7.840). Mỗi mảnh là một dòng được lưu riêng, cùng `ts`, ghi theo thứ tự, nên các mảnh có id tăng dần và API trả chúng đúng thứ tự. Nối các mảnh lại được đúng dòng ban đầu. Mỗi mảnh tính vào trần mỗi lần thử như một dòng, với số byte của chính nó. Độ dài mảnh là hằng số `LOG_PIECE_CHARS = 15_360`, không phải cấu hình.
+
+**Một ký tự là gì.** egret đếm **Unicode scalar value** (`char` của Rust), nên chỗ chia không bao giờ rơi vào giữa một ký tự và mảnh nào cũng là UTF-8 hợp lệ. Mã Java của Kestra đếm **UTF-16 code unit** (`String.length()`). Hai cách đếm trùng nhau với mọi ký tự trong Basic Multilingual Plane. Chúng khác nhau với ký tự nằm ngoài (emoji, một số chữ CJK): một ký tự như vậy là 1 với egret và 2 với Kestra, nên mảnh của egret có thể chứa nhiều ký tự như vậy hơn, và Kestra có thể chia đôi một cặp surrogate còn egret thì không. Đây là khác biệt có chủ đích và **chưa được đo**: dòng dài của Task 1 chỉ gồm ASCII.
 
 **Trần mỗi lần thử.** `RunLog` đếm số dòng và số byte đã gửi. Dòng đầu tiên làm vượt `log_run_max_lines` (mặc định 10.000) hoặc `log_run_max_bytes` (mặc định 10 MiB) tắt việc lưu cho lần thử đó. Việc đếm vẫn tiếp tục. Khi `finish()`, nếu có dòng nào không được lưu, egret ghi đúng một dòng WARN, **nằm ngoài** trần:
 
@@ -141,7 +144,7 @@ Task vẫn chạy tiếp và kết quả không đổi. Giới hạn tính theo 
 3. **Không có dòng bao quanh của worker** trong log của execution. `Type {} started` và `Flow completed with state {}` đi vào logger riêng của server. Runner script của Kestra tự thêm các dòng chẩn đoán DEBUG/TRACE (`Starting command with pid …`, `Command succeed with exit code 0`, id container và volume); egret **không** tái tạo chúng (đã chọn).
 4. **`attemptNumber` đếm từ 0**: các dòng của lần thử đầu mang 0, lần retry mang 1, cùng một task run id. Nó là chỉ số trong `task_runs.attempts`. `TaskInput.attempt` của egret đếm từ 1, nên `task_logs.attempt = TaskInput.attempt - 1` (cách quy đổi là đã chọn, cách đánh số là đã đo).
 5. **Khung `##kestra:log:debug##` có áp dụng**, trên cả hai runner: các dòng stdout sau nó là DEBUG cho tới `##kestra:log:info##`, và cả hai dòng marker đều không được lưu. Dòng stderr bên trong khung vẫn là ERROR. Một chế độ cho mỗi lệnh, bật/tắt bởi marker trên stream nào cũng được.
-6. **Dòng dài bị chia, không bị cắt:** Kestra lưu một dòng 100.000 ký tự thành các mảnh 15.360 ký tự cùng một timestamp, và đọc lại chúng không theo thứ tự. egret thì cắt ở 65.536 byte (ở trên); đây là khác biệt có chủ đích.
+6. **Dòng dài bị chia, không bị cắt:** Kestra lưu một dòng 100.000 ký tự thành các mảnh 15.360 ký tự cùng một timestamp, và đọc lại chúng không theo thứ tự. egret chia cùng cách đó (ở trên, D6) và giữ các mảnh đúng thứ tự.
 
 Mã làm theo phép đo, và mọi chỗ bất đồng với mã Java đều được ghi lại.
 
@@ -150,7 +153,7 @@ Mã làm theo phép đo, và mọi chỗ bất đồng với mã Java đều đ�
 ```
 GET /api/ws/{workspace}/workflows/executions/{id}/logs
     ?after=<id>&limit=<n>&task_id=<s>&task_run_id=<uuid>&min_level=<TRACE..ERROR>
-→ 200 { items: [ {id, task_id, task_run_id, attempt, level, ts, message, truncated} ],
+→ 200 { items: [ {id, task_id, task_run_id, attempt, level, ts, message} ],
         next_after: <id|null>, execution_state: <State> }
 ```
 
@@ -177,14 +180,14 @@ Tài liệu hoá bằng utoipa; client frontend được sinh lại bằng `npm 
 - Không câu lệnh nào giữ khoá lâu. Nhiều bản chạy đồng thời cũng vô hại, vì xoá một hàng hai lần không làm gì.
 - `ON DELETE CASCADE` xoá các dòng của một execution cùng với execution đó.
 
-Cấu hình (`egret_config::WorkflowConfig`, biến môi trường `EGRET_WORKFLOW__…`): `log_retention_days` (30), `log_line_max_bytes` (65536), `log_run_max_lines` (10000), `log_run_max_bytes` (10485760).
+Cấu hình (`egret_config::WorkflowConfig`, biến môi trường `EGRET_WORKFLOW__…`): `log_retention_days` (30), `log_run_max_lines` (10000), `log_run_max_bytes` (10485760).
 
 ## 8. Các task
 
 1. **Đo trên artifact** (các câu 1–5 ở §5); fixture `oracle-exec/w11-logs.json`.
 2. **Migration `0159` và `LogRepo`:** insert theo lô, đọc theo con trỏ có độ trễ lắng, xoá theo lô.
 3. **Phần log thuần:**
-   - `LogSink` async, `LogLine`, `RunLog` (cắt dòng, trần, tóm tắt khi `finish`);
+   - `LogSink` async, `LogLine`, `RunLog` (chia dòng dài, trần, tóm tắt khi `finish`);
    - bốn handler và `ingest_line` chuyển sang `RunLog`;
    - registry mang sink;
    - mức log theo Task 1.
@@ -201,7 +204,7 @@ Chạy trên Postgres thật, mỗi test đi kèm một mutation phải bị gi�
 | đầu-cuối: publish và chạy một flow gồm `Log` + một container in cả stdout lẫn stderr, không có gì điều khiển tick bằng tay; đọc lại qua API đúng thứ tự và đúng mức đo được | handler container không ghi qua `RunLog` |
 | kênh đầy với writer bị làm chậm: handler chờ và **không mất dòng nào** | `try_send` bỏ dòng thay vì `send().await` |
 | vượt trần: dòng lưu dừng ở trần, đúng **một** dòng WARN tóm tắt, task thành công | dòng tóm tắt ghi bên trong trần / không ghi trên đường `Err` |
-| cắt dòng tại ranh giới ký tự nhiều byte | cắt theo số byte |
+| một dòng 40.000 ký tự có các ký tự nhiều byte ở ngay và quanh ký tự thứ 15.360 → 3 dòng được lưu đúng thứ tự (15.360 / 15.360 / 9.280 ký tự), nối lại bằng đúng dòng ban đầu | chia theo số byte thay vì theo số `char` |
 | commit lệch thứ tự: hai transaction commit ngược thứ tự id và client polling đọc được cả hai | bỏ độ trễ lắng |
 | tắt máy thì kênh được rút hết | thoát mà không rút kênh |
 | giữ log chỉ xoá dòng cũ hơn hạn; `0` không xoá gì | bỏ điều kiện `ts` |
