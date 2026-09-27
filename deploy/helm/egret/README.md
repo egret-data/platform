@@ -117,9 +117,14 @@ kubectl -n egret-engines delete pod <engine>-fe-0                          # FE 
 - **anything created directly on the FE** — databases, views, materialized views. Table DATA in the
   object store is untouched; what is lost is the FE's record of it.
 
-The **`root` password is not in that list**: it is restored by egret. A bare `kubectl delete pod`
-does bring `root` back with no password, but an engine update through egret (`PUT /engines/{id}`)
-re-templates the `initpwd` Job and it runs again within seconds — measured on the live gate (§5).
+**The `root` password is a special case, and the honest answer is "sometimes".** The claim that it is
+simply lost is wrong: an engine update through egret (`PUT /engines/{id}`) deletes and re-applies the
+`initpwd` Job whenever a root password is on record, and on 2026-09-26 that Job re-ran within
+seconds and restored the password (§7.4 of the live-result document). It did **not** reproduce on
+2026-09-27: a PUT on the same engine templated no `initpwd` Job at all and `root` came back with no
+password (§10). So treat a restored root password as likely on the egret path and not guaranteed, and
+check `SHOW ALL AUTHENTICATION` after any FE roll. A bare `kubectl delete pod` never restores it —
+that path does not go through egret at all.
 
 **What recovers the rest, and what does not:**
 

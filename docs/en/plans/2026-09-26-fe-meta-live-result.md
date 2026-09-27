@@ -619,7 +619,100 @@ it on a live engine would be a supported way to reproduce §7.
 destroys that FE's metadata (§5.3 is the inventory of what that costs). Nothing in egret does this,
 and nothing needs it done. The README's loss inventory now describes only that deliberate action.
 
-**Also corrected in the README:** the claim that the `root` password is lost. §7.4 measured the
-opposite on the egret path — `PUT /engines/{id}` re-templates the `initpwd` Job and it re-runs within
-seconds, so the password is restored. It is lost only on a bare `kubectl delete pod`, which does not
-go through egret.
+### 10.1 Verified live, 2026-09-27 (OBSERVED)
+
+Deployed from this worktree with all six `--set`s including `ranger.enabled=true`, verified by the
+pods rather than by helm's report:
+
+```text
+$ docker exec egret-control-plane crictl inspecti docker.io/library/egret-backend:dev | jq -r .status.id
+sha256:a3eb9870f9cbd5b7ce87d2b812fefe487ae853cc8c2b4ddf451845ad7ee9118a
+$ kubectl -n egret-system get pods -l app=egret -o json | … imageID
+egret-85b7c8b6cc-42bwl True sha256:a3eb9870f9cbd5b7ce87d2b812fefe487ae853cc8c2b4ddf451845ad7ee9118a
+egret-85b7c8b6cc-9wmtr True sha256:a3eb9870f9cbd5b7ce87d2b812fefe487ae853cc8c2b4ddf451845ad7ee9118a
+$ kubectl -n egret-system exec <each pod> -- env | grep EGRET_RANGER__ENABLED
+EGRET_RANGER__ENABLED=true          # both pods
+```
+
+**The wedged engine healed.** `PUT /engines/43bc0bf7-…` re-sending `sp3c2-sr-live`'s own stored
+config now stores `feMetaPersistent: false` and renders the pre-PVC shape, so the operator's patch is
+accepted again:
+
+```text
+PUT response … "feMetaPersistent":false,"feMetaStorageSize":null,"feMetaStorageClass":null   HTTP=200
+
+$ kubectl -n egret-engines get starrockscluster sp3c2-sr-live -o jsonpath='{…storageVolumes}'
+[{"hostPath":{"path":"/var/lib/egret/starrocks/sp3c2-sr-live/ssl-keystore","type":"DirectoryOrCreate"},
+  "mountPath":"/etc/starrocks/ssl","name":"ssl-keystore"}]      # the keystore ALONE — pre-PVC shape
+
+phase=reconciling → phase=running          (within ~45s)
+$ kubectl -n egret-engines get sts sp3c2-sr-live-fe -o jsonpath='{.spec.volumeClaimTemplates}'
+                                            # still empty
+$ kubectl -n egret-engines get pod sp3c2-sr-live-fe-0 -o …volumes… | grep fe-meta
+fe-meta  {"emptyDir":{},"name":"fe-meta"}   # emptyDir intact
+$ kubectl -n starrocks logs …operator… --since=3m | grep -c sp3c2-sr-live
+0                                           # no rejected patch any more
+```
+
+**A new engine still gets the PVC** — the check that keeps the gate falsifiable, since a broken gate
+that renders the claim for NOBODY would pass every check above. `POST /engines` for `femeta-marker`:
+
+```text
+create response … "feMetaPersistent":true …                                       HTTP=201
+$ kubectl -n egret-engines get starrockscluster femeta-marker -o jsonpath='{…storageVolumes}'
+[{"mountPath":"/opt/starrocks/fe/meta","name":"fe-meta","storageSize":"20Gi"},
+ {"hostPath":{…},"mountPath":"/etc/starrocks/ssl","name":"ssl-keystore"}]   # PVC + keystore, alongside
+$ kubectl -n egret-engines get sts femeta-marker-fe -o jsonpath='{…volumeClaimTemplates…}'
+fe-meta 20Gi
+$ kubectl -n egret-engines get pvc
+fe-meta-femeta-marker-fe-0   Bound   pvc-3cc92224-…   20Gi   standard   8s
+```
+
+`femeta-marker` was deleted afterwards (and its PVC with it) — it existed only to make that
+measurement. `femeta-live`'s `fe-meta-femeta-live-fe-0` is still `Bound` to the same
+`pvc-84ea751b-…` volume, and `demo-trino` was neither used nor modified.
+
+### 10.2 Two honest caveats from the 2026-09-27 run
+
+**`femeta-live` carries no marker.** It was created on 2026-09-26 by the unconditional code, so its
+stored spec has no `feMetaPersistent` at all. Its PVC is verified `Bound` by observation, NOT by a
+re-provision — and it must not be PUT, because the corrected renderer would drop its claim template,
+which is the same immutable-field change in reverse. Nothing in production is in that state (the
+unconditional render never shipped); this one engine is an artefact of the test cluster.
+
+**The heal PUT cost `sp3c2-sr-live` its metadata, and this is why.** Removing the `fe-meta` entry
+changed the FE pod template, so the operator rolled the pod (`poduid` `fc307d0e-…` → `cba7e4d6-…`,
+`restarts` 33 → 0) and — the volume being an `emptyDir` — its metadata went with it:
+
+```text
+$ mysql -uroot --password= -e 'SHOW CATALOGS; SHOW ALL AUTHENTICATION;'
+default_catalog  Internal  …          # sp4a10_wh is GONE
+'root'@'%'  No  MYSQL_NATIVE_PASSWORD  NULL    # root is passwordless again
+$ ls -la /opt/starrocks/fe/meta   → bdb/ and image/ both created Sep 27 00:19
+```
+
+That is the `emptyDir` defect doing exactly what §0 said it does, on an engine the earlier
+unconditional render had already wedged. It is not a consequence of the corrected renderer: for an
+engine that never met the unconditional code, the corrected render equals what is already stored, so
+there is nothing for the operator to change.
+
+**The root-password restoration did NOT reproduce.** §7.4 measured `PUT /engines/{id}` re-running the
+initpwd Job. Today's PUT on the same engine templated **no Job at all**:
+
+```text
+$ kubectl -n egret-engines get jobs
+NAME                  STATUS     COMPLETIONS   DURATION   AGE
+femeta-live-initpwd   Complete   1/1           96s        8h          # sp3c2-sr-live-initpwd absent
+$ kubectl -n egret-engines get cm,secret | grep sp3c2-sr-live-initpwd
+configmap/sp3c2-sr-live-initpwd-shell   1        3d10h                # unchanged, not re-applied
+secret/sp3c2-sr-live-initpwd-secret     Opaque   1        3d10h
+$ kubectl -n egret-engines get events | grep -i initpwd    → (no output)
+```
+
+The provisioner applies the Job whenever `root_password` is `Some` (deleting any existing one first,
+since `spec.template` is immutable), and the engine row does carry a `root_secret_id`, so the
+password apparently did not resolve on this apply. **Not diagnosed** — it is outside this
+correction's diff, which touches only the `fe_meta_persistent` render and the marker — but it is
+recorded because it contradicts the measurement the README correction rests on. The README now says
+restoration is likely on the egret path and not guaranteed, and tells operators to check
+`SHOW ALL AUTHENTICATION` after an FE roll, rather than promising it.
