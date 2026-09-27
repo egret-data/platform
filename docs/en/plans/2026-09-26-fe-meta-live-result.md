@@ -15,6 +15,13 @@ engine keeps its `emptyDir`, and its `StarRocksCluster` sits in `phase=failed` r
 has the verbatim operator error. Section 3 is the deploy, verified by the pods; §9 is the scoreboard.
 Sections 0-2 are the earlier run's observations, re-confirmed today in §2b.
 
+**CORRECTED 2026-09-27 (§10).** §7's finding was acted on: the PVC is now rendered ONLY for engines
+created after the change, decided from a creation-time marker in the stored spec. Existing engines
+are left exactly as they are and keep the operator's `emptyDir`, so their clusters keep reconciling.
+Wherever a section below says the existing-engine path needs a required operator step in the README,
+or that reverting is impossible through egret, read §10 instead — both were written before that fix
+existed.
+
 Every section below is written as it finished. A case that could not be run says so.
 
 ---
@@ -530,10 +537,14 @@ observation is worse and belongs in that README instead:
 
 **One further caveat, stated rather than left implied:** §5's PASS is for an engine **created** by
 this code. The fix is proven for new engines. For engines that already exist, this branch as it
-stands does not deliver persistence and leaves their operator reconcile wedged — that needs a
-follow-up (recreate the FE StatefulSet, e.g. `kubectl delete sts <name>-fe --cascade=orphan` so the
-operator rebuilds it with the claim template, which is also the moment the metadata is lost), and it
-needs to be in the README as a required operator step, not as a passive warning.
+stands does not deliver persistence and leaves their operator reconcile wedged.
+
+**Superseded by §10.** That caveat was written with only §7's measurement in hand, and it proposed a
+required operator step in the README. The decision taken with these facts went the other way: the
+unconditional render was the defect, so the PVC is now gated on a creation-time marker and existing
+engines are left untouched. Recreating the FE StatefulSet stays available as a DELIBERATE operator
+action for anyone who wants it, and it still destroys that FE's metadata — it is not a required
+upgrade step, and it is not a side effect of upgrading.
 
 ### 7.5 What was deliberately NOT done
 
@@ -544,8 +555,9 @@ check was asked to measure, and executing it would have destroyed that engine's 
 remains a prediction, as the task instructed when the measurement cannot be taken cleanly.
 
 The cluster is left with `sp3c2-sr-live` in `phase=failed` and the operator retrying. That state is
-the finding, not damage from the measurement: reverting it is impossible through egret, since this
-branch renders the `fe-meta` entry unconditionally on every provision.
+the finding, not damage from the measurement: reverting it was impossible through egret **at the time
+this was written**, since the branch then rendered the `fe-meta` entry unconditionally on every
+provision. §10 records the fix that made it revertible, and the verification that it did revert.
 
 ## 8. Confirmed untouched
 
@@ -567,4 +579,47 @@ demo-trino-coordinator-c54f46974-xwgbt   1/1   Running   59 (50m ago)   6d1h
 | 4. the one-time migration loss, measured | **the prediction is FALSIFIED** — the migration does not happen at all and the operator wedges (§7). The loss inventory itself stays a prediction. |
 
 The headline is proven for new engines. The existing-engine path is broken in a way the unit tests
-could not see, and the README's upgrade note is wrong about it.
+could not see, and the README's upgrade note is wrong about it. **§10 is the correction.**
+
+---
+
+## 10. The correction (2026-09-27) — the PVC is rendered only for engines created after the change
+
+§7 falsified the plan's own prediction, so the plan changed. Recorded here because the prose above
+was written before this existed and still reads as if the unconditional render were the shipped
+behaviour.
+
+**The decision.** Render the FE metadata PVC only for engines created after this change. Existing
+engines keep the operator's `emptyDir` until an operator deliberately migrates them. The point is
+that no existing deployment breaks — and §7 is the reason: the unconditional render gave an existing
+engine **no** persistence **and** a `StarRocksCluster` that stops converging entirely, so no further
+change of any kind applies to it, a Ranger rebind included. That is strictly worse than leaving it
+alone, which is what the plan and the README previously predicted ("loses metadata once, then
+fine").
+
+**How it is decided.** From stored engine state, never from live Kubernetes: the renderer
+(`starrocks_cluster_cr`) stays a pure function of the `EngineSpec`, and asking the API server
+"does this StatefulSet already exist?" inside it would both break that and open a TOCTOU between the
+check and the apply. The marker is `starrocksConfig.feMetaPersistent`, on the same StarRocks config
+surface as `feMetaStorageClass` / `feMetaStorageSize`, stamped `true` by
+`build_starrocks_spec(&body, None)` — which is exactly the create path — and only preserved, never
+introduced, on update. It is deliberately NOT a field on the request body: a wire knob that could set
+it on a live engine would be a supported way to reproduce §7.
+
+**What each kind of engine renders now.**
+
+| engine | `starRocksFeSpec.storageVolumes` |
+|---|---|
+| created before the change (no marker), TLS off | the KEY IS ABSENT — byte-identical to the pre-`414035e2` render, so an upgrade is a no-op and the cluster keeps reconciling. An empty array would already be a change and is refused by a test. |
+| created before the change, TLS on | the `ssl-keystore` entry ALONE, exactly as before |
+| created after the change | the `fe-meta` PVC, plus the `ssl-keystore` entry ALONGSIDE it when TLS is on |
+
+**Migration is an operator action, not an upgrade side effect.** `kubectl delete sts <engine>-fe
+--cascade=orphan` lets the operator rebuild the StatefulSet, and the FE pod replacement that follows
+destroys that FE's metadata (§5.3 is the inventory of what that costs). Nothing in egret does this,
+and nothing needs it done. The README's loss inventory now describes only that deliberate action.
+
+**Also corrected in the README:** the claim that the `root` password is lost. §7.4 measured the
+opposite on the egret path — `PUT /engines/{id}` re-templates the `initpwd` Job and it re-runs within
+seconds, so the password is restored. It is lost only on a bare `kubectl delete pod`, which does not
+go through egret.
