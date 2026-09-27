@@ -104,17 +104,36 @@ impl Fixture {
     /// service — the compiled output an engine would download. Scoped to the
     /// fixture's `service_id`, so other tests' profiles cannot perturb it.
     async fn compiled_policy_names(&self) -> Vec<String> {
+        self.compiled_policy_names_under(self.service_id).await
+    }
+
+    /// The same read for ANY profile — the patch tests need it for the profile
+    /// a grant has just been moved AWAY from as well as the one it moved to,
+    /// which is the whole point of the union recompile.
+    async fn compiled_policy_names_under(&self, service_id: i64) -> Vec<String> {
         sqlx::query_scalar::<_, String>(
             "SELECT name FROM policy.authz_policies \
              WHERE service_id = $1 AND (name LIKE $2 || '%' OR name LIKE $3 || '%') \
              ORDER BY name",
         )
-        .bind(self.service_id)
+        .bind(service_id)
         .bind(COMPILER_GRANT_PREFIX)
         .bind(COMPILER_RULE_PREFIX)
         .fetch_all(&self.db.pool)
         .await
         .expect("read compiled policies")
+    }
+
+    /// One compiled policy's body, under this fixture's own profile.
+    async fn compiled_policy_body(&self, name: &str) -> Value {
+        sqlx::query_scalar::<_, Value>(
+            "SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+        )
+        .bind(self.service_id)
+        .bind(name)
+        .fetch_one(&self.db.pool)
+        .await
+        .unwrap_or_else(|e| panic!("read compiled policy {name:?}: {e}"))
     }
 
     /// How many grants name this fixture's catalog — a scoped population, used
@@ -533,44 +552,7 @@ async fn a_grant_on_an_unreachable_catalog_touches_no_profile() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
 
-    // A registry catalog attached to no engine at all, under its own
-    // warehouse (`registry.catalogs` is UNIQUE on `warehouse_id`).
-    let ws_id: Uuid =
-        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
-            .bind(unique("perm-orphan-ws"))
-            .bind("Perm Orphan WS")
-            .fetch_one(&f.db.pool)
-            .await
-            .expect("workspace");
-    let sc_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
-         VALUES ($1,'us-east-1','egret-perm-orphan-test','AKIATEST') RETURNING id",
-    )
-    .bind(unique("perm-orphan-sc"))
-    .fetch_one(&f.db.pool)
-    .await
-    .expect("storage connection");
-    let orphan_wh: Uuid = sqlx::query_scalar(
-        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
-         VALUES ($1,$2,$3) RETURNING id",
-    )
-    .bind(unique("perm_orphan_wh"))
-    .bind(ws_id)
-    .bind(sc_id)
-    .fetch_one(&f.db.pool)
-    .await
-    .expect("warehouse");
-    let orphan: Uuid = sqlx::query_scalar(
-        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
-         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
-                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
-         RETURNING id",
-    )
-    .bind(unique("perm_routes_orphan"))
-    .bind(orphan_wh)
-    .fetch_one(&f.db.pool)
-    .await
-    .expect("orphan catalog");
+    let orphan = orphan_catalog(&f, "perm-orphan").await;
 
     let (status, body) = into_json(
         f.app()
@@ -628,6 +610,49 @@ async fn a_grant_on_an_unreachable_catalog_touches_no_profile() {
         before,
         "the refused grant must not have been stored"
     );
+}
+
+/// A registry catalog attached to NO engine at all, under its own warehouse
+/// (`registry.catalogs` is UNIQUE on `warehouse_id`). Its affected-service set
+/// is empty, which is the case where the service-independent shape check is the
+/// only thing that can refuse an uncompilable row.
+async fn orphan_catalog(f: &Fixture, tag: &str) -> Uuid {
+    let ws_id: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
+            .bind(unique(tag))
+            .bind("Perm Orphan WS")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("workspace");
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','egret-perm-orphan-test','AKIATEST') RETURNING id",
+    )
+    .bind(unique(tag))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("storage connection");
+    let orphan_wh: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(unique("perm_orphan_wh"))
+    .bind(ws_id)
+    .bind(sc_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("warehouse");
+    sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(unique("perm_routes_orphan"))
+    .bind(orphan_wh)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("orphan catalog")
 }
 
 /// Grants naming one catalog — the scoped population a test can count without
@@ -748,6 +773,599 @@ async fn a_grant_that_cannot_compile_is_refused_and_not_stored() {
          its policies is worse than a rejected one, because the UI shows it as active"
     );
     assert_eq!(f.compiled_policy_names().await, Vec::<String>::new());
+}
+
+// ---------------------------------------------------------------------------
+// PATCH: editing in place (SP4b D1)
+// ---------------------------------------------------------------------------
+
+/// A SECOND StarRocks profile, with its own engine, warehouse and registry
+/// catalog attached to that engine. Returned as `(service_id, catalog_id)`.
+///
+/// The catalog-move patch test needs two profiles that reach DIFFERENT
+/// catalogs: the defect it discriminates against (recompiling only the NEW
+/// affected set) is invisible when both catalogs land in the same profile.
+async fn extra_profile(f: &Fixture, tag: &str) -> (i64, Uuid) {
+    let service = f
+        .policy
+        .create_service(&unique(tag), "starrocks", &json!({}))
+        .await
+        .expect("create second service");
+    let ws_id: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
+            .bind(unique(tag))
+            .bind("Perm Patch WS")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("workspace");
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','egret-perm-patch-test','AKIATEST') RETURNING id",
+    )
+    .bind(unique(tag))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("storage connection");
+    let warehouse_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(unique("perm_patch_wh"))
+    .bind(ws_id)
+    .bind(sc_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("warehouse");
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+    )
+    .bind(unique(tag))
+    .bind(service.id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("engine");
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(unique("perm_patch_cat"))
+    .bind(warehouse_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("registry catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine_id)
+    .bind(catalog_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("attach catalog");
+    (service.id, catalog_id)
+}
+
+/// Create one grant through the endpoint and return its id.
+async fn create_grant_returning_id(f: &Fixture, token: &str, body: Value) -> String {
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/grants", token, Some(body)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    created["id"].as_str().expect("minted grant id").to_string()
+}
+
+/// The users a compiled access policy's first item names — the compiled output
+/// an edit has to actually change, rather than the `perm.grants` row.
+fn policy_item_users(body: &Value) -> Vec<String> {
+    body["policyItems"][0]["users"]
+        .as_array()
+        .unwrap_or_else(|| panic!("policyItems[0].users in {body}"))
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// **The id survives, and the compiled POLICY BODY changes.** A patch that
+/// stored the new principals without recompiling would pass a `perm.grants`
+/// assertion and leave the engine enforcing the old principal — so this looks
+/// at `policy.authz_policies`, and at the policy NAME, which carries the grant
+/// id and therefore fails if the handler delete-and-recreated instead.
+#[tokio::test]
+async fn patching_a_grants_principals_recompiles_and_keeps_the_id() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let grant_id = create_grant_returning_id(&f, &token, grant_body(f.catalog_id, "analyst")).await;
+    let name = format!("{COMPILER_GRANT_PREFIX}{grant_id}");
+    assert_eq!(f.compiled_policy_names().await, vec![name.clone()]);
+    assert_eq!(
+        policy_item_users(&f.compiled_policy_body(&name).await),
+        vec!["analyst".to_string()]
+    );
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/grants/{grant_id}"),
+                &token,
+                Some(grant_body(f.catalog_id, "auditor")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["updated"], 1,
+        "the patch must have UPDATED the compiled policy in place — 1 created plus \
+         1 deleted would mean the id churned; body: {body}"
+    );
+    assert_eq!(
+        f.compiled_policy_names().await,
+        vec![name.clone()],
+        "the policy name carries the grant id, so an unchanged name is the id surviving"
+    );
+    assert_eq!(
+        policy_item_users(&f.compiled_policy_body(&name).await),
+        vec!["auditor".to_string()],
+        "the COMPILED policy must name the patched principal — a patch that wrote \
+         `perm.grants` and skipped the recompile leaves the engine enforcing the old one"
+    );
+
+    // And the row itself kept its id, which is what an `explain` reason links to.
+    let (status, listed) = into_json(
+        f.app()
+            .oneshot(req("GET", "/perm/grants", &token, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mine = listed
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|g| g["id"] == grant_id)
+        .unwrap_or_else(|| panic!("the patched grant must still carry its id; got {listed}"));
+    assert_eq!(mine["principals"]["include"][0]["ref"], "auditor");
+}
+
+/// **THE test this task exists for.** Moving a grant to another catalog must
+/// REAP the policy from the profile it used to reach and create it in the new
+/// one. Asserting only the new profile passes against the bug: recompiling
+/// just the new affected set leaves the old policy in place, served to that
+/// engine forever with nothing in the model producing it — SP4a's "a deleted
+/// grant's policy is enforced forever" Critical, through the edit door.
+#[tokio::test]
+async fn patching_a_grants_catalog_reaps_the_policy_from_the_old_profile() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (other_service, other_catalog) = extra_profile(&f, "perm-patch-move").await;
+
+    let grant_id = create_grant_returning_id(&f, &token, grant_body(f.catalog_id, "analyst")).await;
+    let name = format!("{COMPILER_GRANT_PREFIX}{grant_id}");
+    assert_eq!(
+        f.compiled_policy_names().await,
+        vec![name.clone()],
+        "the grant starts out compiled under the FIRST profile"
+    );
+    assert_eq!(
+        f.compiled_policy_names_under(other_service).await,
+        Vec::<String>::new(),
+        "and not under the second one"
+    );
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/grants/{grant_id}"),
+                &token,
+                Some(grant_body(other_catalog, "analyst")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    assert_eq!(
+        f.compiled_policy_names().await,
+        Vec::<String>::new(),
+        "THE OLD PROFILE MUST BE REAPED. Its engine still downloads this policy, and \
+         after the patch nothing in the model produces it and no later recompile of \
+         that profile would sweep it — recompiling only the NEW affected set leaves \
+         the old grant enforced forever; body: {body}"
+    );
+    assert_eq!(
+        f.compiled_policy_names_under(other_service).await,
+        vec![name],
+        "and the policy must exist under the profile the grant now reaches, under the \
+         SAME id; body: {body}"
+    );
+    let services = body["services"].as_array().expect("services");
+    assert!(
+        services.iter().any(|v| v.as_i64() == Some(f.service_id)),
+        "the response must name the OLD profile it recompiled; body: {body}"
+    );
+    assert!(
+        services.iter().any(|v| v.as_i64() == Some(other_service)),
+        "and the new one; body: {body}"
+    );
+    assert_eq!(body["deleted"], 1, "one policy reaped; body: {body}");
+    assert_eq!(body["created"], 1, "one policy created; body: {body}");
+}
+
+/// A patch that could store an uncompilable row would reopen at update the
+/// defect SP4a closed at create, so the patch path runs the SAME
+/// `validate_grant_shape` — and the refusal must leave both the row and its
+/// compiled policy exactly as they were.
+#[tokio::test]
+async fn patching_a_grant_into_an_uncompilable_shape_is_refused_and_changes_nothing() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let grant_id = create_grant_returning_id(&f, &token, grant_body(f.catalog_id, "analyst")).await;
+    let name = format!("{COMPILER_GRANT_PREFIX}{grant_id}");
+
+    // Ranger matches bare usernames, so an email address in a `user` principal
+    // can never compile (`CompileError::UnusableUserRef`).
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/grants/{grant_id}"),
+                &token,
+                Some(grant_body(f.catalog_id, "analyst@egret.local")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an uncompilable patch must be refused; body: {body}"
+    );
+    assert_eq!(
+        f.compiled_policy_names().await,
+        vec![name.clone()],
+        "the refused patch must have ROLLED BACK — a stored-but-uncompiled grant is \
+         worse than a rejected one, because the UI shows it as active"
+    );
+    assert_eq!(
+        policy_item_users(&f.compiled_policy_body(&name).await),
+        vec!["analyst".to_string()],
+        "and the policy body must be the one the grant had before the refused patch"
+    );
+    // The ROW too, not just the policy: a handler that committed the UPDATE and
+    // only then discovered the compile failure would leave the grant reading as
+    // patched-and-active in the UI while no engine had ever been told.
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT ref FROM perm.grant_principals WHERE grant_id = $1 AND mode = 'include'",
+    )
+    .bind(Uuid::parse_str(&grant_id).unwrap())
+    .fetch_all(&f.db.pool)
+    .await
+    .expect("read principals");
+    assert_eq!(
+        stored,
+        vec!["analyst".to_string()],
+        "the refused patch must not have committed its own UPDATE"
+    );
+}
+
+/// **The half the recompile cannot cover.** A grant on a catalog no engine
+/// reaches affects no profile, so the recompile validates NOTHING — exactly as
+/// on the create path — and only the service-independent shape check can refuse
+/// an uncompilable patch. Without it such a row commits and lies in wait:
+/// attach an engine to that catalog later and every recompile of the profile
+/// 400s, rolling back every tag write on the warehouse with it.
+#[tokio::test]
+async fn patching_a_grant_that_affects_no_profile_still_validates_its_shape() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let orphan = orphan_catalog(&f, "perm-patch-orphan").await;
+    let grant_id = create_grant_returning_id(&f, &token, grant_body(orphan, "analyst")).await;
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/grants/{grant_id}"),
+                &token,
+                // Ranger matches bare usernames: an email can never compile.
+                Some(grant_body(orphan, "analyst@egret.local")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an ill-formed patch must be refused even when it affects no profile; body: {body}"
+    );
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT ref FROM perm.grant_principals WHERE grant_id = $1 AND mode = 'include'",
+    )
+    .bind(Uuid::parse_str(&grant_id).unwrap())
+    .fetch_all(&f.db.pool)
+    .await
+    .expect("read principals");
+    assert_eq!(
+        stored,
+        vec!["analyst".to_string()],
+        "the refused patch must not have been stored"
+    );
+}
+
+/// An empty `actions` is refused on patch for the same reason it is on create.
+#[tokio::test]
+async fn patching_a_grant_to_no_actions_is_refused() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let grant_id = create_grant_returning_id(&f, &token, grant_body(f.catalog_id, "analyst")).await;
+    let mut body = grant_body(f.catalog_id, "analyst");
+    body["actions"] = json!([]);
+    let (status, got) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/grants/{grant_id}"),
+                &token,
+                Some(body),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {got}");
+}
+
+/// A `workspace_assignment` grant belongs to the assignment sync, which
+/// derives it from `(catalog, workspace)` and recreates it on demand (D3). A
+/// patch here would be reverted by the next sync or collide with
+/// `grants_one_per_assignment` — the same reason `NewGrant` cannot MINT one.
+#[tokio::test]
+async fn patching_a_workspace_assignment_grant_is_refused() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let ws_id: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
+            .bind(unique("perm-patch-assign-ws"))
+            .bind("Perm Patch Assign WS")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("workspace");
+    egret_perm::sync_assignment_grants(&f.perm, f.catalog_id, &[ws_id])
+        .await
+        .expect("assign catalog to workspace");
+    let implicit: Uuid = sqlx::query_scalar(
+        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment'",
+    )
+    .bind(f.catalog_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("implicit grant");
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/grants/{implicit}"),
+                &token,
+                Some(grant_body(f.catalog_id, "analyst")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a grant the assignment sync owns must not be editable here; body: {body}"
+    );
+    let origin: String = sqlx::query_scalar("SELECT origin FROM perm.grants WHERE id = $1")
+        .bind(implicit)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("read origin");
+    assert_eq!(origin, "workspace_assignment", "the row must be untouched");
+}
+
+#[tokio::test]
+async fn patching_an_unknown_grant_or_rule_is_a_404() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let missing = Uuid::new_v4();
+    for (uri, body) in [
+        (
+            format!("/perm/grants/{missing}"),
+            grant_body(f.catalog_id, "analyst"),
+        ),
+        (
+            format!("/perm/rules/{missing}"),
+            json!({
+                "name": unique("nope"),
+                "kind": { "type": "mask", "mask_type": "MASK_HASH", "value_expr": null },
+                "selector": { "type": "path", "catalog_id": f.catalog_id,
+                              "schema": "sales", "table": "orders", "column": "email" },
+                "exempt": { "include": [], "exclude": [] }
+            }),
+        ),
+    ] {
+        let (status, got) = into_json(
+            f.app()
+                .oneshot(req("PATCH", &uri, &token, Some(body)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri} -> {got}");
+    }
+}
+
+/// **The rollback assertion, on an input the pre-write shape check cannot
+/// catch.** `validate_rule_shape` is service-INDEPENDENT by construction, so
+/// `UnsupportedMaskType` — which reads the target engine's service-def — can
+/// only be discovered by the recompile, i.e. AFTER the `UPDATE`. StarRocks'
+/// def declares no `MASK_SHOW_LAST_4` (Trino's does), so this is exactly that
+/// case: the request must fail AND the stored row must be the one that was
+/// there before. A handler that committed the write and only then reported the
+/// compile failure would leave the rule reading as patched-and-active in the UI
+/// while the engine had never been told — the state this model refuses to have.
+#[tokio::test]
+async fn a_patch_the_profile_cannot_compile_rolls_the_stored_row_back() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let rule_name = unique("pii-mask-rollback");
+    let path_rule = |mask: &str| {
+        json!({
+            "name": rule_name,
+            "kind": { "type": "mask", "mask_type": mask, "value_expr": null },
+            "selector": { "type": "path", "catalog_id": f.catalog_id,
+                          "schema": "sales", "table": "orders", "column": "email" },
+            "exempt": { "include": [], "exclude": [] }
+        })
+    };
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/rules",
+                &token,
+                Some(path_rule("MASK_HASH")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let rule_id = created["id"].as_str().expect("minted rule id").to_string();
+    let name = f.compiled_policy_names().await.remove(0);
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/rules/{rule_id}"),
+                &token,
+                Some(path_rule("MASK_SHOW_LAST_4")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a mask type this profile's service-def does not declare must fail the \
+         request; body: {body}"
+    );
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT mask_type FROM perm.rules WHERE id = $1")
+            .bind(Uuid::parse_str(&rule_id).unwrap())
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("read mask_type");
+    assert_eq!(
+        stored.as_deref(),
+        Some("MASK_HASH"),
+        "the UPDATE ran BEFORE the failing recompile, so the transaction must have \
+         rolled it back — a stored-but-uncompiled rule is worse than a rejected one"
+    );
+    assert_eq!(
+        f.compiled_policy_body(&name).await["dataMaskPolicyItems"][0]["dataMaskInfo"]
+            ["dataMaskType"],
+        "MASK_HASH",
+        "and the compiled policy must still be the one the engine was told about"
+    );
+}
+
+/// The rule half of D1. A path selector (not a tag one) so the write stays
+/// catalog-scoped and this test does not fan out over the shared database.
+/// `update_rule_in_tx` rewrites every kind and selector column, so the
+/// assertion is on the compiled mask type, which only changes if that write
+/// and the recompile both happened.
+#[tokio::test]
+async fn patching_a_rule_recompiles_and_keeps_the_id() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let rule_name = unique("pii-mask");
+    let path_rule = |mask: &str, name: &str| {
+        json!({
+            "name": name,
+            "kind": { "type": "mask", "mask_type": mask, "value_expr": null },
+            "selector": { "type": "path", "catalog_id": f.catalog_id,
+                          "schema": "sales", "table": "orders", "column": "email" },
+            "exempt": { "include": [], "exclude": [] }
+        })
+    };
+
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/rules",
+                &token,
+                Some(path_rule("MASK_HASH", &rule_name)),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let rule_id = created["id"].as_str().expect("minted rule id").to_string();
+    let names = f.compiled_policy_names().await;
+    assert_eq!(names.len(), 1, "one path mask policy; got {names:?}");
+    assert!(names[0].starts_with(&format!("{COMPILER_RULE_PREFIX}{rule_id}")));
+    let name = names[0].clone();
+    assert_eq!(
+        f.compiled_policy_body(&name).await["dataMaskPolicyItems"][0]["dataMaskInfo"]
+            ["dataMaskType"],
+        "MASK_HASH"
+    );
+
+    let renamed = unique("pii-nulled");
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/rules/{rule_id}"),
+                &token,
+                Some(path_rule("MASK_NULL", &renamed)),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        f.compiled_policy_names().await,
+        vec![name.clone()],
+        "the compiled policy name is derived from the rule id, so it must not churn"
+    );
+    assert_eq!(
+        f.compiled_policy_body(&name).await["dataMaskPolicyItems"][0]["dataMaskInfo"]
+            ["dataMaskType"],
+        "MASK_NULL",
+        "the COMPILED mask type must be the patched one; body: {body}"
+    );
+    let stored: String = sqlx::query_scalar("SELECT name FROM perm.rules WHERE id = $1")
+        .bind(Uuid::parse_str(&rule_id).unwrap())
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("read rule name");
+    assert_eq!(
+        stored, renamed,
+        "the rule's own name must be the patched one"
+    );
 }
 
 // ---------------------------------------------------------------------------

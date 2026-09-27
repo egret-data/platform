@@ -55,17 +55,18 @@ use egret_auth::session::SessionService;
 use egret_core::http::ErrorBody;
 use egret_perm::{
     create_grant_in_tx, create_rule_in_tx, delete_grant_in_tx, delete_rule_in_tx, evaluate,
-    get_grant_via, get_rule_via, list_grants_via, list_rules_via, Action, Decision, Effect, Grant,
-    GrantOrigin, PermStore, PrincipalKind, PrincipalSet, Reason, Rule, RuleKind, Scope, Selector,
-    Subject,
+    get_grant_via, get_rule_via, list_grants_via, list_rules_via, update_grant_in_tx,
+    update_rule_in_tx, Action, Decision, Effect, Grant, GrantOrigin, PermStore, PrincipalKind,
+    PrincipalSet, Reason, Rule, RuleKind, Scope, Selector, Subject,
 };
 use egret_policy::{tag_keys_for_resource_via, PolicyStore};
+use sqlx::{Postgres, Transaction};
 
 use crate::grants::validate_grant_shape;
 use crate::rules::validate_rule_shape;
 use crate::trigger::{
     affected_services_for_grant, affected_services_for_rule, lock_services_in_tx,
-    recompile_service, recompile_services_in_tx, CompileSummary, SourceKind,
+    merge_service_ids, recompile_service, recompile_services_in_tx, CompileSummary, SourceKind,
 };
 
 mod error;
@@ -95,9 +96,15 @@ impl FromRef<PermState> for SessionService {
 pub fn perm_router() -> Router<PermState> {
     Router::new()
         .route("/perm/grants", get(list_grants).post(create_grant))
-        .route("/perm/grants/{id}", axum::routing::delete(delete_grant))
+        .route(
+            "/perm/grants/{id}",
+            axum::routing::patch(patch_grant).delete(delete_grant),
+        )
         .route("/perm/rules", get(list_rules).post(create_rule))
-        .route("/perm/rules/{id}", axum::routing::delete(delete_rule))
+        .route(
+            "/perm/rules/{id}",
+            axum::routing::patch(patch_rule).delete(delete_rule),
+        )
         .route("/perm/explain", post(explain))
         .route("/perm/compile/{service_id}", post(compile))
 }
@@ -115,9 +122,11 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     paths(
         list_grants,
         create_grant,
+        patch_grant,
         delete_grant,
         list_rules,
         create_rule,
+        patch_rule,
         delete_rule,
         explain,
         compile
@@ -359,6 +368,185 @@ pub struct CreatedResponse {
 }
 
 // ---------------------------------------------------------------------------
+// the one implementation of a model write
+// ---------------------------------------------------------------------------
+
+/// What a model write did: the id the row now has, the services the write
+/// recompiled, and what each recompile wrote.
+struct WriteOutcome {
+    id: Uuid,
+    services: Vec<i64>,
+    summaries: Vec<CompileSummary>,
+}
+
+impl WriteOutcome {
+    fn into_compile_response(self) -> (Uuid, CompileResponse) {
+        let compile = CompileResponse::from_summaries(self.services, &self.summaries);
+        (self.id, compile)
+    }
+}
+
+/// Create (`id: None`) or patch in place (`id: Some(_)`) one grant on the
+/// caller's open transaction, recompiling every profile the write can change.
+/// Neither begins nor commits: the caller owns both, which is what lets the
+/// create route, the patch route and the (rolled-back) preview route run the
+/// same code rather than three implementations of the same rules.
+///
+/// **The patch-specific hazard this function exists to hold, once.** A patch
+/// can move a grant to a different catalog, and the profile the grant USED to
+/// reach must be recompiled too or its compiled policy stays behind, served to
+/// that engine forever with nothing in the model producing it (SP4a's Critical,
+/// through the edit door). So the affected set is the UNION of the set derived
+/// from the row as it stands now and the set derived from the row as it will
+/// stand — read before the write, merged by
+/// [`crate::trigger::merge_service_ids`], locked ascending, recompiled once.
+async fn write_grant(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Option<Uuid>,
+    body: NewGrant,
+) -> Result<WriteOutcome, PermHttpError> {
+    if body.actions.is_empty() {
+        return Err(PermHttpError::BadRequest(
+            "a grant must name at least one action".into(),
+        ));
+    }
+
+    // The OLD affected set, and the origin the patched row keeps. Read from
+    // the stored row BEFORE anything is written — after the UPDATE the old
+    // catalog is gone and the profiles it reached are unrecoverable.
+    let (old_services, origin) = match id {
+        Some(id) => {
+            let Some(old) = get_grant_via(&mut **tx, id).await? else {
+                return Err(PermHttpError::NotFound);
+            };
+            // A `workspace_assignment` grant is the assignment path's row (D3):
+            // it is derived from `(catalog, workspace)` and recreated from the
+            // assignment on demand, so an edit here would either be reverted by
+            // the next sync or collide with `grants_one_per_assignment`. The
+            // create path refuses to MINT one for the same reason.
+            if !matches!(old.origin, GrantOrigin::Explicit) {
+                return Err(PermHttpError::BadRequest(
+                    "this grant is derived from a workspace assignment and is owned by the \
+                     assignment sync; change the assignment instead"
+                        .into(),
+                ));
+            }
+            (
+                affected_services_for_grant(&mut **tx, &old).await?,
+                old.origin,
+            )
+        }
+        // The database mints the id on a create; `GrantOrigin::Explicit` is the
+        // only origin this surface may write — see `NewGrant`'s doc comment.
+        None => (Vec::new(), GrantOrigin::Explicit),
+    };
+
+    let g = Grant {
+        id: id.unwrap_or_else(Uuid::nil),
+        effect: body.effect,
+        actions: body.actions,
+        scope: body.scope,
+        principals: body.principals,
+        origin,
+    };
+    // The recompile below refuses a grant that cannot compile — but only for
+    // the profiles it actually touches, and that set is EMPTY for a catalog no
+    // engine attaches yet. Without this check such a grant commits and then
+    // breaks every future recompile of the profile that eventually reaches it,
+    // including `egret-bi::catalog_tags`'s, which rolls back tag writes on the
+    // whole warehouse. See `validate_grant_shape`. Run on the patch path too:
+    // a patch that could store an uncompilable row reopens at update exactly
+    // the defect SP4a closed at create.
+    validate_grant_shape(&g)?;
+
+    let new_services = affected_services_for_grant(&mut **tx, &g).await?;
+    let services = merge_service_ids(&old_services, &new_services);
+
+    // The affected set is derived from the grant's own catalog, so it can be
+    // resolved (and locked) before the row is written — and it MUST be, or
+    // this transaction holds a `perm.grants` row lock while reaching for a
+    // profile lock, which deadlocks against a concurrent recompile holding
+    // that profile and reaching for the grant row. See `lock_services_in_tx`.
+    lock_services_in_tx(tx, &services).await?;
+    let id = match id {
+        Some(id) => {
+            if !update_grant_in_tx(tx, id, &g).await? {
+                return Err(PermHttpError::NotFound);
+            }
+            id
+        }
+        None => create_grant_in_tx(tx, &g).await?,
+    };
+    let summaries = recompile_services_in_tx(tx, &services).await?;
+    Ok(WriteOutcome {
+        id,
+        services,
+        summaries,
+    })
+}
+
+/// Create (`id: None`) or patch in place (`id: Some(_)`) one rule — the rule
+/// twin of [`write_grant`], including the old-plus-new union, which matters
+/// here for a second reason: a patch can turn a path selector into a tag
+/// selector or the other way round, so the two sets can differ by the whole
+/// installation rather than by one profile.
+async fn write_rule(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Option<Uuid>,
+    body: NewRule,
+) -> Result<WriteOutcome, PermHttpError> {
+    // `perm.rules.name` is `text NOT NULL UNIQUE` with no emptiness CHECK, and
+    // the name is what every skip log, compile error and audit line identifies
+    // the rule by. Refused here for the same reason a grant's empty `actions`
+    // is — the write paths should reject a nonsense body the same way.
+    if body.name.trim().is_empty() {
+        return Err(PermHttpError::BadRequest(
+            "a rule must have a non-blank name".into(),
+        ));
+    }
+
+    let old_services = match id {
+        Some(id) => {
+            let Some(old) = get_rule_via(&mut **tx, id).await? else {
+                return Err(PermHttpError::NotFound);
+            };
+            affected_services_for_rule(&mut **tx, &old).await?
+        }
+        None => Vec::new(),
+    };
+
+    let r = Rule {
+        id: id.unwrap_or_else(Uuid::nil),
+        name: body.name,
+        kind: body.kind,
+        selector: body.selector,
+        exempt: body.exempt,
+    };
+    // Same reason as the grant path: an empty affected set validates nothing.
+    validate_rule_shape(&r)?;
+
+    let new_services = affected_services_for_rule(&mut **tx, &r).await?;
+    let services = merge_service_ids(&old_services, &new_services);
+
+    lock_services_in_tx(tx, &services).await?;
+    let id = match id {
+        Some(id) => {
+            if !update_rule_in_tx(tx, id, &r).await? {
+                return Err(PermHttpError::NotFound);
+            }
+            id
+        }
+        None => create_rule_in_tx(tx, &r).await?,
+    };
+    let summaries = recompile_services_in_tx(tx, &services).await?;
+    Ok(WriteOutcome {
+        id,
+        services,
+        summaries,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // grants
 // ---------------------------------------------------------------------------
 
@@ -401,45 +589,59 @@ async fn create_grant(
     Json(body): Json<NewGrant>,
 ) -> Result<(axum::http::StatusCode, Json<CreatedResponse>), PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
-    if body.actions.is_empty() {
-        return Err(PermHttpError::BadRequest(
-            "a grant must name at least one action".into(),
-        ));
-    }
-    let g = Grant {
-        id: Uuid::nil(), // the database mints it
-        effect: body.effect,
-        actions: body.actions,
-        scope: body.scope,
-        principals: body.principals,
-        origin: GrantOrigin::Explicit, // see `NewGrant`'s doc comment
-    };
-    // The recompile below refuses a grant that cannot compile — but only for
-    // the profiles it actually touches, and that set is EMPTY for a catalog no
-    // engine attaches yet. Without this check such a grant commits and then
-    // breaks every future recompile of the profile that eventually reaches it,
-    // including `egret-bi::catalog_tags`'s, which rolls back tag writes on the
-    // whole warehouse. See `validate_grant_shape`.
-    validate_grant_shape(&g)?;
-
     // ONE transaction: the affected profiles' locks, the row, and every
-    // recompile. The affected set is derived from the grant's own catalog, so
-    // it can be resolved (and locked) before the row exists — and it MUST be,
-    // or this transaction holds a `perm.grants` row lock while reaching for a
-    // profile lock, which deadlocks against a concurrent recompile holding
-    // that profile and reaching for the grant row. See `lock_services_in_tx`.
+    // recompile — see `write_grant`, which is the same code the patch and
+    // preview routes run.
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
-    let services = affected_services_for_grant(&mut tx, &g).await?;
-    lock_services_in_tx(&mut tx, &services).await?;
-    let id = create_grant_in_tx(&mut tx, &g).await?;
-    let summaries = recompile_services_in_tx(&mut tx, &services).await?;
-    let compile = CompileResponse::from_summaries(services, &summaries);
+    let (id, compile) = write_grant(&mut tx, None, body)
+        .await?
+        .into_compile_response();
     tx.commit().await.map_err(PermHttpError::db)?;
 
     Ok((
         axum::http::StatusCode::CREATED,
         Json(CreatedResponse { id, compile }),
     ))
+}
+
+/// **Edit in place, keeping the id — SP4b D1.** The body is the whole grant,
+/// exactly the create route's shape: this replaces the grant's body and keeps
+/// its identity, which is what a UI "Edit" must mean. Before this route the
+/// only way to change a grant was delete-plus-create, i.e. a new id, two
+/// recompiles and a window with no row — and an `explain` reason carries the
+/// `grant_id` the UI deep-links from, so every such link broke on every edit.
+#[utoipa::path(
+    patch,
+    path = "/api/control-plane/perm/grants/{id}",
+    tag = "perm",
+    params(("id" = Uuid, Path, description = "Grant id")),
+    request_body = NewGrant,
+    description = "Replace a grant's body, keeping its id, and recompile the UNION of the \
+                   profiles it affected before and after the change — a patch that moves the \
+                   grant to another catalog must reap the policy from the profile it used to \
+                   reach, or that engine enforces it forever.",
+    responses(
+        (status = 200, description = "Grant updated AND every affected profile recompiled, in one transaction", body = CompileResponse),
+        (status = 400, description = "The patched grant cannot be compiled, or the grant is owned by the workspace-assignment sync", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No such grant", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn patch_grant(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(body): Json<NewGrant>,
+) -> Result<Json<CompileResponse>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    let (_, compile) = write_grant(&mut tx, Some(id), body)
+        .await?
+        .into_compile_response();
+    tx.commit().await.map_err(PermHttpError::db)?;
+    Ok(Json(compile))
 }
 
 #[utoipa::path(
@@ -526,38 +728,53 @@ async fn create_rule(
     Json(body): Json<NewRule>,
 ) -> Result<(axum::http::StatusCode, Json<CreatedResponse>), PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
-    // `perm.rules.name` is `text NOT NULL UNIQUE` with no emptiness CHECK, and
-    // the name is what every skip log, compile error and audit line identifies
-    // the rule by. Refused here for the same reason `create_grant` refuses an
-    // empty `actions` — the two write paths should reject a nonsense body the
-    // same way.
-    if body.name.trim().is_empty() {
-        return Err(PermHttpError::BadRequest(
-            "a rule must have a non-blank name".into(),
-        ));
-    }
-    let r = Rule {
-        id: Uuid::nil(), // the database mints it
-        name: body.name,
-        kind: body.kind,
-        selector: body.selector,
-        exempt: body.exempt,
-    };
-    // Same reason as the grant path: an empty affected set validates nothing.
-    validate_rule_shape(&r)?;
-
     let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
-    let services = affected_services_for_rule(&mut tx, &r).await?;
-    lock_services_in_tx(&mut tx, &services).await?;
-    let id = create_rule_in_tx(&mut tx, &r).await?;
-    let summaries = recompile_services_in_tx(&mut tx, &services).await?;
-    let compile = CompileResponse::from_summaries(services, &summaries);
+    let (id, compile) = write_rule(&mut tx, None, body)
+        .await?
+        .into_compile_response();
     tx.commit().await.map_err(PermHttpError::db)?;
 
     Ok((
         axum::http::StatusCode::CREATED,
         Json(CreatedResponse { id, compile }),
     ))
+}
+
+/// Edit a rule in place, keeping the id — the rule half of SP4b D1. Same
+/// old-plus-new union as [`patch_grant`], and the same reason: an `explain`
+/// reason carries the `rule_id` a UI links from.
+#[utoipa::path(
+    patch,
+    path = "/api/control-plane/perm/rules/{id}",
+    tag = "perm",
+    params(("id" = Uuid, Path, description = "Rule id")),
+    request_body = NewRule,
+    description = "Replace a rule's body, keeping its id, and recompile the UNION of the \
+                   profiles it affected before and after the change. A patch that turns a path \
+                   selector into a tag selector (or back) changes that set by the whole \
+                   installation, not by one profile.",
+    responses(
+        (status = 200, description = "Rule updated AND every affected profile recompiled, in one transaction", body = CompileResponse),
+        (status = 400, description = "The patched rule cannot be compiled for a profile it affects", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No such rule", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn patch_rule(
+    State(st): State<PermState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(body): Json<NewRule>,
+) -> Result<Json<CompileResponse>, PermHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
+    let mut tx = st.perm.pool().begin().await.map_err(PermHttpError::db)?;
+    let (_, compile) = write_rule(&mut tx, Some(id), body)
+        .await?
+        .into_compile_response();
+    tx.commit().await.map_err(PermHttpError::db)?;
+    Ok(Json(compile))
 }
 
 #[utoipa::path(
