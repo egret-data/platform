@@ -7910,3 +7910,397 @@ async fn a_replay_keeps_its_depth(pool: sqlx::PgPool) {
         .expect("the replacement exists");
     assert_eq!(depth_of(&pool, replay).await, 7, "the original's depth");
 }
+
+// ===========================================================================
+// W11 Task 3: the attempt's log, written through `run_one`
+// ===========================================================================
+
+use egret_workflow::logs::{LogLevel, LogLimits, LogLine};
+use egret_workflow::worker::handlers::LogSink;
+
+/// W11 Task 1's measured fixture, read for its typed `egret_expected`.
+fn w11_expected(id: &str) -> serde_json::Value {
+    let w: serde_json::Value =
+        serde_json::from_str(include_str!("../oracle-exec/w11-logs.json")).expect("parses");
+    w["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == id)
+        .unwrap_or_else(|| panic!("no finding {id}"))["egret_expected"]
+        .clone()
+}
+
+fn w11_level(v: &serde_json::Value) -> LogLevel {
+    LogLevel::parse(v.as_str().expect("a level name")).expect("one of the five")
+}
+
+/// A recording [`LogSink`]; `handlers::testing::Recorder` is `pub(crate)`.
+#[derive(Debug, Default)]
+struct Lines(Mutex<Vec<LogLine>>);
+
+#[async_trait::async_trait]
+impl LogSink for Lines {
+    async fn write(&self, line: LogLine) {
+        self.0.lock().unwrap().push(line);
+    }
+}
+
+impl Lines {
+    /// `(level, message)` of every line about `execution`, in write order.
+    fn of(&self, execution: Uuid) -> Vec<(LogLevel, String)> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.execution_id == execution)
+            .map(|l| (l.level, l.message.clone()))
+            .collect()
+    }
+}
+
+/// A one-task flow; the task id tells [`Scripted`] what to do.
+fn scripted_flow(id: &str, task: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: {task}\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    )
+}
+
+/// A [`Registry`] whose handler writes `lines` INFO lines through `task.log`
+/// and then answers by task id: `err` is a worker `Err`, `slow` sleeps past
+/// any tight budget, `boom` fails with a message, `nomsg` fails without one,
+/// anything else succeeds. Its log goes to `sink` under `limits`.
+struct Scripted {
+    sink: std::sync::Arc<Lines>,
+    limits: LogLimits,
+    lines: usize,
+    started: Mutex<Vec<String>>,
+}
+
+impl Scripted {
+    fn new(max_lines: u64, lines: usize) -> Self {
+        Self {
+            sink: std::sync::Arc::new(Lines::default()),
+            limits: LogLimits {
+                run_max_lines: max_lines,
+                ..LogLimits::default()
+            },
+            lines,
+            started: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The cap summary for `n` withheld lines of `bytes`.
+    fn summary(&self, n: usize, bytes: usize) -> String {
+        format!(
+            "{n} lines ({bytes} bytes) of this attempt were not stored: over the per-run log \
+             cap ({} lines / {} bytes).",
+            self.limits.run_max_lines, self.limits.run_max_bytes
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl Registry for Scripted {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        self.started.lock().unwrap().push(task.task_id.clone());
+        for i in 1..=self.lines {
+            task.log.info(&format!("{} line {i}", task.task_id)).await;
+        }
+        match task.task_id.as_str() {
+            "err" => Err(egret_core::Error::Internal(anyhow::anyhow!(
+                "an egret outage, not the task's"
+            ))),
+            "slow" => {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok(Outcome::success())
+            }
+            "boom" => Ok(Outcome::failed_with("boom")),
+            "nomsg" => Ok(Outcome::failed()),
+            _ => Ok(Outcome::success()),
+        }
+    }
+    async fn cancel(&self, _task: &TaskInput) -> egret_core::Result<()> {
+        Ok(())
+    }
+    fn log_sink(&self) -> (std::sync::Arc<dyn LogSink>, LogLimits) {
+        (self.sink.clone(), self.limits)
+    }
+}
+
+/// **`finish()` runs on every path out of the handler**: success (the
+/// control), a worker `Err`, and a budget that expired (the kill path). In
+/// all three the handler logged past a 1-line cap, so the summary must be
+/// there.
+#[sqlx::test(migrations = "../../migrations")]
+async fn run_one_finishes_the_log_on_error_timeout_and_cancel(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = Scripted::new(1, 3);
+    let start = |src: String| {
+        let pool = pool.clone();
+        async move {
+            start_execution(&pool, ws, None, &src, serde_json::json!({}))
+                .await
+                .expect("start")
+        }
+    };
+    let ok = start(scripted_flow("fin-ok", "ok")).await;
+    let err = start(scripted_flow("fin-err", "err")).await;
+    let slow = start(one_task_with_timeout("fin-slow", "slow", "PT0.001S")).await;
+
+    let r = egret_workflow::worker::tick(&pool, 8, &reg).await;
+    assert!(r.is_err(), "the `err` handler's Err reaches the tick");
+    let mut started = reg.started.lock().unwrap().clone();
+    started.sort();
+    assert_eq!(started, ["err", "ok", "slow"]);
+
+    let two = |t: &str| format!("{t} line 2").len() + format!("{t} line 3").len();
+    assert_eq!(
+        reg.sink.of(ok),
+        vec![
+            (LogLevel::Info, "ok line 1".to_string()),
+            (LogLevel::Warn, reg.summary(2, two("ok"))),
+        ]
+    );
+    assert_eq!(
+        reg.sink.of(err),
+        vec![
+            (LogLevel::Info, "err line 1".to_string()),
+            (LogLevel::Warn, reg.summary(2, two("err"))),
+        ],
+        "the Err path finishes the log too"
+    );
+    assert_eq!(
+        reg.sink.of(slow),
+        vec![
+            (LogLevel::Info, "slow line 1".to_string()),
+            (LogLevel::Error, "Timeout after 00:00:00.001".to_string()),
+            (LogLevel::Warn, reg.summary(2, two("slow"))),
+        ],
+        "an expired budget finishes the log too"
+    );
+}
+
+/// **The failed-attempt line**: once, at ERROR, after the handler's lines and
+/// before the summary, and outside the cap — Task 1's `failed_attempt_line`.
+/// A `Failed` outcome with no message writes none.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_failed_attempt_logs_its_reason_once_even_over_the_cap(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let e = w11_expected("script_runner_diagnostics")["failed_attempt_line"].clone();
+    assert_eq!(w11_level(&e["level"]), LogLevel::Error);
+    assert_eq!(e["count"], 1);
+    assert_eq!(e["bypasses_run_cap"], true);
+    assert_eq!(
+        e["order"],
+        serde_json::json!(["handler_lines", "failed_attempt_line", "cap_summary"])
+    );
+    let path = |p: &str| {
+        e["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["path"] == p)
+            .unwrap_or_else(|| panic!("no path {p}"))["written"]
+            .as_bool()
+            .unwrap()
+    };
+    assert!(path("handler_ok_failed"));
+    assert!(!path("failed_without_message"));
+
+    let (_db, ws) = seed(&pool).await;
+    let reg = Scripted::new(1, 3);
+    let boom = start_execution(
+        &pool,
+        ws,
+        None,
+        &scripted_flow("fa-boom", "boom"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    let nomsg = start_execution(
+        &pool,
+        ws,
+        None,
+        &scripted_flow("fa-nomsg", "nomsg"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    assert_eq!(drain_with(&pool, &reg).await, 2);
+    assert_eq!(
+        run_message(&pool, boom, "boom").await.as_deref(),
+        Some("boom")
+    );
+
+    let got = reg.sink.of(boom);
+    assert_eq!(
+        got,
+        vec![
+            (LogLevel::Info, "boom line 1".to_string()),
+            (w11_level(&e["level"]), "boom".to_string()),
+            (
+                LogLevel::Warn,
+                reg.summary(2, "boom line 2".len() + "boom line 3".len())
+            ),
+        ]
+    );
+    assert_eq!(got.iter().filter(|l| l.0 == LogLevel::Error).count(), 1);
+    assert!(
+        reg.sink.of(nomsg).iter().all(|l| l.0 != LogLevel::Error),
+        "a Failed outcome with no message writes no failure line: {:?}",
+        reg.sink.of(nomsg)
+    );
+}
+
+/// **A refused budget logs its reason**: one ERROR line, the refusal, and the
+/// handler never ran.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_refused_budget_logs_its_reason(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let e = w11_expected("script_runner_diagnostics")["failed_attempt_line"].clone();
+    assert!(e["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["path"] == "budget_refused" && x["written"] == true));
+    let (_db, ws) = seed(&pool).await;
+    let reg = Scripted::new(1, 3);
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_timeout("refused", "refused", "abc"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    assert_eq!(drain_with(&pool, &reg).await, 1);
+    assert!(
+        reg.started.lock().unwrap().is_empty(),
+        "the handler never ran"
+    );
+    let message = run_message(&pool, ex, "refused").await.expect("a message");
+    assert!(message.contains("abc"), "{message}");
+    assert_eq!(reg.sink.of(ex), vec![(LogLevel::Error, message)]);
+}
+
+/// **An expired budget logs `Timeout after …`**: one ERROR line, Kestra's own
+/// text.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_expired_budget_logs_timeout_after(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let e = w11_expected("script_runner_diagnostics")["failed_attempt_line"].clone();
+    assert!(e["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["path"] == "timeout_expired"
+            && x["written"] == true
+            && x["text"] == "Timeout after {HH}:{mm}:{ss}.{SSS}"));
+    let (_db, ws) = seed(&pool).await;
+    let reg = Scripted::new(10, 0);
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_timeout("expired", "slow", "PT0.001S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    assert_eq!(drain_with(&pool, &reg).await, 1);
+    assert_eq!(
+        reg.sink.of(ex),
+        vec![(LogLevel::Error, "Timeout after 00:00:00.001".to_string())]
+    );
+}
+
+/// **A handler `Err` writes no failure line** — it is egret's outage and this
+/// tick records no outcome — but the summary is still written.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_handler_err_logs_no_failure_line(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let e = w11_expected("script_runner_diagnostics")["failed_attempt_line"].clone();
+    assert!(e["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|x| x["path"] == "handler_err" && x["written"] == false));
+    let (_db, ws) = seed(&pool).await;
+    let reg = Scripted::new(1, 3);
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &scripted_flow("herr", "err"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    assert!(egret_workflow::worker::tick(&pool, 8, &reg).await.is_err());
+    let got = reg.sink.of(ex);
+    assert_eq!(
+        got,
+        vec![
+            (LogLevel::Info, "err line 1".to_string()),
+            (
+                LogLevel::Warn,
+                reg.summary(2, "err line 2".len() + "err line 3".len())
+            ),
+        ]
+    );
+    assert!(got.iter().all(|l| l.0 != LogLevel::Error));
+}
+
+/// **`Fail` stores Kestra's lines**: the unconditional path one ERROR line
+/// (written by `run_one`), the conditional path two (the handler's, then
+/// `run_one`'s), a falsy condition none — Task 1's `fail_task` table, typed,
+/// through the shipping registry. A successful `Log` stores no ERROR line.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_unconditional_fail_logs_one_line_and_a_conditional_fail_two(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let sink = std::sync::Arc::new(Lines::default());
+    let reg = Handlers::with_core_tasks().with_log_sink(sink.clone(), LogLimits::default());
+
+    let cases = w11_expected("script_runner_diagnostics")["failed_attempt_line"]["fail_task"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(cases.len(), 3);
+    let mut runs = Vec::new();
+    for (i, case) in cases.iter().enumerate() {
+        let mut task = format!(
+            "  - id: f\n    type: io.kestra.plugin.core.execution.Fail\n    errorMessage: {}\n",
+            case["error_message"]
+        );
+        match &case["condition"] {
+            serde_json::Value::Null => {}
+            serde_json::Value::Bool(b) => task.push_str(&format!("    condition: \"{b}\"\n")),
+            other => panic!("condition {other}"),
+        }
+        let src = format!("id: fail-{i}\nnamespace: t\ntasks:\n{task}");
+        let ex = start_execution(&pool, ws, None, &src, serde_json::json!({}))
+            .await
+            .expect("start");
+        runs.push((ex, case.clone()));
+    }
+    let ok = start_execution(&pool, ws, None, &one_task("fail-ok"), serde_json::json!({}))
+        .await
+        .expect("start");
+    drain(&pool, &reg).await;
+
+    for (ex, case) in &runs {
+        let want: Vec<(LogLevel, String)> = case["stored"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (w11_level(&p[0]), p[1].as_str().unwrap().to_string()))
+            .collect();
+        assert_eq!(sink.of(*ex), want, "{case}");
+    }
+    assert_eq!(sink.of(ok), vec![(LogLevel::Info, "hi".to_string())]);
+}

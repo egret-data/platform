@@ -564,6 +564,36 @@ pub struct WorkflowConfig {
     /// trigger per pass.
     #[serde(default = "default_trigger_interval_secs")]
     pub trigger_interval_secs: u64,
+
+    /// **How long stored task-run log lines are kept, in days (W11); `0` keeps
+    /// them for ever.**
+    ///
+    /// One global setting (W11 decision D2), not per workspace or per flow.
+    /// When the worker runs (`worker_enabled`), an hourly ticker in
+    /// `egret_workflow::runtime` deletes lines produced more than this many
+    /// days ago, in batches of 10,000 with a 30 s budget per pass, so no
+    /// statement holds locks for long. With `0` no ticker is started and the
+    /// table only shrinks when executions are deleted (their lines cascade).
+    /// `EGRET_WORKFLOW__LOG_RETENTION_DAYS=30`.
+    #[serde(default = "default_log_retention_days")]
+    pub log_retention_days: u32,
+
+    /// The most log lines one task-run **attempt** stores (W11 decision D4).
+    ///
+    /// Past it the attempt keeps running and its further lines are not
+    /// stored; when it ends, exactly one WARN line says how many were
+    /// withheld, written outside the cap. A retry starts a fresh count. A line
+    /// longer than 15,360 characters is split like Kestra's, and each piece
+    /// counts here. `EGRET_WORKFLOW__LOG_RUN_MAX_LINES=10000`.
+    #[serde(default = "default_log_run_max_lines")]
+    pub log_run_max_lines: u64,
+
+    /// The most bytes of log text one task-run attempt stores (W11 decision
+    /// D4): the byte half of [`WorkflowConfig::log_run_max_lines`]'s cap,
+    /// whichever is reached first, with the same single WARN summary.
+    /// `EGRET_WORKFLOW__LOG_RUN_MAX_BYTES=10485760` (10 MiB).
+    #[serde(default = "default_log_run_max_bytes")]
+    pub log_run_max_bytes: u64,
 }
 
 /// `false` — see [`WorkflowConfig::worker_enabled`]. A named function rather
@@ -610,6 +640,23 @@ fn default_trigger_interval_secs() -> u64 {
     1
 }
 
+/// `30` -- see [`WorkflowConfig::log_retention_days`].
+fn default_log_retention_days() -> u32 {
+    30
+}
+
+/// `10000` -- see [`WorkflowConfig::log_run_max_lines`]. Equal to
+/// `egret_workflow::logs::LogLimits::default()`, which this crate cannot name.
+fn default_log_run_max_lines() -> u64 {
+    10_000
+}
+
+/// `10485760` (10 MiB) -- see [`WorkflowConfig::log_run_max_bytes`]. Equal to
+/// `egret_workflow::logs::LogLimits::default()`.
+fn default_log_run_max_bytes() -> u64 {
+    10_485_760
+}
+
 /// Serde's fallback for a `[workflow]` section a deployment's TOML predates.
 ///
 /// Every value is the field's own `default_*` function, so the defaults layer
@@ -631,6 +678,9 @@ fn default_workflow() -> WorkflowConfig {
         working_timeout_s: default_working_timeout_s(),
         scheduler_enabled: default_scheduler_enabled(),
         trigger_interval_secs: default_trigger_interval_secs(),
+        log_retention_days: default_log_retention_days(),
+        log_run_max_lines: default_log_run_max_lines(),
+        log_run_max_bytes: default_log_run_max_bytes(),
     }
 }
 

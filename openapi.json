@@ -27627,6 +27627,174 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/executions/{id}/logs": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "An execution's log lines after a cursor, in `id` order.",
+        "description": "**Lines appear about 2 seconds after they are written (the settle lag,\n[`crate::logs::SETTLE_LAG`]).** A page stops before the first line whose\n`inserted_at` is less than 2 s old, and serves nothing above it. The reason\nis out-of-order commits: `bigserial` ids are allocated at insert and\ncommitted later, so with two writers (two egret replicas) id 100 can\ncommit after id 101. A client that had read 101 and moved its cursor past\nit would never see 100. Holding lines back until the lowest unserved one\nhas settled lets the lower id commit first, provided a log write lasts less\nthan half the lag (a log batch is one short `INSERT`).\n\n**When to stop polling: on `complete && items.is_empty()`, never on a\nterminal `execution_state` alone.** A run's lines are inserted before its\noutcome commits (`RunLog::finish` waits on the log writer's flush barrier),\nso once the execution has been terminal for longer than the settle lag,\nevery line it will ever have is visible; `complete` says exactly that,\ncomputed from the execution row itself. A terminal state seen earlier can\nstill have its last lines inside the lag. `complete` does NOT mean every\nline the run printed was stored: see spec §11 for the cases (the process\ndying, a dropped batch, a log-write fault during which the barrier does not\nwait, a run executed twice).\n\nAuthorisation is exactly `GET …/executions/{id}`'s: `WsContext` (session,\nmembership, the `workflows` feature gate), then `workflow:read`, then\n[`ExecutionRepo::log_status`] for existence and ownership (the same\ncontract as `ExecutionRepo::get`, one row, no source or task runs) -- **an\nexecution in another workspace is a 404, never a 403** -- and only then the\npage, which filters on the workspace AND the execution again.",
+        "operationId": "get_execution_logs",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "The cursor: only lines with an `id` greater than this. Omit it for the\nfirst call, then pass the previous response's `next_after`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many lines to return, 1..=2000 (default 500). Outside that range is\na 400, not a clamp.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 500,
+              "maximum": 2000,
+              "minimum": 1
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "query",
+            "description": "Only lines of this task (the YAML's task `id`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "task_run_id",
+            "in": "query",
+            "description": "Only lines of this task run.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "min_level",
+            "in": "query",
+            "description": "Only lines at this level or above. The five names, upper case, compared\ncase-sensitively; anything else is a 400.",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/LogLevel"
+                }
+              ]
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Up to `limit` settled lines after `after`, in id order, with the next cursor, the execution's current state, and `complete`. Lines appear about 2 s after they are written (the settle lag guards against out-of-order commits). Stop polling on `complete` with no `items`, not on a terminal state alone.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogPageDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`limit` outside 1..=2000, a `min_level` that is not one of TRACE/DEBUG/INFO/WARN/ERROR, or a malformed `{id}`/`after`/`task_run_id`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace. **An execution belonging to another workspace answers exactly this**, indistinguishably from one that never existed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/executions/{id}/replay": {
       "post": {
         "tags": [
@@ -35058,6 +35226,99 @@
             "items": {
               "$ref": "#/components/schemas/ObjectDto"
             }
+          }
+        }
+      },
+      "LogLevel": {
+        "type": "string",
+        "description": "A log line's level: slf4j's five, which are `Log.java`'s `level:` and\nKestra's stored `level`. Stored as `smallint` 0..=4 (the table's CHECK), so\n`min_level` is a plain `>=`.",
+        "enum": [
+          "TRACE",
+          "DEBUG",
+          "INFO",
+          "WARN",
+          "ERROR"
+        ]
+      },
+      "LogLineDto": {
+        "type": "object",
+        "description": "One stored log line. `task_id`, `task_run_id` and `attempt` are all `null`\nfor a line about the execution rather than one run; `attempt` is 0-based,\nas Kestra's is. A line longer than 15,360 characters was stored as several\nconsecutive lines (W11 D6), so there is no `truncated` flag.",
+        "required": [
+          "id",
+          "level",
+          "ts",
+          "message"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The cursor value: strictly increasing in the order lines are served."
+          },
+          "task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task_run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "attempt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "level": {
+            "$ref": "#/components/schemas/LogLevel"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the line was produced, by the worker's clock."
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "LogPageDto": {
+        "type": "object",
+        "description": "One page of an execution's log.",
+        "required": [
+          "items",
+          "execution_state",
+          "complete"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogLineDto"
+            },
+            "description": "In `id` order, at most `limit` of them."
+          },
+          "next_after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The last returned `id` -- the next call's `after` -- or `null` when\nnothing was returned (keep the `after` you sent)."
+          },
+          "execution_state": {
+            "type": "string",
+            "description": "The execution's state (Kestra's wire spelling, `RUNNING`, `SUCCESS`,\n...), read on this call. For display: **do not stop polling on a\nterminal state alone** -- see `complete`."
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "The execution is terminal AND became so more than the 2 s settle lag\nago. **Stop polling when `complete` is true and `items` is empty**:\nthen every stored line has been served. A terminal `execution_state`\nalone is not enough -- the run's last lines may be younger than the\nsettle lag and not served yet."
           }
         }
       },

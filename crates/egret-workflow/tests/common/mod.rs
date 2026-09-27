@@ -180,6 +180,7 @@ pub async fn app(db: &Db) -> App {
         db: db.clone(),
         repo: egret_workflow::FlowRepo::new(db.clone()),
         executions: egret_workflow::ExecutionRepo::new(db.clone()),
+        logs: egret_workflow::logs::LogRepo::new(db.pool.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
@@ -479,6 +480,7 @@ pub async fn webhook_app_with_guard(
         db: db.clone(),
         repo: egret_workflow::FlowRepo::new(db.clone()),
         executions: egret_workflow::ExecutionRepo::new(db.clone()),
+        logs: egret_workflow::logs::LogRepo::new(db.pool.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),

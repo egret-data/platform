@@ -7698,7 +7698,10 @@ will trip over it.**
   `stdOutLineCount`/`stdErrLineCount`, i.e. counts and not content. A Logs panel
   therefore needs a table, a persisting sink on every handler path, a retention
   policy and a paginated read API, which is why W10's spec named it as the place
-  to stop. Triggers: re-derived in the W6 section at this commit — zero uses of
+  to stop. *(2026-09-27, W11 Task 6: the logs half of this bullet is the record
+  of the deferral, not the present. W11 built all four pieces -- migration
+  0159, `logs::PgLogSink` behind every handler's `RunLog`, the hourly pruner
+  and `GET …/executions/{id}/logs`; see the W11 section below.)* Triggers: re-derived in the W6 section at this commit — zero uses of
   `trigger::tick`, `run_until_idle`, `TriggerState` and `WindowFreeFlowTrigger`
   outside `crates/egret-workflow/src/trigger/`, four doc-comment mentions of
   `ScheduleTrigger`, against a control of 828 for `RunState`.
@@ -8626,6 +8629,202 @@ W13a plan (1) and this package's own plan (3, the brief quoting the phrases);
 the design spec's §7.2 "drop the window's `FOR UPDATE`" (1), a mutation's
 name. (7 + 1 + 3 + 1 + 3 + 1 + 3 + 1 = 20.) **Those left are the control that the sweep
 does not retire everything it matches.**
+
+### W11 — every line a task prints is stored now, and the oracle cannot see a single one
+
+**109 before W11 and 109 at its tip, both measured.** Both figures are the
+`executor_matches_golden` line printed with `--nocapture`: **294 golden
+entries, 109 mismatching, 109 baselined, 0 broken**. The base was measured at
+the package base `6749a37b`, in a temporary detached worktree with its own
+target directory (the shared `egret_test_template`, already migrated to 0159 by
+this branch, refused the base with `VersionMissing(159)`, so it was dropped
+first and re-migrated by the next branch run), and the tip at `e0f86320` (the branch rebased onto
+`cd48121e`). `origin/main` moved between the two (#599, #600), but
+`git diff --stat 6749a37b cd48121e -- crates/egret-workflow migrations` is
+empty, so the move changed nothing the ratchet reads.
+
+The ratchet cannot move for W11, and that is structural rather than
+observed:
+
+- **The golden holds no log line.** `golden.json` has 13 distinct keys at any
+  depth, and none contains `log` or `message`. The oracle compares traces
+  (states, terminals, ordered pairs), not what a task printed.
+- **The driver names none of W11's code.** `logs::`, `RunLog`, `PgLogSink`,
+  `LogRepo` and `task_logs` each occur **0** times in `oracle-exec/driver.rs`,
+  against `worker::` at **26** (the positive control, the same command W13b
+  used). In `tests/executor.rs` the only W11 name is one
+  `log: egret_workflow::logs::RunLog::discard()`, a field W11 added to
+  `TaskInput` and set in the kill-path test's hand-built input; `worker::`
+  occurs **38** times there. The driver builds its registry with
+  `Handlers::new()` and never calls `with_log_sink`, so its runs write to
+  `TracingSink` exactly as before.
+
+| | ratchet | what the task shipped |
+|---|---|---|
+| package base `6749a37b` (origin/main, W13b's merge) | 109 mismatching, 109 baselined, 0 broken of 294 (measured, above) | -- |
+| Task 1 | 109 (docs and one JSON fixture only) | the log behaviour of the pinned artifact (`oracle-exec/w11-logs.json`): stdout INFO and **stderr ERROR** (not WARN, whatever `warningOnStdErr` says), marker lines not logged, one WARN `Invalid outputs '…'` for a broken marker, the debug bracket, no framing lines, long lines **split at 15,360 characters** (decision D6); the failed-attempt line |
+| Task 2 | 109 | migration 0159 (`workflow.task_logs`), `LogRepo`: a batch insert that drops, and counts, a line whose execution was deleted instead of poisoning the batch; the cursor read behind the 2 s settle lag; the batch prune |
+| Task 3 | 109 (`--test executor`, 58 passed) | async `LogSink`, `LogLine`, the per-attempt `RunLog` (split, 10,000-line / 10 MiB cap, one WARN summary outside it); `Log`, `Fail`, container and python moved onto it; levels per Task 1 |
+| Task 4 | 109 | `PgLogSink` and its writer (channel 10,000, `send().await`, batches of 500 or 1 s, 30 s retry, 10 s shutdown drain), the hourly pruner, the three config keys, the wiring in `egret-bin` |
+| Task 5 | 109 | `GET /api/ws/{workspace}/workflows/executions/{id}/logs`, utoipa, `gen:api`; fix round 1: the flush barrier in `RunLog::finish` and `complete` |
+| Task 6 | **109** (measured, above) | this section, the sweep below, the full local gate |
+
+#### What W11's tests cover, and what they do not
+
+**Covered** (against a real Postgres wherever a line is stored or read; the
+split and the cap are pure `RunLog` tests): a flow run through the real runtime (`spawn_with_logs`, the
+production registry, nothing driving the tick) stores its `Log` and `Fail`
+lines, and the API returns them in order at the measured levels
+(`end_to_end_a_flow_logs_through_the_real_runtime`); a full channel makes the
+writing handler wait and loses nothing; a failing batch is retried, then
+reported, and never ends the writer; shutdown drains the channel, and a line an
+in-flight run writes after cancel is stored; the cap stores up to its limit
+and writes exactly one WARN summary; a 40,000-character line splits into
+15,360 / 15,360 / 9,280 characters in order; out-of-order commits are not
+skipped by a polling reader; the prune deletes only lines older than the
+window, and `0` starts no pruner; another workspace's execution is a 404;
+`finish()` runs on error, timeout and cancel, and does not return before the
+run's lines are inserted; `complete` stays false until the settle lag has
+passed. Container and python stdout/stderr reaching `RunLog` at INFO/ERROR is
+tested in `tests/container_docker_live.rs` against a real Docker daemon.
+Mutations: Task 2 4/4, Task 3 13/13, Task 4 6/6 (five plus the shutdown-order
+mutant its fix round added), Task 5 6/6 (two plus four in the fix round), each
+killed by a named assertion and recorded in that task's report. None survived.
+
+**Not covered, or not true, and stated here so nobody infers it:**
+
+1. **No production run stores a stdout or stderr line today.** `egret-bin`
+   hands `Handlers::with_core_tasks()` to the runtime, and that registry holds
+   `Log`, `Return`, `Fail` and `Sleep` only: no container and no python
+   handler (user decision D5, 2026-09-27). Container and python output is
+   stored and tested **only through test registries**. In production the stored
+   lines come from `Log`, `Fail` and the handlers' own failure and timeout
+   messages. Wiring container, python and sql into production is its own
+   package, because how the server may run containers is a security decision.
+2. **There is no SSE and no `follow`.** A client polls the cursor. That was
+   decided with the user (D1); egret has no SSE endpoint anywhere.
+3. **A line becomes readable about 2 s after it is written.** A page stops
+   before the first row after the cursor whose `inserted_at` is less than 2 s
+   old (a watermark, not a per-row filter), so that an id committed after a
+   higher one (two writers: two replicas) is not skipped by a reader whose
+   cursor has already passed it. That holds while each write transaction is
+   shorter than **half** the lag (1 s); `inserted_at` is the transaction's
+   start.
+4. **The flush barrier is bounded at 5 s, and it does not wait at all while
+   the writer is failing.** `RunLog::finish` waits for the writer to store
+   every line the attempt handed it (`WriterConfig::flush_within`), then the
+   outcome commits. If the writer does not acknowledge within 5 s, or is gone,
+   `finish` logs a `warn` and returns, and the timeout sets the writer's
+   breaker; while the breaker is set (an insert failed, until one succeeds),
+   the barrier returns at once and a `write` on a full channel drops its line
+   with a count instead of waiting. So a log write never changes a run's
+   outcome, and can delay it by at most one barrier bound per failing spell.
+   A write can still wait while the writer is healthy but slow (D3), and that
+   wait counts against the task's `timeout:`.
+5. **What `complete` guarantees, and what it does not** (W11 design spec §11).
+   `complete` is true when the execution is terminal **and** its `updated_at`
+   is more than 2 s old. Because the barrier inserts a run's lines before its
+   outcome commits, a client that stops on `complete && items == []` has read
+   every line that was stored. It does **not** mean that every line the run
+   printed was stored: `complete` can be true with lines missing when the
+   process died with lines still in the channel, when a batch was dropped
+   (retries exhausted, or its one attempt failed while the writer was
+   failing; its count is in `tracing::error!`), or when the barrier did not
+   wait (timed out, or skipped by the breaker; item 4). A run that executes
+   twice (reaped while its handler still ran) writes both runs' lines under
+   one attempt, and its stale handler can write after the terminal commit. And `complete`
+   assumes nothing writes after the terminal state; that holds while egret
+   has no kill route, and a future kill must re-check it.
+6. **Paths with no test:** a barrier that times out because the channel is
+   full is reasoned about in `logs::writer` and not exercised; the 10 s
+   shutdown drain does not bound an insert already in flight. (The
+   lost-acknowledgement and drain-time acknowledgement paths are tested since
+   the final-review fix wave.)
+7. **The barrier's cost is not measured under load.** Every `finish()`
+   forces its own INSERT, which defeats the 1 s batching for short runs and
+   adds one insert per run to the sequential claim loop. Not measured. During
+   a log-write fault the breaker stops the barrier from waiting (item 4);
+   `tests/task_logs.rs`'s `a_failing_writer_does_not_slow_finish` measures
+   five runs' `finish` under failing inserts, not throughput under load.
+
+#### The sweep: "nothing persists a log line" is retired where it described W11's absence
+
+Same discipline as W13b: every tracked file flattened to one line (comment
+markers stripped), denominators over `git ls-tree` at **`e0f86320`**, this
+task's base after the rebase, before this task edited anything, and
+`/usr/bin/grep` with file arguments.
+
+| # | population | examined | corrected |
+|---|---|---:|---:|
+| 1 | the brief's phrases and their glosses, EN, whole repository | **3912 files** (3904 plus 8 dotfiles, which had 0 hits), 13 matching, **33 occurrences** | **14** |
+| 2 | the other language: every file under `docs/vi/`, flattened | **289 files**, 4 matching, **11 occurrences** | **9** |
+| 3 | stale level claims: stderr at WARN, whole repository, case-sensitive | **3912 files**, 3 matching, **5 occurrences** | **0** |
+| 4 | `handlers/mod.rs`'s *"egret has no durable workflow-log store yet"* | 1 file | **0** here: Task 3 (`8bb88306`) already rewrote the trait's doc, and the phrase's one remaining hit is the W11 plan quoting it (counted in population 1) |
+
+**Population 1's fourteen corrections, by site** (7 + 3 + 4 = 14):
+
+- `docs/en/specs/2026-09-01-workflow-programme-design.md` (7): §6.1's
+  *"NOT BUILT: W11"* rewritten to what W11 built (the old text is quoted in
+  the correction); W7's row, *"logs panel needs W11"*, gets a dated
+  parenthesis (the API exists, the panel is W7's); W11's row, *"no `task_logs`
+  table"*, *"none of the three persists a line"*, *"counts, not content"* and
+  *"W7 ships without a logs panel"*, retired by a new dated W11 correction
+  under the table; §11 open question 1's *"nothing persists a log line"* gets
+  its answer.
+- `docs/en/specs/2026-09-14-workflow-w10-runtime-and-execution-surface-design.md`
+  (3): §5's measurement (*"persists a line"*, *"counts, not content"*,
+  *"ships without a logs panel"*), dated in place by a note at the end of §5.
+- this README (4): the W10 section's bullet (*"Logs are W11"*, *"persists a
+  line"*, *"counts and not content"*) and W3b's later *"Logs are W11 and the
+  trigger loop is W12"*, each by a dated parenthesis.
+
+**Population 2's nine corrections**: the VI programme spec (6, the twins of
+six of population 1's seven; the seventh's twin, *"không migration nào tạo bảng
+`task_logs`"*, matched no pattern and is retired by the same VI correction,
+which names the row's whole measurement) and the VI W10 spec (3, *"không bản nào lưu một dòng nào"*,
+*"không phải nội dung"*, *"không có panel log"*), by the VI twins of the same
+notes. *"không bản nào lưu"* was not in the first VI pattern; it was found by
+reading the W10 VI section a hit pointed at, and the pattern below includes
+it.
+
+**Nineteen EN occurrences examined and left** (population 1): seven *"nothing
+persists"* about other things (migrations 0136 and 0137, `worker/mod.rs`, the
+W3b plan and this README's note under item 13 of *What this ratchet does
+**not** prove*, all about `Outcome::outputs` or
+`Outcome::message`; `EngineCreate.tsx` and its test, about the engine form);
+four in the W11 design spec EN and two in its VI twin (§1's table, headed
+*"state on origin/main (`6749a37b`)"*, and §8's task list quoting the
+phrases); three in the W11 plan (the brief quoting them); three in the W10
+plan (its scope decision, a record of the instruction given).
+(7 + 4 + 2 + 3 + 3 = 19; 14 + 19 = 33.) **Two VI occurrences left**
+(population 2): the W11 VI design spec's §1 table, dated like its EN twin, and
+`2026-08-16-data-api-p5-design.md`'s unrelated *"không phải nội dung"*.
+**All five of population 3 left**: three say stderr is ERROR *not* WARN (the
+fixture and the W11 spec EN/VI §5), and two are the W11 spec's §1 table row,
+dated. `worker/commands.rs` itself has **0** hits: Task 3 rewrote the comment
+to *"stderr is **ERROR**"*.
+
+**The commands.** Flattening, per file at `e0f86320`: `git show
+e0f86320:<path>`, replace every `\n\s*(//[!/]?|#|\*|>|--)?\s*` with one space,
+collapse spaces and tabs, write under the path with `/` spelled `%2F`; count
+with `/usr/bin/grep -o -i -E -- "$P" * | wc -l`. Population 1's `$P`:
+
+```text
+persists a (log )?line|none of the three persists|nothing persists|ships without a logs panel|logs panel needs W11|NOT BUILT: W11|no durable workflow-log store|durable (workflow[- ])?log store|no `?task_logs`? table|task_logs` (does not exist|is not built)|W11 (has not started|is (still )?pending|is not built)|until W11|counts,? (and )?not content|The text goes to `tracing` and nowhere else|logs are W11|logs are deferred|defers? `?(workflow\.)?task_logs`? to W11|logs (are|remain) (in )?W11
+```
+
+Population 2's, over `docs%2Fvi%2F*` only:
+
+```text
+CHƯA DỰNG: W11|ghi xuống lấy một dòng|không (cái|bản) nào (ghi|lưu)|không có panel log|Panel log cần W11|không phải nội dung|không có gì ghi xuống|kho log bền|W11 (chưa|CHƯA)|log (là|thuộc) W11|Log là W11|hoãn[^.]{0,40}task_logs
+```
+
+Population 3's, case-sensitive (`-o -E`, no `-i`, so `warningOnStdErr` does
+not match):
+
+```text
+stderr[^.;|]{0,30}\bWARN\b|stdout INFO, stderr WARN
+```
 
 ### What this ratchet does **not** prove
 
@@ -9745,7 +9944,8 @@ item necessary rather than what makes it unnecessary.** Four things a green
 
 **Logs are W11 and the trigger loop is W12.** The trigger half of that is
 re-measured in the W6 section at this commit and still reads zero uses outside
-`crates/egret-workflow/src/trigger/`.
+`crates/egret-workflow/src/trigger/`. *(2026-09-27: both have shipped since --
+W12, W13a/b and W11 each in its own section above. The sentence is W10's.)*
 
 ### The stale twins this statement retires
 

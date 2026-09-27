@@ -232,7 +232,8 @@ use std::time::Duration;
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 
-use crate::worker::Registry;
+use crate::logs::{spawn_pruner, spawn_writer, LogLimits, LogRepo, PruneConfig, WriterConfig};
+use crate::worker::{Handlers, Registry};
 
 /// What [`spawn`] needs to know, in this crate's own vocabulary.
 ///
@@ -277,6 +278,86 @@ pub struct RuntimeConfig {
     pub scheduler_enabled: bool,
     /// Between scheduler passes.
     pub trigger_interval: Duration,
+    /// W11: each attempt's log cap, handed to the registry with the sink by
+    /// [`spawn_with_logs`]. `egret_config::WorkflowConfig::{log_run_max_lines,
+    /// log_run_max_bytes}`.
+    pub log_limits: LogLimits,
+    /// W11: stored log lines older than this many days are pruned hourly by
+    /// [`spawn_with_logs`]; `0` keeps them for ever (no pruner is started).
+    /// `egret_config::WorkflowConfig::log_retention_days`.
+    pub log_retention_days: i32,
+}
+
+/// What [`spawn`] and [`spawn_with_logs`] started, to wait for at shutdown.
+#[derive(Debug, Default)]
+pub struct RuntimeHandle {
+    claim_loop: Option<tokio::task::JoinHandle<()>>,
+    log_writer: Option<tokio::task::JoinHandle<()>>,
+    pruner: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RuntimeHandle {
+    /// Wait for the claim loop, then the log writer (which the claim loop's
+    /// end releases, see [`spawn_with_logs`]), then the pruner. Unbounded if a
+    /// tick is in flight; the caller bounds it.
+    pub async fn join(self) {
+        for h in [self.claim_loop, self.log_writer, self.pruner]
+            .into_iter()
+            .flatten()
+        {
+            let _ = h.await;
+        }
+    }
+}
+
+/// [`spawn`], plus W11's durable log: the Postgres log writer, the retention
+/// pruner, and `handlers` wired to write through the writer.
+///
+/// **Why it takes [`Handlers`] and not `Arc<dyn Registry>`.** The sink must be
+/// in the registry before the registry is shared, and an `Arc<dyn Registry>`
+/// can no longer be given one. The caller (`egret-bin`) still decides WHICH
+/// handlers run; this function decides only where their lines go, so it cannot
+/// forget to: [`Handlers::with_log_sink`] is called here, with
+/// [`RuntimeConfig::log_limits`].
+///
+/// With `cfg.enabled` false this is [`spawn`]: no writer and no pruner,
+/// because the worker is the only producer of lines (spec §4.3).
+///
+/// # Shutdown order, and what enforces it
+///
+/// The writer is **not** cancelled by `cancel`. It has its own token, and the
+/// only thing that fires it is the **claim loop's task ending** (a drop guard
+/// inside that task, so a panic fires it too). The claim loop checks `cancel`
+/// only between ticks, so by the time it ends, any tick in flight -- and every
+/// handler writing through the sink -- has returned. Then the writer stops
+/// accepting, drains what is queued and exits within
+/// [`WriterConfig::drain_within`](crate::logs::WriterConfig::drain_within).
+/// A write that still arrives after that (nothing in this crate produces one)
+/// is dropped with one `warn` (spec §11). The pruner stops on `cancel`.
+/// [`RuntimeHandle::join`] waits for the claim loop, then the writer.
+pub fn spawn_with_logs(
+    pool: PgPool,
+    handlers: Handlers,
+    cfg: RuntimeConfig,
+    cancel: CancellationToken,
+) -> RuntimeHandle {
+    if !cfg.enabled {
+        return spawn(pool, Arc::new(handlers), cfg, cancel);
+    }
+    let repo = LogRepo::new(pool.clone());
+    let writer_stop = CancellationToken::new();
+    let (sink, writer) = spawn_writer(repo.clone(), WriterConfig::default(), writer_stop.clone());
+    let pruner = spawn_pruner(
+        repo,
+        PruneConfig::new(cfg.log_retention_days),
+        cancel.clone(),
+    );
+    let reg: Arc<dyn Registry> = Arc::new(handlers.with_log_sink(Arc::new(sink), cfg.log_limits));
+
+    let mut handle = spawn_inner(pool, reg, cfg, cancel, Some(writer_stop));
+    handle.log_writer = Some(writer);
+    handle.pruner = pruner;
+    handle
 }
 
 /// Start the claim ticker and the reaper ticker, and the scheduler ticker;
@@ -293,9 +374,36 @@ pub struct RuntimeConfig {
 /// Every ticker stops on `cancel`. One per replica and no leader election; see
 /// this module's doc, and [`scheduler`](crate::scheduler)'s, for why that is
 /// safe **per statement** rather than once.
-pub fn spawn(pool: PgPool, reg: Arc<dyn Registry>, cfg: RuntimeConfig, cancel: CancellationToken) {
+///
+/// **No durable log**: every attempt's lines go to whatever `reg` answers
+/// [`Registry::log_sink`] with (`tracing`, for [`Handlers`] without a sink).
+/// Production calls [`spawn_with_logs`]; this is for registries a test builds.
+pub fn spawn(
+    pool: PgPool,
+    reg: Arc<dyn Registry>,
+    cfg: RuntimeConfig,
+    cancel: CancellationToken,
+) -> RuntimeHandle {
+    spawn_inner(pool, reg, cfg, cancel, None)
+}
+
+/// [`spawn`]'s body; `release_on_stop` is fired when the claim loop ends.
+fn spawn_inner(
+    pool: PgPool,
+    reg: Arc<dyn Registry>,
+    cfg: RuntimeConfig,
+    cancel: CancellationToken,
+    release_on_stop: Option<CancellationToken>,
+) -> RuntimeHandle {
+    let mut handle = RuntimeHandle::default();
     if cfg.enabled {
-        spawn_worker(pool.clone(), reg, cfg, cancel.clone());
+        handle.claim_loop = Some(spawn_worker(
+            pool.clone(),
+            reg,
+            cfg,
+            cancel.clone(),
+            release_on_stop,
+        ));
     } else {
         tracing::info!("workflow worker disabled by config; no claim loop, no reaper");
     }
@@ -312,6 +420,7 @@ pub fn spawn(pool: PgPool, reg: Arc<dyn Registry>, cfg: RuntimeConfig, cancel: C
     } else {
         tracing::info!("workflow scheduler disabled by config; no trigger loop");
     }
+    handle
 }
 
 /// The third ticker: one [`fire_due`](crate::scheduler::fire_due) pass per
@@ -438,7 +547,8 @@ fn spawn_worker(
     reg: Arc<dyn Registry>,
     cfg: RuntimeConfig,
     cancel: CancellationToken,
-) {
+    release_on_stop: Option<CancellationToken>,
+) -> tokio::task::JoinHandle<()> {
     tracing::info!(
         tick_interval_secs = cfg.tick_interval.as_secs(),
         batch = cfg.batch,
@@ -448,10 +558,14 @@ fn spawn_worker(
     );
 
     // ── Ticker 1: the claim loop ────────────────────────────────────────────
-    {
+    let claim_loop = {
         let pool = pool.clone();
         let cancel = cancel.clone();
         tokio::spawn(async move {
+            // W11: the log writer's stop signal, fired when this task ends --
+            // after its loop has broken, so after any tick in flight has
+            // returned -- or unwinds. See `spawn_with_logs`.
+            let _release = release_on_stop.map(CancellationToken::drop_guard);
             let mut tick = tokio::time::interval(cfg.tick_interval);
             // A replica that pauses (or a laptop that sleeps) must not then fire
             // a burst of catch-up ticks: the runnable runs are still there and
@@ -479,8 +593,8 @@ fn spawn_worker(
                 }
             }
             tracing::info!("workflow claim loop stopped");
-        });
-    }
+        })
+    };
 
     // ── Ticker 2: the lease reaper ──────────────────────────────────────────
     tokio::spawn(async move {
@@ -500,4 +614,5 @@ fn spawn_worker(
         }
         tracing::info!("workflow reaper stopped");
     });
+    claim_loop
 }

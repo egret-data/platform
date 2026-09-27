@@ -1,12 +1,10 @@
 //! `core.execution.Fail` — the one that does not always fail.
 
-use std::sync::Arc;
-
 use serde::Deserialize;
 
 use super::super::{Outcome, TaskHandler, TaskInput};
-use super::{default_sink, Level, LogSink};
 use crate::executor::is_truthy;
+use crate::logs::LogLevel;
 use crate::models::Property;
 
 /// `io.kestra.plugin.core.execution.Fail`.
@@ -31,29 +29,19 @@ struct Spec {
 }
 
 /// Fail the run — unless a `condition:` is present and falsy.
-#[derive(Debug)]
-pub struct Fail {
-    sink: Arc<dyn LogSink>,
-}
-
-impl Default for Fail {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+///
+/// **Its log lines, with `claim::run_one`'s** (W11 spec §4.4): the
+/// unconditional path writes nothing itself and `run_one` writes the
+/// failed-attempt line (`errorMessage`), which is Kestra's one ERROR line; the
+/// conditional path writes `errorMessage` here and `run_one` then writes
+/// `Fail on a condition`, which are Kestra's two. Adding a line to the
+/// unconditional path would store the `errorMessage` twice.
+#[derive(Debug, Default)]
+pub struct Fail;
 
 impl Fail {
     pub fn new() -> Self {
-        Self {
-            sink: default_sink(),
-        }
-    }
-
-    /// The constructor a test uses to see the `errorMessage` a conditional
-    /// failure logs — the only place that message is observable, since the
-    /// exception carries the literal instead.
-    pub fn with_sink(sink: Arc<dyn LogSink>) -> Self {
-        Self { sink }
+        Self
     }
 }
 
@@ -106,7 +94,7 @@ impl TaskHandler for Fail {
         // pair: the author's message is logged and the exception carries the
         // literal, so a handler that failed with the author's message would be
         // reporting something Kestra never reports.
-        self.sink.log(task, Level::Error, &error_message);
+        task.log.line(LogLevel::Error, &error_message).await;
         Ok(Outcome::failed_with(CONDITIONAL_MESSAGE))
     }
 
@@ -128,7 +116,7 @@ fn render_error_message(p: &Option<Property<String>>, task: &TaskInput) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::{input, Recorder};
+    use super::super::testing::{input, recorded};
     use super::*;
     use crate::executor::RunState;
 
@@ -138,11 +126,8 @@ mod tests {
     #[tokio::test]
     async fn a_falsy_condition_succeeds_and_produces_no_output() {
         for falsy in ["false", "0", "-0", "", "  ", " false "] {
-            let sink = Recorder::new();
-            let out = Fail::with_sink(sink.clone())
-                .run(&input(TYPE_ID, serde_json::json!({"condition": falsy})))
-                .await
-                .unwrap();
+            let (task, sink) = recorded(TYPE_ID, serde_json::json!({"condition": falsy}));
+            let out = Fail.run(&task).await.unwrap();
             assert_eq!(
                 out.state,
                 RunState::Success,
@@ -160,14 +145,11 @@ mod tests {
     /// tells the two throwing paths apart.
     #[tokio::test]
     async fn a_truthy_condition_logs_the_error_message_and_fails_with_the_literal() {
-        let sink = Recorder::new();
-        let out = Fail::with_sink(sink.clone())
-            .run(&input(
-                TYPE_ID,
-                serde_json::json!({"condition": "true", "errorMessage": "boom"}),
-            ))
-            .await
-            .unwrap();
+        let (task, sink) = recorded(
+            TYPE_ID,
+            serde_json::json!({"condition": "true", "errorMessage": "boom"}),
+        );
+        let out = Fail.run(&task).await.unwrap();
         assert_eq!(out.state, RunState::Failed);
         assert_eq!(
             out.message.as_deref(),
@@ -175,8 +157,8 @@ mod tests {
             "the thrown message is the literal, not the author's errorMessage"
         );
         assert_eq!(
-            sink.lines(),
-            vec![(Level::Error, "boom".to_string())],
+            sink.texts(),
+            vec![(LogLevel::Error, "boom".to_string())],
             "the author's errorMessage is logged at ERROR (Fail.java:134)"
         );
     }
@@ -186,11 +168,8 @@ mod tests {
     /// from the conditional path, and nothing is logged on the way.
     #[tokio::test]
     async fn no_condition_fails_with_the_error_message_and_logs_nothing() {
-        let sink = Recorder::new();
-        let out = Fail::with_sink(sink.clone())
-            .run(&input(TYPE_ID, serde_json::json!({})))
-            .await
-            .unwrap();
+        let (task, sink) = recorded(TYPE_ID, serde_json::json!({}));
+        let out = Fail.run(&task).await.unwrap();
         assert_eq!(out.state, RunState::Failed);
         assert_eq!(out.message.as_deref(), Some("Task failure"));
         assert!(
@@ -198,7 +177,7 @@ mod tests {
             "the unconditional path throws without logging (Fail.java:140)"
         );
 
-        let out = Fail::with_sink(Recorder::new())
+        let out = Fail
             .run(&input(TYPE_ID, serde_json::json!({"errorMessage": "nope"})))
             .await
             .unwrap();
@@ -210,7 +189,7 @@ mod tests {
     /// artifact: FAILED with `Task failure`, **not** SUCCESS.
     #[tokio::test]
     async fn an_explicitly_null_condition_is_an_absent_one_and_fails() {
-        let out = Fail::with_sink(Recorder::new())
+        let out = Fail
             .run(&input(TYPE_ID, serde_json::json!({"condition": null})))
             .await
             .unwrap();

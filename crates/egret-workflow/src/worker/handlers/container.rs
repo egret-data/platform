@@ -101,9 +101,8 @@ use std::sync::Arc;
 use egret_core::{Error, Result};
 use serde::Deserialize;
 
-use super::super::commands::{CommandsResult, DockerRunner, TaskCommands, TaskRunner};
+use super::super::commands::{CommandsResult, DockerRunner, NoObserver, TaskCommands, TaskRunner};
 use super::super::{Outcome, TaskHandler, TaskInput};
-use super::{default_sink, LogSink};
 use crate::runners::render_str;
 
 /// The `type:` a flow writes.
@@ -153,9 +152,11 @@ fn yes() -> bool {
 }
 
 /// `egret.container`, over a [`TaskRunner`].
+///
+/// Its log lines are the runner's: every stdout/stderr line goes to
+/// `task.log` through [`stream_line`](crate::worker::commands::stream_line).
 pub struct Container {
     runner: Arc<dyn TaskRunner>,
-    sink: Arc<dyn LogSink>,
 }
 
 impl std::fmt::Debug for Container {
@@ -173,7 +174,7 @@ impl Default for Container {
 }
 
 impl Container {
-    /// The shipping handler: a [`DockerRunner`] and `tracing`.
+    /// The shipping handler: a [`DockerRunner`].
     pub fn new() -> Self {
         Self::with_runner(Arc::new(DockerRunner::new()))
     }
@@ -181,18 +182,7 @@ impl Container {
     /// The same handler over another runner — a Kubernetes one later, a fake
     /// in a test.
     pub fn with_runner(runner: Arc<dyn TaskRunner>) -> Self {
-        Self {
-            runner,
-            sink: default_sink(),
-        }
-    }
-
-    /// The constructor a test uses to see what was logged. A container's
-    /// stdout is most of what it produces, so a test that could not read the
-    /// log lines could only assert that it ran.
-    pub fn with_sink(mut self, sink: Arc<dyn LogSink>) -> Self {
-        self.sink = sink;
-        self
+        Self { runner }
     }
 }
 
@@ -383,7 +373,7 @@ impl TaskHandler for Container {
             output_files,
         };
 
-        match self.runner.run(task, &cmds, self.sink.as_ref()).await {
+        match self.runner.run(task, &cmds, &NoObserver).await {
             Ok(result) => Ok(outcome_for(TYPE_ID, &result)),
             Err(e) => mapped(TYPE_ID, e),
         }
@@ -425,6 +415,9 @@ pub(super) mod testing {
         pub seen: Mutex<Vec<TaskCommands>>,
         pub cancelled: Mutex<Vec<String>>,
         answer: Mutex<Option<Result<CommandsResult>>>,
+        /// `(is_stderr, line)` to stream, in order. `None` streams the one
+        /// stdout line the argv would print.
+        streams: Mutex<Option<Vec<(bool, String)>>>,
     }
 
     impl Spy {
@@ -437,6 +430,12 @@ pub(super) mod testing {
         pub fn ok(result: CommandsResult) -> Arc<Self> {
             Self::new(Ok(result))
         }
+        /// Stream these `(is_stderr, line)` pairs, through the same
+        /// `commands::stream_line` the real runner uses.
+        pub fn streaming(self: Arc<Self>, lines: Vec<(bool, String)>) -> Arc<Self> {
+            *self.streams.lock().unwrap() = Some(lines);
+            self
+        }
         pub fn only(&self) -> TaskCommands {
             let seen = self.seen.lock().unwrap();
             assert_eq!(seen.len(), 1, "expected exactly one run");
@@ -448,19 +447,35 @@ pub(super) mod testing {
     impl TaskRunner for Spy {
         async fn run(
             &self,
-            _task: &TaskInput,
+            task: &TaskInput,
             commands: &TaskCommands,
-            sink: &dyn LogSink,
+            observer: &dyn crate::worker::commands::LineObserver,
         ) -> Result<CommandsResult> {
             self.seen.lock().unwrap().push(commands.clone());
-            // A real runner streams; this one emits the one line the argv it
-            // was given would print, so a test can assert the sink is wired
-            // without a daemon.
-            sink.log(
-                _task,
-                super::super::Level::Info,
-                &commands.argv().join(" \u{2423} "),
-            );
+            // A real runner streams; this one streams what the test gave it,
+            // or the one line the argv would print, through the real runner's
+            // own `stream_line` — so the levels, the markers and the
+            // destination (`task.log`) are the shipping ones, without a daemon.
+            let lines = self
+                .streams
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| vec![(false, commands.argv().join(" \u{2423} "))]);
+            let mut scratch = CommandsResult::default();
+            let mut state = crate::worker::commands::StreamState::default();
+            for (is_err, line) in lines {
+                crate::worker::commands::stream_line(
+                    task,
+                    observer,
+                    &mut scratch,
+                    &mut state,
+                    usize::MAX,
+                    &line,
+                    is_err,
+                )
+                .await;
+            }
             self.answer
                 .lock()
                 .unwrap()
@@ -483,8 +498,8 @@ mod tests {
     use super::testing::Spy;
     use super::*;
     use crate::executor::RunState;
-    use crate::worker::handlers::testing::{input, Recorder};
-    use crate::worker::handlers::Level;
+    use crate::logs::{fixture, LogLevel};
+    use crate::worker::handlers::testing::{input, recorded};
 
     fn spec() -> serde_json::Value {
         serde_json::json!({
@@ -673,21 +688,74 @@ mod tests {
         assert!(spy.seen.lock().unwrap().is_empty());
     }
 
-    /// The log sink is wired: a container's stdout is most of what it
-    /// produces, and a handler that streamed to nowhere would still pass every
+    /// The log is wired: a container's stdout is most of what it produces,
+    /// and a handler that streamed to nowhere would still pass every
     /// assertion about its outputs.
     #[tokio::test]
     async fn the_log_sink_receives_the_runners_lines() {
-        let rec = Recorder::new();
+        let (task, rec) = recorded(TYPE_ID, spec());
         let spy = Spy::ok(CommandsResult::default());
-        let h = Container::with_runner(spy).with_sink(rec.clone());
-        h.run(&input(TYPE_ID, spec()))
+        Container::with_runner(spy)
+            .run(&task)
             .await
             .expect("no worker error");
-        let lines = rec.lines();
+        let lines = rec.texts();
         assert_eq!(lines.len(), 1, "got {lines:?}");
-        assert_eq!(lines[0].0, Level::Info);
+        assert_eq!(lines[0].0, LogLevel::Info);
         assert!(lines[0].1.contains("echo one"), "got {:?}", lines[0].1);
+    }
+
+    /// **Both streams arrive on `task.log` at Task 1's levels, and marker
+    /// lines follow Task 1** — through the handler, over a runner that
+    /// streams through the shipping `stream_line`.
+    #[tokio::test]
+    async fn stdout_and_stderr_reach_task_log_at_the_measured_levels() {
+        let lines: Vec<(bool, String)> = vec![
+            (false, "out-line".into()),
+            (true, "err-line".into()),
+            (false, r#"::{"outputs":{"k":"v"}}::"#.into()),
+            (true, r#"::{"outputs":{"k2":"v2"}}::"#.into()),
+            (false, r#"x ::{"outputs":{"k3":"v3"}}::"#.into()),
+            (false, "##kestra:log:debug##".into()),
+            (false, "dbg-out".into()),
+            (true, "dbg-err".into()),
+            (false, "##kestra:log:info##".into()),
+            (false, "::{not json}::".into()),
+            (false, "after".into()),
+        ];
+        let (task, rec) = recorded(TYPE_ID, spec());
+        let spy = Spy::ok(CommandsResult::default()).streaming(lines);
+        Container::with_runner(spy)
+            .run(&task)
+            .await
+            .expect("no worker error");
+
+        let table = &fixture::w11()["level_table"];
+        let out = fixture::level(&table["stdout"]);
+        let err = fixture::level(&table["stderr"]);
+        let dbg = fixture::level(&table["stdout_inside_debug_bracket"]);
+        let warn = fixture::level(&table["invalid_marker_warning"]);
+        let bad = serde_json::from_str::<serde_json::Value>("{not json}")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            rec.texts(),
+            vec![
+                (out, "out-line".to_string()),
+                (err, "err-line".to_string()),
+                (out, r#"x ::{"outputs":{"k3":"v3"}}::"#.to_string()),
+                (dbg, "dbg-out".to_string()),
+                (err, "dbg-err".to_string()),
+                (warn, format!("Invalid outputs '{bad}'")),
+                (out, "after".to_string()),
+            ]
+        );
+        assert!(
+            rec.lines()
+                .iter()
+                .all(|l| l.task_run_id == Some(task.run_id)),
+            "every line carries this run's identity"
+        );
     }
 
     /// **The publish table and these two handlers agree — asserted, not

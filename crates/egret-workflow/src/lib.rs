@@ -31,6 +31,7 @@
 //! - `flow_trigger` — W13a (the outbox processor: the Flow trigger's database
 //!   half, run from the scheduler ticker)
 //! - `plugins`   — W5 (handler registry)
+//! - `logs`      — W11 (`workflow.task_logs` and `LogRepo`)
 //!
 //! `models`, `runners`, and `executor` must never touch the database or the
 //! network. That boundary holds all the semantic difficulty and is what makes
@@ -43,6 +44,9 @@ pub mod executor;
 /// W13a: `process_events`, the Flow-trigger outbox processor. `pub` because
 /// `tests/flow_trigger_fire.rs` drives it directly.
 pub mod flow_trigger;
+/// W11: `workflow.task_logs` -- the log vocabulary and `LogRepo`. `pub`
+/// because `tests/task_logs.rs` drives the repository directly.
+pub mod logs;
 pub mod models;
 pub mod publish;
 pub mod refs;
@@ -84,8 +88,9 @@ pub mod worker;
 pub use publish::publish;
 pub use refs::WorkflowRefs;
 pub use repo::{
-    CreateFlowInput, ExecutionDetail, ExecutionFilter, ExecutionPage, ExecutionRepo, ExecutionRow,
-    FlowRepo, FlowRow, FlowVersionRow, ListFilter, Page, TaskRunRow, UpdateFlowInput,
+    CreateFlowInput, ExecutionDetail, ExecutionFilter, ExecutionLogStatus, ExecutionPage,
+    ExecutionRepo, ExecutionRow, FlowRepo, FlowRow, FlowVersionRow, ListFilter, Page, TaskRunRow,
+    UpdateFlowInput,
 };
 pub use routes::{management_router, openapi, WorkflowState};
 pub use runners::{render_str, rewrite, RenderContext, RenderError, RewriteError};

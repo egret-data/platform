@@ -183,6 +183,8 @@ fn fast(tick_ms: u64, batch: usize) -> RuntimeConfig {
         working_timeout: Duration::from_secs(3600),
         scheduler_enabled: false,
         trigger_interval: Duration::from_millis(tick_ms),
+        log_limits: egret_workflow::logs::LogLimits::default(),
+        log_retention_days: 30,
     }
 }
 
@@ -329,6 +331,8 @@ async fn a_cancelled_token_stops_both_tickers(pool: sqlx::PgPool) {
         working_timeout: Duration::from_secs(1),
         scheduler_enabled: false,
         trigger_interval: Duration::from_secs(3600),
+        log_limits: egret_workflow::logs::LogLimits::default(),
+        log_retention_days: 30,
     };
     spawn(pool.clone(), reg.clone(), cfg, cancel.clone());
 
@@ -897,6 +901,8 @@ async fn two_tickers_reclaim_an_expired_lease_once_and_leave_a_live_one(pool: sq
         working_timeout: Duration::from_secs(3600),
         scheduler_enabled: false,
         trigger_interval: Duration::from_secs(3600),
+        log_limits: egret_workflow::logs::LogLimits::default(),
+        log_retention_days: 30,
     };
     spawn(pool.clone(), reg.clone(), cfg, cancel.clone());
     spawn(pool.clone(), reg.clone(), cfg, cancel.clone());

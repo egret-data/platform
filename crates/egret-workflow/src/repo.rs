@@ -1067,4 +1067,51 @@ impl ExecutionRepo {
         .await
         .map_err(db_err)
     }
+
+    /// What `GET …/executions/{id}/logs` needs of the execution, in one row
+    /// and nothing else: no `source`, no task runs -- a logs panel polls this
+    /// every few seconds, and [`get`](Self::get) loads both.
+    ///
+    /// **Same existence and ownership contract as [`get`](Self::get)**: an id
+    /// in another workspace is [`Error::NotFound`], exactly as one that never
+    /// existed.
+    ///
+    /// `complete` is computed from this same row: the state is terminal
+    /// ([`RunState::is_terminal`](crate::executor::RunState::is_terminal), the
+    /// one list) AND `updated_at` is older than
+    /// [`SETTLE_LAG`](crate::logs::SETTLE_LAG). The run's last lines were
+    /// inserted before its outcome committed (`RunLog::finish`'s flush
+    /// barrier), so once the settle lag has also passed since that commit,
+    /// the page has nothing more to reveal (spec §6).
+    pub async fn log_status(&self, ws: Uuid, id: Uuid) -> Result<ExecutionLogStatus> {
+        let terminal: Vec<&'static str> = crate::executor::RunState::ALL
+            .iter()
+            .filter(|s| s.is_terminal())
+            .map(|s| s.wire())
+            .collect();
+        let row: Option<(String, bool)> = sqlx::query_as(
+            "SELECT state, \
+                    state = ANY($3) \
+                      AND updated_at < now() - make_interval(secs => $4) \
+               FROM workflow.executions WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(ws)
+        .bind(terminal)
+        .bind(crate::logs::SETTLE_LAG.as_secs_f64())
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        let (state, complete) = row.ok_or_else(|| Error::NotFound("execution".into()))?;
+        Ok(ExecutionLogStatus { state, complete })
+    }
+}
+
+/// [`ExecutionRepo::log_status`]'s answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionLogStatus {
+    /// Kestra's wire spelling, as stored.
+    pub state: String,
+    /// Terminal, and terminal for longer than the settle lag.
+    pub complete: bool,
 }

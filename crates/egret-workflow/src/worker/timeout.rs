@@ -41,9 +41,9 @@
 //! not wrapped at 24**. Probed inside the image rather than derived:
 //! `PT1S → "Timeout after 00:00:01.000"`, `PT1.5S → "…00:00:01.500"`,
 //! `PT2M → "…00:02:00.000"`, `PT30H → "…30:00:00.000"`. Kestra logs it at
-//! ERROR against the task run; egret has no workflow-log table
-//! ([`LogSink`](super::handlers::LogSink) says so), so it is stored on the run
-//! instead — migration 0137.
+//! ERROR against the task run; egret stores it on the run (migration 0137)
+//! and, since W11, `claim::run_one` also writes it to the attempt's log as
+//! the failed-attempt line.
 //!
 //! **A `timeout:` on a flowable is ignored**, which is Kestra's own validator
 //! speaking (`FlowService` warns "cannot use the 'timeout' property as it's

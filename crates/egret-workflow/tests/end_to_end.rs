@@ -169,6 +169,8 @@ fn cfg(enabled: bool) -> RuntimeConfig {
         working_timeout: Duration::from_secs(3600),
         scheduler_enabled: false,
         trigger_interval: Duration::from_secs(3600),
+        log_limits: egret_workflow::logs::LogLimits::default(),
+        log_retention_days: 30,
     }
 }
 

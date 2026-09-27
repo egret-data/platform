@@ -70,8 +70,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use egret_workflow::worker::commands::{container_name, DockerRunner, TaskCommands, TaskRunner};
-use egret_workflow::worker::handlers::{container, python, Level, LogSink, TracingSink};
+use egret_workflow::logs::{LogLevel, LogLimits, LogLine, RunIdentity, RunLog};
+use egret_workflow::worker::commands::{
+    container_name, DockerRunner, NoObserver, TaskCommands, TaskRunner,
+};
+use egret_workflow::worker::handlers::{container, python, LogSink};
 use egret_workflow::worker::{Outcome, TaskHandler, TaskInput};
 use uuid::Uuid;
 
@@ -243,28 +246,46 @@ fn the_docker_gate_fails_rather_than_skipping_and_the_opt_out_must_be_typed() {
 /// an integration test cannot reach it.
 #[derive(Debug, Default)]
 struct Recorder {
-    lines: Mutex<Vec<(Level, String)>>,
+    lines: Mutex<Vec<LogLine>>,
 }
 
 impl Recorder {
-    fn new() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-    fn lines(&self) -> Vec<(Level, String)> {
-        self.lines.lock().unwrap().clone()
+    fn lines(&self) -> Vec<(LogLevel, String)> {
+        self.lines
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| (l.level, l.message.clone()))
+            .collect()
     }
     fn texts(&self) -> Vec<String> {
         self.lines().into_iter().map(|(_, t)| t).collect()
     }
 }
 
+#[async_trait::async_trait]
 impl LogSink for Recorder {
-    fn log(&self, _task: &TaskInput, level: Level, message: &str) {
-        self.lines
-            .lock()
-            .unwrap()
-            .push((level, message.to_string()));
+    async fn write(&self, line: LogLine) {
+        self.lines.lock().unwrap().push(line);
     }
+}
+
+/// [`task`], with its `log` recording into the returned [`Recorder`].
+fn recorded(type_id: &str, spec: serde_json::Value) -> (TaskInput, Arc<Recorder>) {
+    let rec = Arc::new(Recorder::default());
+    let mut t = task(type_id, spec);
+    t.log = RunLog::new(
+        RunIdentity {
+            workspace_id: t.workspace_id,
+            execution_id: t.execution_id,
+            task_run_id: t.run_id,
+            task_id: t.task_id.clone(),
+            attempt: RunIdentity::stored_attempt(t.attempt),
+        },
+        rec.clone(),
+        LogLimits::default(),
+    );
+    (t, rec)
 }
 
 /// A [`TaskInput`] with a **fresh** run id and a lease of `now`, so two tests
@@ -283,6 +304,7 @@ fn task(type_id: &str, spec: serde_json::Value) -> TaskInput {
         timeout: None,
         principal: None,
         claimed_at: chrono::Utc::now(),
+        log: RunLog::discard(),
     }
 }
 
@@ -338,9 +360,8 @@ fn failed(out: &Outcome) -> String {
 /// daemon can say is that a **process** ran and that its two pipes were both
 /// read.
 async fn a_container_runs_and_both_of_its_streams_reach_the_sink() {
-    let rec = Recorder::new();
-    let h = container::Container::new().with_sink(rec.clone());
-    let t = task(
+    let h = container::Container::new();
+    let (t, rec) = recorded(
         container::TYPE_ID,
         serde_json::json!({
             "image": SHELL_IMAGE,
@@ -371,8 +392,8 @@ async fn a_container_runs_and_both_of_its_streams_reach_the_sink() {
             .into_iter()
             .find(|(_, t)| t == "err-one")
             .map(|(l, _)| l),
-        Some(Level::Warn),
-        "and the stream it came from must survive the trip"
+        Some(LogLevel::Error),
+        "and the stream it came from must survive the trip: stderr is ERROR (W11 Task 1)"
     );
     assert!(
         !container_exists(&container_name(&t)),
@@ -498,8 +519,7 @@ async fn a_directory_named_as_an_output_file_does_not_wedge_the_worker() {
 /// **A non-zero exit fails the task on a real daemon**, and `set -e` is what
 /// makes the first failing line the one that decides it.
 async fn a_non_zero_exit_fails_the_task_and_set_e_stops_at_the_first_failure() {
-    let rec = Recorder::new();
-    let t = task(
+    let (t, rec) = recorded(
         container::TYPE_ID,
         serde_json::json!({
             "image": SHELL_IMAGE,
@@ -507,7 +527,6 @@ async fn a_non_zero_exit_fails_the_task_and_set_e_stops_at_the_first_failure() {
         }),
     );
     let out = container::Container::new()
-        .with_sink(rec.clone())
         .run(&t)
         .await
         .expect("a command that failed is the author's flow");
@@ -528,9 +547,8 @@ async fn a_non_zero_exit_fails_the_task_and_set_e_stops_at_the_first_failure() {
 /// **`egret.script.python` runs the author's program in the artifact's own
 /// default image**, streams it, and its outputs are computed by CPython.
 async fn python_runs_the_authors_script_and_its_numbers_come_from_cpython() {
-    let rec = Recorder::new();
-    let h = python::Python::new().with_sink(rec.clone());
-    let t = task(
+    let h = python::Python::new();
+    let (t, rec) = recorded(
         python::TYPE_ID,
         serde_json::json!({
             "script": "import json, sys\n\
@@ -693,7 +711,7 @@ async fn the_runner_refuses_an_empty_image_with_the_artifacts_own_message() {
                 commands: vec!["true".into()],
                 ..TaskCommands::default()
             },
-            &TracingSink,
+            &NoObserver,
         )
         .await
         .expect_err("no image is a refusal");
@@ -729,7 +747,7 @@ async fn a_path_that_escapes_the_working_directory_is_refused_by_the_runner() {
                 input_files: BTreeMap::from([("../escaped.txt".to_string(), "x".to_string())]),
                 ..TaskCommands::default()
             },
-            &TracingSink,
+            &NoObserver,
         )
         .await
         .expect_err("`..` must be refused");
@@ -747,7 +765,7 @@ async fn a_path_that_escapes_the_working_directory_is_refused_by_the_runner() {
                 output_files: vec!["/etc/passwd".to_string()],
                 ..TaskCommands::default()
             },
-            &TracingSink,
+            &NoObserver,
         )
         .await
         .expect("an absolute output path is the author's flow, not egret's outage");
@@ -948,7 +966,7 @@ async fn an_output_file_over_the_cap_fails_the_task_rather_than_being_truncated(
         ..TaskCommands::default()
     };
     let out = runner
-        .run(&t, &cmds, &TracingSink)
+        .run(&t, &cmds, &NoObserver)
         .await
         .expect("a file over the cap is the author's flow");
     let why = out.failure.clone().expect("the cap must fail the task");
@@ -964,7 +982,7 @@ async fn an_output_file_over_the_cap_fails_the_task_rather_than_being_truncated(
     let runner = DockerRunner::new().with_limits(1024, 1_048_576);
     let t = task(container::TYPE_ID, serde_json::json!({}));
     let out = runner
-        .run(&t, &cmds, &TracingSink)
+        .run(&t, &cmds, &NoObserver)
         .await
         .expect("100 bytes is under a 1024-byte cap");
     assert_eq!(out.failure, None, "{out:?}");
@@ -987,7 +1005,7 @@ async fn a_flood_of_output_markers_is_refused_rather_than_stored() {
                 ],
                 ..TaskCommands::default()
             },
-            &TracingSink,
+            &NoObserver,
         )
         .await
         .expect("a flooding container is the author's flow");
