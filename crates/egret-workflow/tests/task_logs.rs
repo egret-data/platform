@@ -42,17 +42,20 @@ struct Fx {
     db: Db,
     repo: LogRepo,
     ws: Uuid,
+    /// A member of `ws`, with no grants until a test gives it some.
+    user: egret_core::UserId,
     _serial: tokio::sync::MutexGuard<'static, ()>,
 }
 
 async fn fx() -> Option<Fx> {
     let serial = SERIAL.lock().await;
     let db = common::db().await?;
-    let (ws, _user) = common::seed_workspace(&db).await;
+    let (ws, user) = common::seed_workspace(&db).await;
     Some(Fx {
         repo: LogRepo::new(db.pool.clone()),
         db,
         ws,
+        user,
         _serial: serial,
     })
 }
@@ -1243,4 +1246,324 @@ async fn a_line_written_after_cancel_by_an_in_flight_run_is_stored(pool: sqlx::P
         "a line an in-flight run wrote after cancellation must be stored before \
          the runtime's join returns; stored: {stored:?}"
     );
+}
+
+// ── The read API (W11 Task 5) ───────────────────────────────────────────────
+//
+// `GET /api/ws/{workspace}/workflows/executions/{id}/logs`, driven over the
+// same composed app and REAL `CedarPdp` as `tests/executions_routes.rs`.
+// Every grant is written before `common::app` builds the PDP, which loads the
+// policy set once.
+
+/// `GET …/executions/{exec}/logs?{q}` as `user`: the status and, when the body
+/// is JSON, the body (`Value::Null` otherwise, e.g. a query-string rejection).
+async fn get_logs(
+    app: &common::App,
+    ws: Uuid,
+    exec: Uuid,
+    user: egret_core::UserId,
+    q: &str,
+) -> (u16, serde_json::Value) {
+    let res = common::get(
+        app,
+        &format!("/api/ws/{ws}/workflows/executions/{exec}/logs?{q}"),
+        user,
+    )
+    .await;
+    let status = res.status().as_u16();
+    let text = common::body_text(res).await;
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+fn item_messages(body: &serde_json::Value) -> Vec<String> {
+    body["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no items array in {body}"))
+        .iter()
+        .map(|i| i["message"].as_str().unwrap().to_string())
+        .collect()
+}
+
+impl Fx {
+    async fn set_state(&self, execution: Uuid, state: &str) {
+        sqlx::query("UPDATE workflow.executions SET state = $2 WHERE id = $1")
+            .bind(execution)
+            .bind(state)
+            .execute(&self.db.pool)
+            .await
+            .expect("set execution state");
+    }
+}
+
+#[tokio::test]
+async fn logs_route_pages_with_after_and_limit_and_reports_execution_state() {
+    let Some(fx) = fx().await else { return };
+    common::grant(&fx.db, fx.ws, fx.user, &["workflow:read"]).await;
+    let exec = fx.execution().await;
+    let run = Uuid::new_v4();
+    let lines: Vec<LogLine> = (0..5)
+        .map(|i| {
+            let mut l = fx.line(exec, LogLevel::Info, &format!("l{i}"));
+            l.task_id = Some("t".into());
+            l.task_run_id = Some(run);
+            l.attempt = Some(1);
+            l
+        })
+        .collect();
+    fx.repo.insert_batch(&lines).await.unwrap();
+    fx.settle(exec).await;
+    // Inserted AFTER the settle, so younger than the lag: the route must not
+    // serve it (the lag is the repository's, and the route must not bypass it).
+    fx.repo
+        .insert_batch(&[fx.line(exec, LogLevel::Info, "young")])
+        .await
+        .unwrap();
+    let ids: Vec<i64> = fx
+        .page(exec, &q(None, 100))
+        .await
+        .iter()
+        .map(|l| l.id)
+        .collect();
+    assert_eq!(ids.len(), 5);
+
+    let app = common::app(&fx.db).await;
+
+    let (status, p1) = get_logs(&app, fx.ws, exec, fx.user, "limit=2").await;
+    assert_eq!(status, 200, "{p1}");
+    assert_eq!(item_messages(&p1), ["l0", "l1"]);
+    assert_eq!(p1["next_after"], ids[1], "{p1}");
+    assert_eq!(p1["execution_state"], "RUNNING", "{p1}");
+    // Every field of an item reaches the wire, by value.
+    let first = &p1["items"][0];
+    assert_eq!(first["id"], ids[0]);
+    assert_eq!(first["task_id"], "t");
+    assert_eq!(first["task_run_id"], run.to_string());
+    assert_eq!(first["attempt"], 1);
+    assert_eq!(first["level"], "INFO");
+    assert_eq!(
+        first["ts"]
+            .as_str()
+            .unwrap()
+            .parse::<DateTime<Utc>>()
+            .unwrap(),
+        lines[0].ts
+    );
+    assert_eq!(first["message"], "l0");
+    assert!(
+        p1.get("truncated").is_none() && first.get("truncated").is_none(),
+        "D6: {p1}"
+    );
+
+    let (_, p2) = get_logs(
+        &app,
+        fx.ws,
+        exec,
+        fx.user,
+        &format!("after={}&limit=2", ids[1]),
+    )
+    .await;
+    assert_eq!(item_messages(&p2), ["l2", "l3"]);
+    assert_eq!(p2["next_after"], ids[3]);
+
+    let (_, p3) = get_logs(
+        &app,
+        fx.ws,
+        exec,
+        fx.user,
+        &format!("after={}&limit=2", ids[3]),
+    )
+    .await;
+    assert_eq!(item_messages(&p3), ["l4"]);
+    assert_eq!(p3["next_after"], ids[4]);
+
+    let (status, p4) = get_logs(&app, fx.ws, exec, fx.user, &format!("after={}", ids[4])).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        item_messages(&p4),
+        Vec::<String>::new(),
+        "the unsettled line is held back"
+    );
+    assert!(
+        p4["next_after"].is_null(),
+        "an empty page has no cursor: {p4}"
+    );
+
+    // `execution_state` is read from the row on every call, not fixed.
+    fx.set_state(exec, "SUCCESS").await;
+    let (_, done) = get_logs(&app, fx.ws, exec, fx.user, "").await;
+    assert_eq!(done["execution_state"], "SUCCESS", "{done}");
+    assert_eq!(item_messages(&done), ["l0", "l1", "l2", "l3", "l4"]);
+
+    // The default limit is 500: 501 settled lines, no `limit`, 500 served.
+    let many = fx.execution().await;
+    let batch: Vec<LogLine> = (0..501)
+        .map(|i| fx.line(many, LogLevel::Info, &format!("m{i}")))
+        .collect();
+    fx.repo.insert_batch(&batch).await.unwrap();
+    fx.settle(many).await;
+    let (_, big) = get_logs(&app, fx.ws, many, fx.user, "").await;
+    assert_eq!(big["items"].as_array().unwrap().len(), 500, "default limit");
+    let (_, rest) = get_logs(
+        &app,
+        fx.ws,
+        many,
+        fx.user,
+        &format!("after={}", big["next_after"]),
+    )
+    .await;
+    assert_eq!(item_messages(&rest), ["m500"]);
+}
+
+#[tokio::test]
+async fn logs_route_filters_by_min_level_and_task() {
+    let Some(fx) = fx().await else { return };
+    common::grant(&fx.db, fx.ws, fx.user, &["workflow:read"]).await;
+    let exec = fx.execution().await;
+    let (r1, r2) = (Uuid::new_v4(), Uuid::new_v4());
+    let mk = |task: Option<&str>, run: Option<Uuid>, level: LogLevel, m: &str| {
+        let mut l = fx.line(exec, level, m);
+        l.task_id = task.map(str::to_string);
+        l.task_run_id = run;
+        l.attempt = run.map(|_| 0);
+        l
+    };
+    fx.repo
+        .insert_batch(&[
+            mk(None, None, LogLevel::Info, "exec"),
+            mk(Some("a"), Some(r1), LogLevel::Debug, "a-debug"),
+            mk(Some("a"), Some(r1), LogLevel::Warn, "a-warn"),
+            mk(Some("a"), Some(r2), LogLevel::Error, "a2-error"),
+            mk(Some("b"), Some(Uuid::new_v4()), LogLevel::Trace, "b-trace"),
+        ])
+        .await
+        .unwrap();
+    fx.settle(exec).await;
+    let app = common::app(&fx.db).await;
+    let msgs = |body: serde_json::Value| item_messages(&body);
+
+    let (s, all) = get_logs(&app, fx.ws, exec, fx.user, "").await;
+    assert_eq!(s, 200);
+    assert_eq!(
+        msgs(all),
+        ["exec", "a-debug", "a-warn", "a2-error", "b-trace"],
+        "control"
+    );
+    let (_, b) = get_logs(&app, fx.ws, exec, fx.user, "min_level=WARN").await;
+    assert_eq!(msgs(b), ["a-warn", "a2-error"], "min_level is inclusive");
+    let (_, b) = get_logs(&app, fx.ws, exec, fx.user, "task_id=a").await;
+    assert_eq!(msgs(b), ["a-debug", "a-warn", "a2-error"]);
+    let (_, b) = get_logs(&app, fx.ws, exec, fx.user, &format!("task_run_id={r1}")).await;
+    assert_eq!(msgs(b), ["a-debug", "a-warn"]);
+    let (_, b) = get_logs(
+        &app,
+        fx.ws,
+        exec,
+        fx.user,
+        &format!("task_id=a&task_run_id={r1}&min_level=INFO"),
+    )
+    .await;
+    assert_eq!(msgs(b), ["a-warn"], "filters combine");
+
+    // A level outside the five, including a lower-case one (the names compare
+    // case-sensitively, as Kestra's Jackson enum does), is a 400.
+    for bad in ["min_level=LOUD", "min_level=warn", "task_run_id=nope"] {
+        let (s, body) = get_logs(&app, fx.ws, exec, fx.user, bad).await;
+        assert_eq!(s, 400, "{bad}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn logs_route_answers_404_for_another_workspaces_execution() {
+    let Some(fx) = fx().await else { return };
+    let (ws_b, user_b) = common::seed_workspace(&fx.db).await;
+    common::grant(&fx.db, fx.ws, fx.user, &["workflow:read"]).await;
+    common::grant(&fx.db, ws_b, user_b, &["workflow:read"]).await;
+    let theirs = fx.execution_in(ws_b).await;
+    let mut l = fx.line(theirs, LogLevel::Info, "b's secret");
+    l.workspace_id = ws_b;
+    assert_eq!(fx.repo.insert_batch(&[l]).await.unwrap(), 1);
+    fx.settle(theirs).await;
+    let app = common::app(&fx.db).await;
+
+    let (status, body) = get_logs(&app, fx.ws, theirs, fx.user, "").await;
+    assert_eq!(
+        status, 404,
+        "another workspace's execution must be a 404, never a 403 and never an \
+         empty 200: {body}"
+    );
+    assert!(!body.to_string().contains("b's secret"), "{body}");
+    // Indistinguishable from an id that exists nowhere.
+    let (nowhere, _) = get_logs(&app, fx.ws, Uuid::new_v4(), fx.user, "").await;
+    assert_eq!(nowhere, 404);
+    // Control: the same id in its own workspace serves its line.
+    let (status, body) = get_logs(&app, ws_b, theirs, user_b, "").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(item_messages(&body), ["b's secret"]);
+}
+
+#[tokio::test]
+async fn logs_route_is_gated_by_the_workflows_feature() {
+    let Some(fx) = fx().await else { return };
+    common::grant(&fx.db, fx.ws, fx.user, &["workflow:read"]).await;
+    common::disable_feature(&fx.db, fx.ws, "workflows").await;
+    let exec = fx.execution().await;
+    // Control: an enabled workspace, same shape, answers 200 -- so the 403
+    // below is the gate and not a missing route.
+    let (ws_on, user_on) = common::seed_workspace(&fx.db).await;
+    common::grant(&fx.db, ws_on, user_on, &["workflow:read"]).await;
+    let exec_on = fx.execution_in(ws_on).await;
+    // And a `workflow:manage`-only member of an enabled workspace: the route
+    // checks `workflow:read` specifically.
+    let (ws_m, user_m) = common::seed_workspace(&fx.db).await;
+    common::grant(&fx.db, ws_m, user_m, &["workflow:manage"]).await;
+    let exec_m = fx.execution_in(ws_m).await;
+    let app = common::app(&fx.db).await;
+
+    let (status, body) = get_logs(&app, fx.ws, exec, fx.user, "").await;
+    assert_eq!(status, 403, "a disabled workflows module: {body}");
+    let (status, body) = get_logs(&app, ws_m, exec_m, user_m, "").await;
+    assert_eq!(
+        status, 403,
+        "workflow:manage does not imply workflow:read: {body}"
+    );
+    let (status, body) = get_logs(&app, ws_on, exec_on, user_on, "").await;
+    assert_eq!(status, 200, "control: {body}");
+    let res = common::anon_get(
+        &app,
+        &format!("/api/ws/{ws_on}/workflows/executions/{exec_on}/logs"),
+    )
+    .await;
+    assert_eq!(res.status(), 401, "anonymous");
+}
+
+#[tokio::test]
+async fn logs_route_rejects_limit_over_2000() {
+    let Some(fx) = fx().await else { return };
+    common::grant(&fx.db, fx.ws, fx.user, &["workflow:read"]).await;
+    let exec = fx.execution().await;
+    fx.repo
+        .insert_batch(&[fx.line(exec, LogLevel::Info, "one")])
+        .await
+        .unwrap();
+    fx.settle(exec).await;
+    let app = common::app(&fx.db).await;
+
+    let (status, body) = get_logs(&app, fx.ws, exec, fx.user, "limit=2001").await;
+    assert_eq!(
+        status, 400,
+        "limit over 2000 is refused, not clamped: {body}"
+    );
+    for bad in ["limit=0", "limit=-1", "limit=many"] {
+        let (status, body) = get_logs(&app, fx.ws, exec, fx.user, bad).await;
+        assert_eq!(status, 400, "{bad}: {body}");
+    }
+    // Controls: both ends of the range are served.
+    for ok in ["limit=2000", "limit=1"] {
+        let (status, body) = get_logs(&app, fx.ws, exec, fx.user, ok).await;
+        assert_eq!(status, 200, "{ok}: {body}");
+        assert_eq!(item_messages(&body), ["one"]);
+    }
 }

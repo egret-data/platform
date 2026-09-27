@@ -33,11 +33,13 @@ import type {
   FlowDto,
   FlowListItemDto,
   FlowVersionDto,
+  LogPageDto,
   PublishFlowRequest,
   StartExecutionRequest,
   UpdateFlowRequest,
   ValidateFlowRequest,
   ValidationReportDto,
+  WorkflowGetExecutionLogsParams,
   WorkflowListExecutionsParams,
   WorkflowListFlowsParams
 } from '../model';
@@ -342,6 +344,183 @@ export function useWorkflowGetExecution<TData = Awaited<ReturnType<typeof workfl
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getWorkflowGetExecutionQueryOptions(workspace,id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowGetExecutionLogsResponse200 = {
+  data: LogPageDto
+  status: 200
+}
+
+export type workflowGetExecutionLogsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowGetExecutionLogsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowGetExecutionLogsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowGetExecutionLogsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowGetExecutionLogsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowGetExecutionLogsResponseSuccess = (workflowGetExecutionLogsResponse200) & {
+  headers: Headers;
+};
+export type workflowGetExecutionLogsResponseError = (workflowGetExecutionLogsResponse400 | workflowGetExecutionLogsResponse401 | workflowGetExecutionLogsResponse403 | workflowGetExecutionLogsResponse404 | workflowGetExecutionLogsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowGetExecutionLogsResponse = (workflowGetExecutionLogsResponseSuccess | workflowGetExecutionLogsResponseError)
+
+export const getWorkflowGetExecutionLogsUrl = (workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionLogsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/logs?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/logs`
+}
+
+/**
+ * **Lines appear about 2 seconds after they are written (the settle lag,
+ * [`crate::logs::SETTLE_LAG`]).** Only lines whose `inserted_at` is more than
+ * 2 s old are returned. The reason is out-of-order commits: `bigserial` ids
+ * are allocated at insert and committed later, so with two writers (two egret
+ * replicas, or one writer's retry overlapping its next batch) id 100 can
+ * commit after id 101. A client that had read 101 and moved its cursor past
+ * it would never see 100. Holding every line back until it has settled lets
+ * the lower id commit first; a log batch is one short transaction, so 2 s
+ * bounds that window generously.
+ *
+ * Authorisation is exactly `GET …/executions/{id}`'s: `WsContext` (session,
+ * membership, the `workflows` feature gate), then `workflow:read`, then
+ * [`ExecutionRepo::get`] for existence and ownership -- **an execution in
+ * another workspace is a 404, never a 403** -- and only then the page, which
+ * filters on the workspace AND the execution again.
+ * @summary An execution's log lines after a cursor, in `id` order.
+ */
+export const workflowGetExecutionLogs = async (workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionLogsParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowGetExecutionLogsResponse> => {
+
+  return customInstance<workflowGetExecutionLogsResponse>(getWorkflowGetExecutionLogsUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowGetExecutionLogsQueryKey = (workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionLogsParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/logs`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowGetExecutionLogsQueryOptions = <TData = Awaited<ReturnType<typeof workflowGetExecutionLogs>>, TError = ErrorBody>(workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionLogsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecutionLogs>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowGetExecutionLogsQueryKey(workspace,id,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowGetExecutionLogs>>> = ({ signal }) => workflowGetExecutionLogs(workspace,id,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecutionLogs>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowGetExecutionLogsQueryResult = NonNullable<Awaited<ReturnType<typeof workflowGetExecutionLogs>>>
+export type WorkflowGetExecutionLogsQueryError = ErrorBody
+
+
+export function useWorkflowGetExecutionLogs<TData = Awaited<ReturnType<typeof workflowGetExecutionLogs>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: undefined |  WorkflowGetExecutionLogsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecutionLogs>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowGetExecutionLogs>>,
+          TError,
+          Awaited<ReturnType<typeof workflowGetExecutionLogs>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowGetExecutionLogs<TData = Awaited<ReturnType<typeof workflowGetExecutionLogs>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionLogsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecutionLogs>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowGetExecutionLogs>>,
+          TError,
+          Awaited<ReturnType<typeof workflowGetExecutionLogs>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowGetExecutionLogs<TData = Awaited<ReturnType<typeof workflowGetExecutionLogs>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionLogsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecutionLogs>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary An execution's log lines after a cursor, in `id` order.
+ */
+
+export function useWorkflowGetExecutionLogs<TData = Awaited<ReturnType<typeof workflowGetExecutionLogs>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params?: WorkflowGetExecutionLogsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowGetExecutionLogs>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowGetExecutionLogsQueryOptions(workspace,id,params,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

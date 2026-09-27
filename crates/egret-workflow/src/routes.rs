@@ -14,6 +14,7 @@
 //! POST   /api/ws/{workspace}/workflows/flows/{id}/executions
 //! GET    /api/ws/{workspace}/workflows/executions
 //! GET    /api/ws/{workspace}/workflows/executions/{id}
+//! GET    /api/ws/{workspace}/workflows/executions/{id}/logs
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/resume
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/replay
 //! ```
@@ -69,6 +70,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::executor::RunState;
+use crate::logs::{LogLevel, LogQuery, LogRepo, StoredLine};
 use crate::repo::{
     CreateFlowInput, ExecutionDetail, ExecutionFilter, ExecutionRepo, ExecutionRow, FlowRepo,
     FlowRow, FlowVersionRow, ListFilter, Page, TaskRunRow, UpdateFlowInput, DEFAULT_PAGE_LIMIT,
@@ -108,6 +110,10 @@ pub struct WorkflowState {
     /// writes stay in `worker::claim`, which holds the `FOR NO KEY UPDATE` this type
     /// deliberately does not.
     pub executions: ExecutionRepo,
+    /// The READ side of `workflow.task_logs` (W11): `GET …/executions/{id}/logs`
+    /// pages it. A field for the reason `executions` is one. The writes are
+    /// the log writer's (`logs::spawn_writer`), never a route's.
+    pub logs: LogRepo,
     /// The seam `publish` resolves every reference through — see
     /// [`crate::refs::WorkflowRefs`] for the real implementation and which
     /// `RefKind`s it can and cannot answer for today.
@@ -1175,6 +1181,165 @@ async fn get_execution(
     Ok(Json(ExecutionDto::from(detail)))
 }
 
+// ---------- Execution logs (W11 Task 5, spec §6) ----------
+//
+// GET /api/ws/{workspace}/workflows/executions/{id}/logs
+//
+// A cursor over `workflow.task_logs`, not W10's offset: the log is append-only
+// and grows while it is read, and offset paging over a growing set repeats or
+// skips rows. W7's logs panel polls it.
+
+/// `GET …/logs`' default `limit` (spec §6).
+pub const DEFAULT_LOG_PAGE_LIMIT: i64 = 500;
+/// `GET …/logs`' largest `limit` (spec §6). A larger one is **refused (400)**,
+/// not clamped: a cursor client that asked for more than it got could not tell
+/// a clamp from the end of what has settled.
+pub const MAX_LOG_PAGE_LIMIT: i64 = 2_000;
+
+fn default_log_limit() -> i64 {
+    DEFAULT_LOG_PAGE_LIMIT
+}
+
+/// `GET …/executions/{id}/logs`' query parameters. Every filter narrows within
+/// the one execution; none widens past it.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ExecutionLogsQuery {
+    /// The cursor: only lines with an `id` greater than this. Omit it for the
+    /// first call, then pass the previous response's `next_after`.
+    pub after: Option<i64>,
+    /// How many lines to return, 1..=2000 (default 500). Outside that range is
+    /// a 400, not a clamp.
+    #[serde(default = "default_log_limit")]
+    #[param(minimum = 1, maximum = 2000, default = 500)]
+    pub limit: i64,
+    /// Only lines of this task (the YAML's task `id`).
+    pub task_id: Option<String>,
+    /// Only lines of this task run.
+    pub task_run_id: Option<Uuid>,
+    /// Only lines at this level or above. The five names, upper case, compared
+    /// case-sensitively; anything else is a 400.
+    pub min_level: Option<LogLevel>,
+}
+
+/// One stored log line. `task_id`, `task_run_id` and `attempt` are all `null`
+/// for a line about the execution rather than one run; `attempt` is 0-based,
+/// as Kestra's is. A line longer than 15,360 characters was stored as several
+/// consecutive lines (W11 D6), so there is no `truncated` flag.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct LogLineDto {
+    /// The cursor value: strictly increasing in the order lines are served.
+    pub id: i64,
+    pub task_id: Option<String>,
+    pub task_run_id: Option<Uuid>,
+    pub attempt: Option<i32>,
+    pub level: LogLevel,
+    /// When the line was produced, by the worker's clock.
+    pub ts: DateTime<Utc>,
+    pub message: String,
+}
+
+impl From<StoredLine> for LogLineDto {
+    fn from(l: StoredLine) -> Self {
+        Self {
+            id: l.id,
+            task_id: l.task_id,
+            task_run_id: l.task_run_id,
+            attempt: l.attempt,
+            level: l.level,
+            ts: l.ts,
+            message: l.message,
+        }
+    }
+}
+
+/// One page of an execution's log.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct LogPageDto {
+    /// In `id` order, at most `limit` of them.
+    pub items: Vec<LogLineDto>,
+    /// The last returned `id` -- the next call's `after` -- or `null` when
+    /// nothing was returned (keep the `after` you sent).
+    pub next_after: Option<i64>,
+    /// The execution's state (Kestra's wire spelling, `RUNNING`, `SUCCESS`,
+    /// ...), read on this call. **A terminal state together with an empty
+    /// `items` means the client has every line and can stop polling.**
+    pub execution_state: String,
+}
+
+/// An execution's log lines after a cursor, in `id` order.
+///
+/// **Lines appear about 2 seconds after they are written (the settle lag,
+/// [`crate::logs::SETTLE_LAG`]).** Only lines whose `inserted_at` is more than
+/// 2 s old are returned. The reason is out-of-order commits: `bigserial` ids
+/// are allocated at insert and committed later, so with two writers (two egret
+/// replicas, or one writer's retry overlapping its next batch) id 100 can
+/// commit after id 101. A client that had read 101 and moved its cursor past
+/// it would never see 100. Holding every line back until it has settled lets
+/// the lower id commit first; a log batch is one short transaction, so 2 s
+/// bounds that window generously.
+///
+/// Authorisation is exactly `GET …/executions/{id}`'s: `WsContext` (session,
+/// membership, the `workflows` feature gate), then `workflow:read`, then
+/// [`ExecutionRepo::get`] for existence and ownership -- **an execution in
+/// another workspace is a 404, never a 403** -- and only then the page, which
+/// filters on the workspace AND the execution again.
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/logs",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+        ExecutionLogsQuery,
+    ),
+    responses(
+        (status = 200, description = "Up to `limit` settled lines after `after`, in id order, with the next cursor and the execution's current state. Lines appear about 2 s after they are written (the settle lag guards against out-of-order commits).", body = LogPageDto),
+        (status = 400, description = "`limit` outside 1..=2000, a `min_level` that is not one of TRACE/DEBUG/INFO/WARN/ERROR, or a malformed `{id}`/`after`/`task_run_id`", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace. **An execution belonging to another workspace answers exactly this**, indistinguishably from one that never existed.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn get_execution_logs(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Query(q): Query<ExecutionLogsQuery>,
+) -> EgretResult<Json<LogPageDto>> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    if !(1..=MAX_LOG_PAGE_LIMIT).contains(&q.limit) {
+        return Err(Error::InvalidInput(format!(
+            "limit must be between 1 and {MAX_LOG_PAGE_LIMIT}, got {}",
+            q.limit
+        )));
+    }
+    // Existence AND ownership: `NotFound` for a foreign id, before any line is
+    // read. `LogRepo::page` also filters on the workspace, but an empty page
+    // would be a 200 -- the existence check is what makes a foreign id a 404.
+    let execution = st.executions.get(ctx.workspace_id.0, id).await?;
+    let lines = st
+        .logs
+        .page(
+            ctx.workspace_id.0,
+            id,
+            &LogQuery {
+                after: q.after,
+                limit: q.limit,
+                task_id: q.task_id,
+                task_run_id: q.task_run_id,
+                min_level: q.min_level,
+            },
+        )
+        .await?;
+    let next_after = lines.last().map(|l| l.id);
+    Ok(Json(LogPageDto {
+        items: lines.into_iter().map(LogLineDto::from).collect(),
+        next_after,
+        execution_state: execution.execution.state,
+    }))
+}
+
 // ---------- Executions: the WRITE surface (W10 Task 5) ----------
 //
 // The first writes in this subsystem. Everything above is a read; until this
@@ -1717,6 +1882,10 @@ pub fn management_router() -> Router<WorkflowState> {
             get(get_execution),
         )
         .route(
+            "/ws/{workspace}/workflows/executions/{id}/logs",
+            get(get_execution_logs),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/{id}/resume",
             post(resume_execution),
         )
@@ -1740,6 +1909,7 @@ pub fn management_router() -> Router<WorkflowState> {
         get_flow_version,
         list_executions,
         get_execution,
+        get_execution_logs,
         start_flow_execution,
         resume_execution,
         replay_execution,
@@ -1759,6 +1929,9 @@ pub fn management_router() -> Router<WorkflowState> {
         ExecutionDto,
         ExecutionPageDto,
         StartExecutionRequest,
+        LogLevel,
+        LogLineDto,
+        LogPageDto,
     )),
     tags((name = "workflow", description = "Flow drafts and published versions (W1)"))
 )]
