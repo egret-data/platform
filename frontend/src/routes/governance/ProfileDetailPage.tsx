@@ -67,6 +67,13 @@ export default function ProfileDetailPage() {
     retry: false,
   });
   const profile = profiles.data?.find((p) => p.name === service);
+  // The tag service is its OWN `authz_services` row, and `list_profiles`
+  // returns every service (that is how it resolves `tag_service` at all), so
+  // its `origin` needs no extra request (review M-5). It is the right record
+  // for the Tags tab's guard: a compiled TAG policy is stored under the tag
+  // service's `service_id`, so `refuse_if_compiler_owned` reads THAT service's
+  // origin — the main profile's would be marking rows against the wrong row.
+  const tagProfile = profiles.data?.find((p) => p.name === profile?.tag_service);
 
   const seedDefaults = useMutation({
     mutationFn: () => seedDefaultPolicies(service),
@@ -215,18 +222,19 @@ export default function ProfileDetailPage() {
         ))}
         {profile?.tag_service && (
           <TabsContent value="tags">
-            {/* profileOrigin deliberately omitted: these rows list FROM
-                `profile.tag_service` — a different `authz_services` row —
-                and its own `origin` isn't fetched here, so asserting
-                compiler-ownership against the MAIN profile's origin would
-                be checking the wrong record. Left unmarked rather than
-                guessed at. */}
+            {/* The TAG service's own origin, not the main profile's — see
+                `tagProfile` above. Marking these rows against the main
+                profile's origin would be checking the wrong record; leaving
+                them unmarked (as this did before review M-5) offered a
+                compiler-owned tag policy for edit and let the operator
+                discover the 409 by hitting it. */}
             <PolicyTypeTable
               service={service}
               listFrom={profile.tag_service}
               label="Tag"
               showType
               newHref={`/governance/policies/${encodeURIComponent(service)}/access/new?scope=tag`}
+              profileOrigin={tagProfile?.origin}
               can={can}
             />
           </TabsContent>
@@ -275,8 +283,9 @@ function PolicyTypeTable({
    * SPECIFIC policy whose name carries the `perm-grant-`/`perm-rule-`
    * prefix, and SP4a moved it there precisely because gating on the profile
    * alone made a foreign policy inside a generated profile permanently
-   * uneditable — a one-way door. Omit this prop (the Tags tab does) to
-   * leave every row in this table unmarked rather than guess.
+   * uneditable — a one-way door. Whichever service a table LISTS FROM is the
+   * one whose origin belongs here: the Tags tab passes its tag service's own
+   * `origin`, never the main profile's (review M-5).
    */
   profileOrigin?: string;
   /** Whether this account holds a given `policy:*` permission — see

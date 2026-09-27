@@ -25,6 +25,11 @@ vi.mock("react-router-dom", async () => {
 // that the SAME table behaves differently only for the compiler-owned ROW,
 // never for every row just because the profile is generated.
 let profileOrigin: string = "manual";
+/** The TAG service's own origin, which is what the Tags tab's guard must read
+ *  (review M-5). Independent of `profileOrigin` on purpose: the two services
+ *  are two `authz_services` rows and the compiler can have written to one and
+ *  not the other. */
+let tagServiceOrigin: string = "manual";
 
 vi.mock("@/api/policies", async (orig) => ({
   ...(await orig<typeof import("@/api/policies")>()),
@@ -36,6 +41,18 @@ vi.mock("@/api/policies", async (orig) => ({
       policy_version: 3,
       engines: [{ id: "e1", name: "prod", status: "running" }],
       origin: profileOrigin,
+      tag_service: "trino-prod_tag",
+    },
+    // The tag service is its own row in `policy.authz_services`, and
+    // `list_profiles` returns every service — which is how the FE resolves its
+    // `origin` without a second request.
+    {
+      id: 2,
+      name: "trino-prod_tag",
+      type: "tag",
+      policy_version: 1,
+      engines: [],
+      origin: tagServiceOrigin,
     },
   ]),
   listPolicies: () => Promise.resolve([
@@ -103,6 +120,7 @@ function wrap(ui: React.ReactNode, me: Me | null = ADMIN) {
 describe("ProfileDetailPage", () => {
   beforeEach(() => {
     profileOrigin = "manual";
+    tagServiceOrigin = "manual";
   });
 
   it("renders the profile name and a policy row", async () => {
@@ -240,6 +258,7 @@ describe("ProfileDetailPage — D10, the guard is on the policy, not the profile
 describe("ProfileDetailPage — a write this account cannot make is not offered (SP4b-2 finding 3)", () => {
   beforeEach(() => {
     profileOrigin = "manual";
+    tagServiceOrigin = "manual";
   });
 
   /**
@@ -290,5 +309,55 @@ describe("ProfileDetailPage — a write this account cannot make is not offered 
 
     expect(await screen.findByText(/needs the policy:update permission/)).toBeInTheDocument();
     expect(screen.queryByText(/^forbidden$/)).not.toBeInTheDocument();
+  });
+});
+
+describe("ProfileDetailPage — the Tags tab guards on the TAG service's origin (review M-5)", () => {
+  beforeEach(() => {
+    profileOrigin = "manual";
+    tagServiceOrigin = "manual";
+  });
+
+  /**
+   * **THE DISCRIMINATING CASE.** A compiled tag policy is stored under the tag
+   * service's own `service_id`, so `refuse_if_compiler_owned` reads THAT
+   * service's origin. The Tags tab passed no origin at all, so a
+   * compiler-owned tag policy was offered for edit and the operator discovered
+   * the 409 by hitting it. Note the main profile is `manual` here: a fix that
+   * reused `profileOrigin` would mark nothing and pass nothing.
+   */
+  it("freezes a compiler-owned tag policy when the TAG service is generated", async () => {
+    profileOrigin = "manual";
+    tagServiceOrigin = "generated";
+    const user = userEvent.setup();
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+
+    await user.click(screen.getByRole("tab", { name: "Tags" }));
+    await screen.findByRole("heading", { name: /Tag policies/ });
+
+    expect(screen.queryByRole("link", { name: "perm-grant-abc123" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete perm-grant-abc123" })).toBeDisabled();
+    expect(screen.getByRole("switch", { name: /toggle perm-grant-abc123/i })).toBeDisabled();
+
+    // …and the foreign policy in that same generated tag service stays
+    // editable, which is the distinction SP4a moved to the policy.
+    expect(screen.getByRole("link", { name: "allow-analysts" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete allow-analysts" })).not.toBeDisabled();
+  });
+
+  /** And a MANUAL tag service leaves even a `perm-grant-`-named row editable,
+   *  exactly as the backend does — the same conjunction as the Access tab. */
+  it("leaves a compiler-named tag policy editable when the tag service is manual", async () => {
+    profileOrigin = "generated";
+    tagServiceOrigin = "manual";
+    const user = userEvent.setup();
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+
+    await user.click(screen.getByRole("tab", { name: "Tags" }));
+    await screen.findByRole("heading", { name: /Tag policies/ });
+
+    expect(screen.getByRole("link", { name: "perm-grant-abc123" })).toBeInTheDocument();
   });
 });
