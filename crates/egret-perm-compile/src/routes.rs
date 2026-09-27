@@ -450,6 +450,32 @@ async fn write_grant(
             "a grant must name at least one action".into(),
         ));
     }
+    // **A grant with nothing in `principals.include` REVOKES, silently** (SP4b-1
+    // review, I-2). `NewGrant.principals` is `#[serde(default)]`, so a body that
+    // omits the field deserializes to an empty `PrincipalSet` — and
+    // `compile_desired` treats an empty include as a SKIP (`trigger.rs`, "the
+    // grant's principals name no engine principal"), which means the recompile
+    // produces nothing for the grant and the sweep REAPS the policy it had.
+    // Over a PATCH that is a 200 that quietly stops enforcing a live grant, and
+    // because the field is optional in the schema the generated TypeScript types
+    // it `principals?` and cannot catch it at the call site either. So the guard
+    // is here, at the authoring boundary, refused the same way an empty
+    // `actions` is.
+    //
+    // **It cannot go in the compiler instead**, which is why the skip stays: an
+    // implicit `workspace_assignment` grant legitimately expands to an empty
+    // include when its workspace has no members yet, and refusing that would
+    // make every recompile of the profile fail. `exempt` is untouched for the
+    // same kind of reason — empty there means "no exemptions", which is a
+    // meaningful thing to say.
+    if body.principals.include.is_empty() {
+        return Err(PermHttpError::BadRequest(
+            "a grant must name at least one principal in `principals.include` — a grant \
+             that includes nobody enforces nothing, and on a patch it would silently \
+             revoke the grant it replaces"
+                .into(),
+        ));
+    }
 
     // The OLD affected set, and the origin the patched row keeps. Read from
     // the stored row BEFORE anything is written — after the UPDATE the old

@@ -1232,6 +1232,113 @@ async fn patching_an_unknown_grant_or_rule_is_a_404() {
     }
 }
 
+/// **A PATCH that omits `principals` must not silently revoke the grant**
+/// (SP4b-1 review, I-2). `NewGrant.principals` is `#[serde(default)]`, so the
+/// field is optional on the wire and optional in the generated TypeScript; an
+/// empty include then reaches `compile_desired`, which SKIPS the grant, so the
+/// recompile produces nothing and the sweep REAPS the policy the grant had. A
+/// 200 and a dropped grant is the worst answer available, so the write paths
+/// refuse the body instead.
+///
+/// Asserted on the patch path AND the create path, because it is one guard in
+/// one function and the create half is where a UI most easily sends it.
+#[tokio::test]
+async fn a_grant_naming_no_principal_is_refused_rather_than_revoking() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let scope = json!({ "catalog_id": f.catalog_id, "schema": "sales",
+                        "table": "orders", "column": null });
+
+    // The PATCH first: it carries the load-bearing assertion (the live grant's
+    // policy survives the refusal), so it is the one a mutation reports.
+    let grant_id = create_grant_returning_id(&f, &token, grant_body(f.catalog_id, "analyst")).await;
+    let name = format!("{COMPILER_GRANT_PREFIX}{grant_id}");
+    assert_eq!(f.compiled_policy_names().await, vec![name.clone()]);
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "PATCH",
+                &format!("/perm/grants/{grant_id}"),
+                &token,
+                // The full-body-replace contract's sharp edge: a UI that omits
+                // the field is asking for "this grant, with nobody in it".
+                Some(json!({ "effect": "allow", "actions": ["read"], "scope": scope })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a patch that includes nobody must be refused, not accepted with a 200; body: {body}"
+    );
+    assert_eq!(
+        f.compiled_policy_names().await,
+        vec![name.clone()],
+        "THE POLICY MUST STILL BE THERE. An empty include compiles to a SKIP, so \
+         accepting this patch reaps the policy and the grant stops being enforced \
+         while the UI reports success"
+    );
+    assert_eq!(
+        policy_item_users(&f.compiled_policy_body(&name).await),
+        vec!["analyst".to_string()],
+        "and it must still name the principal it named before"
+    );
+
+    // A preview of the same body is refused for the same reason, since it runs
+    // the same write.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/preview",
+                &token,
+                Some(json!({ "id": grant_id,
+                             "grant": { "effect": "allow", "actions": ["read"], "scope": scope } })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+
+    // And the create path — one guard in one function, but the create half is
+    // where a UI most easily sends it. Both the omitted field and an explicitly
+    // empty one, since `#[serde(default)]` makes them the same value.
+    for payload in [
+        json!({ "effect": "allow", "actions": ["read"], "scope": scope }),
+        json!({ "effect": "allow", "actions": ["read"], "scope": scope,
+                "principals": { "include": [], "exclude": [] } }),
+    ] {
+        let (status, body) = into_json(
+            f.app()
+                .oneshot(req("POST", "/perm/grants", &token, Some(payload)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a grant that includes nobody must be refused; body: {body}"
+        );
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("principal"),
+            "and the refusal must say what is missing; body: {body}"
+        );
+    }
+    assert_eq!(
+        f.compiled_policy_names().await,
+        vec![name],
+        "and no refused create compiled anything of its own"
+    );
+}
+
 /// **The rollback assertion, on an input the pre-write shape check cannot
 /// catch.** `validate_rule_shape` is service-INDEPENDENT by construction, so
 /// `UnsupportedMaskType` — which reads the target engine's service-def — can
