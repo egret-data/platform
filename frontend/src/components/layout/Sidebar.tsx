@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
-  Activity, ChevronDown, ChevronRight, Compass,
+  Activity, ChevronDown, ChevronRight, Compass, EyeOff,
   FolderKanban, Gauge, HardDrive, KeyRound, Library, ListChecks, type LucideIcon,
-  PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Settings, Share2, ShieldCheck,
-  Tags, UserCog, Users, UsersRound,
+  PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Search, Server, Settings, Share2, ShieldCheck,
+  Tags, UserCheck, UserCog, Users, UsersRound,
 } from "lucide-react";
 import {
   Tooltip,
@@ -60,6 +60,23 @@ const EXPLORE_GROUPS: NavGroup[] = [
 // Control Plane). Headings must stay distinct from every other app's headings —
 // collapsed-group state is one localStorage key across all three apps.
 const GOVERNANCE_GROUPS: NavGroup[] = [
+  // SP4b-2: data-plane permission UI, steward-facing first, then admin-facing —
+  // "Data permissions" alone (not "Permissions") is deliberate: Control Plane →
+  // Access → Permissions already names the RBAC permission *catalog*, and these
+  // pages are about data access instead. Order per the design spec's D4: Data
+  // permissions, Mask & filter rules, Explain access, then the existing Policies.
+  {
+    heading: "Data permissions",
+    items: [{ label: "Data permissions", icon: UserCheck, perm: "policy:read", to: "data-permissions" }],
+  },
+  {
+    heading: "Mask & filter rules",
+    items: [{ label: "Mask & filter rules", icon: EyeOff, perm: "policy:read", to: "mask-filter-rules" }],
+  },
+  {
+    heading: "Explain access",
+    items: [{ label: "Explain access", icon: Search, perm: "policy:read", to: "explain-access" }],
+  },
   {
     heading: "Policies",
     items: [{ label: "Policies", icon: ShieldCheck, perm: "policy:read", to: "policies" }],
