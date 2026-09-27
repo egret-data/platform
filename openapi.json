@@ -6388,6 +6388,180 @@
             }
           }
         }
+      },
+      "patch": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "**Edit in place, keeping the id — SP4b D1.** The body is the whole grant,\nexactly the create route's shape: this replaces the grant's body and keeps\nits identity, which is what a UI \"Edit\" must mean. Before this route the\nonly way to change a grant was delete-plus-create, i.e. a new id, two\nrecompiles and a window with no row — and an `explain` reason carries the\n`grant_id` the UI deep-links from, so every such link broke on every edit.",
+        "description": "Replace a grant's body, keeping its id, and recompile the UNION of the profiles it affected before and after the change — a patch that moves the grant to another catalog must reap the policy from the profile it used to reach, or that engine enforces it forever.",
+        "operationId": "patch_grant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Grant id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewGrant"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Grant updated AND every affected profile recompiled, in one transaction",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompileResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The patched grant cannot be compiled, or the grant is owned by the workspace-assignment sync",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/preview": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "**The dry run — SP4b D2. It runs the REAL write and rolls it back.**",
+        "description": "Dry-run a grant or rule write: report the policy profiles it would recompile, and the compile error it would fail with, without storing anything. Runs the real write in a transaction that is rolled back, so the answer cannot differ from what the write would do.",
+        "operationId": "preview",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The profiles the write would touch, and what its recompile would do",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The same refusal the write itself would have returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Previewing a patch of an id that does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/control-plane/perm/rules": {
@@ -6526,6 +6700,98 @@
         "responses": {
           "200": {
             "description": "Rule deleted AND its compiled policies reaped, in one transaction"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "Edit a rule in place, keeping the id — the rule half of SP4b D1. Same\nold-plus-new union as [`patch_grant`], and the same reason: an `explain`\nreason carries the `rule_id` a UI links from.",
+        "description": "Replace a rule's body, keeping its id, and recompile the UNION of the profiles it affected before and after the change. A patch that turns a path selector into a tag selector (or back) changes that set by the whole installation, not by one profile.",
+        "operationId": "patch_rule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Rule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewRule"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Rule updated AND every affected profile recompiled, in one transaction",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompileResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The patched rule cannot be compiled for a profile it affects",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           },
           "401": {
             "description": "Not authenticated",
@@ -29860,6 +30126,23 @@
           }
         }
       },
+      "AffectedProfile": {
+        "type": "object",
+        "description": "One policy profile a write would touch, named so a steward reads\n\"Trino-prod\" rather than a bare id.",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "ApplyOutcomeDto": {
         "type": "object",
         "description": "One engine's result of applying a catalog.",
@@ -35997,6 +36280,59 @@
           }
         ],
         "description": "The on-screen draft, as the request carries it.\n\nNo `cache`, `limits` or `rate_limit`: preview does not consult any of them,\nand accepting fields it ignores would invite the reader to think it did.\n# Unknown keys, `sql`-or-`script`, and why [`Deserialize`] is hand-written\n\nPackage S Task 7 gave this body the same two-case source\n[`egret_dataapi_api::StatementSpec`] has, flattened onto the object the same\nway: `{\"sql\": …}` or `{\"script\": …}`, never both and never neither. That\nshape and `#[serde(deny_unknown_fields)]` are the pair serde documents as not\ncomposing, so this impl states all three rules itself — exactly what\n`StatementSpec` does, for the reasons measured there. A body an older client\nsends is unchanged: `sql` is still `sql`, in the same position, with the same\ntype."
+      },
+      "PreviewRequest": {
+        "type": "object",
+        "description": "What `preview` is asked to try — SP4b D2.\n\nIt is the create body plus an optional `id`, rather than a separate shape,\nbecause the preview runs the REAL write: anything the preview could accept\nand a write could not would be a lie by construction. Exactly one of `grant`\nand `rule` must be present; two optional fields rather than a tagged union\nso the generated client is one plain object with two optional members.",
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Present ⇒ preview a PATCH of this existing row. Absent ⇒ a create."
+          },
+          "grant": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NewGrant"
+              }
+            ]
+          },
+          "rule": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NewRule"
+              }
+            ]
+          }
+        }
+      },
+      "PreviewResponse": {
+        "type": "object",
+        "description": "What the write WOULD have done. `compile` is the same summary the write\nitself returns, produced by the same recompile — this endpoint rolls that\nwork back rather than recomputing it.",
+        "required": [
+          "affected",
+          "compile"
+        ],
+        "properties": {
+          "affected": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AffectedProfile"
+            }
+          },
+          "compile": {
+            "$ref": "#/components/schemas/CompileResponse"
+          }
+        }
       },
       "Principal": {
         "type": "object",
