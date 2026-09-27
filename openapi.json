@@ -6394,7 +6394,7 @@
           "perm"
         ],
         "summary": "**Edit in place, keeping the id — SP4b D1.** The body is the whole grant,\nexactly the create route's shape: this replaces the grant's body and keeps\nits identity, which is what a UI \"Edit\" must mean. Before this route the\nonly way to change a grant was delete-plus-create, i.e. a new id, two\nrecompiles and a window with no row — and an `explain` reason carries the\n`grant_id` the UI deep-links from, so every such link broke on every edit.",
-        "description": "Replace a grant's body, keeping its id, and recompile the UNION of the profiles it affected before and after the change — a patch that moves the grant to another catalog must reap the policy from the profile it used to reach, or that engine enforces it forever.",
+        "description": "Replace a grant's body, keeping its id, and recompile the UNION of the profiles it affected before and after the change — a patch that moves the grant to another catalog must reap the policy from the profile it used to reach, or that engine enforces it forever.\n\n**The body is the WHOLE grant, exactly the create route's shape.** This replaces the grant and keeps only its id; a field left out is cleared, not preserved. `principals.include` may not be empty — a grant that includes nobody compiles to nothing, so accepting one here would silently revoke the grant it replaces.",
         "operationId": "patch_grant",
         "parameters": [
           {
@@ -6430,7 +6430,7 @@
             }
           },
           "400": {
-            "description": "The patched grant cannot be compiled, or the grant is owned by the workspace-assignment sync",
+            "description": "The patched grant cannot be compiled, names no principal or no action, or is owned by the workspace-assignment sync",
             "content": {
               "application/json": {
                 "schema": {
@@ -6461,6 +6461,16 @@
           },
           "404": {
             "description": "No such grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The grant changed concurrently and now affects a profile this request did not lock; retry",
             "content": {
               "application/json": {
                 "schema": {
@@ -6543,6 +6553,16 @@
           },
           "404": {
             "description": "Previewing a patch of an id that does not exist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The previewed row changed concurrently — the same refusal the write would have given",
             "content": {
               "application/json": {
                 "schema": {
@@ -6748,7 +6768,7 @@
           "perm"
         ],
         "summary": "Edit a rule in place, keeping the id — the rule half of SP4b D1. Same\nold-plus-new union as [`patch_grant`], and the same reason: an `explain`\nreason carries the `rule_id` a UI links from.",
-        "description": "Replace a rule's body, keeping its id, and recompile the UNION of the profiles it affected before and after the change. A patch that turns a path selector into a tag selector (or back) changes that set by the whole installation, not by one profile.",
+        "description": "Replace a rule's body, keeping its id, and recompile the UNION of the profiles it affected before and after the change. A patch that turns a path selector into a tag selector (or back) changes that set by the whole installation, not by one profile.\n\n**The body is the WHOLE rule, exactly the create route's shape.** This replaces the rule and keeps only its id; a field left out is cleared, not preserved — including `exempt`, where an omitted set means no exemptions at all.",
         "operationId": "patch_rule",
         "parameters": [
           {
@@ -6815,6 +6835,16 @@
           },
           "404": {
             "description": "No such rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The rule changed concurrently and now affects a profile this request did not lock; retry",
             "content": {
               "application/json": {
                 "schema": {

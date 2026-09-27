@@ -752,13 +752,19 @@ async fn create_grant(
     description = "Replace a grant's body, keeping its id, and recompile the UNION of the \
                    profiles it affected before and after the change — a patch that moves the \
                    grant to another catalog must reap the policy from the profile it used to \
-                   reach, or that engine enforces it forever.",
+                   reach, or that engine enforces it forever.\n\n\
+                   **The body is the WHOLE grant, exactly the create route's shape.** This \
+                   replaces the grant and keeps only its id; a field left out is cleared, not \
+                   preserved. `principals.include` may not be empty — a grant that includes \
+                   nobody compiles to nothing, so accepting one here would silently revoke \
+                   the grant it replaces.",
     responses(
         (status = 200, description = "Grant updated AND every affected profile recompiled, in one transaction", body = CompileResponse),
-        (status = 400, description = "The patched grant cannot be compiled, or the grant is owned by the workspace-assignment sync", body = ErrorBody),
+        (status = 400, description = "The patched grant cannot be compiled, names no principal or no action, or is owned by the workspace-assignment sync", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such grant", body = ErrorBody),
+        (status = 409, description = "The grant changed concurrently and now affects a profile this request did not lock; retry", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -885,13 +891,18 @@ async fn create_rule(
     description = "Replace a rule's body, keeping its id, and recompile the UNION of the \
                    profiles it affected before and after the change. A patch that turns a path \
                    selector into a tag selector (or back) changes that set by the whole \
-                   installation, not by one profile.",
+                   installation, not by one profile.\n\n\
+                   **The body is the WHOLE rule, exactly the create route's shape.** This \
+                   replaces the rule and keeps only its id; a field left out is cleared, not \
+                   preserved — including `exempt`, where an omitted set means no exemptions \
+                   at all.",
     responses(
         (status = 200, description = "Rule updated AND every affected profile recompiled, in one transaction", body = CompileResponse),
         (status = 400, description = "The patched rule cannot be compiled for a profile it affects", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "No such rule", body = ErrorBody),
+        (status = 409, description = "The rule changed concurrently and now affects a profile this request did not lock; retry", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -1005,6 +1016,7 @@ async fn name_profiles(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:update permission", body = ErrorBody),
         (status = 404, description = "Previewing a patch of an id that does not exist", body = ErrorBody),
+        (status = 409, description = "The previewed row changed concurrently — the same refusal the write would have given", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

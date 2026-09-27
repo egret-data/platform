@@ -626,6 +626,11 @@ export type permPatchGrantResponse404 = {
   status: 404
 }
 
+export type permPatchGrantResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type permPatchGrantResponse500 = {
   data: ErrorBody
   status: 500
@@ -634,7 +639,7 @@ export type permPatchGrantResponse500 = {
 export type permPatchGrantResponseSuccess = (permPatchGrantResponse200) & {
   headers: Headers;
 };
-export type permPatchGrantResponseError = (permPatchGrantResponse400 | permPatchGrantResponse401 | permPatchGrantResponse403 | permPatchGrantResponse404 | permPatchGrantResponse500) & {
+export type permPatchGrantResponseError = (permPatchGrantResponse400 | permPatchGrantResponse401 | permPatchGrantResponse403 | permPatchGrantResponse404 | permPatchGrantResponse409 | permPatchGrantResponse500) & {
   headers: Headers;
 };
 
@@ -650,6 +655,8 @@ export const getPermPatchGrantUrl = (id: string,) => {
 
 /**
  * Replace a grant's body, keeping its id, and recompile the UNION of the profiles it affected before and after the change — a patch that moves the grant to another catalog must reap the policy from the profile it used to reach, or that engine enforces it forever.
+ *
+ * **The body is the WHOLE grant, exactly the create route's shape.** This replaces the grant and keeps only its id; a field left out is cleared, not preserved. `principals.include` may not be empty — a grant that includes nobody compiles to nothing, so accepting one here would silently revoke the grant it replaces.
  * @summary **Edit in place, keeping the id — SP4b D1.** The body is the whole grant,
 exactly the create route's shape: this replaces the grant's body and keeps
 its identity, which is what a UI "Edit" must mean. Before this route the
@@ -747,6 +754,11 @@ export type permPreviewResponse404 = {
   status: 404
 }
 
+export type permPreviewResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type permPreviewResponse500 = {
   data: ErrorBody
   status: 500
@@ -755,7 +767,7 @@ export type permPreviewResponse500 = {
 export type permPreviewResponseSuccess = (permPreviewResponse200) & {
   headers: Headers;
 };
-export type permPreviewResponseError = (permPreviewResponse400 | permPreviewResponse401 | permPreviewResponse403 | permPreviewResponse404 | permPreviewResponse500) & {
+export type permPreviewResponseError = (permPreviewResponse400 | permPreviewResponse401 | permPreviewResponse403 | permPreviewResponse404 | permPreviewResponse409 | permPreviewResponse500) & {
   headers: Headers;
 };
 
@@ -1179,6 +1191,11 @@ export type permPatchRuleResponse404 = {
   status: 404
 }
 
+export type permPatchRuleResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type permPatchRuleResponse500 = {
   data: ErrorBody
   status: 500
@@ -1187,7 +1204,7 @@ export type permPatchRuleResponse500 = {
 export type permPatchRuleResponseSuccess = (permPatchRuleResponse200) & {
   headers: Headers;
 };
-export type permPatchRuleResponseError = (permPatchRuleResponse400 | permPatchRuleResponse401 | permPatchRuleResponse403 | permPatchRuleResponse404 | permPatchRuleResponse500) & {
+export type permPatchRuleResponseError = (permPatchRuleResponse400 | permPatchRuleResponse401 | permPatchRuleResponse403 | permPatchRuleResponse404 | permPatchRuleResponse409 | permPatchRuleResponse500) & {
   headers: Headers;
 };
 
@@ -1203,6 +1220,8 @@ export const getPermPatchRuleUrl = (id: string,) => {
 
 /**
  * Replace a rule's body, keeping its id, and recompile the UNION of the profiles it affected before and after the change. A patch that turns a path selector into a tag selector (or back) changes that set by the whole installation, not by one profile.
+ *
+ * **The body is the WHOLE rule, exactly the create route's shape.** This replaces the rule and keeps only its id; a field left out is cleared, not preserved — including `exempt`, where an omitted set means no exemptions at all.
  * @summary Edit a rule in place, keeping the id — the rule half of SP4b D1. Same
 old-plus-new union as [`patch_grant`], and the same reason: an `explain`
 reason carries the `rule_id` a UI links from.
