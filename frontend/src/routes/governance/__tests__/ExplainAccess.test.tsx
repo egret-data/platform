@@ -1,0 +1,149 @@
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { beforeEach, describe, expect, test, vi } from "vitest";
+
+/**
+ * `ExplainAccess` reads the generated perm client directly (`usePermExplain`),
+ * matching `Catalogs.test.tsx`'s pattern for the newest list pages. `ScopePicker`
+ * is mocked to a dumb controlled stand-in — its own behavior (progressive
+ * narrowing, row-filter mode) is covered by `ScopePicker.test.tsx`; this file
+ * is about D9: the reason CLASS renders distinguishably, a `grant_id`/`rule_id`
+ * links to that row, and the two honest limits are stated on the result.
+ */
+vi.mock("@/api/generated/perm/perm");
+vi.mock("@/api/generated/policy-admin/policy-admin");
+vi.mock("@/components/perm/ScopePicker", () => ({
+  ScopePicker: ({ value, onChange }: { value: unknown; onChange: (v: unknown) => void }) => (
+    <div>
+      <div data-testid="scope-value">{JSON.stringify(value)}</div>
+      <button type="button" onClick={() => onChange({ catalog_id: "cat-1" })}>
+        set-scope
+      </button>
+    </div>
+  ),
+}));
+
+import * as permApi from "@/api/generated/perm/perm";
+import { policyAdminListPrincipals } from "@/api/generated/policy-admin/policy-admin";
+import { ApiError } from "@/api/client";
+import type { ExplainResponse } from "@/api/generated/model";
+import ExplainAccess from "@/routes/governance/ExplainAccess";
+
+const ALL_KINDS_RESULT: ExplainResponse = {
+  allowed: true,
+  reasons: [
+    { kind: "allowed_by_grant", grant_id: "grant-1" },
+    { kind: "explicit_deny", grant_id: "grant-2" },
+    { kind: "no_grant_matched" },
+    { kind: "masked_by_rule", rule_id: "rule-1", mask_type: "MASK_HASH" },
+    { kind: "filtered_by_rule", rule_id: "rule-2", filter_expr: "ws = 'eng'" },
+  ],
+  tags: ["pii"],
+};
+
+let mutateAsync: ReturnType<typeof vi.fn>;
+
+function renderPage() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <MemoryRouter>
+      <QueryClientProvider client={qc}>
+        <ExplainAccess />
+      </QueryClientProvider>
+    </MemoryRouter>,
+  );
+}
+
+async function submit(user: ReturnType<typeof userEvent.setup>) {
+  await user.type(screen.getByLabelText("User"), "alice-doe");
+  await user.click(screen.getByRole("button", { name: "set-scope" }));
+  await user.click(screen.getByRole("button", { name: /Explain/ }));
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mutateAsync = vi.fn().mockResolvedValue({ status: 200, data: ALL_KINDS_RESULT });
+  vi.mocked(permApi.usePermExplain).mockReturnValue({
+    mutateAsync,
+    isPending: false,
+  } as unknown as ReturnType<typeof permApi.usePermExplain>);
+  vi.mocked(policyAdminListPrincipals).mockResolvedValue({
+    status: 200,
+    data: [],
+    headers: new Headers(),
+  } as Awaited<ReturnType<typeof policyAdminListPrincipals>>);
+});
+
+describe("ExplainAccess — the reason class is the answer (D9)", () => {
+  test("each of the five reason classes renders with its own distinguishable label", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    expect(result).toHaveTextContent("Allowed by grant");
+    expect(result).toHaveTextContent("Explicit deny");
+    expect(result).toHaveTextContent("No grant matched");
+    expect(result).toHaveTextContent("Masked by rule");
+    expect(result).toHaveTextContent("Filtered by rule");
+
+    // no_grant_matched and explicit_deny are different administrative
+    // problems and must not collapse into the same rendered sentence.
+    const noGrantHint = screen.getByText(/Nobody granted this/);
+    const denyHint = screen.getByText(/Somebody forbade this/);
+    expect(noGrantHint.textContent).not.toEqual(denyHint.textContent);
+  });
+
+  test("a reason carrying a grant_id links to that grant, and a rule_id to that rule", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    await screen.findByTestId("explain-result");
+
+    const grantLink = screen.getByRole("link", { name: "View grant grant-1" });
+    expect(grantLink).toHaveAttribute("href", "/governance/data-permissions?grant=grant-1");
+
+    const ruleLink = screen.getByRole("link", { name: "View rule rule-1" });
+    expect(ruleLink).toHaveAttribute("href", "/governance/mask-filter-rules?rule=rule-1");
+  });
+
+  test("the two honest limits are stated on the result, not tucked in a help page", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    // Not shown before there is a result to attach them to.
+    expect(screen.queryByText(/cannot see hand-written Ranger policy/)).not.toBeInTheDocument();
+
+    await submit(user);
+    const result = await screen.findByTestId("explain-result");
+
+    expect(result).toHaveTextContent(/cannot see hand-written Ranger policy/);
+    expect(result).toHaveTextContent(/seeded admin policy/);
+    expect(result).toHaveTextContent(/Tags populate only when the target names both a schema and a table/);
+  });
+
+  test("tags populate only when the target names a schema and a table — none renders honestly", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: { allowed: false, reasons: [{ kind: "no_grant_matched" }], tags: [] },
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    expect(result).toHaveTextContent("None.");
+  });
+
+  test("a 403 renders as a forbidden message, not a bare error", async () => {
+    mutateAsync.mockRejectedValueOnce(new ApiError(403, "forbidden"));
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    expect(await screen.findByText(/policy:read/)).toBeInTheDocument();
+  });
+});
