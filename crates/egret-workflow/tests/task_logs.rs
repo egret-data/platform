@@ -1151,3 +1151,96 @@ async fn end_to_end_a_flow_logs_through_the_real_runtime(pool: sqlx::PgPool) {
         .await
         .expect("the runtime stops: claim loop, then the writer's drain");
 }
+
+/// A `Log`-typed handler that signals it has started, waits for the test, and
+/// only then writes its line: a run in flight when the process is told to stop.
+struct GatedLog {
+    started: Arc<tokio::sync::Notify>,
+    go: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl egret_workflow::worker::TaskHandler for GatedLog {
+    fn type_id(&self) -> &'static str {
+        "io.kestra.plugin.core.log.Log"
+    }
+
+    async fn run(
+        &self,
+        task: &egret_workflow::worker::TaskInput,
+    ) -> egret_core::Result<egret_workflow::worker::Outcome> {
+        self.started.notify_one();
+        self.go.notified().await;
+        task.log.info("written after cancel").await;
+        Ok(egret_workflow::worker::Outcome::success())
+    }
+
+    async fn cancel(&self, _task: &egret_workflow::worker::TaskInput) -> egret_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// **The shutdown order `spawn_with_logs` promises: the writer outlives the
+/// process token until the claim loop has stopped.** A run in flight when
+/// `cancel` fires writes its line AFTER the cancel; that line must be stored
+/// by the time `join()` returns. Were the writer stopped by `cancel` itself,
+/// it would have closed its channel and the line would be dropped.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_line_written_after_cancel_by_an_in_flight_run_is_stored(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let source = "id: w11gate\nnamespace: t\ntasks:\n  \
+        - id: slow\n    type: io.kestra.plugin.core.log.Log\n    message: unused\n";
+    let exec = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let go = Arc::new(tokio::sync::Notify::new());
+    let mut handlers = Handlers::with_core_tasks();
+    handlers.register(
+        "io.kestra.plugin.core.log.Log",
+        Arc::new(GatedLog {
+            started: started.clone(),
+            go: go.clone(),
+        }),
+    );
+    let cancel = CancellationToken::new();
+    let cfg = RuntimeConfig {
+        enabled: true,
+        tick_interval: Duration::from_millis(50),
+        batch: 8,
+        reaper_interval: Duration::from_secs(3600),
+        working_timeout: Duration::from_secs(3600),
+        scheduler_enabled: false,
+        trigger_interval: Duration::from_secs(3600),
+        log_limits: LogLimits::default(),
+        log_retention_days: 30,
+    };
+    let rt = spawn_with_logs(pool.clone(), handlers, cfg, cancel.clone());
+
+    tokio::time::timeout(Duration::from_secs(10), started.notified())
+        .await
+        .expect("control: the gated run was claimed and started");
+    cancel.cancel();
+    // Long enough for a writer that obeyed `cancel` to have closed its channel.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    go.notify_one();
+    tokio::time::timeout(Duration::from_secs(15), rt.join())
+        .await
+        .expect("the runtime stops: the in-flight run, then the writer's drain");
+
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT message FROM workflow.task_logs WHERE execution_id = $1 ORDER BY id",
+    )
+    .bind(exec)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        stored.iter().any(|m| m == "written after cancel"),
+        "a line an in-flight run wrote after cancellation must be stored before \
+         the runtime's join returns; stored: {stored:?}"
+    );
+}
