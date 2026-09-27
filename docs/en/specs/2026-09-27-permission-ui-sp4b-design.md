@@ -35,7 +35,9 @@ A mode switch on a shared page was considered and rejected: a steward can wander
 
 Every page uses the established Control Plane scaffold (`SummaryStrip` + `FilterableTable` + `FacetSelect`), not a new one. `SummaryStrip` is the standard for list pages; the unresolved `SummaryStrip`-versus-`StatCard` question for Engines and Warehouses is untouched by this work.
 
-**D5 — A grant reads as a sentence, and the sentence is the primary column.** Not a resource map. `analyst can read wh.sales.* except column pii` is one row; the structural form lives behind the row, and in the Policies page. The subtract (`exclude`) is rendered in the sentence because it changes its meaning, and SP4a chose an explicit principal subtract precisely so this could be said in one line instead of four Ranger policies.
+**D5 — A grant reads as a sentence, and the sentence is the primary column.** Not a resource map. `role analyst can read wh.sales.*` is one row, and `role analyst can read and write wh.sales.* except group contractors` is another; the structural form lives behind the row, and in the Policies page. The subtract (`exclude`) is rendered in the sentence because it changes its meaning, and SP4a chose an explicit principal subtract precisely so this could be said in one line instead of four Ranger policies.
+
+**Corrected 2026-09-27, caught during implementation.** This decision originally illustrated itself with `analyst can read wh.sales.* except column pii`, which **cannot exist**: a grant's only subtract is `principals.exclude`, so `except` always names an excluded **principal**, never a column. Masking a column is a *rule*, on the neighbouring page. The original example conflated the two halves of the product into one sentence and then offered it as a single grant — the sort of plausible-looking example that gets implemented literally if nobody checks it against the model.
 
 ## What the UI must refuse on its own
 
