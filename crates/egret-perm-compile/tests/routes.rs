@@ -1496,6 +1496,216 @@ async fn patching_a_rule_recompiles_and_keeps_the_id() {
     );
 }
 
+/// Hold `service_id`'s `policy.authz_services` row lock on a session of its own,
+/// and return that session with its backend pid. Releasing means `COMMIT` on the
+/// returned connection.
+///
+/// Used to park a PATCH *after* its pre-lock read and *before* it takes the
+/// profile locks — the only window in which the row it read can go stale.
+async fn hold_profile_lock(f: &Fixture, service_id: i64) -> (sqlx::PgConnection, i32) {
+    use sqlx::Connection as _;
+    let mut holder = sqlx::PgConnection::connect(&f.dsn).await.expect("holder");
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut holder)
+        .await
+        .expect("holder pid");
+    sqlx::query("BEGIN")
+        .execute(&mut holder)
+        .await
+        .expect("begin");
+    sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
+        .bind(service_id)
+        .execute(&mut holder)
+        .await
+        .expect("hold the profile lock");
+    (holder, pid)
+}
+
+/// Block until some backend is waiting on `holder_pid`'s transaction.
+///
+/// Scoped to that one pid on purpose: "somebody, somewhere is waiting" would be
+/// satisfied by another test's contention, and the caller would then race ahead
+/// while the request it means to park has not reached the lock yet — which would
+/// make the test pass for the wrong reason. Polled, never slept on blindly.
+async fn wait_until_parked_on(f: &Fixture, holder_pid: i32) {
+    for _ in 0..400 {
+        let blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+               SELECT 1 FROM pg_locks w \
+                 JOIN pg_locks h ON h.locktype = 'transactionid' \
+                                AND h.transactionid = w.transactionid \
+                                AND h.granted \
+                WHERE NOT w.granted AND h.pid = $1)",
+        )
+        .bind(holder_pid)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("read pg_locks");
+        if blocked {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!(
+        "no backend ever blocked on the held profile lock — this test's premise (that \
+         the request reaches `lock_services_in_tx` and parks there) no longer holds"
+    );
+}
+
+/// **The stale-read window, closed** (SP4b-1 review, I-3). The old row is read
+/// without `FOR UPDATE` and before the profile locks exist, because taking a
+/// `perm.grants` row lock first is the deadlock `lock_services_in_tx`
+/// documents. So two overlapping PATCHes of one grant can both read the same
+/// old catalog, and the second one's union then misses the profile the first
+/// moved the grant to — that profile's compiled policy never gets swept again.
+///
+/// Driven deterministically rather than by racing: a separate session holds the
+/// fixture profile's row lock, so the PATCH gets past its pre-lock read and then
+/// blocks inside `lock_services_in_tx`. While it is parked there the grant is
+/// moved to a THIRD catalog behind its back, and the lock is released. The
+/// re-read under the locks must see that and refuse with a 409 rather than
+/// writing over it. Waiting is polled on `pg_locks` against the holder's own
+/// pid, not slept on, so nothing here depends on timing.
+#[tokio::test]
+async fn a_patch_whose_row_moved_while_it_waited_is_a_409() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (service_b, catalog_b) = extra_profile(&f, "race-b").await;
+    let (service_c, catalog_c) = extra_profile(&f, "race-c").await;
+    let grant_id = create_grant_returning_id(&f, &token, grant_body(f.catalog_id, "analyst")).await;
+    let name = format!("{COMPILER_GRANT_PREFIX}{grant_id}");
+    assert_eq!(f.compiled_policy_names().await, vec![name.clone()]);
+
+    let (mut holder, holder_pid) = hold_profile_lock(&f, f.service_id).await;
+
+    // Fire the patch: catalog_id → catalog_b, so its union is
+    // {fixture profile, service_b} and it blocks on the fixture profile.
+    let app = f.app();
+    let patch_token = token.clone();
+    let uri = format!("/perm/grants/{grant_id}");
+    let body = grant_body(catalog_b, "analyst");
+    let patching = tokio::spawn(async move {
+        app.oneshot(req("PATCH", &uri, &patch_token, Some(body)))
+            .await
+            .unwrap()
+    });
+
+    wait_until_parked_on(&f, holder_pid).await;
+
+    // Behind its back: move the grant to a catalog whose profile the parked
+    // request did NOT lock. A plain UPDATE, so no recompile and no lock of its
+    // own — this stands in for the concurrent PATCH that committed first.
+    sqlx::query("UPDATE perm.grants SET catalog_id = $2 WHERE id = $1")
+        .bind(Uuid::parse_str(&grant_id).unwrap())
+        .bind(catalog_c)
+        .execute(&f.db.pool)
+        .await
+        .expect("move the grant under the parked request");
+    sqlx::query("COMMIT")
+        .execute(&mut holder)
+        .await
+        .expect("release the profile lock");
+
+    let (status, got) = into_json(patching.await.expect("patch task")).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "the row moved out from under this request, so its union no longer covers the \
+         profiles the grant affects — writing anyway would leave profile {service_c}'s \
+         compiled policy behind forever; body: {got}"
+    );
+    let catalog_now: Uuid = sqlx::query_scalar("SELECT catalog_id FROM perm.grants WHERE id = $1")
+        .bind(Uuid::parse_str(&grant_id).unwrap())
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("read catalog_id");
+    assert_eq!(
+        catalog_now, catalog_c,
+        "and the refused patch must not have overwritten the change that won"
+    );
+    assert_eq!(
+        f.compiled_policy_names_under(service_b).await,
+        Vec::<String>::new(),
+        "nor compiled anything under the profile it was moving to"
+    );
+}
+
+/// The rule half of the same window — `write_rule` has its own re-read, and an
+/// untested guard is how the gate in I-1 shipped. A rule's version of "moved
+/// outside the locked set" is a concurrent patch repointing its path selector at
+/// a catalog only another profile reaches.
+#[tokio::test]
+async fn a_rule_patch_whose_row_moved_while_it_waited_is_a_409() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+    let (_, catalog_c) = extra_profile(&f, "race-rule-c").await;
+    let rule_name = unique("race-rule");
+    let path_rule = |catalog: Uuid, mask: &str| {
+        json!({
+            "name": rule_name,
+            "kind": { "type": "mask", "mask_type": mask, "value_expr": null },
+            "selector": { "type": "path", "catalog_id": catalog,
+                          "schema": "sales", "table": "orders", "column": "email" },
+            "exempt": { "include": [], "exclude": [] }
+        })
+    };
+    let (status, created) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/rules",
+                &token,
+                Some(path_rule(f.catalog_id, "MASK_HASH")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let rule_id = created["id"].as_str().expect("minted rule id").to_string();
+
+    let (mut holder, holder_pid) = hold_profile_lock(&f, f.service_id).await;
+    let app = f.app();
+    let patch_token = token.clone();
+    let uri = format!("/perm/rules/{rule_id}");
+    let body = path_rule(f.catalog_id, "MASK_NULL");
+    let patching = tokio::spawn(async move {
+        app.oneshot(req("PATCH", &uri, &patch_token, Some(body)))
+            .await
+            .unwrap()
+    });
+    wait_until_parked_on(&f, holder_pid).await;
+
+    sqlx::query("UPDATE perm.rules SET catalog_id = $2 WHERE id = $1")
+        .bind(Uuid::parse_str(&rule_id).unwrap())
+        .bind(catalog_c)
+        .execute(&f.db.pool)
+        .await
+        .expect("move the rule under the parked request");
+    sqlx::query("COMMIT")
+        .execute(&mut holder)
+        .await
+        .expect("release the profile lock");
+
+    let (status, got) = into_json(patching.await.expect("patch task")).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "the rule moved out from under this request; body: {got}"
+    );
+    let catalog_now: Option<Uuid> =
+        sqlx::query_scalar("SELECT catalog_id FROM perm.rules WHERE id = $1")
+            .bind(Uuid::parse_str(&rule_id).unwrap())
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("read catalog_id");
+    assert_eq!(
+        catalog_now,
+        Some(catalog_c),
+        "and the refused patch must not have overwritten the change that won"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // preview: the dry run that cannot disagree with the write (SP4b D2)
 // ---------------------------------------------------------------------------

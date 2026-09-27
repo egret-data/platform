@@ -536,6 +536,25 @@ async fn write_grant(
     lock_services_in_tx(tx, &services).await?;
     let id = match id {
         Some(id) => {
+            // **The old row was read WITHOUT `FOR UPDATE`, before these locks
+            // existed** (SP4b-1 review, I-3), because taking a `perm.grants` row
+            // lock first is the deadlock `lock_services_in_tx` documents. So the
+            // read can be stale: two overlapping PATCHes of one grant can both
+            // see the same old catalog, and the second one's union then misses
+            // the profile the first one moved the grant to — leaving that
+            // profile's compiled policy unswept and enforced forever, SP4a's
+            // Critical one door further in.
+            //
+            // Re-reading HERE closes it. Every profile either patch can touch is
+            // locked by now, and each holds its locks until commit, so whichever
+            // transaction got them second sees the other's committed row. If the
+            // row still affects only profiles this request locked, the union is
+            // sound and the write proceeds; if it has moved outside that set,
+            // nothing is written and the caller gets a 409 to retry against the
+            // state that won. Refusing is the conservative half: recompiling the
+            // newly-discovered profile would mean taking a lock out of ascending
+            // order, which is the deadlock again.
+            ensure_grant_still_covered(tx, id, &services).await?;
             if !update_grant_in_tx(tx, id, &g).await? {
                 return Err(PermHttpError::NotFound);
             }
@@ -549,6 +568,49 @@ async fn write_grant(
         services,
         summaries,
     })
+}
+
+/// Re-read grant `id` now that every profile in `locked` is locked, and refuse
+/// if the row has moved outside that set — see the call site in [`write_grant`]
+/// for why the first read cannot take a row lock and what a stale one costs.
+/// `locked` is ascending, so `binary_search` is the membership test.
+async fn ensure_grant_still_covered(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    locked: &[i64],
+) -> Result<(), PermHttpError> {
+    let Some(current) = get_grant_via(&mut **tx, id).await? else {
+        return Err(PermHttpError::NotFound);
+    };
+    let now = affected_services_for_grant(&mut **tx, &current).await?;
+    if let Some(escaped) = now.iter().find(|s| locked.binary_search(s).is_err()) {
+        return Err(PermHttpError::Conflict(format!(
+            "this grant changed while the request was waiting: it now affects policy \
+             profile {escaped}, which this request did not lock, so patching it here \
+             would leave that profile's compiled policy behind — retry"
+        )));
+    }
+    Ok(())
+}
+
+/// The rule twin of [`ensure_grant_still_covered`], for the same reason.
+async fn ensure_rule_still_covered(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    locked: &[i64],
+) -> Result<(), PermHttpError> {
+    let Some(current) = get_rule_via(&mut **tx, id).await? else {
+        return Err(PermHttpError::NotFound);
+    };
+    let now = affected_services_for_rule(&mut **tx, &current).await?;
+    if let Some(escaped) = now.iter().find(|s| locked.binary_search(s).is_err()) {
+        return Err(PermHttpError::Conflict(format!(
+            "this rule changed while the request was waiting: it now affects policy \
+             profile {escaped}, which this request did not lock, so patching it here \
+             would leave that profile's compiled policy behind — retry"
+        )));
+    }
+    Ok(())
 }
 
 /// Create (`id: None`) or patch in place (`id: Some(_)`) one rule — the rule
@@ -597,6 +659,11 @@ async fn write_rule(
     lock_services_in_tx(tx, &services).await?;
     let id = match id {
         Some(id) => {
+            // Same stale-read window as `write_grant`'s, and the same close —
+            // read its call-site comment. A rule's version of "moved outside the
+            // locked set" is a concurrent patch turning a path selector into a
+            // tag one or back.
+            ensure_rule_still_covered(tx, id, &services).await?;
             if !update_rule_in_tx(tx, id, &r).await? {
                 return Err(PermHttpError::NotFound);
             }
