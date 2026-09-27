@@ -215,3 +215,60 @@ describe("ExplainAccess — a group in the subject is a permissive-direction lie
     expect(screen.queryByText(/no group provider or usersync/)).not.toBeInTheDocument();
   });
 });
+
+describe("ExplainAccess — the subject's ref is the allocated username (fact 5/5)", () => {
+  /**
+   * **THE DISCRIMINATING CASE (review M-2).** The engine sees a bare
+   * `username`; `list_principals` returns an email as well, and a page that
+   * stored the email would get `no_grant_matched` — a wrong answer that looks
+   * exactly like a real one, on the page built to explain why. The suggestion
+   * shows `stored as …` so the operator can see which value is kept, and the
+   * explain request carries that value.
+   */
+  test("selecting a suggestion sends the username, not the email", async () => {
+    vi.mocked(policyAdminListPrincipals).mockResolvedValue({
+      status: 200,
+      data: [
+        {
+          kind: "user",
+          name: "alice@egret.local",
+          label: "Alice Doe",
+          username: "alice-doe-2",
+        },
+      ],
+      headers: new Headers(),
+    } as Awaited<ReturnType<typeof policyAdminListPrincipals>>);
+
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByLabelText("User"));
+
+    const option = await screen.findByRole("button", { name: /Alice Doe/ });
+    expect(option).toHaveTextContent("stored as alice-doe-2");
+    await user.click(option);
+
+    await user.click(screen.getByRole("button", { name: "set-scope" }));
+    await user.click(screen.getByRole("button", { name: /Explain/ }));
+
+    expect(mutateAsync).toHaveBeenCalled();
+    expect(mutateAsync.mock.calls[0][0].data.subject.user).toBe("alice-doe-2");
+  });
+
+  /** A principal with no allocated username has no ref the engine could ever
+   *  see, so it is shown and NOT selectable — never an invented slug (the
+   *  collision suffix `-2` above is unreproducible client-side). */
+  test("a principal with no allocated username is not offered", async () => {
+    vi.mocked(policyAdminListPrincipals).mockResolvedValue({
+      status: 200,
+      data: [{ kind: "user", name: "bob@egret.local", label: "Bob Roe", username: null }],
+      headers: new Headers(),
+    } as Awaited<ReturnType<typeof policyAdminListPrincipals>>);
+
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByLabelText("User"));
+
+    expect(await screen.findByText(/no allocated username yet/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Bob Roe/ })).not.toBeInTheDocument();
+  });
+});

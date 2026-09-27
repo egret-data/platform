@@ -17,6 +17,7 @@ import { usePermExplain } from "@/api/generated/perm/perm";
 import { policyAdminListPrincipals } from "@/api/generated/policy-admin/policy-admin";
 import type { Action, ExplainReason, ExplainResponse, Scope } from "@/api/generated/model";
 import { ApiError } from "@/api/client";
+import { refFor } from "@/components/perm/PrincipalPicker";
 import { ScopePicker } from "@/components/perm/ScopePicker";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge, type badgeVariants } from "@/components/ui/badge";
@@ -141,9 +142,9 @@ function ReasonRow({ reason }: { reason: ExplainReason }) {
  * The subject's single `user` field — a search over the same principal
  * source `PrincipalPicker` uses (`policyAdminListPrincipals`, kind `user`).
  * Stores the allocated `username`, never the email `list_principals` also
- * returns and never a client-side guess — the same fact `PrincipalPicker`
- * encodes (design spec: "a user's `ref` is the bare username, never an
- * email"). Typing a value directly is also accepted (not every operator
+ * returns and never a client-side guess — via `PrincipalPicker`'s own `refFor`,
+ * imported rather than re-implemented (design spec: "a user's `ref` is the bare
+ * username, never an email"). Typing a value directly is also accepted (not every operator
  * knows a name to search for), so a principal with no allocated username
  * is shown but not selectable, exactly as `PrincipalPicker` shows it.
  */
@@ -181,7 +182,10 @@ function SubjectUserField({
       {open && (
         <div className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md">
           {(suggestions.data ?? []).map((p) => {
-            const ref = p.username ?? undefined;
+            // Fact 5/5's ONE implementation, imported rather than re-derived
+            // (review M-2): the engine sees the allocated bare `username`,
+            // never the email `list_principals` also returns.
+            const ref = refFor("user", p);
             if (!ref) {
               return (
                 <div

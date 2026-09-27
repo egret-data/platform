@@ -47,8 +47,14 @@ type OfferableKind = "user" | "group" | "role";
  *
  * A group's Ranger identity is its plain name, so it has no `username` and
  * needs no translation.
+ *
+ * Exported because `ExplainAccess`'s subject field resolves the same `ref` from
+ * the same `list_principals` response (review M-2 — it had a hand-copy, correct
+ * today and exactly the drift the task ordering existed to prevent: a page that
+ * stored the email instead would silently answer `no_grant_matched`, a wrong
+ * answer that looks like a real one).
  */
-function refFor(kind: OfferableKind, principal: Principal): string | undefined {
+export function refFor(kind: OfferableKind, principal: Principal): string | undefined {
   return kind === "user" ? (principal.username ?? undefined) : principal.name;
 }
 
