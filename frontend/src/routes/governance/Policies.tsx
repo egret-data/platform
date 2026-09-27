@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, Loader2, MoreHorizontal, Plus, Server, Trash2 } from "lucide-react";
+import { Cog, Download, Loader2, MoreHorizontal, Plus, Server, Trash2 } from "lucide-react";
 
 import {
   type CreatedProfile,
@@ -125,9 +125,27 @@ export default function Policies() {
       // span carries the truncation because a bare `truncate` on the inline-flex
       // Badge clips mid-string instead of showing an ellipsis.
       cell: (p) => (
-        <Badge variant="secondary" className="max-w-[16rem]" title={p.type}>
-          <span className="min-w-0 truncate">{p.type}</span>
-        </Badge>
+        <div className="flex flex-wrap items-center gap-1">
+          <Badge variant="secondary" className="max-w-[16rem]" title={p.type}>
+            <span className="min-w-0 truncate">{p.type}</span>
+          </Badge>
+          {/* D10: `origin` has carried "generated" since SP4a with a comment
+              saying the frontend must show it — this is that. A generated
+              profile's `perm-grant-`/`perm-rule-` policies are compiler-owned
+              and refuse a direct edit (409); everything else in it stays
+              editable — see ProfileDetailPage, which is where that
+              distinction actually matters. */}
+          {p.origin === "generated" && (
+            <Badge
+              variant="outline"
+              className="gap-1"
+              title="Compiled by the permission model from grants and rules. Its perm-grant-/perm-rule- policies are protected; everything else in this profile stays editable."
+            >
+              <Cog className="h-3 w-3" />
+              Generated
+            </Badge>
+          )}
+        </div>
       ),
     },
     {

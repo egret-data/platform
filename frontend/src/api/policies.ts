@@ -43,7 +43,7 @@ import type {
   ProfileDto,
   ProfileEngine,
 } from "./generated/model";
-import { apiFetch } from "./client";
+import { apiFetch, ApiError } from "./client";
 
 // ── Policies (Ranger-backed / control-plane) ─────────────────────────────────
 
@@ -237,4 +237,40 @@ export async function resourceLookup(
 
 export async function setPolicyEnabled(id: number, enabled: boolean): Promise<void> {
   await policyAdminSetPolicyEnabled(id, { enabled });
+}
+
+// ── D10: the compiler's namespace, and the 409 it produces ─────────────────
+//
+// The spec exposes no flag distinguishing a compiler-owned policy from any
+// other, so — like D6's five hardcoded facts in the pickers — the FE mirrors
+// the backend's own rule directly rather than guessing at it.
+
+/**
+ * Mirrors `egret-policy::store::{COMPILER_GRANT_PREFIX,COMPILER_RULE_PREFIX}`
+ * / `is_compiler_owned_policy_name`: every ACCESS policy the SP4a permission
+ * model compiles is named `perm-grant-<uuid>`, every MASKING/ROW-FILTER
+ * policy `perm-rule-<uuid>`. The backend's guard fires on the name alone
+ * (regardless of profile origin) for the reserved-name check, and on the
+ * name AND the profile's `origin` for the edit/delete refusal — see
+ * `compilerOwnedConflict` and the `origin` check callers pair this with.
+ */
+export function isCompilerOwnedPolicyName(name: string): boolean {
+  return name.startsWith("perm-grant-") || name.startsWith("perm-rule-");
+}
+
+/**
+ * A write refused because the SP4a permission-model compiler owns the
+ * target policy (D10). `PolicyStoreError::CompilerOwned` surfaces as a 409
+ * whose JSON body's `error` field is `PolicyHttpError::Conflict`'s Display
+ * text, `"conflict: <reason>"` — the reason itself already names the policy
+ * and says to edit the grant/rule instead, so this only strips the
+ * "conflict: " wire prefix rather than replacing the server's own
+ * explanation with a generic one. Returns `null` for anything that is not
+ * this specific refusal, so a caller falls back to its normal error path.
+ */
+export function compilerOwnedConflict(err: unknown): string | null {
+  if (!(err instanceof ApiError) || err.status !== 409) return null;
+  const msg = err.message || "";
+  if (msg.startsWith("conflict: ")) return msg.slice("conflict: ".length);
+  return msg || "This policy is compiled by the permission model and cannot be edited directly.";
 }

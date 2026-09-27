@@ -10,6 +10,7 @@ import {
   type RowFilterItem,
   type ServiceDef,
   type ServiceDefResource,
+  compilerOwnedConflict,
   createPolicy,
   deletePolicy,
   getPolicy,
@@ -611,7 +612,22 @@ export default function PolicyEditorPage() {
 
       {save.isError && (
         <Alert variant="destructive">
-          <AlertDescription>{save.error?.message ?? "Failed to save policy."}</AlertDescription>
+          <AlertDescription>
+            {(() => {
+              // D10: a write the compiler owns comes back 409 with an
+              // explanation ("edit the grant/rule instead") — surface that,
+              // not a bare error. Any other failure keeps the old fallback.
+              const conflict = compilerOwnedConflict(save.error);
+              return conflict ? (
+                <>
+                  <span className="font-medium">This policy is owned by the permission model.</span>{" "}
+                  {conflict}
+                </>
+              ) : (
+                (save.error?.message ?? "Failed to save policy.")
+              );
+            })()}
+          </AlertDescription>
         </Alert>
       )}
 

@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ApiError } from "@/api/client";
 
 const navigate = vi.fn();
 let routeParams: Record<string, string | undefined> = { service: "trino", kind: "access" };
@@ -183,6 +184,51 @@ describe("PolicyEditorPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
     await waitFor(() => expect(updatePolicy).toHaveBeenCalledWith(42, expect.any(Object)));
     expect(createPolicy).not.toHaveBeenCalled();
+  });
+
+  it("renders the 409 compiler-owned explanation, not a bare error (D10)", async () => {
+    routeParams = { service: "trino", kind: "access", id: "42" };
+    getPolicy.mockResolvedValueOnce({
+      name: "perm-grant-abc123",
+      isEnabled: true,
+      resources: { catalog: { values: ["iceberg"] } },
+      policyItems: [],
+      denyPolicyItems: [],
+    });
+    updatePolicy.mockRejectedValueOnce(
+      new ApiError(
+        409,
+        'conflict: policy "perm-grant-abc123" is compiled by the SP4a permission model — edit or delete that grant/rule instead of writing this policy directly',
+      ),
+    );
+
+    wrap(<PolicyEditorPage />);
+    await screen.findByDisplayValue("perm-grant-abc123");
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    expect(await screen.findByText(/owned by the permission model/i)).toBeInTheDocument();
+    expect(screen.getByText(/edit or delete that grant\/rule instead/)).toBeInTheDocument();
+    // The raw wire prefix must not leak through as a second, redundant "conflict:".
+    expect(screen.queryByText(/^conflict:/)).not.toBeInTheDocument();
+  });
+
+  it("renders a plain, non-conflict save error unchanged (not mistaken for a 409)", async () => {
+    routeParams = { service: "trino", kind: "access", id: "42" };
+    getPolicy.mockResolvedValueOnce({
+      name: "existing",
+      isEnabled: true,
+      resources: { catalog: { values: ["iceberg"] } },
+      policyItems: [],
+      denyPolicyItems: [],
+    });
+    updatePolicy.mockRejectedValueOnce(new ApiError(500, "internal error"));
+
+    wrap(<PolicyEditorPage />);
+    await screen.findByDisplayValue("existing");
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    expect(await screen.findByText("internal error")).toBeInTheDocument();
+    expect(screen.queryByText(/owned by the permission model/i)).not.toBeInTheDocument();
   });
 
   it("renders a masking editor with mask-type items for kind=masking", async () => {

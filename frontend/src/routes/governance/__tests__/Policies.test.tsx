@@ -22,6 +22,7 @@ vi.mock("@/api/policies", () => ({
         policy_version: 3,
         policy_count: 3,
         engines: [{ id: "e1", name: "prod", status: "running" }],
+        origin: "manual",
       },
       {
         id: 2,
@@ -30,6 +31,7 @@ vi.mock("@/api/policies", () => ({
         policy_version: 1,
         policy_count: 0,
         engines: [],
+        origin: "generated",
       },
     ]),
   createProfile: (name: string, type: string) => createProfile(name, type),
@@ -68,6 +70,14 @@ describe("Policies page (profiles landing)", () => {
     await screen.findByRole("link", { name: "trino" });
     expect(screen.getByText("hive")).toBeInTheDocument();
     expect(screen.getByText("olap")).toBeInTheDocument();
+  });
+
+  it("marks a generated profile, and only a generated one (D10)", async () => {
+    wrap(<Policies />);
+    const trinoRow = (await screen.findByRole("link", { name: "trino" })).closest("tr");
+    const starrocksRow = screen.getByRole("link", { name: "starrocks" }).closest("tr");
+    expect(within(starrocksRow!).getByText("Generated")).toBeInTheDocument();
+    expect(within(trinoRow!).queryByText("Generated")).not.toBeInTheDocument();
   });
 
   it("renders bound engine names", async () => {
