@@ -316,3 +316,39 @@ describe("GrantDialog — it resolves the catalog's name itself (review M-6)", (
     expect(screen.getByText(/Preview: read and write on cat-1\.sales\.orders/)).toBeInTheDocument();
   });
 });
+
+describe("GrantDialog — a preview that did not succeed says so (review M-7)", () => {
+  /**
+   * **THE DISCRIMINATING CASE.** The generated mutator resolves whatever
+   * envelope came back, so a non-200 that does not throw left `preview` null
+   * and no error: pressing Preview looked like nothing happened at all. It
+   * failed CLOSED — Save stays blocked without a preview — but an operator
+   * cannot tell "refused" from "button broken", and silence is the failure this
+   * branch keeps fixing elsewhere.
+   */
+  test("a non-200 preview envelope reports the status instead of nothing", async () => {
+    previewMutateAsync.mockResolvedValueOnce({ status: 500, data: { error: "boom" } });
+    const user = userEvent.setup();
+    renderDialog({ existing: EXISTING });
+
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+
+    expect(await screen.findByText(/Preview failed \(HTTP 500\)/)).toBeInTheDocument();
+    // …and it still fails closed.
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    expect(screen.queryByText(/Would recompile/)).not.toBeInTheDocument();
+  });
+
+  /** A thrown ApiError keeps its own message — this must not have flattened
+   *  every failure into the generic status line. */
+  test("a thrown error still shows the server's message", async () => {
+    previewMutateAsync.mockRejectedValueOnce(new ApiError(400, "scope names no catalog"));
+    const user = userEvent.setup();
+    renderDialog({ existing: EXISTING });
+
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+
+    expect(await screen.findByText(/scope names no catalog/)).toBeInTheDocument();
+    expect(screen.queryByText(/HTTP/)).not.toBeInTheDocument();
+  });
+});

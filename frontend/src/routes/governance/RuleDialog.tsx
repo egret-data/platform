@@ -293,6 +293,14 @@ function RuleForm({
         data: { id: existing?.id ?? null, rule: body },
       });
       const data = result.status === 200 ? result.data : undefined;
+      if (!data) {
+        // A non-200 that did not throw (the mutator resolves whatever the
+        // envelope carries) left `preview` null and no error, so pressing
+        // Preview looked like nothing happened — it failed CLOSED, since Save
+        // stays blocked without a preview, but silence is the failure mode this
+        // branch keeps fixing elsewhere (review M-7). Say the status.
+        setPreviewError(`Preview failed (HTTP ${result.status}).`);
+      }
       setPreview(data ?? null);
       setPreviewedFor(bodySnapshot);
     } catch (e) {
