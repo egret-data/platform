@@ -196,8 +196,8 @@ pub struct TracingSink;            // unchanged role: writes to `tracing`
 // testing::Recorder keeps its role; it now records LogLine.
 
 // logs/mod.rs
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub const LOG_PIECE_CHARS: usize = 15_360;   // Kestra's RunContextLogger.MAX_MESSAGE_LENGTH (1024 * 15), measured in Task 1
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LogLimits { pub run_max_lines: u64, pub run_max_bytes: u64 }
 impl Default for LogLimits { /* 10_000, 10_485_760 */ }
 
@@ -209,6 +209,7 @@ impl RunLog {
     pub fn discard() -> Self;                                   // TracingSink-backed; tests and non-run callers
     pub async fn line(&self, level: LogLevel, message: &str);
     pub async fn info(&self, message: &str);
+    pub async fn failure(&self, message: &str);                 // the failed-attempt line: ERROR, bypasses the cap
     pub async fn finish(&self);                                 // writes the summary once, if anything was withheld
 }
 impl std::fmt::Debug for RunLog { /* identity only */ }
@@ -239,10 +240,26 @@ It is written at `WARN`, bypassing the cap. A second `finish()` is a no-op.
 **`run_one`:**
 - Build `RunLog` from `reg.log_sink()` and the run's identity (`workspace_id`, `execution_id`, `run_id`, `task_id`, `attempt`), inside `input_for` or right after it.
 - Call `input.log.finish().await` after the `match budget {…}`, **before** `pool.begin()`, on every path. That includes the `Budget::Refused` arm and the `?` error path: make the `Err` path call `finish()` too (for example by capturing the `Result` and finishing before returning it).
+- **The failed-attempt line (spec §4.4).** Kestra's `AbstractWorkerCallable.exceptionHandler` logs `e.getMessage()` at ERROR for **every** task that throws, unless the callable was killed. It also writes an ERROR line of the cause-chain messages when there is a cause, and a DEBUG stack trace. egret's `run_one` writes the first of the three and neither of the others, because egret has no cause chain. The rule is: **if `run_one` reaches an `Outcome` with `state == Failed` and `message == Some(m)`, call `input.log.failure(m).await`, then `finish()`.**
+
+  | path in `run_one` | line | text | basis |
+  |---|---|---|---|
+  | handler returned `Ok(Outcome{Failed, Some(m)})` | yes | `m`. For `Fail` it is the `errorMessage` (unconditional) or `Fail on a condition` (conditional), as in Kestra | the rule is from the Java and q4/q5; the texts of other handlers are egret's own (chosen) |
+  | `Budget::Refused(m)` | yes | `m`, e.g. `timeout: "abc" is not an ISO-8601 duration` | Java: a render failure in `doCall` reaches `exceptionHandler`; egret's text (chosen) |
+  | timeout expiry (`Guarded::Expired`) | yes | `Timeout after HH:mm:ss.SSS` | Java: `callWithTimeout` calls `kill(false)`, which leaves `killed` false, so `exceptionHandler` logs it; the text is Kestra's `TimeoutExceededException` message |
+  | handler returned `Err(e)` | **no** | (none; `e` goes to `tracing::error!`) | chosen: `Err` is egret's own outage, not the task's, and this tick records no outcome for the run |
+  | `run_one`'s future dropped (worker shutdown) | **no** | (none) | Kestra writes nothing for a killed callable (`exceptionHandler` returns `KILLED` before logging); a dropped future cannot write anyway |
+  | `Outcome{Failed, None}` (`Outcome::failed()`, tests only) | **no** | (none) | chosen: there is no reason to state |
+  | any non-`Failed` outcome | no | | |
+
+  - **`failure` bypasses the cap**, exactly as the summary does, so an attempt that hit the cap still stores why it failed. It is subject to the D6 split.
+  - **Order:** the handler's own lines, then the failure line, then the cap summary (`finish()`), all before `pool.begin()`.
+  - **No second line for `Fail`.** `fail.rs` keeps its current split: the unconditional path logs nothing and only fails the run, and the conditional path logs `errorMessage` at ERROR and fails with `Fail on a condition`. With `run_one`'s line, that gives one ERROR line and two ERROR lines respectively, which are Kestra's one and two. Do not add a sink call to the unconditional path.
+  - **Known divergences, stated:** no cause-chain ERROR line and no DEBUG stack trace for any task. For a script, Kestra writes `io.kestra…TaskException: Command failed with exit code N` and then the cause `Command failed with exit code N`; egret writes one line, the container/python handler's own failure message. A reaped worker whose `apply_outcome` is then fenced has already written its failure line, and that line is kept: it truthfully says what that attempt's handler returned.
 
 **Levels:** apply Task 1's `egret_expected` table in `commands::ingest_line` (stderr level, debug bracket) and in the marker-line rule. Rewrite the `commands.rs` stderr comment to cite the measurement instead of `warningOnStdErr`.
 
-**Typed expectations:** load `oracle-exec/w11-logs.json` with `include_str!` and assert its `egret_expected` values, not a reading of the prose: marker `cases` (whole-line `::{json}::` not stored on either stream, including a `metrics`-only one; a line merely containing a marker stored), `invalid_marker_warning` (one WARN, prefix `Invalid outputs '`), the debug-bracket `sequence`, `log_task_cases`, `failed_attempt_line` (one ERROR line whose message is the failed `Outcome`'s message, written by `run_one`; this is the only line an unconditional `Fail` produces), and `long_line_split.cases`. Every `level_table` value is a member of `level_set`.
+**Typed expectations:** load `oracle-exec/w11-logs.json` with `include_str!` and assert its `egret_expected` values, not a reading of the prose: marker `cases` (whole-line `::{json}::` not stored on either stream, including a `metrics`-only one; a line merely containing a marker stored), `invalid_marker_warning` (one WARN, prefix `Invalid outputs '`), the debug-bracket `sequence`, `log_task_cases`, `failed_attempt_line` with its `paths`, `order` and `fail_task` tables (see `run_one` above), and `long_line_split.cases`. Every `level_table` value is a member of `level_set`.
 
 - [ ] **Step 1: Failing unit tests** in `run_log.rs`, with `Recorder`:
   - `a_line_is_written_with_the_runs_identity`.
@@ -254,6 +271,11 @@ It is written at `WARN`, bypassing the cap. A second `finish()` is a no-op.
   - `a_retry_attempt_starts_fresh`.
 - [ ] **Step 2: Failing tests for the wiring:**
   - `run_one_finishes_the_log_on_error_timeout_and_cancel`: a fake registry whose handler logs past a 1-line cap, then returns `Err`, then expires under a 1 ms budget; the summary appears in all three.
+  - `a_failed_attempt_logs_its_reason_once_even_over_the_cap`: `run_max_lines = 1`, the handler logs 3 lines and returns `failed_with("boom")`. The stored lines are: 1 handler line, then ERROR `boom`, then the WARN summary naming 2 lines. Exactly one ERROR line.
+  - `a_refused_budget_logs_its_reason`: `timeout: "abc"`. One ERROR line, the refusal message; the handler never ran.
+  - `an_expired_budget_logs_timeout_after`: a 1 ms budget over a sleeping handler. One ERROR line `Timeout after 00:00:00.001`.
+  - `a_handler_err_logs_no_failure_line`: the handler returns `Err`. No ERROR line from `run_one`, and the summary is still written if the cap was hit.
+  - `an_unconditional_fail_logs_one_line_and_a_conditional_fail_two`: through `Handlers::with_core_tasks()`. `Fail{errorMessage: boom-fail}` stores exactly `[ERROR boom-fail]`. `Fail{condition: true, errorMessage: boom}` stores exactly `[ERROR boom, ERROR Fail on a condition]`. A successful run stores no ERROR line.
   - A container test (the fake `CommandRunner` style already in `container.rs` tests) asserting stdout and stderr arrive on `task.log` at Task 1's levels, and marker lines per Task 1.
   - The existing `log.rs`/`fail.rs`/`python.rs` sink tests, moved onto `Recorder` through `TaskInput.log`.
 - [ ] **Step 3: Implement.** Keep `src/trigger/` untouched. Run `cargo test -p egret-workflow --lib` plus `worker`, `container_docker_live` (if docker is up) and `end_to_end`.
@@ -265,6 +287,13 @@ It is written at `WARN`, bypassing the cap. A second `finish()` is a no-op.
 | pieces not counted toward the cap (the split line counted once) | `the_pieces_of_a_split_line_count_toward_the_cap` |
 | summary counted inside the cap (written only if under cap) | `the_cap_stops_storing_…` |
 | `finish()` only on the `Ok` path of `run_one` | `run_one_finishes_the_log_on_error_timeout_and_cancel` |
+| failed-attempt line counted inside the cap (`failure` goes through `line`) | `a_failed_attempt_logs_its_reason_once_even_over_the_cap` |
+| failed-attempt line not written (`failure` call deleted) | `a_failed_attempt_logs_its_reason_once_even_over_the_cap`, `an_unconditional_fail_logs_one_line_…` |
+| failure line written after the summary (swap the two calls) | `a_failed_attempt_logs_its_reason_once_even_over_the_cap` (order) |
+| written on the `Err` path too | `a_handler_err_logs_no_failure_line` |
+| written only for a handler's `Ok(Failed)`, not for `Budget::Refused` | `a_refused_budget_logs_its_reason` |
+| written only for a handler's `Ok(Failed)`, not for an expired budget | `an_expired_budget_logs_timeout_after` |
+| unconditional `Fail` also logs `errorMessage` itself | `an_unconditional_fail_logs_one_line_…` (two ERROR lines) |
 | container handler writes to `TracingSink` instead of `task.log` | the container wiring test |
 | stderr level swapped to Task 1's other value | the container wiring test |
 

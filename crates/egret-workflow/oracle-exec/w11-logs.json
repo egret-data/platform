@@ -549,7 +549,9 @@
     "log_task_cases": [
      {
       "level_declared": null,
-      "message": "hello-log",
+      "message": [
+       "hello-log"
+      ],
       "stored": [
        [
         "INFO",
@@ -574,19 +576,7 @@
        ]
       ]
      }
-    ],
-    "fail_task_unconditional": {
-     "error_message": "boom-fail",
-     "stored": [
-      [
-       "ERROR",
-       "boom-fail"
-      ]
-     ],
-     "stack_trace_line_count": 0,
-     "basis": "egret-chosen",
-     "note": "the ERROR line is measured; Kestra's DEBUG stack-trace line is not replicated. egret's unconditional Fail writes no line today (`fail.rs` only fails the run); this line is `failed_attempt_line` from `script_runner_diagnostics`, whose message is the run's failure message, i.e. the errorMessage"
-    }
+    ]
    }
   },
   {
@@ -676,11 +666,93 @@
      "count": 1,
      "message_template": "{failure_message}",
      "written_by": "run_one",
-     "when": "the attempt's Outcome is failed",
-     "stack_trace_line_count": 0
+     "when": "the attempt's Outcome is Failed with a message",
+     "bypasses_run_cap": true,
+     "order": [
+      "handler_lines",
+      "failed_attempt_line",
+      "cap_summary"
+     ],
+     "cause_line_count": 0,
+     "stack_trace_line_count": 0,
+     "paths": [
+      {
+       "path": "handler_ok_failed",
+       "written": true,
+       "text": "{failure_message}",
+       "basis": "java-only"
+      },
+      {
+       "path": "budget_refused",
+       "written": true,
+       "text": "{refusal_message}",
+       "basis": "java-only"
+      },
+      {
+       "path": "timeout_expired",
+       "written": true,
+       "text": "Timeout after {HH}:{mm}:{ss}.{SSS}",
+       "basis": "java-only"
+      },
+      {
+       "path": "handler_err",
+       "written": false,
+       "text": null,
+       "basis": "egret-chosen"
+      },
+      {
+       "path": "future_dropped",
+       "written": false,
+       "text": null,
+       "basis": "java-only"
+      },
+      {
+       "path": "failed_without_message",
+       "written": false,
+       "text": null,
+       "basis": "egret-chosen"
+      }
+     ],
+     "fail_task": [
+      {
+       "condition": null,
+       "error_message": "boom-fail",
+       "stored": [
+        [
+         "ERROR",
+         "boom-fail"
+        ]
+       ],
+       "handler_lines": 0,
+       "basis": "measured"
+      },
+      {
+       "condition": true,
+       "error_message": "boom",
+       "stored": [
+        [
+         "ERROR",
+         "boom"
+        ],
+        [
+         "ERROR",
+         "Fail on a condition"
+        ]
+       ],
+       "handler_lines": 1,
+       "basis": "java-only"
+      },
+      {
+       "condition": false,
+       "error_message": "boom",
+       "stored": [],
+       "handler_lines": 0,
+       "basis": "java-only"
+      }
+     ]
     },
     "basis": "egret-chosen",
-    "note": "`{failure_message}` is the failed Outcome's message, exactly. Kestra writes the exception message at ERROR for a failed attempt (measured for Fail and for a script); egret writes one such line and no pid/container/volume diagnostics"
+    "note": "Kestra's exceptionHandler logs every throwing task's message at ERROR unless killed; RunContextLogger then adds an ERROR line of the cause-chain messages when there is a cause, and a DEBUG stack trace. q4 (Fail: ERROR + DEBUG, no cause) and q5 (script: ERROR `io.kestra...TaskException: Command failed with exit code 1`, DEBUG, ERROR cause `Command failed with exit code 1`) show both shapes. egret has no cause chain and writes only the first line: `cause_line_count` and `stack_trace_line_count` 0 are stated divergences. The text matches Kestra for Fail and timeout; for other handlers `{failure_message}` is egret's own. `future_dropped` follows Kestra's KILLED (no line). No pid/container/volume diagnostics"
    }
   },
   {
@@ -849,7 +921,15 @@
     "pieces_share_ts": true,
     "concatenation_equals_input": true,
     "each_piece_counts_toward_run_cap": true,
-    "basis": "measured",
+    "basis_per_item": {
+     "piece_chars": "measured",
+     "cases": "measured",
+     "pieces_share_ts": "measured",
+     "concatenation_equals_input": "measured",
+     "char_unit": "egret-chosen",
+     "pieces_in_input_order": "egret-chosen",
+     "each_piece_counts_toward_run_cap": "egret-chosen"
+    },
     "note": "user decision D6: split as Kestra splits. The piece length and the equal timestamps are measured. Two chosen differences: egret counts Unicode scalar values (Rust `char`), Kestra's Java counts UTF-16 code units, so they differ only for text outside the Basic Multilingual Plane, where Java can also split a surrogate pair (unmeasured); and egret returns the pieces in input order (ascending id), where the artifact returned them out of order"
    }
   }

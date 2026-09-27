@@ -112,17 +112,21 @@ Writer chạy khi `worker_enabled` bật, vì worker là nơi duy nhất sinh d�
 
 ### 4.4 Nguồn của các dòng
 
-| nguồn | mức |
-|---|---|
-| `core.log.Log` | `level:` được khai báo (đã đo ở W3) |
-| `core.execution.Fail` | ERROR, chính `errorMessage` (đã đo; dòng stack trace DEBUG của Kestra không được tái tạo) |
-| stdout của container / python | INFO; **DEBUG** giữa `##kestra:log:debug##` và `##kestra:log:info##` (đã đo; các dòng marker không được lưu) |
-| stderr của container / python | **ERROR** (đã đo, §5), kể cả bên trong khung debug |
-| marker `::{…}::` chiếm trọn dòng nhưng không hợp lệ | WARN `Invalid outputs '…'` (dạng đã đo, §5) |
-| dòng bao quanh của worker ("started"/"ended") | không có (đã đo: Kestra không lưu dòng nào như vậy) |
-| một lần thử thất bại | một dòng ERROR có nội dung là thông điệp của `Outcome` thất bại, do `run_one` ghi (đã chọn; Kestra ghi thông điệp exception ở ERROR cộng một stack trace DEBUG) |
-| thông báo handler đang gửi qua sink | giữ nguyên |
-| dòng tóm tắt vượt trần ở §5 | WARN |
+| loại task / đường đi | ai ghi | các dòng (mức, nội dung) |
+|---|---|---|
+| `core.log.Log` | handler | mỗi message một dòng, ở `level:` được khai báo (đã đo ở W3 và Task 1) |
+| `core.execution.Fail`, không có `condition` | chỉ `run_one` (handler không ghi gì) | một dòng: ERROR, chính `errorMessage`. Kestra ghi đúng một dòng ERROR như vậy (đã đo) |
+| `core.execution.Fail`, `condition` đúng | handler, rồi `run_one` | hai dòng: ERROR `errorMessage` (handler), rồi ERROR `Fail on a condition` (`run_one`), đúng hai dòng của Kestra (`Fail.java:131-136` và `exceptionHandler`) |
+| `core.execution.Fail`, `condition` sai | không ai | không có |
+| stdout của container / python | handler (`ingest_line`) | INFO; **DEBUG** giữa `##kestra:log:debug##` và `##kestra:log:info##` (đã đo; các dòng marker không được lưu) |
+| stderr của container / python | handler (`ingest_line`) | **ERROR** (đã đo, §5), kể cả bên trong khung debug |
+| marker `::{…}::` chiếm trọn dòng nhưng không hợp lệ | handler (`ingest_line`) | WARN `Invalid outputs '…'` (dạng đã đo, §5) |
+| mọi task có lần thử kết thúc `Failed` kèm thông điệp (handler trả `Ok(Failed)`, `Budget::Refused`, hết thời gian) | `run_one` (`RunLog::failure`) | **dòng lần-thử-thất-bại**: một dòng ERROR, thông điệp của `Outcome`. Dòng này **đi vòng qua trần**, nằm sau các dòng của handler và trước dòng tóm tắt. Không ghi khi handler trả `Err` (sự cố của egret, đã chọn), khi future bị drop (Kestra không ghi gì khi bị kill), hoặc khi `Outcome` `Failed` không có thông điệp |
+| dòng bao quanh của worker ("started"/"ended") | không ai | không có (đã đo: Kestra không lưu dòng nào như vậy) |
+| thông báo handler đang gửi qua sink | handler | giữ nguyên |
+| dòng tóm tắt vượt trần ở §5 | `RunLog::finish` | WARN, sau dòng lần-thử-thất-bại, nằm ngoài trần |
+
+**Dòng lần-thử-thất-bại so với Kestra.** `AbstractWorkerCallable.exceptionHandler` của Kestra ghi `e.getMessage()` ở ERROR cho mọi task ném exception, trừ khi task đã bị kill. Sau đó `RunContextLogger.logEntries` thêm một dòng ERROR thứ hai chứa thông điệp của chuỗi nguyên nhân khi exception có nguyên nhân, và một stack trace DEBUG. Bản ghi q4 (`Fail`) và q5 (script) cho thấy cả hai dạng. egret không có chuỗi nguyên nhân, nên chỉ ghi **dòng đầu tiên**; dòng nguyên nhân và stack trace là khác biệt đã nêu rõ. Nội dung trùng với Kestra cho `Fail` (`errorMessage`, `Fail on a condition`) và cho hết thời gian (`Timeout after HH:mm:ss.SSS`). Với mọi handler khác, đó là thông điệp thất bại riêng của egret (đã chọn). Với script, Kestra ghi `io.kestra…TaskException: Command failed with exit code N` rồi đến dòng nguyên nhân.
 
 Các dòng bị tiêu thụ làm marker `::{…}::` chiếm trọn dòng **không được lưu** (đã đo, §5).
 
@@ -140,7 +144,7 @@ Task vẫn chạy tiếp và kết quả không đổi. Giới hạn tính theo 
 
 **Mức log, đã đo.** Task 1 đo các điểm sau trên artifact (fixture `crates/egret-workflow/oracle-exec/w11-logs.json`, plugin shell 1.9.8, runner Process và Docker). Comment của egret trong `commands.rs` hiểu `warningOnStdErr` của Kestra là núm chỉnh *mức log* của stderr, và lời tự bào chữa của nó, *"nothing here reads a level back"*, không còn đúng ở W11, vì `min_level` đọc lại mức log. Kết quả đo:
 1. **stderr là ERROR**, không phải WARN, bất kể `warningOnStdErr` (mặc định, `false` và `true` đều ghi ERROR). egret đổi WARN thành ERROR và vẫn không cung cấp `warningOnStdErr`.
-2. **Marker `::{json}::` chiếm trọn dòng không được lưu**, trên stdout lẫn stderr, và `outputs` của nó vẫn vào output của task. Điều này đúng với mọi object JSON, không riêng object có `outputs` (dòng `::{"metrics":[]}::` cũng không được lưu). Dòng chỉ chứa marker ở giữa (`x ::{…}::`, hay có dấu cách ở cuối) là dòng thường. Marker chiếm trọn dòng mà JSON không parse được thì không được lưu; Kestra ghi thay vào đó một dòng WARN `Invalid outputs '<lỗi>'`, còn egret ghi một dòng WARN bắt đầu bằng `Invalid outputs '` với nội dung lỗi của serde (đã chọn: không có dòng stack trace). Comment "consumed as an output AND logged" của egret nói sai về Kestra.
+2. **Marker `::{json}::` chiếm trọn dòng không được lưu**, trên stdout lẫn stderr, và `outputs` của nó vẫn vào output của task. Điều này đúng với mọi object JSON, không riêng object có `outputs` (dòng `::{"metrics":[]}::` cũng không được lưu). Dòng có chứa marker nhưng không phải đúng một marker (`x ::{…}::`, hay marker có dấu cách theo sau) là dòng thường và được lưu. Marker chiếm trọn dòng mà JSON không parse được thì không được lưu; Kestra ghi thay vào đó một dòng WARN `Invalid outputs '<lỗi>'`, còn egret ghi một dòng WARN bắt đầu bằng `Invalid outputs '` với nội dung lỗi của serde (đã chọn: không có dòng stack trace). Comment "consumed as an output AND logged" của egret nói sai về Kestra.
 3. **Không có dòng bao quanh của worker** trong log của execution. `Type {} started` và `Flow completed with state {}` đi vào logger riêng của server. Runner script của Kestra tự thêm các dòng chẩn đoán DEBUG/TRACE (`Starting command with pid …`, `Command succeed with exit code 0`, id container và volume); egret **không** tái tạo chúng (đã chọn).
 4. **`attemptNumber` đếm từ 0**: các dòng của lần thử đầu mang 0, lần retry mang 1, cùng một task run id. Nó là chỉ số trong `task_runs.attempts`. `TaskInput.attempt` của egret đếm từ 1, nên `task_logs.attempt = TaskInput.attempt - 1` (cách quy đổi là đã chọn, cách đánh số là đã đo).
 5. **Khung `##kestra:log:debug##` có áp dụng**, trên cả hai runner: các dòng stdout sau nó là DEBUG cho tới `##kestra:log:info##`, và cả hai dòng marker đều không được lưu. Dòng stderr bên trong khung vẫn là ERROR. Một chế độ cho mỗi lệnh, bật/tắt bởi marker trên stream nào cũng được.
@@ -204,6 +208,7 @@ Chạy trên Postgres thật, mỗi test đi kèm một mutation phải bị gi�
 | đầu-cuối: publish và chạy một flow gồm `Log` + một container in cả stdout lẫn stderr, không có gì điều khiển tick bằng tay; đọc lại qua API đúng thứ tự và đúng mức đo được | handler container không ghi qua `RunLog` |
 | kênh đầy với writer bị làm chậm: handler chờ và **không mất dòng nào** | `try_send` bỏ dòng thay vì `send().await` |
 | vượt trần: dòng lưu dừng ở trần, đúng **một** dòng WARN tóm tắt, task thành công | dòng tóm tắt ghi bên trong trần / không ghi trên đường `Err` |
+| một lần thử thất bại khi đã vượt trần: các dòng đã lưu của handler, rồi đúng một dòng ERROR lần-thử-thất-bại, rồi dòng tóm tắt; `Fail` không điều kiện lưu một dòng ERROR, `Fail` có điều kiện lưu hai | dòng thất bại bị tính vào trần / ghi sau dòng tóm tắt / ghi trên đường `Err` / `Fail` ghi `errorMessage` hai lần |
 | một dòng 40.000 ký tự có các ký tự nhiều byte ở ngay và quanh ký tự thứ 15.360 → 3 dòng được lưu đúng thứ tự (15.360 / 15.360 / 9.280 ký tự), nối lại bằng đúng dòng ban đầu | chia theo số byte thay vì theo số `char` |
 | commit lệch thứ tự: hai transaction commit ngược thứ tự id và client polling đọc được cả hai | bỏ độ trễ lắng |
 | tắt máy thì kênh được rút hết | thoát mà không rút kênh |

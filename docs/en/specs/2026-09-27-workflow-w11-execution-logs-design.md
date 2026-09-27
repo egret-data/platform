@@ -110,17 +110,21 @@ The writer runs whenever `worker_enabled` is true, because the worker is the onl
 
 ### 4.4 Sources of lines
 
-| source | level |
-|---|---|
-| `core.log.Log` | declared `level:` (measured in W3) |
-| `core.execution.Fail` | ERROR, the `errorMessage` (measured; Kestra's DEBUG stack-trace line is not replicated) |
-| container / python stdout | INFO; **DEBUG** between `##kestra:log:debug##` and `##kestra:log:info##` (measured; the marker lines are not stored) |
-| container / python stderr | **ERROR** (measured, §5), also inside a debug bracket |
-| invalid whole-line `::{…}::` marker | WARN `Invalid outputs '…'` (measured shape, §5) |
-| worker framing ("started"/"ended") | none (measured: Kestra stores none) |
-| a failed attempt | one ERROR line whose message is the failed `Outcome`'s message, written by `run_one` (chosen; Kestra writes the exception message at ERROR plus a DEBUG stack trace) |
-| handler messages already emitted through the sink | unchanged |
-| §5's cap summary | WARN |
+| task kind / path | written by | lines (level, text) |
+|---|---|---|
+| `core.log.Log` | the handler | one line per message, at the declared `level:` (measured in W3 and Task 1) |
+| `core.execution.Fail`, no `condition` | `run_one` only (the handler writes nothing) | one line: ERROR, the `errorMessage`. Kestra writes the same one ERROR line (measured) |
+| `core.execution.Fail`, `condition` true | the handler, then `run_one` | two lines: ERROR `errorMessage` (handler), then ERROR `Fail on a condition` (`run_one`), which are Kestra's two (`Fail.java:131-136` and `exceptionHandler`) |
+| `core.execution.Fail`, `condition` false | nobody | none |
+| container / python stdout | the handler (`ingest_line`) | INFO; **DEBUG** between `##kestra:log:debug##` and `##kestra:log:info##` (measured; the marker lines are not stored) |
+| container / python stderr | the handler (`ingest_line`) | **ERROR** (measured, §5), also inside a debug bracket |
+| invalid whole-line `::{…}::` marker | the handler (`ingest_line`) | WARN `Invalid outputs '…'` (measured shape, §5) |
+| any task whose attempt ends `Failed` with a message (handler `Ok(Failed)`, `Budget::Refused`, timeout expiry) | `run_one` (`RunLog::failure`) | **the failed-attempt line**: one ERROR line, the `Outcome`'s message. It **bypasses the cap** and comes after the handler's lines and before the summary. Not written for a handler `Err` (egret's outage, chosen), a dropped future (Kestra writes nothing when killed), or a `Failed` outcome with no message |
+| worker framing ("started"/"ended") | nobody | none (measured: Kestra stores none) |
+| handler messages already emitted through the sink | the handler | unchanged |
+| §5's cap summary | `RunLog::finish` | WARN, after the failed-attempt line, outside the cap |
+
+**The failed-attempt line against Kestra.** Kestra's `AbstractWorkerCallable.exceptionHandler` logs every throwing task's `e.getMessage()` at ERROR unless it was killed. `RunContextLogger.logEntries` then adds a second ERROR line with the cause-chain messages when the exception has a cause, and a DEBUG stack trace. The q4 (`Fail`) and q5 (script) records show both shapes. egret has no cause chain, so it writes **only the first line**; the cause line and the stack trace are a stated divergence. The text matches Kestra for `Fail` (`errorMessage`, `Fail on a condition`) and for a timeout (`Timeout after HH:mm:ss.SSS`). For every other handler it is egret's own failure message (chosen). For a script, Kestra's is `io.kestra…TaskException: Command failed with exit code N` followed by the cause line.
 
 Lines consumed as whole-line `::{…}::` markers are **not stored** (measured, §5).
 
@@ -202,6 +206,7 @@ Against real Postgres, each with a mutation that must die:
 | end to end: publish and run a flow with `Log` + a container that prints stdout and stderr, with no harness driving the tick; read it back through the API in order and at the measured levels | the container handler not writing through `RunLog` |
 | a full channel with a slowed writer: the handler waits and **no line is lost** | `try_send` that drops instead of `send().await` |
 | over the cap: stored lines stop at the cap, exactly **one** WARN summary, the task succeeds | summary written inside the cap / not written on the `Err` path |
+| a failed attempt over the cap: the handler's stored lines, then exactly one ERROR failure line, then the summary; an unconditional `Fail` stores one ERROR line and a conditional one two | failure line counted inside the cap / written after the summary / written on the `Err` path / `Fail` logging `errorMessage` twice |
 | a 40,000-character line with multi-byte characters at and around the 15,360th character → 3 stored lines in order (15,360 / 15,360 / 9,280 characters), their concatenation equals the input | splitting at a byte count instead of a `char` count |
 | out-of-order commit: two transactions commit in reverse id order and a polling client reads both | removing the settle lag |
 | shutdown drains the channel | exit without draining |
