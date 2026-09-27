@@ -1739,9 +1739,14 @@ export const getPolicyAdminListPrincipalsUrl = (params?: PolicyAdminListPrincipa
 }
 
 /**
- * Correctness note: the user principal `name` is the user's `email`; if a
- * deployment's Trino/Ranger group-mapping keys identities on something else
- * (e.g. a username), the admin must free-type the correct value instead.
+ * Correctness note: `name` is the user's `email`, kept for the raw-JSON
+ * Ranger policy editor, which deliberately writes emails. A `user`
+ * principal's `username` field carries its allocated `users.username` when
+ * one exists — the engine-visible identity — so a caller that needs the
+ * engine-native `ref` (e.g. the permission-UI's `PrincipalPicker`) should
+ * read `username`, not derive one from `name`. If a deployment's
+ * Trino/Ranger group-mapping keys identities on something else entirely, an
+ * admin can still free-type a value directly in the raw-JSON editor.
  * @summary GET /principals?q=&kind= — egret users + groups for the policy picker.
  */
 export const policyAdminListPrincipals = async (params?: PolicyAdminListPrincipalsParams, options?: Parameters<typeof customInstance>[1]): Promise<policyAdminListPrincipalsResponse> => {

@@ -8001,7 +8001,7 @@
           "policy-admin"
         ],
         "summary": "GET /principals?q=&kind= — egret users + groups for the policy picker.",
-        "description": "Correctness note: the user principal `name` is the user's `email`; if a\ndeployment's Trino/Ranger group-mapping keys identities on something else\n(e.g. a username), the admin must free-type the correct value instead.",
+        "description": "Correctness note: `name` is the user's `email`, kept for the raw-JSON\nRanger policy editor, which deliberately writes emails. A `user`\nprincipal's `username` field carries its allocated `users.username` when\none exists — the engine-visible identity — so a caller that needs the\nengine-native `ref` (e.g. the permission-UI's `PrincipalPicker`) should\nread `username`, not derive one from `name`. If a deployment's\nTrino/Ranger group-mapping keys identities on something else entirely, an\nadmin can still free-type a value directly in the raw-JSON editor.",
         "operationId": "list_principals",
         "parameters": [
           {
@@ -36378,11 +36378,18 @@
           },
           "name": {
             "type": "string",
-            "description": "The value written into the policy (user email / group name)."
+            "description": "The value written into the raw-JSON Ranger policy editor (user email /\ngroup name). Deliberately unchanged by `username` below — that editor\nsurface is Ranger-native and an email can be the right value there."
           },
           "label": {
             "type": "string",
             "description": "Display label."
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The user's allocated bare username (`users.username`, minted by\n[`egret_auth::users::UserRepo::ensure_username`]) — this is the value\nthe engine actually sees (SP4a D7 measured `current_user` as `admin`,\nnever `admin@egret.local`). `None` for a `group` principal, and for a\n`user` principal that has never triggered allocation. Never guess this\nby slugifying `name`/`label`: `ensure_username` lowercases, slugifies,\n*and* appends `-2`/`-3`/… on collision, which no client can reproduce."
           }
         }
       },

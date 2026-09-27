@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, X } from "lucide-react";
 
 import { policyAdminListPrincipals } from "@/api/generated/policy-admin/policy-admin";
-import type { PermPrincipal, PrincipalSet } from "@/api/generated/model";
+import type { PermPrincipal, Principal, PrincipalSet } from "@/api/generated/model";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -31,33 +31,25 @@ import {
 type OfferableKind = "user" | "group" | "role";
 
 /**
- * Mirrors `slugify_localpart` in `crates/egret-auth/src/users.rs` (SP4a D7's
- * measurement: the engine sees a bare username, e.g. Trino's `current_user`
- * answered `admin`, never `admin@egret.local`).
+ * What a chip stores a `ref` as, for a given kind — the value
+ * `list_principals` (`crates/egret-policy/src/admin/mod.rs`) actually
+ * allocated, never a client-side guess.
  *
  * **Hardcoded fact 5/5 (design spec, "a user's `ref` is the bare username,
- * never an email"):** `policyAdminListPrincipals` (the endpoint this picker
- * reuses, built for the raw-JSON policy editor) returns a user's email as
- * `Principal.name` — that surface's own doc comment says so. `PermPrincipal`
- * needs the bare username instead, and there is no endpoint that returns an
- * arbitrary user's already-allocated `users.username` (only `ensure_username`
- * exists, and it is not exposed over HTTP). This is therefore a BEST-EFFORT,
- * client-side mirror of the server's own derivation, not a guaranteed match:
- * the server appends `-2`, `-3`, … on a collision, which this function
- * cannot know about. The picker shows the derived value next to the display
- * name (both in the suggestion list and in the chip) so an admin can see
- * exactly what will be stored and catch a mismatch before saving.
+ * never an email"):** SP4a D7 measured live that the engine sees a bare
+ * username (Trino's `current_user` answered `admin`, never
+ * `admin@egret.local`). `Principal.username` now carries that allocated
+ * `users.username` directly — minted by `ensure_username`, which lowercases,
+ * slugifies, AND appends `-2`/`-3`/… on collision. A client-side slugify of
+ * the email can never reproduce the collision suffix, so this picker does
+ * not attempt one: a `user` principal with no allocated username is not
+ * offered at all (see `suggestions` below).
+ *
+ * A group's Ranger identity is its plain name, so it has no `username` and
+ * needs no translation.
  */
-export function slugifyLocalpart(email: string): string {
-  const local = email.split("@")[0]?.toLowerCase() ?? "";
-  const slug = local.replace(/[^a-z0-9_]+/g, "-").replace(/^-+|-+$/g, "");
-  return slug || "user";
-}
-
-/** What a chip stores a `ref` as, for a given kind. Only `user` needs the
- * email→username translation; a group's Ranger identity is its plain name. */
-function refFor(kind: OfferableKind, principalName: string): string {
-  return kind === "user" ? slugifyLocalpart(principalName) : principalName;
+function refFor(kind: OfferableKind, principal: Principal): string | undefined {
+  return kind === "user" ? (principal.username ?? undefined) : principal.name;
 }
 
 export interface PrincipalPickerProps {
@@ -237,7 +229,24 @@ function PrincipalListEditor({
                 {open && (
                   <div className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md">
                     {(suggestions.data ?? []).map((principal) => {
-                      const ref = refFor(effectiveKind, principal.name);
+                      const ref = refFor(effectiveKind, principal);
+                      // A `user` principal with no allocated `username` (never
+                      // triggered `ensure_username`) has no `ref` the engine
+                      // can ever see — refuse to offer it rather than
+                      // inventing one. See `refFor` above.
+                      if (effectiveKind === "user" && !ref) {
+                        return (
+                          <div
+                            key={`${effectiveKind}-${principal.name}`}
+                            className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm text-muted-foreground"
+                          >
+                            <span>{principal.label}</span>
+                            <span className="shrink-0 text-xs italic">
+                              no allocated username yet
+                            </span>
+                          </div>
+                        );
+                      }
                       return (
                         <button
                           key={`${effectiveKind}-${principal.name}`}
@@ -245,7 +254,7 @@ function PrincipalListEditor({
                           className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
                           // Fires before the input's onBlur closes the list.
                           onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => add({ kind: effectiveKind, ref })}
+                          onClick={() => add({ kind: effectiveKind, ref: ref as string })}
                         >
                           <span>{principal.label}</span>
                           <span className="shrink-0 text-xs text-muted-foreground">

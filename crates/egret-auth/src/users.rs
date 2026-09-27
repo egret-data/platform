@@ -224,6 +224,28 @@ impl UserRepo {
         ensure_username_via(&mut conn, user_id).await
     }
 
+    /// Read-only, batched lookup of already-allocated usernames for `ids`.
+    ///
+    /// Unlike [`ensure_username`](Self::ensure_username) this NEVER mints one:
+    /// a user missing from the returned map has not yet triggered allocation
+    /// (no query run, no notebook opened, no engine token issued). That is a
+    /// real, distinct state from "has a username" — the policy admin picker
+    /// (`egret-policy::admin::list_principals`) must be able to tell them
+    /// apart so it can refuse to offer a user with no `ref` to write, rather
+    /// than inventing one.
+    pub async fn usernames(&self, ids: &[Uuid]) -> Result<std::collections::HashMap<Uuid, String>> {
+        let rows: Vec<(Uuid, Option<String>)> =
+            sqlx::query_as("SELECT id, username::text FROM users WHERE id = ANY($1)")
+                .bind(ids)
+                .fetch_all(&self.db.pool)
+                .await
+                .map_err(db_err)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, u)| u.map(|u| (id, u)))
+            .collect())
+    }
+
     /// Hard-delete `target` and dependents in one transaction. `target`'s notebooks
     /// are reassigned to `reassign_notebooks_to` (the deleting admin) because
     /// `notebooks.owner_user_id` is NOT NULL; attribution columns (created_by/
