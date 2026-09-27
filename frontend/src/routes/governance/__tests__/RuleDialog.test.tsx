@@ -12,6 +12,8 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
  * data to browse.
  */
 vi.mock("@/api/generated/perm/perm");
+// The dialog reads the catalog registry itself now (review M-6).
+vi.mock("@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry");
 vi.mock("@/api/tags");
 vi.mock("@/components/perm/ScopePicker", () => ({
   ScopePicker: ({
@@ -44,10 +46,24 @@ vi.mock("@/components/perm/ScopePicker", () => ({
 }));
 
 import * as permApi from "@/api/generated/perm/perm";
+import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import * as tagsApi from "@/api/tags";
 import { ApiError } from "@/api/client";
-import type { Rule } from "@/api/generated/model";
+import type { RegistryCatalogDto, Rule } from "@/api/generated/model";
 import { RuleDialog } from "@/routes/governance/RuleDialog";
+
+const CATALOG = {
+  id: "cat-1",
+  name: "wh",
+  kind: "iceberg",
+  config: {},
+  advanced: {},
+  warehouseId: "wh-1",
+  engines: [],
+  workspaceIds: [],
+  createdAt: "2026-09-01T00:00:00Z",
+  updatedAt: "2026-09-01T00:00:00Z",
+} as unknown as RegistryCatalogDto;
 
 const TAGS = [
   {
@@ -91,7 +107,7 @@ function renderDialog(props: Partial<React.ComponentProps<typeof RuleDialog>> = 
   const onOpenChange = vi.fn();
   const utils = render(
     <QueryClientProvider client={qc}>
-      <RuleDialog open onOpenChange={onOpenChange} catalogName={(id) => (id === "cat-1" ? "wh" : id)} {...props} />
+      <RuleDialog open onOpenChange={onOpenChange} {...props} />
     </QueryClientProvider>,
   );
   return { ...utils, onOpenChange };
@@ -99,6 +115,11 @@ function renderDialog(props: Partial<React.ComponentProps<typeof RuleDialog>> = 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
+    data: { status: 200, data: [CATALOG] },
+    isLoading: false,
+    isError: false,
+  } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
   vi.mocked(tagsApi.useTags).mockReturnValue({ data: TAGS } as unknown as ReturnType<typeof tagsApi.useTags>);
   previewMutateAsync = vi.fn().mockResolvedValue(OK_PREVIEW_ONE);
   createMutateAsync = vi.fn().mockResolvedValue({ status: 201, data: undefined });
@@ -356,5 +377,22 @@ describe("RuleDialog — the fan-out's skip list (SP4b-2 finding 4)", () => {
     ).toHaveLength(0);
 
     spy.mockRestore();
+  });
+});
+
+describe("RuleDialog — it resolves the catalog's name itself (review M-6)", () => {
+  /** The path-selector summary must name the catalog, for the same reason
+   *  `GrantDialog`'s preview line must: this is the one place on the surface
+   *  that still needs the registry, so its resolution needs an assertion. */
+  test("the path selector's summary names the catalog, not its uuid", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.click(screen.getByRole("combobox", { name: "Selects by" }));
+    await user.click(await screen.findByRole("option", { name: "Path" }));
+    await user.click(screen.getByRole("button", { name: "set-scope-complete" }));
+
+    expect(screen.getByText(/Selects wh\.sales\.orders/)).toBeInTheDocument();
+    expect(screen.queryByText(/Selects cat-1/)).not.toBeInTheDocument();
   });
 });

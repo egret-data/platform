@@ -8,7 +8,6 @@ import {
   usePermDeleteRule,
   usePermListRules,
 } from "@/api/generated/perm/perm";
-import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import type { RuleView } from "@/api/generated/model";
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
@@ -40,17 +39,6 @@ export default function MaskFilterRules() {
 
   const rulesQ = usePermListRules({ query: { retry: false } });
   const rows: RuleView[] = rulesQ.data?.status === 200 ? rulesQ.data.data : [];
-
-  // ONLY for `RuleDialog`'s own preview line — see the same comment on
-  // `DataPermissions`. The `Selects` column below reads `RuleView.tag_name` /
-  // `RuleView.catalog_name` off the payload, so it no longer needs `tag:read`
-  // (which showed a reader `tag pii` instead of `tag PII`) or
-  // `catalog_registry:read` (SP4b-2 finding 1).
-  const catalogsQ = useControlPlaneCatalogRegistryListRegistryCatalogs(undefined, {
-    query: { retry: false },
-  });
-  const catalogs = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
-  const catalogName = (id: string) => catalogs.find((c) => c.id === id)?.name ?? id;
 
   const [kindFilter, setKindFilter] = useState(FACET_ALL);
   const filtered = rows.filter((r) => kindFilter === FACET_ALL || r.kind.type === kindFilter);
@@ -232,7 +220,6 @@ export default function MaskFilterRules() {
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         existing={editing}
-        catalogName={catalogName}
       />
 
       <ConfirmDeleteDialog

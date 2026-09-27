@@ -192,6 +192,22 @@ describe("DataPermissions — the sentence must not need a second permission", (
     expect(screen.queryByText(/cat-1/)).not.toBeInTheDocument();
   });
 
+  /**
+   * **THE STRUCTURAL VERSION of the same guarantee (review M-6).** The 403 test
+   * above proves the sentence survives a forbidden registry; this proves the
+   * page never asks. A reader used to eat a guaranteed 403 on every load for a
+   * lookup the page no longer needs, and a request that is never made cannot
+   * come back wrong.
+   */
+  test("does not call the catalog registry at all", () => {
+    vi.mocked(permApi.usePermListGrants).mockReturnValue(listResult([grant()]));
+    renderPage();
+    expect(screen.getByText("role analyst can read wh.sales.*")).toBeInTheDocument();
+    expect(
+      registry.useControlPlaneCatalogRegistryListRegistryCatalogs,
+    ).not.toHaveBeenCalled();
+  });
+
   test("with no name on the payload the id is shown — never a guess", () => {
     vi.mocked(permApi.usePermListGrants).mockReturnValue(
       listResult([grant({ catalog_name: null })]),

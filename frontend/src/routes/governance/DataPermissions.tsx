@@ -7,7 +7,6 @@ import {
   usePermDeleteGrant,
   usePermListGrants,
 } from "@/api/generated/perm/perm";
-import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import type { Action, GrantView } from "@/api/generated/model";
 import { ApiError } from "@/api/client";
 import { useMyWorkspaces } from "@/api/hooks";
@@ -47,18 +46,6 @@ export default function DataPermissions() {
 
   const grantsQ = usePermListGrants({ query: { retry: false } });
   const rows: GrantView[] = grantsQ.data?.status === 200 ? grantsQ.data.data : [];
-
-  // ONLY for `GrantDialog`'s own preview line, which a writer opens and which
-  // needs the registry anyway to pick a catalog. The SENTENCE below is
-  // rendered from `GrantView.catalog_name` on the payload — SP4b-2 finding 1:
-  // this page gates on `policy:read`, this endpoint gates on
-  // `catalog_registry:read`, and resolving the primary column here made D5's
-  // sentence read as a raw uuid for exactly the persona the page is for.
-  const catalogsQ = useControlPlaneCatalogRegistryListRegistryCatalogs(undefined, {
-    query: { retry: false },
-  });
-  const catalogs = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
-  const catalogName = (id: string) => catalogs.find((c) => c.id === id)?.name ?? id;
 
   const workspaces = useMyWorkspaces(true);
   const workspaceLabel = (id: string) => workspaces.data?.find((w) => w.id === id)?.name ?? id;
@@ -237,7 +224,6 @@ export default function DataPermissions() {
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         existing={editing}
-        catalogName={catalogName}
       />
 
       <ConfirmDeleteDialog

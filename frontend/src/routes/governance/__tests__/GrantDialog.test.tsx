@@ -11,6 +11,9 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
  * full-body PATCH, preview-before-save, and verbatim refusals.
  */
 vi.mock("@/api/generated/perm/perm");
+// The dialog reads the catalog registry itself now (review M-6) instead of
+// taking a resolved-name function from the list page.
+vi.mock("@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry");
 vi.mock("@/components/perm/PrincipalPicker", () => ({
   PrincipalPicker: ({
     value,
@@ -47,9 +50,23 @@ vi.mock("@/components/perm/ScopePicker", () => ({
 }));
 
 import * as permApi from "@/api/generated/perm/perm";
+import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import { ApiError } from "@/api/client";
-import type { Grant } from "@/api/generated/model";
+import type { Grant, RegistryCatalogDto } from "@/api/generated/model";
 import { GrantDialog } from "@/routes/governance/GrantDialog";
+
+const CATALOG = {
+  id: "cat-1",
+  name: "wh",
+  kind: "iceberg",
+  config: {},
+  advanced: {},
+  warehouseId: "wh-1",
+  engines: [],
+  workspaceIds: [],
+  createdAt: "2026-09-01T00:00:00Z",
+  updatedAt: "2026-09-01T00:00:00Z",
+} as unknown as RegistryCatalogDto;
 
 const EXISTING: Grant = {
   id: "g1",
@@ -80,12 +97,7 @@ function renderDialog(props: Partial<React.ComponentProps<typeof GrantDialog>> =
   const onOpenChange = vi.fn();
   const utils = render(
     <QueryClientProvider client={qc}>
-      <GrantDialog
-        open
-        onOpenChange={onOpenChange}
-        catalogName={(id) => (id === "cat-1" ? "wh" : id)}
-        {...props}
-      />
+      <GrantDialog open onOpenChange={onOpenChange} {...props} />
     </QueryClientProvider>,
   );
   return { ...utils, onOpenChange };
@@ -93,6 +105,11 @@ function renderDialog(props: Partial<React.ComponentProps<typeof GrantDialog>> =
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
+    data: { status: 200, data: [CATALOG] },
+    isLoading: false,
+    isError: false,
+  } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
   previewMutateAsync = vi.fn().mockResolvedValue(OK_PREVIEW);
   createMutateAsync = vi.fn().mockResolvedValue({ status: 201, data: undefined });
   patchMutateAsync = vi.fn().mockResolvedValue({ status: 200, data: {} });
@@ -265,5 +282,37 @@ describe("GrantDialog — two identical skip lines (SP4b-2 finding 4)", () => {
     ).toHaveLength(0);
 
     spy.mockRestore();
+  });
+});
+
+describe("GrantDialog — it resolves the catalog's name itself (review M-6)", () => {
+  /**
+   * The dialog reads the catalog registry directly now, instead of taking a
+   * lookup function from the list page. Nothing asserted the resolved NAME, so
+   * a mutation that returned the id survived — this is that missing assertion.
+   * The dialog is the one place on this surface that still needs the registry:
+   * a writer must pick a catalog, and the preview line must say which.
+   */
+  test("the preview line names the catalog, not its uuid", async () => {
+    renderDialog({ existing: EXISTING });
+
+    expect(screen.getByText(/Preview: read and write on wh\.sales\.orders/)).toBeInTheDocument();
+    // (The mocked `ScopePicker` stand-in prints the raw scope JSON, so `cat-1`
+    // legitimately appears in the DOM — the negative direction is asserted by
+    // the forbidden-registry test below instead.)
+  });
+
+  /** With the registry forbidden the dialog falls back to the id rather than
+   *  inventing a name — the same honesty the list page's sentence keeps. */
+  test("falls back to the id when the registry is forbidden", async () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: new ApiError(403, "forbidden"),
+    } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
+    renderDialog({ existing: EXISTING });
+
+    expect(screen.getByText(/Preview: read and write on cat-1\.sales\.orders/)).toBeInTheDocument();
   });
 });

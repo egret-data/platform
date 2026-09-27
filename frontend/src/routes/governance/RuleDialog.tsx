@@ -9,6 +9,7 @@ import {
   usePermPreview,
 } from "@/api/generated/perm/perm";
 import type { NewRule, PreviewResponse, PrincipalSet, Rule, RuleKind, Scope, Selector } from "@/api/generated/model";
+import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import { ApiError } from "@/api/client";
 import { type Tag, useTags } from "@/api/tags";
 import { PrincipalPicker } from "@/components/perm/PrincipalPicker";
@@ -163,19 +164,15 @@ export function RuleDialog({
   open,
   onOpenChange,
   existing,
-  catalogName,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   existing?: Rule | null;
-  catalogName: (id: string) => string;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-        {open && (
-          <RuleForm existing={existing} catalogName={catalogName} onOpenChange={onOpenChange} />
-        )}
+        {open && <RuleForm existing={existing} onOpenChange={onOpenChange} />}
       </DialogContent>
     </Dialog>
   );
@@ -189,13 +186,19 @@ export function RuleDialog({
  */
 function RuleForm({
   existing,
-  catalogName,
   onOpenChange,
 }: {
   existing?: Rule | null;
-  catalogName: (id: string) => string;
   onOpenChange: (open: boolean) => void;
 }) {
+  // Read here rather than passed down — see the same note in `GrantDialog`
+  // (review M-6).
+  const catalogsQ = useControlPlaneCatalogRegistryListRegistryCatalogs(undefined, {
+    query: { retry: false },
+  });
+  const catalogs = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
+  const catalogName = (id: string) => catalogs.find((c) => c.id === id)?.name ?? id;
+
   const [name, setName] = useState(existing?.name ?? "");
   const [kindType, setKindType] = useState<KindType>(existing?.kind.type ?? "mask");
   const [maskType, setMaskType] = useState(

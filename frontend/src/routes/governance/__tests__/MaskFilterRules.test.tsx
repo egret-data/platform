@@ -170,3 +170,16 @@ describe("MaskFilterRules — the Selects column must not need a second permissi
     expect(screen.getByText("wh.sales.orders")).toBeInTheDocument();
   });
 });
+
+describe("MaskFilterRules — the page asks for no lookup it does not need (review M-6)", () => {
+  /** The structural half of finding 1: not "the 403 is survivable" but "no
+   *  request is made". A reader used to eat a guaranteed 403 per load. */
+  test("does not call the catalog registry at all", () => {
+    vi.mocked(permApi.usePermListRules).mockReturnValue(listResult([maskRule()]));
+    renderPage();
+    expect(screen.getByText("tag PII Data")).toBeInTheDocument();
+    expect(
+      registry.useControlPlaneCatalogRegistryListRegistryCatalogs,
+    ).not.toHaveBeenCalled();
+  });
+});
