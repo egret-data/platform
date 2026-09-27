@@ -45,6 +45,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
+import { refusalMessage, usePolicyPermissions } from "./policyWrites";
 
 export const profilesQueryKey = ["control-plane", "profiles"] as const;
 
@@ -61,6 +62,12 @@ export default function Policies() {
   const { me } = useAuth();
   const canProvisionEngine =
     (me?.platform_roles.includes("platform_admin") ?? false) || (me?.permissions?.includes("engine:create") ?? false);
+  // SP4b-2 finding 3, the sibling path the first pass missed: this page offered
+  // a `policy:read` steward `New profile` and `Delete profile`, and answered
+  // the submitted dialog with the server's bare `forbidden`. Same per-key
+  // gating and same refusal wording as the detail page — see `policyWrites`
+  // for the control→route→permission table this surface as a whole obeys.
+  const can = usePolicyPermissions();
   const queryClient = useQueryClient();
   const [configTarget, setConfigTarget] = useState<string | null>(null);
   const [typeFacet, setTypeFacet] = useState(FACET_ALL);
@@ -81,7 +88,8 @@ export default function Policies() {
       queryClient.invalidateQueries({ queryKey: profilesQueryKey });
       setDeleteError(null);
     },
-    onError: (err) => setDeleteError(err.message ?? "Failed to delete profile."),
+    onError: (err) =>
+      setDeleteError(refusalMessage(err, "policy:delete", "Failed to delete profile.")),
   });
 
   const filtered = rows.filter((p) => typeFacet === FACET_ALL || p.type === typeFacet);
@@ -188,6 +196,11 @@ export default function Policies() {
       className: "text-right",
       cell: (p) => {
         const bound = p.engines.length > 0;
+        const canDownload = p.type.startsWith("trino");
+        const canDelete = can("policy:delete");
+        // Every item in this menu is conditional, so the trigger has to be
+        // too: a menu that opens on nothing is its own small lie.
+        if (!canDownload && !canDelete) return null;
         return (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -197,16 +210,18 @@ export default function Policies() {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               {/* The config download is the Trino coordinator's Ranger-plugin
-                  config — only meaningful for Trino profiles. */}
-              {p.type.startsWith("trino") && (
+                  config — only meaningful for Trino profiles. A GET on
+                  `policy:read`, so never gated here. */}
+              {canDownload && (
                 <>
                   <DropdownMenuItem onClick={() => setConfigTarget(p.name)}>
                     <Download className="mr-2 h-4 w-4" />
                     Download config
                   </DropdownMenuItem>
-                  <DropdownMenuSeparator />
+                  {canDelete && <DropdownMenuSeparator />}
                 </>
               )}
+              {canDelete && (
               <DropdownMenuItem
                 disabled={bound}
                 title={
@@ -223,6 +238,7 @@ export default function Policies() {
                 <Trash2 className="mr-2 h-4 w-4" />
                 Delete profile
               </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         );
@@ -241,15 +257,17 @@ export default function Policies() {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setAddOpen(true)}
-            title="For an engine egret doesn't provision itself (e.g. an existing StarRocks cluster). Provisioning an engine creates its profile automatically."
-          >
-            <Plus className="mr-1.5 h-4 w-4" />
-            New profile
-          </Button>
+          {can("policy:create") && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setAddOpen(true)}
+              title="For an engine egret doesn't provision itself (e.g. an existing StarRocks cluster). Provisioning an engine creates its profile automatically."
+            >
+              <Plus className="mr-1.5 h-4 w-4" />
+              New profile
+            </Button>
+          )}
           {canProvisionEngine && (
             <Button asChild variant="outline" size="sm">
               <Link to="/control-plane/engines">
@@ -377,7 +395,11 @@ function AddProfileDialog({
       await createMutation.mutateAsync({ name: name.trim(), type });
       handleOpenChange(false);
     } catch (err) {
-      setError((err as ApiError).message ?? "Failed to create profile.");
+      // M-1: the create route's OWN refusal, on the dialog the steward has
+      // just filled in. `New profile` is hidden without `policy:create`, so
+      // this fires for a stale permission snapshot — and must still say what
+      // is missing rather than the server's bare `forbidden`.
+      setError(refusalMessage(err, "policy:create", "Failed to create profile."));
     }
   }
 

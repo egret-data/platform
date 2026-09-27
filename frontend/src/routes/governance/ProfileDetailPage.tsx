@@ -5,7 +5,6 @@ import { ArrowLeft, Cog, Download, Loader2, Lock, Plus, ShieldCheck, Sprout, Tra
 import {
   type Profile,
   type PolicySummary,
-  compilerOwnedConflict,
   isCompilerOwnedPolicyName,
   listProfiles,
   listPolicies,
@@ -14,7 +13,6 @@ import {
   seedDefaultPolicies,
 } from "@/api/policies";
 import { ApiError } from "@/api/client";
-import { useAuth } from "@/auth/useAuth";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,6 +23,7 @@ import { FilterableTable, type Column } from "@/components/explore/FilterableTab
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
+import { refusalMessage, usePolicyPermissions } from "./policyWrites";
 
 const TYPES = [
   { key: "access", label: "Access" },
@@ -241,42 +240,6 @@ export default function ProfileDetailPage() {
       />
     </div>
   );
-}
-
-/**
- * Which `policy:*` writes this account may make (SP4b-2 finding 3).
- *
- * A `policy:read` holder used to be offered `Seed default policies`, `New
- * policy`, the `Enabled` switch and `Delete` on this page, and clicking the
- * switch produced a 403 whose whole rendered message was the word
- * `forbidden` — the switch snapped back and nothing said why. The two SP4b
- * steward pages (`DataPermissions`, `MaskFilterRules`) already hide what a
- * reader cannot use; this brings the SP4a page in line, and the refusals that
- * remain reachable (a stale permission snapshot, or a policy the compiler
- * claimed after the page loaded) now name the permission instead of echoing
- * `forbidden`.
- *
- * `platform_admin` bypasses inside the PDP, so it passes every key — the same
- * shape the steward pages use.
- */
-function usePolicyPermissions(): (permission: string) => boolean {
-  const { me } = useAuth();
-  const isAdmin = !!me && me.platform_roles.includes("platform_admin");
-  return (permission: string) => isAdmin || !!me?.permissions.includes(permission);
-}
-
-/** The refused-write message. A 403 says which permission is missing: the
- *  server's own body is the bare word `forbidden`, which tells an operator
- *  nothing about what to ask for. A compiler-owned 409 keeps its own
- *  explanation (D10). */
-function refusalMessage(e: unknown, needs: string, fallback: string): string {
-  const conflict = compilerOwnedConflict(e);
-  if (conflict) return conflict;
-  const err = e as ApiError;
-  if (err?.status === 403) {
-    return `This account cannot do that: it needs the ${needs} permission.`;
-  }
-  return err?.message ?? fallback;
 }
 
 /** Ranger policy table for one policy type (or, for the Tags tab, all types of

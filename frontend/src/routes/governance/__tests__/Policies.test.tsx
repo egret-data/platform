@@ -6,6 +6,7 @@ import { describe, it, expect, vi } from "vitest";
 import Policies from "../Policies";
 import { AuthContext } from "@/auth/useAuth";
 import type { Me } from "@/api/hooks";
+import { ApiError } from "@/api/client";
 
 const createProfile = vi.fn((_name: string, _type: string) =>
   Promise.resolve({ id: 3, name: "sr", type: "starrocks" }),
@@ -33,12 +34,34 @@ vi.mock("@/api/policies", () => ({
         engines: [],
         origin: "generated",
       },
+      // A trino-TYPED profile, so the `Download config` item (a `policy:read`
+      // GET, offered to a steward) and the `Delete profile` item (a
+      // `policy:delete` write, not offered) can be distinguished in the same
+      // menu. The two rows above are typed `hive`/`olap` and carry no
+      // download item at all.
+      {
+        id: 3,
+        name: "trino-live",
+        type: "trino",
+        policy_version: 2,
+        policy_count: 5,
+        engines: [],
+        origin: "manual",
+      },
     ]),
   createProfile: (name: string, type: string) => createProfile(name, type),
   deleteProfile: (name: string) => deleteProfile(name),
+  // `policyWrites.refusalMessage` consults this to let D10's 409 keep its own
+  // explanation; the real one is covered by `ProfileDetailPage.test.tsx`.
+  compilerOwnedConflict: () => null,
 }));
 
-function wrap(ui: React.ReactNode, me: Me | null = null) {
+const ADMIN: Me = { user_id: "u2", email: "admin@egret.local", platform_roles: ["platform_admin"], permissions: [] };
+
+/** Default `me` is the admin, because every test below that drives a WRITE is
+ *  measuring the admin's page — SP4b-2 finding 3's whole lesson is that a
+ *  measurement taken as `platform_admin` says nothing about a steward's. */
+function wrap(ui: React.ReactNode, me: Me | null = ADMIN) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
@@ -50,7 +73,6 @@ function wrap(ui: React.ReactNode, me: Me | null = null) {
 }
 
 const STEWARD: Me = { user_id: "u1", email: "steward@egret.local", platform_roles: [], permissions: ["policy:read"] };
-const ADMIN: Me = { user_id: "u2", email: "admin@egret.local", platform_roles: ["platform_admin"], permissions: [] };
 const ENGINE_CREATOR: Me = {
   user_id: "u3",
   email: "infra@egret.local",
@@ -173,5 +195,86 @@ describe("Policies page (profiles landing)", () => {
       "href",
       "/control-plane/engines",
     );
+  });
+
+  /**
+   * **THE DISCRIMINATING CASE (SP4b-2 finding 3's sibling path).** Every write
+   * test above renders as `platform_admin`, who bypasses the PDP and passes
+   * all five `policy:*` keys — which is exactly why this page kept the defect
+   * the detail page had fixed: a `policy:read` steward was offered `New
+   * profile` and `Delete profile`, filled the dialog in, submitted, and read
+   * `forbidden`.
+   */
+  it("offers a policy:read steward no New profile and no Delete profile", async () => {
+    const user = userEvent.setup();
+    wrap(<Policies />, STEWARD);
+    await screen.findByRole("link", { name: "starrocks" });
+
+    expect(screen.queryByRole("button", { name: /New profile/i })).not.toBeInTheDocument();
+
+    // The menu still opens for a trino-typed profile (Download config is a
+    // `policy:read` GET) but carries no delete.
+    await user.click(screen.getByRole("button", { name: "Actions for trino-live" }));
+    expect(await screen.findByRole("menuitem", { name: /download config/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /delete profile/i })).not.toBeInTheDocument();
+  });
+
+  /** A menu whose every item is gated away must not offer a trigger either —
+   *  `starrocks` here is not trino-typed, so a steward has nothing to open. */
+  it("renders no actions trigger at all when every item is gated away", async () => {
+    const { unmount } = wrap(<Policies />, STEWARD);
+    await screen.findByRole("link", { name: "starrocks" });
+    // `starrocks` is typed `olap`: no download item, and no delete for a
+    // steward, so there is nothing for a trigger to open.
+    expect(
+      screen.queryByRole("button", { name: "Actions for starrocks" }),
+    ).not.toBeInTheDocument();
+
+    // …while the same row DOES give an admin one — otherwise this test would
+    // pass just as well if the trigger had been deleted outright.
+    unmount();
+    wrap(<Policies />, ADMIN);
+    await screen.findByRole("link", { name: "starrocks" });
+    expect(screen.getByRole("button", { name: "Actions for starrocks" })).toBeInTheDocument();
+  });
+
+  /**
+   * Hiding is not the whole fix: a permission snapshot can be stale, so a
+   * refused write must name the permission instead of echoing the server's
+   * bare `forbidden` body. Driven on the delete path, whose error surfaces on
+   * the page rather than inside the dialog.
+   */
+  it("names the permission a refused delete needs, not 'forbidden'", async () => {
+    deleteProfile.mockRejectedValueOnce(new ApiError(403, "forbidden"));
+    const user = userEvent.setup();
+    wrap(<Policies />);
+    await screen.findByRole("link", { name: "starrocks" });
+
+    await user.click(screen.getByRole("button", { name: "Actions for starrocks" }));
+    await user.click(await screen.findByRole("menuitem", { name: /delete profile/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    await user.type(within(dialog).getByPlaceholderText("delete"), "delete");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    expect(await screen.findByText(/needs the policy:delete permission/)).toBeInTheDocument();
+    expect(screen.queryByText(/^forbidden$/)).not.toBeInTheDocument();
+  });
+
+  /** The create dialog's own refusal, the second call site (M-1). */
+  it("names the permission a refused create needs, not 'forbidden'", async () => {
+    createProfile.mockRejectedValueOnce(new ApiError(403, "forbidden"));
+    const user = userEvent.setup();
+    wrap(<Policies />);
+    await screen.findByRole("link", { name: "trino" });
+
+    await user.click(screen.getByRole("button", { name: /New profile/i }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText("Name"), "sr-2");
+    await user.click(within(dialog).getByRole("button", { name: /Create profile/i }));
+
+    expect(
+      await within(dialog).findByText(/needs the policy:create permission/),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText(/^forbidden$/)).not.toBeInTheDocument();
   });
 });
