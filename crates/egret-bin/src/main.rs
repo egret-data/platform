@@ -1788,7 +1788,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         kernel_idle,
     ));
 
-    // Spawn the idle reaper (sweeps every 60 s; cancelled via the token on SIGINT).
+    // Spawn the idle reaper (sweeps every 60 s). `reaper_cancel` is the
+    // background loops' shared token, cancelled on SIGTERM or SIGINT by the
+    // task spawned after the workflow runtime below.
     let reaper_cancel = tokio_util::sync::CancellationToken::new();
     egret_kernel::spawn_reaper(
         kernel_registry,
@@ -1797,14 +1799,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         std::time::Duration::from_secs(60),
         reaper_cancel.clone(),
     );
-    {
-        let reaper_cancel = reaper_cancel.clone();
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("SIGINT received, stopping kernel reaper");
-            reaper_cancel.cancel();
-        });
-    }
 
     // ── Alerts & Reports ticker (P2) ───────────────────────────────────────
     //
@@ -1905,13 +1899,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         },
         reaper_cancel.clone(),
     );
-    // SIGTERM (not only Ctrl-C) stops the background loops, so the workflow
-    // runtime's claim loop and log writer wind down while the HTTP server
-    // drains rather than being killed when `main` returns.
+    // SIGTERM or SIGINT (`shutdown_signal` observes both) stops every
+    // background loop on `reaper_cancel` -- the kernel idle reaper, the
+    // automation ticker and the workflow runtime -- at the signal, while the
+    // HTTP server drains. (Before W11 only Ctrl-C cancelled it, from a task of
+    // its own; on SIGTERM the loops ran on until `main` returned.) So the
+    // workflow claim loop stops claiming and its log writer drains inside the
+    // grace period, and other replicas pick up the runs.
     {
         let reaper_cancel = reaper_cancel.clone();
         tokio::spawn(async move {
             egret_server::shutdown_signal().await;
+            tracing::info!("shutdown signal received, stopping background loops");
             reaper_cancel.cancel();
         });
     }
