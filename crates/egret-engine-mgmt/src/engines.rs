@@ -3206,6 +3206,15 @@ async fn build_starrocks_provision_req(
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty());
+    // The creation-time marker. Absent / null / `false` ⇒ `false`, so every
+    // engine that predates the marker renders the pre-PVC shape and its
+    // StatefulSet keeps reconciling. Only `build_starrocks_spec` on the CREATE
+    // path writes `true`; see `StarRocksConfig::fe_meta_persistent` for why
+    // this can never be flipped on for a live engine.
+    let fe_meta_persistent = cfg
+        .and_then(|c| c.get("feMetaPersistent"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Delegation opt-in read back from the stored `{mode, tlsEnabled}` block.
     // `tls_enabled` mirrors create: on only when delegation is configured,
@@ -3363,6 +3372,7 @@ async fn build_starrocks_provision_req(
             root_password,
             fe_meta_storage_class,
             fe_meta_storage_size,
+            fe_meta_persistent,
         }),
     };
     Ok((req, delegation_bootstrap))
@@ -3588,6 +3598,34 @@ fn build_starrocks_spec(
                 .cloned()
         })
         .unwrap_or(serde_json::Value::Null);
+    // FE metadata PERSISTENCE MARKER — creation-time, and deliberately NOT a
+    // field on `StarRocksConfigBody`. `existing_cfg.is_none()` is exactly
+    // "this call is a create" (the only two production callers are
+    // `create_starrocks_engine`, which passes `None`, and
+    // `update_starrocks_engine`, which passes the stored spec), so a create
+    // stamps `true` and every engine that already exists stays at `false`.
+    //
+    // No wire knob because `volumeClaimTemplates` is IMMUTABLE on a live
+    // StatefulSet (measured on kind 2026-09-26, §7 of
+    // `docs/en/plans/2026-09-26-fe-meta-live-result.md`): a PUT that could set
+    // this to `true` would not migrate the engine, it would make every operator
+    // reconcile rejected by the API server and park the `StarRocksCluster` at
+    // `phase=failed` — no further change of any kind would apply to it,
+    // including a Ranger rebind. There is no body value to honour, so an update
+    // can only PRESERVE what is stored, which is the omit=preserve rule taken to
+    // its limit.
+    //
+    // Matched on `existing`, NOT on `existing_cfg`: `existing_cfg` is `None`
+    // both on create AND for a stored spec that carries no `starrocksConfig`
+    // object at all, and conflating those would stamp the marker onto an
+    // existing engine — the one outcome that must never happen.
+    let fe_meta_persistent = match existing {
+        None => serde_json::Value::Bool(true),
+        Some(_) => existing_cfg
+            .and_then(|c| c.get("feMetaPersistent"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Bool(false)),
+    };
 
     serde_json::json!({
         "imageVersion": fe_image,
@@ -3605,6 +3643,7 @@ fn build_starrocks_spec(
             "pod": pod,
             "feMetaStorageClass": fe_meta_storage_class,
             "feMetaStorageSize": fe_meta_storage_size,
+            "feMetaPersistent": fe_meta_persistent,
         },
     })
 }
@@ -6741,6 +6780,53 @@ mod tests {
         );
         assert_eq!(kept["starrocksConfig"]["feMetaStorageClass"], "fast-ssd");
         assert_eq!(kept["starrocksConfig"]["feMetaStorageSize"], "50Gi");
+    }
+
+    /// The FE-metadata persistence MARKER is stamped by create and only by
+    /// create. `volumeClaimTemplates` is immutable on a live StatefulSet, so an
+    /// engine that already exists must never acquire the marker — an update can
+    /// only preserve what is stored, and an update of a legacy engine leaves it
+    /// `false`.
+    #[test]
+    fn build_starrocks_spec_marks_only_engines_it_creates() {
+        // CREATE ⇒ marked.
+        let created = build_starrocks_spec(&StarRocksConfigBody::default(), None);
+        assert_eq!(created["starrocksConfig"]["feMetaPersistent"], true);
+
+        // UPDATE of a marked engine ⇒ still marked.
+        let kept = build_starrocks_spec(
+            &StarRocksConfigBody {
+                fe_replicas: Some(3),
+                ..Default::default()
+            },
+            Some(&created),
+        );
+        assert_eq!(kept["starrocksConfig"]["feMetaPersistent"], true);
+
+        // UPDATE of a LEGACY engine — a stored spec written before the marker
+        // existed ⇒ NOT marked. This is the case the live gate falsified the
+        // plan on.
+        let legacy = serde_json::json!({
+            "imageVersion": "3.3-latest",
+            "starrocksConfig": { "feImage": "starrocks/fe-ubuntu:3.3-latest", "feReplicas": 1 },
+        });
+        let updated = build_starrocks_spec(
+            &StarRocksConfigBody {
+                fe_replicas: Some(2),
+                ..Default::default()
+            },
+            Some(&legacy),
+        );
+        assert_eq!(updated["starrocksConfig"]["feMetaPersistent"], false);
+
+        // And a stored spec with NO `starrocksConfig` object at all is still an
+        // UPDATE, not a create: `existing_cfg` is `None` for both, so matching
+        // on it instead of on `existing` would mark a live engine.
+        let bare = build_starrocks_spec(
+            &StarRocksConfigBody::default(),
+            Some(&serde_json::json!({})),
+        );
+        assert_eq!(bare["starrocksConfig"]["feMetaPersistent"], false);
     }
 
     // ── build_starrocks_spec: omitted-field-preserves + delegation rule ─────

@@ -545,6 +545,26 @@ pub struct StarRocksConfig {
     /// against `(^0|([0-9]*l[.])?[0-9]+((M|G|T|E|P)i))$`, so only binary
     /// suffixes are accepted.
     pub fe_meta_storage_size: Option<String>,
+    /// Whether egret renders the FE metadata volume at all.
+    ///
+    /// `false` ⇒ render NOTHING at the meta path, so the kube-starrocks
+    /// operator injects its own `fe-meta {"emptyDir": {}}` default — the exact
+    /// shape egret emitted before the PVC existed. `true` ⇒ render the PVC.
+    ///
+    /// This is a CREATION-TIME marker, not a knob: `volumeClaimTemplates` is
+    /// IMMUTABLE on a live StatefulSet, measured on kind 2026-09-26 (see
+    /// `docs/en/plans/2026-09-26-fe-meta-live-result.md` §7). Adding the claim
+    /// to an engine that already has a StatefulSet does not migrate it — every
+    /// operator reconcile is rejected by the API server with `updates to
+    /// statefulset spec for fields other than 'replicas', 'ordinals',
+    /// 'template', ... are forbidden`, the FE keeps its `emptyDir`, AND the
+    /// `StarRocksCluster` stops converging entirely, so no later change of any
+    /// kind (a Ranger rebind included) applies either. Existing engines
+    /// therefore keep `false` and are left exactly as they are; migrating one
+    /// is a deliberate operator action (`kubectl delete sts <engine>-fe
+    /// --cascade=orphan`, which destroys that FE's metadata), never a side
+    /// effect of upgrading egret.
+    pub fe_meta_persistent: bool,
 }
 
 /// Default size of the FE metadata PVC when
@@ -618,6 +638,7 @@ impl std::fmt::Debug for StarRocksConfig {
             )
             .field("fe_meta_storage_class", &self.fe_meta_storage_class)
             .field("fe_meta_storage_size", &self.fe_meta_storage_size)
+            .field("fe_meta_persistent", &self.fe_meta_persistent)
             .finish()
     }
 }
@@ -701,6 +722,7 @@ mod tests {
             root_password: None,
             fe_meta_storage_class: None,
             fe_meta_storage_size: None,
+            fe_meta_persistent: true,
         };
         assert_eq!(s.fe_replicas, 1);
     }

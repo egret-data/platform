@@ -666,7 +666,25 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
     // mount needs a live-tuned fix (candidate: an initContainer image that
     // reads the cert+key via a k8s API/downward mechanism instead of a shared
     // volume).
-    // FE METADATA — a PVC, unconditionally, for every engine.
+    // FE METADATA — a PVC, but ONLY for an engine created after this shipped.
+    //
+    // `fe_meta_persistent` is a creation-time marker stamped by the create path
+    // (`build_starrocks_spec` with no existing config), so it is `false` for
+    // every engine that already exists. That gate is not caution, it is a
+    // measured constraint: `volumeClaimTemplates` is IMMUTABLE on a live
+    // StatefulSet. Adding the claim to an engine whose FE StatefulSet already
+    // exists does not migrate it — the operator's merge patch is rejected by
+    // the API server (`updates to statefulset spec for fields other than
+    // 'replicas', 'ordinals', 'template', ... are forbidden`), the FE keeps the
+    // `emptyDir` it already had, AND the `StarRocksCluster` goes to
+    // `phase=failed` and stops converging, so NO later change of any kind (a
+    // Ranger rebind, an image bump) applies either. Measured on kind
+    // 2026-09-26; §7 of `docs/en/plans/2026-09-26-fe-meta-live-result.md` has
+    // the verbatim error. An unmarked engine therefore renders EXACTLY what it
+    // rendered before the PVC existed, so upgrading egret is a no-op for it and
+    // its cluster keeps reconciling. Migrating one is a deliberate operator
+    // action (`kubectl delete sts <engine>-fe --cascade=orphan`, which destroys
+    // that FE's metadata and requires accepting that), never a side effect.
     //
     // Without an entry at the meta path the operator injects its own default
     // `fe-meta {"emptyDir": {}}`, so the FE's metadata lives and dies with the
@@ -695,29 +713,32 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
     // rebuildable by definition. `fe-meta` is the only volume in this CR whose
     // loss destroys state that exists nowhere else.
     let mut storage_volumes: Vec<Value> = Vec::new();
-    let mut fe_meta = json!({
-        "name": FE_META_VOLUME_NAME,
-        "mountPath": FE_META_MOUNT_PATH,
-        "storageSize": sr
-            .fe_meta_storage_size
+    if sr.fe_meta_persistent {
+        let mut fe_meta = json!({
+            "name": FE_META_VOLUME_NAME,
+            "mountPath": FE_META_MOUNT_PATH,
+            "storageSize": sr
+                .fe_meta_storage_size
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(DEFAULT_FE_META_STORAGE_SIZE),
+        });
+        // Omitted (not `""`) when unset, so the claim binds the cluster's
+        // DEFAULT StorageClass. An empty-string `storageClassName` in k8s means
+        // "no class, bind a pre-provisioned PV only" — the opposite of the
+        // intent — so a blank config value must render as ABSENT, never as an
+        // empty string.
+        if let Some(class) = sr
+            .fe_meta_storage_class
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or(DEFAULT_FE_META_STORAGE_SIZE),
-    });
-    // Omitted (not `""`) when unset, so the claim binds the cluster's DEFAULT
-    // StorageClass. An empty-string `storageClassName` in k8s means "no class,
-    // bind a pre-provisioned PV only" — the opposite of the intent — so a blank
-    // config value must render as ABSENT, never as an empty string.
-    if let Some(class) = sr
-        .fe_meta_storage_class
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        fe_meta["storageClassName"] = json!(class);
+        {
+            fe_meta["storageClassName"] = json!(class);
+        }
+        storage_volumes.push(fe_meta);
     }
-    storage_volumes.push(fe_meta);
 
     let tls_enabled = starrocks_ssl_secret(spec).is_some();
     if tls_enabled {
@@ -771,7 +792,13 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
             ],
         }]);
     }
-    fe_spec["storageVolumes"] = json!(storage_volumes);
+    // ONLY when something is in it. An unmarked, TLS-less engine must render no
+    // `storageVolumes` KEY AT ALL — an empty array is a different document and
+    // would be a live change for every existing engine, which is the whole
+    // thing this gate exists to prevent.
+    if !storage_volumes.is_empty() {
+        fe_spec["storageVolumes"] = json!(storage_volumes);
+    }
 
     let mut cn_spec = json!({
         "image": sr.cn_image,
@@ -1165,8 +1192,30 @@ mod tests {
                 root_password: None,
                 fe_meta_storage_class: None,
                 fe_meta_storage_size: None,
+                // The default fixture is an engine created AFTER the FE-meta
+                // PVC shipped, i.e. the shape every new engine has from now on.
+                // `sample_sr_spec_unmarked` below is the legacy counterpart.
+                fe_meta_persistent: true,
             }),
         }
+    }
+
+    /// `sample_sr_spec` as an engine that ALREADY EXISTED when the FE metadata
+    /// PVC shipped: no creation-time marker, so egret must render exactly what
+    /// it rendered before — nothing at the meta path, leaving the operator's
+    /// `emptyDir` default in place. See `fe_meta_*_unmarked_*` below for why
+    /// that is mandatory and not merely conservative.
+    fn sample_sr_spec_unmarked() -> EngineSpec {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().fe_meta_persistent = false;
+        spec
+    }
+
+    /// `sample_sr_spec_with_tls` with the creation-time marker cleared.
+    fn sample_sr_spec_with_tls_unmarked() -> EngineSpec {
+        let mut spec = sample_sr_spec_with_tls();
+        spec.starrocks.as_mut().unwrap().fe_meta_persistent = false;
+        spec
     }
 
     /// `sample_sr_spec` plus a delegation block with TLS enabled — the fixture
@@ -1586,6 +1635,81 @@ mod tests {
         let meta = volumes.iter().find(|v| v["name"] == "fe-meta").unwrap();
         assert!(meta["storageSize"].is_string());
         assert!(meta.get("hostPath").is_none());
+    }
+
+    /// An engine WITHOUT the creation-time marker renders NO meta volume entry
+    /// and — with TLS off — no `storageVolumes` KEY AT ALL, which is byte-for-byte
+    /// what egret rendered before the PVC existed.
+    ///
+    /// This is the whole correction. `volumeClaimTemplates` is IMMUTABLE on a
+    /// live StatefulSet (measured on kind 2026-09-26): rendering the claim for
+    /// an engine that already has one does not migrate it, it makes every
+    /// operator reconcile rejected by the API server and parks the
+    /// `StarRocksCluster` at `phase=failed` forever, so nothing else ever
+    /// applies to it either. An empty ARRAY would fail this test too, on
+    /// purpose: `{"storageVolumes": []}` is a different document from no key,
+    /// and shipping it would be a live change for every existing engine.
+    #[test]
+    fn fe_meta_volume_absent_for_an_unmarked_engine() {
+        let cr = starrocks_cluster_cr(&sample_sr_spec_unmarked());
+        let fe_spec = &cr["spec"]["starRocksFeSpec"];
+        assert!(
+            fe_spec.get("storageVolumes").is_none(),
+            "an unmarked, TLS-less engine must render no storageVolumes key at \
+             all (an empty array is already a change): {}",
+            fe_spec["storageVolumes"]
+        );
+
+        // With TLS the key exists — it always did — but it holds the keystore
+        // and NOTHING else, exactly the pre-PVC shape.
+        let cr = starrocks_cluster_cr(&sample_sr_spec_with_tls_unmarked());
+        let volumes = cr["spec"]["starRocksFeSpec"]["storageVolumes"]
+            .as_array()
+            .expect("the TLS branch still renders storageVolumes");
+        assert_eq!(
+            volumes.len(),
+            1,
+            "pre-PVC shape is the keystore alone: {volumes:?}"
+        );
+        assert_eq!(volumes[0]["name"], "ssl-keystore");
+        assert_eq!(volumes[0]["mountPath"], "/etc/starrocks/ssl");
+        assert!(volumes[0]["hostPath"]["path"].is_string());
+        assert!(
+            !volumes
+                .iter()
+                .any(|v| v["mountPath"] == "/opt/starrocks/fe/meta"),
+            "nothing may mount the meta path for an unmarked engine: {volumes:?}"
+        );
+    }
+
+    /// An engine WITH the marker renders the PVC — and when TLS is on, the
+    /// keystore entry is still there ALONGSIDE it rather than replacing it or
+    /// being replaced by it.
+    #[test]
+    fn fe_meta_volume_rendered_for_a_marked_engine() {
+        let cr = starrocks_cluster_cr(&sample_sr_spec());
+        let volumes = cr["spec"]["starRocksFeSpec"]["storageVolumes"]
+            .as_array()
+            .expect("a marked engine renders storageVolumes");
+        assert_eq!(volumes.len(), 1);
+        assert_eq!(volumes[0]["name"], "fe-meta");
+        assert_eq!(volumes[0]["mountPath"], "/opt/starrocks/fe/meta");
+        assert_eq!(volumes[0]["storageSize"], "20Gi");
+        assert!(volumes[0].get("hostPath").is_none());
+
+        let cr = starrocks_cluster_cr(&sample_sr_spec_with_tls());
+        let volumes = cr["spec"]["starRocksFeSpec"]["storageVolumes"]
+            .as_array()
+            .expect("a marked TLS engine renders storageVolumes");
+        let by_name = |n: &str| volumes.iter().find(|v| v["name"] == n);
+        let meta = by_name("fe-meta").expect("the meta PVC survives the TLS branch");
+        assert_eq!(meta["mountPath"], "/opt/starrocks/fe/meta");
+        assert_eq!(meta["storageSize"], "20Gi");
+        assert!(meta.get("hostPath").is_none());
+        let ks = by_name("ssl-keystore").expect("the keystore is ALONGSIDE the PVC, not replaced");
+        assert_eq!(ks["mountPath"], "/etc/starrocks/ssl");
+        assert!(ks["hostPath"]["path"].is_string());
+        assert_eq!(volumes.len(), 2, "exactly the two entries: {volumes:?}");
     }
 
     /// No delegation TLS → no init-container/storageVolumes/secrets noise on
