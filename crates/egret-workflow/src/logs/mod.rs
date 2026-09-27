@@ -8,12 +8,44 @@
 //! docs/en/specs/2026-09-27-workflow-w11-execution-logs-design.md §3 and §6.
 
 mod repo;
+mod run_log;
 
 use chrono::{DateTime, Utc};
 use std::time::Duration;
 use uuid::Uuid;
 
 pub use repo::{InsertError, LogQuery, LogRepo, StoredLine};
+pub use run_log::{RunIdentity, RunLog};
+
+/// The longest piece a log line is stored as, in `char`s (D6).
+///
+/// Kestra's `RunContextLogger.MAX_MESSAGE_LENGTH` (`1024 * 15`), split with
+/// `Splitter.fixedLength`: measured in W11 Task 1, a 100,000-character line
+/// was stored as 6 x 15,360 + 7,840. A constant rather than a setting, because
+/// it is Kestra's shape and not a policy. [`RunLog`] splits every line longer
+/// than this before its cap is consulted. egret counts Unicode scalar values
+/// (Rust `char`) where Java counts UTF-16 code units; the two agree on the
+/// Basic Multilingual Plane (spec section 5).
+pub const LOG_PIECE_CHARS: usize = 15_360;
+
+/// The per-attempt log cap (D4): once an attempt has stored this many lines or
+/// bytes, [`RunLog`] stops storing and [`RunLog::finish`] writes one WARN
+/// summary instead. Per attempt, so a retry starts fresh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LogLimits {
+    pub run_max_lines: u64,
+    pub run_max_bytes: u64,
+}
+
+impl Default for LogLimits {
+    /// 10,000 lines / 10 MiB, verbatim from the spec.
+    fn default() -> Self {
+        Self {
+            run_max_lines: 10_000,
+            run_max_bytes: 10_485_760,
+        }
+    }
+}
 
 /// How old a row's `inserted_at` must be before [`LogRepo::page`] returns it.
 ///
@@ -109,4 +141,58 @@ pub struct LogLine {
     pub level: LogLevel,
     pub ts: DateTime<Utc>,
     pub message: String,
+}
+
+/// W11 Task 1's measured fixture, for the tests that assert its typed
+/// `egret_expected` values rather than a reading of its prose.
+#[cfg(test)]
+pub(crate) mod fixture {
+    /// The whole of `oracle-exec/w11-logs.json`.
+    pub fn w11() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../oracle-exec/w11-logs.json"))
+            .expect("w11-logs.json parses")
+    }
+
+    /// `findings[id = id].egret_expected`.
+    pub fn expected(id: &str) -> serde_json::Value {
+        w11()["findings"]
+            .as_array()
+            .expect("findings is an array")
+            .iter()
+            .find(|f| f["id"] == id)
+            .unwrap_or_else(|| panic!("no finding {id:?} in w11-logs.json"))["egret_expected"]
+            .clone()
+    }
+
+    /// A level name from the fixture, parsed: a name outside the five is a
+    /// broken fixture, not a test input.
+    pub fn level(v: &serde_json::Value) -> super::LogLevel {
+        let s = v
+            .as_str()
+            .unwrap_or_else(|| panic!("level {v} is not a string"));
+        super::LogLevel::parse(s).unwrap_or_else(|| panic!("level {s:?} is not one of the five"))
+    }
+
+    /// Every `level_table` value is a member of `level_set`.
+    #[test]
+    fn every_level_table_value_is_a_member_of_the_level_set() {
+        let w = w11();
+        let set: Vec<&str> = w["level_set"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(set, ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]);
+        let table = w["level_table"].as_object().unwrap();
+        assert!(!table.is_empty());
+        for (k, v) in table {
+            let v = v.as_str().unwrap();
+            assert!(
+                set.contains(&v),
+                "level_table.{k} = {v:?} is not in level_set"
+            );
+            level(&serde_json::json!(v));
+        }
+    }
 }

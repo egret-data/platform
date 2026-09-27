@@ -117,8 +117,8 @@ use egret_core::{Error, Result};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use super::handlers::{Level, LogSink};
 use super::TaskInput;
+use crate::logs::LogLevel;
 
 /// The directory a command runs in, inside the container.
 ///
@@ -284,8 +284,8 @@ pub struct CommandsResult {
 /// [`TaskHandler::cancel`]: super::TaskHandler::cancel
 #[async_trait::async_trait]
 pub trait TaskRunner: Send + Sync + std::fmt::Debug {
-    /// Run `commands` for `task`, streaming every log line to `sink` as it
-    /// arrives.
+    /// Run `commands` for `task`, writing every log line to `task.log` as it
+    /// arrives, through [`stream_line`], after showing it to `observer`.
     ///
     /// `Err` is a **worker** failure — the daemon is unreachable, egret's own
     /// outage. The run's own outcome is not applied, so it stays `RUNNING` and
@@ -301,7 +301,7 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
         &self,
         task: &TaskInput,
         commands: &TaskCommands,
-        sink: &dyn LogSink,
+        observer: &dyn LineObserver,
     ) -> Result<CommandsResult>;
 
     /// Stop whatever `task` is running, addressed by **identity**.
@@ -309,6 +309,60 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
     /// The caller is [`cancel::guarded`](super::TaskHandler::cancel) by way of
     /// a handler, and it has no handle to pass: see [`container_name`].
     async fn cancel(&self, task: &TaskInput) -> Result<()>;
+}
+
+/// Something that sees each line a runner writes, before it goes to
+/// `task.log` — `handlers::python`'s `NameHintSink`, which connects a
+/// `NameError` to its cause.
+///
+/// An observer and not a sink: it cannot drop, reorder or re-level a line,
+/// and the line reaches the log whatever it does.
+pub trait LineObserver: Send + Sync {
+    fn observe(&self, level: LogLevel, line: &str);
+}
+
+/// The observer for a handler with nothing to watch for.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoObserver;
+
+impl LineObserver for NoObserver {
+    fn observe(&self, _level: LogLevel, _line: &str) {}
+}
+
+/// `DefaultLogConsumer`'s per-command state: the bytes of markers harvested
+/// so far (for the vars cap) and whether a `##kestra:log:debug##` bracket is
+/// open. One per command, shared by both streams — which is why a marker on
+/// either stream toggles it.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct StreamState {
+    pub vars_bytes: usize,
+    pub debug: bool,
+}
+
+/// The line that opens a DEBUG bracket: `DefaultLogConsumer.LOG_DEBUG_MARKER`.
+pub const LOG_DEBUG_MARKER: &str = "##kestra:log:debug##";
+/// The line that closes it: `DefaultLogConsumer.LOG_INFO_MARKER`.
+pub const LOG_INFO_MARKER: &str = "##kestra:log:info##";
+
+/// One line from a command's stream: decide it with [`ingest_line`], show it
+/// to `observer`, and write it to `task.log`.
+///
+/// The async half of line handling, shared by [`DockerRunner`] and every fake
+/// runner in the tests, so a test driving a fake exercises the same levels and
+/// the same destination the real runner does.
+pub(crate) async fn stream_line(
+    task: &TaskInput,
+    observer: &dyn LineObserver,
+    result: &mut CommandsResult,
+    state: &mut StreamState,
+    max_vars_bytes: usize,
+    line: &str,
+    is_err: bool,
+) {
+    if let Some((level, text)) = ingest_line(result, state, max_vars_bytes, line, is_err) {
+        observer.observe(level, &text);
+        task.log.line(level, &text).await;
+    }
 }
 
 /// The container this run owns, named from its **lease**.
@@ -409,64 +463,126 @@ pub fn labels(task: &TaskInput) -> Vec<(String, String)> {
 /// to give.
 ///
 /// Everything here is decided without a daemon, a process or a pipe: the counts,
-/// the marker, the vars cap, and the level. `run_created` keeps only the parts
-/// that genuinely need one.
+/// the marker, the vars cap, the debug bracket and the level. `run_created`
+/// keeps only the parts that genuinely need one.
+///
+/// Returns what to store, `None` for a line that is not stored at all. It is
+/// `DefaultLogConsumer.accept` + `PluginUtilsService.parseOut`, in their
+/// order, and every level is W11 Task 1's measurement
+/// (`oracle-exec/w11-logs.json`):
+///
+/// 1. `##kestra:log:debug##` / `##kestra:log:info##` toggle the bracket, on
+///    either stream, and are neither stored nor counted (`accept` returns
+///    before counting).
+/// 2. A **whole-line** `::{…}::` marker is not stored, on either stream: its
+///    `outputs` are harvested, any other key (`metrics`) is ignored, and one
+///    that does not parse is stored as one WARN `Invalid outputs '<error>'`
+///    (the error text is serde's; Kestra's DEBUG stack line is not written).
+///    A line that merely contains a marker is an ordinary line.
+/// 3. stderr is **ERROR** — measured with `warningOnStdErr` default, `false`
+///    and `true` alike, and `parseOut` tests the stream before the bracket, so
+///    also inside one. stdout is DEBUG inside a bracket and INFO outside.
 ///
 /// **The cap sets [`CommandsResult::failure`] and clears the vars rather than
 /// returning an error.** Returning one mid-stream abandoned the exit code and
 /// left `docker start`'s pipes unread, which stalls a container that is still
 /// writing; and the vars are cleared rather than kept because the whole point
 /// of the cap is that this much is not going into `task_runs.outputs`.
-pub(crate) fn ingest_line(
+pub(crate) fn ingest_line<'a>(
     result: &mut CommandsResult,
-    vars_bytes: &mut usize,
+    state: &mut StreamState,
     max_vars_bytes: usize,
-    line: &str,
+    line: &'a str,
     is_err: bool,
-) -> Level {
+) -> Option<(LogLevel, std::borrow::Cow<'a, str>)> {
+    let bare = line.trim_end_matches(['\r', '\n']);
+    if bare == LOG_DEBUG_MARKER {
+        state.debug = true;
+        return None;
+    }
+    if bare == LOG_INFO_MARKER {
+        state.debug = false;
+        return None;
+    }
+
     if is_err {
         result.stderr_line_count += 1;
     } else {
         result.stdout_line_count += 1;
     }
 
-    // The marker is consumed as an output AND logged, which is what
-    // `DefaultLogConsumer` does: it calls `parseOut` and then logs the line
-    // either way.
-    //
     // **There is deliberately no `if result.failure.is_none()` guard around
-    // this**, and fix round 1's mutation round is why. There was one; mutating
-    // it to `if true` was killed by **nothing** in the whole crate, and the
-    // reason is that it could not be: `vars_bytes` only ever grows, so once the
-    // cap has fired every later marker re-fires it on its first key and clears
-    // the map again before inserting anything. The guard was unobservable, so
-    // it went — a guard nobody can see fail is a guard nobody has seen, and
-    // this package has refused ten of them.
-    if let Some(outputs) = parse_marker(line) {
-        for (k, v) in outputs {
-            *vars_bytes += k.len() + v.to_string().len();
-            if *vars_bytes > max_vars_bytes {
-                result.vars.clear();
-                result.failure = Some(format!(
-                    "the command emitted more than {max_vars_bytes} bytes of \
-                     `::{{\"outputs\": …}}::` markers, and every byte of that would be \
-                     stored on the task run and re-rendered by every later task in \
-                     the execution"
-                ));
-                break;
+    // the harvest**, and fix round 1's mutation round is why. There was one;
+    // mutating it to `if true` was killed by **nothing** in the whole crate,
+    // and the reason is that it could not be: `vars_bytes` only ever grows, so
+    // once the cap has fired every later marker re-fires it on its first key
+    // and clears the map again before inserting anything. The guard was
+    // unobservable, so it went.
+    match classify_marker(line) {
+        Marker::Ordinary => {}
+        Marker::Object(obj) => {
+            if let Some(serde_json::Value::Object(outputs)) = obj.get("outputs") {
+                for (k, v) in outputs {
+                    state.vars_bytes += k.len() + v.to_string().len();
+                    if state.vars_bytes > max_vars_bytes {
+                        result.vars.clear();
+                        result.failure = Some(format!(
+                            "the command emitted more than {max_vars_bytes} bytes of \
+                             `::{{\"outputs\": …}}::` markers, and every byte of that would be \
+                             stored on the task run and re-rendered by every later task in \
+                             the execution"
+                        ));
+                        break;
+                    }
+                    result.vars.insert(k.clone(), v.clone());
+                }
             }
-            result.vars.insert(k, v);
+            return None;
+        }
+        Marker::Invalid(error) => {
+            return Some((
+                LogLevel::Warn,
+                std::borrow::Cow::Owned(format!("Invalid outputs '{error}'")),
+            ));
         }
     }
 
-    // stdout is INFO and stderr is WARN. Kestra's knob for the second half is
-    // `AbstractExecScript.warningOnStdErr`; egret does not offer it, because a
-    // property with no reader does not ship and nothing here reads a level
-    // back.
-    if is_err {
-        Level::Warn
+    let level = if is_err {
+        LogLevel::Error
+    } else if state.debug {
+        LogLevel::Debug
     } else {
-        Level::Info
+        LogLevel::Info
+    };
+    Some((level, std::borrow::Cow::Borrowed(line)))
+}
+
+/// What [`classify_marker`] makes of a line.
+pub(crate) enum Marker {
+    /// An ordinary line.
+    Ordinary,
+    /// A whole-line `::{…}::` whose payload parsed.
+    Object(serde_json::Map<String, serde_json::Value>),
+    /// A whole-line `::{…}::` whose payload did not parse: the parser's error.
+    Invalid(String),
+}
+
+/// `TaskLogLineMatcher.LOG_DATA_SYNTAX` — `^::(\{.*})::$` — and then Jackson.
+pub(crate) fn classify_marker(line: &str) -> Marker {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let Some(inner) = line.strip_prefix("::").and_then(|l| l.strip_suffix("::")) else {
+        return Marker::Ordinary;
+    };
+    // `\{.*}` — the payload must itself be brace-delimited. A `::foo::` line is
+    // an ordinary line, not a broken marker.
+    if !(inner.starts_with('{') && inner.ends_with('}')) {
+        return Marker::Ordinary;
+    }
+    match serde_json::from_str::<serde_json::Value>(inner) {
+        Ok(serde_json::Value::Object(obj)) => Marker::Object(obj),
+        // Brace-delimited and valid is always an object; kept total anyway.
+        Ok(other) => Marker::Invalid(format!("not a JSON object: {other}")),
+        Err(e) => Marker::Invalid(e.to_string()),
     }
 }
 
@@ -610,24 +726,18 @@ pub(crate) fn ingest_output_file(
 /// against each other on the cases that distinguish them (a `::` line that is
 /// not JSON, a line with `::` in the middle, an empty payload).
 ///
-/// Returns the JSON **object** the line carried, or `None` when the line is an
-/// ordinary log line — including when it looks like a marker and does not
-/// parse, which is Kestra's behaviour too (`parseOut` logs *"Invalid outputs
-/// '{}'"* and carries on).
+/// Returns the `outputs` object the line carried, or `None` — for an ordinary
+/// line, for a marker without `outputs`, and for one that does not parse. Whether
+/// the line is **stored** is a different question, answered by [`ingest_line`]:
+/// every whole-line marker is consumed, and a broken one becomes a WARN.
 pub fn parse_marker(line: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let line = line.trim_end_matches(['\r', '\n']);
-    let inner = line.strip_prefix("::")?.strip_suffix("::")?;
-    // `\{.*}` — the payload must itself be brace-delimited. A `::foo::` line is
-    // an ordinary line, not a broken marker.
-    if !(inner.starts_with('{') && inner.ends_with('}')) {
-        return None;
-    }
-    let parsed: serde_json::Value = serde_json::from_str(inner).ok()?;
-    let obj = parsed.as_object()?;
     // `parseOut` merges the `outputs` key and nothing else.
-    match obj.get("outputs") {
-        Some(serde_json::Value::Object(outputs)) => Some(outputs.clone()),
-        _ => None,
+    match classify_marker(line) {
+        Marker::Object(obj) => match obj.get("outputs") {
+            Some(serde_json::Value::Object(outputs)) => Some(outputs.clone()),
+            _ => None,
+        },
+        Marker::Ordinary | Marker::Invalid(_) => None,
     }
 }
 
@@ -950,7 +1060,7 @@ impl TaskRunner for DockerRunner {
         &self,
         task: &TaskInput,
         commands: &TaskCommands,
-        sink: &dyn LogSink,
+        observer: &dyn LineObserver,
     ) -> Result<CommandsResult> {
         // `Docker.run`'s own first act, and its own message.
         if commands.container_image.trim().is_empty() {
@@ -999,7 +1109,7 @@ impl TaskRunner for DockerRunner {
 
         // Everything from here on owns a container, so every exit runs through
         // `remove`. `?` would leak one.
-        let result = self.run_created(task, commands, sink, &name).await;
+        let result = self.run_created(task, commands, observer, &name).await;
         let removed = self.cli(&["rm", "--force", &name]).await;
         match removed {
             Ok(out) if !out.status.success() => tracing::warn!(
@@ -1060,7 +1170,7 @@ impl DockerRunner {
         &self,
         task: &TaskInput,
         commands: &TaskCommands,
-        sink: &dyn LogSink,
+        observer: &dyn LineObserver,
         name: &str,
     ) -> Result<CommandsResult> {
         // ---- input files ------------------------------------------------
@@ -1133,7 +1243,7 @@ impl DockerRunner {
         let mut err_lines = BufReader::new(child.stderr.take().expect("stderr piped")).lines();
 
         let mut result = CommandsResult::default();
-        let mut vars_bytes = 0usize;
+        let mut state = StreamState::default();
         let mut out_open = true;
         let mut err_open = true;
         while out_open || err_open {
@@ -1154,14 +1264,16 @@ impl DockerRunner {
             // **Every decision about this line is [`ingest_line`]'s**, and
             // this loop keeps only the pipes. See that function for why the
             // split is a merge condition and not a tidy-up.
-            let level = ingest_line(
+            stream_line(
+                task,
+                observer,
                 &mut result,
-                &mut vars_bytes,
+                &mut state,
                 self.max_vars_bytes,
                 &line,
                 is_err,
-            );
-            sink.log(task, level, &line);
+            )
+            .await;
         }
 
         let status = child.wait().await.map_err(io_err)?;
@@ -1518,6 +1630,7 @@ fn io_err(e: std::io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logs::fixture;
     use crate::worker::handlers::testing::input;
 
     fn leased(secs: i64) -> TaskInput {
@@ -1629,8 +1742,8 @@ mod tests {
             // A marker carrying something other than `outputs` contributes
             // nothing: `parseOut` merges that key and no other.
             "::{\"metrics\":{\"a\":1}}::",
-            // Broken JSON is an ordinary line, not a failure -- `parseOut`
-            // logs "Invalid outputs '{}'" and carries on.
+            // Broken JSON carries no outputs (it is not STORED either --
+            // `ingest_line` turns it into one WARN; see its tests).
             "::{\"outputs\":}::",
         ] {
             assert!(
@@ -1689,46 +1802,162 @@ mod tests {
         dir
     }
 
-    /// **Both streams are counted, and the level says which one it was.**
+    /// `ingest_line` over a fresh state, one line.
+    fn one(
+        r: &mut CommandsResult,
+        st: &mut StreamState,
+        max: usize,
+        line: &str,
+        is_err: bool,
+    ) -> Option<(LogLevel, String)> {
+        ingest_line(r, st, max, line, is_err).map(|(l, t)| (l, t.into_owned()))
+    }
+
+    /// **Both streams are counted, and the level says which one it was** —
+    /// Task 1's `stdout_level` and `stderr_level`, typed.
     ///
     /// This is one of the four properties fix round 1 moved out of
     /// `run_created` so a machine with no daemon can judge them. Before the
     /// split, the only test that could see the level was a live one.
     #[test]
     fn a_line_is_counted_on_its_own_stream_and_logged_at_its_own_level() {
+        let out = fixture::level(&fixture::expected("stdout_level")["stdout_level"]);
+        let err = fixture::level(&fixture::expected("stderr_level")["stderr_level"]);
+        assert_eq!((out, err), (LogLevel::Info, LogLevel::Error));
+        let table = &fixture::w11()["level_table"];
+        assert_eq!(fixture::level(&table["stdout"]), out);
+        assert_eq!(fixture::level(&table["stderr"]), err);
+
         let mut r = CommandsResult::default();
-        let mut bytes = 0usize;
+        let mut st = StreamState::default();
         assert_eq!(
-            ingest_line(&mut r, &mut bytes, 1024, "out", false),
-            Level::Info
+            one(&mut r, &mut st, 1024, "out", false),
+            Some((out, "out".into()))
         );
         assert_eq!(
-            ingest_line(&mut r, &mut bytes, 1024, "err", true),
-            Level::Warn,
-            "stderr is WARN and stdout is INFO -- a logger that took the level from \
-             nowhere would still have the text"
+            one(&mut r, &mut st, 1024, "err", true),
+            Some((err, "err".into())),
+            "stderr is ERROR (measured, whatever warningOnStdErr says) and stdout INFO"
         );
         assert_eq!((r.stdout_line_count, r.stderr_line_count), (1, 1));
         assert!(r.vars.is_empty() && r.failure.is_none());
     }
 
-    /// **A marker becomes vars; an ordinary line does not.**
+    /// Task 1's marker `cases` (both `outputs_marker_consumed` and
+    /// `other_marker_shapes`), typed: a whole-line `::{json}::` is not stored
+    /// on either stream and adds its `outputs`; a line merely containing one
+    /// is stored at its stream's level and adds nothing.
     #[test]
-    fn a_marker_line_is_harvested_and_still_logged() {
+    fn a_whole_line_marker_is_harvested_and_not_stored() {
+        let mut cases = Vec::new();
+        for id in ["outputs_marker_consumed", "other_marker_shapes"] {
+            cases.extend(fixture::expected(id)["cases"].as_array().unwrap().clone());
+        }
+        assert_eq!(cases.len(), 6);
+        for case in &cases {
+            let line = case["line"].as_str().unwrap();
+            let is_err = match case["stream"].as_str().unwrap() {
+                "stdout" => false,
+                "stderr" => true,
+                s => panic!("stream {s}"),
+            };
+            let mut r = CommandsResult::default();
+            let mut st = StreamState::default();
+            let got = one(&mut r, &mut st, 1 << 20, line, is_err);
+            let invalid = matches!(classify_marker(line), Marker::Invalid(_));
+            if case["stored"] == true {
+                assert_eq!(
+                    got,
+                    Some((fixture::level(&case["level"]), line.to_string())),
+                    "{case}"
+                );
+            } else if invalid {
+                // Not stored as itself; the WARN is asserted below.
+                assert_ne!(got.as_ref().map(|g| g.1.as_str()), Some(line), "{case}");
+            } else {
+                assert_eq!(got, None, "{case}");
+            }
+            let want = case["outputs"].as_object().unwrap();
+            let have: serde_json::Map<String, serde_json::Value> =
+                r.vars.clone().into_iter().collect();
+            assert_eq!(&have, want, "{case}");
+            assert_eq!(
+                (r.stdout_line_count, r.stderr_line_count),
+                if is_err { (0, 1) } else { (1, 0) },
+                "a marker line is still counted on its stream: {case}"
+            );
+        }
+    }
+
+    /// `invalid_marker_warning`, typed: one WARN, `Invalid outputs '<serde
+    /// error>'`, no stack line.
+    #[test]
+    fn an_invalid_marker_is_one_warn_naming_the_error() {
+        let w = &fixture::expected("other_marker_shapes")["invalid_marker_warning"];
+        assert_eq!(w["count"], 1);
+        assert_eq!(w["stack_trace_line_count"], 0);
+        let prefix = w["message_prefix"].as_str().unwrap();
+        let suffix = w["message_suffix"].as_str().unwrap();
         let mut r = CommandsResult::default();
-        let mut bytes = 0usize;
-        ingest_line(&mut r, &mut bytes, 1024, "ordinary", false);
-        ingest_line(
-            &mut r,
-            &mut bytes,
-            1024,
-            r#"::{"outputs":{"a":1}}::"#,
-            false,
-        );
-        assert_eq!(r.vars.get("a"), Some(&serde_json::json!(1)));
+        let mut st = StreamState::default();
+        let (level, text) = one(&mut r, &mut st, 1024, "::{not json}::", false).expect("a WARN");
+        assert_eq!(level, fixture::level(&w["level"]));
         assert_eq!(
-            r.stdout_line_count, 2,
-            "a marker is a line too -- `DefaultLogConsumer` parses it AND logs it"
+            fixture::level(&fixture::w11()["level_table"]["invalid_marker_warning"]),
+            level
+        );
+        let error = serde_json::from_str::<serde_json::Value>("{not json}")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(text, format!("{prefix}{error}{suffix}"));
+        assert!(r.vars.is_empty());
+    }
+
+    /// The debug bracket's `sequence`, typed: stored lines and levels in input
+    /// order, marker lines not stored, stderr ERROR inside the bracket; and a
+    /// marker on stderr toggles it too (`toggled_by_stderr_marker`).
+    #[test]
+    fn the_debug_bracket_follows_task_1s_sequence() {
+        let e = fixture::expected("debug_bracket");
+        assert_eq!(e["bracket_marker_lines_stored"], false);
+        let seq = &e["sequence"];
+        let mut r = CommandsResult::default();
+        let mut st = StreamState::default();
+        let mut stored = Vec::new();
+        for pair in seq["input"].as_array().unwrap() {
+            let is_err = pair[0] == "stderr";
+            if let Some(x) = one(&mut r, &mut st, 1024, pair[1].as_str().unwrap(), is_err) {
+                stored.push(x);
+            }
+        }
+        let want: Vec<(LogLevel, String)> = seq["stored"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (fixture::level(&p[0]), p[1].as_str().unwrap().to_string()))
+            .collect();
+        assert_eq!(stored, want);
+        let table = &fixture::w11()["level_table"];
+        assert_eq!(
+            fixture::level(&table["stdout_inside_debug_bracket"]),
+            LogLevel::Debug
+        );
+        assert_eq!(
+            fixture::level(&table["stderr_inside_debug_bracket"]),
+            LogLevel::Error
+        );
+
+        assert_eq!(e["toggled_by_stderr_marker"], true);
+        let mut st = StreamState::default();
+        assert_eq!(one(&mut r, &mut st, 1024, LOG_DEBUG_MARKER, true), None);
+        assert_eq!(
+            one(&mut r, &mut st, 1024, "x", false),
+            Some((LogLevel::Debug, "x".into()))
+        );
+        assert_eq!(one(&mut r, &mut st, 1024, LOG_INFO_MARKER, true), None);
+        assert_eq!(
+            one(&mut r, &mut st, 1024, "y", false),
+            Some((LogLevel::Info, "y".into()))
         );
     }
 
@@ -1737,11 +1966,11 @@ mod tests {
     #[test]
     fn the_vars_cap_fails_the_task_and_keeps_reading() {
         let mut r = CommandsResult::default();
-        let mut bytes = 0usize;
+        let mut st = StreamState::default();
         let big = "y".repeat(200);
-        ingest_line(
+        one(
             &mut r,
-            &mut bytes,
+            &mut st,
             32,
             &format!(r#"::{{"outputs":{{"a":"{big}"}}}}::"#),
             false,
@@ -1757,8 +1986,8 @@ mod tests {
         // And the stream keeps being read, so the container is not left
         // blocked on a full pipe and the line counts still complete.
         assert_eq!(
-            ingest_line(&mut r, &mut bytes, 32, "later", true),
-            Level::Warn
+            one(&mut r, &mut st, 32, "later", true),
+            Some((LogLevel::Error, "later".into()))
         );
         assert_eq!(r.stderr_line_count, 1);
         assert_eq!(
@@ -1773,9 +2002,9 @@ mod tests {
         // because the only line sent after the flood was an ordinary one. A
         // cap that clears the vars and then lets the next marker repopulate
         // them bounds nothing at all.
-        ingest_line(
+        one(
             &mut r,
-            &mut bytes,
+            &mut st,
             32,
             r#"::{"outputs":{"sneaked":"in"}}::"#,
             false,
@@ -1787,7 +2016,7 @@ mod tests {
         );
         assert_eq!(
             r.stdout_line_count, 2,
-            "it is still counted and still logged -- only its payload is dropped"
+            "it is still counted -- only its payload is dropped"
         );
     }
 
@@ -2108,7 +2337,7 @@ mod tests {
                     output_files: vec!["wanted.txt".into(), "nested/also.txt".into()],
                     ..TaskCommands::default()
                 },
-                &super::super::handlers::TracingSink,
+                &NoObserver,
             )
             .await
             .expect("the shim is a well-behaved daemon");
@@ -2259,7 +2488,7 @@ mod tests {
                     output_files: vec!["a".into(), "a/b.txt".into()],
                     ..TaskCommands::default()
                 },
-                &super::super::handlers::TracingSink,
+                &NoObserver,
             )
             .await
             .expect(
@@ -2335,7 +2564,7 @@ mod tests {
             output_files: vec!["a".into(), "a/b.txt".into()],
             ..TaskCommands::default()
         };
-        let sink = super::super::handlers::TracingSink;
+        let sink = NoObserver;
         runner
             .run(&leased(1_700_000_000), &cmds, &sink)
             .await
@@ -2442,7 +2671,7 @@ mod tests {
             )]),
             ..TaskCommands::default()
         };
-        let sink = super::super::handlers::TracingSink;
+        let sink = NoObserver;
         let fut = runner.run(&task, &cmds, &sink);
         // Exactly what `timeout::guard` does to a handler that outruns its
         // budget: drop the future.
@@ -2578,7 +2807,7 @@ mod tests {
             output_files: vec!["docker.sock".into()],
             ..TaskCommands::default()
         };
-        let sink = super::super::handlers::TracingSink;
+        let sink = NoObserver;
         let out = runner
             .run(&leased(1_700_000_000), &cmds, &sink)
             .await

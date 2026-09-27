@@ -255,6 +255,15 @@ pub struct TaskInput {
     /// A handler that holds nothing must ignore this field, and the four core
     /// handlers do.
     pub claimed_at: chrono::DateTime<chrono::Utc>,
+    /// **This attempt's log** (W11): every line a handler or its runner
+    /// writes goes through it with `task.log.line(level, msg).await`.
+    ///
+    /// On the input rather than a separate argument so `Registry::run` and
+    /// `cancel::guarded` need no new parameter. `claim::run_one` builds it from
+    /// [`Registry::log_sink`] and the run's identity, and calls
+    /// [`RunLog::finish`](crate::logs::RunLog::finish) on every path after the
+    /// handler. It compares by identity only, so this struct keeps `PartialEq`.
+    pub log: crate::logs::RunLog,
 }
 
 /// What a handler produces.
@@ -477,6 +486,25 @@ pub trait Registry: Send + Sync {
     /// `Err` is a **refusal**, not a worker failure: it is logged and the run
     /// keeps the terminal its budget gave it. See [`cancel`].
     async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()>;
+
+    /// The sink and limits `claim::run_one` builds each attempt's
+    /// [`RunLog`](crate::logs::RunLog) from.
+    ///
+    /// A default body, unlike the two above, because every answer is safe:
+    /// `tracing` under the spec's default limits loses nothing a test registry
+    /// asserts on. [`Handlers`] answers with what
+    /// [`Handlers::with_log_sink`] was given.
+    fn log_sink(
+        &self,
+    ) -> (
+        std::sync::Arc<dyn handlers::LogSink>,
+        crate::logs::LogLimits,
+    ) {
+        (
+            std::sync::Arc::new(handlers::TracingSink),
+            crate::logs::LogLimits::default(),
+        )
+    }
 }
 
 /// The failures this module raises that are not database errors.

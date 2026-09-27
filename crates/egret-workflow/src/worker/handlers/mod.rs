@@ -47,9 +47,7 @@ pub mod ret;
 pub mod sleep;
 pub mod sql;
 
-use std::sync::Arc;
-
-use super::TaskInput;
+use crate::logs::{LogLevel, LogLine};
 
 /// Where a task's log lines go.
 ///
@@ -58,94 +56,106 @@ use super::TaskInput;
 /// lines, and a test that could not see them could only assert that the
 /// handler *ran*. That is the failure mode this task exists to avoid.
 ///
-/// egret has no durable workflow-log store yet — Kestra writes to one and W3b
-/// builds no table for it — so [`TracingSink`] is the shipping implementation
-/// and the gap is stated rather than papered over.
-pub trait LogSink: Send + Sync + std::fmt::Debug {
-    fn log(&self, task: &TaskInput, level: Level, message: &str);
-}
-
-/// `Log.java`'s `level:`, which is `org.slf4j.event.Level`.
+/// **Async, and it takes an owned line** (W11 spec §4.1): a durable sink sends
+/// into a bounded channel with `send().await`, so a full channel makes the
+/// writer WAIT (D3) without blocking a tokio thread. A sync method could only
+/// drop the line or block the runtime.
 ///
-/// The five names are slf4j's own and are compared **case-sensitively**, as
-/// Jackson compares an enum: measured, `level: SHOUT` fails the run on the
-/// artifact rather than falling back to `INFO`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Level {
-    Trace,
-    Debug,
-    Info,
-    Warn,
-    Error,
+/// Nothing writes to a sink directly any more: a handler writes through the
+/// attempt's [`RunLog`](crate::logs::RunLog) on
+/// [`TaskInput::log`](super::TaskInput::log), which stamps the identity,
+/// splits long lines and enforces the per-attempt cap. The registry holds the
+/// sink ([`Handlers::with_log_sink`](super::Handlers::with_log_sink)) and
+/// `claim::run_one` builds the handle from it.
+#[async_trait::async_trait]
+pub trait LogSink: Send + Sync + std::fmt::Debug {
+    async fn write(&self, line: LogLine);
 }
 
-impl Level {
-    /// `None` for anything outside the five — the caller turns that into a
-    /// failed run, exactly as Jackson's enum conversion does.
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "TRACE" => Level::Trace,
-            "DEBUG" => Level::Debug,
-            "INFO" => Level::Info,
-            "WARN" => Level::Warn,
-            "ERROR" => Level::Error,
-            _ => return None,
-        })
-    }
-}
-
-/// The shipping [`LogSink`]: the workspace's own `tracing`.
+/// A [`LogSink`] over the workspace's own `tracing`: the default when no
+/// durable sink is configured, and what [`RunLog::discard`] writes to.
+///
+/// [`RunLog::discard`]: crate::logs::RunLog::discard
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TracingSink;
 
+#[async_trait::async_trait]
 impl LogSink for TracingSink {
-    fn log(&self, task: &TaskInput, level: Level, message: &str) {
-        let execution = task.execution_id;
-        let task_id = &task.task_id;
-        match level {
-            Level::Trace => tracing::trace!(%execution, %task_id, "{message}"),
-            Level::Debug => tracing::debug!(%execution, %task_id, "{message}"),
-            Level::Info => tracing::info!(%execution, %task_id, "{message}"),
-            Level::Warn => tracing::warn!(%execution, %task_id, "{message}"),
-            Level::Error => tracing::error!(%execution, %task_id, "{message}"),
+    async fn write(&self, line: LogLine) {
+        let execution = line.execution_id;
+        let task_id = line.task_id.as_deref().unwrap_or("");
+        let attempt = line.attempt.unwrap_or(-1);
+        let message = &line.message;
+        match line.level {
+            LogLevel::Trace => tracing::trace!(%execution, %task_id, attempt, "{message}"),
+            LogLevel::Debug => tracing::debug!(%execution, %task_id, attempt, "{message}"),
+            LogLevel::Info => tracing::info!(%execution, %task_id, attempt, "{message}"),
+            LogLevel::Warn => tracing::warn!(%execution, %task_id, attempt, "{message}"),
+            LogLevel::Error => tracing::error!(%execution, %task_id, attempt, "{message}"),
         }
     }
 }
 
-/// The sink a handler built with `::new()` writes to.
-pub fn default_sink() -> Arc<dyn LogSink> {
-    Arc::new(TracingSink)
-}
-
 #[cfg(test)]
 pub(crate) mod testing {
-    //! A recording [`LogSink`], shared by `log`'s and `fail`'s tests.
+    //! A recording [`LogSink`], shared by the handlers' and `RunLog`'s tests.
 
     use std::sync::{Arc, Mutex};
 
-    use super::{Level, LogSink, TaskInput};
+    use super::super::TaskInput;
+    use super::LogSink;
+    use crate::logs::{LogLevel, LogLimits, LogLine, RunIdentity, RunLog};
 
     #[derive(Debug, Default)]
     pub struct Recorder {
-        lines: Mutex<Vec<(Level, String)>>,
+        lines: Mutex<Vec<LogLine>>,
     }
 
     impl Recorder {
         pub fn new() -> Arc<Self> {
             Arc::new(Self::default())
         }
-        pub fn lines(&self) -> Vec<(Level, String)> {
+        pub fn lines(&self) -> Vec<LogLine> {
             self.lines.lock().unwrap().clone()
+        }
+        /// `(level, message)` per line, in write order.
+        pub fn texts(&self) -> Vec<(LogLevel, String)> {
+            self.lines()
+                .into_iter()
+                .map(|l| (l.level, l.message))
+                .collect()
         }
     }
 
+    #[async_trait::async_trait]
     impl LogSink for Recorder {
-        fn log(&self, _task: &TaskInput, level: Level, message: &str) {
-            self.lines
-                .lock()
-                .unwrap()
-                .push((level, message.to_string()));
+        async fn write(&self, line: LogLine) {
+            self.lines.lock().unwrap().push(line);
         }
+    }
+
+    /// `input(type_id, spec)` whose `log` records into the returned
+    /// [`Recorder`], under default limits.
+    pub fn recorded(type_id: &str, spec: serde_json::Value) -> (TaskInput, Arc<Recorder>) {
+        let rec = Recorder::new();
+        let mut task = input(type_id, spec);
+        task.log = recording(&task, &rec);
+        (task, rec)
+    }
+
+    /// A [`RunLog`] for `task`'s identity writing into `rec`.
+    pub fn recording(task: &TaskInput, rec: &Arc<Recorder>) -> RunLog {
+        RunLog::new(
+            RunIdentity {
+                workspace_id: task.workspace_id,
+                execution_id: task.execution_id,
+                task_run_id: task.run_id,
+                task_id: task.task_id.clone(),
+                attempt: RunIdentity::stored_attempt(task.attempt),
+            },
+            rec.clone(),
+            LogLimits::default(),
+        )
     }
 
     /// A [`TaskInput`] carrying `spec`, against an empty render context.
@@ -175,6 +185,9 @@ pub(crate) mod testing {
             // two runs of the same test. `handlers::container`'s tests build
             // their own input when they need two DIFFERENT leases.
             claimed_at: chrono::DateTime::UNIX_EPOCH,
+            // `tracing`, under a nil identity. A test that reads the lines
+            // uses `recorded` instead.
+            log: RunLog::discard(),
         }
     }
 }

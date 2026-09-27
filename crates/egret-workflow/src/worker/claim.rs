@@ -174,7 +174,17 @@ impl Claimed {
     /// **One walk, not two.** `spec` and `timeout` are two fields of the same
     /// `models::Task`, and a second traversal to fetch the second one could
     /// disagree with the first about which task it found.
-    fn input(&self, render: crate::runners::RenderContext) -> Result<(TaskInput, Budget)> {
+    ///
+    /// **`log` is this attempt's handle** (W11), built here from the
+    /// registry's sink so every path through [`run_one`] has one to finish.
+    fn input(
+        &self,
+        render: crate::runners::RenderContext,
+        log: (
+            std::sync::Arc<dyn super::handlers::LogSink>,
+            crate::logs::LogLimits,
+        ),
+    ) -> Result<(TaskInput, Budget)> {
         let flow = crate::spec::parse(&self.source)
             .map_err(|e| worker_err(WorkerError::Unplannable(self.execution_id, e.message)))?;
         let leaf = leaf(&flow, &self.task_id).ok_or_else(|| {
@@ -202,6 +212,19 @@ impl Claimed {
                 // resource names it after this and not after `run_id` alone,
                 // so a reaped worker cannot reach its replacement's resource.
                 claimed_at: self.claimed_at,
+                log: crate::logs::RunLog::new(
+                    crate::logs::RunIdentity {
+                        workspace_id: self.workspace_id,
+                        execution_id: self.execution_id,
+                        task_run_id: self.id,
+                        task_id: self.task_id.clone(),
+                        attempt: crate::logs::RunIdentity::stored_attempt(
+                            self.attempt.max(0) as usize
+                        ),
+                    },
+                    log.0,
+                    log.1,
+                ),
             },
             budget,
         ))
@@ -1036,16 +1059,45 @@ pub async fn tick(pool: &PgPool, n: usize, reg: &dyn Registry) -> Result<usize> 
 /// A `timeout:` this run cannot use fails the run **without calling a
 /// handler**, which is also the artifact's answer: all three bad spellings
 /// produce a FAILED run whose attempt never ran the task body.
+///
+/// # The attempt's log is finished here, on every path (W11)
+///
+/// The handler's result is captured as a `Result` rather than `?`-ed, so the
+/// `Err` path reaches the same two calls as every other before it returns:
+///
+/// 1. **the failed-attempt line** (spec §4.4) — if the outcome is `Failed`
+///    with a message, that message at ERROR, outside the cap. That is Kestra's
+///    `exceptionHandler`, which logs `e.getMessage()` for every task that
+///    throws unless it was killed. One rule covers a handler's own
+///    `Ok(Failed)`, a refused budget and an expired one (`Timeout after …`),
+///    because all three arrive here as the same `Outcome`. A handler `Err` is
+///    egret's outage and not the task's, and records no outcome, so it writes
+///    no line; a dropped future cannot write one, as Kestra's killed callable
+///    does not;
+/// 2. **`finish()`** — the cap summary, if anything was withheld.
+///
+/// Both come after the handler's own lines and before `pool.begin()`, so no
+/// log write happens inside the transaction.
 async fn run_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<()> {
-    let (input, budget) = input_for(pool, c).await?;
+    let (input, budget) = input_for(pool, c, reg).await?;
     let outcome = match budget {
-        Budget::Refused(message) => Outcome::failed_with(message),
+        Budget::Refused(message) => Ok(Outcome::failed_with(message)),
         // `cancel::guarded` rather than `timeout::guard` directly: the budget's
         // expiry is the artifact's only `kill(null)` site, so the kill path
         // hangs off it. A refusal there does not reach this expression — it is
         // logged and the budget's outcome stands. See `super::cancel`.
-        other => cancel::guarded(reg, &input, other.duration()).await?,
+        other => cancel::guarded(reg, &input, other.duration()).await,
     };
+    if let Ok(Outcome {
+        state: RunState::Failed,
+        message: Some(message),
+        ..
+    }) = &outcome
+    {
+        input.log.failure(message).await;
+    }
+    input.log.finish().await;
+    let outcome = outcome?;
     let mut tx = pool.begin().await.map_err(db_err)?;
     apply_outcome(&mut tx, c, &outcome).await?;
     tx.commit().await.map_err(db_err)?;
@@ -1062,7 +1114,7 @@ async fn run_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<()> {
 /// IT; a sibling of the same execution may finish while the handler runs, and
 /// what that costs is that a handler's `outputs` are a snapshot rather than a
 /// live view. Kestra's worker renders from a snapshot for the same reason.
-async fn input_for(pool: &PgPool, c: &Claimed) -> Result<(TaskInput, Budget)> {
+async fn input_for(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<(TaskInput, Budget)> {
     let mut conn = pool.acquire().await.map_err(db_err)?;
     let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No, Stack::Fresh).await?;
     let surface = Surface::load(&mut conn, &ctx).await?;
@@ -1072,7 +1124,10 @@ async fn input_for(pool: &PgPool, c: &Claimed) -> Result<(TaskInput, Budget)> {
             format!("negative run_ix {}", c.run_ix),
         ))
     })?;
-    c.input(surface.context(&ctx.plan, &state, Some(run)))
+    c.input(
+        surface.context(&ctx.plan, &state, Some(run)),
+        reg.log_sink(),
+    )
 }
 
 /// Record one handler's result, drive `advance()` to a fixed point, and write

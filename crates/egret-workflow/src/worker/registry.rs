@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::handlers::{LogSink, TracingSink};
 use super::{handlers, Outcome, Registry, TaskHandler, TaskInput, WorkerError};
+use crate::logs::LogLimits;
 use egret_core::Result;
 
 /// The handlers this worker can run, keyed by the `type:` a flow writes.
@@ -60,6 +62,9 @@ use egret_core::Result;
 #[derive(Default)]
 pub struct Handlers {
     by_type: HashMap<String, Arc<dyn TaskHandler>>,
+    /// Where each attempt's [`RunLog`](crate::logs::RunLog) writes, and its
+    /// cap. `None` is `tracing` under the default limits.
+    log: Option<(Arc<dyn LogSink>, LogLimits)>,
 }
 
 impl std::fmt::Debug for Handlers {
@@ -116,11 +121,26 @@ impl Handlers {
         // `add_publishable`, not `add`: each of these must be a type publish
         // accepts, and each of publish's alias spellings must dispatch here.
         // Before W10 Task 6 fix round 1 that was true of none of them.
-        r.add_publishable(Arc::new(handlers::log::Log::new()));
+        r.add_publishable(Arc::new(handlers::log::Log));
         r.add_publishable(Arc::new(handlers::ret::Return));
-        r.add_publishable(Arc::new(handlers::fail::Fail::new()));
+        r.add_publishable(Arc::new(handlers::fail::Fail));
         r.add_publishable(Arc::new(handlers::sleep::Sleep::new()));
         r
+    }
+
+    /// The same registry, with every attempt's log going to `sink` under
+    /// `limits`. W11 Task 4 passes the Postgres-backed sink here.
+    pub fn with_log_sink(mut self, sink: Arc<dyn LogSink>, limits: LogLimits) -> Self {
+        self.log = Some((sink, limits));
+        self
+    }
+
+    /// The sink and limits [`Registry::log_sink`] answers with.
+    pub fn log_sink(&self) -> (Arc<dyn LogSink>, LogLimits) {
+        match &self.log {
+            Some((sink, limits)) => (sink.clone(), *limits),
+            None => (Arc::new(TracingSink), LogLimits::default()),
+        }
     }
 
     /// Register `handler` under its own [`TaskHandler::type_id`] **and under
@@ -210,6 +230,9 @@ impl Registry for Handlers {
                 WorkerError::NoHandler(task.type_id.clone())
             ))),
         }
+    }
+    fn log_sink(&self) -> (Arc<dyn LogSink>, LogLimits) {
+        Handlers::log_sink(self)
     }
 }
 

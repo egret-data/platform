@@ -641,6 +641,7 @@ mod tests {
             // rather than a clock reading, for `handlers::testing::input`'s
             // reason.
             claimed_at: chrono::DateTime::UNIX_EPOCH,
+            log: crate::logs::RunLog::discard(),
         }
     }
 

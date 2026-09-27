@@ -151,10 +151,10 @@ pub(super) async fn guarded(
 /// same way, with `RunnableTask.kill()` throwing and its *caller*
 /// `WorkerTaskCallable.kill` doing the `logger.warn`.
 ///
-/// The refusal is a `tracing` event rather than a row because egret has no
-/// workflow-log store at all
-/// ([`LogSink`](super::handlers::LogSink) states that gap and owns it), and it
-/// is deliberately **not** written to `task_runs.message`: that column is the
+/// The refusal is a `tracing` event rather than a row in the execution's log
+/// (W11's `task.log`): Kestra's `logger.warn` here is the worker's own logger,
+/// not the task run's, and it is deliberately **not** written to
+/// `task_runs.message` either: that column is the
 /// reason the task failed, which an author reads, while a kill that could not
 /// be delivered is an operator's fact about egret. The artifact keeps the two
 /// apart the same way (the message comes from `TimeoutExceededException`, the

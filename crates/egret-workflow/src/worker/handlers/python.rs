@@ -87,10 +87,10 @@ use std::sync::{Arc, Mutex};
 use egret_core::Result;
 use serde::Deserialize;
 
-use super::super::commands::{DockerRunner, TaskCommands, TaskRunner};
+use super::super::commands::{DockerRunner, LineObserver, TaskCommands, TaskRunner};
 use super::super::{Outcome, TaskHandler, TaskInput};
 use super::container::{mapped, outcome_for, render_all, render_values, EXIT_ON_ERROR};
-use super::{default_sink, LogSink};
+use crate::logs::LogLevel;
 use crate::runners::render_str;
 
 /// The `type:` a flow writes.
@@ -166,26 +166,21 @@ fn yes() -> bool {
 /// [`Python::run`] appends the explanation to the failure message.
 const KESTRA_PREDEFINED: [&str; 3] = ["true", "false", "null"];
 
-/// A [`LogSink`] that passes every line through and remembers whether Python
-/// complained about one of [`KESTRA_PREDEFINED`].
+/// A [`LineObserver`] that remembers whether Python complained about one of
+/// [`KESTRA_PREDEFINED`].
 ///
-/// A decorator rather than a field on `CommandsResult`, because this is one
-/// handler's authoring hint and not part of what a command produces — the
-/// runner has no business knowing that `null` means something to Python.
-#[derive(Debug)]
+/// W11 made it an observer rather than a sink decorator: the runner shows it
+/// each line and then writes the line to `task.log` itself, so the hint can
+/// neither lose nor reorder a line. It is still not a field on
+/// `CommandsResult`, because this is one handler's authoring hint and not part
+/// of what a command produces — the runner has no business knowing that `null`
+/// means something to Python.
+#[derive(Debug, Default)]
 struct NameHintSink {
-    inner: Arc<dyn LogSink>,
     seen: Mutex<Option<String>>,
 }
 
 impl NameHintSink {
-    fn new(inner: Arc<dyn LogSink>) -> Arc<Self> {
-        Arc::new(Self {
-            inner,
-            seen: Mutex::new(None),
-        })
-    }
-
     /// The name CPython said was undefined, if it was one of Kestra's three.
     ///
     /// Matched on CPython's own wording — `NameError: name 'true' is not
@@ -202,8 +197,8 @@ impl NameHintSink {
     }
 }
 
-impl LogSink for NameHintSink {
-    fn log(&self, task: &TaskInput, level: super::Level, message: &str) {
+impl LineObserver for NameHintSink {
+    fn observe(&self, _level: LogLevel, message: &str) {
         if let Some(name) = Self::undefined_name(message) {
             let mut seen = self.seen.lock().unwrap();
             if seen.is_none() {
@@ -219,14 +214,12 @@ impl LogSink for NameHintSink {
                 ));
             }
         }
-        self.inner.log(task, level, message);
     }
 }
 
 /// `egret.script.python`, over a [`TaskRunner`].
 pub struct Python {
     runner: Arc<dyn TaskRunner>,
-    sink: Arc<dyn LogSink>,
 }
 
 impl std::fmt::Debug for Python {
@@ -244,21 +237,13 @@ impl Default for Python {
 }
 
 impl Python {
-    /// The shipping handler: a [`DockerRunner`] and `tracing`.
+    /// The shipping handler: a [`DockerRunner`].
     pub fn new() -> Self {
         Self::with_runner(Arc::new(DockerRunner::new()))
     }
 
     pub fn with_runner(runner: Arc<dyn TaskRunner>) -> Self {
-        Self {
-            runner,
-            sink: default_sink(),
-        }
-    }
-
-    pub fn with_sink(mut self, sink: Arc<dyn LogSink>) -> Self {
-        self.sink = sink;
-        self
+        Self { runner }
     }
 }
 
@@ -337,11 +322,11 @@ impl TaskHandler for Python {
             output_files,
         };
 
-        // The sink is wrapped for the run so an authoring mistake Kestra hides
-        // is connected to its cause here — see [`NameHintSink`] and review
-        // Minor 7.
-        let watcher = NameHintSink::new(self.sink.clone());
-        match self.runner.run(task, &cmds, watcher.as_ref()).await {
+        // Every line is shown to the watcher on its way to `task.log`, so an
+        // authoring mistake Kestra hides is connected to its cause here — see
+        // [`NameHintSink`] and review Minor 7.
+        let watcher = NameHintSink::default();
+        match self.runner.run(task, &cmds, &watcher).await {
             Ok(result) => {
                 let mut outcome = outcome_for(TYPE_ID, &result);
                 if let (Some(hint), Some(message)) = (watcher.hint(), outcome.message.as_mut()) {
@@ -369,7 +354,7 @@ mod tests {
     use super::*;
     use crate::executor::RunState;
     use crate::worker::commands::CommandsResult;
-    use crate::worker::handlers::testing::input;
+    use crate::worker::handlers::testing::{input, recorded};
 
     fn spec() -> serde_json::Value {
         serde_json::json!({"script": "print('hi')"})
@@ -523,36 +508,18 @@ mod tests {
     /// it.
     #[tokio::test]
     async fn a_kestra_predefined_name_error_is_connected_to_its_cause() {
-        use crate::worker::commands::{CommandsResult, TaskCommands, TaskRunner};
+        let traceback = |line: &str| {
+            Spy::ok(CommandsResult {
+                exit_code: 1,
+                stderr_line_count: 1,
+                ..CommandsResult::default()
+            })
+            .streaming(vec![(true, line.to_string())])
+        };
 
-        /// A runner that prints the traceback a ported Kestra script produces,
-        /// then fails the way the container would.
-        #[derive(Debug)]
-        struct Traceback(&'static str);
-
-        #[async_trait::async_trait]
-        impl TaskRunner for Traceback {
-            async fn run(
-                &self,
-                task: &TaskInput,
-                _c: &TaskCommands,
-                sink: &dyn LogSink,
-            ) -> Result<CommandsResult> {
-                sink.log(task, super::super::Level::Warn, self.0);
-                Ok(CommandsResult {
-                    exit_code: 1,
-                    stderr_line_count: 1,
-                    ..CommandsResult::default()
-                })
-            }
-            async fn cancel(&self, _task: &TaskInput) -> Result<()> {
-                Ok(())
-            }
-        }
-
-        let h = Python::with_runner(Arc::new(Traceback("NameError: name 'null' is not defined")));
-        let out = h
-            .run(&input(TYPE_ID, spec()))
+        let (task, rec) = recorded(TYPE_ID, spec());
+        let out = Python::with_runner(traceback("NameError: name 'null' is not defined"))
+            .run(&task)
             .await
             .expect("no worker error");
         let msg = out.message.expect("a failed run carries a message");
@@ -564,11 +531,19 @@ mod tests {
             msg.contains("Kestra's `python.Script` silently prepends"),
             "and the divergence is explained where the author meets it: {msg}"
         );
+        assert_eq!(
+            rec.texts(),
+            vec![(
+                LogLevel::Error,
+                "NameError: name 'null' is not defined".to_string()
+            )],
+            "the observer passes the line on: it still reaches task.log, at stderr's level"
+        );
 
         // A line that merely mentions the word must not trigger it.
-        let h = Python::with_runner(Arc::new(Traceback("loaded null values from the source")));
-        let out = h
-            .run(&input(TYPE_ID, spec()))
+        let (task, rec) = recorded(TYPE_ID, spec());
+        let out = Python::with_runner(traceback("loaded null values from the source"))
+            .run(&task)
             .await
             .expect("no worker error");
         let msg = out.message.expect("a message");
@@ -576,6 +551,7 @@ mod tests {
             !msg.contains("silently prepends"),
             "the hint keys on CPython's own NameError wording, not on the word: {msg}"
         );
+        assert_eq!(rec.lines().len(), 1);
     }
 
     /// `cancel` reaches the runner here too — a `Python` holds a container
