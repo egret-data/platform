@@ -14,6 +14,7 @@ import {
   seedDefaultPolicies,
 } from "@/api/policies";
 import { ApiError } from "@/api/client";
+import { useAuth } from "@/auth/useAuth";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -45,6 +46,7 @@ export default function ProfileDetailPage() {
   const { service = "" } = useParams();
   const [configOpen, setConfigOpen] = useState(false);
   const queryClient = useQueryClient();
+  const can = usePolicyPermissions();
 
   // Active policy-type tab lives in the URL (`?tab=`) so the view is
   // deep-linkable and survives a refresh. Default preserved: "access".
@@ -135,19 +137,26 @@ export default function ProfileDetailPage() {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={seedDefaults.isPending || !service}
-            onClick={() => seedDefaults.mutate()}
-          >
-            {seedDefaults.isPending ? (
-              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-            ) : (
-              <Sprout className="mr-1 h-4 w-4" />
-            )}
-            Seed default policies
-          </Button>
+          {/* SP4b-2 finding 3: a write this account cannot make is not offered.
+              Each control below names the permission ITS OWN route requires —
+              they are four different keys (`policy:seed`, `policy:create`,
+              `policy:update`, `policy:delete`), so one blanket "can write"
+              flag would hide a control the account can in fact use. */}
+          {can("policy:seed") && (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={seedDefaults.isPending || !service}
+              onClick={() => seedDefaults.mutate()}
+            >
+              {seedDefaults.isPending ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <Sprout className="mr-1 h-4 w-4" />
+              )}
+              Seed default policies
+            </Button>
+          )}
           {/* The downloadable config is the Trino coordinator's Ranger-plugin
               config — only meaningful for Trino profiles. */}
           {(profile?.type ?? "trino").startsWith("trino") && (
@@ -201,6 +210,7 @@ export default function ProfileDetailPage() {
               type={t.key}
               label={t.label}
               profileOrigin={profile?.origin}
+              can={can}
             />
           </TabsContent>
         ))}
@@ -218,6 +228,7 @@ export default function ProfileDetailPage() {
               label="Tag"
               showType
               newHref={`/governance/policies/${encodeURIComponent(service)}/access/new?scope=tag`}
+              can={can}
             />
           </TabsContent>
         )}
@@ -232,6 +243,42 @@ export default function ProfileDetailPage() {
   );
 }
 
+/**
+ * Which `policy:*` writes this account may make (SP4b-2 finding 3).
+ *
+ * A `policy:read` holder used to be offered `Seed default policies`, `New
+ * policy`, the `Enabled` switch and `Delete` on this page, and clicking the
+ * switch produced a 403 whose whole rendered message was the word
+ * `forbidden` — the switch snapped back and nothing said why. The two SP4b
+ * steward pages (`DataPermissions`, `MaskFilterRules`) already hide what a
+ * reader cannot use; this brings the SP4a page in line, and the refusals that
+ * remain reachable (a stale permission snapshot, or a policy the compiler
+ * claimed after the page loaded) now name the permission instead of echoing
+ * `forbidden`.
+ *
+ * `platform_admin` bypasses inside the PDP, so it passes every key — the same
+ * shape the steward pages use.
+ */
+function usePolicyPermissions(): (permission: string) => boolean {
+  const { me } = useAuth();
+  const isAdmin = !!me && me.platform_roles.includes("platform_admin");
+  return (permission: string) => isAdmin || !!me?.permissions.includes(permission);
+}
+
+/** The refused-write message. A 403 says which permission is missing: the
+ *  server's own body is the bare word `forbidden`, which tells an operator
+ *  nothing about what to ask for. A compiler-owned 409 keeps its own
+ *  explanation (D10). */
+function refusalMessage(e: unknown, needs: string, fallback: string): string {
+  const conflict = compilerOwnedConflict(e);
+  if (conflict) return conflict;
+  const err = e as ApiError;
+  if (err?.status === 403) {
+    return `This account cannot do that: it needs the ${needs} permission.`;
+  }
+  return err?.message ?? fallback;
+}
+
 /** Ranger policy table for one policy type (or, for the Tags tab, all types of
  *  a separate tag service), scoped to this profile. */
 function PolicyTypeTable({
@@ -242,6 +289,7 @@ function PolicyTypeTable({
   newHref,
   showType = false,
   profileOrigin,
+  can,
 }: {
   /** The profile whose editor create/edit links point at (the main profile). */
   service: string;
@@ -268,6 +316,9 @@ function PolicyTypeTable({
    * leave every row in this table unmarked rather than guess.
    */
   profileOrigin?: string;
+  /** Whether this account holds a given `policy:*` permission — see
+   *  `usePolicyPermissions`. */
+  can: (permission: string) => boolean;
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -292,7 +343,7 @@ function PolicyTypeTable({
       queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
     },
     onError: (e: unknown) =>
-      setError(compilerOwnedConflict(e) ?? (e as ApiError)?.message ?? "Failed to delete policy."),
+      setError(refusalMessage(e, "policy:delete", "Failed to delete policy.")),
   });
 
   // D10: which ROWS are compiler-owned — the policy's OWN name, not this
@@ -311,7 +362,7 @@ function PolicyTypeTable({
       queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
     },
     onError: (e: unknown) => {
-      setError(compilerOwnedConflict(e) ?? (e as ApiError)?.message ?? "Failed to update policy.");
+      setError(refusalMessage(e, "policy:update", "Failed to update policy."));
       // Refetch so the Switch snaps back to the real server state.
       queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
     },
@@ -433,8 +484,18 @@ function PolicyTypeTable({
         <Switch
           aria-label={`toggle ${r.name}`}
           checked={r.is_enabled}
-          disabled={(toggleEnabled.isPending && togglingId === r.id) || compilerOwned(r)}
-          title={compilerOwned(r) ? "Compiler-owned — edit the underlying grant or rule instead." : undefined}
+          disabled={
+            (toggleEnabled.isPending && togglingId === r.id) ||
+            compilerOwned(r) ||
+            !can("policy:update")
+          }
+          title={
+            compilerOwned(r)
+              ? "Compiler-owned — edit the underlying grant or rule instead."
+              : !can("policy:update")
+                ? "Enabling or disabling a policy needs the policy:update permission."
+                : undefined
+          }
           onCheckedChange={(c) => toggleEnabled.mutate({ id: r.id, enabled: c })}
         />
       ),
@@ -443,22 +504,23 @@ function PolicyTypeTable({
       key: "actions",
       label: "",
       className: "text-right",
-      cell: (r) => (
-        <Button
-          variant="ghost"
-          size="icon"
-          disabled={compilerOwned(r)}
-          title={
-            compilerOwned(r)
-              ? "Compiler-owned — delete the underlying grant or rule instead."
-              : "Delete policy"
-          }
-          aria-label={`Delete ${r.name}`}
-          onClick={() => setDeleteTarget(r)}
-        >
-          <Trash2 className="h-4 w-4" />
-        </Button>
-      ),
+      cell: (r) =>
+        can("policy:delete") ? (
+          <Button
+            variant="ghost"
+            size="icon"
+            disabled={compilerOwned(r)}
+            title={
+              compilerOwned(r)
+                ? "Compiler-owned — delete the underlying grant or rule instead."
+                : "Delete policy"
+            }
+            aria-label={`Delete ${r.name}`}
+            onClick={() => setDeleteTarget(r)}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        ) : null,
     },
   ];
 
@@ -471,10 +533,12 @@ function PolicyTypeTable({
             Ranger {label.toLowerCase()} policies enforced for this profile.
           </p>
         </div>
-        <Button size="sm" onClick={goToNew}>
-          <Plus className="mr-1 h-4 w-4" />
-          New policy
-        </Button>
+        {can("policy:create") && (
+          <Button size="sm" onClick={goToNew}>
+            <Plus className="mr-1 h-4 w-4" />
+            New policy
+          </Button>
+        )}
       </div>
 
       {error && (

@@ -4,6 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { AuthContext } from "@/auth/useAuth";
+import type { Me } from "@/api/hooks";
 import { setPolicyEnabled, seedDefaultPolicies } from "@/api/policies";
 import { ApiError } from "@/api/client";
 import ProfileDetailPage from "../ProfileDetailPage";
@@ -70,14 +72,31 @@ vi.mock("@/api/policies", async (orig) => ({
   seedDefaultPolicies: vi.fn(() => Promise.resolve({ created: 13 })),
 }));
 
-function wrap(ui: React.ReactNode) {
+const ADMIN: Me = {
+  user_id: "u1",
+  email: "a@example.com",
+  platform_roles: ["platform_admin"],
+  permissions: [],
+};
+
+/** A reader: the `policy:read`-only persona SP4b-2 finding 3 is about. */
+const READER: Me = {
+  user_id: "u2",
+  email: "r@example.com",
+  platform_roles: [],
+  permissions: ["policy:read"],
+};
+
+function wrap(ui: React.ReactNode, me: Me | null = ADMIN) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <QueryClientProvider client={qc}>
-      <TooltipProvider>
-        <MemoryRouter>{ui}</MemoryRouter>
-      </TooltipProvider>
-    </QueryClientProvider>,
+    <AuthContext.Provider value={{ me, isLoading: false }}>
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <MemoryRouter>{ui}</MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>
+    </AuthContext.Provider>,
   );
 }
 
@@ -187,5 +206,61 @@ describe("ProfileDetailPage — D10, the guard is on the policy, not the profile
 
     expect(await screen.findByText(/is compiled by the SP4a permission model/)).toBeInTheDocument();
     expect(screen.queryByText(/^conflict:/)).not.toBeInTheDocument();
+  });
+});
+
+describe("ProfileDetailPage — a write this account cannot make is not offered (SP4b-2 finding 3)", () => {
+  beforeEach(() => {
+    profileOrigin = "manual";
+  });
+
+  /**
+   * **THE DISCRIMINATING CASE.** Every other test in this file renders as a
+   * `platform_admin`, who bypasses the PDP and so passes all four keys — which
+   * is why this page shipped offering a reader `New policy`, `Seed default
+   * policies`, `Delete` and an enabled `Enabled` switch, and answering the
+   * refused toggle with the single word `forbidden`. This renders the same page
+   * for the persona the browser run used.
+   */
+  it("offers a policy:read-only account no create, seed or delete, and a disabled toggle", async () => {
+    wrap(<ProfileDetailPage />, READER);
+    await screen.findByText("allow-analysts");
+
+    expect(screen.queryByRole("button", { name: /new policy/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /seed default policies/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete allow-analysts" })).not.toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: /toggle allow-analysts/i })).toBeDisabled();
+  });
+
+  /** The same page for an admin still offers all four — a fix that hid them
+   *  from everybody would pass the test above and break the page. */
+  it("still offers all of them to a platform_admin", async () => {
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+
+    expect(screen.getByRole("button", { name: /new policy/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /seed default policies/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete allow-analysts" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: /toggle allow-analysts/i })).toBeEnabled();
+  });
+
+  /**
+   * Hiding the control is not the whole fix: a permission snapshot can be
+   * stale, or the server can refuse for a reason this client did not predict.
+   * When a 403 does come back it must name the permission — the server's own
+   * body is the bare word `forbidden`, which tells an operator nothing about
+   * what to ask for.
+   */
+  it("names the permission a refused toggle needs, instead of echoing 'forbidden'", async () => {
+    vi.mocked(setPolicyEnabled).mockRejectedValueOnce(new ApiError(403, "forbidden"));
+    const user = userEvent.setup();
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+    await user.click(screen.getByRole("switch", { name: /toggle allow-analysts/i }));
+
+    expect(await screen.findByText(/needs the policy:update permission/)).toBeInTheDocument();
+    expect(screen.queryByText(/^forbidden$/)).not.toBeInTheDocument();
   });
 });
