@@ -1,0 +1,4344 @@
+{
+ "artifact": "kestra/kestra@sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd",
+ "artifact_note": "image labels: version=nightly, revision=169ca7f25a1b3aeeaaab1206a89b2446a1335a46. Java cross-reference: checkout 96893b589. Script plugin measured: io_kestra_plugin__plugin-script-shell__1_9_8.jar (`io.kestra.plugin.scripts.shell.Commands`); Process runner and Docker runner (alpine:3.20, pullPolicy NEVER). Where the Java and the measurement differ, the measurement is used.",
+ "captured_at": {
+  "q1_proc": {
+   "posted_at": "2026-09-27T07:07:13.768549+00:00",
+   "logs_captured_at": "2026-09-27T07:07:17.192601+00:00"
+  },
+  "q1_proc_nowarn": {
+   "posted_at": "2026-09-27T07:07:17.598939+00:00",
+   "logs_captured_at": "2026-09-27T07:07:21.769457+00:00"
+  },
+  "q1_docker": {
+   "posted_at": "2026-09-27T07:07:22.116765+00:00",
+   "logs_captured_at": "2026-09-27T07:07:34.482140+00:00"
+  },
+  "q2_marker": {
+   "posted_at": "2026-09-27T07:07:34.941619+00:00",
+   "logs_captured_at": "2026-09-27T07:07:39.249761+00:00"
+  },
+  "q2_marker_docker": {
+   "posted_at": "2026-09-27T07:07:39.937325+00:00",
+   "logs_captured_at": "2026-09-27T07:07:51.526067+00:00"
+  },
+  "q3_debug": {
+   "posted_at": "2026-09-27T07:07:52.116626+00:00",
+   "logs_captured_at": "2026-09-27T07:07:56.348755+00:00"
+  },
+  "q3_debug_trace": {
+   "posted_at": "2026-09-27T07:07:56.858715+00:00",
+   "logs_captured_at": "2026-09-27T07:08:01.119976+00:00"
+  },
+  "q3_debug_docker": {
+   "posted_at": "2026-09-27T07:08:01.631272+00:00",
+   "logs_captured_at": "2026-09-27T07:08:10.308587+00:00"
+  },
+  "q4_log_fail": {
+   "posted_at": "2026-09-27T07:08:11.138316+00:00",
+   "logs_captured_at": "2026-09-27T07:08:15.490474+00:00"
+  },
+  "q4_log_only": {
+   "posted_at": "2026-09-27T07:08:15.733892+00:00",
+   "logs_captured_at": "2026-09-27T07:08:20.027180+00:00"
+  },
+  "q5_retry": {
+   "posted_at": "2026-09-27T07:08:20.495581+00:00",
+   "logs_captured_at": "2026-09-27T07:08:26.887630+00:00"
+  },
+  "q6_long": {
+   "posted_at": "2026-09-27T07:08:27.711580+00:00",
+   "logs_captured_at": "2026-09-27T07:08:32.095542+00:00"
+  },
+  "q6_long_docker": {
+   "posted_at": "2026-09-27T07:08:32.451276+00:00",
+   "logs_captured_at": "2026-09-27T07:08:51.891992+00:00"
+  },
+  "q1_proc_warn_true": {
+   "posted_at": "2026-09-27T07:09:37.795649+00:00",
+   "logs_captured_at": "2026-09-27T07:09:41.928356+00:00"
+  },
+  "q2_marker_read": {
+   "posted_at": "2026-09-27T07:09:42.303548+00:00",
+   "logs_captured_at": "2026-09-27T07:09:46.550668+00:00"
+  },
+  "q2_marker_read_docker": {
+   "posted_at": "2026-09-27T07:09:47.134894+00:00",
+   "logs_captured_at": "2026-09-27T07:09:57.403148+00:00"
+  },
+  "q2_marker_other": {
+   "posted_at": "2026-09-27T07:10:37.914807+00:00",
+   "logs_captured_at": "2026-09-27T07:10:42.254022+00:00"
+  }
+ },
+ "method": "Each flow in namespace w11 was published by POST /api/v1/main/flows (YAML), run by POST /api/v1/main/executions/w11/<id>, polled until terminal, then 3 s later its logs were read with GET /api/v1/main/logs/<executionId> (no filters) and the execution with GET /api/v1/main/executions/<id>. The artifact was brought up with `docker compose -p w3oracle up -d` and taken down with `down -v`.",
+ "how_to_read_for_egret": "`findings[].egret_expected` is what W11 Task 3 asserts. Values marked `egret-chosen` are deliberate differences from the measured Kestra behaviour, stated in the spec. `raw_records` is evidence, not an egret expectation.",
+ "level_table": {
+  "stdout": "INFO",
+  "stdout_inside_debug_bracket": "DEBUG",
+  "stderr": "ERROR",
+  "stderr_inside_debug_bracket": "ERROR",
+  "log_task": "declared level",
+  "fail_task": "ERROR",
+  "invalid_marker_warning": "WARN",
+  "cap_summary": "WARN (egret-only)"
+ },
+ "findings": [
+  {
+   "id": "stdout_level",
+   "question": 1,
+   "finding": "A script task's stdout line is logged at INFO, on both runners.",
+   "quoted": [
+    {
+     "level": "INFO",
+     "message": "out-line",
+     "attemptNumber": 0,
+     "_at": "raw_records.q1_proc.logs[1]"
+    },
+    {
+     "level": "INFO",
+     "message": "out-line",
+     "_at": "raw_records.q1_docker.logs[3]"
+    }
+   ],
+   "egret_expected": {
+    "stdout_level": "INFO"
+   }
+  },
+  {
+   "id": "stderr_level",
+   "question": 1,
+   "finding": "A stderr line is logged at ERROR, not WARN, on both runners, and `warningOnStdErr` does not change the level: default, `false` and `true` all logged ERROR. The property exists on shell plugin 1.9.8 (each flow deployed 200) and in all three runs the task ended SUCCESS, so on this artifact it did not change the state either. This matches the Java (`PluginUtilsService.parseOut`: `else if (isStdErr) runContext.logger().error(line)`) and contradicts egret's `ingest_line`, which returns `Level::Warn`.",
+   "quoted": [
+    {
+     "level": "ERROR",
+     "message": "err-line",
+     "_at": "raw_records.q1_proc.logs[2]"
+    },
+    {
+     "level": "ERROR",
+     "message": "err-line",
+     "_at": "raw_records.q1_proc_nowarn.logs[1]"
+    },
+    {
+     "level": "ERROR",
+     "message": "err-line",
+     "_at": "raw_records.q1_proc_warn_true.logs[2]"
+    },
+    {
+     "level": "ERROR",
+     "message": "err-line",
+     "_at": "raw_records.q1_docker.logs[4]"
+    },
+    {
+     "q1_proc.state": "SUCCESS",
+     "q1_proc_nowarn.state": "SUCCESS",
+     "q1_proc_warn_true.state": "SUCCESS"
+    }
+   ],
+   "egret_expected": {
+    "stderr_level": "ERROR",
+    "warningOnStdErr_offered": false,
+    "basis": "measured; egret changes WARN -> ERROR"
+   }
+  },
+  {
+   "id": "outputs_marker_consumed",
+   "question": 2,
+   "finding": "A whole-line `::{\"outputs\":{...}}::` is NOT logged, on stdout and on stderr, and its values reach the task's outputs: a downstream Log rendered `k=v k2=v2`. Only the whole line counts: `x ::{...}::` and a marker with one trailing space are logged verbatim at INFO and not consumed. The execution API returns `outputs: null` on every task run on this artifact, so the value was read through a downstream Log, not off the execution. egret's comment in `ingest_line` (\"consumed as an output AND logged\") is wrong about Kestra.",
+   "quoted": [
+    {
+     "q2_marker.logs": [
+      "Starting command with pid 245 [/bin/sh -c set -e\necho before\necho '::{\"outputs\":{\"k\":\"v\"}}::'\necho '::{\"outputs\":{\"k2\":\"v2\"}}::' >&2\necho 'x ::{\"outputs\":{\"k3\":\"v3\"}}::'\necho after]",
+      "before",
+      "x ::{\"outputs\":{\"k3\":\"v3\"}}::",
+      "after",
+      "Command succeed with exit code 0",
+      "Captured 0 output file(s)."
+     ]
+    },
+    {
+     "taskId": "r",
+     "level": "INFO",
+     "message": "k=v k2=v2",
+     "_at": "raw_records.q2_marker_read.logs[3]"
+    },
+    {
+     "taskId": "r",
+     "level": "INFO",
+     "message": "k=v",
+     "_at": "raw_records.q2_marker_read_docker.logs[7]"
+    },
+    {
+     "level": "INFO",
+     "message": "x ::{\"outputs\":{\"k3\":\"v3\"}}::",
+     "_at": "raw_records.q2_marker.logs[2]"
+    },
+    {
+     "level": "INFO",
+     "message": "::{\"outputs\":{\"k\":\"v\"}}:: ",
+     "_at": "raw_records.q2_marker_other.logs[4]"
+    }
+   ],
+   "egret_expected": {
+    "marker_line_stored": false,
+    "marker_on_stderr_stored": false,
+    "marker_values_in_outputs": true,
+    "non_whole_line_marker": "stored verbatim at the stream's level"
+   }
+  },
+  {
+   "id": "other_marker_shapes",
+   "question": 2,
+   "finding": "Any whole-line `::{json}::` is consumed, not only one with `outputs`: `::{\"metrics\":[]}::` produced no line. A whole-line marker whose JSON does not parse is not logged verbatim either: Kestra wrote one WARN `Invalid outputs '<Jackson error>'` plus a DEBUG stack trace. egret's `parse_marker` returns None for both shapes, so today egret would store them as ordinary lines.",
+   "quoted": [
+    {
+     "q2_marker_other.logs": [
+      [
+       "DEBUG",
+       "Starting command with pid 290 [/bin/sh -c set -e\necho before\necho '::{\"metrics\":[]}::'\necho '::{not json}::'\necho '::{\"outputs\":{\"k\":\"v\"}}:: '\necho after]"
+      ],
+      [
+       "INFO",
+       "before"
+      ],
+      [
+       "WARN",
+       "Invalid outputs 'Unexpected character ('n' (code 110)): was expecting double-quote to start field name\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_"
+      ],
+      [
+       "DEBUG",
+       "com.fasterxml.jackson.core.JsonParseException: Unexpected character ('n' (code 110)): was expecting double-quote to start field name\n at [Source: REDACTED (`Str"
+      ],
+      [
+       "INFO",
+       "::{\"outputs\":{\"k\":\"v\"}}:: "
+      ],
+      [
+       "INFO",
+       "after"
+      ],
+      [
+       "DEBUG",
+       "Command succeed with exit code 0"
+      ],
+      [
+       "TRACE",
+       "Captured 0 output file(s)."
+      ]
+     ]
+    }
+   ],
+   "egret_expected": {
+    "whole_line_json_marker_without_outputs_stored": false,
+    "whole_line_marker_with_invalid_json": "the line is not stored; one WARN line is stored whose message starts with `Invalid outputs '` (serde's error text, not Jackson's); no stack-trace line",
+    "basis": "measured shape; the error text and the absent stack trace are egret-chosen"
+   }
+  },
+  {
+   "id": "debug_bracket",
+   "question": 3,
+   "finding": "`##kestra:log:debug##` switches later stdout lines to DEBUG until `##kestra:log:info##`; neither marker line is logged. It applies on the Docker runner too. A stderr line inside the bracket stays ERROR (stderr is tested before debug in `parseOut`). The mode lives in one `DefaultLogConsumer` shared by both streams, and the Java tests the marker before the stream, so a marker on either stream toggles it (the stderr-marker case is from the Java, not measured). DEBUG lines are stored with the task's default log level: `logLevel: TRACE` changed nothing, and TRACE lines are stored too.",
+   "quoted": [
+    {
+     "q3_debug.logs": [
+      [
+       "DEBUG",
+       "Starting command with pid 252 [/bin/sh -c set -e\necho before"
+      ],
+      [
+       "INFO",
+       "before"
+      ],
+      [
+       "DEBUG",
+       "dbg-out"
+      ],
+      [
+       "INFO",
+       "after"
+      ],
+      [
+       "ERROR",
+       "dbg-err"
+      ],
+      [
+       "DEBUG",
+       "Command succeed with exit code 0"
+      ],
+      [
+       "TRACE",
+       "Captured 0 output file(s)."
+      ]
+     ]
+    },
+    {
+     "q3_debug_trace.logs": [
+      [
+       "DEBUG",
+       "Starting command with pid 255 [/bin/sh -c set -e\necho before"
+      ],
+      [
+       "INFO",
+       "before"
+      ],
+      [
+       "DEBUG",
+       "dbg-out"
+      ],
+      [
+       "ERROR",
+       "dbg-err"
+      ],
+      [
+       "INFO",
+       "after"
+      ],
+      [
+       "DEBUG",
+       "Command succeed with exit code 0"
+      ],
+      [
+       "TRACE",
+       "Captured 0 output file(s)."
+      ]
+     ]
+    },
+    {
+     "q3_debug_docker.logs": [
+      [
+       "TRACE",
+       "Container created: 94055e9fb0abcce9a3dae25cb673d7fe4a1263674"
+      ],
+      [
+       "TRACE",
+       "Volume created: d91fb487d2a3e450da5e3f9cb4e021fb9a2203b8fde6"
+      ],
+      [
+       "DEBUG",
+       "Starting command with container id 94055e9fb0abcce9a3dae25cb"
+      ],
+      [
+       "INFO",
+       "before"
+      ],
+      [
+       "DEBUG",
+       "dbg-out"
+      ],
+      [
+       "INFO",
+       "after"
+      ],
+      [
+       "DEBUG",
+       "Command succeed with exit code 0"
+      ],
+      [
+       "TRACE",
+       "Container deleted: 94055e9fb0abcce9a3dae25cb673d7fe4a1263674"
+      ],
+      [
+       "TRACE",
+       "Volume deleted: d91fb487d2a3e450da5e3f9cb4e021fb9a2203b8fde6"
+      ],
+      [
+       "TRACE",
+       "Captured 0 output file(s)."
+      ]
+     ]
+    }
+   ],
+   "egret_expected": {
+    "bracketed_stdout_level": "DEBUG",
+    "bracketed_stderr_level": "ERROR",
+    "bracket_marker_lines_stored": false,
+    "after_info_marker": "INFO",
+    "mode_scope": "one mode per command, toggled by a marker on either stream"
+   }
+  },
+  {
+   "id": "no_worker_framing",
+   "question": 4,
+   "finding": "The execution log holds no worker framing line. The worker's `Type {} started` / `Type {} with state {} completed in {}` (`WorkerTaskProcessor`) and the executor's `Flow completed with state {}` go through `Logs.logTaskRun`/`logExecution` to the server's slf4j logger, not the execution log. Every stored line carries a `taskId` and `taskRunId`; none is execution-level. A Log-only flow stores exactly one line. Log with a list `message` stores one line per element. Fail stores ERROR `<errorMessage>` and then a DEBUG Java stack trace.",
+   "quoted": [
+    {
+     "q4_log_only.logs": [
+      {
+       "namespace": "w11",
+       "flowId": "q4_log_only",
+       "taskId": "l",
+       "executionId": "286xv1m2CqDb0VtAwSKQJM",
+       "taskRunId": "2GXFACh4QvJ8CpRDD1RoLY",
+       "attemptNumber": 0,
+       "timestamp": "2026-09-27T07:08:15.712688Z",
+       "level": "INFO",
+       "thread": "worker-default_57",
+       "message": "hello-log"
+      }
+     ]
+    },
+    {
+     "q4_log_fail.logs": [
+      [
+       "l",
+       "24FNChF7keihIfvHpxrEUe",
+       0,
+       "INFO",
+       "hello-log"
+      ],
+      [
+       "w",
+       "s4SNxGBCe8f8dmMx4Txiq",
+       0,
+       "WARN",
+       "warn-a"
+      ],
+      [
+       "w",
+       "s4SNxGBCe8f8dmMx4Txiq",
+       0,
+       "WARN",
+       "warn-b"
+      ],
+      [
+       "f",
+       "5gwxLeFZwA3qBOMxIkbBZO",
+       0,
+       "ERROR",
+       "boom-fail"
+      ],
+      [
+       "f",
+       "5gwxLeFZwA3qBOMxIkbBZO",
+       0,
+       "DEBUG",
+       "java.lang.Exception: boom-fail\n\tat io.kestra.plugin.core.execution.Fail.run(Fail"
+      ]
+     ]
+    }
+   ],
+   "egret_expected": {
+    "framing_lines": false,
+    "framing_text": null,
+    "log_task": "one line per message at the declared level",
+    "fail_task": "one ERROR line, the errorMessage; no stack-trace line (egret has no Java stack)",
+    "execution_level_lines": 0
+   }
+  },
+  {
+   "id": "script_runner_diagnostics",
+   "question": 4,
+   "finding": "Script tasks add their own lines around the output: DEBUG `Starting command with pid N [<cmd>]` (or `with container id ...`), DEBUG `Command succeed with exit code 0`, TRACE `Captured 0 output file(s).`, and on Docker TRACE `Container created/deleted` and `Volume created/deleted`. A failed attempt adds ERROR `io.kestra...TaskException: Command failed with exit code 1`, a DEBUG stack trace and ERROR `Command failed with exit code 1`. These are the runner's, not the worker's.",
+   "quoted": [
+    {
+     "q1_proc.logs": [
+      [
+       "DEBUG",
+       "Starting command with pid 233 [/bin/sh -c set -e\necho out-li"
+      ],
+      [
+       "INFO",
+       "out-line"
+      ],
+      [
+       "ERROR",
+       "err-line"
+      ],
+      [
+       "DEBUG",
+       "Command succeed with exit code 0"
+      ],
+      [
+       "TRACE",
+       "Captured 0 output file(s)."
+      ]
+     ]
+    },
+    {
+     "q1_docker.logs": [
+      [
+       "TRACE",
+       "Container created: 0922302316ae839d924fd"
+      ],
+      [
+       "TRACE",
+       "Volume created: c0e733dbeb3bdc67b0b8e15e"
+      ],
+      [
+       "DEBUG",
+       "Starting command with container id 09223"
+      ],
+      [
+       "INFO",
+       "out-line"
+      ],
+      [
+       "ERROR",
+       "err-line"
+      ],
+      [
+       "DEBUG",
+       "Command succeed with exit code 0"
+      ],
+      [
+       "TRACE",
+       "Container deleted: 0922302316ae839d924fd"
+      ],
+      [
+       "TRACE",
+       "Volume deleted: c0e733dbeb3bdc67b0b8e15e"
+      ],
+      [
+       "TRACE",
+       "Captured 0 output file(s)."
+      ]
+     ]
+    },
+    {
+     "level": "ERROR",
+     "message": "io.kestra.core.models.tasks.runners.TaskException: Command failed with exit code 1",
+     "_at": "raw_records.q5_retry.logs[4]"
+    },
+    {
+     "level": "ERROR",
+     "message": "Command failed with exit code 1",
+     "_at": "raw_records.q5_retry.logs[6]"
+    }
+   ],
+   "egret_expected": {
+    "runner_diagnostic_lines": false,
+    "failure_line": "the handler's failure message as it is emitted through the sink today",
+    "basis": "egret-chosen: W11 stores output and handler messages; replicating Kestra's runner diagnostics (pids, container and volume ids) is out of W11's scope"
+   }
+  },
+  {
+   "id": "attempt_numbering",
+   "question": 5,
+   "finding": "`attemptNumber` is 0-based: the failing first attempt's lines carry 0 and the retry's carry 1, with the same `taskRunId`. It equals the index into `taskRun.attempts` (2 attempts: FAILED then SUCCESS). `{{ taskrun.attemptsCount }}` rendered 0 then 1. egret's `TaskInput.attempt` is 1-based (`jsonb_array_length(attempts)`, claim.rs).",
+   "quoted": [
+    {
+     "q5_retry.logs": [
+      [
+       "71OepRhFyiIvtvSYsgHymw",
+       0,
+       "DEBUG",
+       "Starting command with pid 260 [/bin/sh -c set -e\nf"
+      ],
+      [
+       "71OepRhFyiIvtvSYsgHymw",
+       0,
+       "INFO",
+       "attempt-line-0"
+      ],
+      [
+       "71OepRhFyiIvtvSYsgHymw",
+       0,
+       "ERROR",
+       "first-attempt-fails"
+      ],
+      [
+       "71OepRhFyiIvtvSYsgHymw",
+       0,
+       "TRACE",
+       "Captured 0 output file(s)."
+      ],
+      [
+       "71OepRhFyiIvtvSYsgHymw",
+       0,
+       "ERROR",
+       "io.kestra.core.models.tasks.runners.TaskException:"
+      ],
+      [
+       "71OepRhFyiIvtvSYsgHymw",
+       0,
+       "DEBUG",
+       "io.kestra.core.models.tasks.RunnableTaskException:"
+      ],
+      [
+       "71OepRhFyiIvtvSYsgHymw",
+       0,
+       "ERROR",
+       "Command failed with exit code 1"
+      ],
+      [
+       "71OepRhFyiIvtvSYsgHymw",
+       1,
+       "DEBUG",
+       "Starting command with pid 262 [/bin/sh -c set -e\nf"
+      ],
+      [
+       "71OepRhFyiIvtvSYsgHymw",
+       1,
+       "INFO",
+       "attempt-line-1"
+      ],
+      [
+       "71OepRhFyiIvtvSYsgHymw",
+       1,
+       "INFO",
+       "second-attempt-ok"
+      ],
+      [
+       "71OepRhFyiIvtvSYsgHymw",
+       1,
+       "DEBUG",
+       "Command succeed with exit code 0"
+      ],
+      [
+       "71OepRhFyiIvtvSYsgHymw",
+       1,
+       "TRACE",
+       "Captured 0 output file(s)."
+      ]
+     ]
+    },
+    {
+     "attempt_states": [
+      "FAILED",
+      "SUCCESS"
+     ]
+    }
+   ],
+   "egret_expected": {
+    "first_attempt": 0,
+    "retry_attempt": 1,
+    "same_task_run_id": true,
+    "mapping": "task_logs.attempt = TaskInput.attempt - 1 (the index into task_runs.attempts)",
+    "basis": "measured numbering; the conversion is egret-chosen"
+   }
+  },
+  {
+   "id": "long_line_split",
+   "question": 6,
+   "finding": "Kestra does NOT store a 100,000-char line whole, and does not cut it either: it SPLITS it into 15,360-char pieces (`RunContextLogger.MAX_MESSAGE_LENGTH = 1024 * 15`, `Splitter.fixedLength`), each a separate INFO line with the same timestamp. 6 x 15,360 + 7,840 = 100,000, nothing lost. Because the pieces share a timestamp, the API returned them out of order: the 7,840-char remainder came back at position 5 of 7 (Process) and 3 of 7 (Docker), not last. There is no volume cap. The spec's section 2 statement \"there is no line or volume cap\" is half wrong.",
+   "quoted": [
+    {
+     "q6_long.piece_lengths_in_api_order": [
+      15360,
+      15360,
+      15360,
+      15360,
+      15360,
+      7840,
+      15360
+     ],
+     "q6_long_docker.piece_lengths_in_api_order": [
+      15360,
+      15360,
+      15360,
+      7840,
+      15360,
+      15360,
+      15360
+     ],
+     "timestamps_equal": true
+    }
+   ],
+   "egret_expected": {
+    "line_100000_bytes": {
+     "rows": 1,
+     "message_bytes": 65536,
+     "truncated": true
+    },
+    "basis": "egret-chosen (user decision, spec section 5): cut at 65,536 bytes, not split; a deliberate difference from the measured split"
+   }
+  }
+ ],
+ "raw_records": {
+  "q1_proc": {
+   "flow_yaml": "id: q1_proc\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.core.runner.Process\n    commands:\n      - \"echo out-line\"\n      - \"echo err-line >&2\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:07:13.768549+00:00",
+   "execution_id": "257hN71xvTVB95gnc3fJXD",
+   "execution": {
+    "tenantId": "main",
+    "id": "257hN71xvTVB95gnc3fJXD",
+    "namespace": "w11",
+    "flowId": "q1_proc",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "1rDv5I8zXCZ1RXTwuJGH1f",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:07:12.982564Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:07:12.982567Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:07:13.329795Z"
+          }
+         ],
+         "duration": "PT0.347231S",
+         "startDate": "2026-09-27T07:07:12.982564Z",
+         "endDate": "2026-09-27T07:07:13.329795Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:07:12.872263Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:07:12.875276Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:07:12.982258Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:07:13.347177Z"
+        }
+       ],
+       "duration": "PT0.474914S",
+       "startDate": "2026-09-27T07:07:12.872263Z",
+       "endDate": "2026-09-27T07:07:13.347177Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "257hN71xvTVB95gnc3fJXD"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:07:12.869896Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:07:12.875197Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:07:13.617209Z"
+      }
+     ],
+     "duration": "PT0.747313S",
+     "startDate": "2026-09-27T07:07:12.869896Z",
+     "endDate": "2026-09-27T07:07:13.617209Z"
+    },
+    "originalId": "257hN71xvTVB95gnc3fJXD",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:07:12.869898Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:07:17.192601+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc",
+     "taskId": "s",
+     "executionId": "257hN71xvTVB95gnc3fJXD",
+     "taskRunId": "1rDv5I8zXCZ1RXTwuJGH1f",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:13.298660Z",
+     "level": "DEBUG",
+     "thread": "worker-default_51",
+     "message": "Starting command with pid 233 [/bin/sh -c set -e\necho out-line\necho err-line >&2]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc",
+     "taskId": "s",
+     "executionId": "257hN71xvTVB95gnc3fJXD",
+     "taskRunId": "1rDv5I8zXCZ1RXTwuJGH1f",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:13.307186Z",
+     "level": "INFO",
+     "thread": "virtual-4518",
+     "message": "out-line"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc",
+     "taskId": "s",
+     "executionId": "257hN71xvTVB95gnc3fJXD",
+     "taskRunId": "1rDv5I8zXCZ1RXTwuJGH1f",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:13.319365Z",
+     "level": "ERROR",
+     "thread": "virtual-4519",
+     "message": "err-line"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc",
+     "taskId": "s",
+     "executionId": "257hN71xvTVB95gnc3fJXD",
+     "taskRunId": "1rDv5I8zXCZ1RXTwuJGH1f",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:13.321573Z",
+     "level": "DEBUG",
+     "thread": "worker-default_51",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc",
+     "taskId": "s",
+     "executionId": "257hN71xvTVB95gnc3fJXD",
+     "taskRunId": "1rDv5I8zXCZ1RXTwuJGH1f",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:13.329107Z",
+     "level": "TRACE",
+     "thread": "worker-default_51",
+     "message": "Captured 0 output file(s)."
+    }
+   ]
+  },
+  "q1_proc_nowarn": {
+   "flow_yaml": "id: q1_proc_nowarn\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.core.runner.Process\n    warningOnStdErr: false\n    commands:\n      - \"echo out-line\"\n      - \"echo err-line >&2\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:07:17.598939+00:00",
+   "execution_id": "1JU2UWCE68fmHKGRyo7VaT",
+   "execution": {
+    "tenantId": "main",
+    "id": "1JU2UWCE68fmHKGRyo7VaT",
+    "namespace": "w11",
+    "flowId": "q1_proc_nowarn",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "3r4RdmAb9LxtrVyvKWhaB",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:07:17.600179Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:07:17.600181Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:07:17.763507Z"
+          }
+         ],
+         "duration": "PT0.163328S",
+         "startDate": "2026-09-27T07:07:17.600179Z",
+         "endDate": "2026-09-27T07:07:17.763507Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:07:17.494334Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:07:17.496035Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:07:17.599914Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:07:17.763599Z"
+        }
+       ],
+       "duration": "PT0.269265S",
+       "startDate": "2026-09-27T07:07:17.494334Z",
+       "endDate": "2026-09-27T07:07:17.763599Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "1JU2UWCE68fmHKGRyo7VaT"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:07:17.469250Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:07:17.496001Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:07:17.849748Z"
+      }
+     ],
+     "duration": "PT0.380498S",
+     "startDate": "2026-09-27T07:07:17.469250Z",
+     "endDate": "2026-09-27T07:07:17.849748Z"
+    },
+    "originalId": "1JU2UWCE68fmHKGRyo7VaT",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:07:17.469252Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:07:21.769457+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc_nowarn",
+     "taskId": "s",
+     "executionId": "1JU2UWCE68fmHKGRyo7VaT",
+     "taskRunId": "3r4RdmAb9LxtrVyvKWhaB",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:17.735976Z",
+     "level": "DEBUG",
+     "thread": "worker-default_1",
+     "message": "Starting command with pid 238 [/bin/sh -c set -e\necho out-line\necho err-line >&2]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc_nowarn",
+     "taskId": "s",
+     "executionId": "1JU2UWCE68fmHKGRyo7VaT",
+     "taskRunId": "3r4RdmAb9LxtrVyvKWhaB",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:17.760331Z",
+     "level": "ERROR",
+     "thread": "virtual-4649",
+     "message": "err-line"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc_nowarn",
+     "taskId": "s",
+     "executionId": "1JU2UWCE68fmHKGRyo7VaT",
+     "taskRunId": "3r4RdmAb9LxtrVyvKWhaB",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:17.760676Z",
+     "level": "INFO",
+     "thread": "virtual-4648",
+     "message": "out-line"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc_nowarn",
+     "taskId": "s",
+     "executionId": "1JU2UWCE68fmHKGRyo7VaT",
+     "taskRunId": "3r4RdmAb9LxtrVyvKWhaB",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:17.761733Z",
+     "level": "DEBUG",
+     "thread": "worker-default_1",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc_nowarn",
+     "taskId": "s",
+     "executionId": "1JU2UWCE68fmHKGRyo7VaT",
+     "taskRunId": "3r4RdmAb9LxtrVyvKWhaB",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:17.762739Z",
+     "level": "TRACE",
+     "thread": "worker-default_1",
+     "message": "Captured 0 output file(s)."
+    }
+   ]
+  },
+  "q1_docker": {
+   "flow_yaml": "id: q1_docker\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.scripts.runner.docker.Docker\n      pullPolicy: NEVER\n    containerImage: alpine:3.20\n    commands:\n      - \"echo out-line\"\n      - \"echo err-line >&2\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:07:22.116765+00:00",
+   "execution_id": "4StC1RMXQBtGEsTl4E5wIp",
+   "execution": {
+    "tenantId": "main",
+    "id": "4StC1RMXQBtGEsTl4E5wIp",
+    "namespace": "w11",
+    "flowId": "q1_docker",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "7eRoxmncK0tvhQdHALgm9R",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:07:22.123168Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:07:22.123169Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:07:30.041848Z"
+          }
+         ],
+         "duration": "PT7.91868S",
+         "startDate": "2026-09-27T07:07:22.123168Z",
+         "endDate": "2026-09-27T07:07:30.041848Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:07:22.077342Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:07:22.078587Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:07:22.122971Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:07:30.043688Z"
+        }
+       ],
+       "duration": "PT7.966346S",
+       "startDate": "2026-09-27T07:07:22.077342Z",
+       "endDate": "2026-09-27T07:07:30.043688Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "4StC1RMXQBtGEsTl4E5wIp"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:07:22.069760Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:07:22.078561Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:07:30.479057Z"
+      }
+     ],
+     "duration": "PT8.409297S",
+     "startDate": "2026-09-27T07:07:22.069760Z",
+     "endDate": "2026-09-27T07:07:30.479057Z"
+    },
+    "originalId": "4StC1RMXQBtGEsTl4E5wIp",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:07:22.069761Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:07:34.482140+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q1_docker",
+     "taskId": "s",
+     "executionId": "4StC1RMXQBtGEsTl4E5wIp",
+     "taskRunId": "7eRoxmncK0tvhQdHALgm9R",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:23.934308Z",
+     "level": "TRACE",
+     "thread": "worker-default_31",
+     "message": "Container created: 0922302316ae839d924fd58ca16a936c7d40392996227a29f9b7e7bfd5452ac9"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_docker",
+     "taskId": "s",
+     "executionId": "4StC1RMXQBtGEsTl4E5wIp",
+     "taskRunId": "7eRoxmncK0tvhQdHALgm9R",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:23.965293Z",
+     "level": "TRACE",
+     "thread": "worker-default_31",
+     "message": "Volume created: c0e733dbeb3bdc67b0b8e15e961ad861a9c30efb42f2cffe34fe265f1a0ac23a"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_docker",
+     "taskId": "s",
+     "executionId": "4StC1RMXQBtGEsTl4E5wIp",
+     "taskRunId": "7eRoxmncK0tvhQdHALgm9R",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:26.496699Z",
+     "level": "DEBUG",
+     "thread": "worker-default_31",
+     "message": "Starting command with container id 0922302316ae839d924fd58ca16a936c7d40392996227a29f9b7e7bfd5452ac9 [/bin/sh -c set -e\necho out-line\necho err-line >&2]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_docker",
+     "taskId": "s",
+     "executionId": "4StC1RMXQBtGEsTl4E5wIp",
+     "taskRunId": "7eRoxmncK0tvhQdHALgm9R",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:28.275037Z",
+     "level": "INFO",
+     "thread": "docker-java-stream-16180043",
+     "message": "out-line"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_docker",
+     "taskId": "s",
+     "executionId": "4StC1RMXQBtGEsTl4E5wIp",
+     "taskRunId": "7eRoxmncK0tvhQdHALgm9R",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:28.275346Z",
+     "level": "ERROR",
+     "thread": "docker-java-stream-16180043",
+     "message": "err-line"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_docker",
+     "taskId": "s",
+     "executionId": "4StC1RMXQBtGEsTl4E5wIp",
+     "taskRunId": "7eRoxmncK0tvhQdHALgm9R",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:28.531102Z",
+     "level": "DEBUG",
+     "thread": "worker-default_31",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_docker",
+     "taskId": "s",
+     "executionId": "4StC1RMXQBtGEsTl4E5wIp",
+     "taskRunId": "7eRoxmncK0tvhQdHALgm9R",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:29.975170Z",
+     "level": "TRACE",
+     "thread": "worker-default_31",
+     "message": "Container deleted: 0922302316ae839d924fd58ca16a936c7d40392996227a29f9b7e7bfd5452ac9"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_docker",
+     "taskId": "s",
+     "executionId": "4StC1RMXQBtGEsTl4E5wIp",
+     "taskRunId": "7eRoxmncK0tvhQdHALgm9R",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:30.040839Z",
+     "level": "TRACE",
+     "thread": "worker-default_31",
+     "message": "Volume deleted: c0e733dbeb3bdc67b0b8e15e961ad861a9c30efb42f2cffe34fe265f1a0ac23a"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_docker",
+     "taskId": "s",
+     "executionId": "4StC1RMXQBtGEsTl4E5wIp",
+     "taskRunId": "7eRoxmncK0tvhQdHALgm9R",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:30.041691Z",
+     "level": "TRACE",
+     "thread": "worker-default_31",
+     "message": "Captured 0 output file(s)."
+    }
+   ]
+  },
+  "q2_marker": {
+   "flow_yaml": "id: q2_marker\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.core.runner.Process\n    commands:\n      - \"echo before\"\n      - \"echo '::{\\\"outputs\\\":{\\\"k\\\":\\\"v\\\"}}::'\"\n      - \"echo '::{\\\"outputs\\\":{\\\"k2\\\":\\\"v2\\\"}}::' >&2\"\n      - \"echo 'x ::{\\\"outputs\\\":{\\\"k3\\\":\\\"v3\\\"}}::'\"\n      - \"echo after\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:07:34.941619+00:00",
+   "execution_id": "79K7qOnP2MhUUsPjlcyS71",
+   "execution": {
+    "tenantId": "main",
+    "id": "79K7qOnP2MhUUsPjlcyS71",
+    "namespace": "w11",
+    "flowId": "q2_marker",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "1fAd2iWUO5WaiUwSwMtmUa",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:07:34.969061Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:07:34.969063Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:07:35.362641Z"
+          }
+         ],
+         "duration": "PT0.39358S",
+         "startDate": "2026-09-27T07:07:34.969061Z",
+         "endDate": "2026-09-27T07:07:35.362641Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:07:34.765575Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:07:34.766764Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:07:34.961198Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:07:35.362901Z"
+        }
+       ],
+       "duration": "PT0.597326S",
+       "startDate": "2026-09-27T07:07:34.765575Z",
+       "endDate": "2026-09-27T07:07:35.362901Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "79K7qOnP2MhUUsPjlcyS71"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:07:34.763402Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:07:34.766733Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:07:35.512621Z"
+      }
+     ],
+     "duration": "PT0.749219S",
+     "startDate": "2026-09-27T07:07:34.763402Z",
+     "endDate": "2026-09-27T07:07:35.512621Z"
+    },
+    "originalId": "79K7qOnP2MhUUsPjlcyS71",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:07:34.763404Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:07:39.249761+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker",
+     "taskId": "s",
+     "executionId": "79K7qOnP2MhUUsPjlcyS71",
+     "taskRunId": "1fAd2iWUO5WaiUwSwMtmUa",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:35.092157Z",
+     "level": "DEBUG",
+     "thread": "worker-default_17",
+     "message": "Starting command with pid 245 [/bin/sh -c set -e\necho before\necho '::{\"outputs\":{\"k\":\"v\"}}::'\necho '::{\"outputs\":{\"k2\":\"v2\"}}::' >&2\necho 'x ::{\"outputs\":{\"k3\":\"v3\"}}::'\necho after]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker",
+     "taskId": "s",
+     "executionId": "79K7qOnP2MhUUsPjlcyS71",
+     "taskRunId": "1fAd2iWUO5WaiUwSwMtmUa",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:35.096473Z",
+     "level": "INFO",
+     "thread": "virtual-5156",
+     "message": "before"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker",
+     "taskId": "s",
+     "executionId": "79K7qOnP2MhUUsPjlcyS71",
+     "taskRunId": "1fAd2iWUO5WaiUwSwMtmUa",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:35.332097Z",
+     "level": "INFO",
+     "thread": "virtual-5156",
+     "message": "x ::{\"outputs\":{\"k3\":\"v3\"}}::"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker",
+     "taskId": "s",
+     "executionId": "79K7qOnP2MhUUsPjlcyS71",
+     "taskRunId": "1fAd2iWUO5WaiUwSwMtmUa",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:35.334096Z",
+     "level": "INFO",
+     "thread": "virtual-5156",
+     "message": "after"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker",
+     "taskId": "s",
+     "executionId": "79K7qOnP2MhUUsPjlcyS71",
+     "taskRunId": "1fAd2iWUO5WaiUwSwMtmUa",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:35.335797Z",
+     "level": "DEBUG",
+     "thread": "worker-default_17",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker",
+     "taskId": "s",
+     "executionId": "79K7qOnP2MhUUsPjlcyS71",
+     "taskRunId": "1fAd2iWUO5WaiUwSwMtmUa",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:35.344923Z",
+     "level": "TRACE",
+     "thread": "worker-default_17",
+     "message": "Captured 0 output file(s)."
+    }
+   ]
+  },
+  "q2_marker_docker": {
+   "flow_yaml": "id: q2_marker_docker\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.scripts.runner.docker.Docker\n      pullPolicy: NEVER\n    containerImage: alpine:3.20\n    commands:\n      - \"echo before\"\n      - \"echo '::{\\\"outputs\\\":{\\\"k\\\":\\\"v\\\"}}::'\"\n      - \"echo after\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:07:39.937325+00:00",
+   "execution_id": "4uaqn2cCjOOwjcaGiHqsT1",
+   "execution": {
+    "tenantId": "main",
+    "id": "4uaqn2cCjOOwjcaGiHqsT1",
+    "namespace": "w11",
+    "flowId": "q2_marker_docker",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "1UphNWnPtPjRoIGaQLLdcn",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:07:40.053020Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:07:40.053022Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:07:47.375219Z"
+          }
+         ],
+         "duration": "PT7.322199S",
+         "startDate": "2026-09-27T07:07:40.053020Z",
+         "endDate": "2026-09-27T07:07:47.375219Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:07:39.733162Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:07:39.736784Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:07:40.052303Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:07:47.375343Z"
+        }
+       ],
+       "duration": "PT7.642181S",
+       "startDate": "2026-09-27T07:07:39.733162Z",
+       "endDate": "2026-09-27T07:07:47.375343Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "4uaqn2cCjOOwjcaGiHqsT1"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:07:39.731446Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:07:39.736730Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:07:47.885514Z"
+      }
+     ],
+     "duration": "PT8.154068S",
+     "startDate": "2026-09-27T07:07:39.731446Z",
+     "endDate": "2026-09-27T07:07:47.885514Z"
+    },
+    "originalId": "4uaqn2cCjOOwjcaGiHqsT1",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:07:39.731447Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:07:51.526067+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_docker",
+     "taskId": "s",
+     "executionId": "4uaqn2cCjOOwjcaGiHqsT1",
+     "taskRunId": "1UphNWnPtPjRoIGaQLLdcn",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:41.633379Z",
+     "level": "TRACE",
+     "thread": "worker-default_42",
+     "message": "Container created: e17b723262497c7ccade904eb9b49583a52ffb328c94cbafc8bc3ba8d6cb68f1"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_docker",
+     "taskId": "s",
+     "executionId": "4uaqn2cCjOOwjcaGiHqsT1",
+     "taskRunId": "1UphNWnPtPjRoIGaQLLdcn",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:41.718699Z",
+     "level": "TRACE",
+     "thread": "worker-default_42",
+     "message": "Volume created: cce5097b658e2c5911793aea88eed700a5866343b845bde9d2bfdf3b7b37d555"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_docker",
+     "taskId": "s",
+     "executionId": "4uaqn2cCjOOwjcaGiHqsT1",
+     "taskRunId": "1UphNWnPtPjRoIGaQLLdcn",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:44.703527Z",
+     "level": "DEBUG",
+     "thread": "worker-default_42",
+     "message": "Starting command with container id e17b723262497c7ccade904eb9b49583a52ffb328c94cbafc8bc3ba8d6cb68f1 [/bin/sh -c set -e\necho before\necho '::{\"outputs\":{\"k\":\"v\"}}::'\necho after]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_docker",
+     "taskId": "s",
+     "executionId": "4uaqn2cCjOOwjcaGiHqsT1",
+     "taskRunId": "1UphNWnPtPjRoIGaQLLdcn",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:44.880117Z",
+     "level": "INFO",
+     "thread": "docker-java-stream--875166741",
+     "message": "before"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_docker",
+     "taskId": "s",
+     "executionId": "4uaqn2cCjOOwjcaGiHqsT1",
+     "taskRunId": "1UphNWnPtPjRoIGaQLLdcn",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:44.880683Z",
+     "level": "INFO",
+     "thread": "docker-java-stream--875166741",
+     "message": "after"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_docker",
+     "taskId": "s",
+     "executionId": "4uaqn2cCjOOwjcaGiHqsT1",
+     "taskRunId": "1UphNWnPtPjRoIGaQLLdcn",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:46.341893Z",
+     "level": "DEBUG",
+     "thread": "worker-default_42",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_docker",
+     "taskId": "s",
+     "executionId": "4uaqn2cCjOOwjcaGiHqsT1",
+     "taskRunId": "1UphNWnPtPjRoIGaQLLdcn",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:47.107923Z",
+     "level": "TRACE",
+     "thread": "worker-default_42",
+     "message": "Container deleted: e17b723262497c7ccade904eb9b49583a52ffb328c94cbafc8bc3ba8d6cb68f1"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_docker",
+     "taskId": "s",
+     "executionId": "4uaqn2cCjOOwjcaGiHqsT1",
+     "taskRunId": "1UphNWnPtPjRoIGaQLLdcn",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:47.311024Z",
+     "level": "TRACE",
+     "thread": "worker-default_42",
+     "message": "Volume deleted: cce5097b658e2c5911793aea88eed700a5866343b845bde9d2bfdf3b7b37d555"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_docker",
+     "taskId": "s",
+     "executionId": "4uaqn2cCjOOwjcaGiHqsT1",
+     "taskRunId": "1UphNWnPtPjRoIGaQLLdcn",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:47.369958Z",
+     "level": "TRACE",
+     "thread": "worker-default_42",
+     "message": "Captured 0 output file(s)."
+    }
+   ]
+  },
+  "q3_debug": {
+   "flow_yaml": "id: q3_debug\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.core.runner.Process\n    commands:\n      - \"echo before\"\n      - \"echo '##kestra:log:debug##'\"\n      - \"echo dbg-out\"\n      - \"echo dbg-err >&2\"\n      - \"echo '##kestra:log:info##'\"\n      - \"echo after\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:07:52.116626+00:00",
+   "execution_id": "2p5glH5nOxCAZD90PXsz37",
+   "execution": {
+    "tenantId": "main",
+    "id": "2p5glH5nOxCAZD90PXsz37",
+    "namespace": "w11",
+    "flowId": "q3_debug",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "BDcd0a3Mtbh2Gv74MhCUL",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:07:52.141230Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:07:52.141232Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:07:52.242249Z"
+          }
+         ],
+         "duration": "PT0.101019S",
+         "startDate": "2026-09-27T07:07:52.141230Z",
+         "endDate": "2026-09-27T07:07:52.242249Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:07:52.019816Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:07:52.024415Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:07:52.141016Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:07:52.242391Z"
+        }
+       ],
+       "duration": "PT0.222575S",
+       "startDate": "2026-09-27T07:07:52.019816Z",
+       "endDate": "2026-09-27T07:07:52.242391Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "2p5glH5nOxCAZD90PXsz37"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:07:52.016969Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:07:52.024374Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:07:52.331252Z"
+      }
+     ],
+     "duration": "PT0.314283S",
+     "startDate": "2026-09-27T07:07:52.016969Z",
+     "endDate": "2026-09-27T07:07:52.331252Z"
+    },
+    "originalId": "2p5glH5nOxCAZD90PXsz37",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:07:52.016972Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:07:56.348755+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug",
+     "taskId": "s",
+     "executionId": "2p5glH5nOxCAZD90PXsz37",
+     "taskRunId": "BDcd0a3Mtbh2Gv74MhCUL",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:52.238096Z",
+     "level": "DEBUG",
+     "thread": "worker-default_16",
+     "message": "Starting command with pid 252 [/bin/sh -c set -e\necho before\necho '##kestra:log:debug##'\necho dbg-out\necho dbg-err >&2\necho '##kestra:log:info##'\necho after]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug",
+     "taskId": "s",
+     "executionId": "2p5glH5nOxCAZD90PXsz37",
+     "taskRunId": "BDcd0a3Mtbh2Gv74MhCUL",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:52.238718Z",
+     "level": "INFO",
+     "thread": "virtual-5566",
+     "message": "before"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug",
+     "taskId": "s",
+     "executionId": "2p5glH5nOxCAZD90PXsz37",
+     "taskRunId": "BDcd0a3Mtbh2Gv74MhCUL",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:52.240591Z",
+     "level": "DEBUG",
+     "thread": "virtual-5566",
+     "message": "dbg-out"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug",
+     "taskId": "s",
+     "executionId": "2p5glH5nOxCAZD90PXsz37",
+     "taskRunId": "BDcd0a3Mtbh2Gv74MhCUL",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:52.240716Z",
+     "level": "INFO",
+     "thread": "virtual-5566",
+     "message": "after"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug",
+     "taskId": "s",
+     "executionId": "2p5glH5nOxCAZD90PXsz37",
+     "taskRunId": "BDcd0a3Mtbh2Gv74MhCUL",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:52.241590Z",
+     "level": "ERROR",
+     "thread": "virtual-5567",
+     "message": "dbg-err"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug",
+     "taskId": "s",
+     "executionId": "2p5glH5nOxCAZD90PXsz37",
+     "taskRunId": "BDcd0a3Mtbh2Gv74MhCUL",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:52.241819Z",
+     "level": "DEBUG",
+     "thread": "worker-default_16",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug",
+     "taskId": "s",
+     "executionId": "2p5glH5nOxCAZD90PXsz37",
+     "taskRunId": "BDcd0a3Mtbh2Gv74MhCUL",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:52.241954Z",
+     "level": "TRACE",
+     "thread": "worker-default_16",
+     "message": "Captured 0 output file(s)."
+    }
+   ]
+  },
+  "q3_debug_trace": {
+   "flow_yaml": "id: q3_debug_trace\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.core.runner.Process\n    logLevel: TRACE\n    commands:\n      - \"echo before\"\n      - \"echo '##kestra:log:debug##'\"\n      - \"echo dbg-out\"\n      - \"echo dbg-err >&2\"\n      - \"echo '##kestra:log:info##'\"\n      - \"echo after\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:07:56.858715+00:00",
+   "execution_id": "7l2asgxVMpi4G4puCpzuNq",
+   "execution": {
+    "tenantId": "main",
+    "id": "7l2asgxVMpi4G4puCpzuNq",
+    "namespace": "w11",
+    "flowId": "q3_debug_trace",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "7iackGFUaoBZL4QzF1tObE",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:07:56.854731Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:07:56.854731Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:07:56.981741Z"
+          }
+         ],
+         "duration": "PT0.12701S",
+         "startDate": "2026-09-27T07:07:56.854731Z",
+         "endDate": "2026-09-27T07:07:56.981741Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:07:56.715638Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:07:56.735279Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:07:56.854510Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:07:56.981820Z"
+        }
+       ],
+       "duration": "PT0.266182S",
+       "startDate": "2026-09-27T07:07:56.715638Z",
+       "endDate": "2026-09-27T07:07:56.981820Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "7l2asgxVMpi4G4puCpzuNq"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:07:56.713348Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:07:56.735156Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:07:57.124341Z"
+      }
+     ],
+     "duration": "PT0.410993S",
+     "startDate": "2026-09-27T07:07:56.713348Z",
+     "endDate": "2026-09-27T07:07:57.124341Z"
+    },
+    "originalId": "7l2asgxVMpi4G4puCpzuNq",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:07:56.713350Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:08:01.119976+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_trace",
+     "taskId": "s",
+     "executionId": "7l2asgxVMpi4G4puCpzuNq",
+     "taskRunId": "7iackGFUaoBZL4QzF1tObE",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:56.968049Z",
+     "level": "DEBUG",
+     "thread": "worker-default_37",
+     "message": "Starting command with pid 255 [/bin/sh -c set -e\necho before\necho '##kestra:log:debug##'\necho dbg-out\necho dbg-err >&2\necho '##kestra:log:info##'\necho after]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_trace",
+     "taskId": "s",
+     "executionId": "7l2asgxVMpi4G4puCpzuNq",
+     "taskRunId": "7iackGFUaoBZL4QzF1tObE",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:56.978355Z",
+     "level": "INFO",
+     "thread": "virtual-5710",
+     "message": "before"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_trace",
+     "taskId": "s",
+     "executionId": "7l2asgxVMpi4G4puCpzuNq",
+     "taskRunId": "7iackGFUaoBZL4QzF1tObE",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:56.978991Z",
+     "level": "DEBUG",
+     "thread": "virtual-5710",
+     "message": "dbg-out"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_trace",
+     "taskId": "s",
+     "executionId": "7l2asgxVMpi4G4puCpzuNq",
+     "taskRunId": "7iackGFUaoBZL4QzF1tObE",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:56.979292Z",
+     "level": "ERROR",
+     "thread": "virtual-5711",
+     "message": "dbg-err"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_trace",
+     "taskId": "s",
+     "executionId": "7l2asgxVMpi4G4puCpzuNq",
+     "taskRunId": "7iackGFUaoBZL4QzF1tObE",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:56.979902Z",
+     "level": "INFO",
+     "thread": "virtual-5710",
+     "message": "after"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_trace",
+     "taskId": "s",
+     "executionId": "7l2asgxVMpi4G4puCpzuNq",
+     "taskRunId": "7iackGFUaoBZL4QzF1tObE",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:56.981576Z",
+     "level": "DEBUG",
+     "thread": "worker-default_37",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_trace",
+     "taskId": "s",
+     "executionId": "7l2asgxVMpi4G4puCpzuNq",
+     "taskRunId": "7iackGFUaoBZL4QzF1tObE",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:07:56.981704Z",
+     "level": "TRACE",
+     "thread": "worker-default_37",
+     "message": "Captured 0 output file(s)."
+    }
+   ]
+  },
+  "q3_debug_docker": {
+   "flow_yaml": "id: q3_debug_docker\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.scripts.runner.docker.Docker\n      pullPolicy: NEVER\n    containerImage: alpine:3.20\n    logLevel: TRACE\n    commands:\n      - \"echo before\"\n      - \"echo '##kestra:log:debug##'\"\n      - \"echo dbg-out\"\n      - \"echo '##kestra:log:info##'\"\n      - \"echo after\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:08:01.631272+00:00",
+   "execution_id": "2fSBTQ4QxjBgIqM1sYTDDD",
+   "execution": {
+    "tenantId": "main",
+    "id": "2fSBTQ4QxjBgIqM1sYTDDD",
+    "namespace": "w11",
+    "flowId": "q3_debug_docker",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "3HacdLOvgkdjd4osYPbbvf",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:08:01.635794Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:08:01.635795Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:08:06.103369Z"
+          }
+         ],
+         "duration": "PT4.467575S",
+         "startDate": "2026-09-27T07:08:01.635794Z",
+         "endDate": "2026-09-27T07:08:06.103369Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:08:01.437948Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:08:01.439282Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:08:01.635578Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:08:06.103644Z"
+        }
+       ],
+       "duration": "PT4.665696S",
+       "startDate": "2026-09-27T07:08:01.437948Z",
+       "endDate": "2026-09-27T07:08:06.103644Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "2fSBTQ4QxjBgIqM1sYTDDD"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:08:01.416749Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:08:01.439255Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:08:06.338466Z"
+      }
+     ],
+     "duration": "PT4.921717S",
+     "startDate": "2026-09-27T07:08:01.416749Z",
+     "endDate": "2026-09-27T07:08:06.338466Z"
+    },
+    "originalId": "2fSBTQ4QxjBgIqM1sYTDDD",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:08:01.416750Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:08:10.308587+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_docker",
+     "taskId": "s",
+     "executionId": "2fSBTQ4QxjBgIqM1sYTDDD",
+     "taskRunId": "3HacdLOvgkdjd4osYPbbvf",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:02.590109Z",
+     "level": "TRACE",
+     "thread": "worker-default_61",
+     "message": "Container created: 94055e9fb0abcce9a3dae25cb673d7fe4a12636746991ea6b8e43d54f4c15f95"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_docker",
+     "taskId": "s",
+     "executionId": "2fSBTQ4QxjBgIqM1sYTDDD",
+     "taskRunId": "3HacdLOvgkdjd4osYPbbvf",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:02.612440Z",
+     "level": "TRACE",
+     "thread": "worker-default_61",
+     "message": "Volume created: d91fb487d2a3e450da5e3f9cb4e021fb9a2203b8fde6e5d3ce23d0802ac7cd9a"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_docker",
+     "taskId": "s",
+     "executionId": "2fSBTQ4QxjBgIqM1sYTDDD",
+     "taskRunId": "3HacdLOvgkdjd4osYPbbvf",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:04.228657Z",
+     "level": "DEBUG",
+     "thread": "worker-default_61",
+     "message": "Starting command with container id 94055e9fb0abcce9a3dae25cb673d7fe4a12636746991ea6b8e43d54f4c15f95 [/bin/sh -c set -e\necho before\necho '##kestra:log:debug##'\necho dbg-out\necho '##kestra:log:info##'\necho after]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_docker",
+     "taskId": "s",
+     "executionId": "2fSBTQ4QxjBgIqM1sYTDDD",
+     "taskRunId": "3HacdLOvgkdjd4osYPbbvf",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:04.354153Z",
+     "level": "INFO",
+     "thread": "docker-java-stream--913131454",
+     "message": "before"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_docker",
+     "taskId": "s",
+     "executionId": "2fSBTQ4QxjBgIqM1sYTDDD",
+     "taskRunId": "3HacdLOvgkdjd4osYPbbvf",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:04.358005Z",
+     "level": "DEBUG",
+     "thread": "docker-java-stream--913131454",
+     "message": "dbg-out"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_docker",
+     "taskId": "s",
+     "executionId": "2fSBTQ4QxjBgIqM1sYTDDD",
+     "taskRunId": "3HacdLOvgkdjd4osYPbbvf",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:04.361003Z",
+     "level": "INFO",
+     "thread": "docker-java-stream--913131454",
+     "message": "after"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_docker",
+     "taskId": "s",
+     "executionId": "2fSBTQ4QxjBgIqM1sYTDDD",
+     "taskRunId": "3HacdLOvgkdjd4osYPbbvf",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:05.364159Z",
+     "level": "DEBUG",
+     "thread": "worker-default_61",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_docker",
+     "taskId": "s",
+     "executionId": "2fSBTQ4QxjBgIqM1sYTDDD",
+     "taskRunId": "3HacdLOvgkdjd4osYPbbvf",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:06.041884Z",
+     "level": "TRACE",
+     "thread": "worker-default_61",
+     "message": "Container deleted: 94055e9fb0abcce9a3dae25cb673d7fe4a12636746991ea6b8e43d54f4c15f95"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_docker",
+     "taskId": "s",
+     "executionId": "2fSBTQ4QxjBgIqM1sYTDDD",
+     "taskRunId": "3HacdLOvgkdjd4osYPbbvf",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:06.090699Z",
+     "level": "TRACE",
+     "thread": "worker-default_61",
+     "message": "Volume deleted: d91fb487d2a3e450da5e3f9cb4e021fb9a2203b8fde6e5d3ce23d0802ac7cd9a"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q3_debug_docker",
+     "taskId": "s",
+     "executionId": "2fSBTQ4QxjBgIqM1sYTDDD",
+     "taskRunId": "3HacdLOvgkdjd4osYPbbvf",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:06.101512Z",
+     "level": "TRACE",
+     "thread": "worker-default_61",
+     "message": "Captured 0 output file(s)."
+    }
+   ]
+  },
+  "q4_log_fail": {
+   "flow_yaml": "id: q4_log_fail\nnamespace: w11\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hello-log\n  - id: w\n    type: io.kestra.plugin.core.log.Log\n    level: WARN\n    message: [warn-a, warn-b]\n  - id: f\n    type: io.kestra.plugin.core.execution.Fail\n    errorMessage: boom-fail\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:08:11.138316+00:00",
+   "execution_id": "3Tq60zwHoaEj2V3ApvSA64",
+   "execution": {
+    "tenantId": "main",
+    "id": "3Tq60zwHoaEj2V3ApvSA64",
+    "namespace": "w11",
+    "flowId": "q4_log_fail",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "24FNChF7keihIfvHpxrEUe",
+      "taskId": "l",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:08:11.112941Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:08:11.112945Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:08:11.139658Z"
+          }
+         ],
+         "duration": "PT0.026717S",
+         "startDate": "2026-09-27T07:08:11.112941Z",
+         "endDate": "2026-09-27T07:08:11.139658Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:08:10.677249Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:08:10.678872Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:08:11.074829Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:08:11.139710Z"
+        }
+       ],
+       "duration": "PT0.462461S",
+       "startDate": "2026-09-27T07:08:10.677249Z",
+       "endDate": "2026-09-27T07:08:11.139710Z"
+      }
+     },
+     {
+      "id": "s4SNxGBCe8f8dmMx4Txiq",
+      "taskId": "w",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:08:11.619106Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:08:11.619107Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:08:11.638631Z"
+          }
+         ],
+         "duration": "PT0.019525S",
+         "startDate": "2026-09-27T07:08:11.619106Z",
+         "endDate": "2026-09-27T07:08:11.638631Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:08:11.330284Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:08:11.424527Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:08:11.618914Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:08:11.638653Z"
+        }
+       ],
+       "duration": "PT0.308369S",
+       "startDate": "2026-09-27T07:08:11.330284Z",
+       "endDate": "2026-09-27T07:08:11.638653Z"
+      }
+     },
+     {
+      "id": "5gwxLeFZwA3qBOMxIkbBZO",
+      "taskId": "f",
+      "attempts": [
+       {
+        "state": {
+         "current": "FAILED",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:08:11.869003Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:08:11.869006Z"
+          },
+          {
+           "state": "FAILED",
+           "date": "2026-09-27T07:08:11.946436Z"
+          }
+         ],
+         "duration": "PT0.077433S",
+         "startDate": "2026-09-27T07:08:11.869003Z",
+         "endDate": "2026-09-27T07:08:11.946436Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "FAILED",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:08:11.762305Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:08:11.763234Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:08:11.868666Z"
+        },
+        {
+         "state": "FAILED",
+         "date": "2026-09-27T07:08:11.946471Z"
+        }
+       ],
+       "duration": "PT0.184166S",
+       "startDate": "2026-09-27T07:08:11.762305Z",
+       "endDate": "2026-09-27T07:08:11.946471Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "3Tq60zwHoaEj2V3ApvSA64"
+     }
+    ],
+    "state": {
+     "current": "FAILED",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:08:10.674704Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:08:10.678842Z"
+      },
+      {
+       "state": "FAILED",
+       "date": "2026-09-27T07:08:11.988418Z"
+      }
+     ],
+     "duration": "PT1.313714S",
+     "startDate": "2026-09-27T07:08:10.674704Z",
+     "endDate": "2026-09-27T07:08:11.988418Z"
+    },
+    "originalId": "3Tq60zwHoaEj2V3ApvSA64",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:08:10.674705Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:08:15.490474+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q4_log_fail",
+     "taskId": "l",
+     "executionId": "3Tq60zwHoaEj2V3ApvSA64",
+     "taskRunId": "24FNChF7keihIfvHpxrEUe",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:11.139517Z",
+     "level": "INFO",
+     "thread": "worker-default_27",
+     "message": "hello-log"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q4_log_fail",
+     "taskId": "w",
+     "executionId": "3Tq60zwHoaEj2V3ApvSA64",
+     "taskRunId": "s4SNxGBCe8f8dmMx4Txiq",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:11.629512Z",
+     "level": "WARN",
+     "thread": "worker-default_30",
+     "message": "warn-a"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q4_log_fail",
+     "taskId": "w",
+     "executionId": "3Tq60zwHoaEj2V3ApvSA64",
+     "taskRunId": "s4SNxGBCe8f8dmMx4Txiq",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:11.638560Z",
+     "level": "WARN",
+     "thread": "worker-default_30",
+     "message": "warn-b"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q4_log_fail",
+     "taskId": "f",
+     "executionId": "3Tq60zwHoaEj2V3ApvSA64",
+     "taskRunId": "5gwxLeFZwA3qBOMxIkbBZO",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:11.916090Z",
+     "level": "ERROR",
+     "thread": "worker-default_36",
+     "message": "boom-fail"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q4_log_fail",
+     "taskId": "f",
+     "executionId": "3Tq60zwHoaEj2V3ApvSA64",
+     "taskRunId": "5gwxLeFZwA3qBOMxIkbBZO",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:11.916090Z",
+     "level": "DEBUG",
+     "thread": "worker-default_36",
+     "message": "java.lang.Exception: boom-fail\n\tat io.kestra.plugin.core.execution.Fail.run(Fail.java:140)\n\tat io.kestra.plugin.core.execution.Fail.run(Fail.java:20)\n\tat io.kestra.worker.processors.internals.WorkerTaskCallable.lambda$doCall$0(WorkerTaskCallable.java:63)\n\tat io.kestra.worker.processors.internals.AbstractWorkerCallable.callWithTimeout(AbstractWorkerCallable.java:161)\n\tat io.kestra.worker.processors.internals.WorkerTaskCallable.doCall(WorkerTaskCallable.java:61)\n\tat io.kestra.worker.processors.internals.AbstractWorkerCallable.call(AbstractWorkerCallable.java:77)\n\tat io.kestra.worker.WorkerSecurityService.callInSecurityContext(WorkerSecurityService.java:12)\n\tat io.kestra.worker.processors.AbstractWorkerJobProcessor.lambda$callJob$0(AbstractWorkerJobProcessor.java:91)\n\tat io.kestra.core.trace.NoopTracer.inCurrentContext(NoopTracer.java:16)\n\tat io.kestra.worker.processors.AbstractWorkerJobProcessor.callJob(AbstractWorkerJobProcessor.java:85)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.runAttempt(WorkerTaskProcessor.java:442)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.runTask(WorkerTaskProcessor.java:260)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.runTask(WorkerTaskProcessor.java:181)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.doProcess(WorkerTaskProcessor.java:103)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.doProcess(WorkerTaskProcessor.java:57)\n\tat io.kestra.worker.processors.AbstractWorkerJobProcessor.process(AbstractWorkerJobProcessor.java:63)\n\tat io.kestra.worker.WorkerJobExecutor$WorkerJobConsumer.lambda$doOnLoop$0(WorkerJobExecutor.java:316)\n\tat io.micrometer.core.instrument.internal.TimedRunnable.run(TimedRunnable.java:49)\n\tat java.base/java.util.concurrent.Executors$RunnableAdapter.call(Unknown Source)\n\tat java.base/java.util.concurrent.FutureTask.run(Unknown Source)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(Unknown Source)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(Unknown Source)\n\tat java.base/java.lang.Thread.run(Unknown Source)\n"
+    }
+   ]
+  },
+  "q4_log_only": {
+   "flow_yaml": "id: q4_log_only\nnamespace: w11\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hello-log\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:08:15.733892+00:00",
+   "execution_id": "286xv1m2CqDb0VtAwSKQJM",
+   "execution": {
+    "tenantId": "main",
+    "id": "286xv1m2CqDb0VtAwSKQJM",
+    "namespace": "w11",
+    "flowId": "q4_log_only",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "2GXFACh4QvJ8CpRDD1RoLY",
+      "taskId": "l",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:08:15.712195Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:08:15.712197Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:08:15.712797Z"
+          }
+         ],
+         "duration": "PT0.000602S",
+         "startDate": "2026-09-27T07:08:15.712195Z",
+         "endDate": "2026-09-27T07:08:15.712797Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:08:15.616186Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:08:15.617807Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:08:15.711969Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:08:15.712820Z"
+        }
+       ],
+       "duration": "PT0.096634S",
+       "startDate": "2026-09-27T07:08:15.616186Z",
+       "endDate": "2026-09-27T07:08:15.712820Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "286xv1m2CqDb0VtAwSKQJM"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:08:15.613823Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:08:15.617771Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:08:15.791209Z"
+      }
+     ],
+     "duration": "PT0.177386S",
+     "startDate": "2026-09-27T07:08:15.613823Z",
+     "endDate": "2026-09-27T07:08:15.791209Z"
+    },
+    "originalId": "286xv1m2CqDb0VtAwSKQJM",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:08:15.613825Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:08:20.027180+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q4_log_only",
+     "taskId": "l",
+     "executionId": "286xv1m2CqDb0VtAwSKQJM",
+     "taskRunId": "2GXFACh4QvJ8CpRDD1RoLY",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:15.712688Z",
+     "level": "INFO",
+     "thread": "worker-default_57",
+     "message": "hello-log"
+    }
+   ]
+  },
+  "q5_retry": {
+   "flow_yaml": "id: q5_retry\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.core.runner.Process\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 2\n    commands:\n      - \"f=/tmp/w11-retry-{{ execution.id }}\"\n      - \"echo attempt-line-{{ taskrun.attemptsCount }}\"\n      - \"if [ ! -f $f ]; then touch $f; echo first-attempt-fails >&2; exit 1; fi\"\n      - \"echo second-attempt-ok\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:08:20.495581+00:00",
+   "execution_id": "KxgiRuUblA5lc1CcjMCl0",
+   "execution": {
+    "tenantId": "main",
+    "id": "KxgiRuUblA5lc1CcjMCl0",
+    "namespace": "w11",
+    "flowId": "q5_retry",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "71OepRhFyiIvtvSYsgHymw",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "FAILED",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:08:20.511150Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:08:20.511153Z"
+          },
+          {
+           "state": "FAILED",
+           "date": "2026-09-27T07:08:20.656471Z"
+          }
+         ],
+         "duration": "PT0.145321S",
+         "startDate": "2026-09-27T07:08:20.511150Z",
+         "endDate": "2026-09-27T07:08:20.656471Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       },
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:08:22.622438Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:08:22.622439Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:08:22.667130Z"
+          }
+         ],
+         "duration": "PT0.044692S",
+         "startDate": "2026-09-27T07:08:22.622438Z",
+         "endDate": "2026-09-27T07:08:22.667130Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:08:20.391414Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:08:20.415012Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:08:20.509600Z"
+        },
+        {
+         "state": "FAILED",
+         "date": "2026-09-27T07:08:20.656579Z"
+        },
+        {
+         "state": "RETRYING",
+         "date": "2026-09-27T07:08:20.809525Z"
+        },
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:08:22.434667Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:08:22.587235Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:08:22.622221Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:08:22.667298Z"
+        }
+       ],
+       "duration": "PT2.275884S",
+       "startDate": "2026-09-27T07:08:20.391414Z",
+       "endDate": "2026-09-27T07:08:22.667298Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "KxgiRuUblA5lc1CcjMCl0"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:08:20.385100Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:08:20.414966Z"
+      },
+      {
+       "state": "FAILED",
+       "date": "2026-09-27T07:08:20.806945Z"
+      },
+      {
+       "state": "RETRYING",
+       "date": "2026-09-27T07:08:20.809547Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:08:22.434689Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:08:22.790341Z"
+      }
+     ],
+     "duration": "PT2.405241S",
+     "startDate": "2026-09-27T07:08:20.385100Z",
+     "endDate": "2026-09-27T07:08:22.790341Z"
+    },
+    "originalId": "KxgiRuUblA5lc1CcjMCl0",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:08:20.385101Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:08:26.887630+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q5_retry",
+     "taskId": "s",
+     "executionId": "KxgiRuUblA5lc1CcjMCl0",
+     "taskRunId": "71OepRhFyiIvtvSYsgHymw",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:20.617434Z",
+     "level": "DEBUG",
+     "thread": "worker-default_19",
+     "message": "Starting command with pid 260 [/bin/sh -c set -e\nf=/tmp/w11-retry-KxgiRuUblA5lc1CcjMCl0\necho attempt-line-0\nif [ ! -f $f ]; then touch $f; echo first-attempt-fails >&2; exit 1; fi\necho second-attempt-ok]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q5_retry",
+     "taskId": "s",
+     "executionId": "KxgiRuUblA5lc1CcjMCl0",
+     "taskRunId": "71OepRhFyiIvtvSYsgHymw",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:20.622055Z",
+     "level": "INFO",
+     "thread": "virtual-6477",
+     "message": "attempt-line-0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q5_retry",
+     "taskId": "s",
+     "executionId": "KxgiRuUblA5lc1CcjMCl0",
+     "taskRunId": "71OepRhFyiIvtvSYsgHymw",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:20.646354Z",
+     "level": "ERROR",
+     "thread": "virtual-6478",
+     "message": "first-attempt-fails"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q5_retry",
+     "taskId": "s",
+     "executionId": "KxgiRuUblA5lc1CcjMCl0",
+     "taskRunId": "71OepRhFyiIvtvSYsgHymw",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:20.650491Z",
+     "level": "TRACE",
+     "thread": "worker-default_19",
+     "message": "Captured 0 output file(s)."
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q5_retry",
+     "taskId": "s",
+     "executionId": "KxgiRuUblA5lc1CcjMCl0",
+     "taskRunId": "71OepRhFyiIvtvSYsgHymw",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:20.651348Z",
+     "level": "ERROR",
+     "thread": "worker-default_19",
+     "message": "io.kestra.core.models.tasks.runners.TaskException: Command failed with exit code 1"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q5_retry",
+     "taskId": "s",
+     "executionId": "KxgiRuUblA5lc1CcjMCl0",
+     "taskRunId": "71OepRhFyiIvtvSYsgHymw",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:20.651348Z",
+     "level": "DEBUG",
+     "thread": "worker-default_19",
+     "message": "io.kestra.core.models.tasks.RunnableTaskException: io.kestra.core.models.tasks.runners.TaskException: Command failed with exit code 1\n\tat io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper.run(CommandsWrapper.java:259)\n\tat io.kestra.plugin.scripts.shell.Commands.run(Commands.java:333)\n\tat io.kestra.plugin.scripts.shell.Commands.run(Commands.java:22)\n\tat io.kestra.worker.processors.internals.WorkerTaskCallable.lambda$doCall$0(WorkerTaskCallable.java:63)\n\tat io.kestra.worker.processors.internals.AbstractWorkerCallable.callWithTimeout(AbstractWorkerCallable.java:161)\n\tat io.kestra.worker.processors.internals.WorkerTaskCallable.doCall(WorkerTaskCallable.java:61)\n\tat io.kestra.worker.processors.internals.AbstractWorkerCallable.call(AbstractWorkerCallable.java:77)\n\tat io.kestra.worker.WorkerSecurityService.callInSecurityContext(WorkerSecurityService.java:12)\n\tat io.kestra.worker.processors.AbstractWorkerJobProcessor.lambda$callJob$0(AbstractWorkerJobProcessor.java:91)\n\tat io.kestra.core.trace.NoopTracer.inCurrentContext(NoopTracer.java:16)\n\tat io.kestra.worker.processors.AbstractWorkerJobProcessor.callJob(AbstractWorkerJobProcessor.java:85)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.runAttempt(WorkerTaskProcessor.java:442)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.runTask(WorkerTaskProcessor.java:260)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.runTask(WorkerTaskProcessor.java:181)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.doProcess(WorkerTaskProcessor.java:103)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.doProcess(WorkerTaskProcessor.java:57)\n\tat io.kestra.worker.processors.AbstractWorkerJobProcessor.process(AbstractWorkerJobProcessor.java:63)\n\tat io.kestra.worker.WorkerJobExecutor$WorkerJobConsumer.lambda$doOnLoop$0(WorkerJobExecutor.java:316)\n\tat io.micrometer.core.instrument.internal.TimedRunnable.run(TimedRunnable.java:49)\n\tat java.base/java.util.concurrent.Executors$RunnableAdapter.call(Unknown Source)\n\tat java.base/java.util.concurrent.FutureTask.run(Unknown Source)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(Unknown Source)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(Unknown Source)\n\tat java.base/java.lang.Thread.run(Unknown Source)\nCaused by: io.kestra.core.models.tasks.runners.TaskException: Command failed with exit code 1\n\tat io.kestra.plugin.core.runner.Process.run(Process.java:154)\n\tat io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper.run(CommandsWrapper.java:238)\n\t... 23 more\n"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q5_retry",
+     "taskId": "s",
+     "executionId": "KxgiRuUblA5lc1CcjMCl0",
+     "taskRunId": "71OepRhFyiIvtvSYsgHymw",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:20.651348Z",
+     "level": "ERROR",
+     "thread": "worker-default_19",
+     "message": "Command failed with exit code 1"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q5_retry",
+     "taskId": "s",
+     "executionId": "KxgiRuUblA5lc1CcjMCl0",
+     "taskRunId": "71OepRhFyiIvtvSYsgHymw",
+     "attemptNumber": 1,
+     "timestamp": "2026-09-27T07:08:22.661023Z",
+     "level": "DEBUG",
+     "thread": "worker-default_32",
+     "message": "Starting command with pid 262 [/bin/sh -c set -e\nf=/tmp/w11-retry-KxgiRuUblA5lc1CcjMCl0\necho attempt-line-1\nif [ ! -f $f ]; then touch $f; echo first-attempt-fails >&2; exit 1; fi\necho second-attempt-ok]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q5_retry",
+     "taskId": "s",
+     "executionId": "KxgiRuUblA5lc1CcjMCl0",
+     "taskRunId": "71OepRhFyiIvtvSYsgHymw",
+     "attemptNumber": 1,
+     "timestamp": "2026-09-27T07:08:22.663936Z",
+     "level": "INFO",
+     "thread": "virtual-6551",
+     "message": "attempt-line-1"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q5_retry",
+     "taskId": "s",
+     "executionId": "KxgiRuUblA5lc1CcjMCl0",
+     "taskRunId": "71OepRhFyiIvtvSYsgHymw",
+     "attemptNumber": 1,
+     "timestamp": "2026-09-27T07:08:22.664287Z",
+     "level": "INFO",
+     "thread": "virtual-6551",
+     "message": "second-attempt-ok"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q5_retry",
+     "taskId": "s",
+     "executionId": "KxgiRuUblA5lc1CcjMCl0",
+     "taskRunId": "71OepRhFyiIvtvSYsgHymw",
+     "attemptNumber": 1,
+     "timestamp": "2026-09-27T07:08:22.666574Z",
+     "level": "DEBUG",
+     "thread": "worker-default_32",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q5_retry",
+     "taskId": "s",
+     "executionId": "KxgiRuUblA5lc1CcjMCl0",
+     "taskRunId": "71OepRhFyiIvtvSYsgHymw",
+     "attemptNumber": 1,
+     "timestamp": "2026-09-27T07:08:22.667055Z",
+     "level": "TRACE",
+     "thread": "worker-default_32",
+     "message": "Captured 0 output file(s)."
+    }
+   ]
+  },
+  "q6_long": {
+   "flow_yaml": "id: q6_long\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.core.runner.Process\n    commands:\n      - \"head -c 100000 /dev/zero | tr '\\\\0' 'x'; echo\"\n      - \"echo short-after\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:08:27.711580+00:00",
+   "execution_id": "4rztR4cBMQHzFDbC8OhxuC",
+   "execution": {
+    "tenantId": "main",
+    "id": "4rztR4cBMQHzFDbC8OhxuC",
+    "namespace": "w11",
+    "flowId": "q6_long",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "242xdJHPWg26MmMxpdZEuX",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:08:27.648108Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:08:27.648109Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:08:27.962606Z"
+          }
+         ],
+         "duration": "PT0.314498S",
+         "startDate": "2026-09-27T07:08:27.648108Z",
+         "endDate": "2026-09-27T07:08:27.962606Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:08:27.440080Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:08:27.441233Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:08:27.647928Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:08:27.962694Z"
+        }
+       ],
+       "duration": "PT0.522614S",
+       "startDate": "2026-09-27T07:08:27.440080Z",
+       "endDate": "2026-09-27T07:08:27.962694Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "4rztR4cBMQHzFDbC8OhxuC"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:08:27.436734Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:08:27.441211Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:08:28.485225Z"
+      }
+     ],
+     "duration": "PT1.048491S",
+     "startDate": "2026-09-27T07:08:27.436734Z",
+     "endDate": "2026-09-27T07:08:28.485225Z"
+    },
+    "originalId": "4rztR4cBMQHzFDbC8OhxuC",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:08:27.436736Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:08:32.095542+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q6_long",
+     "taskId": "s",
+     "executionId": "4rztR4cBMQHzFDbC8OhxuC",
+     "taskRunId": "242xdJHPWg26MmMxpdZEuX",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:27.809517Z",
+     "level": "DEBUG",
+     "thread": "worker-default_57",
+     "message": "Starting command with pid 263 [/bin/sh -c set -e\nhead -c 100000 /dev/zero | tr '\\0' 'x'; echo\necho short-after]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long",
+     "taskId": "s",
+     "executionId": "4rztR4cBMQHzFDbC8OhxuC",
+     "taskRunId": "242xdJHPWg26MmMxpdZEuX",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:27.897889Z",
+     "level": "INFO",
+     "thread": "virtual-6732",
+     "message": null,
+     "message_elided": {
+      "chars": 15360,
+      "all_chars_are": "x",
+      "sha256": "448e72d5a77b0f93e7f5d3d2527a3a4df984c0cf2064829e971d168bcec2c6cd",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long",
+     "taskId": "s",
+     "executionId": "4rztR4cBMQHzFDbC8OhxuC",
+     "taskRunId": "242xdJHPWg26MmMxpdZEuX",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:27.897889Z",
+     "level": "INFO",
+     "thread": "virtual-6732",
+     "message": null,
+     "message_elided": {
+      "chars": 15360,
+      "all_chars_are": "x",
+      "sha256": "448e72d5a77b0f93e7f5d3d2527a3a4df984c0cf2064829e971d168bcec2c6cd",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long",
+     "taskId": "s",
+     "executionId": "4rztR4cBMQHzFDbC8OhxuC",
+     "taskRunId": "242xdJHPWg26MmMxpdZEuX",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:27.897889Z",
+     "level": "INFO",
+     "thread": "virtual-6732",
+     "message": null,
+     "message_elided": {
+      "chars": 15360,
+      "all_chars_are": "x",
+      "sha256": "448e72d5a77b0f93e7f5d3d2527a3a4df984c0cf2064829e971d168bcec2c6cd",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long",
+     "taskId": "s",
+     "executionId": "4rztR4cBMQHzFDbC8OhxuC",
+     "taskRunId": "242xdJHPWg26MmMxpdZEuX",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:27.897889Z",
+     "level": "INFO",
+     "thread": "virtual-6732",
+     "message": null,
+     "message_elided": {
+      "chars": 15360,
+      "all_chars_are": "x",
+      "sha256": "448e72d5a77b0f93e7f5d3d2527a3a4df984c0cf2064829e971d168bcec2c6cd",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long",
+     "taskId": "s",
+     "executionId": "4rztR4cBMQHzFDbC8OhxuC",
+     "taskRunId": "242xdJHPWg26MmMxpdZEuX",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:27.897889Z",
+     "level": "INFO",
+     "thread": "virtual-6732",
+     "message": null,
+     "message_elided": {
+      "chars": 15360,
+      "all_chars_are": "x",
+      "sha256": "448e72d5a77b0f93e7f5d3d2527a3a4df984c0cf2064829e971d168bcec2c6cd",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long",
+     "taskId": "s",
+     "executionId": "4rztR4cBMQHzFDbC8OhxuC",
+     "taskRunId": "242xdJHPWg26MmMxpdZEuX",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:27.897889Z",
+     "level": "INFO",
+     "thread": "virtual-6732",
+     "message": null,
+     "message_elided": {
+      "chars": 7840,
+      "all_chars_are": "x",
+      "sha256": "38a561ac9e8793b81386a6e904959acf7c92c7c90cdf2371daa70a25575adcb6",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long",
+     "taskId": "s",
+     "executionId": "4rztR4cBMQHzFDbC8OhxuC",
+     "taskRunId": "242xdJHPWg26MmMxpdZEuX",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:27.897889Z",
+     "level": "INFO",
+     "thread": "virtual-6732",
+     "message": null,
+     "message_elided": {
+      "chars": 15360,
+      "all_chars_are": "x",
+      "sha256": "448e72d5a77b0f93e7f5d3d2527a3a4df984c0cf2064829e971d168bcec2c6cd",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long",
+     "taskId": "s",
+     "executionId": "4rztR4cBMQHzFDbC8OhxuC",
+     "taskRunId": "242xdJHPWg26MmMxpdZEuX",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:27.951751Z",
+     "level": "INFO",
+     "thread": "virtual-6732",
+     "message": "short-after"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long",
+     "taskId": "s",
+     "executionId": "4rztR4cBMQHzFDbC8OhxuC",
+     "taskRunId": "242xdJHPWg26MmMxpdZEuX",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:27.962415Z",
+     "level": "DEBUG",
+     "thread": "worker-default_57",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long",
+     "taskId": "s",
+     "executionId": "4rztR4cBMQHzFDbC8OhxuC",
+     "taskRunId": "242xdJHPWg26MmMxpdZEuX",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:27.962565Z",
+     "level": "TRACE",
+     "thread": "worker-default_57",
+     "message": "Captured 0 output file(s)."
+    }
+   ]
+  },
+  "q6_long_docker": {
+   "flow_yaml": "id: q6_long_docker\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.scripts.runner.docker.Docker\n      pullPolicy: NEVER\n    containerImage: alpine:3.20\n    commands:\n      - \"head -c 100000 /dev/zero | tr '\\\\0' 'x'; echo\"\n      - \"echo short-after\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:08:32.451276+00:00",
+   "execution_id": "1mwRvpIEzkeDNfM4ikYvRT",
+   "execution": {
+    "tenantId": "main",
+    "id": "1mwRvpIEzkeDNfM4ikYvRT",
+    "namespace": "w11",
+    "flowId": "q6_long_docker",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "4rML101ZqoKTRi7PXKULpb",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:08:32.468745Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:08:32.468746Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:08:46.887414Z"
+          }
+         ],
+         "duration": "PT14.418669S",
+         "startDate": "2026-09-27T07:08:32.468745Z",
+         "endDate": "2026-09-27T07:08:46.887414Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:08:32.384861Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:08:32.388274Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:08:32.468530Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:08:46.887774Z"
+        }
+       ],
+       "duration": "PT14.502913S",
+       "startDate": "2026-09-27T07:08:32.384861Z",
+       "endDate": "2026-09-27T07:08:46.887774Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "1mwRvpIEzkeDNfM4ikYvRT"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:08:32.381935Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:08:32.388233Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:08:48.104052Z"
+      }
+     ],
+     "duration": "PT15.722117S",
+     "startDate": "2026-09-27T07:08:32.381935Z",
+     "endDate": "2026-09-27T07:08:48.104052Z"
+    },
+    "originalId": "1mwRvpIEzkeDNfM4ikYvRT",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:08:32.381936Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:08:51.891992+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:33.030407Z",
+     "level": "TRACE",
+     "thread": "worker-default_14",
+     "message": "Container created: c658f474f01ec085ce00629b5b28db56aff62ccc9d1e25e9cecdf0129ac554ae"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:33.216291Z",
+     "level": "TRACE",
+     "thread": "worker-default_14",
+     "message": "Volume created: 7a8aaff18a2cdcc07ffd9a5768b3a2b193c059f001ada5b36dccbc7b013a97de"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:35.940755Z",
+     "level": "DEBUG",
+     "thread": "worker-default_14",
+     "message": "Starting command with container id c658f474f01ec085ce00629b5b28db56aff62ccc9d1e25e9cecdf0129ac554ae [/bin/sh -c set -e\nhead -c 100000 /dev/zero | tr '\\0' 'x'; echo\necho short-after]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:45.661800Z",
+     "level": "INFO",
+     "thread": "docker-java-stream-93765530",
+     "message": null,
+     "message_elided": {
+      "chars": 15360,
+      "all_chars_are": "x",
+      "sha256": "448e72d5a77b0f93e7f5d3d2527a3a4df984c0cf2064829e971d168bcec2c6cd",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:45.661800Z",
+     "level": "INFO",
+     "thread": "docker-java-stream-93765530",
+     "message": null,
+     "message_elided": {
+      "chars": 15360,
+      "all_chars_are": "x",
+      "sha256": "448e72d5a77b0f93e7f5d3d2527a3a4df984c0cf2064829e971d168bcec2c6cd",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:45.661800Z",
+     "level": "INFO",
+     "thread": "docker-java-stream-93765530",
+     "message": null,
+     "message_elided": {
+      "chars": 15360,
+      "all_chars_are": "x",
+      "sha256": "448e72d5a77b0f93e7f5d3d2527a3a4df984c0cf2064829e971d168bcec2c6cd",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:45.661800Z",
+     "level": "INFO",
+     "thread": "docker-java-stream-93765530",
+     "message": null,
+     "message_elided": {
+      "chars": 7840,
+      "all_chars_are": "x",
+      "sha256": "38a561ac9e8793b81386a6e904959acf7c92c7c90cdf2371daa70a25575adcb6",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:45.661800Z",
+     "level": "INFO",
+     "thread": "docker-java-stream-93765530",
+     "message": null,
+     "message_elided": {
+      "chars": 15360,
+      "all_chars_are": "x",
+      "sha256": "448e72d5a77b0f93e7f5d3d2527a3a4df984c0cf2064829e971d168bcec2c6cd",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:45.661800Z",
+     "level": "INFO",
+     "thread": "docker-java-stream-93765530",
+     "message": null,
+     "message_elided": {
+      "chars": 15360,
+      "all_chars_are": "x",
+      "sha256": "448e72d5a77b0f93e7f5d3d2527a3a4df984c0cf2064829e971d168bcec2c6cd",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:45.661800Z",
+     "level": "INFO",
+     "thread": "docker-java-stream-93765530",
+     "message": null,
+     "message_elided": {
+      "chars": 15360,
+      "all_chars_are": "x",
+      "sha256": "448e72d5a77b0f93e7f5d3d2527a3a4df984c0cf2064829e971d168bcec2c6cd",
+      "why": "verbatim would add 200 KB of 'x'; length and content are what the finding needs"
+     }
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:45.666311Z",
+     "level": "INFO",
+     "thread": "docker-java-stream-93765530",
+     "message": "short-after"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:45.729559Z",
+     "level": "DEBUG",
+     "thread": "worker-default_14",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:46.681521Z",
+     "level": "TRACE",
+     "thread": "worker-default_14",
+     "message": "Container deleted: c658f474f01ec085ce00629b5b28db56aff62ccc9d1e25e9cecdf0129ac554ae"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:46.863165Z",
+     "level": "TRACE",
+     "thread": "worker-default_14",
+     "message": "Volume deleted: 7a8aaff18a2cdcc07ffd9a5768b3a2b193c059f001ada5b36dccbc7b013a97de"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q6_long_docker",
+     "taskId": "s",
+     "executionId": "1mwRvpIEzkeDNfM4ikYvRT",
+     "taskRunId": "4rML101ZqoKTRi7PXKULpb",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:08:46.884766Z",
+     "level": "TRACE",
+     "thread": "worker-default_14",
+     "message": "Captured 0 output file(s)."
+    }
+   ]
+  },
+  "q1_proc_warn_true": {
+   "flow_yaml": "id: q1_proc_warn_true\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.core.runner.Process\n    warningOnStdErr: true\n    commands:\n      - \"echo out-line\"\n      - \"echo err-line >&2\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:09:37.795649+00:00",
+   "execution_id": "3w79MUljdlQQKEa7yuH9ov",
+   "execution": {
+    "tenantId": "main",
+    "id": "3w79MUljdlQQKEa7yuH9ov",
+    "namespace": "w11",
+    "flowId": "q1_proc_warn_true",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "c4BKIpIebgrPz09LpPbEY",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:09:37.567712Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:09:37.567713Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:09:37.632093Z"
+          }
+         ],
+         "duration": "PT0.064381S",
+         "startDate": "2026-09-27T07:09:37.567712Z",
+         "endDate": "2026-09-27T07:09:37.632093Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:09:37.433551Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:09:37.440115Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:09:37.566988Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:09:37.632281Z"
+        }
+       ],
+       "duration": "PT0.19873S",
+       "startDate": "2026-09-27T07:09:37.433551Z",
+       "endDate": "2026-09-27T07:09:37.632281Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "3w79MUljdlQQKEa7yuH9ov"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:09:37.396698Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:09:37.440085Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:09:38.056042Z"
+      }
+     ],
+     "duration": "PT0.659344S",
+     "startDate": "2026-09-27T07:09:37.396698Z",
+     "endDate": "2026-09-27T07:09:38.056042Z"
+    },
+    "originalId": "3w79MUljdlQQKEa7yuH9ov",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:09:37.396699Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:09:41.928356+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc_warn_true",
+     "taskId": "s",
+     "executionId": "3w79MUljdlQQKEa7yuH9ov",
+     "taskRunId": "c4BKIpIebgrPz09LpPbEY",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:37.621731Z",
+     "level": "DEBUG",
+     "thread": "worker-default_58",
+     "message": "Starting command with pid 281 [/bin/sh -c set -e\necho out-line\necho err-line >&2]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc_warn_true",
+     "taskId": "s",
+     "executionId": "3w79MUljdlQQKEa7yuH9ov",
+     "taskRunId": "c4BKIpIebgrPz09LpPbEY",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:37.626834Z",
+     "level": "INFO",
+     "thread": "virtual-8862",
+     "message": "out-line"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc_warn_true",
+     "taskId": "s",
+     "executionId": "3w79MUljdlQQKEa7yuH9ov",
+     "taskRunId": "c4BKIpIebgrPz09LpPbEY",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:37.627479Z",
+     "level": "ERROR",
+     "thread": "virtual-8863",
+     "message": "err-line"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc_warn_true",
+     "taskId": "s",
+     "executionId": "3w79MUljdlQQKEa7yuH9ov",
+     "taskRunId": "c4BKIpIebgrPz09LpPbEY",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:37.630792Z",
+     "level": "DEBUG",
+     "thread": "worker-default_58",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q1_proc_warn_true",
+     "taskId": "s",
+     "executionId": "3w79MUljdlQQKEa7yuH9ov",
+     "taskRunId": "c4BKIpIebgrPz09LpPbEY",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:37.630954Z",
+     "level": "TRACE",
+     "thread": "worker-default_58",
+     "message": "Captured 0 output file(s)."
+    }
+   ]
+  },
+  "q2_marker_read": {
+   "flow_yaml": "id: q2_marker_read\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.core.runner.Process\n    commands:\n      - \"echo '::{\\\"outputs\\\":{\\\"k\\\":\\\"v\\\"}}::'\"\n      - \"echo '::{\\\"outputs\\\":{\\\"k2\\\":\\\"v2\\\"}}::' >&2\"\n  - id: r\n    type: io.kestra.plugin.core.log.Log\n    message: \"k={{ outputs.s.vars.k }} k2={{ outputs.s.vars.k2 }}\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:09:42.303548+00:00",
+   "execution_id": "dp1aSnt9EQwtebZ585d0l",
+   "execution": {
+    "tenantId": "main",
+    "id": "dp1aSnt9EQwtebZ585d0l",
+    "namespace": "w11",
+    "flowId": "q2_marker_read",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "5Q6H53jzGdcbxDwaSVH79D",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:09:42.441119Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:09:42.441120Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:09:42.466819Z"
+          }
+         ],
+         "duration": "PT0.0257S",
+         "startDate": "2026-09-27T07:09:42.441119Z",
+         "endDate": "2026-09-27T07:09:42.466819Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:09:42.087235Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:09:42.088604Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:09:42.440939Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:09:42.466951Z"
+        }
+       ],
+       "duration": "PT0.379716S",
+       "startDate": "2026-09-27T07:09:42.087235Z",
+       "endDate": "2026-09-27T07:09:42.466951Z"
+      }
+     },
+     {
+      "id": "7PVoibXm71FGKnFojMbGJV",
+      "taskId": "r",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:09:42.831414Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:09:42.831415Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:09:42.832750Z"
+          }
+         ],
+         "duration": "PT0.001336S",
+         "startDate": "2026-09-27T07:09:42.831414Z",
+         "endDate": "2026-09-27T07:09:42.832750Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:09:42.705526Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:09:42.710744Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:09:42.831221Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:09:42.832793Z"
+        }
+       ],
+       "duration": "PT0.127267S",
+       "startDate": "2026-09-27T07:09:42.705526Z",
+       "endDate": "2026-09-27T07:09:42.832793Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "dp1aSnt9EQwtebZ585d0l"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:09:42.084751Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:09:42.088568Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:09:42.950674Z"
+      }
+     ],
+     "duration": "PT0.865923S",
+     "startDate": "2026-09-27T07:09:42.084751Z",
+     "endDate": "2026-09-27T07:09:42.950674Z"
+    },
+    "originalId": "dp1aSnt9EQwtebZ585d0l",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:09:42.084752Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:09:46.550668+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_read",
+     "taskId": "s",
+     "executionId": "dp1aSnt9EQwtebZ585d0l",
+     "taskRunId": "5Q6H53jzGdcbxDwaSVH79D",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:42.456343Z",
+     "level": "DEBUG",
+     "thread": "worker-default_15",
+     "message": "Starting command with pid 285 [/bin/sh -c set -e\necho '::{\"outputs\":{\"k\":\"v\"}}::'\necho '::{\"outputs\":{\"k2\":\"v2\"}}::' >&2]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_read",
+     "taskId": "s",
+     "executionId": "dp1aSnt9EQwtebZ585d0l",
+     "taskRunId": "5Q6H53jzGdcbxDwaSVH79D",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:42.465236Z",
+     "level": "DEBUG",
+     "thread": "worker-default_15",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_read",
+     "taskId": "s",
+     "executionId": "dp1aSnt9EQwtebZ585d0l",
+     "taskRunId": "5Q6H53jzGdcbxDwaSVH79D",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:42.466692Z",
+     "level": "TRACE",
+     "thread": "worker-default_15",
+     "message": "Captured 0 output file(s)."
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_read",
+     "taskId": "r",
+     "executionId": "dp1aSnt9EQwtebZ585d0l",
+     "taskRunId": "7PVoibXm71FGKnFojMbGJV",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:42.832564Z",
+     "level": "INFO",
+     "thread": "worker-default_22",
+     "message": "k=v k2=v2"
+    }
+   ]
+  },
+  "q2_marker_read_docker": {
+   "flow_yaml": "id: q2_marker_read_docker\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.scripts.runner.docker.Docker\n      pullPolicy: NEVER\n    containerImage: alpine:3.20\n    commands:\n      - \"echo '::{\\\"outputs\\\":{\\\"k\\\":\\\"v\\\"}}::'\"\n  - id: r\n    type: io.kestra.plugin.core.log.Log\n    message: \"k={{ outputs.s.vars.k }}\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:09:47.134894+00:00",
+   "execution_id": "2oBzf0UkhxlUbxxoVCeWIQ",
+   "execution": {
+    "tenantId": "main",
+    "id": "2oBzf0UkhxlUbxxoVCeWIQ",
+    "namespace": "w11",
+    "flowId": "q2_marker_read_docker",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "4LA9zDMD5ihPXYz24rCYv9",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:09:47.033568Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:09:47.033569Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:09:52.658588Z"
+          }
+         ],
+         "duration": "PT5.62502S",
+         "startDate": "2026-09-27T07:09:47.033568Z",
+         "endDate": "2026-09-27T07:09:52.658588Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:09:46.881704Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:09:46.883452Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:09:47.033354Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:09:52.658800Z"
+        }
+       ],
+       "duration": "PT5.777096S",
+       "startDate": "2026-09-27T07:09:46.881704Z",
+       "endDate": "2026-09-27T07:09:52.658800Z"
+      }
+     },
+     {
+      "id": "2unSEiIAxZ0t6yXv74kXPN",
+      "taskId": "r",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:09:53.314854Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:09:53.314855Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:09:53.324920Z"
+          }
+         ],
+         "duration": "PT0.010066S",
+         "startDate": "2026-09-27T07:09:53.314854Z",
+         "endDate": "2026-09-27T07:09:53.324920Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:09:52.970622Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:09:53.050128Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:09:53.314634Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:09:53.324968Z"
+        }
+       ],
+       "duration": "PT0.354346S",
+       "startDate": "2026-09-27T07:09:52.970622Z",
+       "endDate": "2026-09-27T07:09:53.324968Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "2oBzf0UkhxlUbxxoVCeWIQ"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:09:46.816746Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:09:46.883414Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:09:53.562982Z"
+      }
+     ],
+     "duration": "PT6.746236S",
+     "startDate": "2026-09-27T07:09:46.816746Z",
+     "endDate": "2026-09-27T07:09:53.562982Z"
+    },
+    "originalId": "2oBzf0UkhxlUbxxoVCeWIQ",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:09:46.816748Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:09:57.403148+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_read_docker",
+     "taskId": "s",
+     "executionId": "2oBzf0UkhxlUbxxoVCeWIQ",
+     "taskRunId": "4LA9zDMD5ihPXYz24rCYv9",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:48.309719Z",
+     "level": "TRACE",
+     "thread": "worker-default_47",
+     "message": "Container created: 30cce49b5096f59958bf50977b8cc3fc2801392e01e2a9c71caeb7ca51adbb70"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_read_docker",
+     "taskId": "s",
+     "executionId": "2oBzf0UkhxlUbxxoVCeWIQ",
+     "taskRunId": "4LA9zDMD5ihPXYz24rCYv9",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:48.451292Z",
+     "level": "TRACE",
+     "thread": "worker-default_47",
+     "message": "Volume created: 9950ba45e695bf5f8c1220af2e893b4c8276396371b2bc994b612079755e4f5a"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_read_docker",
+     "taskId": "s",
+     "executionId": "2oBzf0UkhxlUbxxoVCeWIQ",
+     "taskRunId": "4LA9zDMD5ihPXYz24rCYv9",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:49.927421Z",
+     "level": "DEBUG",
+     "thread": "worker-default_47",
+     "message": "Starting command with container id 30cce49b5096f59958bf50977b8cc3fc2801392e01e2a9c71caeb7ca51adbb70 [/bin/sh -c set -e\necho '::{\"outputs\":{\"k\":\"v\"}}::']"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_read_docker",
+     "taskId": "s",
+     "executionId": "2oBzf0UkhxlUbxxoVCeWIQ",
+     "taskRunId": "4LA9zDMD5ihPXYz24rCYv9",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:51.558541Z",
+     "level": "DEBUG",
+     "thread": "worker-default_47",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_read_docker",
+     "taskId": "s",
+     "executionId": "2oBzf0UkhxlUbxxoVCeWIQ",
+     "taskRunId": "4LA9zDMD5ihPXYz24rCYv9",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:52.587189Z",
+     "level": "TRACE",
+     "thread": "worker-default_47",
+     "message": "Container deleted: 30cce49b5096f59958bf50977b8cc3fc2801392e01e2a9c71caeb7ca51adbb70"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_read_docker",
+     "taskId": "s",
+     "executionId": "2oBzf0UkhxlUbxxoVCeWIQ",
+     "taskRunId": "4LA9zDMD5ihPXYz24rCYv9",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:52.639802Z",
+     "level": "TRACE",
+     "thread": "worker-default_47",
+     "message": "Volume deleted: 9950ba45e695bf5f8c1220af2e893b4c8276396371b2bc994b612079755e4f5a"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_read_docker",
+     "taskId": "s",
+     "executionId": "2oBzf0UkhxlUbxxoVCeWIQ",
+     "taskRunId": "4LA9zDMD5ihPXYz24rCYv9",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:52.655005Z",
+     "level": "TRACE",
+     "thread": "worker-default_47",
+     "message": "Captured 0 output file(s)."
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_read_docker",
+     "taskId": "r",
+     "executionId": "2oBzf0UkhxlUbxxoVCeWIQ",
+     "taskRunId": "2unSEiIAxZ0t6yXv74kXPN",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:09:53.323948Z",
+     "level": "INFO",
+     "thread": "worker-default_9",
+     "message": "k=v"
+    }
+   ]
+  },
+  "q2_marker_other": {
+   "flow_yaml": "id: q2_marker_other\nnamespace: w11\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    taskRunner:\n      type: io.kestra.plugin.core.runner.Process\n    commands:\n      - \"echo before\"\n      - \"echo '::{\\\"metrics\\\":[]}::'\"\n      - \"echo '::{not json}::'\"\n      - \"echo '::{\\\"outputs\\\":{\\\"k\\\":\\\"v\\\"}}:: '\"\n      - \"echo after\"\n",
+   "deploy_status": 200,
+   "posted_at": "2026-09-27T07:10:37.914807+00:00",
+   "execution_id": "2tMqRrHqfM12LY25in5W4q",
+   "execution": {
+    "tenantId": "main",
+    "id": "2tMqRrHqfM12LY25in5W4q",
+    "namespace": "w11",
+    "flowId": "q2_marker_other",
+    "flowRevision": 1,
+    "taskRunList": [
+     {
+      "id": "7JO7NttSGlbc0W0BFmvoud",
+      "taskId": "s",
+      "attempts": [
+       {
+        "state": {
+         "current": "SUCCESS",
+         "histories": [
+          {
+           "state": "CREATED",
+           "date": "2026-09-27T07:10:37.837120Z"
+          },
+          {
+           "state": "RUNNING",
+           "date": "2026-09-27T07:10:37.837121Z"
+          },
+          {
+           "state": "SUCCESS",
+           "date": "2026-09-27T07:10:37.976277Z"
+          }
+         ],
+         "duration": "PT0.139157S",
+         "startDate": "2026-09-27T07:10:37.837120Z",
+         "endDate": "2026-09-27T07:10:37.976277Z"
+        },
+        "workerId": "6ll1XbYf7POiYoIHDEEIAT"
+       }
+      ],
+      "state": {
+       "current": "SUCCESS",
+       "histories": [
+        {
+         "state": "CREATED",
+         "date": "2026-09-27T07:10:37.699713Z"
+        },
+        {
+         "state": "SUBMITTED",
+         "date": "2026-09-27T07:10:37.755470Z"
+        },
+        {
+         "state": "RUNNING",
+         "date": "2026-09-27T07:10:37.836961Z"
+        },
+        {
+         "state": "SUCCESS",
+         "date": "2026-09-27T07:10:37.976442Z"
+        }
+       ],
+       "duration": "PT0.276729S",
+       "startDate": "2026-09-27T07:10:37.699713Z",
+       "endDate": "2026-09-27T07:10:37.976442Z"
+      }
+     }
+    ],
+    "labels": [
+     {
+      "key": "system.from",
+      "value": "api"
+     },
+     {
+      "key": "system.correlationId",
+      "value": "2tMqRrHqfM12LY25in5W4q"
+     }
+    ],
+    "state": {
+     "current": "SUCCESS",
+     "histories": [
+      {
+       "state": "CREATED",
+       "date": "2026-09-27T07:10:37.696518Z"
+      },
+      {
+       "state": "RUNNING",
+       "date": "2026-09-27T07:10:37.754916Z"
+      },
+      {
+       "state": "SUCCESS",
+       "date": "2026-09-27T07:10:38.395771Z"
+      }
+     ],
+     "duration": "PT0.699253S",
+     "startDate": "2026-09-27T07:10:37.696518Z",
+     "endDate": "2026-09-27T07:10:38.395771Z"
+    },
+    "originalId": "2tMqRrHqfM12LY25in5W4q",
+    "metadata": {
+     "attemptNumber": 1,
+     "originalCreatedDate": "2026-09-27T07:10:37.696520Z"
+    }
+   },
+   "logs_status": 200,
+   "logs_captured_at": "2026-09-27T07:10:42.254022+00:00",
+   "logs": [
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_other",
+     "taskId": "s",
+     "executionId": "2tMqRrHqfM12LY25in5W4q",
+     "taskRunId": "7JO7NttSGlbc0W0BFmvoud",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:10:37.921648Z",
+     "level": "DEBUG",
+     "thread": "worker-default_19",
+     "message": "Starting command with pid 290 [/bin/sh -c set -e\necho before\necho '::{\"metrics\":[]}::'\necho '::{not json}::'\necho '::{\"outputs\":{\"k\":\"v\"}}:: '\necho after]"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_other",
+     "taskId": "s",
+     "executionId": "2tMqRrHqfM12LY25in5W4q",
+     "taskRunId": "7JO7NttSGlbc0W0BFmvoud",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:10:37.924265Z",
+     "level": "INFO",
+     "thread": "virtual-11077",
+     "message": "before"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_other",
+     "taskId": "s",
+     "executionId": "2tMqRrHqfM12LY25in5W4q",
+     "taskRunId": "7JO7NttSGlbc0W0BFmvoud",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:10:37.974408Z",
+     "level": "WARN",
+     "thread": "virtual-11077",
+     "message": "Invalid outputs 'Unexpected character ('n' (code 110)): was expecting double-quote to start field name\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 2]'"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_other",
+     "taskId": "s",
+     "executionId": "2tMqRrHqfM12LY25in5W4q",
+     "taskRunId": "7JO7NttSGlbc0W0BFmvoud",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:10:37.974408Z",
+     "level": "DEBUG",
+     "thread": "virtual-11077",
+     "message": "com.fasterxml.jackson.core.JsonParseException: Unexpected character ('n' (code 110)): was expecting double-quote to start field name\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 2]\n\tat com.fasterxml.jackson.core.JsonParser._constructReadException(JsonParser.java:2675)\n\tat com.fasterxml.jackson.core.base.ParserMinimalBase._reportUnexpectedChar(ParserMinimalBase.java:743)\n\tat com.fasterxml.jackson.core.json.ReaderBasedJsonParser._handleOddName(ReaderBasedJsonParser.java:1909)\n\tat com.fasterxml.jackson.core.json.ReaderBasedJsonParser.nextToken(ReaderBasedJsonParser.java:709)\n\tat com.fasterxml.jackson.databind.deser.BeanDeserializer.deserialize(BeanDeserializer.java:173)\n\tat com.fasterxml.jackson.databind.deser.DefaultDeserializationContext.readRootValue(DefaultDeserializationContext.java:342)\n\tat com.fasterxml.jackson.databind.ObjectMapper._readMapAndClose(ObjectMapper.java:5052)\n\tat com.fasterxml.jackson.databind.ObjectMapper.readValue(ObjectMapper.java:3954)\n\tat com.fasterxml.jackson.databind.ObjectMapper.readValue(ObjectMapper.java:3922)\n\tat io.kestra.core.models.tasks.runners.TaskLogLineMatcher.matches(TaskLogLineMatcher.java:86)\n\tat io.kestra.core.models.tasks.runners.PluginUtilsService.parseOut(PluginUtilsService.java:124)\n\tat io.kestra.core.models.tasks.runners.DefaultLogConsumer.accept(DefaultLogConsumer.java:35)\n\tat io.kestra.core.models.tasks.runners.DefaultLogConsumer.accept(DefaultLogConsumer.java:23)\n\tat io.kestra.core.models.tasks.runners.DefaultLogConsumer.accept(DefaultLogConsumer.java:10)\n\tat io.kestra.plugin.core.runner.Process$LogRunnable.run(Process.java:212)\n\tat java.base/java.lang.VirtualThread.run(Unknown Source)\n"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_other",
+     "taskId": "s",
+     "executionId": "2tMqRrHqfM12LY25in5W4q",
+     "taskRunId": "7JO7NttSGlbc0W0BFmvoud",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:10:37.975461Z",
+     "level": "INFO",
+     "thread": "virtual-11077",
+     "message": "::{\"outputs\":{\"k\":\"v\"}}:: "
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_other",
+     "taskId": "s",
+     "executionId": "2tMqRrHqfM12LY25in5W4q",
+     "taskRunId": "7JO7NttSGlbc0W0BFmvoud",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:10:37.975543Z",
+     "level": "INFO",
+     "thread": "virtual-11077",
+     "message": "after"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_other",
+     "taskId": "s",
+     "executionId": "2tMqRrHqfM12LY25in5W4q",
+     "taskRunId": "7JO7NttSGlbc0W0BFmvoud",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:10:37.976134Z",
+     "level": "DEBUG",
+     "thread": "worker-default_19",
+     "message": "Command succeed with exit code 0"
+    },
+    {
+     "namespace": "w11",
+     "flowId": "q2_marker_other",
+     "taskId": "s",
+     "executionId": "2tMqRrHqfM12LY25in5W4q",
+     "taskRunId": "7JO7NttSGlbc0W0BFmvoud",
+     "attemptNumber": 0,
+     "timestamp": "2026-09-27T07:10:37.976244Z",
+     "level": "TRACE",
+     "thread": "worker-default_19",
+     "message": "Captured 0 output file(s)."
+    }
+   ]
+  }
+ }
+}

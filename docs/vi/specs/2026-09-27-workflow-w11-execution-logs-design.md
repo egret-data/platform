@@ -32,15 +32,15 @@ Kestra (checkout `96893b589`, image `kestra/kestra:v2.0.0-rc13`):
 - **Model:** `LogEntry` gồm tenant, namespace, flow, task, execution, task run, attempt, trigger, timestamp, level, thread, message, execution kind. Trên Postgres nó nằm trong bảng `logs` dạng JSONB với các cột sinh sẵn, có index trên `(execution_id, task_id)`, `(execution_id, taskrun_id)` và thời gian/mức, cộng một index GIN toàn văn.
 - **API đọc:** `LogController` phục vụ `GET /{executionId}` (mọi dòng, không phân trang), `/download` (văn bản thô), `/follow` (SSE, xem trực tiếp), `/search` (có phân trang) và các lệnh xoá.
 - **Thời hạn giữ:** **không có** cơ chế tự xoá. Người dùng tự viết task `PurgeLogs` trong một flow.
-- **Output của script:** các dòng stdout và stderr thành dòng log qua `AbstractLogConsumer`. Marker `##kestra:log:debug##` đóng khung phần DEBUG. Đọc mã nguồn thì stderr ra **ERROR**, còn egret hiện nói **WARN** (§5).
-- **Giới hạn:** **không có** trần theo dòng hay theo tổng lượng.
+- **Output của script:** các dòng stdout và stderr thành dòng log qua `AbstractLogConsumer`. Marker `##kestra:log:debug##` đóng khung phần DEBUG. Đọc mã nguồn thì stderr ra **ERROR**, Task 1 đo được **ERROR**, còn egret hiện nói **WARN** (§5).
+- **Giới hạn:** **không có** trần theo tổng lượng. Một dòng dài hơn 15.360 ký tự bị **chia** thành nhiều dòng cùng một timestamp (`RunContextLogger`, Task 1 đã đo), và API trả chúng về không theo thứ tự.
 
 Các chỗ khác có chủ đích, đều đã chọn cùng người dùng:
 
 | Kestra | egret W11 | lý do |
 |---|---|---|
 | không tự xoá; người dùng tự viết `PurgeLogs` | giữ theo cấu hình chung, ticker xoá | một bảng chỉ lớn lên là một sự cố Postgres bị hoãn lại; egret dùng chung một database |
-| không có trần | 64 KiB mỗi dòng, 10.000 dòng / 10 MiB mỗi lần thử của task run | một script in vòng lặp không được làm đầy database dùng chung |
+| không có trần tổng lượng; dòng quá 15.360 ký tự bị chia làm nhiều dòng | một dòng bị cắt ở 64 KiB (một hàng, `truncated`), 10.000 dòng / 10 MiB mỗi lần thử của task run | một script in vòng lặp không được làm đầy database dùng chung |
 | SSE `follow` | polling bằng con trỏ (§6) | egret chưa có SSE ở đâu; polling đạt cùng mục tiêu "thấy log khi task đang chạy", trễ khoảng 2 giây |
 | `thread`, `triggerId`, `executionKind` | không lưu | egret không có các khái niệm này |
 | `GET /{executionId}` không phân trang | phân trang bằng con trỏ | một execution có thể chứa 10 MiB cho mỗi lần thử |
@@ -115,13 +115,15 @@ Writer chạy khi `worker_enabled` bật, vì worker là nơi duy nhất sinh d�
 | nguồn | mức |
 |---|---|
 | `core.log.Log` | `level:` được khai báo (đã đo ở W3) |
-| `core.execution.Fail` | như hiện nay |
-| stdout của container / python | INFO (khung `##kestra:log:debug##` → DEBUG, nếu Task 1 đo được là có áp dụng) |
-| stderr của container / python | **theo phép đo của Task 1** (§5) |
+| `core.execution.Fail` | ERROR, chính `errorMessage` (đã đo; dòng stack trace DEBUG của Kestra không được tái tạo) |
+| stdout của container / python | INFO; **DEBUG** giữa `##kestra:log:debug##` và `##kestra:log:info##` (đã đo; các dòng marker không được lưu) |
+| stderr của container / python | **ERROR** (đã đo, §5), kể cả bên trong khung debug |
+| marker `::{…}::` chiếm trọn dòng nhưng không hợp lệ | WARN `Invalid outputs '…'` (dạng đã đo, §5) |
+| dòng bao quanh của worker ("started"/"ended") | không có (đã đo: Kestra không lưu dòng nào như vậy) |
 | thông báo handler đang gửi qua sink | giữ nguyên |
 | dòng tóm tắt vượt trần ở §5 | WARN |
 
-Các dòng bị tiêu thụ làm marker `::{"outputs":…}::` có được lưu hay không là **theo phép đo của Task 1**.
+Các dòng bị tiêu thụ làm marker `::{…}::` chiếm trọn dòng **không được lưu** (đã đo, §5).
 
 ## 5. Giới hạn, và mức log theo phép đo
 
@@ -133,12 +135,13 @@ Các dòng bị tiêu thụ làm marker `::{"outputs":…}::` có được lưu 
 
 Task vẫn chạy tiếp và kết quả không đổi. Giới hạn tính theo từng lần thử, nên một lần retry bắt đầu lại từ đầu.
 
-**Mức log.** Comment của egret trong `commands.rs` hiểu `warningOnStdErr` của Kestra là núm chỉnh *mức log* của stderr. Đọc mã nguồn Kestra thì khác: `warningOnStdErr` đặt *trạng thái* task thành WARNING, còn `AbstractLogConsumer` ghi stderr ở mức **ERROR**. Lời tự bào chữa của chính comment, *"nothing here reads a level back"*, không còn đúng ở W11, vì `min_level` đọc lại mức log. **Task 1 đo trên artifact:**
-1. mức của một dòng stderr;
-2. dòng marker `outputs` có hiện trong log không;
-3. Kestra có thêm dòng bao quanh một task không, ví dụ lúc bắt đầu hay kết thúc;
-4. một dòng mang `attempt` nào sau một lần retry;
-5. khung `##kestra:log:debug##` có áp dụng cho task script của egret không.
+**Mức log, đã đo.** Task 1 đo các điểm sau trên artifact (fixture `crates/egret-workflow/oracle-exec/w11-logs.json`, plugin shell 1.9.8, runner Process và Docker). Comment của egret trong `commands.rs` hiểu `warningOnStdErr` của Kestra là núm chỉnh *mức log* của stderr, và lời tự bào chữa của nó, *"nothing here reads a level back"*, không còn đúng ở W11, vì `min_level` đọc lại mức log. Kết quả đo:
+1. **stderr là ERROR**, không phải WARN, bất kể `warningOnStdErr` (mặc định, `false` và `true` đều ghi ERROR). egret đổi WARN thành ERROR và vẫn không cung cấp `warningOnStdErr`.
+2. **Marker `::{json}::` chiếm trọn dòng không được lưu**, trên stdout lẫn stderr, và `outputs` của nó vẫn vào output của task. Điều này đúng với mọi object JSON, không riêng object có `outputs` (dòng `::{"metrics":[]}::` cũng không được lưu). Dòng chỉ chứa marker ở giữa (`x ::{…}::`, hay có dấu cách ở cuối) là dòng thường. Marker chiếm trọn dòng mà JSON không parse được thì không được lưu; Kestra ghi thay vào đó một dòng WARN `Invalid outputs '<lỗi>'`, còn egret ghi một dòng WARN bắt đầu bằng `Invalid outputs '` với nội dung lỗi của serde (đã chọn: không có dòng stack trace). Comment "consumed as an output AND logged" của egret nói sai về Kestra.
+3. **Không có dòng bao quanh của worker** trong log của execution. `Type {} started` và `Flow completed with state {}` đi vào logger riêng của server. Runner script của Kestra tự thêm các dòng chẩn đoán DEBUG/TRACE (`Starting command with pid …`, `Command succeed with exit code 0`, id container và volume); egret **không** tái tạo chúng (đã chọn).
+4. **`attemptNumber` đếm từ 0**: các dòng của lần thử đầu mang 0, lần retry mang 1, cùng một task run id. Nó là chỉ số trong `task_runs.attempts`. `TaskInput.attempt` của egret đếm từ 1, nên `task_logs.attempt = TaskInput.attempt - 1` (cách quy đổi là đã chọn, cách đánh số là đã đo).
+5. **Khung `##kestra:log:debug##` có áp dụng**, trên cả hai runner: các dòng stdout sau nó là DEBUG cho tới `##kestra:log:info##`, và cả hai dòng marker đều không được lưu. Dòng stderr bên trong khung vẫn là ERROR. Một chế độ cho mỗi lệnh, bật/tắt bởi marker trên stream nào cũng được.
+6. **Dòng dài bị chia, không bị cắt:** Kestra lưu một dòng 100.000 ký tự thành các mảnh 15.360 ký tự cùng một timestamp, và đọc lại chúng không theo thứ tự. egret thì cắt ở 65.536 byte (ở trên); đây là khác biệt có chủ đích.
 
 Mã làm theo phép đo, và mọi chỗ bất đồng với mã Java đều được ghi lại.
 
