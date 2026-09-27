@@ -398,7 +398,7 @@ function RuleForm({
               <ScopePicker value={scope} onChange={setScope} rowFilterMode={kindType === "row_filter"} />
               {scope.catalog_id && (
                 <p className="text-xs text-muted-foreground">
-                  Selects {formatScope(scope, catalogName)}
+                  Selects {formatScope(scope, catalogName(scope.catalog_id))}
                 </p>
               )}
             </div>

@@ -23,7 +23,8 @@ import * as permApi from "@/api/generated/perm/perm";
 import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
 import * as hooks from "@/api/hooks";
 import type { Me } from "@/api/hooks";
-import type { Grant, RegistryCatalogDto } from "@/api/generated/model";
+import type { GrantView, RegistryCatalogDto } from "@/api/generated/model";
+import { ApiError } from "@/api/client";
 import { AuthContext } from "@/auth/useAuth";
 import DataPermissions from "@/routes/governance/DataPermissions";
 
@@ -42,7 +43,14 @@ const CATALOG: RegistryCatalogDto = {
 
 const ADMIN: Me = { user_id: "u1", email: "a@example.com", platform_roles: ["platform_admin"], permissions: [] };
 
-function grant(over: Partial<Grant> = {}): Grant {
+/**
+ * A grant as the READ surface hands it over — `catalog_name` included, since
+ * the server resolves it (SP4b-2 finding 1). The fixture carries it rather
+ * than relying on the registry mock below on purpose: the payload is where the
+ * name comes from now, and a test that only worked because the registry mock
+ * answered would not notice the field disappearing.
+ */
+function grant(over: Partial<GrantView> = {}): GrantView {
   return {
     id: "g1",
     effect: "allow",
@@ -50,11 +58,12 @@ function grant(over: Partial<Grant> = {}): Grant {
     scope: { catalog_id: "cat-1", schema: "sales" },
     principals: { include: [{ kind: "role", ref: "analyst" }], exclude: [] },
     origin: { type: "explicit" },
+    catalog_name: "wh",
     ...over,
   };
 }
 
-function listResult(rows: Grant[]) {
+function listResult(rows: GrantView[]) {
   return { data: { status: 200, data: rows }, isLoading: false, isError: false, error: null } as unknown as ReturnType<
     typeof permApi.usePermListGrants
   >;
@@ -147,5 +156,47 @@ describe("DataPermissions — the sentence is the primary column (D5)", () => {
     renderPage(reader);
     expect(screen.queryByRole("button", { name: /^Edit /i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New grant" })).not.toBeInTheDocument();
+  });
+});
+
+describe("DataPermissions — the sentence must not need a second permission", () => {
+  /**
+   * **THE DISCRIMINATING CASE (SP4b-2 finding 1).** The four governance pages
+   * gate on `policy:read`; `GET /control-plane/catalogs` gates on
+   * `catalog_registry:read`. Every other test in this file, and the browser
+   * run's whole admin pass, resolved the catalog through that second endpoint
+   * and so passed whether or not the name was on the grant payload — while a
+   * `policy_reader` saw
+   * `role analyst cannot read 4a8fe34a-af58-4984-a1e7-12854fb9d496.sales.orders`.
+   * Here the registry answers 403, exactly as it does for that persona, so the
+   * name can only come from `GrantView.catalog_name`.
+   */
+  test("the catalog's NAME still renders when the catalog registry answers 403", () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: new ApiError(403, "forbidden"),
+    } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
+    vi.mocked(permApi.usePermListGrants).mockReturnValue(
+      listResult([grant({ scope: { catalog_id: "cat-1", schema: "sales", table: "orders" } })]),
+    );
+    renderPage({
+      user_id: "u2",
+      email: "r@example.com",
+      platform_roles: [],
+      permissions: ["policy:read"],
+    });
+
+    expect(screen.getByText("role analyst can read wh.sales.orders")).toBeInTheDocument();
+    expect(screen.queryByText(/cat-1/)).not.toBeInTheDocument();
+  });
+
+  test("with no name on the payload the id is shown — never a guess", () => {
+    vi.mocked(permApi.usePermListGrants).mockReturnValue(
+      listResult([grant({ catalog_name: null })]),
+    );
+    renderPage();
+    expect(screen.getByText("role analyst can read cat-1.sales.*")).toBeInTheDocument();
   });
 });

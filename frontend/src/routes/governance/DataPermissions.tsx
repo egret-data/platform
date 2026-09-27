@@ -8,7 +8,7 @@ import {
   usePermListGrants,
 } from "@/api/generated/perm/perm";
 import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
-import type { Action, Grant } from "@/api/generated/model";
+import type { Action, GrantView } from "@/api/generated/model";
 import { ApiError } from "@/api/client";
 import { useMyWorkspaces } from "@/api/hooks";
 import { useAuth } from "@/auth/useAuth";
@@ -46,8 +46,14 @@ export default function DataPermissions() {
   const canWrite = isAdmin || !!me?.permissions.includes("policy:update");
 
   const grantsQ = usePermListGrants({ query: { retry: false } });
-  const rows: Grant[] = grantsQ.data?.status === 200 ? grantsQ.data.data : [];
+  const rows: GrantView[] = grantsQ.data?.status === 200 ? grantsQ.data.data : [];
 
+  // ONLY for `GrantDialog`'s own preview line, which a writer opens and which
+  // needs the registry anyway to pick a catalog. The SENTENCE below is
+  // rendered from `GrantView.catalog_name` on the payload — SP4b-2 finding 1:
+  // this page gates on `policy:read`, this endpoint gates on
+  // `catalog_registry:read`, and resolving the primary column here made D5's
+  // sentence read as a raw uuid for exactly the persona the page is for.
   const catalogsQ = useControlPlaneCatalogRegistryListRegistryCatalogs(undefined, {
     query: { retry: false },
   });
@@ -66,8 +72,8 @@ export default function DataPermissions() {
   );
 
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [editing, setEditing] = useState<Grant | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<Grant | null>(null);
+  const [editing, setEditing] = useState<GrantView | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<GrantView | null>(null);
 
   const queryClient = useQueryClient();
   const deleteGrant = usePermDeleteGrant<ApiError>({
@@ -81,20 +87,20 @@ export default function DataPermissions() {
     setEditing(null);
     setDialogOpen(true);
   }
-  function openEdit(g: Grant) {
+  function openEdit(g: GrantView) {
     setEditing(g);
     setDialogOpen(true);
   }
 
-  const columns: Column<Grant>[] = [
+  const columns: Column<GrantView>[] = [
     {
       key: "sentence",
       label: "Grant",
       sortable: true,
-      value: (g) => grantSentence(g, catalogName),
+      value: (g) => grantSentence(g),
       cell: (g) => (
         <div className="space-y-1 py-0.5">
-          <p className="text-sm">{grantSentence(g, catalogName)}</p>
+          <p className="text-sm">{grantSentence(g)}</p>
           {g.origin.type === "workspace_assignment" && (
             <AssignmentBadge workspaceLabel={workspaceLabel(g.origin.workspace_id)} />
           )}
@@ -111,7 +117,7 @@ export default function DataPermissions() {
             <Button
               variant="ghost"
               size="icon"
-              aria-label={`Edit ${grantSentence(g, catalogName)}`}
+              aria-label={`Edit ${grantSentence(g)}`}
               onClick={() => openEdit(g)}
             >
               <Pencil className="h-4 w-4" />
@@ -120,7 +126,7 @@ export default function DataPermissions() {
               variant="ghost"
               size="icon"
               className="text-muted-foreground hover:text-destructive"
-              aria-label={`Delete ${grantSentence(g, catalogName)}`}
+              aria-label={`Delete ${grantSentence(g)}`}
               onClick={() => setDeleteTarget(g)}
             >
               <Trash2 className="h-4 w-4" />
@@ -241,7 +247,7 @@ export default function DataPermissions() {
         }}
         title={
           deleteTarget
-            ? `Delete "${grantSentence(deleteTarget, catalogName)}"?`
+            ? `Delete "${grantSentence(deleteTarget)}"?`
             : "Delete grant?"
         }
         description="This grant is permanently removed and every profile it reaches recompiles."

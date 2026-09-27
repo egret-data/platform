@@ -9,9 +9,8 @@ import {
   usePermListRules,
 } from "@/api/generated/perm/perm";
 import { useControlPlaneCatalogRegistryListRegistryCatalogs } from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
-import type { Rule } from "@/api/generated/model";
+import type { RuleView } from "@/api/generated/model";
 import { ApiError } from "@/api/client";
-import { useTags } from "@/api/tags";
 import { useAuth } from "@/auth/useAuth";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { FACET_ALL, FacetSelect } from "@/components/explore/FacetSelect";
@@ -40,23 +39,25 @@ export default function MaskFilterRules() {
   const canWrite = isAdmin || !!me?.permissions.includes("policy:update");
 
   const rulesQ = usePermListRules({ query: { retry: false } });
-  const rows: Rule[] = rulesQ.data?.status === 200 ? rulesQ.data.data : [];
+  const rows: RuleView[] = rulesQ.data?.status === 200 ? rulesQ.data.data : [];
 
+  // ONLY for `RuleDialog`'s own preview line — see the same comment on
+  // `DataPermissions`. The `Selects` column below reads `RuleView.tag_name` /
+  // `RuleView.catalog_name` off the payload, so it no longer needs `tag:read`
+  // (which showed a reader `tag pii` instead of `tag PII`) or
+  // `catalog_registry:read` (SP4b-2 finding 1).
   const catalogsQ = useControlPlaneCatalogRegistryListRegistryCatalogs(undefined, {
     query: { retry: false },
   });
   const catalogs = catalogsQ.data?.status === 200 ? catalogsQ.data.data : [];
   const catalogName = (id: string) => catalogs.find((c) => c.id === id)?.name ?? id;
 
-  const tags = useTags();
-  const tagName = (key: string) => tags.data?.find((t) => t.key === key)?.name ?? key;
-
   const [kindFilter, setKindFilter] = useState(FACET_ALL);
   const filtered = rows.filter((r) => kindFilter === FACET_ALL || r.kind.type === kindFilter);
 
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [editing, setEditing] = useState<Rule | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<Rule | null>(null);
+  const [editing, setEditing] = useState<RuleView | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<RuleView | null>(null);
 
   const queryClient = useQueryClient();
   const deleteRule = usePermDeleteRule<ApiError>({
@@ -70,12 +71,12 @@ export default function MaskFilterRules() {
     setEditing(null);
     setDialogOpen(true);
   }
-  function openEdit(r: Rule) {
+  function openEdit(r: RuleView) {
     setEditing(r);
     setDialogOpen(true);
   }
 
-  const columns: Column<Rule>[] = [
+  const columns: Column<RuleView>[] = [
     {
       key: "name",
       label: "Name",
@@ -98,8 +99,8 @@ export default function MaskFilterRules() {
     {
       key: "selects",
       label: "Selects",
-      value: (r) => formatSelector(r.selector, catalogName, tagName),
-      cell: (r) => formatSelector(r.selector, catalogName, tagName),
+      value: (r) => formatSelector(r),
+      cell: (r) => formatSelector(r),
     },
     {
       key: "exempt",

@@ -1,4 +1,4 @@
-import type { Action, Grant, PermPrincipal, Rule, Scope, Selector } from "@/api/generated/model";
+import type { Action, GrantView, PermPrincipal, Rule, RuleView, Scope } from "@/api/generated/model";
 
 /**
  * Shared formatting for the two steward-facing perm pages (`DataPermissions`
@@ -29,9 +29,18 @@ export function formatActions(actions: Action[]): string {
  * `schema`/`table`/`column` narrow progressively (a column implies a table
  * implies a schema, enforced by the database and by `ScopePicker`), so at
  * most one of these branches is ever a real narrowing choice for a given row.
+ *
+ * `catalogName` is the ALREADY-RESOLVED display name, not a lookup function
+ * (SP4b-2 finding 1). The read surface puts it on the payload
+ * (`GrantView.catalog_name`, `RuleView.catalog_name`) precisely so rendering
+ * a grant needs no second request: `GET /control-plane/catalogs` gates on
+ * `catalog_registry:read`, these pages gate on `policy:read`, and a client
+ * holding only the latter used to render its primary column as a raw uuid.
+ * Absent (a catalog deleted under the read), the id is shown — the honest
+ * fallback, never a guess.
  */
-export function formatScope(scope: Scope, catalogName: (id: string) => string): string {
-  const catalog = catalogName(scope.catalog_id) || scope.catalog_id;
+export function formatScope(scope: Scope, catalogName?: string | null): string {
+  const catalog = catalogName || scope.catalog_id;
   if (!scope.schema) return `${catalog}.*`;
   if (!scope.table) return `${catalog}.${scope.schema}.*`;
   if (!scope.column) return `${catalog}.${scope.schema}.${scope.table}`;
@@ -57,26 +66,30 @@ export function formatPrincipals(list: PermPrincipal[]): string {
  * entirely when there is nothing excluded, rather than printed as "except
  * nobody".
  */
-export function grantSentence(g: Grant, catalogName: (id: string) => string): string {
+export function grantSentence(g: GrantView): string {
   const who = formatPrincipals(g.principals.include);
   const verb = g.effect === "allow" ? "can" : "cannot";
   const actions = formatActions(g.actions);
-  const scope = formatScope(g.scope, catalogName);
+  const scope = formatScope(g.scope, g.catalog_name);
   const exclude =
     g.principals.exclude.length > 0 ? ` except ${formatPrincipals(g.principals.exclude)}` : "";
   return `${who} ${verb} ${actions} ${scope}${exclude}`;
 }
 
-/** What a `Rule`'s `selector` picks out: a tag (by name, resolved from the
- * `key` it actually stores) or a path (a `Scope`, formatted the same way a
- * grant's is). */
-export function formatSelector(
-  selector: Selector,
-  catalogName: (id: string) => string,
-  tagName: (key: string) => string,
-): string {
-  if (selector.type === "tag") return `tag ${tagName(selector.key) || selector.key}`;
-  return formatScope(selector, catalogName);
+/**
+ * What a `Rule`'s `selector` picks out: a tag (by display name) or a path (a
+ * `Scope`, formatted the same way a grant's is).
+ *
+ * Takes the whole `RuleView` rather than its `selector` because both display
+ * names — `tag_name` for a tag selector, `catalog_name` for a path one — ride
+ * on the payload beside the selector, for the reason `formatScope` documents.
+ * `tags.key` (`pii`) is what the rule stores; `tags.name` (`PII`) is what a
+ * steward reads, and `GET /tags` needs `tag:read`, which `policy:read` does
+ * not imply.
+ */
+export function formatSelector(r: RuleView): string {
+  if (r.selector.type === "tag") return `tag ${r.tag_name || r.selector.key}`;
+  return formatScope(r.selector, r.catalog_name);
 }
 
 /** The rule's kind, actions notwithstanding — mirrors `RuleKind`'s own two

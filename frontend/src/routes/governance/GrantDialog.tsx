@@ -227,7 +227,7 @@ function GrantForm({
           <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
             <div className="flex items-center justify-between gap-2">
               <p className="text-sm font-medium">
-                Preview: {formatActions(actions)} on {noCatalog ? "…" : formatScope(scope, catalogName)}
+                Preview: {formatActions(actions)} on {noCatalog ? "…" : formatScope(scope, catalogName(scope.catalog_id))}
               </p>
               <Button
                 type="button"

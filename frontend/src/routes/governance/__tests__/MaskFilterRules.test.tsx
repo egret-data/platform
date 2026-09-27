@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 vi.mock("@/api/generated/perm/perm");
 vi.mock("@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry");
-vi.mock("@/api/tags");
 vi.mock("../RuleDialog", async () => {
   const actual = await vi.importActual<typeof import("../RuleDialog")>("../RuleDialog");
   return { ...actual, RuleDialog: () => null };
@@ -12,9 +11,9 @@ vi.mock("../RuleDialog", async () => {
 
 import * as permApi from "@/api/generated/perm/perm";
 import * as registry from "@/api/generated/control-plane-catalog-registry/control-plane-catalog-registry";
-import * as tagsApi from "@/api/tags";
 import type { Me } from "@/api/hooks";
-import type { RegistryCatalogDto, Rule } from "@/api/generated/model";
+import type { RegistryCatalogDto, RuleView } from "@/api/generated/model";
+import { ApiError } from "@/api/client";
 import { AuthContext } from "@/auth/useAuth";
 import MaskFilterRules from "@/routes/governance/MaskFilterRules";
 
@@ -33,18 +32,26 @@ const CATALOG: RegistryCatalogDto = {
 
 const ADMIN: Me = { user_id: "u1", email: "a@example.com", platform_roles: ["platform_admin"], permissions: [] };
 
-function maskRule(over: Partial<Rule> = {}): Rule {
+/**
+ * A rule as the READ surface hands it over. `tag_name`/`catalog_name` are
+ * resolved server-side (SP4b-2 finding 1) — `GET /tags` needs `tag:read` and
+ * the catalog registry needs `catalog_registry:read`, neither of which
+ * `policy:read` implies, so a client-side lookup showed a reader the stored
+ * key (`tag pii_v2`) instead of the display name.
+ */
+function maskRule(over: Partial<RuleView> = {}): RuleView {
   return {
     id: "r1",
     name: "mask-ssn",
     kind: { type: "mask", mask_type: "MASK_HASH" },
     selector: { type: "tag", key: "pii_v2" },
     exempt: { include: [], exclude: [] },
+    tag_name: "PII Data",
     ...over,
   };
 }
 
-function listResult(rows: Rule[]) {
+function listResult(rows: RuleView[]) {
   return { data: { status: 200, data: rows }, isLoading: false, isError: false, error: null } as unknown as ReturnType<
     typeof permApi.usePermListRules
   >;
@@ -68,9 +75,6 @@ beforeEach(() => {
     isLoading: false,
     isError: false,
   } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
-  vi.mocked(tagsApi.useTags).mockReturnValue({
-    data: [{ id: "t1", key: "pii_v2", name: "PII Data", description: "", color: "#fff", assignment_count: 0, created_at: "", required_roles: [], required_groups: [] }],
-  } as unknown as ReturnType<typeof tagsApi.useTags>);
   vi.mocked(permApi.usePermDeleteRule).mockReturnValue({
     mutate: vi.fn(),
   } as unknown as ReturnType<typeof permApi.usePermDeleteRule>);
@@ -101,6 +105,8 @@ describe("MaskFilterRules list", () => {
           name: "filter-region",
           kind: { type: "row_filter", filter_expr: "region = 'us'" },
           selector: { type: "path", catalog_id: "cat-1", schema: "sales", table: "orders" },
+          tag_name: null,
+          catalog_name: "wh",
         }),
       ]),
     );
@@ -122,5 +128,45 @@ describe("MaskFilterRules list", () => {
     renderPage(reader);
     expect(screen.queryByRole("button", { name: /^Edit /i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New rule" })).not.toBeInTheDocument();
+  });
+});
+
+describe("MaskFilterRules — the Selects column must not need a second permission", () => {
+  /**
+   * **THE DISCRIMINATING CASE (SP4b-2 finding 1, the rule half).** Both name
+   * sources answer 403 here, exactly as they do for a `policy:read`-only
+   * holder — the browser run measured `tag pii` where a steward should read
+   * `tag PII`. The names can only come from the rule payload.
+   */
+  test("the tag's DISPLAY name and the catalog's name render with both lookups forbidden", () => {
+    vi.mocked(registry.useControlPlaneCatalogRegistryListRegistryCatalogs).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: new ApiError(403, "forbidden"),
+    } as unknown as ReturnType<typeof registry.useControlPlaneCatalogRegistryListRegistryCatalogs>);
+    vi.mocked(permApi.usePermListRules).mockReturnValue(
+      listResult([
+        maskRule(),
+        maskRule({
+          id: "r2",
+          name: "filter-region",
+          kind: { type: "row_filter", filter_expr: "region = 'us'" },
+          selector: { type: "path", catalog_id: "cat-1", schema: "sales", table: "orders" },
+          tag_name: null,
+          catalog_name: "wh",
+        }),
+      ]),
+    );
+    renderPage({
+      user_id: "u2",
+      email: "r@example.com",
+      platform_roles: [],
+      permissions: ["policy:read"],
+    });
+
+    expect(screen.getByText("tag PII Data")).toBeInTheDocument();
+    expect(screen.queryByText("tag pii_v2")).not.toBeInTheDocument();
+    expect(screen.getByText("wh.sales.orders")).toBeInTheDocument();
   });
 });
