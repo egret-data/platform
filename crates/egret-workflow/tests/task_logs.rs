@@ -1,5 +1,6 @@
-//! W11 Task 2: `workflow.task_logs` (migration 0159) and `LogRepo`.
-//! Requires DATABASE_URL.
+//! W11 Task 2: `workflow.task_logs` (migration 0159) and `LogRepo`; W11
+//! Task 4: the batch writer (`PgLogSink`), the retention pruner, and a flow
+//! logging through the real runtime. Requires DATABASE_URL.
 //!
 //! Every test makes its own workspace and execution, so the per-execution
 //! reads cannot see each other's rows. Pruning is not per-execution -- it
@@ -15,9 +16,20 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
 use chrono::{DateTime, Duration as ChronoDuration, SubsecRound, Utc};
 use egret_metastore::Db;
-use egret_workflow::logs::{InsertError, LogLevel, LogLine, LogQuery, LogRepo, StoredLine};
+use egret_workflow::logs::{
+    spawn_pruner, spawn_writer, InsertError, Inserter, LogLevel, LogLimits, LogLine, LogQuery,
+    LogRepo, PruneConfig, StoredLine, WriterConfig,
+};
+use egret_workflow::runtime::{spawn_with_logs, RuntimeConfig};
+use egret_workflow::worker::handlers::LogSink;
+use egret_workflow::worker::{start_execution, Handlers};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -649,4 +661,493 @@ async fn deleting_an_execution_cascades_its_lines() {
         "the execution's lines went with it"
     );
     assert_eq!(fx.count(keep).await, 1, "another execution's did not");
+}
+
+// ── W11 Task 4: the writer, the pruner, and the runtime's wiring ────────────
+//
+// A test that needs a stored line to be past the settle lag backdates it
+// (`settle`), as above; what these tests wait for is the WRITER, polled with a
+// deadline that names what was missing (`wait_for_count`).
+
+/// A writer config for tests: the spec's values except where a test says
+/// otherwise.
+fn wcfg() -> WriterConfig {
+    WriterConfig::default()
+}
+
+/// Poll the stored count of `execution` until it is `n`, or panic saying how
+/// many there were.
+async fn wait_for_count(fx: &Fx, execution: Uuid, n: i64, limit: Duration) {
+    let start = std::time::Instant::now();
+    loop {
+        let got = fx.count(execution).await;
+        if got == n {
+            return;
+        }
+        assert!(
+            start.elapsed() < limit,
+            "timed out after {limit:?} waiting for {n} stored lines; {got} stored"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// An [`Inserter`] over the real repository whose inserts can be held
+/// (`gate`) or failed (`fail_next` calls fail with a pool error;
+/// `fail_always` fails every call; `deleted_next` calls fail as
+/// [`InsertError::ExecutionDeleted`]). Counts every call.
+#[derive(Clone)]
+struct Rigged {
+    repo: LogRepo,
+    gate: tokio::sync::watch::Receiver<bool>,
+    fail_next: Arc<AtomicUsize>,
+    fail_always: Arc<AtomicBool>,
+    deleted_next: Arc<AtomicUsize>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Rigged {
+    fn new(repo: LogRepo, open: bool) -> (Self, tokio::sync::watch::Sender<bool>) {
+        let (tx, rx) = tokio::sync::watch::channel(open);
+        (
+            Self {
+                repo,
+                gate: rx,
+                fail_next: Arc::default(),
+                fail_always: Arc::default(),
+                deleted_next: Arc::default(),
+                calls: Arc::default(),
+            },
+            tx,
+        )
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+fn take_one(n: &AtomicUsize) -> bool {
+    n.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
+        .is_ok()
+}
+
+#[async_trait::async_trait]
+impl Inserter for Rigged {
+    async fn insert_batch(&self, lines: &[LogLine]) -> Result<u64, InsertError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut gate = self.gate.clone();
+        gate.wait_for(|open| *open)
+            .await
+            .expect("gate sender alive");
+        if take_one(&self.deleted_next) {
+            return Err(InsertError::ExecutionDeleted(sqlx::Error::PoolTimedOut));
+        }
+        if self.fail_always.load(Ordering::SeqCst) || take_one(&self.fail_next) {
+            return Err(InsertError::Db(sqlx::Error::PoolTimedOut));
+        }
+        self.repo.insert_batch(lines).await
+    }
+}
+
+#[tokio::test]
+async fn lines_reach_postgres_in_order_within_a_flush() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let cancel = CancellationToken::new();
+    let cfg = WriterConfig {
+        flush_every: Duration::from_millis(300),
+        ..wcfg()
+    };
+    let (sink, handle) = spawn_writer(fx.repo.clone(), cfg, cancel.clone());
+
+    for m in ["first", "second", "third"] {
+        sink.write(fx.line(exec, LogLevel::Info, m)).await;
+    }
+    assert_eq!(
+        fx.count(exec).await,
+        0,
+        "control: three lines are far short of a 500-line batch, so only the \
+         timer can flush them, and it has not fired yet"
+    );
+    wait_for_count(&fx, exec, 3, cfg.flush_every + Duration::from_secs(1)).await;
+    fx.settle(exec).await;
+    assert_eq!(
+        messages(&fx.page(exec, &q(None, 10)).await),
+        ["first", "second", "third"],
+        "one flush, in the order they were written"
+    );
+    assert!(!handle.is_finished(), "the writer keeps running");
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_full_channel_makes_the_writer_wait_and_loses_nothing() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let (rigged, gate) = Rigged::new(fx.repo.clone(), false);
+    let cancel = CancellationToken::new();
+    let cfg = WriterConfig {
+        capacity: 4,
+        batch: 2,
+        flush_every: Duration::from_millis(50),
+        ..wcfg()
+    };
+    let (sink, handle) = spawn_writer(rigged.clone(), cfg, cancel.clone());
+
+    let done = Arc::new(AtomicUsize::new(0));
+    let lines: Vec<LogLine> = (0..20)
+        .map(|i| fx.line(exec, LogLevel::Info, &format!("line-{i:02}")))
+        .collect();
+    let task = {
+        let done = done.clone();
+        let sink = sink.clone();
+        tokio::spawn(async move {
+            for l in lines {
+                sink.write(l).await;
+                done.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+    };
+
+    // The first batch (2 lines) is held at the gate; the channel holds 4 more.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let while_held = done.load(Ordering::SeqCst);
+    assert!(
+        rigged.calls() >= 1,
+        "control: the writer reached the held insert"
+    );
+    assert!(
+        while_held >= cfg.capacity,
+        "control: writes did go through until the channel filled ({while_held})"
+    );
+    assert!(
+        while_held < 20,
+        "a full channel must make `write` WAIT: {while_held} of 20 writes had \
+         returned while the insert was held"
+    );
+    assert!(!task.is_finished(), "the writing task is still pending");
+
+    gate.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("the writes complete once the insert is released")
+        .unwrap();
+    wait_for_count(&fx, exec, 20, Duration::from_secs(5)).await;
+    fx.settle(exec).await;
+    let expected: Vec<String> = (0..20).map(|i| format!("line-{i:02}")).collect();
+    assert_eq!(
+        messages(&fx.page(exec, &q(None, 100)).await),
+        expected,
+        "all 20 stored, in order: nothing was dropped"
+    );
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failing_batch_is_retried_then_reported_not_fatal() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let (rigged, _gate) = Rigged::new(fx.repo.clone(), true);
+    let cancel = CancellationToken::new();
+    let cfg = WriterConfig {
+        batch: 2,
+        flush_every: Duration::from_millis(50),
+        retry_for: Duration::from_millis(700),
+        ..wcfg()
+    };
+    let (sink, handle) = spawn_writer(rigged.clone(), cfg, cancel.clone());
+
+    // 1. Two failures, then success: the batch lands after its retries.
+    rigged.fail_next.store(2, Ordering::SeqCst);
+    sink.write(fx.line(exec, LogLevel::Info, "retried-1")).await;
+    sink.write(fx.line(exec, LogLevel::Info, "retried-2")).await;
+    wait_for_count(&fx, exec, 2, Duration::from_secs(3)).await;
+    assert_eq!(
+        rigged.calls(),
+        3,
+        "two failed calls and the one that landed"
+    );
+
+    // 2. Every call fails: the batch is dropped once `retry_for` runs out.
+    rigged.fail_always.store(true, Ordering::SeqCst);
+    let before = rigged.calls();
+    sink.write(fx.line(exec, LogLevel::Info, "lost-1")).await;
+    sink.write(fx.line(exec, LogLevel::Info, "lost-2")).await;
+    tokio::time::sleep(cfg.retry_for + Duration::from_millis(500)).await;
+    let tried = rigged.calls() - before;
+    assert!(tried >= 3, "the failing batch was retried ({tried} calls)");
+    assert!(
+        !handle.is_finished(),
+        "a batch whose retries ran out must not end the writer"
+    );
+
+    // 3. The database is back: later batches land.
+    rigged.fail_always.store(false, Ordering::SeqCst);
+    sink.write(fx.line(exec, LogLevel::Info, "later-1")).await;
+    sink.write(fx.line(exec, LogLevel::Info, "later-2")).await;
+    wait_for_count(&fx, exec, 4, Duration::from_secs(3)).await;
+    fx.settle(exec).await;
+    assert_eq!(
+        messages(&fx.page(exec, &q(None, 10)).await),
+        ["retried-1", "retried-2", "later-1", "later-2"],
+        "the dropped batch is gone; the ones around it are stored"
+    );
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+/// SQLSTATE 23503 is the concurrent-delete race, and a retry with backoff
+/// cannot help it: the batch is re-run ONCE at once (the join then drops the
+/// deleted execution's lines), and a second 23503 drops the batch.
+#[tokio::test]
+async fn an_execution_deleted_batch_is_rerun_once_not_retried() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let (rigged, _gate) = Rigged::new(fx.repo.clone(), true);
+    let cancel = CancellationToken::new();
+    let cfg = WriterConfig {
+        batch: 2,
+        flush_every: Duration::from_millis(50),
+        ..wcfg()
+    };
+    let (sink, handle) = spawn_writer(rigged.clone(), cfg, cancel.clone());
+
+    rigged.deleted_next.store(1, Ordering::SeqCst);
+    let t0 = std::time::Instant::now();
+    sink.write(fx.line(exec, LogLevel::Info, "rerun-1")).await;
+    sink.write(fx.line(exec, LogLevel::Info, "rerun-2")).await;
+    wait_for_count(&fx, exec, 2, Duration::from_secs(3)).await;
+    assert_eq!(rigged.calls(), 2, "one 23503, one re-run");
+    assert!(
+        t0.elapsed() < Duration::from_millis(100 + 300),
+        "the re-run does not wait out a backoff ({:?})",
+        t0.elapsed()
+    );
+
+    rigged.deleted_next.store(5, Ordering::SeqCst);
+    sink.write(fx.line(exec, LogLevel::Info, "dropped-1")).await;
+    sink.write(fx.line(exec, LogLevel::Info, "dropped-2")).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        rigged.calls(),
+        4,
+        "a second 23503 drops the batch rather than retrying it"
+    );
+    rigged.deleted_next.store(0, Ordering::SeqCst);
+    sink.write(fx.line(exec, LogLevel::Info, "after-1")).await;
+    sink.write(fx.line(exec, LogLevel::Info, "after-2")).await;
+    wait_for_count(&fx, exec, 4, Duration::from_secs(3)).await;
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_drains_what_is_in_the_channel() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let cancel = CancellationToken::new();
+    let cfg = wcfg();
+    let (sink, handle) = spawn_writer(fx.repo.clone(), cfg, cancel.clone());
+
+    for i in 0..50 {
+        sink.write(fx.line(exec, LogLevel::Info, &format!("d{i:02}")))
+            .await;
+    }
+    cancel.cancel();
+    tokio::time::timeout(cfg.drain_within + Duration::from_secs(2), handle)
+        .await
+        .expect("the writer exits within its drain bound")
+        .unwrap();
+    assert_eq!(
+        fx.count(exec).await,
+        50,
+        "every line in the channel at cancellation was stored before exit"
+    );
+
+    // After the writer has gone, a write returns at once and drops its line.
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        sink.write(fx.line(exec, LogLevel::Info, "too-late")),
+    )
+    .await
+    .expect("a write on a closed channel does not hang");
+    assert_eq!(fx.count(exec).await, 50);
+}
+
+#[tokio::test]
+async fn the_pruner_deletes_old_lines_in_batches_and_stops_on_cancel() {
+    let Some(fx) = fx().await else { return };
+    // Pruning is table-wide: start from no old lines at all.
+    while fx.repo.prune_batch(30, 100_000).await.unwrap() > 0 {}
+    let exec = fx.execution().await;
+    let mut lines = Vec::new();
+    for i in 0..25 {
+        let mut l = fx.line(exec, LogLevel::Info, &format!("old-{i:02}"));
+        l.ts -= ChronoDuration::days(31);
+        lines.push(l);
+    }
+    lines.push(fx.line(exec, LogLevel::Info, "new-1"));
+    lines.push(fx.line(exec, LogLevel::Info, "new-2"));
+    fx.repo.insert_batch(&lines).await.unwrap();
+
+    // Control: a pass with no budget stops after its first batch of 10.
+    let cancel = CancellationToken::new();
+    let one_batch = PruneConfig {
+        batch: 10,
+        pass_budget: Duration::ZERO,
+        ..PruneConfig::new(30)
+    };
+    let h = spawn_pruner(fx.repo.clone(), one_batch, cancel.clone()).expect("30 days prunes");
+    wait_for_count(&fx, exec, 27 - 10, Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        fx.count(exec).await,
+        17,
+        "control: one batch, then the pass ends"
+    );
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(2), h)
+        .await
+        .expect("the pruner stops on cancel")
+        .unwrap();
+
+    // With a budget, one pass loops batch after batch until a short one.
+    // `every` is an hour, so everything below is the FIRST pass.
+    let cancel = CancellationToken::new();
+    let cfg = PruneConfig {
+        batch: 10,
+        ..PruneConfig::new(30)
+    };
+    assert_eq!(cfg.every, Duration::from_secs(3600));
+    let h = spawn_pruner(fx.repo.clone(), cfg, cancel.clone()).expect("30 days prunes");
+    wait_for_count(&fx, exec, 2, Duration::from_secs(3)).await;
+    fx.settle(exec).await;
+    assert_eq!(
+        messages(&fx.page(exec, &q(None, 10)).await),
+        ["new-1", "new-2"],
+        "the 15 old lines went in one pass of two batches; the new ones stay"
+    );
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(2), h)
+        .await
+        .expect("the pruner stops on cancel")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_pruner_is_not_started_at_zero_days() {
+    let Some(fx) = fx().await else { return };
+    let cancel = CancellationToken::new();
+    assert!(
+        spawn_pruner(fx.repo.clone(), PruneConfig::new(0), cancel.clone()).is_none(),
+        "0 means keep forever: no pruner"
+    );
+    let h = spawn_pruner(fx.repo.clone(), PruneConfig::new(30), cancel.clone());
+    assert!(h.is_some(), "control: 30 days starts one");
+    cancel.cancel();
+}
+
+/// A flow run through the REAL runtime -- `spawn_with_logs`, the production
+/// handlers, nothing driving the tick -- stores its lines.
+///
+/// `#[sqlx::test]` (a scratch database), for `tests/runtime.rs`'s reason: the
+/// claim is global, and this runtime would claim other tests' runs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn end_to_end_a_flow_logs_through_the_real_runtime(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let source = "id: w11e2e\nnamespace: t\ntasks:\n  \
+        - id: hello\n    type: io.kestra.plugin.core.log.Log\n    \
+          message: hello from w11\n    level: INFO\n  \
+        - id: boom\n    type: io.kestra.plugin.core.execution.Fail\n    \
+          errorMessage: boom from w11\n";
+    let exec = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    let cancel = CancellationToken::new();
+    let cfg = RuntimeConfig {
+        enabled: true,
+        tick_interval: Duration::from_millis(50),
+        batch: 8,
+        reaper_interval: Duration::from_secs(3600),
+        working_timeout: Duration::from_secs(3600),
+        scheduler_enabled: false,
+        trigger_interval: Duration::from_secs(3600),
+        log_limits: LogLimits::default(),
+        log_retention_days: 30,
+    };
+    let rt = spawn_with_logs(
+        pool.clone(),
+        Handlers::with_core_tasks(),
+        cfg,
+        cancel.clone(),
+    );
+
+    let repo = LogRepo::new(pool.clone());
+    let start = std::time::Instant::now();
+    loop {
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
+                .bind(exec)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let stored: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM workflow.task_logs WHERE execution_id = $1")
+                .bind(exec)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if state == "FAILED" && stored >= 2 {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "timed out: execution {state}, {stored} lines stored"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    sqlx::query(
+        "UPDATE workflow.task_logs SET inserted_at = inserted_at - interval '3 seconds' \
+          WHERE execution_id = $1",
+    )
+    .bind(exec)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let got: Vec<(Option<String>, Option<i32>, LogLevel, String)> = repo
+        .page(ws, exec, &q(None, 100))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| (l.task_id, l.attempt, l.level, l.message))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                Some("hello".into()),
+                Some(0),
+                LogLevel::Info,
+                "hello from w11".into()
+            ),
+            (
+                Some("boom".into()),
+                Some(0),
+                LogLevel::Error,
+                "boom from w11".into()
+            ),
+        ],
+        "both tasks' lines, with their task id, 0-based attempt and level"
+    );
+
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(15), rt.join())
+        .await
+        .expect("the runtime stops: claim loop, then the writer's drain");
 }

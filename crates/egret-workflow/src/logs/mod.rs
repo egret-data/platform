@@ -2,20 +2,26 @@
 //! migration 0159).
 //!
 //! This module holds the vocabulary -- [`LogLevel`], [`LogLine`] -- and
-//! [`LogRepo`], the only code that reads or writes the table. The writer that
-//! batches lines into it and the read route are built on the repository by
-//! later W11 tasks. See
-//! docs/en/specs/2026-09-27-workflow-w11-execution-logs-design.md §3 and §6.
+//! [`LogRepo`], the only code that reads or writes the table; [`PgLogSink`]
+//! and its batch writer ([`spawn_writer`]), which store what handlers write;
+//! and the retention pruner ([`spawn_pruner`]). `runtime::spawn_with_logs`
+//! starts both beside the worker. See
+//! docs/en/specs/2026-09-27-workflow-w11-execution-logs-design.md §3, §4.3,
+//! §6 and §7.
 
+mod prune;
 mod repo;
 mod run_log;
+mod writer;
 
 use chrono::{DateTime, Utc};
 use std::time::Duration;
 use uuid::Uuid;
 
+pub use prune::{spawn_pruner, PruneConfig};
 pub use repo::{InsertError, LogQuery, LogRepo, StoredLine};
 pub use run_log::{RunIdentity, RunLog};
+pub use writer::{spawn_writer, Inserter, PgLogSink, WriterConfig};
 
 /// The longest piece a log line is stored as, in `char`s (D6).
 ///

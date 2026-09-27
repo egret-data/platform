@@ -1876,9 +1876,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // thirteen publishable rows, **nine of thirteen types hang in production**.
     // `oracle-exec/README.md` item 19 carries this and its second cause (a
     // handler that OUTRUNS `working_timeout`; `Sleep::new()` is uncapped).
-    egret_workflow::runtime::spawn(
+    //
+    // W11: `spawn_with_logs` takes the `Handlers` unshared so it can give them
+    // the Postgres log sink (`Handlers::with_log_sink`) before wrapping them;
+    // WHICH handlers run is still decided here. With the worker on it also
+    // starts the log writer and the retention pruner. The writer is stopped by
+    // the claim loop's end, not by the token, so a tick in flight finishes
+    // writing before the writer drains; `workflow_runtime.join()` below waits
+    // for that at shutdown.
+    let workflow_runtime = egret_workflow::runtime::spawn_with_logs(
         db.pool.clone(),
-        std::sync::Arc::new(egret_workflow::worker::Handlers::with_core_tasks()),
+        egret_workflow::worker::Handlers::with_core_tasks(),
         egret_workflow::RuntimeConfig {
             enabled: config.workflow.worker_enabled,
             tick_interval: std::time::Duration::from_secs(config.workflow.tick_interval_secs),
@@ -1887,9 +1895,26 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             working_timeout: std::time::Duration::from_secs(config.workflow.working_timeout_s),
             scheduler_enabled: config.workflow.scheduler_enabled,
             trigger_interval: std::time::Duration::from_secs(config.workflow.trigger_interval_secs),
+            log_limits: egret_workflow::logs::LogLimits {
+                run_max_lines: config.workflow.log_run_max_lines,
+                run_max_bytes: config.workflow.log_run_max_bytes,
+            },
+            // A retention longer than i32::MAX days is "for ever" in practice.
+            log_retention_days: i32::try_from(config.workflow.log_retention_days)
+                .unwrap_or(i32::MAX),
         },
         reaper_cancel.clone(),
     );
+    // SIGTERM (not only Ctrl-C) stops the background loops, so the workflow
+    // runtime's claim loop and log writer wind down while the HTTP server
+    // drains rather than being killed when `main` returns.
+    {
+        let reaper_cancel = reaper_cancel.clone();
+        tokio::spawn(async move {
+            egret_server::shutdown_signal().await;
+            reaper_cancel.cancel();
+        });
+    }
 
     // api_url: the server's own externally-reachable base URL (for EGRET_API_URL
     // forwarded to kernel processes as a callback base). Defaults to
@@ -2339,9 +2364,27 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     )
     .await
     .context("server error")?;
+    // The workflow claim loop, then its log writer's drain (bounded at 10 s by
+    // the writer itself). Bounded here too: a tick in flight can be a long
+    // `Sleep`, and a pod's grace period is finite.
+    reaper_cancel.cancel();
+    if tokio::time::timeout(WORKFLOW_STOP_WAIT, workflow_runtime.join())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            wait_secs = WORKFLOW_STOP_WAIT.as_secs(),
+            "workflow runtime did not stop in time; queued log lines may be lost"
+        );
+    }
     tracing::info!("egret stopped");
     Ok(())
 }
+
+/// How long `main` waits, after the HTTP drain, for the workflow claim loop
+/// and its log writer to stop. The writer's own drain is bounded at 10 s; the
+/// server's drain (55 s) plus this stays inside the chart's 65 s grace period.
+const WORKFLOW_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 mod catalog_authz_tests {
