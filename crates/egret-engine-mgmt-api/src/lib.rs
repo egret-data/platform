@@ -535,7 +535,44 @@ pub struct StarRocksConfig {
     /// `starrocks_initpwd_*`). `None`/empty = legacy passwordless root (no
     /// initpwd resources templated). Minted by the create path (T3).
     pub root_password: Option<String>,
+    /// StorageClass backing the FE metadata PVC (`/opt/starrocks/fe/meta`).
+    /// `None`/blank ⇒ the field is omitted from the CR, so the cluster's
+    /// DEFAULT StorageClass binds the claim (on kind: `standard`,
+    /// `rancher.io/local-path`).
+    pub fe_meta_storage_class: Option<String>,
+    /// Size of the FE metadata PVC (a k8s quantity, e.g. `"20Gi"`). `None`
+    /// ⇒ [`DEFAULT_FE_META_STORAGE_SIZE`]. The CRD validates the string
+    /// against `(^0|([0-9]*l[.])?[0-9]+((M|G|T|E|P)i))$`, so only binary
+    /// suffixes are accepted.
+    pub fe_meta_storage_size: Option<String>,
+    /// Whether egret renders the FE metadata volume at all.
+    ///
+    /// `false` ⇒ render NOTHING at the meta path, so the kube-starrocks
+    /// operator injects its own `fe-meta {"emptyDir": {}}` default — the exact
+    /// shape egret emitted before the PVC existed. `true` ⇒ render the PVC.
+    ///
+    /// This is a CREATION-TIME marker, not a knob: `volumeClaimTemplates` is
+    /// IMMUTABLE on a live StatefulSet, measured on kind 2026-09-26 (see
+    /// `docs/en/plans/2026-09-26-fe-meta-live-result.md` §7). Adding the claim
+    /// to an engine that already has a StatefulSet does not migrate it — every
+    /// operator reconcile is rejected by the API server with `updates to
+    /// statefulset spec for fields other than 'replicas', 'ordinals',
+    /// 'template', ... are forbidden`, the FE keeps its `emptyDir`, AND the
+    /// `StarRocksCluster` stops converging entirely, so no later change of any
+    /// kind (a Ranger rebind included) applies either. Existing engines
+    /// therefore keep `false` and are left exactly as they are; migrating one
+    /// is a deliberate operator action (`kubectl delete sts <engine>-fe
+    /// --cascade=orphan`, which destroys that FE's metadata), never a side
+    /// effect of upgrading egret.
+    pub fe_meta_persistent: bool,
 }
+
+/// Default size of the FE metadata PVC when
+/// [`StarRocksConfig::fe_meta_storage_size`] is `None`. FE metadata (the BDBJE
+/// journal + image) is small — single-digit GiB even for a large catalog — so
+/// this is deliberately modest; `local-path` on kind ignores the request
+/// anyway (it hands out a host directory).
+pub const DEFAULT_FE_META_STORAGE_SIZE: &str = "20Gi";
 
 /// Delegation/security wiring for a provisioned StarRocks. `None` on
 /// [`StarRocksConfig::delegation`] = no JWT/TLS templated.
@@ -599,6 +636,9 @@ impl std::fmt::Debug for StarRocksConfig {
                     &"None"
                 },
             )
+            .field("fe_meta_storage_class", &self.fe_meta_storage_class)
+            .field("fe_meta_storage_size", &self.fe_meta_storage_size)
+            .field("fe_meta_persistent", &self.fe_meta_persistent)
             .finish()
     }
 }
@@ -680,6 +720,9 @@ mod tests {
             cn_autoscaling: None,
             pod: None,
             root_password: None,
+            fe_meta_storage_class: None,
+            fe_meta_storage_size: None,
+            fe_meta_persistent: true,
         };
         assert_eq!(s.fe_replicas, 1);
     }

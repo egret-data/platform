@@ -3905,7 +3905,7 @@
             }
           },
           "400": {
-            "description": "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), `authz_service_id` naming no policy profile or one with no usable tag service, or re-materializing workspace connections failed",
+            "description": "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), `starrocks.feMetaStorageClass`/`feMetaStorageSize` sent (create-only — they render into the FE StatefulSet's immutable `volumeClaimTemplates`; the message says what to do instead), `authz_service_id` naming no policy profile or one with no usable tag service, or re-materializing workspace connections failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -38705,6 +38705,22 @@
           "pod": {
             "type": "object",
             "description": "Pod- & container-level scheduling / customization surface (nodeSelector,\ntolerations, affinity, sidecars, …). Opaque JSON here; typed into\n`StarRocksPod` at provision-req assembly. Omitted ⇒ preserved on update."
+          },
+          "feMetaStorageClass": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "StorageClass backing the FE metadata PVC (`/opt/starrocks/fe/meta`).\nOmitted/blank ⇒ the cluster's DEFAULT StorageClass. Omitted ⇒ preserved\non update.",
+            "default": null
+          },
+          "feMetaStorageSize": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Size of the FE metadata PVC, as a k8s binary quantity (`\"20Gi\"`).\nOmitted ⇒ preserved on update, then\n`egret_engine_mgmt_api::DEFAULT_FE_META_STORAGE_SIZE`.",
+            "default": null
           }
         }
       },

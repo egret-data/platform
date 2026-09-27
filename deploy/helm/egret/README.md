@@ -57,6 +57,120 @@ To use an **external Postgres/MinIO** instead of the bundled ones, set
 `deps.enabled=false` and point the `EGRET_*` connection values at your
 services.
 
+## Upgrade notes
+
+### StarRocks FE metadata is persistent for engines created from this release on
+
+Before this release egret rendered no `storageVolumes` entry for the StarRocks FE's metadata
+directory, so the kube-starrocks operator applied its own default — `fe-meta: {emptyDir: {}}`.
+Metadata therefore lived and died with the pod. This release renders a PersistentVolumeClaim at
+`/opt/starrocks/fe/meta` for every StarRocks engine **created after the upgrade**.
+
+**New engines get it automatically and need nothing from you** (measured:
+`docs/en/plans/2026-09-26-fe-meta-live-result.md` §4-§6 — a bound PVC, and a catalog, a user, its
+grant and the root password all surviving `kubectl delete pod` on the FE).
+
+**Existing engines are left exactly as they are: upgrading changes nothing for them.** They keep the
+operator's `emptyDir`, so their FE metadata is no safer than before — and their clusters keep
+reconciling, which is the point. egret decides this from a marker (`starrocksConfig.feMetaPersistent`)
+stamped into the stored spec at create time, so it is only ever set on engines created after this
+release; a later `PUT /engines/{id}` preserves whatever is stored and never adds it.
+
+**Why it is not applied to existing engines** (measured, §7 of the same document; this is a
+constraint, not caution). A `storageSize` entry becomes a StatefulSet `spec.volumeClaimTemplates`
+entry, and `volumeClaimTemplates` is **immutable** on a StatefulSet that already exists. When egret
+rendered it unconditionally, the `StarRocksCluster` updated correctly and then every operator
+reconcile was rejected by the API server —
+
+```text
+ERROR StarRocksClusterReconciler.feController deploy statefulset failed
+  error: failed to apply merge patch: StatefulSet.apps "<engine>-fe" is invalid:
+    spec: Forbidden: updates to statefulset spec for fields other than 'replicas', 'ordinals',
+    'template', 'updateStrategy', 'revisionHistoryLimit', 'persistentVolumeClaimRetentionPolicy'
+    and 'minReadySeconds' are forbidden
+```
+
+— forever. The FE kept its `emptyDir` (so it gained nothing), and the `StarRocksCluster` sat at
+`phase=failed`, which means **no other change to that engine reconciled either** — not an image
+bump, not a rescale, not a Ranger rebind. That outcome is strictly worse than leaving the engine
+alone, which is why the marker exists.
+
+**Migrating an existing engine is a deliberate operator action, never a side effect of upgrading.**
+Nothing below happens on its own, and none of it is required. Recreating the FE StatefulSet is what
+lets the operator build it with a claim template; it replaces the FE pod, and that is the moment the
+old `emptyDir` — and with it that FE's metadata — is destroyed. Read the loss list below first.
+There is also no egret-side way to set the marker on an existing engine today, so an engine migrated
+this way renders no claim template until it is recreated through egret; if the metadata matters, the
+supported route is to create a NEW engine and repoint at it.
+
+```bash
+kubectl -n egret-engines delete statefulset <engine>-fe --cascade=orphan   # keeps the FE pod alive
+kubectl -n egret-engines delete pod <engine>-fe-0                          # FE metadata is destroyed here
+```
+
+**What that loses** — observed on PR #597's live gate when a pod replacement wiped an `emptyDir`
+(`first start fe with meta not exist` in `fe.log`):
+
+- **every catalog on that engine** — `SHOW CATALOGS` came back with `default_catalog` alone,
+  including the `egret-warehouse` Iceberg catalog egret wires up at create time;
+- **every StarRocks-side user, role and grant** — the `analyst` user was simply gone;
+- **anything created directly on the FE** — databases, views, materialized views. Table DATA in the
+  object store is untouched; what is lost is the FE's record of it.
+
+**The `root` password is a special case, and the honest answer is "sometimes".** The claim that it is
+simply lost is wrong: an engine update through egret (`PUT /engines/{id}`) deletes and re-applies the
+`initpwd` Job whenever a root password is on record, and on 2026-09-26 that Job re-ran within
+seconds and restored the password (§7.4 of the live-result document). It did **not** reproduce on
+2026-09-27: a PUT on the same engine templated no `initpwd` Job at all and `root` came back with no
+password (§10). So treat a restored root password as likely on the egret path and not guaranteed, and
+check `SHOW ALL AUTHENTICATION` after any FE roll. A bare `kubectl delete pod` never restores it —
+that path does not go through egret at all.
+
+**What recovers the rest, and what does not:**
+
+| lost | recovered by |
+|---|---|
+| catalogs | `POST /api/control-plane/catalogs/{id}/reapply` per registry catalog (needs `catalog_registry:update`), which re-applies the stored configuration to every attached engine |
+| StarRocks users, roles, grants | **nothing automatic — recreate them by hand.** egret does not keep a copy of StarRocks-side principals to replay |
+| databases / views created directly on the FE | **nothing — recreate them.** Only the object-store data survives |
+
+**Before migrating an engine by hand:** write down its StarRocks-side users, roles and grants
+(`SHOW GRANTS`), expect to re-run `reapply` for its catalogs afterwards, and if its FE state matters
+and cannot be rebuilt, snapshot `/opt/starrocks/fe/meta` out of the running pod first
+(`kubectl cp`). None of this is needed to upgrade egret.
+
+Per-engine knobs, both optional, **CREATE-ONLY**, and only meaningful for an engine created after
+this release:
+
+| field | default | meaning |
+|---|---|---|
+| `feMetaStorageClass` | absent ⇒ the cluster's **default** StorageClass (`standard` on kind) | StorageClass backing the claim |
+| `feMetaStorageSize` | `20Gi` | claim size; FE metadata is small, so this is generous |
+
+`PUT /engines/{id}` **refuses** both fields — it does not accept and ignore them. They render inside
+the FE StatefulSet's `spec.volumeClaimTemplates`, which Kubernetes makes immutable once the
+StatefulSet exists, so on exactly the engines they are meaningful for they are also **destructive**:
+changing either would not resize anything, it would park that engine's `StarRocksCluster` at
+`phase=failed` with nothing reconciling again. Pick the class and size when you create the engine.
+There is no bypass flag; resizing a running engine means recreating its FE StatefulSet by hand, which
+destroys that FE's metadata (see above), or creating a new engine.
+
+Two values are refused at CREATE time as well, because the operator reads them as "render no claim"
+and would silently leave you on ephemeral storage: `feMetaStorageClass: emptyDir` or `hostPath` (they
+are special to the operator, not StorageClass names) and any zero `feMetaStorageSize`. A
+`feMetaStorageSize` that is not a positive binary quantity (`20Gi`, `1.5Ti`, `512Mi` — `Mi/Gi/Ti/Ei/Pi`
+only) is a 400 at create rather than a CR rejection minutes later.
+
+### Logs still do not survive a pod replacement
+
+Only the FE metadata volume was made persistent. `fe-log` (`/opt/starrocks/fe/log`) and `cn-log`
+(`/opt/starrocks/cn/log`) stay on `emptyDir` **by design**, and the CN's shared-data block cache has
+no volume at all (it is rebuilt from the object store). The consequence is deliberate and worth
+knowing: **a replaced pod starts with empty logs, and the previous pod's `fe.log` / `fe.audit.log`
+are gone.** Read them with `kubectl logs` while the pod lives, or ship them off the pod, if you need
+them after a restart. Governed-access audit does not depend on this: that is Ranger's, written by
+the plugin.
+
 ## Teardown
 
 ```bash

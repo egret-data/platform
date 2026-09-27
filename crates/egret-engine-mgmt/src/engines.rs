@@ -256,6 +256,14 @@ struct StarRocksConfigBody {
     /// `StarRocksPod` at provision-req assembly. Omitted ⇒ preserved on update.
     #[schema(value_type = Object)]
     pod: Option<serde_json::Value>,
+    /// StorageClass backing the FE metadata PVC (`/opt/starrocks/fe/meta`).
+    /// Omitted/blank ⇒ the cluster's DEFAULT StorageClass. Omitted ⇒ preserved
+    /// on update.
+    fe_meta_storage_class: Option<String>,
+    /// Size of the FE metadata PVC, as a k8s binary quantity (`"20Gi"`).
+    /// Omitted ⇒ preserved on update, then
+    /// `egret_engine_mgmt_api::DEFAULT_FE_META_STORAGE_SIZE`.
+    fe_meta_storage_size: Option<String>,
 }
 
 /// The provisioning parameters surfaced back to clients (subset of the stored
@@ -3185,6 +3193,30 @@ async fn build_starrocks_provision_req(
         .filter(|v| !v.is_null())
         .cloned()
         .and_then(|v| serde_json::from_value(v).ok());
+    // FE metadata PVC knobs. Absent/null ⇒ `None` ⇒ default StorageClass +
+    // `DEFAULT_FE_META_STORAGE_SIZE` in the provisioner. They only have an
+    // effect at all when `feMetaPersistent` below is true: an engine created
+    // before the PVC shipped renders NO meta volume whatever these say, and
+    // keeps the operator's `emptyDir`.
+    let fe_meta_storage_class = cfg
+        .and_then(|c| c.get("feMetaStorageClass"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty());
+    let fe_meta_storage_size = cfg
+        .and_then(|c| c.get("feMetaStorageSize"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty());
+    // The creation-time marker. Absent / null / `false` ⇒ `false`, so every
+    // engine that predates the marker renders the pre-PVC shape and its
+    // StatefulSet keeps reconciling. Only `build_starrocks_spec` on the CREATE
+    // path writes `true`; see `StarRocksConfig::fe_meta_persistent` for why
+    // this can never be flipped on for a live engine.
+    let fe_meta_persistent = cfg
+        .and_then(|c| c.get("feMetaPersistent"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Delegation opt-in read back from the stored `{mode, tlsEnabled}` block.
     // `tls_enabled` mirrors create: on only when delegation is configured,
@@ -3340,6 +3372,9 @@ async fn build_starrocks_provision_req(
             cn_autoscaling,
             pod,
             root_password,
+            fe_meta_storage_class,
+            fe_meta_storage_size,
+            fe_meta_persistent,
         }),
     };
     Ok((req, delegation_bootstrap))
@@ -3422,6 +3457,175 @@ fn validate_sr_autoscaling(sr_body: &StarRocksConfigBody) -> Result<(), CpError>
         }
     }
     Ok(())
+}
+
+/// Reject an FE-metadata storage class or size that the kube-starrocks operator
+/// would turn into "no PVC at all", or that the CRD would reject at apply time.
+///
+/// Both fields render INSIDE the FE StatefulSet's `volumeClaimTemplates`, so a
+/// value the operator reads as "not a claim" does not merely mis-size the
+/// volume — it removes the claim template, which on a live StatefulSet is an
+/// immutable-field change that parks the `StarRocksCluster` at `phase=failed`
+/// forever (see `validate_sr_fe_meta_immutable`). Three values do that:
+///
+/// - `storageClassName: "emptyDir"` and `"hostPath"` are SPECIAL to the
+///   operator, not StorageClass names: it interprets them as "mount this kind
+///   of volume instead" and skips the PVC entirely. Matched
+///   case-INSENSITIVELY: being stricter than the operator can only refuse a
+///   real StorageClass named `EmptyDir`, which is not a thing, whereas being
+///   laxer would let a casing variant through if the operator ever normalizes.
+/// - a ZERO size (`0`, `0Gi`, `0.0Gi`) makes the operator skip the claim too.
+///
+/// The size is also checked against the CRD's own quantity pattern
+/// (`([0-9]*[.])?[0-9]+(Mi|Gi|Ti|Ei|Pi)`), so `"20"`, `"20GB"`, `"20Ki"` or
+/// `"big"` are a 400 here instead of an apply-time CR rejection minutes later
+/// with nothing readable to point at.
+///
+/// Runs on create AND update. On update the immutability guard below refuses
+/// these fields outright, so this is the create-time gate in practice — but it
+/// stays on both paths so a value that cannot be created cannot be reached by
+/// an edit either (the rule `validate_sr_autoscaling` states).
+fn validate_sr_fe_meta_storage(sr_body: &StarRocksConfigBody) -> Result<(), CpError> {
+    if let Some(class) = sr_body
+        .fe_meta_storage_class
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let lower = class.to_ascii_lowercase();
+        if lower == "emptydir" || lower == "hostpath" {
+            return Err(CpError::BadRequest(format!(
+                "`starrocks.feMetaStorageClass: {class}` is not a StorageClass: the \
+                 kube-starrocks operator treats `emptyDir` and `hostPath` as a request \
+                 for an EPHEMERAL volume and renders no PersistentVolumeClaim, which \
+                 defeats FE metadata persistence entirely. Omit the field to bind the \
+                 cluster's default StorageClass, or name a real StorageClass"
+            )));
+        }
+    }
+    if let Some(size) = sr_body
+        .fe_meta_storage_size
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if !fe_meta_size_is_a_positive_quantity(size) {
+            return Err(CpError::BadRequest(format!(
+                "`starrocks.feMetaStorageSize: {size}` is not a positive binary quantity: \
+                 it must look like `20Gi` — digits with an optional decimal point and one \
+                 of the Mi/Gi/Ti/Ei/Pi suffixes — and be greater than zero. A zero size \
+                 makes the operator render no PersistentVolumeClaim at all, and any other \
+                 shape is rejected by the StarRocksCluster CRD at apply time"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `true` when `s` matches the CRD's quantity pattern for a binary size AND is
+/// strictly greater than zero. Hand-rolled rather than a regex: the pattern is
+/// small and this crate carries no regex dependency for it.
+///
+/// Accepts `20Gi`, `1.5Ti`, `.5Gi`. Rejects `0`, `0Gi`, `0.0Gi` (zero), `20`
+/// (no suffix), `20Ki` / `20GB` / `20G` (not a CRD suffix), `1.2.3Gi`, `Gi`.
+fn fe_meta_size_is_a_positive_quantity(s: &str) -> bool {
+    const SUFFIXES: [&str; 5] = ["Mi", "Gi", "Ti", "Ei", "Pi"];
+    let Some(suffix) = SUFFIXES.iter().find(|x| s.ends_with(**x)) else {
+        return false;
+    };
+    let num = &s[..s.len() - suffix.len()];
+    let mut dots = 0usize;
+    let mut digits = 0usize;
+    let mut nonzero = false;
+    for c in num.chars() {
+        if c == '.' {
+            dots += 1;
+            if dots > 1 {
+                return false;
+            }
+        } else if c.is_ascii_digit() {
+            digits += 1;
+            if c != '0' {
+                nonzero = true;
+            }
+        } else {
+            return false;
+        }
+    }
+    digits > 0 && nonzero
+}
+
+/// Refuse a PUT that tries to change the FE metadata volume of an engine that
+/// already has one. `feMetaStorageClass` and `feMetaStorageSize` are CREATE-ONLY
+/// for the same reason `feMetaPersistent` has no wire knob at all: both render
+/// inside the FE StatefulSet's `spec.volumeClaimTemplates`, which Kubernetes
+/// makes IMMUTABLE once the StatefulSet exists. Changing either does not resize
+/// anything — the operator's merge patch is rejected by the API server, the
+/// `StarRocksCluster` goes to `phase=failed`, and from then on NO change of any
+/// kind reconciles for that engine, a Ranger rebind included. Measured on kind
+/// 2026-09-26, §7 of `docs/en/plans/2026-09-26-fe-meta-live-result.md`.
+///
+/// Refusing rather than accepting-and-dropping follows the `catalogs`-on-update
+/// rule in [`update_engine`]: silently ignoring the field would tell the caller
+/// their volume was resized when it was not. There is deliberately NO bypass
+/// flag — the only safe migration is outside egret, and the message says so.
+///
+/// Only a NON-BLANK body value is refused. Absent/blank is exactly the
+/// omit=preserve case: it cannot change the render, so refusing it would break
+/// an idempotent `GET` → `PUT` round-trip for no benefit.
+///
+/// An UNMARKED engine is refused too, with its own reason: its stored values are
+/// never rendered (it keeps the operator's `emptyDir`), so accepting them would
+/// persist a knob that silently does nothing.
+fn validate_sr_fe_meta_immutable(
+    sr_body: &StarRocksConfigBody,
+    stored_spec: &serde_json::Value,
+) -> Result<(), CpError> {
+    let sent: Vec<&str> = [
+        (
+            "feMetaStorageClass",
+            sr_body.fe_meta_storage_class.as_deref(),
+        ),
+        ("feMetaStorageSize", sr_body.fe_meta_storage_size.as_deref()),
+    ]
+    .into_iter()
+    .filter(|(_, v)| v.map(str::trim).is_some_and(|s| !s.is_empty()))
+    .map(|(k, _)| k)
+    .collect();
+    if sent.is_empty() {
+        return Ok(());
+    }
+    let fields = sent
+        .iter()
+        .map(|f| format!("`starrocks.{f}`"))
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let marked = stored_spec
+        .get("starrocksConfig")
+        .and_then(|c| c.get("feMetaPersistent"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if marked {
+        Err(CpError::BadRequest(format!(
+            "{fields} is not accepted on update: it renders into the FE StatefulSet's \
+             `volumeClaimTemplates`, which Kubernetes makes immutable once the \
+             StatefulSet exists, so changing it does not resize the volume — every \
+             operator reconcile is rejected and the StarRocksCluster stops converging \
+             entirely. To change this engine's FE metadata volume, recreate its FE \
+             StatefulSet yourself (`kubectl -n <namespace> delete statefulset \
+             <engine>-fe --cascade=orphan`), which DESTROYS that FE's metadata \
+             (catalogs, StarRocks-side users and grants), or create a new engine with \
+             the class and size you want"
+        )))
+    } else {
+        Err(CpError::BadRequest(format!(
+            "{fields} is not accepted on update, and this engine has no FE metadata \
+             PersistentVolumeClaim to configure: it was created before FE metadata \
+             persistence shipped and keeps the operator's `emptyDir`, so the value \
+             would be stored and never rendered. Create a new engine to get a \
+             persistent FE metadata volume"
+        )))
+    }
 }
 
 /// Build the stored engine `spec` JSON from a StarRocks body. On UPDATE,
@@ -3539,6 +3743,81 @@ fn build_starrocks_spec(
         .clone()
         .or_else(|| existing_cfg.and_then(|c| c.get("pod")).cloned())
         .unwrap_or(serde_json::Value::Null);
+    // FE metadata PVC class/size: same omit=preserve rule, and absent on both
+    // sides stores `null`, which the provisioner reads as "default StorageClass"
+    // + `DEFAULT_FE_META_STORAGE_SIZE`.
+    //
+    // Both are CREATE-ONLY in practice: `validate_sr_fe_meta_immutable` refuses
+    // a non-blank value on update, because they render inside the FE
+    // StatefulSet's immutable `volumeClaimTemplates`. The omit=preserve
+    // fallbacks below therefore only ever carry a create-time value forward.
+    //
+    // An engine created BEFORE the PVC shipped gets no persistent meta volume
+    // from these — it has no marker, so the renderer emits nothing at the meta
+    // path and the operator's `emptyDir` default applies. That is deliberate:
+    // adding the claim to a live StatefulSet wedges its whole cluster. Migrating
+    // such an engine is a manual operator action, never an edit.
+    //
+    // The body is read ONLY on create (`existing.is_none()`). On update the
+    // stored value is carried forward whatever the body says, so this builder
+    // cannot change the FE metadata volume even if a future caller forgets
+    // `validate_sr_fe_meta_immutable`: the refusal is what the operator SEES,
+    // this is what makes the wedge unreachable. Two mechanisms on purpose —
+    // a check the caller can skip is not a guarantee.
+    let (fe_meta_storage_class, fe_meta_storage_size) = match existing {
+        None => (
+            sr_body
+                .fe_meta_storage_class
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .map(serde_json::Value::from)
+                .unwrap_or(serde_json::Value::Null),
+            sr_body
+                .fe_meta_storage_size
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .map(serde_json::Value::from)
+                .unwrap_or(serde_json::Value::Null),
+        ),
+        Some(_) => (
+            existing_cfg
+                .and_then(|c| c.get("feMetaStorageClass"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            existing_cfg
+                .and_then(|c| c.get("feMetaStorageSize"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        ),
+    };
+    // FE metadata PERSISTENCE MARKER — creation-time, and deliberately NOT a
+    // field on `StarRocksConfigBody`. `existing_cfg.is_none()` is exactly
+    // "this call is a create" (the only two production callers are
+    // `create_starrocks_engine`, which passes `None`, and
+    // `update_starrocks_engine`, which passes the stored spec), so a create
+    // stamps `true` and every engine that already exists stays at `false`.
+    //
+    // No wire knob because `volumeClaimTemplates` is IMMUTABLE on a live
+    // StatefulSet (measured on kind 2026-09-26, §7 of
+    // `docs/en/plans/2026-09-26-fe-meta-live-result.md`): a PUT that could set
+    // this to `true` would not migrate the engine, it would make every operator
+    // reconcile rejected by the API server and park the `StarRocksCluster` at
+    // `phase=failed` — no further change of any kind would apply to it,
+    // including a Ranger rebind. There is no body value to honour, so an update
+    // can only PRESERVE what is stored, which is the omit=preserve rule taken to
+    // its limit.
+    //
+    // Matched on `existing`, NOT on `existing_cfg`: `existing_cfg` is `None`
+    // both on create AND for a stored spec that carries no `starrocksConfig`
+    // object at all, and conflating those would stamp the marker onto an
+    // existing engine — the one outcome that must never happen.
+    let fe_meta_persistent = match existing {
+        None => serde_json::Value::Bool(true),
+        Some(_) => existing_cfg
+            .and_then(|c| c.get("feMetaPersistent"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Bool(false)),
+    };
 
     serde_json::json!({
         "imageVersion": fe_image,
@@ -3554,6 +3833,9 @@ fn build_starrocks_spec(
             "cnConfig": cn_config,
             "cnAutoscaling": cn_autoscaling,
             "pod": pod,
+            "feMetaStorageClass": fe_meta_storage_class,
+            "feMetaStorageSize": fe_meta_storage_size,
+            "feMetaPersistent": fe_meta_persistent,
         },
     })
 }
@@ -3654,6 +3936,11 @@ async fn create_starrocks_engine(
     // Reject an enabled autoscaling policy with out-of-range bounds up front, so
     // the admin gets a clean 400 instead of a deferred HPA-create failure.
     validate_sr_autoscaling(&sr_body)?;
+    // Reject an FE-metadata class/size the operator would read as "no PVC"
+    // (`emptyDir`, `hostPath`, a zero size) or the CRD would reject at apply
+    // time, up front — this is the ONLY path that can set them, since update
+    // refuses both fields outright.
+    validate_sr_fe_meta_storage(&sr_body)?;
 
     // Kubernetes must be configured before anything is minted.
     let Some(prov) = st.engine_provisioner.clone() else {
@@ -4856,7 +5143,7 @@ async fn apply_authz_service_update(
     request_body = CreateEngineBody,
     responses(
         (status = 200, description = "Engine spec updated and pods rolled", body = EngineDto),
-        (status = 400, description = "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), `authz_service_id` naming no policy profile or one with no usable tag service, or re-materializing workspace connections failed", body = ErrorBody),
+        (status = 400, description = "Invalid config, Kubernetes not configured, `catalogs` sent (create-only — attach through POST /engines/{id}/catalogs/{cid}), `starrocks.feMetaStorageClass`/`feMetaStorageSize` sent (create-only — they render into the FE StatefulSet's immutable `volumeClaimTemplates`; the message says what to do instead), `authz_service_id` naming no policy profile or one with no usable tag service, or re-materializing workspace connections failed", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing engine:update permission", body = ErrorBody),
         (status = 404, description = "No such engine", body = ErrorBody),
@@ -4916,6 +5203,10 @@ async fn update_engine(
         validate_sr_delegation_mode(&sr_body)?;
         validate_sr_fe_config(&sr_body)?;
         validate_sr_autoscaling(&sr_body)?;
+        validate_sr_fe_meta_storage(&sr_body)?;
+        // The FE metadata volume is CREATE-ONLY. Hoisted here with the others so
+        // the refusal lands before the `authz_service_id` bind writes anything.
+        validate_sr_fe_meta_immutable(&sr_body, &engine.spec)?;
     }
     // `authz_service_id` is HONOURED here rather than refused the way
     // `catalogs` is above, because there is no other route to send the caller
@@ -5086,6 +5377,12 @@ async fn update_starrocks_engine(
     // guard was originally wired into create only; an edit must enforce it too
     // (a config that can't be created must not be reachable via update either).
     validate_sr_autoscaling(&sr_body)?;
+    // ...and the FE metadata volume, which is CREATE-ONLY: both knobs render
+    // inside the FE StatefulSet's immutable `volumeClaimTemplates`. Duplicated
+    // from the hoisted block in `update_engine` the same way the three above
+    // are — unreachable through the handler, still correct on its own.
+    validate_sr_fe_meta_storage(&sr_body)?;
+    validate_sr_fe_meta_immutable(&sr_body, &engine.spec)?;
     // Validate an optional FE-ingress-TLS secret reference up front (400 on a
     // missing / non-TLS / incomplete secret), mirroring the shared create-time
     // guard — the StarRocks update path dispatches before that Trino-only check.
@@ -6658,6 +6955,235 @@ mod tests {
         assert!(!cert.contains("PRIVATE KEY"));
         // No cert block ⇒ None.
         assert!(extract_leading_cert("-----BEGIN PRIVATE KEY-----\nx\n").is_none());
+    }
+
+    /// The FE metadata PVC knobs follow the same omit=preserve rule as every
+    /// other field, and an engine created before the surface existed stores
+    /// `null` for both — which the provisioner reads as "default StorageClass
+    /// + default size". That says nothing about whether such an engine gets a
+    /// PVC: it does NOT, because it carries no `feMetaPersistent` marker (see
+    /// `build_starrocks_spec_marks_only_engines_it_creates`). These two fields
+    /// only choose the class and size of a volume the marker decides to render.
+    #[test]
+    fn build_starrocks_spec_carries_fe_meta_storage_knobs() {
+        let created = build_starrocks_spec(&StarRocksConfigBody::default(), None);
+        let ccfg = &created["starrocksConfig"];
+        assert!(ccfg["feMetaStorageClass"].is_null());
+        assert!(ccfg["feMetaStorageSize"].is_null());
+
+        let body = StarRocksConfigBody {
+            fe_meta_storage_class: Some("fast-ssd".into()),
+            fe_meta_storage_size: Some("50Gi".into()),
+            ..Default::default()
+        };
+        let set = build_starrocks_spec(&body, None);
+        assert_eq!(set["starrocksConfig"]["feMetaStorageClass"], "fast-ssd");
+        assert_eq!(set["starrocksConfig"]["feMetaStorageSize"], "50Gi");
+
+        // An unrelated edit preserves them.
+        let kept = build_starrocks_spec(
+            &StarRocksConfigBody {
+                fe_replicas: Some(3),
+                ..Default::default()
+            },
+            Some(&set),
+        );
+        assert_eq!(kept["starrocksConfig"]["feMetaStorageClass"], "fast-ssd");
+        assert_eq!(kept["starrocksConfig"]["feMetaStorageSize"], "50Gi");
+
+        // And an update CANNOT change them, body or no body. The handler refuses
+        // such a PUT (`validate_sr_fe_meta_immutable`); this pins that the
+        // builder itself is incapable of it, so a caller that skipped the check
+        // still could not rewrite an immutable `volumeClaimTemplates` field.
+        let forced = build_starrocks_spec(
+            &StarRocksConfigBody {
+                fe_meta_storage_class: Some("slow-hdd".into()),
+                fe_meta_storage_size: Some("500Gi".into()),
+                ..Default::default()
+            },
+            Some(&set),
+        );
+        assert_eq!(forced["starrocksConfig"]["feMetaStorageClass"], "fast-ssd");
+        assert_eq!(forced["starrocksConfig"]["feMetaStorageSize"], "50Gi");
+    }
+
+    /// The FE-metadata persistence MARKER is stamped by create and only by
+    /// create. `volumeClaimTemplates` is immutable on a live StatefulSet, so an
+    /// engine that already exists must never acquire the marker — an update can
+    /// only preserve what is stored, and an update of a legacy engine leaves it
+    /// `false`.
+    #[test]
+    fn build_starrocks_spec_marks_only_engines_it_creates() {
+        // CREATE ⇒ marked.
+        let created = build_starrocks_spec(&StarRocksConfigBody::default(), None);
+        assert_eq!(created["starrocksConfig"]["feMetaPersistent"], true);
+
+        // UPDATE of a marked engine ⇒ still marked.
+        let kept = build_starrocks_spec(
+            &StarRocksConfigBody {
+                fe_replicas: Some(3),
+                ..Default::default()
+            },
+            Some(&created),
+        );
+        assert_eq!(kept["starrocksConfig"]["feMetaPersistent"], true);
+
+        // UPDATE of a LEGACY engine — a stored spec written before the marker
+        // existed ⇒ NOT marked. This is the case the live gate falsified the
+        // plan on.
+        let legacy = serde_json::json!({
+            "imageVersion": "3.3-latest",
+            "starrocksConfig": { "feImage": "starrocks/fe-ubuntu:3.3-latest", "feReplicas": 1 },
+        });
+        let updated = build_starrocks_spec(
+            &StarRocksConfigBody {
+                fe_replicas: Some(2),
+                ..Default::default()
+            },
+            Some(&legacy),
+        );
+        assert_eq!(updated["starrocksConfig"]["feMetaPersistent"], false);
+
+        // And a stored spec with NO `starrocksConfig` object at all is still an
+        // UPDATE, not a create: `existing_cfg` is `None` for both, so matching
+        // on it instead of on `existing` would mark a live engine.
+        let bare = build_starrocks_spec(
+            &StarRocksConfigBody::default(),
+            Some(&serde_json::json!({})),
+        );
+        assert_eq!(bare["starrocksConfig"]["feMetaPersistent"], false);
+    }
+
+    /// A MARKED engine's update may not change its FE metadata volume. This is
+    /// the test that matters: `feMetaStorageClass` / `feMetaStorageSize` render
+    /// inside the FE StatefulSet's `volumeClaimTemplates`, which Kubernetes
+    /// makes immutable once the StatefulSet exists, so a PUT that changed them
+    /// would park the whole `StarRocksCluster` at `phase=failed`. The same
+    /// assertion on an UNMARKED engine would pass against the bug, which is why
+    /// the marked spec is the subject here.
+    #[test]
+    fn update_refuses_fe_meta_storage_on_a_marked_engine() {
+        let marked = build_starrocks_spec(&StarRocksConfigBody::default(), None);
+        assert_eq!(marked["starrocksConfig"]["feMetaPersistent"], true);
+
+        for body in [
+            StarRocksConfigBody {
+                fe_meta_storage_size: Some("50Gi".into()),
+                ..Default::default()
+            },
+            StarRocksConfigBody {
+                fe_meta_storage_class: Some("fast-ssd".into()),
+                ..Default::default()
+            },
+        ] {
+            let err = validate_sr_fe_meta_immutable(&body, &marked)
+                .expect_err("a marked engine must refuse an FE-meta volume change");
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("not accepted on update"),
+                "refuse, never accept-and-drop: {msg}"
+            );
+            assert!(
+                msg.contains("volumeClaimTemplates") && msg.contains("immutable"),
+                "the message must say WHY: {msg}"
+            );
+            assert!(
+                msg.contains("--cascade=orphan") && msg.contains("DESTROYS"),
+                "the message must tell the operator what to do instead, and its cost: {msg}"
+            );
+            // A wrapped literal whose line continuations were dropped reads as
+            // one line with runs of indentation in it. Operators see this text.
+            assert!(
+                !msg.contains("  "),
+                "the message must not carry source indentation: {msg}"
+            );
+        }
+
+        // An UNMARKED engine is refused too — its stored value would never be
+        // rendered — but for its own reason, and it must NOT claim a wedge.
+        let legacy = serde_json::json!({
+            "starrocksConfig": { "feImage": "starrocks/fe-ubuntu:3.3-latest" },
+        });
+        let err = validate_sr_fe_meta_immutable(
+            &StarRocksConfigBody {
+                fe_meta_storage_size: Some("50Gi".into()),
+                ..Default::default()
+            },
+            &legacy,
+        )
+        .expect_err("an unmarked engine has no PVC to configure");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("not accepted on update"), "{msg}");
+        assert!(msg.contains("no FE metadata"), "{msg}");
+        assert!(!msg.contains("  "), "source indentation leaked: {msg}");
+        assert!(
+            !msg.contains("cascade=orphan"),
+            "an engine with no PVC must not be told to recreate a claim template: {msg}"
+        );
+
+        // Absent or BLANK is the omit=preserve case and changes nothing, so it
+        // passes on both — refusing it would break an idempotent GET→PUT.
+        for spec in [&marked, &legacy] {
+            validate_sr_fe_meta_immutable(&StarRocksConfigBody::default(), spec)
+                .expect("an omitted field is preserve, not a change");
+            validate_sr_fe_meta_immutable(
+                &StarRocksConfigBody {
+                    fe_meta_storage_class: Some("   ".into()),
+                    fe_meta_storage_size: Some("".into()),
+                    ..Default::default()
+                },
+                spec,
+            )
+            .expect("a blank field is preserve, not a change");
+        }
+    }
+
+    /// Create rejects a class or size the operator would read as "render no
+    /// PersistentVolumeClaim", which on a live engine would REMOVE the claim
+    /// template — the same immutable-field wedge from the other direction.
+    #[test]
+    fn create_rejects_fe_meta_storage_that_disables_the_pvc() {
+        for class in ["emptyDir", "hostPath", "EMPTYDIR", "HostPath", " emptydir "] {
+            let err = validate_sr_fe_meta_storage(&StarRocksConfigBody {
+                fe_meta_storage_class: Some(class.into()),
+                ..Default::default()
+            })
+            .expect_err(class);
+            let msg = format!("{err:?}");
+            assert!(msg.contains("is not a StorageClass"), "{class}: {msg}");
+            assert!(!msg.contains("  "), "source indentation leaked: {msg}");
+        }
+        // A real class, and an absent/blank one, are fine.
+        for class in [None, Some("".to_string()), Some("fast-ssd".to_string())] {
+            validate_sr_fe_meta_storage(&StarRocksConfigBody {
+                fe_meta_storage_class: class.clone(),
+                ..Default::default()
+            })
+            .unwrap_or_else(|e| panic!("{class:?} should pass: {e:?}"));
+        }
+
+        // Zero sizes render no claim; malformed ones are refused by the CRD at
+        // apply time, minutes later, with nothing readable to point at.
+        for size in [
+            "0", "0Gi", "0.0Gi", "00Gi", "20", "20GB", "20G", "20Ki", "1.2.3Gi", "Gi", "big",
+            "-1Gi",
+        ] {
+            let err = validate_sr_fe_meta_storage(&StarRocksConfigBody {
+                fe_meta_storage_size: Some(size.into()),
+                ..Default::default()
+            })
+            .expect_err(size);
+            let msg = format!("{err:?}");
+            assert!(msg.contains("positive binary quantity"), "{size}: {msg}");
+            assert!(!msg.contains("  "), "source indentation leaked: {msg}");
+        }
+        for size in ["20Gi", "1.5Ti", ".5Gi", "512Mi", "1Pi", "1Ei", " 50Gi "] {
+            validate_sr_fe_meta_storage(&StarRocksConfigBody {
+                fe_meta_storage_size: Some(size.into()),
+                ..Default::default()
+            })
+            .unwrap_or_else(|e| panic!("{size} should pass: {e:?}"));
+        }
     }
 
     // ── build_starrocks_spec: omitted-field-preserves + delegation rule ─────
