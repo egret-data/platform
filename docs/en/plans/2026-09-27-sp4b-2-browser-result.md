@@ -597,3 +597,158 @@ carry `catalog_registry:read`, or these pages need a name source that `policy:re
   table) was not reached, since no row-filter rule was created.
 - **D8's two ceilings** were not provoked: the fixture is far too small to push a profile over
   either cap, so the refusal messages were not seen on screen.
+
+---
+
+## Second run — narrow re-check of the wire-shape fix (2026-09-27, `45e7e641`)
+
+**Scope.** Not a full gate. This re-check targets only the seam findings 3/4 identified above,
+plus the fix for the Policies-landing-page write affordance the first run flagged as most likely
+to still be wrong, plus a cheap admin regression pass. It reuses the first run's stack and fixture
+rather than rebuilding either.
+
+**Environment, reused as found.** `egret_sp4b` still existed with the first run's fixture rows
+intact: catalogs `wh`/`other_wh`, tag `pii`/"PII", the deny grant
+`b27a993f-3c75-409c-9d4c-d2791602a0f3` (`role analyst cannot read wh.sales.orders`), the tag rule
+`3698443b-6ef7-4318-9415-7d9f9a247ead` (`mask-pii-columns`, selector `tag:pii`), users
+`admin@egret.local` and `reader@egret.local`, and `reader`'s platform role `policy_reader` →
+exactly `policy:read` via `access_grants`/`role_permissions`. The dev database `egret` was not
+touched; `demo-trino` was not touched.
+
+Two things needed fixing before anything could be measured:
+
+1. **The running `egret serve` was stale.** A process was already up against `egret_sp4b`, but its
+   binary (`target-check/debug/egret`, built 20:17:12) predated `HEAD` (`45e7e641`, committed
+   21:59:37) by the five fix commits this re-check exists to verify. Rebuilt with
+   `CARGO_TARGET_DIR=target-check cargo build -p egret-bin --bin egret` (54s), killed the stale
+   process, restarted `serve` with the same env it had been using. This sidesteps the
+   `RolesChanged`-staleness trap from the first run's note: a fresh server boot reads roles from
+   the DB at startup, so `reader`'s `policy_reader` role was live immediately — confirmed via
+   `GET /api/auth/me` returning `{"platform_roles":["policy_reader"],"permissions":["policy:read"]}`
+   before touching the browser.
+2. **`reader@egret.local`'s password was not recorded anywhere retrievable** (only its argon2 hash
+   survived in the DB). Reset it directly with `UPDATE users SET password_hash = ...` to a known
+   argon2id hash for `Reader12345!` (generated via `argon2-cffi`; the verifier reads params off the
+   stored hash string, so mismatched KDF cost parameters between the login-time hasher and this
+   ad-hoc hash don't matter). This is a credential reset on a disposable scratch database, not a
+   schema or data change.
+
+`egret migrate` still refuses on `egret_sp4b` with `migration 127 was previously applied but has
+been modified` — but `_sqlx_migrations` is already at version 158, matching every file in
+`migrations/`, and `serve` boots and operates correctly against it. Recorded as a pre-existing
+environment quirk (unrelated to migration 0127, which is untouched history from Aug 23), not a
+functional gap; `migrate` was not required to make progress.
+
+Driven with Playwright/Chromium against `localhost:5173` (Vite) / `localhost:8080` (backend).
+
+### Check 1 — the grant sentence shows the catalog NAME · PASS
+
+As `reader@egret.local` (verified via `GET /api/auth/me`: `policy:read` only), `Data permissions`
+renders the pre-existing deny grant, **verbatim**:
+
+```text
+role analyst cannot read wh.sales.orders
+```
+
+`wh` is the catalog's name, not `4a8fe34a-af58-4984-a1e7-12854fb9d496` — the exact uuid the first
+run's Finding 3 reported in its place. Confirmed independently at the wire: `GET
+/api/control-plane/perm/grants` as reader returns
+`{"scope":{"catalog_id":"4a8fe34a-...","...},"catalog_name":"wh"}` while `GET
+/api/control-plane/catalogs` for the same session is still `403 {"error":"forbidden"}` — so the
+name is coming from the new `GrantView.catalog_name` field, not from a client-side catalog lookup
+that happens to be allowed.
+
+### Check 2 — a tag-selected rule reads `tag PII` · PASS
+
+Same reader session, `Mask & filter rules`, row `mask-pii-columns`. The `Selects` column,
+**verbatim**:
+
+```text
+tag PII
+```
+
+Not `tag pii`. Confirmed at the wire: `GET /api/control-plane/perm/rules` as reader returns
+`{"selector":{"type":"tag","key":"pii"},"catalog_name":null,"tag_name":"PII"}` — `GET /api/tags`
+is unreachable for `policy:read` alone, so this is `RuleView.tag_name`, not a client lookup.
+
+### Check 3 — Explain access names the missing permission · PASS
+
+Same reader session, `Explain access`. The `Catalog` combobox is empty (`Select a catalog`, no
+options), and beside it, rendered as an alert, **verbatim**:
+
+```text
+No catalogs to choose from: listing them needs the catalog_registry:read permission, which this
+account does not have. Nothing on this form can name a target until a platform admin grants it.
+```
+
+(`catalog_registry:read` is rendered as an inline `<code>` span inside that sentence, not a
+separate fragment.) This names the exact missing permission, and the wording — "listing them
+needs the ... permission, which this account does not have" — is unambiguously about the account's
+grants, not about the registry being empty; it does not blame "no catalogs registered". The
+`Explain` button stays disabled with its own separate note, **verbatim**: "Explain needs a user
+and a target catalog." — the two messages are distinct: one says why the list is empty, the other
+says why the button won't submit.
+
+### Check 4 — Policies landing page offers the reader no writes it will refuse · PASS
+
+Same reader session, `/governance/policies`. The page header carries only a search box — **no
+`New profile` button** (the admin session, by contrast, has one). Each profile row's kebab menu
+(`Actions for trino-alpha`) opens with **exactly one item, `Download config`** — no `Delete
+profile`, no other write action. So neither of the two controls the brief named is present, and
+there is no reachable refusal to inspect because the write affordances are absent rather than
+present-and-403ing.
+
+Checked one step further than asked, on the profile detail page (`/governance/policies/trino-alpha`),
+since the first run's Finding 5 lived there: as reader, `Seed default policies` and `New policy`
+are both absent, and **every** row's `Enabled` switch is `disabled` — including
+`zz-hand-written-admin`, the one foreign (non-compiler-owned) policy, which in the first run had an
+enabled-looking switch that 403'd silently on click. That control is now consistently disabled for
+this persona rather than offered and refused. (Not one of the four named checks, but it is the
+same class of defect finding 4/5 named, on the page one click deeper, and it is fixed too.)
+
+### Admin regression pass · PASS
+
+All as `admin@egret.local` (`platform_admin`, bypasses the PDP):
+
+- **Sentence still renders.** `Data permissions` shows, verbatim, `role analyst cannot read
+  wh.sales.orders` (the same grant reader saw, now as admin — unchanged from the first run).
+- **A grant can still be created with its preview.** `New grant` → Allow, Read, catalog `wh`,
+  schema `sales`, include `role analyst`. Preview line before running: `Preview: read on
+  wh.sales.*`. After clicking `Preview`, verbatim:
+  ```text
+  Would recompile trino-alpha.
+  created 1 · updated 0 · deleted 0 · unchanged 1
+  rule 3698443b-6ef7-4318-9415-7d9f9a247ead: profile has no usable `tagService` (unconfigured, or
+  naming a profile that does not exist), so tag rule "mask-pii-columns" cannot compile here
+  ```
+  `Create` enabled after the preview; clicking it produced a `Grant created.` toast, the strip went
+  to `2 grants · 1 allow · 1 deny`, and the new row rendered, verbatim, `role analyst can read
+  wh.sales.*`. The grant compiled to `perm-grant-022bab8f-6b0c-4fa7-8ce3-40709b35501b` in profile
+  `trino-alpha` (now `policy version 9`). This grant was left in place afterward — not cleaned up —
+  since `egret_sp4b` is a disposable scratch database.
+- **The 409 on a compiler-owned policy still explains itself.** Opened
+  `/governance/policies/trino-alpha/access/7` (the just-created grant's compiled policy) and
+  clicked `Save` with no changes. `PUT /api/control-plane/policies/7` → 409, and the page rendered,
+  verbatim:
+  ```text
+  This policy is owned by the permission model. policy "perm-grant-022bab8f-6b0c-4fa7-8ce3-40709b35501b"
+  is compiled by the SP4a permission model — it is produced by a grant or rule, not hand-authored;
+  edit or delete that grant/rule instead of writing this policy directly, since the next recompile
+  would otherwise silently overwrite this change
+  ```
+  Same message shape as the first run's case 8, on a freshly-created policy this time rather than
+  the original fixture's.
+
+### Verdict — second run
+
+| # | check | result |
+|---|---|---|
+| 1 | Grant sentence shows catalog name, not uuid | **PASS** — `role analyst cannot read wh.sales.orders` |
+| 2 | Tag rule reads `tag PII`, not `tag pii` | **PASS** |
+| 3 | Explain access names the missing permission | **PASS** — names `catalog_registry:read`, distinguishes account-lacks-permission from registry-empty |
+| 4 | Policies landing page offers the reader no writes it will refuse | **PASS** — `New profile` absent, row menu has only `Download config` |
+| — | Admin regression: sentence, grant+preview, 409 explanation | **PASS**, all three |
+
+Nothing was BLOCKED. All four checks and the regression pass were measured directly through the
+browser and cross-checked at the wire (`curl`/`fetch` against the same session cookies), not
+inferred from the commit messages that claim to fix them.
