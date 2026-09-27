@@ -382,9 +382,10 @@ pub struct WriterConfig {
 
 impl Default for WriterConfig {
     /// 10,000 lines; 500 lines or 1 s; 30 s of retries; a 10 s drain; a 5 s
-    /// flush barrier. A healthy barrier waits for one `INSERT` of at most 500
-    /// lines, so 5 s is generous; a barrier behind a failing batch is released
-    /// by the breaker, not by this bound.
+    /// flush barrier. A healthy barrier waits for everything queued ahead of
+    /// it -- up to the whole channel, about 21 inserts of 500 lines -- within
+    /// this bound; a barrier behind a failing batch is released by the
+    /// breaker, not by this bound.
     fn default() -> Self {
         Self {
             capacity: 10_000,
