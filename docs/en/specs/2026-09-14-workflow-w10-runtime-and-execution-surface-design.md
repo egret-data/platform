@@ -236,6 +236,16 @@ willing to be large; otherwise they are W11 and W7 ships without a logs panel,
 stated rather than discovered.** That is a decision for the reviewer, and it is
 written here as a decision rather than resolved silently.
 
+*(2026-09-27, W11 Task 6: the reviewer chose W11, and W11 has shipped. The
+measurement above is the state on the day it was taken and is kept as the
+record; none of its three bullets is current. Migration 0159 creates
+`workflow.task_logs`; `logs::PgLogSink` persists every line a handler writes,
+container and python stdout/stderr as content rather than counts; and
+`GET …/executions/{id}/logs` reads them. "W7 ships without a logs panel" now
+means only that the panel is W7's to build: the API it needs exists. See the
+programme spec's §9 W11 correction and
+`docs/{en,vi}/specs/2026-09-27-workflow-w11-execution-logs-design.md`.)*
+
 ## 6. Fidelity rules
 
 Unchanged, with four that carry weight here:

@@ -236,6 +236,16 @@ không có panel log — nói ra chứ không để người sau phát hiện.**
 của người review, và nó được viết ở đây **như một quyết định**, không được giải
 quyết lặng lẽ.
 
+*(2026-09-27, W11 Task 6: người review đã chọn W11, và W11 đã ship. Phép đo ở
+trên là trạng thái vào ngày đo và được giữ làm hồ sơ; không gạch đầu dòng nào
+trong ba cái còn đúng hôm nay. Migration 0159 tạo `workflow.task_logs`;
+`logs::PgLogSink` ghi xuống mọi dòng một handler viết, stdout/stderr của
+container và python là nội dung chứ không phải số đếm; và
+`GET …/executions/{id}/logs` đọc chúng. "W7 ship không có panel log" giờ chỉ còn
+nghĩa là panel là việc W7 phải dựng: API nó cần đã có. Xem đính chính W11 ở §9
+của spec chương trình và
+`docs/{en,vi}/specs/2026-09-27-workflow-w11-execution-logs-design.md`.)*
+
 ## 6. Quy tắc trung thành
 
 Không đổi, với bốn điều mang trọng lượng ở đây:
