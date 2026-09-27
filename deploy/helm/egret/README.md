@@ -139,13 +139,27 @@ that path does not go through egret at all.
 and cannot be rebuilt, snapshot `/opt/starrocks/fe/meta` out of the running pod first
 (`kubectl cp`). None of this is needed to upgrade egret.
 
-Per-engine knobs, both optional, on the engine create/update body under `starrocks`, and both only
-meaningful for an engine created after this release:
+Per-engine knobs, both optional, **CREATE-ONLY**, and only meaningful for an engine created after
+this release:
 
 | field | default | meaning |
 |---|---|---|
 | `feMetaStorageClass` | absent ⇒ the cluster's **default** StorageClass (`standard` on kind) | StorageClass backing the claim |
 | `feMetaStorageSize` | `20Gi` | claim size; FE metadata is small, so this is generous |
+
+`PUT /engines/{id}` **refuses** both fields — it does not accept and ignore them. They render inside
+the FE StatefulSet's `spec.volumeClaimTemplates`, which Kubernetes makes immutable once the
+StatefulSet exists, so on exactly the engines they are meaningful for they are also **destructive**:
+changing either would not resize anything, it would park that engine's `StarRocksCluster` at
+`phase=failed` with nothing reconciling again. Pick the class and size when you create the engine.
+There is no bypass flag; resizing a running engine means recreating its FE StatefulSet by hand, which
+destroys that FE's metadata (see above), or creating a new engine.
+
+Two values are refused at CREATE time as well, because the operator reads them as "render no claim"
+and would silently leave you on ephemeral storage: `feMetaStorageClass: emptyDir` or `hostPath` (they
+are special to the operator, not StorageClass names) and any zero `feMetaStorageSize`. A
+`feMetaStorageSize` that is not a positive binary quantity (`20Gi`, `1.5Ti`, `512Mi` — `Mi/Gi/Ti/Ei/Pi`
+only) is a 400 at create rather than a CR rejection minutes later.
 
 ### Logs still do not survive a pod replacement
 
