@@ -8703,39 +8703,49 @@ killed by a named assertion and recorded in that task's report. None survived.
    package, because how the server may run containers is a security decision.
 2. **There is no SSE and no `follow`.** A client polls the cursor. That was
    decided with the user (D1); egret has no SSE endpoint anywhere.
-3. **A line becomes readable about 2 s after it is written.** The route returns
-   only rows with `inserted_at < now() - 2 s`, so that an id committed after a
-   higher one (two writers, or one writer's retry overlapping its next batch)
-   is not skipped by a reader whose cursor has already passed it. The 2 s
-   assumes each write transaction is shorter than that; `inserted_at` is the
-   transaction's start.
-4. **The flush barrier is bounded at 30 s, and past it the run commits
-   anyway.** `RunLog::finish` waits for the writer to store every line the
-   attempt handed it (`WriterConfig::flush_within`, the retry window), then
-   the outcome commits. If the writer does not acknowledge within 30 s, or is
-   gone, `finish` logs a `warn` and returns: a log write never holds up or
-   changes a run's outcome.
+3. **A line becomes readable about 2 s after it is written.** A page stops
+   before the first row after the cursor whose `inserted_at` is less than 2 s
+   old (a watermark, not a per-row filter), so that an id committed after a
+   higher one (two writers: two replicas) is not skipped by a reader whose
+   cursor has already passed it. That holds while each write transaction is
+   shorter than **half** the lag (1 s); `inserted_at` is the transaction's
+   start.
+4. **The flush barrier is bounded at 5 s, and it does not wait at all while
+   the writer is failing.** `RunLog::finish` waits for the writer to store
+   every line the attempt handed it (`WriterConfig::flush_within`), then the
+   outcome commits. If the writer does not acknowledge within 5 s, or is gone,
+   `finish` logs a `warn` and returns, and the timeout sets the writer's
+   breaker; while the breaker is set (an insert failed, until one succeeds),
+   the barrier returns at once and a `write` on a full channel drops its line
+   with a count instead of waiting. So a log write never changes a run's
+   outcome, and can delay it by at most one barrier bound per failing spell.
+   A write can still wait while the writer is healthy but slow (D3), and that
+   wait counts against the task's `timeout:`.
 5. **What `complete` guarantees, and what it does not** (W11 design spec §11).
    `complete` is true when the execution is terminal **and** its `updated_at`
    is more than 2 s old. Because the barrier inserts a run's lines before its
    outcome commits, a client that stops on `complete && items == []` has read
    every line that was stored. It does **not** mean that every line the run
    printed was stored: `complete` can be true with lines missing when the
-   process died with lines still in the channel, when a batch exhausted its
-   30 s of retries (its count is in `tracing::error!`), or when the barrier
-   timed out (item 4). A run that executes twice (reaped while its handler
-   still ran) writes both runs' lines under one attempt. And `complete`
+   process died with lines still in the channel, when a batch was dropped
+   (retries exhausted, or its one attempt failed while the writer was
+   failing; its count is in `tracing::error!`), or when the barrier did not
+   wait (timed out, or skipped by the breaker; item 4). A run that executes
+   twice (reaped while its handler still ran) writes both runs' lines under
+   one attempt, and its stale handler can write after the terminal commit. And `complete`
    assumes nothing writes after the terminal state; that holds while egret
    has no kill route, and a future kill must re-check it.
-6. **Paths with no test:** the barrier's lost-acknowledgement and drain-time
-   acknowledgement paths, and a barrier that times out because the channel is
-   full, are reasoned about in `logs::writer` and not exercised; the 10 s
-   shutdown drain does not bound an insert already in flight.
+6. **Paths with no test:** a barrier that times out because the channel is
+   full is reasoned about in `logs::writer` and not exercised; the 10 s
+   shutdown drain does not bound an insert already in flight. (The
+   lost-acknowledgement and drain-time acknowledgement paths are tested since
+   the final-review fix wave.)
 7. **The barrier's cost is not measured under load.** Every `finish()`
    forces its own INSERT, which defeats the 1 s batching for short runs and
-   adds one insert per run to the sequential claim loop; during a log-insert
-   outage each run waits up to the 30 s bound. Neither is measured; both are
-   recorded for the whole-branch review.
+   adds one insert per run to the sequential claim loop. Not measured. During
+   a log-write fault the breaker stops the barrier from waiting (item 4);
+   `tests/task_logs.rs`'s `a_failing_writer_does_not_slow_finish` measures
+   five runs' `finish` under failing inserts, not throughput under load.
 
 #### The sweep: "nothing persists a log line" is retired where it described W11's absence
 

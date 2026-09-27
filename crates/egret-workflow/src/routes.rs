@@ -1275,14 +1275,14 @@ pub struct LogPageDto {
 /// An execution's log lines after a cursor, in `id` order.
 ///
 /// **Lines appear about 2 seconds after they are written (the settle lag,
-/// [`crate::logs::SETTLE_LAG`]).** Only lines whose `inserted_at` is more than
-/// 2 s old are returned. The reason is out-of-order commits: `bigserial` ids
-/// are allocated at insert and committed later, so with two writers (two egret
-/// replicas, or one writer's retry overlapping its next batch) id 100 can
+/// [`crate::logs::SETTLE_LAG`]).** A page stops before the first line whose
+/// `inserted_at` is less than 2 s old, and serves nothing above it. The reason
+/// is out-of-order commits: `bigserial` ids are allocated at insert and
+/// committed later, so with two writers (two egret replicas) id 100 can
 /// commit after id 101. A client that had read 101 and moved its cursor past
-/// it would never see 100. Holding every line back until it has settled lets
-/// the lower id commit first; a log batch is one short transaction, so 2 s
-/// bounds that window generously.
+/// it would never see 100. Holding lines back until the lowest unserved one
+/// has settled lets the lower id commit first, provided a log write lasts less
+/// than half the lag (a log batch is one short `INSERT`).
 ///
 /// **When to stop polling: on `complete && items.is_empty()`, never on a
 /// terminal `execution_state` alone.** A run's lines are inserted before its
@@ -1290,8 +1290,10 @@ pub struct LogPageDto {
 /// so once the execution has been terminal for longer than the settle lag,
 /// every line it will ever have is visible; `complete` says exactly that,
 /// computed from the execution row itself. A terminal state seen earlier can
-/// still have its last lines inside the lag. The exceptions are the process
-/// dying mid-run and a batch dropped after its retries (spec §11).
+/// still have its last lines inside the lag. `complete` does NOT mean every
+/// line the run printed was stored: see spec §11 for the cases (the process
+/// dying, a dropped batch, a log-write fault during which the barrier does not
+/// wait, a run executed twice).
 ///
 /// Authorisation is exactly `GET …/executions/{id}`'s: `WsContext` (session,
 /// membership, the `workflows` feature gate), then `workflow:read`, then

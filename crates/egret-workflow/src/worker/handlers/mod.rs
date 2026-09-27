@@ -74,9 +74,9 @@ pub trait LogSink: Send + Sync + std::fmt::Debug {
     /// The flush barrier (W11 spec §4.3): return once every line this sink
     /// accepted before the call is stored, or once the sink's own bound has
     /// passed. **Never unbounded and never an error**: `RunLog::finish` awaits
-    /// it before the run's outcome is committed, and a log write must never
-    /// hold up or change an outcome. A sink that stores synchronously (this
-    /// default) has nothing to wait for.
+    /// it before the run's outcome is committed, so it may delay an outcome by
+    /// at most its bound and must never change one. A sink that stores
+    /// synchronously (this default) has nothing to wait for.
     async fn flush(&self) {}
 }
 

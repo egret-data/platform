@@ -21,7 +21,7 @@ use uuid::Uuid;
 pub use prune::{spawn_pruner, PruneConfig};
 pub use repo::{InsertError, LogQuery, LogRepo, StoredLine};
 pub use run_log::{RunIdentity, RunLog};
-pub use writer::{spawn_writer, Inserter, PgLogSink, WriterConfig};
+pub use writer::{spawn_writer, Barrier, Inserter, PgLogSink, WriterConfig};
 
 /// The longest piece a log line is stored as, in `char`s (D6).
 ///
@@ -53,17 +53,25 @@ impl Default for LogLimits {
     }
 }
 
-/// How old a row's `inserted_at` must be before [`LogRepo::page`] returns it.
+/// How old a row's `inserted_at` must be before [`LogRepo::page`] serves it
+/// -- or any row with a higher id.
 ///
 /// `bigserial` ids are allocated at insert and become visible at commit, so
-/// two writers can commit id 101 before id 100. A reader that returned 101
-/// and moved its cursor past it would never see 100. Holding every row back
-/// until it is this old lets the lower id commit first, provided a write
-/// transaction lasts less than the lag: `inserted_at` is `now()`, the
-/// transaction's START, so a transaction open longer than this could still
-/// commit a row the reader has already moved past. A log batch is one short
-/// `INSERT` (spec §6), so the bound is generous. The price is that a line
-/// shows up about this long after it is written.
+/// two writers (two replicas; one writer is sequential) can commit id 101
+/// before id 100, and a statement that started later can hold a lower id than
+/// one that started earlier. A reader that returned 101 and moved its cursor
+/// past it would never see 100. So `page` is a **watermark**: it stops before
+/// the first row after the cursor that is younger than this, and never serves
+/// a higher id past it.
+///
+/// **The bound: a write transaction must last less than half the lag (1 s).**
+/// `inserted_at` is `now()`, the transaction's START. A row that is still
+/// uncommitted is invisible to the watermark; it can hold an id below a
+/// served row only if its transaction started before that row's transaction
+/// ended, so it commits within two write-durations of the served row's start
+/// -- which must fall inside the lag. A log batch is one short `INSERT`
+/// (spec §6). The price is that a line shows up about this long after it is
+/// written.
 pub const SETTLE_LAG: Duration = Duration::from_secs(2);
 
 /// A log line's level: slf4j's five, which are `Log.java`'s `level:` and

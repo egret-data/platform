@@ -23,8 +23,8 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, SubsecRound, Utc};
 use egret_metastore::Db;
 use egret_workflow::logs::{
-    spawn_pruner, spawn_writer, InsertError, Inserter, LogLevel, LogLimits, LogLine, LogQuery,
-    LogRepo, PruneConfig, RunIdentity, RunLog, StoredLine, WriterConfig,
+    spawn_pruner, spawn_writer, Barrier, InsertError, Inserter, LogLevel, LogLimits, LogLine,
+    LogQuery, LogRepo, PruneConfig, RunIdentity, RunLog, StoredLine, WriterConfig,
 };
 use egret_workflow::runtime::{spawn_with_logs, RuntimeConfig};
 use egret_workflow::worker::handlers::LogSink;
@@ -484,6 +484,70 @@ async fn out_of_order_commits_are_not_skipped_by_a_polling_reader() {
     fx.settle(exec).await; // time passes
     r.poll(&fx, exec).await;
     assert_eq!(r.seen, ["A", "B"], "both lines, in id order");
+}
+
+/// The settle lag is a WATERMARK (final review I3). Two concurrent INSERTs
+/// can give a statement that STARTED later (so settles later) an id below
+/// some of the earlier statement's ids. A per-row "settled" filter would then
+/// serve the higher, settled id and let the cursor pass the lower one, which
+/// is never served again. Staged directly: three committed rows S < A < B;
+/// only S and B are backdated. The page must stop at A -- serving S and
+/// holding B back -- even under a filter that A itself does not match.
+#[tokio::test]
+async fn the_page_stops_at_the_first_unsettled_id() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    fx.repo
+        .insert_batch(&[
+            fx.line(exec, LogLevel::Info, "S"),
+            fx.line(exec, LogLevel::Debug, "A"),
+            fx.line(exec, LogLevel::Info, "B"),
+        ])
+        .await
+        .unwrap();
+    let ids: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM workflow.task_logs WHERE execution_id = $1 ORDER BY id")
+            .bind(exec)
+            .fetch_all(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(ids.len(), 3, "control: all three committed");
+    let (id_s, id_a, id_b) = (ids[0], ids[1], ids[2]);
+    // Settle S and B only: B stands for the earlier statement's higher id,
+    // A for the later statement's lower id, still inside the lag.
+    sqlx::query(
+        "UPDATE workflow.task_logs SET inserted_at = inserted_at - interval '3 seconds' \
+          WHERE id = ANY($1)",
+    )
+    .bind(vec![id_s, id_b])
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+
+    let got = fx.page(exec, &q(None, 10)).await;
+    assert_eq!(
+        messages(&got),
+        ["S"],
+        "B has settled but sits above the unsettled A: it must be held back"
+    );
+    let cursor = got.last().map(|l| l.id);
+    assert_eq!(cursor, Some(id_s));
+    assert!(
+        fx.page(exec, &q(cursor, 10)).await.is_empty(),
+        "the reader cannot advance past A ({id_a}) while it settles"
+    );
+    let info_only = LogQuery {
+        min_level: Some(LogLevel::Info),
+        ..q(cursor, 10)
+    };
+    assert!(
+        fx.page(exec, &info_only).await.is_empty(),
+        "a filter A fails does not lift the watermark: B still waits for A"
+    );
+
+    fx.settle(exec).await;
+    assert_eq!(messages(&fx.page(exec, &q(cursor, 10)).await), ["A", "B"]);
+    assert_eq!(messages(&fx.page(exec, &info_only).await), ["B"]);
 }
 
 #[tokio::test]
@@ -1738,4 +1802,321 @@ async fn logs_route_reports_complete_only_after_the_settle_lag() {
     at("PAUSED", 3).await;
     let (_, body) = get_logs(&app, fx.ws, exec, fx.user, "").await;
     assert!(!complete(&body), "a pause is not an end: {body}");
+}
+
+// ── Final review I1: a line Postgres refuses costs only itself ──────────────
+
+/// A `Log` message holding U+0000 (reachable through a rendered expression
+/// such as `fromJson('"\\u0000"')`) is stored, without the NUL, through the
+/// real writer and table.
+#[tokio::test]
+async fn a_nul_in_a_log_message_is_stored_without_it() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let mut raw = fx.line(exec, LogLevel::Info, "x\0y");
+    let err = fx
+        .repo
+        .insert_batch(std::slice::from_ref(&raw))
+        .await
+        .expect_err("control: Postgres text refuses U+0000");
+    assert!(
+        matches!(err, InsertError::BadData(_)),
+        "classified as a data error: {err:?} ({:?})",
+        err.sqlstate()
+    );
+    assert_eq!(err.sqlstate().as_deref(), Some("22021"));
+    raw.message = "control".into();
+    assert_eq!(fx.repo.insert_batch(&[raw]).await.unwrap(), 1);
+
+    let cancel = CancellationToken::new();
+    let (sink, handle) = spawn_writer(fx.repo.clone(), wcfg(), cancel.clone());
+    let log = fx.run_log(exec, Arc::new(sink));
+    log.info("before\0after").await;
+    log.finish().await;
+    fx.settle(exec).await;
+    assert_eq!(
+        messages(&fx.page(exec, &q(None, 10)).await),
+        ["control", "beforeafter"],
+        "the NUL is removed and the line stored"
+    );
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+/// A line that bypassed `RunLog` and still holds U+0000 fails its batch with
+/// 22021. The writer must not retry that batch (no retry can fix a value), and
+/// must not drop it whole: every other line -- another execution's, another
+/// workspace's -- is stored, and only the bad line is lost.
+#[tokio::test]
+async fn a_refused_line_costs_only_itself_not_its_batch() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let (other_ws, _) = common::seed_workspace(&fx.db).await;
+    let other_exec = fx.execution_in(other_ws).await;
+    let (rigged, _gate) = Rigged::new(fx.repo.clone(), true);
+    let cancel = CancellationToken::new();
+    let cfg = WriterConfig { batch: 4, ..wcfg() };
+    let (sink, handle) = spawn_writer(rigged.clone(), cfg, cancel.clone());
+
+    let t0 = std::time::Instant::now();
+    sink.write(fx.line(exec, LogLevel::Info, "ok-1")).await;
+    sink.write(fx.line(exec, LogLevel::Info, "bad\0line")).await;
+    sink.write(LogLine {
+        workspace_id: other_ws,
+        ..fx.line(other_exec, LogLevel::Info, "other-workspace")
+    })
+    .await;
+    sink.write(fx.line(exec, LogLevel::Info, "ok-2")).await;
+    assert_eq!(sink.barrier().await, Barrier::Acked);
+    assert!(
+        t0.elapsed() < Duration::from_secs(2),
+        "no retry window was waited out ({:?})",
+        t0.elapsed()
+    );
+    assert_eq!(
+        rigged.calls(),
+        1 + 4,
+        "the batch once, then each of its four lines once"
+    );
+    assert_eq!(fx.count(other_exec).await, 1, "the other workspace's line");
+    fx.settle(exec).await;
+    assert_eq!(
+        messages(&fx.page(exec, &q(None, 10)).await),
+        ["ok-1", "ok-2"],
+        "the refused line alone is lost, the others kept in order"
+    );
+    assert!(!sink.is_failing(), "a bad line is not a writer fault");
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+// ── Final review I2: the breaker -- a failing writer never slows a run ──────
+
+/// While every insert fails, `finish()` must return at once, run after run:
+/// the barrier is skipped, not waited out (5 s bound) behind a 30 s retry.
+/// Once inserts succeed again the breaker clears and the barrier waits again.
+#[tokio::test]
+async fn a_failing_writer_does_not_slow_finish() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let (rigged, _gate) = Rigged::new(fx.repo.clone(), true);
+    rigged.fail_always.store(true, Ordering::SeqCst);
+    let cancel = CancellationToken::new();
+    let cfg = wcfg();
+    assert_eq!(
+        (cfg.retry_for, cfg.flush_within),
+        (Duration::from_secs(30), Duration::from_secs(5)),
+        "control: the spec's bounds, which a waiting barrier would show"
+    );
+    let (sink, handle) = spawn_writer(rigged.clone(), cfg, cancel.clone());
+
+    let t0 = std::time::Instant::now();
+    for i in 0..5 {
+        let log = fx.run_log(exec, Arc::new(sink.clone()));
+        log.info(&format!("run-{i}")).await;
+        let t = std::time::Instant::now();
+        log.finish().await;
+        assert!(
+            t.elapsed() < Duration::from_millis(500),
+            "run {i}: finish waited {:?} on a failing writer",
+            t.elapsed()
+        );
+    }
+    assert!(
+        t0.elapsed() < Duration::from_secs(1),
+        "five runs took {:?}",
+        t0.elapsed()
+    );
+    assert!(rigged.calls() >= 1, "control: an insert was attempted");
+    assert!(sink.is_failing(), "the breaker is set");
+    assert_eq!(sink.barrier_skips(), 5, "every barrier was skipped");
+    assert_eq!(fx.count(exec).await, 0, "control: nothing stored yet");
+
+    // The database is back: the first batch's retry lands, the breaker
+    // clears, the queued runs' lines follow, and a barrier waits again.
+    rigged.fail_always.store(false, Ordering::SeqCst);
+    wait_for_count(&fx, exec, 5, Duration::from_secs(8)).await;
+    assert!(
+        !sink.is_failing(),
+        "an insert succeeded: the breaker clears"
+    );
+    let log = fx.run_log(exec, Arc::new(sink.clone()));
+    log.info("healthy").await;
+    assert_eq!(sink.barrier().await, Barrier::Acked);
+    assert_eq!(
+        fx.count(exec).await,
+        6,
+        "an acknowledged barrier means stored"
+    );
+    assert_eq!(sink.barrier_skips(), 5);
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+/// While the writer is failing, a `write` that finds the channel full drops
+/// its line with a count instead of waiting -- including a write that was
+/// already waiting when the writer started failing -- so logging cannot run a
+/// handler into its `timeout:`.
+#[tokio::test]
+async fn a_failing_writer_does_not_block_write() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+
+    // 1. Already failing: 20 writes into a 2-line channel return at once.
+    let (rigged, _gate) = Rigged::new(fx.repo.clone(), true);
+    rigged.fail_always.store(true, Ordering::SeqCst);
+    let cancel = CancellationToken::new();
+    let cfg = WriterConfig {
+        capacity: 2,
+        batch: 1,
+        ..wcfg()
+    };
+    let (sink, handle) = spawn_writer(rigged.clone(), cfg, cancel.clone());
+    sink.write(fx.line(exec, LogLevel::Info, "trips")).await;
+    let t = std::time::Instant::now();
+    while !sink.is_failing() {
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "the breaker never set"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let t = std::time::Instant::now();
+    for i in 0..20 {
+        sink.write(fx.line(exec, LogLevel::Info, &format!("w{i}")))
+            .await;
+    }
+    assert!(
+        t.elapsed() < Duration::from_millis(500),
+        "writes waited {:?} on a failing writer",
+        t.elapsed()
+    );
+    assert_eq!(
+        sink.dropped_while_failing(),
+        18,
+        "the channel took 2 (its writer is backing off); 18 were dropped and counted"
+    );
+    cancel.cancel();
+    handle.await.unwrap();
+
+    // 2. A write waiting on a full channel while the writer is healthy is
+    //    released, and its line dropped, the moment the writer starts failing.
+    let (rigged, gate) = Rigged::new(fx.repo.clone(), false);
+    let cancel = CancellationToken::new();
+    let cfg = WriterConfig {
+        capacity: 1,
+        batch: 1,
+        ..wcfg()
+    };
+    let (sink, handle) = spawn_writer(rigged.clone(), cfg, cancel.clone());
+    sink.write(fx.line(exec, LogLevel::Info, "held")).await; // at the gate
+    let t = std::time::Instant::now();
+    while rigged.calls() == 0 {
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "the insert never started"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    sink.write(fx.line(exec, LogLevel::Info, "fills")).await; // the channel
+    let waiting = tokio::spawn({
+        let sink = sink.clone();
+        let line = fx.line(exec, LogLevel::Info, "waits");
+        async move { sink.write(line).await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !waiting.is_finished(),
+        "control: a healthy writer's full channel makes the write wait (D3)"
+    );
+    rigged.fail_always.store(true, Ordering::SeqCst);
+    gate.send(true).unwrap(); // the held insert now fails: the breaker trips
+    tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .expect("the waiting write is released when the writer starts failing")
+        .unwrap();
+    assert_eq!(sink.dropped_while_failing(), 1, "and its line counted");
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+/// A barrier behind a batch that is DROPPED (not failed over to the breaker:
+/// a second 23503 is not a writer fault) is acknowledged by the writer, at
+/// once -- not left to time out.
+#[tokio::test]
+async fn a_barrier_behind_a_lost_batch_is_acknowledged() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let (rigged, _gate) = Rigged::new(fx.repo.clone(), true);
+    let cancel = CancellationToken::new();
+    let cfg = WriterConfig {
+        flush_within: Duration::from_secs(10),
+        ..wcfg()
+    };
+    let (sink, handle) = spawn_writer(rigged.clone(), cfg, cancel.clone());
+    rigged.deleted_next.store(2, Ordering::SeqCst);
+    sink.write(fx.line(exec, LogLevel::Info, "lost")).await;
+
+    let t = std::time::Instant::now();
+    assert_eq!(sink.barrier().await, Barrier::Acked);
+    assert!(
+        t.elapsed() < Duration::from_secs(1),
+        "acknowledged, not timed out ({:?})",
+        t.elapsed()
+    );
+    assert_eq!(rigged.calls(), 2, "control: 23503, re-run, 23503: dropped");
+    assert_eq!(fx.count(exec).await, 0, "control: the batch was lost");
+    assert!(!sink.is_failing(), "control: the breaker played no part");
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+/// A barrier still in the channel when the writer is cancelled is
+/// acknowledged by the drain, after the lines before it are stored.
+#[tokio::test]
+async fn a_barrier_queued_at_shutdown_is_acknowledged_by_the_drain() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let (rigged, gate) = Rigged::new(fx.repo.clone(), false);
+    let cancel = CancellationToken::new();
+    let cfg = WriterConfig {
+        batch: 1,
+        flush_within: Duration::from_secs(10),
+        ..wcfg()
+    };
+    let (sink, handle) = spawn_writer(rigged.clone(), cfg, cancel.clone());
+    sink.write(fx.line(exec, LogLevel::Info, "held")).await; // at the gate
+    let t = std::time::Instant::now();
+    while rigged.calls() == 0 {
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "the insert never started"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    sink.write(fx.line(exec, LogLevel::Info, "queued")).await;
+    let barrier = tokio::spawn({
+        let sink = sink.clone();
+        async move { sink.barrier().await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!barrier.is_finished(), "control: the barrier is queued");
+
+    cancel.cancel();
+    gate.send(true).unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(5), barrier)
+        .await
+        .expect("the drain answers the barrier")
+        .unwrap();
+    assert_eq!(
+        got,
+        Barrier::Acked,
+        "acknowledged, not released by dropping"
+    );
+    assert_eq!(
+        fx.count(exec).await,
+        2,
+        "the line before the barrier was stored before the acknowledgement"
+    );
+    handle.await.unwrap();
 }

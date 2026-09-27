@@ -23,6 +23,13 @@ pub enum InsertError {
     /// -- and is the only way the other lines get written.
     #[error("an execution was deleted while its log batch was written: {0}")]
     ExecutionDeleted(#[source] sqlx::Error),
+    /// SQLSTATE class `22` (data exception), e.g. `22021` for a U+0000 in a
+    /// `text` value: some LINE of the batch can never be stored, whatever the
+    /// database's health. Retrying the batch cannot help and would hold every
+    /// other line of it hostage, so the writer isolates the offending line(s)
+    /// instead (`logs::writer`).
+    #[error("a log line cannot be stored as it is: {0}")]
+    BadData(#[source] sqlx::Error),
     /// Anything else (connection lost, pool timed out, ...), unclassified.
     #[error("writing a log batch: {0}")]
     Db(#[source] sqlx::Error),
@@ -33,8 +40,14 @@ impl InsertError {
         let fk = e
             .as_database_error()
             .is_some_and(|d| d.is_foreign_key_violation());
+        let data = e
+            .as_database_error()
+            .and_then(|d| d.code())
+            .is_some_and(|c| c.starts_with("22"));
         if fk {
             InsertError::ExecutionDeleted(e)
+        } else if data {
+            InsertError::BadData(e)
         } else {
             InsertError::Db(e)
         }
@@ -42,7 +55,8 @@ impl InsertError {
 
     /// The Postgres SQLSTATE, when the database answered with one.
     pub fn sqlstate(&self) -> Option<String> {
-        let (InsertError::ExecutionDeleted(e) | InsertError::Db(e)) = self;
+        let (InsertError::ExecutionDeleted(e) | InsertError::BadData(e) | InsertError::Db(e)) =
+            self;
         e.as_database_error()
             .and_then(|d| d.code())
             .map(|c| c.into_owned())
@@ -111,8 +125,10 @@ impl LogRepo {
     /// still fails the statement with `23503` (the insert waits on the
     /// delete's row lock, then finds the row gone). That is
     /// [`InsertError::ExecutionDeleted`]; nothing was written, and a retry
-    /// drops the deleted execution's lines. Any other failure is
-    /// [`InsertError::Db`], with the `sqlx::Error` kept whole.
+    /// drops the deleted execution's lines. A value Postgres refuses (SQLSTATE
+    /// class `22`, e.g. a U+0000 byte) is [`InsertError::BadData`]; nothing was
+    /// written. Any other failure is [`InsertError::Db`], with the
+    /// `sqlx::Error` kept whole.
     pub async fn insert_batch(&self, lines: &[LogLine]) -> std::result::Result<u64, InsertError> {
         if lines.is_empty() {
             return Ok(0);
@@ -166,11 +182,15 @@ impl LogRepo {
     /// **Both ids are in the predicate**: an execution id queried under the
     /// wrong workspace returns nothing, which the route turns into a 404.
     ///
-    /// **Only rows older than [`SETTLE_LAG`] are returned** (by `inserted_at`,
-    /// the database's clock). Without it a reader can move its cursor past a
-    /// lower id that commits later and never see that line -- see
-    /// [`SETTLE_LAG`] and `tests/task_logs.rs`'s
-    /// `out_of_order_commits_are_not_skipped_by_a_polling_reader`.
+    /// **A watermark, not a per-row filter: the page stops before the first
+    /// row after the cursor that has not settled** (`inserted_at` younger
+    /// than [`SETTLE_LAG`], the database's clock), whatever the filters. Rows
+    /// with a higher id are held back even when they have settled, so the
+    /// cursor can never pass a lower id that is still settling. Without that a
+    /// reader can move past a lower id that commits late and never see that
+    /// line -- see [`SETTLE_LAG`] and `tests/task_logs.rs`'s
+    /// `out_of_order_commits_are_not_skipped_by_a_polling_reader` and
+    /// `the_page_stops_at_the_first_unsettled_id`.
     pub async fn page(&self, ws: Uuid, execution: Uuid, q: &LogQuery) -> Result<Vec<StoredLine>> {
         let rows = sqlx::query(
             "SELECT id, task_run_id, task_id, attempt, level, ts, message \
@@ -178,7 +198,13 @@ impl LogRepo {
               WHERE workspace_id = $1 \
                 AND execution_id = $2 \
                 AND id > COALESCE($3, 0) \
-                AND inserted_at < now() - make_interval(secs => $4) \
+                AND id < COALESCE( \
+                      (SELECT min(u.id) FROM workflow.task_logs u \
+                        WHERE u.workspace_id = $1 \
+                          AND u.execution_id = $2 \
+                          AND u.id > COALESCE($3, 0) \
+                          AND u.inserted_at >= now() - make_interval(secs => $4)), \
+                      9223372036854775807) \
                 AND ($5::text IS NULL OR task_id = $5) \
                 AND ($6::uuid IS NULL OR task_run_id = $6) \
                 AND ($7::int2 IS NULL OR level >= $7) \

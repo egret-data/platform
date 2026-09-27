@@ -1893,7 +1893,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 run_max_lines: config.workflow.log_run_max_lines,
                 run_max_bytes: config.workflow.log_run_max_bytes,
             },
-            // A retention longer than i32::MAX days is "for ever" in practice.
+            // Saturated at i32::MAX days. NOT "for ever": above about 2.4
+            // million days `now() - make_interval(days => n)` is out of
+            // Postgres's timestamp range, and every prune pass fails (and is
+            // logged). `0` is the way to keep lines for ever.
             log_retention_days: i32::try_from(config.workflow.log_retention_days)
                 .unwrap_or(i32::MAX),
         },

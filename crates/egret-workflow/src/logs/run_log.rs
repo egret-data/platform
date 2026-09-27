@@ -164,8 +164,8 @@ impl RunLog {
     /// `claim::run_one` calls this before it commits the run's outcome, so an
     /// execution that has become terminal has its lines in the table -- which
     /// is what lets the logs API's `complete` tell a poller it may stop
-    /// (spec §6). The exceptions are the process dying and a batch dropped
-    /// after its retries (spec §11).
+    /// (spec §6). The exceptions -- the process dying, a dropped batch, and a
+    /// failing writer whose barrier does not wait -- are spec §11's.
     pub async fn finish(&self) {
         {
             let mut c = self.counters.lock().await;
@@ -196,7 +196,16 @@ impl RunLog {
             .await;
     }
 
+    /// Every line this handle writes is built here, so this is where U+0000
+    /// is removed: Postgres `text` cannot hold it (SQLSTATE 22021), and one
+    /// such line would fail its whole batch. Kestra strips it the same way
+    /// before writing (`JdbcJsonbUtils.java:13`, `replace("\u0000", "")`).
     fn make(&self, level: LogLevel, ts: DateTime<Utc>, message: &str) -> LogLine {
+        let message = if message.contains('\0') {
+            message.replace('\0', "")
+        } else {
+            message.to_string()
+        };
         LogLine {
             workspace_id: self.identity.workspace_id,
             execution_id: self.identity.execution_id,
@@ -205,7 +214,7 @@ impl RunLog {
             attempt: Some(self.identity.attempt),
             level,
             ts,
-            message: message.to_string(),
+            message,
         }
     }
 }
@@ -288,6 +297,24 @@ mod tests {
             (lines[1].level, lines[1].message.as_str()),
             (LogLevel::Info, "again")
         );
+    }
+
+    /// U+0000 cannot be stored in Postgres `text`; every path that builds a
+    /// line removes it, as Kestra does.
+    #[tokio::test]
+    async fn a_nul_character_is_removed_from_every_line() {
+        let rec = Recorder::new();
+        let log = capped(&rec, 1, u64::MAX);
+        log.info("a\0b\0").await;
+        log.info("withheld\0").await; // over the 1-line cap: summarised
+        log.failure("fail\0ed").await;
+        log.finish().await;
+        let got: Vec<String> = rec.lines().into_iter().map(|l| l.message).collect();
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(got[0], "ab", "an ordinary line");
+        assert_eq!(got[1], "failed", "the failure line");
+        assert!(got[2].starts_with("1 lines"), "the summary: {got:?}");
+        assert!(got.iter().all(|m| !m.contains('\0')), "{got:?}");
     }
 
     /// The 1-based `TaskInput.attempt` becomes the 0-based stored one.
