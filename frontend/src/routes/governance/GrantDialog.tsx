@@ -261,8 +261,17 @@ function GrantForm({
                 </p>
                 {preview.compile.skipped.length > 0 && (
                   <ul className="list-disc space-y-0.5 pl-5 text-muted-foreground">
-                    {preview.compile.skipped.map((s) => (
-                      <li key={`${s.source_kind}-${s.id}`}>
+                    {/* The index is part of the key on purpose (SP4b-2
+                        finding 4): `SkipReport` is `{source_kind, id, reason}`
+                        with no profile field, so the SAME rule skipped in two
+                        profiles produces two byte-identical entries — the
+                        normal case for a tag rule, which is catalog-unscoped
+                        and therefore the exact fan-out this panel exists to
+                        show. Keying on `source_kind`+`id` collided there and
+                        React dropped one of the two lines it was asked to
+                        render. */}
+                    {preview.compile.skipped.map((s, i) => (
+                      <li key={`${s.source_kind}-${s.id}-${i}`}>
                         {s.source_kind} {s.id}: {s.reason}
                       </li>
                     ))}

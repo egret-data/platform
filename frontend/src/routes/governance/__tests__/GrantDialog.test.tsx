@@ -216,3 +216,54 @@ describe("GrantDialog — a refusal is surfaced verbatim (D8)", () => {
     expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
   });
 });
+
+describe("GrantDialog — two identical skip lines (SP4b-2 finding 4)", () => {
+  /**
+   * The same panel, keyed the same way, so it carries the same collision:
+   * `SkipReport` has no profile field, so one grant skipped in two profiles is
+   * two byte-identical entries and `${source_kind}-${id}` is not unique. Fixed
+   * in both dialogs, so tested in both — a key fixed only where the browser
+   * happened to trip over it is a fix waiting to be re-broken.
+   */
+  test("renders both and logs no duplicate-key error", async () => {
+    const skip = {
+      source_kind: "grant",
+      id: "e615e686-215b-4513-85bd-15cbc7310cc0",
+      reason: "profile cannot express this grant",
+    };
+    previewMutateAsync.mockResolvedValue({
+      status: 200,
+      data: {
+        affected: [
+          { id: 1, name: "trino-prod" },
+          { id: 2, name: "trino-eu" },
+        ],
+        compile: {
+          services: [1, 2],
+          created: 0,
+          updated: 0,
+          deleted: 0,
+          unchanged: 1,
+          skipped: [skip, { ...skip }],
+        },
+      },
+    });
+    const errors: unknown[][] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args) => {
+      errors.push(args);
+    });
+
+    const user = userEvent.setup();
+    renderDialog({ existing: EXISTING });
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    expect(await screen.findAllByText(/cannot express this grant/)).toHaveLength(2);
+    expect(
+      errors.filter((a) => String(a[0]).includes("same key")),
+      `React reported a duplicate key: ${JSON.stringify(errors)}`,
+    ).toHaveLength(0);
+
+    spy.mockRestore();
+  });
+});

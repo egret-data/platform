@@ -250,3 +250,64 @@ describe("RuleDialog — full-body PATCH and verbatim refusals", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("RuleDialog — the fan-out's skip list (SP4b-2 finding 4)", () => {
+  /**
+   * **THE DISCRIMINATING CASE.** `SkipReport` carries no profile field, so one
+   * tag rule skipped in two profiles comes back as two BYTE-IDENTICAL entries.
+   * That is not an edge case: a tag selector is catalog-unscoped, so it is the
+   * normal shape of the very fan-out this panel exists to show, and the
+   * browser run hit it on the first tag rule it created —
+   * `Encountered two children with the same key, rule-9c4c1e6f-…`, at error
+   * level, with React then rendering one line where the preview reported two.
+   *
+   * Asserted two ways, because either alone is weak: React only WARNS about a
+   * duplicate key (so the console is the only signal it happened), while the
+   * rendered count is the consequence an operator actually sees.
+   */
+  test("renders both identical skip lines and logs no duplicate-key error", async () => {
+    const skip = {
+      source_kind: "rule",
+      id: "9c4c1e6f-88bb-4baa-a12d-0b7093e2821d",
+      reason: "profile has no usable `tagService`, so tag rule cannot compile here",
+    };
+    previewMutateAsync.mockResolvedValue({
+      status: 200,
+      data: {
+        affected: [
+          { id: 1, name: "trino-alpha" },
+          { id: 2, name: "trino-beta" },
+        ],
+        compile: {
+          services: [1, 2],
+          created: 0,
+          updated: 0,
+          deleted: 0,
+          unchanged: 1,
+          skipped: [skip, { ...skip }],
+        },
+      },
+    });
+    const errors: unknown[][] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args) => {
+      errors.push(args);
+    });
+
+    const user = userEvent.setup();
+    renderDialog();
+    await user.type(screen.getByLabelText("Name"), "mask-pii-columns");
+    await user.type(screen.getByPlaceholderText("Search tags by name…"), "PII");
+    await user.click(await screen.findByRole("button", { name: /PII Data/ }));
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+
+    await waitFor(() => expect(previewMutateAsync).toHaveBeenCalled());
+    const lines = await screen.findAllByText(/cannot compile here/);
+    expect(lines).toHaveLength(2);
+    expect(
+      errors.filter((a) => String(a[0]).includes("same key")),
+      `React reported a duplicate key: ${JSON.stringify(errors)}`,
+    ).toHaveLength(0);
+
+    spy.mockRestore();
+  });
+});
