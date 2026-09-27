@@ -263,6 +263,23 @@ function RuleForm({
               ? "A path-selected row filter needs exactly a catalog, schema and table — no column."
               : null;
 
+  /**
+   * Switching Kind to `row_filter` must drop any `scope.column` (review M-4).
+   * `ScopePicker` in `rowFilterMode` does not render a Column field at all
+   * (hardcoded fact 4/5: Ranger's `rowFilterDef` has no column level), so a
+   * column typed while the kind was `mask` survives invisibly and
+   * `rowFilterPathIncomplete` then blocks Save with a reason naming a field
+   * the operator cannot see or clear. The value is dropped on the switch,
+   * where the constraint starts applying — not silently at submit, which
+   * would send something other than what the form last showed.
+   */
+  function changeKind(next: KindType) {
+    setKindType(next);
+    if (next === "row_filter" && scope.column) {
+      setScope({ ...scope, column: undefined });
+    }
+  }
+
   const previewStale = previewedFor !== bodySnapshot;
 
   async function runPreview() {
@@ -323,7 +340,7 @@ function RuleForm({
 
           <div className="space-y-1.5">
             <Label htmlFor="rule-kind">Kind</Label>
-            <Select value={kindType} onValueChange={(v) => setKindType(v as KindType)}>
+            <Select value={kindType} onValueChange={(v) => changeKind(v as KindType)}>
               <SelectTrigger id="rule-kind">
                 <SelectValue />
               </SelectTrigger>

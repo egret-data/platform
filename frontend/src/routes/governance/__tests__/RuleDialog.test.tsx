@@ -179,6 +179,53 @@ describe("RuleDialog — a row filter cannot be scoped to a column (D6)", () => 
     await user.click(screen.getByRole("button", { name: "set-scope-complete" }));
     expect(screen.getByRole("button", { name: "Preview" })).toBeEnabled();
   });
+
+  /**
+   * **THE DISCRIMINATING CASE (review M-4).** A column typed while the kind was
+   * `mask` survives the switch to `row_filter`, where `ScopePicker` renders no
+   * Column field at all (fact 4/5: Ranger's `rowFilterDef` has no column
+   * level). Save was then blocked by a reason naming a field the operator can
+   * neither see nor clear — an unwinnable form. The order here is the operator's
+   * order: pick the column FIRST, switch Kind SECOND.
+   */
+  test("switching Kind to row_filter drops a column the new form cannot show", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.type(screen.getByLabelText("Name"), "filter-region");
+    await user.click(screen.getByRole("combobox", { name: "Selects by" }));
+    await user.click(await screen.findByRole("option", { name: "Path" }));
+    await user.click(screen.getByRole("button", { name: "set-scope-with-column" }));
+    expect(screen.getByTestId("scope-value")).toHaveTextContent('"column":"ssn"');
+
+    await user.click(screen.getByRole("combobox", { name: "Kind" }));
+    await user.click(await screen.findByRole("option", { name: "Filter rows" }));
+    await user.type(screen.getByLabelText("Filter expression"), "region = 'us'");
+
+    // The column is gone from the form's own state, so the form is completable.
+    expect(screen.getByTestId("scope-value")).not.toHaveTextContent('"column"');
+    expect(
+      screen.queryByText(/A path-selected row filter needs exactly a catalog, schema and table/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview" })).toBeEnabled();
+  });
+
+  /** The reverse switch must NOT invent or keep anything: going back to `mask`
+   *  leaves the column cleared rather than resurrecting it. */
+  test("switching back to mask does not resurrect the dropped column", async () => {
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.click(screen.getByRole("combobox", { name: "Selects by" }));
+    await user.click(await screen.findByRole("option", { name: "Path" }));
+    await user.click(screen.getByRole("button", { name: "set-scope-with-column" }));
+    await user.click(screen.getByRole("combobox", { name: "Kind" }));
+    await user.click(await screen.findByRole("option", { name: "Filter rows" }));
+    await user.click(screen.getByRole("combobox", { name: "Kind" }));
+    await user.click(await screen.findByRole("option", { name: "Mask a column" }));
+
+    expect(screen.getByTestId("scope-value")).not.toHaveTextContent('"column"');
+  });
 });
 
 describe("RuleDialog — the preview of a tag rule can fan out to every profile (D2)", () => {
