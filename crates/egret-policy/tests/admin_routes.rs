@@ -622,6 +622,96 @@ async fn admin_can_list_principals() {
     );
 }
 
+/// THE test that matters (task-2b): the picker's whole job is to hand back
+/// the engine-visible `ref`, and `ensure_username` does not merely slugify —
+/// it appends `-2`, `-3`, … on collision. A fixture where every user's
+/// username happens to equal the naive slug of their email passes whether or
+/// not `list_principals` exposes the real, allocated value; only a SECOND
+/// user colliding with an already-taken base can tell the two apart. This
+/// also covers the "never allocated" state: a third user who never triggers
+/// `ensure_username` must come back with `username` absent, not a guess.
+#[tokio::test]
+async fn list_principals_exposes_the_allocated_username_including_on_collision() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "principals_collision_admin", true).await;
+
+    let tag = Uuid::new_v4().simple().to_string();
+    // Both local-parts slugify to the SAME base ("collide-<tag>"): a `.` and a
+    // `-` both collapse to a single `-` in `slugify_localpart`.
+    let email1 = format!("collide.{tag}@egret.local");
+    let email2 = format!("collide-{tag}@egret.local");
+    let email3 = format!("collide3.{tag}@egret.local");
+
+    let uid1 = f
+        .users
+        .insert_local(&email1, "Collide One", "x")
+        .await
+        .expect("insert user1");
+    let uid2 = f
+        .users
+        .insert_local(&email2, "Collide Two", "x")
+        .await
+        .expect("insert user2");
+    let _uid3 = f
+        .users
+        .insert_local(&email3, "Collide Three", "x")
+        .await
+        .expect("insert user3");
+
+    let base = format!("collide-{tag}");
+    let un1 = f
+        .users
+        .ensure_username(uid1)
+        .await
+        .expect("ensure username 1");
+    assert_eq!(un1, base, "first allocation is the bare slug");
+    let un2 = f
+        .users
+        .ensure_username(uid2)
+        .await
+        .expect("ensure username 2");
+    assert_eq!(un2, format!("{base}-2"), "collision must append -2");
+    // user3 deliberately never calls ensure_username.
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req("GET", &format!("/principals?q={tag}"), &token, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "principals; body={body}");
+    let arr = body.as_array().expect("array");
+
+    let row1 = arr
+        .iter()
+        .find(|p| p["name"] == email1)
+        .unwrap_or_else(|| panic!("user1 missing from principals; body={body}"));
+    assert_eq!(row1["username"], base, "row1; body={body}");
+
+    let row2 = arr
+        .iter()
+        .find(|p| p["name"] == email2)
+        .unwrap_or_else(|| panic!("user2 missing from principals; body={body}"));
+    assert_eq!(
+        row2["username"],
+        format!("{base}-2"),
+        "collision suffix must be exposed, not the naive slug; body={body}"
+    );
+
+    let row3 = arr
+        .iter()
+        .find(|p| p["name"] == email3)
+        .unwrap_or_else(|| panic!("user3 missing from principals; body={body}"));
+    assert!(
+        row3["username"].is_null(),
+        "a user who never allocated a username must come back with none, not a guess; body={body}"
+    );
+}
+
 #[tokio::test]
 async fn platform_admin_can_lookup_resource_values() {
     let Some(f) = setup().await else {

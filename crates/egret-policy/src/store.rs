@@ -812,6 +812,56 @@ pub async fn tag_name_for_key_via(
     )
 }
 
+/// The `(id, name)` of each catalog in `ids` that still exists, in one round
+/// trip.
+///
+/// **Why a batch lookup and not `catalogs_for_service_via`.** That one answers
+/// "which catalogs does this profile reach", which is a different question and
+/// needs an engine binding; a grant or rule names a catalog whether or not any
+/// engine is attached to it yet. The perm read surface uses this to put the
+/// catalog's NAME on every grant and rule it returns (SP4b-2 finding 1): a
+/// client holding `policy:read` alone cannot call the catalog registry, so a
+/// client-side id→name lookup degraded the one column those pages exist to
+/// show into a raw uuid. The names are resolved here, where no extra
+/// permission is involved.
+///
+/// An id with no row is simply absent from the result (a catalog deleted
+/// between the grant read and this call) — never an error, and never a
+/// fabricated name.
+pub async fn catalog_names_for_ids_via(
+    conn: &mut sqlx::PgConnection,
+    ids: &[uuid::Uuid],
+) -> Result<Vec<CatalogRow>, PolicyStoreError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as::<_, CatalogRow>(
+        r#"SELECT id, name FROM registry.catalogs WHERE id = ANY($1)"#,
+    )
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// The `(key, name)` of each tag in `keys` that exists — the batch form of
+/// [`tag_name_for_key_via`], for the same reason
+/// [`catalog_names_for_ids_via`] exists. `tags.name` is the display name;
+/// `tags.key` is what a rule stores (D6), and the two differ (`pii` / `PII`).
+pub async fn tag_names_for_keys_via(
+    conn: &mut sqlx::PgConnection,
+    keys: &[String],
+) -> Result<Vec<(String, String)>, PolicyStoreError> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(
+        sqlx::query_as::<_, (String, String)>(r#"SELECT key, name FROM tags WHERE key = ANY($1)"#)
+            .bind(keys)
+            .fetch_all(&mut *conn)
+            .await?,
+    )
+}
+
 /// One registry catalog: `(id, name)`.
 #[derive(Debug, sqlx::FromRow)]
 pub struct CatalogRow {

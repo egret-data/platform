@@ -59,7 +59,9 @@ use egret_perm::{
     update_rule_in_tx, Action, Decision, Effect, Grant, GrantOrigin, PermStore, PrincipalKind,
     PrincipalSet, Reason, Rule, RuleKind, Scope, Selector, Subject,
 };
-use egret_policy::{tag_keys_for_resource_via, PolicyStore};
+use egret_policy::{
+    catalog_names_for_ids_via, tag_keys_for_resource_via, tag_names_for_keys_via, PolicyStore,
+};
 use sqlx::{Postgres, Transaction};
 
 use crate::grants::validate_grant_shape;
@@ -147,7 +149,9 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         CreatedResponse,
         SkipReport,
         Grant,
+        GrantView,
         Rule,
+        RuleView,
         Scope,
         Selector,
         RuleKind,
@@ -199,6 +203,59 @@ pub struct NewRule {
     pub selector: Selector,
     #[serde(default)]
     pub exempt: PrincipalSet,
+}
+
+/// A grant as the READ surface returns it: the stored [`Grant`], unchanged,
+/// plus the display name of the catalog its `scope.catalog_id` points at.
+///
+/// **Why the name belongs on the payload (SP4b-2 finding 1).** These routes
+/// gate on `policy:read`; `GET /control-plane/catalogs` gates on
+/// `catalog_registry:read`. The Data permissions page rendered its one primary
+/// column — D5's "a grant reads as a sentence" — by resolving `catalog_id`
+/// against that second endpoint, so for a holder of `policy:read` alone (the
+/// very persona the page was built for) the sentence degraded to
+/// `role analyst cannot read 4a8fe34a-….sales.orders`. A page's main feature
+/// must not need a permission that page's own gate does not require. The
+/// compiler already resolves id→name internally (D6) — the backend knew this
+/// name and simply never told the client.
+///
+/// **`#[serde(flatten)]`, so the wire shape stays flat** — `{...grant,
+/// "catalog_name": "wh"}`, one object, and a field added to `Grant` tomorrow
+/// appears here with nothing to update. The same idiom
+/// `DataApiEndpointListItemDto` and `EngineDetailDto` use; utoipa renders it
+/// as an `allOf`, which makes the generated TS type assignable to `Grant`.
+///
+/// `scope.catalog_id` is untouched: it is what a write sends back. This adds,
+/// it does not replace. `catalog_name` is `None` only when the catalog row is
+/// gone (an id whose catalog was deleted under a cascade this read raced) —
+/// never a fabricated or key-derived stand-in.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct GrantView {
+    #[serde(flatten)]
+    pub grant: Grant,
+    /// `registry.catalogs.name` for `scope.catalog_id`, resolved server-side.
+    pub catalog_name: Option<String>,
+}
+
+/// A rule as the READ surface returns it: the stored [`Rule`], unchanged, plus
+/// whichever display name its selector needs — see [`GrantView`] for why the
+/// resolution happens here and not in the client.
+///
+/// A rule's selector is one of two shapes, so exactly one of these is ever
+/// `Some`: `catalog_name` for a `path` selector (the same resolution a grant's
+/// scope gets), `tag_name` for a `tag` selector. A tag rule stores `tags.key`
+/// (`pii`) because that is the stable identifier (D6), while a steward reads
+/// the display name (`PII`) — and `GET /tags` needs `tag:read`, which
+/// `policy:read` does not imply either.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RuleView {
+    #[serde(flatten)]
+    pub rule: Rule,
+    /// `registry.catalogs.name` for a `path` selector's catalog; `None` for a
+    /// `tag` selector.
+    pub catalog_name: Option<String>,
+    /// `tags.name` for a `tag` selector's `key`; `None` for a `path` selector.
+    pub tag_name: Option<String>,
 }
 
 /// The caller `explain` decides about.
@@ -680,6 +737,34 @@ async fn write_rule(
 }
 
 // ---------------------------------------------------------------------------
+// display names for the read surface
+// ---------------------------------------------------------------------------
+
+/// `catalog_id` → `registry.catalogs.name` for every DISTINCT id in `ids`, in
+/// one query.
+///
+/// De-duplicated first: a realistic model has many grants over few catalogs,
+/// and `= ANY($1)` with the same uuid repeated a hundred times asks Postgres to
+/// do a hundred times the work for one answer. An id with no row is simply
+/// absent from the map, so its view renders `catalog_name: null` and the client
+/// falls back to the id — the same thing it displayed before this field
+/// existed, never a guess.
+async fn catalog_names(
+    conn: &mut sqlx::PgConnection,
+    ids: impl Iterator<Item = Uuid>,
+) -> Result<std::collections::HashMap<Uuid, String>, PermHttpError> {
+    let distinct: Vec<Uuid> = ids
+        .collect::<std::collections::BTreeSet<Uuid>>()
+        .into_iter()
+        .collect();
+    Ok(catalog_names_for_ids_via(conn, &distinct)
+        .await?
+        .into_iter()
+        .map(|c| (c.id, c.name))
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
 // grants
 // ---------------------------------------------------------------------------
 
@@ -688,7 +773,7 @@ async fn write_rule(
     path = "/api/control-plane/perm/grants",
     tag = "perm",
     responses(
-        (status = 200, description = "Every grant in the model, with its principal subtract", body = Vec<Grant>),
+        (status = 200, description = "Every grant in the model, with its principal subtract and its catalog's resolved name", body = Vec<GrantView>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -697,10 +782,20 @@ async fn write_rule(
 async fn list_grants(
     State(st): State<PermState>,
     Auth(p): Auth,
-) -> Result<Json<Vec<Grant>>, PermHttpError> {
+) -> Result<Json<Vec<GrantView>>, PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
-    Ok(Json(list_grants_via(&mut conn).await?))
+    let grants = list_grants_via(&mut conn).await?;
+    let names = catalog_names(&mut conn, grants.iter().map(|g| g.scope.catalog_id)).await?;
+    Ok(Json(
+        grants
+            .into_iter()
+            .map(|g| GrantView {
+                catalog_name: names.get(&g.scope.catalog_id).cloned(),
+                grant: g,
+            })
+            .collect(),
+    ))
 }
 
 #[utoipa::path(
@@ -829,7 +924,7 @@ async fn delete_grant(
     path = "/api/control-plane/perm/rules",
     tag = "perm",
     responses(
-        (status = 200, description = "Every named rule in the model, with its exemption set", body = Vec<Rule>),
+        (status = 200, description = "Every named rule in the model, with its exemption set and its selector's resolved display name", body = Vec<RuleView>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -838,10 +933,45 @@ async fn delete_grant(
 async fn list_rules(
     State(st): State<PermState>,
     Auth(p): Auth,
-) -> Result<Json<Vec<Rule>>, PermHttpError> {
+) -> Result<Json<Vec<RuleView>>, PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
-    Ok(Json(list_rules_via(&mut conn).await?))
+    let rules = list_rules_via(&mut conn).await?;
+    let names = catalog_names(
+        &mut conn,
+        rules.iter().filter_map(|r| match &r.selector {
+            Selector::Path(s) => Some(s.catalog_id),
+            Selector::Tag { .. } => None,
+        }),
+    )
+    .await?;
+    let keys: Vec<String> = rules
+        .iter()
+        .filter_map(|r| match &r.selector {
+            Selector::Tag { key } => Some(key.clone()),
+            Selector::Path(_) => None,
+        })
+        .collect();
+    let tags: std::collections::HashMap<String, String> = tag_names_for_keys_via(&mut conn, &keys)
+        .await?
+        .into_iter()
+        .collect();
+    Ok(Json(
+        rules
+            .into_iter()
+            .map(|r| {
+                let (catalog_name, tag_name) = match &r.selector {
+                    Selector::Path(s) => (names.get(&s.catalog_id).cloned(), None),
+                    Selector::Tag { key } => (None, tags.get(key).cloned()),
+                };
+                RuleView {
+                    rule: r,
+                    catalog_name,
+                    tag_name,
+                }
+            })
+            .collect(),
+    ))
 }
 
 #[utoipa::path(

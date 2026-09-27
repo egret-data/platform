@@ -2772,3 +2772,147 @@ async fn an_unauthenticated_request_is_refused() {
         "got {status}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// the read surface resolves its own display names (SP4b-2 finding 1)
+// ---------------------------------------------------------------------------
+
+/// **THE DISCRIMINATING CASE.** A caller holding `policy:read` and NOTHING
+/// else must get the catalog's NAME on every grant and the tag's display name
+/// on every tag-selected rule.
+///
+/// Run as a `platform_admin` this assertion passes whether the name is on the
+/// payload or resolved client-side from `GET /control-plane/catalogs`
+/// (`catalog_registry:read`) and `GET /tags` (`tag:read`), because
+/// `platform_admin` bypasses the PDP and therefore holds all three. That is
+/// exactly how the browser run's admin pass reported D5's sentence as
+/// working, while the same page showed a `policy_reader`
+/// `role analyst cannot read 4a8fe34a-af58-4984-a1e7-12854fb9d496.sales.orders`.
+/// The session below cannot reach either of those endpoints, so a name it sees
+/// can only have come from this response.
+///
+/// It also pins the ADD, not replace: `scope.catalog_id` and the tag rule's
+/// `selector.key` are still on the wire unchanged, because they are what a
+/// write sends back.
+#[tokio::test]
+async fn the_read_surface_names_the_catalog_and_the_tag_for_a_policy_read_only_caller() {
+    let Some(mut f) = setup().await else { return };
+
+    let catalog_name: String =
+        sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+            .bind(f.catalog_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("read the fixture catalog's name");
+    let tag_name: String = sqlx::query_scalar("SELECT name FROM tags WHERE key = $1")
+        .bind(&f.tag_key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("read the fixture tag's name");
+    assert_ne!(
+        tag_name, f.tag_key,
+        "the fixture's tag name must differ from its key, or `tag_name` \
+         could be the key and this test could not tell"
+    );
+
+    // The grant goes through the endpoint — a catalog-scoped write, so no
+    // installation-wide fan-out to serialize against.
+    let admin = admin_session(&f).await;
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &admin,
+                Some(grant_body(f.catalog_id, "analyst")),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let grant_id = body["id"].as_str().expect("minted grant id").to_string();
+
+    // The tag rule goes through the STORE, not the endpoint: creating one over
+    // HTTP recompiles every compiler-targeted profile in the installation
+    // (see `TAG_FANOUT_LOCK`), and nothing here is about the fan-out — this is
+    // a test of what the READ hands back.
+    let mut tx = f.db.pool.begin().await.expect("begin");
+    let rule_id = egret_perm::create_rule_in_tx(
+        &mut tx,
+        &egret_perm::Rule {
+            id: Uuid::nil(),
+            name: unique("finding1_rule"),
+            kind: egret_perm::RuleKind::Mask {
+                mask_type: "MASK".into(),
+                value_expr: None,
+            },
+            selector: egret_perm::Selector::Tag {
+                key: f.tag_key.clone(),
+            },
+            exempt: egret_perm::PrincipalSet::default(),
+        },
+    )
+    .await
+    .expect("insert the tag rule");
+    tx.commit().await.expect("commit");
+
+    let token = session_with_permission(&mut f, "policy:read").await;
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("GET", "/perm/grants", &token, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let row = body
+        .as_array()
+        .expect("a grant array")
+        .iter()
+        .find(|g| g["id"] == json!(grant_id))
+        .unwrap_or_else(|| panic!("the grant just created is missing from {body}"));
+    assert_eq!(
+        row["catalog_name"],
+        json!(catalog_name),
+        "a `policy:read`-only caller must be told the catalog's name — it \
+         cannot ask the catalog registry; row: {row}"
+    );
+    assert_eq!(
+        row["scope"]["catalog_id"],
+        json!(f.catalog_id.to_string()),
+        "and the id a write sends back must still be there, unchanged; row: {row}"
+    );
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("GET", "/perm/rules", &token, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let row = body
+        .as_array()
+        .expect("a rule array")
+        .iter()
+        .find(|r| r["id"] == json!(rule_id.to_string()))
+        .unwrap_or_else(|| panic!("the rule just created is missing from {body}"));
+    assert_eq!(
+        row["tag_name"],
+        json!(tag_name),
+        "a tag rule must carry the tag's DISPLAY name; `tag:read` is not \
+         implied by `policy:read`; row: {row}"
+    );
+    assert_eq!(
+        row["selector"]["key"],
+        json!(f.tag_key),
+        "and the stored key — what a write sends back — must be unchanged; row: {row}"
+    );
+    assert_eq!(
+        row["catalog_name"],
+        json!(null),
+        "a tag selector names no catalog, so inventing one would be a lie; row: {row}"
+    );
+}

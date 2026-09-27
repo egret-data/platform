@@ -6219,13 +6219,13 @@
         "operationId": "list_grants",
         "responses": {
           "200": {
-            "description": "Every grant in the model, with its principal subtract",
+            "description": "Every grant in the model, with its principal subtract and its catalog's resolved name",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/Grant"
+                    "$ref": "#/components/schemas/GrantView"
                   }
                 }
               }
@@ -6592,13 +6592,13 @@
         "operationId": "list_rules",
         "responses": {
           "200": {
-            "description": "Every named rule in the model, with its exemption set",
+            "description": "Every named rule in the model, with its exemption set and its selector's resolved display name",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/Rule"
+                    "$ref": "#/components/schemas/RuleView"
                   }
                 }
               }
@@ -8001,7 +8001,7 @@
           "policy-admin"
         ],
         "summary": "GET /principals?q=&kind= — egret users + groups for the policy picker.",
-        "description": "Correctness note: the user principal `name` is the user's `email`; if a\ndeployment's Trino/Ranger group-mapping keys identities on something else\n(e.g. a username), the admin must free-type the correct value instead.",
+        "description": "Correctness note: `name` is the user's `email`, kept for the raw-JSON\nRanger policy editor, which deliberately writes emails. A `user`\nprincipal's `username` field carries its allocated `users.username` when\none exists — the engine-visible identity — so a caller that needs the\nengine-native `ref` (e.g. the permission-UI's `PrincipalPicker`) should\nread `username`, not derive one from `name`. If a deployment's\nTrino/Ranger group-mapping keys identities on something else entirely, an\nadmin can still free-type a value directly in the raw-JSON editor.",
         "operationId": "list_principals",
         "parameters": [
           {
@@ -34854,6 +34854,26 @@
         ],
         "description": "Why a grant exists. `WorkspaceAssignment` rows are written by the\nassignment path, not by a human, and are recreated from the assignment on\ndemand (D3) — `perm.grants` enforces at most one such row per\n`(catalog_id, workspace_id)` via `grants_one_per_assignment`."
       },
+      "GrantView": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Grant"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "catalog_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "`registry.catalogs.name` for `scope.catalog_id`, resolved server-side."
+              }
+            }
+          }
+        ],
+        "description": "A grant as the READ surface returns it: the stored [`Grant`], unchanged,\nplus the display name of the catalog its `scope.catalog_id` points at.\n\n**Why the name belongs on the payload (SP4b-2 finding 1).** These routes\ngate on `policy:read`; `GET /control-plane/catalogs` gates on\n`catalog_registry:read`. The Data permissions page rendered its one primary\ncolumn — D5's \"a grant reads as a sentence\" — by resolving `catalog_id`\nagainst that second endpoint, so for a holder of `policy:read` alone (the\nvery persona the page was built for) the sentence degraded to\n`role analyst cannot read 4a8fe34a-….sales.orders`. A page's main feature\nmust not need a permission that page's own gate does not require. The\ncompiler already resolves id→name internally (D6) — the backend knew this\nname and simply never told the client.\n\n**`#[serde(flatten)]`, so the wire shape stays flat** — `{...grant,\n\"catalog_name\": \"wh\"}`, one object, and a field added to `Grant` tomorrow\nappears here with nothing to update. The same idiom\n`DataApiEndpointListItemDto` and `EngineDetailDto` use; utoipa renders it\nas an `allOf`, which makes the generated TS type assignable to `Grant`.\n\n`scope.catalog_id` is untouched: it is what a write sends back. This adds,\nit does not replace. `catalog_name` is `None` only when the catalog row is\ngone (an id whose catalog was deleted under a cascade this read raced) —\nnever a fabricated or key-derived stand-in."
+      },
       "GroupDto": {
         "type": "object",
         "required": [
@@ -36378,11 +36398,18 @@
           },
           "name": {
             "type": "string",
-            "description": "The value written into the policy (user email / group name)."
+            "description": "The value written into the raw-JSON Ranger policy editor (user email /\ngroup name). Deliberately unchanged by `username` below — that editor\nsurface is Ranger-native and an email can be the right value there."
           },
           "label": {
             "type": "string",
             "description": "Display label."
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The user's allocated bare username (`users.username`, minted by\n[`egret_auth::users::UserRepo::ensure_username`]) — this is the value\nthe engine actually sees (SP4a D7 measured `current_user` as `admin`,\nnever `admin@egret.local`). `None` for a `group` principal, and for a\n`user` principal that has never triggered allocation. Never guess this\nby slugifying `name`/`label`: `ensure_username` lowercases, slugifies,\n*and* appends `-2`/`-3`/… on collision, which no client can reproduce."
           }
         }
       },
@@ -37651,6 +37678,33 @@
           }
         ],
         "description": "`perm.rule_kind` plus its type-dependent payload, CHECK-constrained in the\ndatabase (`(kind = 'mask') = (mask_type IS NOT NULL)`, etc.) and made\nunrepresentable here instead."
+      },
+      "RuleView": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Rule"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "catalog_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "`registry.catalogs.name` for a `path` selector's catalog; `None` for a\n`tag` selector."
+              },
+              "tag_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "`tags.name` for a `tag` selector's `key`; `None` for a `path` selector."
+              }
+            }
+          }
+        ],
+        "description": "A rule as the READ surface returns it: the stored [`Rule`], unchanged, plus\nwhichever display name its selector needs — see [`GrantView`] for why the\nresolution happens here and not in the client.\n\nA rule's selector is one of two shapes, so exactly one of these is ever\n`Some`: `catalog_name` for a `path` selector (the same resolution a grant's\nscope gets), `tag_name` for a `tag` selector. A tag rule stores `tags.key`\n(`pii`) because that is the stable identifier (D6), while a steward reads\nthe display name (`PII`) — and `GET /tags` needs `tag:read`, which\n`policy:read` does not imply either."
       },
       "RunDto": {
         "type": "object",

@@ -80,6 +80,9 @@ import StorageDetail from "@/routes/control-plane/StorageDetail";
 import StorageBrowser from "@/routes/control-plane/StorageBrowser";
 import ControlPlaneSecrets from "@/routes/control-plane/ControlPlaneSecrets";
 import SecretDetail from "@/routes/control-plane/SecretDetail";
+import DataPermissions from "@/routes/governance/DataPermissions";
+import MaskFilterRules from "@/routes/governance/MaskFilterRules";
+import ExplainAccess from "@/routes/governance/ExplainAccess";
 import Policies from "@/routes/governance/Policies";
 import ProfileDetailPage from "@/routes/governance/ProfileDetailPage";
 import PolicyEditorPage from "@/routes/governance/PolicyEditorPage";
@@ -464,6 +467,12 @@ function GovernanceRoutes() {
       <AppShell>
         <Routes>
           <Route index element={<GovernanceIndex />} />
+          {/* SP4b-2: data-plane permission UI, gated the same way the existing
+              governance routes are — see the design spec's D4/D6 for why these
+              are separate pages rather than a mode switch on Policies. */}
+          <Route path="data-permissions" element={<RequirePermission perm="policy:read"><DataPermissions /></RequirePermission>} />
+          <Route path="mask-filter-rules" element={<RequirePermission perm="policy:read"><MaskFilterRules /></RequirePermission>} />
+          <Route path="explain-access" element={<RequirePermission perm="policy:read"><ExplainAccess /></RequirePermission>} />
           <Route path="policies" element={<RequirePermission perm="policy:read"><Policies /></RequirePermission>} />
           <Route path="policies/:service" element={<RequirePermission perm="policy:read"><ProfileDetailPage /></RequirePermission>} />
           <Route path="policies/:service/:kind/new" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />

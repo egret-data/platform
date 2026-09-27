@@ -11,8 +11,23 @@
  */
 export interface Principal {
   kind: string;
-  /** The value written into the policy (user email / group name). */
+  /**
+     * The value written into the raw-JSON Ranger policy editor (user email /
+     * group name). Deliberately unchanged by `username` below — that editor
+     * surface is Ranger-native and an email can be the right value there.
+     */
   name: string;
   /** Display label. */
   label: string;
+  /**
+     * The user's allocated bare username (`users.username`, minted by
+     * [`egret_auth::users::UserRepo::ensure_username`]) — this is the value
+     * the engine actually sees (SP4a D7 measured `current_user` as `admin`,
+     * never `admin@egret.local`). `None` for a `group` principal, and for a
+     * `user` principal that has never triggered allocation. Never guess this
+     * by slugifying `name`/`label`: `ensure_username` lowercases, slugifies,
+     * *and* appends `-2`/`-3`/… on collision, which no client can reproduce.
+     * @nullable
+     */
+  username?: string | null;
 }

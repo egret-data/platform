@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ApiError } from "@/api/client";
 
 const navigate = vi.fn();
 let routeParams: Record<string, string | undefined> = { service: "trino", kind: "access" };
@@ -69,15 +70,36 @@ vi.mock("@/api/tags", () => ({
 }));
 
 import PolicyEditorPage from "../PolicyEditorPage";
+import { AuthContext } from "@/auth/useAuth";
+import type { Me } from "@/api/hooks";
 
-function wrap(ui: React.ReactNode) {
+const ADMIN: Me = {
+  user_id: "u1",
+  email: "a@egret.local",
+  platform_roles: ["platform_admin"],
+  permissions: [],
+};
+/** The `policy:read`-only persona: can open this editor by URL, cannot write. */
+const READER: Me = {
+  user_id: "u2",
+  email: "r@egret.local",
+  platform_roles: [],
+  permissions: ["policy:read"],
+};
+
+/** Default `me` is the admin, because every test that SAVES is measuring the
+ *  admin's page — a measurement taken as `platform_admin` says nothing about a
+ *  reader's (SP4b-2 finding 3). */
+function wrap(ui: React.ReactNode, me: Me | null = ADMIN) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <QueryClientProvider client={qc}>
-      <TooltipProvider>
-        <MemoryRouter>{ui}</MemoryRouter>
-      </TooltipProvider>
-    </QueryClientProvider>,
+    <AuthContext.Provider value={{ me, isLoading: false }}>
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <MemoryRouter>{ui}</MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>
+    </AuthContext.Provider>,
   );
 }
 
@@ -183,6 +205,51 @@ describe("PolicyEditorPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
     await waitFor(() => expect(updatePolicy).toHaveBeenCalledWith(42, expect.any(Object)));
     expect(createPolicy).not.toHaveBeenCalled();
+  });
+
+  it("renders the 409 compiler-owned explanation, not a bare error (D10)", async () => {
+    routeParams = { service: "trino", kind: "access", id: "42" };
+    getPolicy.mockResolvedValueOnce({
+      name: "perm-grant-abc123",
+      isEnabled: true,
+      resources: { catalog: { values: ["iceberg"] } },
+      policyItems: [],
+      denyPolicyItems: [],
+    });
+    updatePolicy.mockRejectedValueOnce(
+      new ApiError(
+        409,
+        'conflict: policy "perm-grant-abc123" is compiled by the SP4a permission model — edit or delete that grant/rule instead of writing this policy directly',
+      ),
+    );
+
+    wrap(<PolicyEditorPage />);
+    await screen.findByDisplayValue("perm-grant-abc123");
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    expect(await screen.findByText(/owned by the permission model/i)).toBeInTheDocument();
+    expect(screen.getByText(/edit or delete that grant\/rule instead/)).toBeInTheDocument();
+    // The raw wire prefix must not leak through as a second, redundant "conflict:".
+    expect(screen.queryByText(/^conflict:/)).not.toBeInTheDocument();
+  });
+
+  it("renders a plain, non-conflict save error unchanged (not mistaken for a 409)", async () => {
+    routeParams = { service: "trino", kind: "access", id: "42" };
+    getPolicy.mockResolvedValueOnce({
+      name: "existing",
+      isEnabled: true,
+      resources: { catalog: { values: ["iceberg"] } },
+      policyItems: [],
+      denyPolicyItems: [],
+    });
+    updatePolicy.mockRejectedValueOnce(new ApiError(500, "internal error"));
+
+    wrap(<PolicyEditorPage />);
+    await screen.findByDisplayValue("existing");
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    expect(await screen.findByText("internal error")).toBeInTheDocument();
+    expect(screen.queryByText(/owned by the permission model/i)).not.toBeInTheDocument();
   });
 
   it("renders a masking editor with mask-type items for kind=masking", async () => {
@@ -361,5 +428,59 @@ describe("PolicyEditorPage", () => {
     expect(arg.kind).toBe("masking");
     expect(arg.resources.catalog.values).toEqual(["iceberg"]);
     expect(arg.tag).toBeUndefined();
+  });
+});
+
+describe("PolicyEditorPage — a reader can read it but not save it (review I-1)", () => {
+  beforeEach(() => {
+    routeParams = { service: "trino", kind: "access" };
+  });
+
+  /**
+   * **THE DISCRIMINATING CASE.** This editor is reachable by URL for anyone who
+   * can READ a policy — the browser run opened it that way — so `Save` was
+   * offered to an account whose write 403s. Disabled WITH a reason rather than
+   * hidden: the form is a legitimate read for a `policy:read` holder, and a
+   * missing button would leave the page looking broken instead of explaining
+   * itself.
+   */
+  it("disables Save and says which permission is missing", async () => {
+    wrap(<PolicyEditorPage />, READER);
+    await screen.findByLabelText("Policy name");
+
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save).toBeDisabled();
+    expect(save).toHaveAttribute("title", "Saving needs the policy:create permission.");
+    expect(screen.getByText(/read-only for this account/)).toHaveTextContent(/policy:create/);
+  });
+
+  /** Editing an EXISTING policy is a different route and a different key. */
+  it("names policy:update, not policy:create, when editing an existing policy", async () => {
+    routeParams = { service: "trino", kind: "access", id: "42" };
+    wrap(<PolicyEditorPage />, READER);
+    await screen.findByLabelText("Policy name");
+
+    expect(screen.getByRole("button", { name: "Save" })).toHaveAttribute(
+      "title",
+      "Saving needs the policy:update permission.",
+    );
+    // …and Delete, a third key again, is not offered at all.
+    expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
+  });
+
+  /** The same page for an admin: Save enabled once the form is valid, Delete
+   *  offered, and no read-only notice — otherwise a fix that disabled Save for
+   *  everybody would pass the two tests above. */
+  it("still lets a platform_admin save and delete", async () => {
+    routeParams = { service: "trino", kind: "access", id: "42" };
+    wrap(<PolicyEditorPage />);
+    await screen.findByLabelText("Policy name");
+
+    expect(screen.queryByText(/read-only for this account/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).not.toHaveAttribute(
+      "title",
+      expect.stringContaining("permission"),
+    );
   });
 });

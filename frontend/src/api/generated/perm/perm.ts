@@ -29,12 +29,12 @@ import type {
   ErrorBody,
   ExplainRequest,
   ExplainResponse,
-  Grant,
+  GrantView,
   NewGrant,
   NewRule,
   PreviewRequest,
   PreviewResponse,
-  Rule
+  RuleView
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -283,7 +283,7 @@ export const usePermExplain = <TError = ErrorBody,
       return useMutation(getPermExplainMutationOptions(options), queryClient);
     }
     export type permListGrantsResponse200 = {
-  data: Grant[]
+  data: GrantView[]
   status: 200
 }
 
@@ -845,7 +845,7 @@ export const usePermPreview = <TError = ErrorBody,
       return useMutation(getPermPreviewMutationOptions(options), queryClient);
     }
     export type permListRulesResponse200 = {
-  data: Rule[]
+  data: RuleView[]
   status: 200
 }
 

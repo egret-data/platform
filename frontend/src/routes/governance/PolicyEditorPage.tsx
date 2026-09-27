@@ -10,6 +10,7 @@ import {
   type RowFilterItem,
   type ServiceDef,
   type ServiceDefResource,
+  compilerOwnedConflict,
   createPolicy,
   deletePolicy,
   getPolicy,
@@ -28,6 +29,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { refusalMessage, usePolicyPermissions } from "./policyWrites";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -384,6 +386,18 @@ export default function PolicyEditorPage() {
     return { ...rest, kind: tagKind, tag };
   };
 
+  // SP4b-2 review I-1, the third page of the same surface: this editor is
+  // reachable by URL for anyone who can READ a policy, so `Save` and `Delete`
+  // were offered to an account whose write would 403. Disabled-with-a-reason
+  // rather than hidden, because the form itself is a legitimate read for a
+  // `policy:read` holder — hiding the button would leave the page looking
+  // broken instead of explaining it. Creating needs `policy:create`, editing
+  // an existing policy `policy:update` (two different routes).
+  const can = usePolicyPermissions();
+  const savePermission = id ? "policy:update" : "policy:create";
+  const canSave = can(savePermission);
+  const canDelete = can("policy:delete");
+
   const save = useMutation<{ id: number }, ApiError>({
     mutationFn: () => (id ? updatePolicy(Number(id), buildPayload()) : createPolicy(buildPayload())),
     onSuccess: () => {
@@ -564,7 +578,7 @@ export default function PolicyEditorPage() {
           </div>
         </div>
         <div className="mb-0.5 flex shrink-0 items-center gap-2">
-          {id && (
+          {id && canDelete && (
             <Button
               type="button"
               variant="ghost"
@@ -589,13 +603,16 @@ export default function PolicyEditorPage() {
             size="sm"
             onClick={() => save.mutate()}
             title={
-              !form.name.trim()
-                ? "Enter a policy name"
-                : missingRequired
-                  ? "Fill the required resource levels"
-                  : undefined
+              !canSave
+                ? `Saving needs the ${savePermission} permission.`
+                : !form.name.trim()
+                  ? "Enter a policy name"
+                  : missingRequired
+                    ? "Fill the required resource levels"
+                    : undefined
             }
             disabled={
+              !canSave ||
               save.isPending ||
               !form.name.trim() ||
               missingRequired ||
@@ -609,9 +626,36 @@ export default function PolicyEditorPage() {
         </div>
       </div>
 
+      {!canSave && (
+        <Alert>
+          <AlertDescription>
+            This policy is read-only for this account: saving needs the{" "}
+            <code>{savePermission}</code> permission. Everything below still shows what the
+            policy contains.
+          </AlertDescription>
+        </Alert>
+      )}
+
       {save.isError && (
         <Alert variant="destructive">
-          <AlertDescription>{save.error?.message ?? "Failed to save policy."}</AlertDescription>
+          <AlertDescription>
+            {(() => {
+              // D10: a write the compiler owns comes back 409 with an
+              // explanation ("edit the grant/rule instead") — surface that,
+              // not a bare error. Any other failure keeps the old fallback.
+              const conflict = compilerOwnedConflict(save.error);
+              return conflict ? (
+                <>
+                  <span className="font-medium">This policy is owned by the permission model.</span>{" "}
+                  {conflict}
+                </>
+              ) : (
+                // A 403's body is the bare word `forbidden`; name the
+                // permission instead (review I-1).
+                refusalMessage(save.error, savePermission, "Failed to save policy.")
+              );
+            })()}
+          </AlertDescription>
         </Alert>
       )}
 

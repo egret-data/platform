@@ -868,17 +868,33 @@ pub struct PrincipalQuery {
 pub struct Principal {
     #[schema(value_type = String)]
     pub kind: &'static str,
-    /// The value written into the policy (user email / group name).
+    /// The value written into the raw-JSON Ranger policy editor (user email /
+    /// group name). Deliberately unchanged by `username` below — that editor
+    /// surface is Ranger-native and an email can be the right value there.
     pub name: String,
     /// Display label.
     pub label: String,
+    /// The user's allocated bare username (`users.username`, minted by
+    /// [`egret_auth::users::UserRepo::ensure_username`]) — this is the value
+    /// the engine actually sees (SP4a D7 measured `current_user` as `admin`,
+    /// never `admin@egret.local`). `None` for a `group` principal, and for a
+    /// `user` principal that has never triggered allocation. Never guess this
+    /// by slugifying `name`/`label`: `ensure_username` lowercases, slugifies,
+    /// *and* appends `-2`/`-3`/… on collision, which no client can reproduce.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
 }
 
 /// GET /principals?q=&kind= — egret users + groups for the policy picker.
 ///
-/// Correctness note: the user principal `name` is the user's `email`; if a
-/// deployment's Trino/Ranger group-mapping keys identities on something else
-/// (e.g. a username), the admin must free-type the correct value instead.
+/// Correctness note: `name` is the user's `email`, kept for the raw-JSON
+/// Ranger policy editor, which deliberately writes emails. A `user`
+/// principal's `username` field carries its allocated `users.username` when
+/// one exists — the engine-visible identity — so a caller that needs the
+/// engine-native `ref` (e.g. the permission-UI's `PrincipalPicker`) should
+/// read `username`, not derive one from `name`. If a deployment's
+/// Trino/Ranger group-mapping keys identities on something else entirely, an
+/// admin can still free-type a value directly in the raw-JSON editor.
 #[utoipa::path(
     get,
     path = "/api/control-plane/principals",
@@ -902,12 +918,18 @@ async fn list_principals(
     let want_groups = qp.kind.as_deref() != Some("user");
     let mut out: Vec<Principal> = Vec::new();
     if want_users {
-        for u in st
+        let users = st
             .users
             .list(200, 0)
             .await
-            .map_err(|_| PolicyHttpError::Internal)?
-        {
+            .map_err(|_| PolicyHttpError::Internal)?;
+        let ids: Vec<uuid::Uuid> = users.iter().map(|u| u.id.0).collect();
+        let usernames = st
+            .users
+            .usernames(&ids)
+            .await
+            .map_err(|_| PolicyHttpError::Internal)?;
+        for u in users {
             let name = u.email.clone();
             let label = if u.name.is_empty() {
                 u.email.clone()
@@ -918,6 +940,7 @@ async fn list_principals(
             {
                 out.push(Principal {
                     kind: "user",
+                    username: usernames.get(&u.id.0).cloned(),
                     name,
                     label,
                 });
@@ -936,6 +959,7 @@ async fn list_principals(
                     kind: "group",
                     name: g.name.clone(),
                     label: g.name,
+                    username: None,
                 });
             }
         }

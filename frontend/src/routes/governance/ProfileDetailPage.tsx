@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Download, Loader2, Plus, ShieldCheck, Sprout, Trash2 } from "lucide-react";
+import { ArrowLeft, Cog, Download, Loader2, Lock, Plus, ShieldCheck, Sprout, Trash2 } from "lucide-react";
 import {
   type Profile,
   type PolicySummary,
+  isCompilerOwnedPolicyName,
   listProfiles,
   listPolicies,
   deletePolicy,
@@ -22,6 +23,7 @@ import { FilterableTable, type Column } from "@/components/explore/FilterableTab
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
+import { refusalMessage, usePolicyPermissions } from "./policyWrites";
 
 const TYPES = [
   { key: "access", label: "Access" },
@@ -43,6 +45,7 @@ export default function ProfileDetailPage() {
   const { service = "" } = useParams();
   const [configOpen, setConfigOpen] = useState(false);
   const queryClient = useQueryClient();
+  const can = usePolicyPermissions();
 
   // Active policy-type tab lives in the URL (`?tab=`) so the view is
   // deep-linkable and survives a refresh. Default preserved: "access".
@@ -64,6 +67,13 @@ export default function ProfileDetailPage() {
     retry: false,
   });
   const profile = profiles.data?.find((p) => p.name === service);
+  // The tag service is its OWN `authz_services` row, and `list_profiles`
+  // returns every service (that is how it resolves `tag_service` at all), so
+  // its `origin` needs no extra request (review M-5). It is the right record
+  // for the Tags tab's guard: a compiled TAG policy is stored under the tag
+  // service's `service_id`, so `refuse_if_compiler_owned` reads THAT service's
+  // origin — the main profile's would be marking rows against the wrong row.
+  const tagProfile = profiles.data?.find((p) => p.name === profile?.tag_service);
 
   const seedDefaults = useMutation({
     mutationFn: () => seedDefaultPolicies(service),
@@ -96,6 +106,22 @@ export default function ProfileDetailPage() {
               ) : (
                 <Badge variant="secondary">{profile?.type ?? "trino"}</Badge>
               )}
+              {/* D10: `origin` has carried "generated" since SP4a with a
+                  comment saying the frontend must show it — before an edit
+                  overwrites something, not after. The guard underneath is on
+                  the POLICY, not this badge: a foreign (non perm-grant-/
+                  perm-rule-) policy in this profile stays fully editable
+                  below — see the per-row treatment in PolicyTypeTable. */}
+              {profile?.origin === "generated" && (
+                <Badge
+                  variant="outline"
+                  className="gap-1"
+                  title="Compiled by the permission model from grants and rules. Its perm-grant-/perm-rule- policies are protected below; everything else stays editable."
+                >
+                  <Cog className="h-3 w-3" />
+                  Generated
+                </Badge>
+              )}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
               {profile && <span>policy version {profile.policy_version}</span>}
@@ -117,19 +143,26 @@ export default function ProfileDetailPage() {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={seedDefaults.isPending || !service}
-            onClick={() => seedDefaults.mutate()}
-          >
-            {seedDefaults.isPending ? (
-              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-            ) : (
-              <Sprout className="mr-1 h-4 w-4" />
-            )}
-            Seed default policies
-          </Button>
+          {/* SP4b-2 finding 3: a write this account cannot make is not offered.
+              Each control below names the permission ITS OWN route requires —
+              they are four different keys (`policy:seed`, `policy:create`,
+              `policy:update`, `policy:delete`), so one blanket "can write"
+              flag would hide a control the account can in fact use. */}
+          {can("policy:seed") && (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={seedDefaults.isPending || !service}
+              onClick={() => seedDefaults.mutate()}
+            >
+              {seedDefaults.isPending ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <Sprout className="mr-1 h-4 w-4" />
+              )}
+              Seed default policies
+            </Button>
+          )}
           {/* The downloadable config is the Trino coordinator's Ranger-plugin
               config — only meaningful for Trino profiles. */}
           {(profile?.type ?? "trino").startsWith("trino") && (
@@ -178,17 +211,31 @@ export default function ProfileDetailPage() {
 
         {TYPES.map((t) => (
           <TabsContent key={t.key} value={t.key}>
-            <PolicyTypeTable service={service} type={t.key} label={t.label} />
+            <PolicyTypeTable
+              service={service}
+              type={t.key}
+              label={t.label}
+              profileOrigin={profile?.origin}
+              can={can}
+            />
           </TabsContent>
         ))}
         {profile?.tag_service && (
           <TabsContent value="tags">
+            {/* The TAG service's own origin, not the main profile's — see
+                `tagProfile` above. Marking these rows against the main
+                profile's origin would be checking the wrong record; leaving
+                them unmarked (as this did before review M-5) offered a
+                compiler-owned tag policy for edit and let the operator
+                discover the 409 by hitting it. */}
             <PolicyTypeTable
               service={service}
               listFrom={profile.tag_service}
               label="Tag"
               showType
               newHref={`/governance/policies/${encodeURIComponent(service)}/access/new?scope=tag`}
+              profileOrigin={tagProfile?.origin}
+              can={can}
             />
           </TabsContent>
         )}
@@ -212,6 +259,8 @@ function PolicyTypeTable({
   listFrom,
   newHref,
   showType = false,
+  profileOrigin,
+  can,
 }: {
   /** The profile whose editor create/edit links point at (the main profile). */
   service: string;
@@ -227,6 +276,21 @@ function PolicyTypeTable({
   newHref?: string;
   /** Show a Type column (the Tags tab mixes access/masking/row-filter). */
   showType?: boolean;
+  /**
+   * `service`'s own `ProfileDto.origin` — used ONLY to decide whether a
+   * ROW's own name is compiler-owned (D10). Deliberately not a profile-wide
+   * switch: the backend's guard (`refuse_if_compiler_owned`) fires on a
+   * SPECIFIC policy whose name carries the `perm-grant-`/`perm-rule-`
+   * prefix, and SP4a moved it there precisely because gating on the profile
+   * alone made a foreign policy inside a generated profile permanently
+   * uneditable — a one-way door. Whichever service a table LISTS FROM is the
+   * one whose origin belongs here: the Tags tab passes its tag service's own
+   * `origin`, never the main profile's (review M-5).
+   */
+  profileOrigin?: string;
+  /** Whether this account holds a given `policy:*` permission — see
+   *  `usePolicyPermissions`. */
+  can: (permission: string) => boolean;
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -251,8 +315,14 @@ function PolicyTypeTable({
       queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
     },
     onError: (e: unknown) =>
-      setError((e as ApiError)?.message ?? "Failed to delete policy."),
+      setError(refusalMessage(e, "policy:delete", "Failed to delete policy.")),
   });
+
+  // D10: which ROWS are compiler-owned — the policy's OWN name, not this
+  // table's profile as a whole. See `profileOrigin`'s own doc comment for
+  // why the guard cannot be profile-wide.
+  const compilerOwned = (r: PolicySummary) =>
+    profileOrigin === "generated" && isCompilerOwnedPolicyName(r.name);
 
   const toggleEnabled = useMutation({
     mutationFn: ({ id, enabled }: { id: number; enabled: boolean }) =>
@@ -264,7 +334,7 @@ function PolicyTypeTable({
       queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
     },
     onError: (e: unknown) => {
-      setError((e as ApiError)?.message ?? "Failed to update policy.");
+      setError(refusalMessage(e, "policy:update", "Failed to update policy."));
       // Refetch so the Switch snaps back to the real server state.
       queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
     },
@@ -288,19 +358,36 @@ function PolicyTypeTable({
       label: "Name",
       sortable: true,
       value: (r) => r.name,
-      cell: (r) => (
-        <div className="min-w-0">
-          <Link
-            to={editPath(r.id, type ?? r.policy_type)}
-            className="font-medium text-primary hover:underline"
-          >
-            {r.name}
-          </Link>
-          {r.description && (
-            <div className="truncate text-xs text-muted-foreground">{r.description}</div>
-          )}
-        </div>
-      ),
+      cell: (r) =>
+        compilerOwned(r) ? (
+          // D10: a compiler-owned row in a generated profile — not a Link,
+          // so it is not "offered for edit" the way a foreign policy still
+          // is (that distinction is the whole point; see `compilerOwned`).
+          <div className="min-w-0">
+            <span
+              className="inline-flex items-center gap-1 font-medium text-muted-foreground"
+              title="Compiled by the permission model — edit the underlying grant or rule instead."
+            >
+              <Lock className="h-3 w-3 shrink-0" />
+              {r.name}
+            </span>
+            {r.description && (
+              <div className="truncate text-xs text-muted-foreground">{r.description}</div>
+            )}
+          </div>
+        ) : (
+          <div className="min-w-0">
+            <Link
+              to={editPath(r.id, type ?? r.policy_type)}
+              className="font-medium text-primary hover:underline"
+            >
+              {r.name}
+            </Link>
+            {r.description && (
+              <div className="truncate text-xs text-muted-foreground">{r.description}</div>
+            )}
+          </div>
+        ),
     },
     ...(showType
       ? [
@@ -369,7 +456,18 @@ function PolicyTypeTable({
         <Switch
           aria-label={`toggle ${r.name}`}
           checked={r.is_enabled}
-          disabled={toggleEnabled.isPending && togglingId === r.id}
+          disabled={
+            (toggleEnabled.isPending && togglingId === r.id) ||
+            compilerOwned(r) ||
+            !can("policy:update")
+          }
+          title={
+            compilerOwned(r)
+              ? "Compiler-owned — edit the underlying grant or rule instead."
+              : !can("policy:update")
+                ? "Enabling or disabling a policy needs the policy:update permission."
+                : undefined
+          }
           onCheckedChange={(c) => toggleEnabled.mutate({ id: r.id, enabled: c })}
         />
       ),
@@ -378,17 +476,23 @@ function PolicyTypeTable({
       key: "actions",
       label: "",
       className: "text-right",
-      cell: (r) => (
-        <Button
-          variant="ghost"
-          size="icon"
-          title="Delete policy"
-          aria-label={`Delete ${r.name}`}
-          onClick={() => setDeleteTarget(r)}
-        >
-          <Trash2 className="h-4 w-4" />
-        </Button>
-      ),
+      cell: (r) =>
+        can("policy:delete") ? (
+          <Button
+            variant="ghost"
+            size="icon"
+            disabled={compilerOwned(r)}
+            title={
+              compilerOwned(r)
+                ? "Compiler-owned — delete the underlying grant or rule instead."
+                : "Delete policy"
+            }
+            aria-label={`Delete ${r.name}`}
+            onClick={() => setDeleteTarget(r)}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        ) : null,
     },
   ];
 
@@ -401,10 +505,12 @@ function PolicyTypeTable({
             Ranger {label.toLowerCase()} policies enforced for this profile.
           </p>
         </div>
-        <Button size="sm" onClick={goToNew}>
-          <Plus className="mr-1 h-4 w-4" />
-          New policy
-        </Button>
+        {can("policy:create") && (
+          <Button size="sm" onClick={goToNew}>
+            <Plus className="mr-1 h-4 w-4" />
+            New policy
+          </Button>
+        )}
       </div>
 
       {error && (
