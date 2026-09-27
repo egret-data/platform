@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use std::time::Duration;
 use uuid::Uuid;
 
-pub use repo::{LogQuery, LogRepo, StoredLine};
+pub use repo::{InsertError, LogQuery, LogRepo, StoredLine};
 
 /// How old a row's `inserted_at` must be before [`LogRepo::page`] returns it.
 ///

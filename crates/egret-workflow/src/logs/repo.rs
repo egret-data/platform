@@ -11,6 +11,50 @@ fn db_err(e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))
 }
 
+/// Why [`LogRepo::insert_batch`] wrote nothing. Typed, not stringified, so
+/// the writer can tell a batch that can never succeed from one worth a retry
+/// without matching on message text.
+#[derive(Debug, thiserror::Error)]
+pub enum InsertError {
+    /// SQLSTATE `23503` on `execution_id`: an execution the statement's join
+    /// still saw was deleted by a transaction that committed before the
+    /// foreign-key check ran. The whole statement is rolled back. Retrying
+    /// the same batch is safe -- the join then drops that execution's lines
+    /// -- and is the only way the other lines get written.
+    #[error("an execution was deleted while its log batch was written: {0}")]
+    ExecutionDeleted(#[source] sqlx::Error),
+    /// Anything else (connection lost, pool timed out, ...), unclassified.
+    #[error("writing a log batch: {0}")]
+    Db(#[source] sqlx::Error),
+}
+
+impl InsertError {
+    fn classify(e: sqlx::Error) -> Self {
+        let fk = e
+            .as_database_error()
+            .is_some_and(|d| d.is_foreign_key_violation());
+        if fk {
+            InsertError::ExecutionDeleted(e)
+        } else {
+            InsertError::Db(e)
+        }
+    }
+
+    /// The Postgres SQLSTATE, when the database answered with one.
+    pub fn sqlstate(&self) -> Option<String> {
+        let (InsertError::ExecutionDeleted(e) | InsertError::Db(e)) = self;
+        e.as_database_error()
+            .and_then(|d| d.code())
+            .map(|c| c.into_owned())
+    }
+}
+
+impl From<InsertError> for Error {
+    fn from(e: InsertError) -> Self {
+        Error::Internal(anyhow::Error::new(e))
+    }
+}
+
 /// What [`LogRepo::page`] returns: `after` is the cursor (the last `id` the
 /// caller has; `None` from the start), `limit` the most rows to return. The
 /// caller bounds `limit` (the API's 500 default and 2,000 max are the route's).
@@ -48,9 +92,28 @@ impl LogRepo {
 
     /// Store `lines` in ONE statement (`INSERT ... SELECT unnest(...)`), so a
     /// batch is one short transaction -- what [`SETTLE_LAG`]'s bound assumes.
-    /// Ids follow the slice's order. Returns the rows written; an empty slice
-    /// writes nothing and takes no connection.
-    pub async fn insert_batch(&self, lines: &[LogLine]) -> Result<u64> {
+    /// Ids follow the slice's order. An empty slice writes nothing and takes
+    /// no connection.
+    ///
+    /// **Only lines whose execution still exists AND belongs to the line's
+    /// `workspace_id` are written**: the statement joins
+    /// `workflow.executions` on both ids. So a line for an execution deleted
+    /// since it was produced does not fail the whole batch on the foreign key,
+    /// and a line carrying the wrong workspace can never become visible to
+    /// that workspace (`page` filters on both ids). Returns the number
+    /// written; **`returned < lines.len()` means the difference was dropped
+    /// as orphaned or mismatched**, and the caller should count and log it.
+    ///
+    /// # Errors
+    ///
+    /// The join reads a snapshot, so an execution deleted by a transaction
+    /// that commits after that snapshot but before the foreign-key check
+    /// still fails the statement with `23503` (the insert waits on the
+    /// delete's row lock, then finds the row gone). That is
+    /// [`InsertError::ExecutionDeleted`]; nothing was written, and a retry
+    /// drops the deleted execution's lines. Any other failure is
+    /// [`InsertError::Db`], with the `sqlx::Error` kept whole.
+    pub async fn insert_batch(&self, lines: &[LogLine]) -> std::result::Result<u64, InsertError> {
         if lines.is_empty() {
             return Ok(0);
         }
@@ -76,11 +139,12 @@ impl LogRepo {
         let done = sqlx::query(
             "INSERT INTO workflow.task_logs \
                (workspace_id, execution_id, task_run_id, task_id, attempt, level, ts, message) \
-             SELECT w, e, r, t, a, lv, ts, m \
+             SELECT l.w, l.e, l.r, l.t, l.a, l.lv, l.ts, l.m \
                FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::text[], \
                            $5::int4[], $6::int2[], $7::timestamptz[], $8::text[]) \
                     WITH ORDINALITY AS l(w, e, r, t, a, lv, ts, m, ord) \
-              ORDER BY ord",
+               JOIN workflow.executions x ON x.id = l.e AND x.workspace_id = l.w \
+              ORDER BY l.ord",
         )
         .bind(workspace_ids)
         .bind(execution_ids)
@@ -92,7 +156,7 @@ impl LogRepo {
         .bind(messages)
         .execute(&self.pool)
         .await
-        .map_err(db_err)?;
+        .map_err(InsertError::classify)?;
         Ok(done.rows_affected())
     }
 
@@ -139,10 +203,18 @@ impl LogRepo {
     /// `older_than_days` days ago; returns how many went. The retention
     /// ticker calls this until it returns less than `batch`.
     ///
-    /// **`0` is not "keep forever"**: `prune_batch(0, _)` deletes every line
-    /// produced before now. Keep-forever (`log_retention_days = 0`) is the
-    /// ticker's decision, and it must not call this with `0`.
+    /// `older_than_days <= 0` is refused with [`Error::InvalidInput`] and
+    /// deletes nothing. As a window, `0` would delete every line produced
+    /// before now and a negative value lines stamped in the future, while the
+    /// configuration's `log_retention_days = 0` means "keep forever" -- so the
+    /// ticker's mistake of passing it through is an error, not a wipe.
     pub async fn prune_batch(&self, older_than_days: i32, batch: i64) -> Result<u64> {
+        if older_than_days <= 0 {
+            return Err(Error::InvalidInput(format!(
+                "prune_batch: older_than_days must be positive, got {older_than_days} \
+                 (0 means keep forever and must not reach the pruner)"
+            )));
+        }
         let done = sqlx::query(
             "DELETE FROM workflow.task_logs \
               WHERE id IN ( \

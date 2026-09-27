@@ -17,7 +17,7 @@ mod common;
 
 use chrono::{DateTime, Duration as ChronoDuration, SubsecRound, Utc};
 use egret_metastore::Db;
-use egret_workflow::logs::{LogLevel, LogLine, LogQuery, LogRepo, StoredLine};
+use egret_workflow::logs::{InsertError, LogLevel, LogLine, LogQuery, LogRepo, StoredLine};
 use uuid::Uuid;
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -497,10 +497,129 @@ async fn prune_deletes_only_lines_older_than_the_window() {
         "lines inside the window survive"
     );
 
-    // `0` is NOT "keep forever" here: it deletes everything produced before
-    // now. Keep-forever is the ticker's job (it must not call this with 0).
-    // Other tests' lines (all produced before now) may go too, hence `>=`.
-    assert!(fx.repo.prune_batch(0, 1_000_000).await.unwrap() >= 2);
+    // A window of 0 (every line before now) or less (lines from the future)
+    // is refused, and deletes nothing: `log_retention_days = 0` means keep
+    // forever and must not reach the pruner as a window.
+    for days in [0, -1] {
+        let err = fx
+            .repo
+            .prune_batch(days, 1_000_000)
+            .await
+            .expect_err("a non-positive window is refused");
+        assert!(
+            matches!(err, egret_core::Error::InvalidInput(_)),
+            "{days}: {err:?}"
+        );
+    }
+    assert_eq!(fx.count(exec).await, 2, "nothing was deleted");
+}
+
+#[tokio::test]
+async fn insert_batch_drops_lines_of_a_deleted_execution_and_reports_the_count() {
+    let Some(fx) = fx().await else { return };
+    let live = fx.execution().await;
+    let gone = fx.execution().await;
+    sqlx::query("DELETE FROM workflow.executions WHERE id = $1")
+        .bind(gone)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+
+    let n = fx
+        .repo
+        .insert_batch(&[
+            fx.line(live, LogLevel::Info, "one"),
+            fx.line(gone, LogLevel::Info, "orphan"),
+            fx.line(live, LogLevel::Info, "two"),
+        ])
+        .await
+        .expect("an orphaned line does not fail the batch");
+    assert_eq!(n, 2, "the orphan is dropped and the count says so");
+    assert_eq!(fx.count(gone).await, 0);
+    fx.settle(live).await;
+    assert_eq!(
+        messages(&fx.page(live, &q(None, 10)).await),
+        ["one", "two"],
+        "the batch's other lines are written, in order"
+    );
+}
+
+#[tokio::test]
+async fn insert_batch_drops_a_line_whose_workspace_does_not_match_its_execution() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let (other_ws, _) = common::seed_workspace(&fx.db).await;
+    let mut wrong = fx.line(exec, LogLevel::Info, "wrong-ws");
+    wrong.workspace_id = other_ws;
+
+    let n = fx
+        .repo
+        .insert_batch(&[fx.line(exec, LogLevel::Info, "right-ws"), wrong])
+        .await
+        .expect("insert");
+    assert_eq!(n, 1, "the mismatched line is dropped");
+    assert_eq!(fx.count(exec).await, 1);
+    fx.settle(exec).await;
+    assert_eq!(messages(&fx.page(exec, &q(None, 10)).await), ["right-ws"]);
+    assert!(fx
+        .repo
+        .page(other_ws, exec, &q(None, 10))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// The race the join cannot close: the execution is deleted by a transaction
+/// that commits after the insert's snapshot. The insert's foreign-key check
+/// waits on the delete's row lock and then fails `23503`, and that must come
+/// back typed. Staged deterministically: the delete is held open until the
+/// insert is observed WAITING on a lock (`pg_stat_activity`), then committed.
+#[tokio::test]
+async fn insert_batch_reports_a_concurrent_delete_as_execution_deleted() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let mut del = fx.db.pool.begin().await.unwrap();
+    sqlx::query("DELETE FROM workflow.executions WHERE id = $1")
+        .bind(exec)
+        .execute(&mut *del)
+        .await
+        .unwrap();
+
+    let repo = fx.repo.clone();
+    let line = fx.line(exec, LogLevel::Info, "raced");
+    let insert = tokio::spawn(async move { repo.insert_batch(&[line]).await });
+
+    let mut waiting = false;
+    for _ in 0..500 {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+              WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                AND query LIKE 'INSERT INTO workflow.task_logs%'",
+        )
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
+        if n == 1 {
+            waiting = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        waiting,
+        "control: the insert blocks on the delete's row lock"
+    );
+    del.commit().await.unwrap();
+
+    let err = insert
+        .await
+        .unwrap()
+        .expect_err("the deleted execution fails the statement");
+    assert!(
+        matches!(err, InsertError::ExecutionDeleted(_)),
+        "typed, not a string: {err:?}"
+    );
+    assert_eq!(err.sqlstate().as_deref(), Some("23503"));
     assert_eq!(fx.count(exec).await, 0);
 }
 
