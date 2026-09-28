@@ -439,6 +439,14 @@ certifies only one engine.
 Start at a few hundred cases; raise until runtime is the binding constraint.
 Record the case count, the seed, and both versions in the README.
 
+**Measure the `EvalOrderAmbiguous` rate.** Task 6 found that the engine
+arbitrates masks with `>=`, not `>` — the first matching evaluator is final —
+so `getEvalOrder()` is load-bearing for masks where Task 5 could ignore it for
+access. Rather than reproduce `computeEvalOrder()` and risk turning an honest
+`Undecidable` into a confident wrong mask, Task 6 refuses a genuine tie inside
+one `(priority, hasDeny)` band. Report how often the corpus hits that refusal;
+if it is common, reproducing `computeEvalOrder()` becomes worth its risk.
+
 - [ ] **Step 5: Verify the gate can fail.** Deliberately break one evaluator rule
 (e.g. make ANCESTOR allow), re-run, confirm the differential test catches it,
 then restore and confirm the restore is byte-identical (`diff` against a backup
@@ -473,10 +481,22 @@ exercises request construction rather than policy logic:
 1. The T1 case: a policy naming `{catalog, schema}` vs a `SELECT` on a table.
 2. The same with `column: ["*"]` — must allow.
 3. A column-level mask, checked by reading the masked value back.
-4. A row filter, checked by row count.
+4. A row filter, checked by row count. **Issue this check at TABLE
+   granularity, not column.** `rowFilterDef.resources` names no `column` on
+   either engine, so a column-level request makes every row-filter policy an
+   ANCESTOR match and yields no filter at all. Task 6 lost six tests to this
+   before spotting it; a live gate that gets it wrong will read as "row filters
+   do not work".
 5. A deny that an allow-exception cancels.
 6. A `public` grant against a user with no groups.
-7. **Whether a Ranger-undetermined request falls through to Trino's own
+7. **Whether StarRocks' Ranger plugin fetches tags at all.** A survey claimed
+   StarRocks has no tag policies, and my Task 6 brief repeated it as fact. Task 6
+   correctly REFUSED to encode it, because encoding an unverified claim would
+   remove an `Undecidable` — fail-open — and the StarRocks FE authorizer jar was
+   not available to check. egret serves `/tags/download/{service}`, so the
+   measurement is direct: bring up a StarRocks engine and observe whether that
+   route is ever called for its service. Record the verbatim evidence either way.
+8. **Whether a Ranger-undetermined request falls through to Trino's own
    authorizer.** Task 5 kept `Denied { NoPolicyMatched }` as a distinct reason
    because `getIsFallbackSupported()` gates only `isAccessDetermined`, but it did
    NOT verify how the Trino plugin consumes that flag. If a fallback fires,
