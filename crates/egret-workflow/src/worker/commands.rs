@@ -165,10 +165,39 @@ pub const MAX_OUTPUT_FILE_BYTES: usize = 1_048_576;
 /// the budget and the self-fence cannot run).
 pub const MAX_LISTING_BYTES: usize = 1_048_576;
 
+/// A pure DoS guard on `docker diff` (W5a Task 5 fix round 3): the most
+/// bytes read of the WHOLE container's diff, most of which is outside the
+/// working directory (`pip install`, `apt-get`) and is skipped, not counted
+/// toward [`MAX_LISTING_BYTES`]. Past it, or past [`DIFF_TIMEOUT`], the task
+/// fails saying the container changed too much to list.
+pub const MAX_DIFF_BYTES: usize = 64 * 1_048_576;
+
+/// How long reading `docker diff` may take (the same DoS guard).
+pub const DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The most names `outputFiles` may resolve to -- literal names and glob
 /// matches together -- before the task fails by name. Each one is a copy or
 /// an exec, and a key in the outputs map.
 pub const MAX_OUTPUT_NAMES: usize = 1_000;
+
+/// The most distinct glob PATTERNS one task's `outputFiles` may declare
+/// (W5a Task 5 fix round 3): refused at save, and again at run for a draft.
+pub const MAX_OUTPUT_PATTERNS: usize = 64;
+
+/// The longest a pattern's FILE NAME may be, in bytes -- `NAME_MAX`: a longer
+/// pattern with one literal character could match no file. Refused at save
+/// and at run.
+pub const MAX_PATTERN_BYTES: usize = 255;
+
+/// The most matcher steps resolving one task's `outputFiles` globs may take
+/// (`scripts::gate::glob_match_within`). With the caps above the worst case
+/// is `MAX_OUTPUT_PATTERNS` x the listing (at most [`MAX_LISTING_BYTES`] of
+/// names) x `MAX_PATTERN_BYTES` -- about 1.7e10 steps, too many to run inside
+/// a handler -- so the work is ALSO bounded by this budget, independent of
+/// the input: past it the task fails by name. 200 M steps leaves room for
+/// every realistic case (64 simple patterns x ~47k names x ~20 steps is
+/// ~60 M) and is measured in `the_glob_worst_case_is_bounded_by_the_step_budget`.
+pub const GLOB_STEP_BUDGET: u64 = 200_000_000;
 
 /// The most bytes the `::{…}::` markers may contribute in total.
 ///
@@ -1004,6 +1033,8 @@ pub struct DockerRunner {
     max_vars_bytes: usize,
     /// [`MAX_LISTING_BYTES`], as a field (a test drives the cap).
     max_listing_bytes: usize,
+    /// [`MAX_DIFF_BYTES`], as a field (a test drives the cap).
+    max_diff_bytes: usize,
     /// Where a re-attach reads the attempt's newest stored line from, so it
     /// follows the container's log from there rather than from its start
     /// (W5a Task 5). `None`: a re-attach replays the whole log.
@@ -1025,6 +1056,7 @@ impl DockerRunner {
             max_output_bytes: MAX_OUTPUT_FILE_BYTES,
             max_vars_bytes: MAX_VARS_BYTES,
             max_listing_bytes: MAX_LISTING_BYTES,
+            max_diff_bytes: MAX_DIFF_BYTES,
             logs: None,
         }
     }
@@ -1064,51 +1096,92 @@ impl DockerRunner {
         self
     }
 
-    /// Run one `docker` subcommand, keeping at most `cap` bytes of its
-    /// stdout: `Ok(None)` when it printed more (the process is killed at
-    /// that point, so an unbounded output is never read to its end).
-    async fn cli_capped(
+    /// The same runner with a smaller [`MAX_DIFF_BYTES`], for a test.
+    pub fn with_diff_cap(mut self, max_diff_bytes: usize) -> Self {
+        self.max_diff_bytes = max_diff_bytes;
+        self
+    }
+
+    /// The entries of each directory in `dirs`, from `docker diff`, **streamed**
+    /// (W5a Task 5 fix round 3): only lines under the working directory are
+    /// kept, and only they count toward the listing cap -- so a container that
+    /// installed a package tree outside it is not "too many files". The whole
+    /// diff is still bounded, by [`MAX_DIFF_BYTES`] and [`DIFF_TIMEOUT`], as a
+    /// DoS guard with its own message. The process is killed at either cap.
+    ///
+    /// `Ok(Err)` is the task's failure; `Err` is egret's (the daemon).
+    async fn diff_listing(
         &self,
-        args: &[&str],
-        cap: usize,
-    ) -> Result<Option<(std::process::ExitStatus, Vec<u8>, String)>> {
+        name: &str,
+        dirs: &std::collections::BTreeSet<String>,
+    ) -> Result<std::result::Result<std::collections::BTreeMap<String, Vec<String>>, String>> {
         use tokio::io::AsyncReadExt;
-        let spawn_err = |e: std::io::Error| {
-            Error::Internal(anyhow::anyhow!(
-                "could not run `{} {}`: {e}",
-                self.binary,
-                args.first().copied().unwrap_or("")
-            ))
-        };
         let mut child = Command::new(&self.binary)
-            .args(args)
+            .args(["diff", name])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(spawn_err)?;
+            .map_err(|e| {
+                Error::Internal(anyhow::anyhow!("could not run `{} diff`: {e}", self.binary))
+            })?;
         let stdout = child.stdout.take().expect("stdout piped");
-        let mut stderr = child.stderr.take().expect("stderr piped");
-        let mut out = Vec::new();
-        let limit = u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1);
-        stdout
-            .take(limit)
-            .read_to_end(&mut out)
-            .await
-            .map_err(io_err)?;
-        if out.len() > cap {
+        let limit = u64::try_from(self.max_diff_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let mut reader = BufReader::new(stdout.take(limit));
+        let prefix = format!("A {WORKING_DIR}/");
+        let prefix_c = format!("C {WORKING_DIR}/");
+        let deadline = tokio::time::Instant::now() + DIFF_TIMEOUT;
+        let (mut total, mut in_wd) = (0usize, 0usize);
+        let mut kept = String::new();
+        let mut line = Vec::new();
+        let too_changed = |what: String| {
+            format!(
+                "the container changed {what} of its filesystem, so egret cannot list its \
+                 outputs to resolve the `outputFiles` glob; name the output files instead"
+            )
+        };
+        let failure = loop {
+            line.clear();
+            let n = match tokio::time::timeout_at(deadline, reader.read_until(b'\n', &mut line))
+                .await
+            {
+                Err(_) => break Some(too_changed(format!("too much to read in {DIFF_TIMEOUT:?}"))),
+                Ok(r) => r.map_err(io_err)?,
+            };
+            if n == 0 {
+                break None;
+            }
+            total += n;
+            if total > self.max_diff_bytes {
+                break Some(too_changed(format!(
+                    "more than {} bytes",
+                    self.max_diff_bytes
+                )));
+            }
+            if line.starts_with(prefix.as_bytes()) || line.starts_with(prefix_c.as_bytes()) {
+                in_wd += n;
+                if in_wd > self.max_listing_bytes {
+                    break Some(listing_too_big(self.max_listing_bytes));
+                }
+                kept.push_str(&String::from_utf8_lossy(&line));
+            }
+        };
+        if let Some(why) = failure {
             let _ = child.kill().await;
-            return Ok(None);
+            return Ok(Err(why));
         }
         let mut err = Vec::new();
-        let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut err).await;
+        if let Some(stderr) = child.stderr.take() {
+            let _ = stderr.take(64 * 1024).read_to_end(&mut err).await;
+        }
         let status = child.wait().await.map_err(io_err)?;
-        Ok(Some((
-            status,
-            out,
-            String::from_utf8_lossy(&err).into_owned(),
-        )))
+        if !status.success() {
+            return Err(self.classify("diff", &String::from_utf8_lossy(&err)).await);
+        }
+        Ok(Ok(parse_docker_diff(&kept, dirs)))
     }
 
     /// Run one `docker` subcommand to completion, capturing both streams.
@@ -1648,18 +1721,12 @@ impl DockerRunner {
         let listed = if dirs.is_empty() {
             std::collections::BTreeMap::new()
         } else {
-            match self
-                .cli_capped(&["diff", name], self.max_listing_bytes)
-                .await?
-            {
-                None => {
-                    result.failure = Some(listing_too_big(self.max_listing_bytes));
+            match self.diff_listing(name, &dirs).await? {
+                Ok(listed) => listed,
+                Err(problem) => {
+                    result.failure = Some(problem);
                     return Ok(());
                 }
-                Some((status, _, stderr)) if !status.success() => {
-                    return Err(self.classify("diff", &stderr).await);
-                }
-                Some((_, stdout, _)) => parse_docker_diff(&String::from_utf8_lossy(&stdout), &dirs),
             }
         };
         let names = match expand_outputs(&commands.output_files, &listed, MAX_OUTPUT_NAMES) {
@@ -2193,6 +2260,13 @@ pub(crate) fn output_problem(rel: &str) -> Option<String> {
         ));
     }
     let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
+    if is_pattern(file) && file.len() > MAX_PATTERN_BYTES {
+        return Some(format!(
+            "an `outputFiles` pattern's file name is {} bytes, over the {MAX_PATTERN_BYTES} \
+             a file name can have",
+            file.len()
+        ));
+    }
     if is_pattern(dir) {
         return Some(format!(
             "{rel:?}: a wildcard in a directory of `outputFiles` is not implemented by \
@@ -2206,6 +2280,36 @@ pub(crate) fn output_problem(rel: &str) -> Option<String> {
         format!("{dir}/{literal}")
     };
     relative_problem(&probe).map(|p| p.replace(&format!("{probe:?}"), &format!("{rel:?}")))
+}
+
+/// The limits on the declared LIST (W5a Task 5 fix round 3), judged at save
+/// by `scripts::parse` and again at run: at most [`MAX_OUTPUT_NAMES`]
+/// entries, and at most [`MAX_OUTPUT_PATTERNS`] distinct patterns.
+pub(crate) fn output_list_problem<'a>(
+    declared: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let mut entries = 0usize;
+    let mut patterns = std::collections::HashSet::new();
+    for rel in declared {
+        entries += 1;
+        if is_pattern(rel) {
+            patterns.insert(rel);
+        }
+    }
+    if entries > MAX_OUTPUT_NAMES {
+        return Some(format!(
+            "`outputFiles` declares {entries} entries, over the {MAX_OUTPUT_NAMES} one task \
+             may read back"
+        ));
+    }
+    if patterns.len() > MAX_OUTPUT_PATTERNS {
+        return Some(format!(
+            "`outputFiles` declares {} distinct patterns, over the {MAX_OUTPUT_PATTERNS} one \
+             task may; match fewer, wider patterns",
+            patterns.len()
+        ));
+    }
+    None
 }
 
 /// Resolve the declared outputs to the names to read back, given the entries
@@ -2229,8 +2333,13 @@ pub(crate) fn expand_outputs(
              the task run: W9 owns storage)"
         )
     };
+    if let Some(problem) = output_list_problem(declared.iter().map(String::as_str)) {
+        return Err(problem);
+    }
     let mut out: Vec<(String, bool)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut seen_patterns = std::collections::HashSet::new();
+    let mut budget = GLOB_STEP_BUDGET;
     for rel in declared {
         if !is_pattern(rel) {
             if seen.insert(rel.clone()) {
@@ -2238,22 +2347,33 @@ pub(crate) fn expand_outputs(
             }
             continue;
         }
+        // A pattern declared twice is matched once.
+        if !seen_patterns.insert(rel.as_str()) {
+            continue;
+        }
         let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
-        let mut matched: Vec<String> = listed
-            .get(dir)
-            .into_iter()
-            .flatten()
-            .filter(|name| crate::scripts::gate::glob_match(file, name))
-            .map(|name| {
-                if dir.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{dir}/{name}")
+        let mut matched: Vec<String> = Vec::new();
+        for name in listed.get(dir).into_iter().flatten() {
+            match crate::scripts::gate::glob_match_within(file, name, &mut budget) {
+                None => {
+                    return Err(format!(
+                        "matching the `outputFiles` patterns against the working directory \
+                         took more than {GLOB_STEP_BUDGET} steps; declare fewer or simpler \
+                         patterns, or fewer files"
+                    ))
                 }
-            })
-            .collect();
-        if matched.len() > max_names {
-            return Err(too_many(&format!("pattern {rel:?} matches")));
+                Some(false) => {}
+                Some(true) => {
+                    if matched.len() == max_names {
+                        return Err(too_many(&format!("pattern {rel:?} matches")));
+                    }
+                    matched.push(if dir.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{dir}/{name}")
+                    });
+                }
+            }
         }
         matched.sort();
         for m in matched {
@@ -2994,6 +3114,139 @@ mod tests {
             .expect_err("12 bytes of names is over 10");
         assert!(err.contains("names and contents"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `docker` shim whose `diff` prints `diff_script`'s output and whose
+    /// `cp` stages the word `staged`.
+    fn diff_shim(tag: &str, diff_script: &str) -> (std::path::PathBuf, String) {
+        let dir = staging(tag);
+        let shim = dir.join("docker-shim.sh");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 \x20 create) echo id ;;\n\
+                 \x20 version) exit 0 ;;\n\
+                 \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
+                 \x20 diff) {diff_script} ;;\n\
+                 \x20 cp) printf 'staged' > \"$3\" ;;\n\
+                 esac\nexit 0\n"
+            ),
+        )
+        .expect("write shim");
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o700);
+        }
+        std::fs::set_permissions(&shim, perms).expect("chmod");
+        (dir, shim.display().to_string())
+    }
+
+    async fn run_glob(runner: &DockerRunner) -> CommandsResult {
+        let cmds = TaskCommands {
+            container_image: "alpine:3.20".into(),
+            commands: vec!["true".into()],
+            output_files: vec!["*.csv".into()],
+            ..TaskCommands::default()
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            runner.run(
+                &leased(1_700_000_000),
+                &cmds,
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+                &NoObserver,
+            ),
+        )
+        .await
+        .expect("bounded")
+        .expect("never a worker failure")
+    }
+
+    /// **Fix round 3: only the working directory counts toward the listing
+    /// cap.** A container that changed ~400 KB of paths OUTSIDE it (a package
+    /// install) under a 64 KiB listing cap still lists its one output.
+    #[tokio::test]
+    async fn a_diff_mostly_outside_the_working_dir_still_lists_the_outputs() {
+        let (dir, shim) = diff_shim(
+            "outside-diff",
+            "yes 'A /usr/lib/python3/site-packages/torch/x.py' | head -n 10000; \
+             echo 'A /egret/working-dir'; echo 'A /egret/working-dir/a.csv'",
+        );
+        let runner = DockerRunner::with_binary(shim).with_listing_cap(64 * 1024);
+        let out = run_glob(&runner).await;
+        assert_eq!(out.failure, None, "{out:?}");
+        assert_eq!(
+            out.output_files,
+            BTreeMap::from([("a.csv".to_string(), "staged".to_string())])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whole diff still has a hard DoS cap, with its own honest message.
+    #[tokio::test]
+    async fn a_diff_over_the_hard_cap_fails_saying_the_container_changed_too_much() {
+        let (dir, shim) = diff_shim(
+            "huge-diff",
+            "yes 'A /usr/lib/python3/site-packages/torch/x.py' | head -n 10000",
+        );
+        let runner = DockerRunner::with_binary(shim).with_diff_cap(100_000);
+        let out = run_glob(&runner).await;
+        let why = out.failure.expect("over the hard cap fails the task");
+        assert!(
+            why.contains("the container changed more than 100000 bytes"),
+            "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The glob worst case at the caps is bounded by the step budget.**
+    /// 64 adversarial 255-byte patterns (`*aaa…ab`, the backtracking worst
+    /// case) against a full 1 MiB-class listing of `aaa…a` names: the budget
+    /// is spent and the task fails by name, in bounded time, rather than the
+    /// ~1e10 steps the caps alone allow. The control -- 64 ordinary patterns
+    /// against the same listing -- resolves within the budget.
+    #[test]
+    fn the_glob_worst_case_is_bounded_by_the_step_budget() {
+        let names: Vec<String> = (0..47_000)
+            .map(|i| format!("{}{i}", "a".repeat(15)))
+            .collect();
+        let listed = BTreeMap::from([(String::new(), names)]);
+        let adversarial: Vec<String> = (0..MAX_OUTPUT_PATTERNS)
+            .map(|i| format!("*{}{i}b", "a".repeat(MAX_PATTERN_BYTES - 4)))
+            .collect();
+        let started = std::time::Instant::now();
+        let err = expand_outputs(&adversarial, &listed, MAX_OUTPUT_NAMES).unwrap_err();
+        let spent = started.elapsed();
+        assert!(err.contains("steps"), "{err}");
+        assert!(spent < std::time::Duration::from_secs(30), "{spent:?}");
+        eprintln!("glob worst case (budget spent): {spent:?}");
+
+        let ordinary: Vec<String> = (0..MAX_OUTPUT_PATTERNS)
+            .map(|i| format!("*.csv{i}"))
+            .collect();
+        let started = std::time::Instant::now();
+        let ok = expand_outputs(&ordinary, &listed, MAX_OUTPUT_NAMES).expect("within budget");
+        assert!(ok.is_empty());
+        eprintln!("64 ordinary patterns x 47k names: {:?}", started.elapsed());
+    }
+
+    /// More than [`MAX_OUTPUT_PATTERNS`] distinct patterns is refused;
+    /// duplicates count once.
+    #[test]
+    fn the_pattern_count_is_capped_and_duplicates_count_once() {
+        let listed = BTreeMap::new();
+        let many: Vec<String> = (0..=MAX_OUTPUT_PATTERNS)
+            .map(|i| format!("*.{i}"))
+            .collect();
+        let err = expand_outputs(&many, &listed, MAX_OUTPUT_NAMES).unwrap_err();
+        assert!(err.contains("distinct patterns"), "{err}");
+        let dupes: Vec<String> = (0..500).map(|_| "*.csv".to_string()).collect();
+        expand_outputs(&dupes, &listed, MAX_OUTPUT_NAMES).expect("one distinct pattern");
+        assert!(output_problem(&format!("*{}", "a".repeat(MAX_PATTERN_BYTES))).is_some());
+        assert!(output_problem(&format!("*{}", "a".repeat(MAX_PATTERN_BYTES - 1))).is_none());
     }
 
     /// The pattern rules: `*`/`?` in the file name only; `**`, `[...]` and a

@@ -536,6 +536,20 @@ pub fn parse(type_id: &str, spec: &Value) -> Result<ScriptTask, Vec<ScriptRefusa
                 // `*`/`?` in the file name are implemented, `**`, `[...]`, a
                 // wildcard directory and an escaping path are refused by
                 // name. A `{{ }}` entry is judged after rendering, at run.
+                // The list's own limits (fix round 3): entries and distinct
+                // literal patterns; a `{{ }}` entry is counted at run.
+                if let Some(problem) = crate::worker::commands::output_list_problem(
+                    out.output_files
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|rel| !gate::is_unrendered(rel)),
+                ) {
+                    errs.push(refusal(
+                        CODE_INVALID,
+                        key,
+                        format!("'outputFiles': {problem}"),
+                    ));
+                }
                 for rel in &out.output_files {
                     if gate::is_unrendered(rel) {
                         continue;

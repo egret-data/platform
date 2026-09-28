@@ -1207,3 +1207,28 @@ fn output_file_patterns_save_and_unimplemented_ones_are_refused_by_name() {
         }
     }
 }
+
+/// **The `outputFiles` list's limits, at save** (fix round 3): more than 64
+/// distinct patterns, or a pattern whose file name is over 255 bytes, is
+/// refused by name; 64 distinct patterns, however often repeated, save.
+#[test]
+fn too_many_or_too_long_output_patterns_are_refused_at_save() {
+    let kind = ScriptKind::ShellCommands;
+    let pats = |n: usize| -> Value { json!((0..n).map(|i| format!("*.{i}")).collect::<Vec<_>>()) };
+    parse(kind.fqcn(), &with(kind, "outputFiles", pats(64))).expect("64 patterns save");
+    let r = refusals(kind.fqcn(), &with(kind, "outputFiles", pats(65)));
+    assert!(
+        r.iter()
+            .any(|r| r.path == "outputFiles" && r.message.contains("65 distinct patterns")),
+        "{r:?}"
+    );
+    let dupes: Vec<&str> = std::iter::repeat_n("*.csv", 200).collect();
+    parse(kind.fqcn(), &with(kind, "outputFiles", json!(dupes))).expect("duplicates count once");
+    let long = format!("*{}", "a".repeat(255));
+    let r = refusals(kind.fqcn(), &with(kind, "outputFiles", json!([long])));
+    assert!(
+        r.iter()
+            .any(|r| r.path == "outputFiles" && r.message.contains("over the 255")),
+        "{r:?}"
+    );
+}

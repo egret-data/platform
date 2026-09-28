@@ -207,27 +207,143 @@ pub fn normalise_image_ref(image: &str) -> String {
 /// Patterns are not normalised: write `ubuntu:latest` or `ubuntu:*`, not
 /// `ubuntu`, since the image side always carries a tag or a digest.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    // memo[pi][ti]: does p[pi..] match t[ti..]? Filled back to front.
-    let mut memo = vec![vec![false; t.len() + 1]; p.len() + 1];
-    memo[p.len()][t.len()] = true;
-    for pi in (0..p.len()).rev() {
-        for ti in (0..=t.len()).rev() {
-            memo[pi][ti] = match p[pi] {
-                // Match nothing, or one non-`/` character and stay on `*`.
-                '*' => memo[pi + 1][ti] || (ti < t.len() && t[ti] != '/' && memo[pi][ti + 1]),
-                '?' => ti < t.len() && t[ti] != '/' && memo[pi + 1][ti + 1],
-                c => ti < t.len() && t[ti] == c && memo[pi + 1][ti + 1],
-            };
+    let mut unbounded = u64::MAX;
+    glob_match_within(pattern, text, &mut unbounded).unwrap_or(false)
+}
+
+/// [`glob_match`] under a **step budget** shared across calls (W5a Task 5 fix
+/// round 3): `None` once `budget` is spent, so a caller matching
+/// author-controlled patterns against an author-sized listing has a hard
+/// bound on the work, independent of the input. Allocation-free.
+///
+/// Because neither `*` nor `?` matches `/`, a `/` in the pattern must meet a
+/// `/` in the text: the two are split on `/` and matched segment by segment
+/// (the same number of segments, or no match). Each segment is the classic
+/// greedy wildcard match with backtracking to the last `*` -- O(|p|·|t|)
+/// steps at worst, each step one unit of `budget`. `?` consumes one whole
+/// character (UTF-8 aware); literals compare bytes.
+pub fn glob_match_within(pattern: &str, text: &str, budget: &mut u64) -> Option<bool> {
+    let mut ps = pattern.split('/');
+    let mut ts = text.split('/');
+    loop {
+        match (ps.next(), ts.next()) {
+            (None, None) => return Some(true),
+            (Some(p), Some(t)) => {
+                if !segment_match(p.as_bytes(), t.as_bytes(), budget)? {
+                    return Some(false);
+                }
+            }
+            _ => return Some(false),
         }
     }
-    memo[0][0]
+}
+
+/// The width of the UTF-8 character starting at `b[i]`.
+fn char_len(b: &[u8], i: usize) -> usize {
+    match b[i] {
+        x if x < 0x80 => 1,
+        x if x >= 0xF0 => 4,
+        x if x >= 0xE0 => 3,
+        _ => 2,
+    }
+    .min(b.len() - i)
+}
+
+fn segment_match(p: &[u8], t: &[u8], budget: &mut u64) -> Option<bool> {
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut mark = 0usize;
+    while ti < t.len() {
+        *budget = budget.checked_sub(1)?;
+        if pi < p.len() && p[pi] == b'?' {
+            pi += 1;
+            ti += char_len(t, ti);
+        } else if pi < p.len() && p[pi] == b'*' {
+            star = Some(pi);
+            pi += 1;
+            mark = ti;
+        } else if pi < p.len() && p[pi] == t[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += char_len(t, mark);
+            ti = mark;
+        } else {
+            return Some(false);
+        }
+    }
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    Some(pi == p.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The first (DP) matcher, kept as the reference the allocation-free one
+    /// must agree with.
+    fn reference(pattern: &str, text: &str) -> bool {
+        let p: Vec<char> = pattern.chars().collect();
+        let t: Vec<char> = text.chars().collect();
+        let mut memo = vec![vec![false; t.len() + 1]; p.len() + 1];
+        memo[p.len()][t.len()] = true;
+        for pi in (0..p.len()).rev() {
+            for ti in (0..=t.len()).rev() {
+                memo[pi][ti] = match p[pi] {
+                    '*' => memo[pi + 1][ti] || (ti < t.len() && t[ti] != '/' && memo[pi][ti + 1]),
+                    '?' => ti < t.len() && t[ti] != '/' && memo[pi + 1][ti + 1],
+                    c => ti < t.len() && t[ti] == c && memo[pi + 1][ti + 1],
+                };
+            }
+        }
+        memo[0][0]
+    }
+
+    /// **The allocation-free matcher agrees with the DP one** on every
+    /// pattern/text pair over a small alphabet (`a`, `b`, `/`, `é` and the
+    /// two wildcards), up to length 4 -- exhaustive, not sampled.
+    #[test]
+    fn the_greedy_matcher_agrees_with_the_reference_exhaustively() {
+        fn all(alphabet: &[&str], max: usize) -> Vec<String> {
+            let mut out = vec![String::new()];
+            let mut frontier = vec![String::new()];
+            for _ in 0..max {
+                let mut next = Vec::new();
+                for s in &frontier {
+                    for a in alphabet {
+                        next.push(format!("{s}{a}"));
+                    }
+                }
+                out.extend(next.iter().cloned());
+                frontier = next;
+            }
+            out
+        }
+        let patterns = all(&["a", "b", "/", "é", "*", "?"], 4);
+        let texts = all(&["a", "b", "/", "é"], 4);
+        let mut checked = 0u64;
+        for p in &patterns {
+            for t in &texts {
+                assert_eq!(glob_match(p, t), reference(p, t), "{p:?} vs {t:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 500_000, "{checked}");
+    }
+
+    /// The budget bounds the work and says so (`None`), rather than
+    /// answering wrongly.
+    #[test]
+    fn the_step_budget_is_a_hard_bound() {
+        let mut b = 3u64;
+        assert_eq!(glob_match_within("*z", "aaaaaaaa", &mut b), None);
+        let mut b = 1_000u64;
+        assert_eq!(glob_match_within("*a", "bbba", &mut b), Some(true));
+        assert!(b < 1_000);
+    }
 
     #[test]
     fn glob_basics() {
