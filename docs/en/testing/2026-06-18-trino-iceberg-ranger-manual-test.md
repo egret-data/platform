@@ -232,6 +232,10 @@ after the result proves nothing. And **a disagreement is a finding**: either the
 harness, or this repo's reading of Ranger is wrong. Work out which. Never adjust a case into
 agreement.
 
+The check covers **ten cases**: eight on a private Trino coordinator (§7.4) and two on a private
+StarRocks FE + CN (§7.4b), because StarRocks runs a different plugin version against a different
+service-def and its result cannot be inferred from Trino's.
+
 ### 7.2 The instrument: a private coordinator, so nothing shared is touched
 
 Two properties are needed that a provisioned engine does not have, and neither is worth changing
@@ -380,15 +384,146 @@ no `column`. Both engines' `rowFilterDef.resources` stop at `table`, so a column
 makes every row-filter policy an ANCESTOR match and returns `NoFilter`, which reads as "row
 filters do not work". Task 6 lost six tests to this before spotting it.
 
+### 7.4b The StarRocks side: a private FE + CN
+
+StarRocks needs its own instrument for the same two reasons Trino did — the profile a provisioned
+FE polls is `generated` (the policy API refuses to write to it) — plus one more: repointing a
+running FE means editing `ranger-starrocks-security.xml` inside it and restarting, and that FE's
+metadata is on an `emptyDir`. Build your own instead. It is worth it: StarRocks runs a different
+plugin version (2.8.0) against a different service-def whose middle level is `database`, so a
+Trino-only gate leaves the evaluator's StarRocks claim untested.
+
+**Check capacity first and be willing to stop.** A NOT MEASURED with a capacity reason is a fine
+outcome; a wedged cluster is not.
+
+```bash
+df -h /                                              # host disk
+kubectl --context kind-egret describe node | sed -n '/Allocated resources/,/Events/p'
+# images must already be on the node — a multi-GB pull is what would hurt
+kubectl --context kind-egret get nodes -o json \
+  | python3 -c 'import json,sys;[print(n) for i in json.load(sys.stdin)["items"][0]["status"]["images"] for n in (i.get("names") or []) if "starrocks" in n]'
+```
+
+Create the profile the same way (`POST /api/control-plane/policies/services`, type `starrocks`),
+then:
+
+```yaml
+# Secret sp4d1-sr-gate-pw  { password: <choose one> }   — the FE root password AND the CN's MYSQL_PWD
+# ConfigMap sp4d1-sr-gate-fe-cm:
+  fe.conf: |
+    JAVA_OPTS = "-Dlog4j2.formatMsgNoLookups=true -Xmx2048m -XX:+UseG1GC"
+    http_port = 8030
+    rpc_port = 9020
+    query_port = 9030
+    edit_log_port = 9010
+    run_mode = shared_data
+    cloud_native_meta_port = 6090
+    cloud_native_storage_type = S3
+    aws_s3_endpoint = http://minio.egret-system.svc.cluster.local:9000   # NOT http://minio:9000
+    aws_s3_path = e2e/starrocks/sp4d1-sr-gate
+    aws_s3_access_key = egret
+    aws_s3_secret_key = egretsecret
+    aws_s3_use_aws_sdk_default_behavior = false
+    aws_s3_enable_path_style_access = true
+    enable_load_volume_from_conf = true
+    access_control = ranger
+# ConfigMap sp4d1-sr-gate-ranger-cm:
+  ranger-starrocks-security.xml: |
+    <configuration>
+    <property><name>ranger.plugin.starrocks.service.name</name><value>sp4d1-sr-gate</value></property>
+    <property><name>ranger.plugin.starrocks.policy.rest.url</name><value>http://egret.egret-system.svc.cluster.local:8080</value></property>
+    <property><name>ranger.plugin.starrocks.policy.source.impl</name><value>org.apache.ranger.admin.client.RangerAdminRESTClient</value></property>
+    <property><name>ranger.plugin.starrocks.policy.cache.dir</name><value>/tmp/ranger/sp4d1-sr-gate/policycache</value></property>
+    <property><name>ranger.plugin.starrocks.policy.pollIntervalMs</name><value>30000</value></property>
+    </configuration>
+  ranger-starrocks-audit.xml: |
+    <configuration>
+    <property><name>xasecure.audit.is.enabled</name><value>false</value></property>
+    </configuration>
+---
+# StatefulSet sp4d1-sr-gate-fe  (1 replica, requests 500m/2Gi, limits 2/3Gi)
+#   image starrocks/fe-ubuntu:4.1-latest, imagePullPolicy IfNotPresent
+#   command ["/opt/starrocks/fe_entrypoint.sh"], args ["$(FE_SERVICE_NAME)"]
+#   env  MYSQL_PWD (from the Secret), POD_NAME/POD_IP/HOST_IP/POD_NAMESPACE (fieldRef),
+#        HOST_TYPE=FQDN, COMPONENT_NAME=fe,
+#        FE_SERVICE_NAME=sp4d1-sr-gate-fe-service.egret-engines,
+#        CONFIGMAP_MOUNT_PATH=/etc/starrocks/fe/conf
+#   startup/readiness probe  GET :8030/api/health   (startup failureThreshold 60, period 5s)
+#   mounts  /opt/starrocks/fe/meta (emptyDir), /opt/starrocks/fe/log (emptyDir),
+#           /etc/starrocks/fe/conf (fe-cm),
+#           /opt/starrocks/fe/conf/ranger-starrocks-{security,audit}.xml (ranger-cm, subPath)
+#   NOTE: omit the ssl_* keys the provisioned FE carries, and you can skip its keystore init container.
+# Services  sp4d1-sr-gate-fe-service (8030/9020/9030/9010)
+#           sp4d1-sr-gate-fe-search  (headless, publishNotReadyAddresses, 9030)
+---
+# StatefulSet sp4d1-sr-gate-cn  (1 replica, requests 500m/2Gi, limits 2/3Gi)
+#   image starrocks/cn-ubuntu:4.1-latest
+#   command ["/opt/starrocks/cn_entrypoint.sh"], args ["$(FE_SERVICE_NAME)"]
+#   env  MYSQL_PWD (same Secret), the four fieldRefs, HOST_TYPE=FQDN, COMPONENT_NAME=cn,
+#        FE_SERVICE_NAME=sp4d1-sr-gate-fe-service, FE_QUERY_PORT=9030
+#   ports 9060/8040/9050/8060; mount /opt/starrocks/cn/log (emptyDir)
+# Service  sp4d1-sr-gate-cn-search (headless, publishNotReadyAddresses, 9050)
+```
+
+Three things will bite, in this order:
+
+1. **The CN cannot register** — `ERROR 1045 (28000): Access denied for user 'root'` in a retry
+   loop. A fresh FE has an *empty* root password while the CN's entrypoint authenticates with
+   `MYSQL_PWD`. Fix on your own FE, once it is ready:
+   ```bash
+   mysql -h127.0.0.1 -P9030 -uroot --skip-password \
+     -e "SET PASSWORD FOR 'root' = PASSWORD('<the Secret value>')"
+   ```
+   Then wait for `SHOW COMPUTE NODES\G` → `Alive: true`.
+2. **The first query takes ~150 s.** Not Ranger. `shared_data` with one CN makes the FE retry
+   creating its `_statistics_` tables at three replicas forever and the CN's agent queue starves
+   the scan (`create table failed … elapsed: 160000 ms`). On your own FE:
+   ```sql
+   ADMIN SET FRONTEND CONFIG ("default_replication_num" = "1");
+   ADMIN SET FRONTEND CONFIG ("enable_statistic_collect" = "false");
+   ```
+   The same read then returns in well under a second.
+3. **The catalog.** Copy the Iceberg-REST properties from a provisioned FE — including the OAuth2
+   credential, which is why they are not printed here:
+   ```sql
+   -- on the provisioned FE, as root:
+   SHOW CREATE CATALOG sp4a10_wh\G
+   -- then on yours, the same PROPERTIES, with
+   --   aws.s3.endpoint = http://minio.egret-system.svc.cluster.local:9000
+   ```
+
+**The subject must be a native user, never `root`.** `root` bypasses the access check before
+Ranger is consulted (`RangerAccessController.java:115-117`), so a `root` result proves nothing
+about a deny. `CREATE USER 'sp4dsr' IDENTIFIED BY '<pw>'` on your own FE, use it for every
+measurement, and keep `root` for DDL and for the data-path control. Confirm with
+`SELECT current_user()`.
+
+The two cases, with StarRocks' `database` where Trino says `schema`:
+
+| # | policy | query | expected |
+|---|---|---|---|
+| S1 | `{catalog, database}`, `select` | `SELECT id, item FROM <cat>.sp4d1a.t1` | **denied** |
+| S2 | the same + `table` + `column: ["*"]` | same on `sp4d1.t2` | 4 rows |
+
+plus a baseline granting `usage` on the catalog and **no `select` on anything**. As on Trino,
+S1 and S2 together are what make the measurement sensitive; if both deny, the setup is wrong.
+
 ### 7.5 Clean-up
+
+Label every object you create with `egret/sp4d1-live-gate: "true"` and the whole instrument comes
+down in one command:
 
 ```bash
 kubectl --context kind-egret delete pod sp4d1-gate-trino -n egret-engines
 kubectl --context kind-egret delete cm  sp4d1-gate-trino -n egret-engines
+kubectl --context kind-egret delete sts,svc,cm,secret -n egret-engines -l egret/sp4d1-live-gate=true
+# confirm, do not assume:
+kubectl --context kind-egret get all,cm,secret -n egret-engines -l egret/sp4d1-live-gate=true
 ```
 
-Keep the profile and the fixture tables — they are additive, enforced by nothing once the pod is
-gone, and they are what makes the check cheap to re-run.
+Keep the profiles and the fixture tables — they are additive, enforced by nothing once the pods
+are gone, and they are what makes the check cheap to re-run. Both private engines read the same
+Iceberg warehouse, which is what makes the Trino and StarRocks results comparable.
 
 ### 7.6 Contract notes this section adds
 

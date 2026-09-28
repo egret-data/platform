@@ -52,20 +52,18 @@ case 8, and cases 7, S1 and S2 are the additions.
 | 6 | grant to group `public`, requester in no groups | `Allowed { 8857 }` | 4 rows | **YES** |
 | 7 | does StarRocks' Ranger plugin fetch tags at all? | — (an observation, not a prediction) | **it does not, and the cause is egret's own service-def** | see §7 |
 | 8 | a Ranger-undetermined request — does Trino fall through? | `Denied { NoPolicyMatched }` | `Access Denied: Cannot select from columns [item, id] in table or view t7` | **YES** |
-| S1 | StarRocks, the ANCESTOR shape | **none — there is nothing to predict from** | **NOT MEASURED** — §9 | — |
-| S2 | StarRocks, `column: ["*"]` | **none — same reason** | **NOT MEASURED** — §9 | — |
+| S1 | StarRocks, the ANCESTOR shape (`{catalog, database}`) | `Denied { NoPolicyMatched }` | `ERROR 5204 (42000): Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN item for this operation.` | **YES** |
+| S2 | StarRocks, the same with `column: ["*"]` | `Allowed { 8859 }` | 4 rows, raw values | **YES** |
 
-**Eight of eight Trino cases agree.** The two StarRocks cases were **not measured and not
-predicted**, and the second half of that is not an omission: a prediction is computed from a
-policy download, and neither shape could be got into one. §9 obstacle 1 is why no policy could be
-written to the profile the FE polls, and obstacle 2 is why the ANCESTOR shape is no longer
-producible through the permission model either — so there is no download in which S1 exists to be
-predicted from. A later run has to create the policy first; §9 says what that costs.
+**Ten of ten cases agree — eight on Trino, two on StarRocks.** S1 and S2 were originally recorded
+here as NOT MEASURED; they were measured on 2026-09-28 against a **private StarRocks FE + CN**
+built the same additive way as the private Trino coordinator, and §9 now records both the
+obstacles that blocked the first attempt (they are still true of the shared engine, and the
+refusals that produced them still stand) and the route that got past them without touching it.
 
-What §8 *does* hold is a different thing, and it is not a substitute: predictions for six
-resources that already exist in the live StarRocks policy set. They were computed and written
-down before any StarRocks query was attempted, they are the reason F2 was found, and they are
-worth re-using — but none of them is the ANCESTOR or the column-wildcard shape.
+§10 is the S1/S2 measurement. §8 remains a separate thing and is **not** a substitute for it:
+predictions for six resources that already exist in the *shared* StarRocks policy set, which are
+what found F2.
 
 Three findings came out of the run that no case asked for:
 
@@ -679,12 +677,16 @@ policy that participates in *this* decision can.
 
 ---
 
-## 9. S1 and S2 — NOT MEASURED, and exactly why
+## 9. Why S1 and S2 were blocked on the shared engine
 
-The two StarRocks cases the brief asks for (the ANCESTOR shape, and the same written down to
-`column: ["*"]`) were **not measured**. Trino's result is **not** assumed to carry over: StarRocks
-runs a different plugin version (2.8.0) against a different service-def whose middle level is
-`database`, not `schema`.
+**Kept, because all three obstacles are still true of the shared StarRocks and because the two
+refusals behind them stand.** The cases themselves were measured — on a private FE + CN, §10 —
+the same way the Trino cases were, and for the same reason: an additive engine of one's own needs
+no permission over a shared one.
+
+Trino's result is **not** assumed to carry over: StarRocks runs a different plugin version
+(2.8.0) against a different service-def whose middle level is `database`, not `schema`. That is
+why §10 exists as a measurement rather than as an inference.
 
 Three obstacles, each recorded with what was tried:
 
@@ -746,31 +748,217 @@ not proportionate: it needs an FE **and** a CN, its own metadata, the external I
 re-registered and an authentication chain configured — the same four repairs SP4c had to make —
 for two cases.
 
-**What StarRocks contributed anyway:** case 7 (§7), which needs no query and no authentication,
-and §8's predictions against the policy set that *does* exist — one of which (F2) found a real
-compiler defect in the live policy store. To be exact, because the distinction is the whole point
-of §9: §8 does **not** contain predictions for S1 or S2. Obstacles 1 and 2 above mean neither
-shape exists in any download, and a prediction is computed from a download. A later run must
-create the policy before it can predict anything, and only then measure.
+**What the shared StarRocks contributed anyway:** case 7 (§7), which needs no query and no
+authentication, and §8's predictions against the policy set that *does* exist — one of which (F2)
+found a real compiler defect in the live policy store. §8 does **not** contain predictions for S1
+or S2: obstacles 1 and 2 mean neither shape exists in any download the shared FE can be given,
+and a prediction is computed from a download. §10 is what creating the policy first, then
+predicting, then measuring actually looked like.
 
 ---
 
-## 10. What was left behind, and what was cleaned up
+## 10. S1 and S2, measured on a private StarRocks FE + CN
+
+The two cases §9 could not get at, measured the same way the Trino cases were: an **additive**
+engine of my own, which needs no permission over a shared one. Neither of §9's two refusals was
+revisited — `sp3c2-sr-live`'s `ranger-starrocks-security.xml` and its `authentication_chain` were
+not touched, and `demo-trino` was not touched at all.
+
+### 10.1 The instrument
+
+| piece | value |
+|---|---|
+| FE | StatefulSet `sp4d1-sr-gate-fe`, image `starrocks/fe-ubuntu:4.1-latest`, `run_mode = shared_data`, `access_control = ranger` |
+| CN | StatefulSet `sp4d1-sr-gate-cn`, image `starrocks/cn-ubuntu:4.1-latest`, one replica |
+| Ranger profile | `sp4d1-sr-gate` (id **57**), created through `POST /api/control-plane/policies/services` so it is `origin = 'manual'` — nothing seeded onto it, and **no tag service**, so no `tagPolicies` and no F1 |
+| storage volume | built from `aws_s3_*` in `fe.conf` with `enable_load_volume_from_conf = true`, pointed at `http://minio.egret-system.svc.cluster.local:9000` — *not* the `http://minio:9000` the shared FE carries, which does not resolve from `egret-engines` and is the defect SP4c had to repair by hand |
+| catalog | `CREATE EXTERNAL CATALOG sp4a10_wh` with the same Iceberg-REST properties the shared FE holds, read from it with `SHOW CREATE CATALOG` |
+| plugin version | 2.8.0, confirmed from this FE's own startup dump (below) |
+
+Both images were already on the kind node (`fe-ubuntu:4.1-latest` 1.03 GB, `cn-ubuntu:4.1-latest`
+1.34 GB, read off `kubectl get nodes -o json`), so nothing was pulled — checked before creating
+anything, along with `df -h /` (34 GiB free) and node headroom (~11 GiB of request capacity).
+
+**The subject is `sp4dsr`, a native StarRocks user, and NOT `root`.** `root` bypasses the access
+check before Ranger is consulted (`RangerAccessController.java:115-117`, recorded in SP4c), so a
+`root` result proves nothing about a deny. `root` is used below only for DDL and for the
+data-path control. Measured, not assumed: `SELECT current_user()` → `'sp4dsr'@'%'`.
+
+Two pieces of setup are recorded because a reader reproducing this will hit both:
+
+- The CN could not register itself — `ERROR 1045 (28000): Access denied for user 'root'` in a
+  retry loop — because the entrypoint authenticates with `MYSQL_PWD` while a fresh FE has an
+  empty root password. Setting root's password on **this private FE** to the same value let the
+  CN in; it came up `Alive: true`, `Version: 4.1.3-8a8e186`.
+- The first query took **146 s**. Not a Ranger effect: `run_mode = shared_data` with a single CN
+  made the FE retry creating its internal `_statistics_` tables at three replicas forever, and
+  the CN's agent queue (`task_count_in_queue=21`, `create table failed … elapsed: 160000 ms`)
+  starved the scan. `default_replication_num = 1` plus `enable_statistic_collect = false` on this
+  private FE drained the queue to 1 and the same read then returned in **0.36 s**. Both are
+  `ADMIN SET FRONTEND CONFIG` calls against my own engine, not a shared one.
+
+### 10.2 The policy set, verbatim
+
+Three policies, all for `sp4dsr`. The baseline grants `usage` on the catalog and **no `select` on
+anything**, so each case's allow can only come from its own policy:
+
+```json
+{"id":8860,"name":"sp4d1sr-base-catalog-usage","policyType":0,
+ "resources":{"catalog":{"values":["sp4a10_wh"]}},
+ "policyItems":[{"users":["sp4dsr"],"accesses":[{"type":"usage","isAllowed":true}]}]}
+
+{"id":8858,"name":"sp4d1sr-s1-ancestor","policyType":0,
+ "resources":{"catalog":{"values":["sp4a10_wh"]},"database":{"values":["sp4d1a"]}},
+ "policyItems":[{"users":["sp4dsr"],"accesses":[{"type":"select","isAllowed":true}]}]}
+
+{"id":8859,"name":"sp4d1sr-s2-colwild","policyType":0,
+ "resources":{"catalog":{"values":["sp4a10_wh"]},"database":{"values":["sp4d1"]},
+              "table":{"values":["t2"]},"column":{"values":["*"]}},
+ "policyItems":[{"users":["sp4dsr"],"accesses":[{"type":"select","isAllowed":true}]}]}
+```
+
+S1 names `{catalog, database}` — StarRocks' middle level is `database`, not Trino's `schema`.
+S2 is the same grant written down to `column: ["*"]`. The tables are the ones the Trino cases
+used, in the shared Iceberg warehouse `sp4a10_wh`, so both engines read the same bytes.
+
+### 10.3 The plugin was holding this policy set
+
+```text
+egret  GET /service/plugins/policies/download/sp4d1-sr-gate
+       → serviceName sp4d1-sr-gate | policyVersion 4 | 3 policies | no `tagPolicies` key
+
+FE     /tmp/ranger/sp4d1-sr-gate/policycache/starrocks_sp4d1-sr-gate.json
+       {"serviceName":"sp4d1-sr-gate","serviceId":57,"policyVersion":4,"policies":[{"id":8858,…
+```
+
+Same `policyVersion 4` on both sides, and the cache still read `policyVersion 4` **after** the
+last query. The plugin is demonstrably live on this profile — 42
+`PolicyRefresher(serviceName=sp4d1-sr-gate)` lines in `fe.log` — and it is the 2.8.0 plugin:
+
+```text
+[RangerPluginConfig.<init>():144] PolicyEngineOptions: { evaluatorType: auto, … ,
+optimizeTagTrieForRetrieval: false, optimizeTagTrieForSpace: false, enableResourceMatcherReuse: true }
+```
+
+`enableResourceMatcherReuse` is the field 2.8.0 adds and 2.5.0 does not have, so the version claim
+is read off the running plugin rather than off the image tag.
+
+### 10.4 The prediction, made before any query as `sp4dsr`
+
+Printed at **2026-09-28T20:29:46Z**; the queries ran at **20:29:55Z**.
+
+```text
+download   : …/sr-gate-dl.json
+service    : sp4d1-sr-gate
+policyVer  : Some(4)
+engine     : StarRocks / Ranger2_8_0
+user       : sp4dsr  (groups {}, roles {})
+unmodelled : []
+defIssues  : []
+
+── case sp4d1a/t1/item
+   request  RequestResource { values: {"catalog": "sp4a10_wh", "column": "item", "database": "sp4d1a", "table": "t1"} }
+   access   Denied { policy_id: None, policy_name: "", reason: NoPolicyMatched }
+   mask     NoMask
+   filter   NoFilter
+
+── case sp4d1/t2/item
+   request  RequestResource { values: {"catalog": "sp4a10_wh", "column": "item", "database": "sp4d1", "table": "t2"} }
+   access   Allowed { policy_id: Some(8859), policy_name: "sp4d1sr-s2-colwild" }
+   mask     NoMask
+   filter   NoFilter
+```
+
+### 10.5 The measurement, verbatim
+
+The data-path control first, as `root`, which bypasses Ranger — so it says the tables are
+readable and says nothing about authorization:
+
+```text
+root   SELECT id, item FROM sp4a10_wh.sp4d1a.t1 ORDER BY id   → 1 book / 2 pen / 3 lamp / 4 desk
+root   SELECT id, item FROM sp4a10_wh.sp4d1.t2  ORDER BY id   → 1 book / 2 pen / 3 lamp / 4 desk
+```
+
+Then the subject.
+
+**S1 — the ANCESTOR shape. PASS (they agree, and they agree on a denial)**
+
+```text
+sp4dsr  SELECT id, item FROM sp4a10_wh.sp4d1a.t1 ORDER BY id
+ERROR 5204 (42000) at line 1: Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN item for this operation.
+```
+
+**S2 — the same written down to `column: ["*"]`. PASS**
+
+```text
+sp4dsr  SELECT id, item FROM sp4a10_wh.sp4d1.t2 ORDER BY id
+id	item
+1	book
+2	pen
+3	lamp
+4	desk
+```
+
+### 10.6 What this measures that the differential corpus cannot
+
+The corpus already covers StarRocks *semantics* at Ranger 2.8.0 against the StarRocks
+service-def. What it cannot see is how **StarRocks itself constructs and issues the request** —
+and StarRocks says so in its own words. The refusal names `COLUMN item`: the request that reached
+Ranger was **column-granular**, so a policy naming only `{catalog, database}` is an ANCESTOR
+match and grants nothing. That is the Trino T1 shape reproduced on a different engine, a
+different plugin version, a different service-def and a different middle-level name — and the
+evaluator predicted both halves from `MatchType::Ancestor` not being an allow.
+
+S1 and S2 differ only in the `table` and `column: "*"` levels, and they came out deny and allow.
+The measurement is **sensitive**, not uniformly denying, so S1's denial means the shape and not
+the setup.
+
+One consequence worth stating for SP4d-2: the engines disagree about the *message* but not about
+the decision. Trino says `Cannot select from columns [item, id] in table or view t1`, StarRocks
+says `you need … the SELECT privilege(s) on COLUMN item`. Anything that parses engine text to
+explain a denial has to handle both; the evaluator's `DenyReason::NoPolicyMatched` is the same on
+both sides.
+
+### 10.7 A second, independent corroboration of F3
+
+This FE is a fresh StarRocks that egret never provisioned, polling a profile created by hand.
+Its policy cache after the run:
+
+```text
+/tmp/ranger/sp4d1-sr-gate/policycache/
+  starrocks_sp4d1-sr-gate.json
+  starrocks_sp4d1-sr-gate_roles.json
+```
+
+Two files. **No `_tag.json`** — exactly as on the shared FE (§7), and exactly as F3 predicts from
+`contextEnrichers: []` in egret's `starrocks` service-def. The private Trino, by contrast, wrote
+a `trino_sp4d1-gate_tag.json` within seconds for a service that likewise had no tag service. Same
+egret, same cluster, same hour, two engines, opposite behaviour — and the difference is one field
+in the service-def.
+
+---
+
+## 11. What was left behind, and what was cleaned up
 
 | object | state after the run |
 |---|---|
 | pod + ConfigMap `sp4d1-gate-trino` (`egret-engines`) | **deleted** — it held 2 GiB of a 24 GiB node |
-| profile `sp4d1-gate` (id 56) and its 16 policies | **kept** — additive, enforced by nothing now, and what makes the gate re-runnable |
-| schemas `sp4a10_wh.sp4d1` / `.sp4d1a` and their 8 tables | **kept**, four rows each |
-| `sp3c2-trino-live`, `demo-trino`, `sp3c2-sr-live` | **untouched** — no ConfigMap, deployment, FE config or policy of theirs was modified |
+| StatefulSets `sp4d1-sr-gate-fe` / `-cn`, their services, ConfigMaps and password Secret | **deleted** — `kubectl get all,cm,secret -l egret/sp4d1-live-gate=true` → `No resources found`, both pods gone |
+| profile `sp4d1-gate` (id 56) and its 16 policies | **kept** — additive, enforced by nothing now, and what makes the Trino gate re-runnable |
+| profile `sp4d1-sr-gate` (id 57) and its 3 policies | **kept**, for the same reason |
+| schemas `sp4a10_wh.sp4d1` / `.sp4d1a` and their 8 tables | **kept**, four rows each; read by BOTH private engines, which is what makes the two results comparable |
+| MinIO prefix `e2e/starrocks/sp4d1-sr-gate` | left in place — the private FE's shared-data volume; a few MB of internal metadata, no fixture data |
+| `sp3c2-trino-live`, `demo-trino`, `sp3c2-sr-live`, `femeta-live` | **untouched** — no ConfigMap, Deployment, StatefulSet, FE config, `authentication_chain` or policy of theirs was modified. The two refusals §9 records still stand; they were routed around, not overridden. |
 | `sp3c_live_wh` | untouched; confirmed still unwritable (`Failed checking new table's location: s3://e2e/sp3c-live/…`), the pre-existing defect SP4a recorded |
-| the impersonated session used for the StarRocks attempt | discarded; the overlay expires 30 min after issue |
+| the impersonated session used for the first StarRocks attempt | discarded; the overlay expires 30 min after issue |
 
-Disk on the host was 42 GiB free before and after.
+Host disk: 42 GiB free before the Trino run, 34 GiB before the StarRocks run (checked first,
+along with node headroom and whether the images were already cached — they were, so nothing was
+pulled), 37 GiB after the private engine was deleted.
 
 ---
 
-## 11. Reproducing this
+## 12. Reproducing this
 
 ```bash
 # 1. the prediction, from whatever the plugin is actually holding
@@ -792,7 +980,24 @@ Step 2 is not optional. The live coordinator polls every 30 s
 (`ranger.plugin.trino.policy.pollIntervalMs = 30000`); measuring before a poll lands records the
 previous policy state and produces a result that looks like a finding.
 
-The full private-coordinator manifest, and the evaluator check as a step in the existing manual
-recipe, are in
+The StarRocks side is the same three steps with `starrocks` as the engine argument and
+`database` where Trino says `schema`:
+
+```bash
+kubectl --context kind-egret exec -n egret-engines sp4d1-sr-gate-fe-0 -- \
+  curl -s http://egret.egret-system.svc.cluster.local:8080/service/plugins/policies/download/sp4d1-sr-gate \
+  > /tmp/sr.json
+cargo run -p egret-ranger-eval --example live_gate -- /tmp/sr.json starrocks sp4dsr sp4a10_wh \
+  sp4d1a/t1/item sp4d1/t2/item
+kubectl --context kind-egret exec -n egret-engines sp4d1-sr-gate-fe-0 -- \
+  head -c 120 /tmp/ranger/sp4d1-sr-gate/policycache/starrocks_sp4d1-sr-gate.json
+kubectl --context kind-egret exec -n egret-engines sp4d1-sr-gate-fe-0 -- \
+  mysql -h127.0.0.1 -P9030 -usp4dsr -p'<pw>' -e "SELECT id, item FROM sp4a10_wh.sp4d1a.t1"
+```
+
+Query as the native subject, never as `root` — `root` bypasses the check before Ranger sees it.
+
+Both private-engine manifests (the Trino coordinator and the StarRocks FE + CN), and the
+evaluator check as a step in the existing manual recipe, are in
 [`docs/en/testing/2026-06-18-trino-iceberg-ranger-manual-test.md`](../testing/2026-06-18-trino-iceberg-ranger-manual-test.md)
 §7.

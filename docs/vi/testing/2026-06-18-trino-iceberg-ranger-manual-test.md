@@ -222,7 +222,12 @@ tiếng Anh chuẩn**:
 [`docs/en/testing/2026-06-18-trino-iceberg-ranger-manual-test.md`](../../en/testing/2026-06-18-trino-iceberg-ranger-manual-test.md) §7.
 Kết quả đã đo: [`docs/en/plans/2026-09-28-sp4d-1-live-result.md`](../../en/plans/2026-09-28-sp4d-1-live-result.md).
 
-Ba điều bắt buộc, tóm tắt:
+Kiểm này gồm **mười case**: tám trên một Trino coordinator riêng, và hai trên một StarRocks
+FE + CN riêng (S1 hình dạng ANCESTOR `{catalog, database}` → BỊ TỪ CHỐI; S2 cùng thế nhưng có
+`column: ["*"]` → ĐƯỢC PHÉP). Phải đo StarRocks riêng: nó chạy plugin 2.8.0 trên một service-def
+khác, tầng giữa tên là `database` chứ không phải `schema`, nên KHÔNG được suy từ kết quả Trino.
+
+Bốn điều bắt buộc, tóm tắt:
 
 1. **Tính dự đoán TRƯỚC, ghi xuống, rồi mới chạy query.** Dự đoán viết sau khi thấy kết quả
    không chứng minh gì. Và **bất đồng là một PHÁT HIỆN**, không phải test cần chỉnh: hoặc
@@ -234,6 +239,11 @@ Ba điều bắt buộc, tóm tắt:
    cả hai engine dừng ở `table`, nên request theo cột biến mọi policy row-filter thành khớp
    ANCESTOR và trả `NoFilter` — đọc ra như "row filter không chạy". Task 6 mất sáu test vì điều
    này.
+
+4. **Chủ thể trên StarRocks phải là user native, KHÔNG BAO GIỜ là `root`.** `root` đi vòng qua
+   kiểm tra trước khi Ranger được hỏi (`RangerAccessController.java:115-117`), nên kết quả đo
+   bằng `root` không chứng minh được gì về một deny. Dùng `root` chỉ để DDL và để làm control
+   xác nhận đường dữ liệu đọc được.
 
 ### Ghi chú hợp đồng mục này thêm vào
 
