@@ -514,3 +514,48 @@ one that was fixed: a caller-supplied copy of a fact only egret can verify.
 `explain` should resolve the subject's roles from `access_grants` the same way it
 now resolves workspace membership. Reported here rather than fixed, because this
 task is the gate.
+
+---
+
+## Case 3 — the clearance lifts, and the policy is reaped. **PASS**
+
+```text
+DELETE /api/control-plane/tags/3954a1a4-…/access-policy  → 200 {"ok":true}
+```
+
+| profile | before lift | after lift |
+|---|---|---|
+| 51 `sp3c2-trino-live_tag` | 4 | **3** |
+| 52 `sp3c2-trino-live` | 31 | 31 |
+| 55 `sp4a-sr-crosscheck` | 35 | **34** |
+
+Both of this tag's clearance rows are gone — reaped by the delete's own recompile,
+nothing forced. The only `perm-clearance-%` row left belongs to the other gated
+tag, which this run never touched:
+
+```text
+select id, service_id, name from policy.authz_policies where name like 'perm-clearance-%'
+8839 | 51 | perm-clearance-3205756d-543e-49f5-adfb-75f31112b5c2
+select count(*) from classification_policies where tag_id = '3954a1a4-…'   →  0
+```
+
+And the reads come back, for the uncleared subject, on both engines and both paths:
+
+```text
+analyst  / Trino      SQL Lab  → finished, [[91,'written-by-uncleared'],[1,'classified-one'],[2,'classified-two'],[3,'classified-three']]
+analyst  / StarRocks  SQL Lab  → finished, same four rows
+d3member / Trino, StarRocks    → finished, same four rows
+analyst  / Trino      view     → finished, same four rows   (the over-block of case 4b is gone too)
+analyst  / notebook            → me = analyst
+                                 TRINO ROWS:     {'id': [1,2,3,91], 'secret': ['classified-one','classified-two','classified-three','written-by-uncleared']}
+                                 STARROCKS ROWS: {'id': [1,2,3,91], 'secret': [...same...]}
+```
+
+No one-way door. **PASS.**
+
+(Two instrument notes from this step, both real and both cheap to hit: a kernel
+pod older than its `EGRET_KERNEL_TOKEN` answers every engine call with
+`egret: kernel token expired — restart the kernel`, and
+`POST /notebooks/{id}/kernel/restart` does **not** fix it — it restarts the Jupyter
+kernel inside the same pod. `DELETE /ws/{ws}/kernel` followed by `POST
+/ws/{ws}/kernel` launches a new pod with a fresh token, which does.)
