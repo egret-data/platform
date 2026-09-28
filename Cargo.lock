@@ -3536,6 +3536,7 @@ dependencies = [
  "egret-events",
  "egret-metastore",
  "egret-policy-api",
+ "egret-ranger-eval",
  "egret-secrets",
  "egret-test-db",
  "http-body-util",

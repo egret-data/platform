@@ -16,10 +16,22 @@
 //! types would just relocate the same lossiness into this evaluator.
 //!
 //! The point of `model`, and of this whole crate: a construct it does not
-//! model must be detected and reported (see [`model::Unmodelled`]), never
-//! silently dropped, because a silently dropped construct produces a
-//! confident wrong decision downstream. Later tasks build resource
-//! matching, precedence and mask/row-filter evaluation on top of these
-//! types; no evaluation logic lives here yet.
+//! model must be detected and reported (see [`model::Unmodelled`] and
+//! [`servicedef::ServiceDefIssue`]), never silently dropped, because a
+//! silently dropped construct produces a confident wrong decision
+//! downstream.
+//!
+//! [`servicedef`] and [`resource`] add the second layer: the service-def's
+//! resource hierarchy and `matcherOptions`, and Ranger's resource
+//! **matching** — `RangerDefaultPolicyResourceMatcher.getMatchType` and the
+//! two matchers it drives. That layer classifies a match; it does not
+//! decide access. In particular [`resource::MatchType::Ancestor`] — a
+//! policy naming fewer hierarchy levels than the request — is NOT an allow:
+//! Ranger refuses to record one for an ancestor match on a resource
+//! request, and a live Trino measurement confirmed it (see the
+//! [`resource`] module doc). Precedence and the final decision are a later
+//! task's; mask and row-filter evaluation a later one still.
 
 pub mod model;
+pub mod resource;
+pub mod servicedef;
