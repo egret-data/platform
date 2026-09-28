@@ -586,7 +586,7 @@ fn invalid_custom_mask(rule_name: &str, expr: &str) -> CompileError {
 // half of Ranger's deny/deny-exception pair D0 measured IS expressible. Two
 // copies of this string would drift, and a drift makes a control that withholds
 // nothing.
-pub(crate) const PUBLIC_GROUP: &str = "public";
+pub(crate) const PUBLIC_GROUP: &str = egret_perm::PUBLIC_GROUP;
 
 /// Bucket a rule's exempt principals into (users, groups) for a
 /// masking/row-filter item. Those Ranger item shapes

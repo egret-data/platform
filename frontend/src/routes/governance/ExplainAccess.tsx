@@ -54,6 +54,17 @@ const REASON_META: Record<
     variant: "success",
     icon: ShieldCheck,
   },
+  // SP4c review. An allow the DATA PLANE will refuse: the grant matched only
+  // through a group principal, and no engine egret provisions can see a group
+  // (D7, measured live). It was previously reported as `allowed_by_grant` —
+  // the same wire string as an enforceable allow — so the warning below the
+  // field was the only signal, and a caller parsing `kind` never saw it.
+  allowed_by_group_only: {
+    label: "Allowed by group only — the engine will refuse",
+    hint: "A grant matches this subject ONLY through a group. egret runs no usersync and writes no group provider, so no engine can see that membership: the model allows this and Trino and StarRocks will both refuse it.",
+    variant: "warning",
+    icon: AlertTriangle,
+  },
   explicit_deny: {
     label: "Explicit deny",
     hint: "Somebody forbade this — a deny grant matches. A different administrative problem than no grant matching at all.",

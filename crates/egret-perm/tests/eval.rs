@@ -530,10 +530,16 @@ fn a_subject_holding_any_required_role_is_cleared_and_grants_still_apply() {
         d.allowed,
         "a subject holding any required role is cleared: {d:?}"
     );
-    assert!(matches!(
-        d.reasons.as_slice(),
-        [Reason::AllowedByGrant { .. }]
-    ));
+    // WHICH allow class it is depends on this fixture's grant naming a GROUP
+    // (`AllowedByGroupOnly`), which is a different mechanism and not what this
+    // test is about; what must not appear is `ClearanceRequired`.
+    assert!(
+        matches!(
+            d.reasons.as_slice(),
+            [Reason::AllowedByGrant { .. } | Reason::AllowedByGroupOnly { .. }]
+        ),
+        "the clearance must not be the reason for a subject who holds a required role: {d:?}"
+    );
 }
 
 /// A gate on a tag NOT present on the target must not fire — `evaluate` only
@@ -563,5 +569,112 @@ fn a_clearance_gate_for_an_absent_tag_does_not_block() {
     assert!(
         d.allowed,
         "a clearance gate for a tag the target does not carry must not block: {d:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `allowed_by_group_only` — an allow the data plane will refuse
+// ---------------------------------------------------------------------------
+
+/// **SP4c review.** egret runs no usersync and writes no group provider, so a
+/// Ranger item naming a group matches NOBODY on any engine egret provisions
+/// (D7, measured live). A subject who reaches a grant only through a group is
+/// therefore allowed by the model and refused by both engines — and until this
+/// class existed that came back as `allowed_by_grant`, the SAME wire string an
+/// enforceable allow carries. The page said so in prose beside the answer; a
+/// caller parsing `kind` never saw it.
+///
+/// `allowed` stays TRUE: the model does allow it, and Cedar enforces exactly
+/// this on control-plane object access. The class is about the DATA plane.
+#[test]
+fn a_grant_matched_only_through_a_group_gets_its_own_reason_class() {
+    let g = grant(
+        Effect::Allow,
+        &["contractors"],
+        &[],
+        scope_table("sales", "orders"),
+    );
+    let d = evaluate(
+        &subject_in_group("contractors"),
+        Action::Read,
+        &scope_table("sales", "orders"),
+        &[g],
+        &[],
+        &[],
+        &[],
+    );
+    assert!(
+        d.allowed,
+        "the MODEL allows it — Cedar enforces this: {d:?}"
+    );
+    assert!(
+        matches!(d.reasons.as_slice(), [Reason::AllowedByGroupOnly { .. }]),
+        "an allow reachable only through a group must not wear `AllowedByGrant`'s wire string, \
+         which is what a caller parsing the reason class reads: {d:?}"
+    );
+}
+
+/// **The discriminating pair.** `public` is Ranger's built-in "everybody" and
+/// is the ONE group name that resolves with no group provider — SP4c's own
+/// clearance compiler puts it on the deny side of a tag policy for exactly that
+/// reason (D0). A grant naming it IS enforceable, so reporting it as
+/// group-only would be the same lie in the other direction, and a test that
+/// only checked the positive case above would pass against that.
+#[test]
+fn a_grant_naming_the_public_group_is_enforceable_and_not_group_only() {
+    let g = grant(
+        Effect::Allow,
+        &[egret_perm::PUBLIC_GROUP],
+        &[],
+        scope_table("sales", "orders"),
+    );
+    let d = evaluate(
+        &subject_in_group(egret_perm::PUBLIC_GROUP),
+        Action::Read,
+        &scope_table("sales", "orders"),
+        &[g],
+        &[],
+        &[],
+        &[],
+    );
+    assert!(d.allowed, "{d:?}");
+    assert!(
+        matches!(d.reasons.as_slice(), [Reason::AllowedByGrant { .. }]),
+        "`public` is resolved by every engine with no group provider, so this allow is real: {d:?}"
+    );
+}
+
+/// A grant naming the subject's own USERNAME as well as a group is enforceable
+/// — the username item is what the engine matches. Reporting it as group-only
+/// would understate a real access, and an implementation that asked "does any
+/// matching principal happen to be a group" instead of "are they ALL groups"
+/// would fail exactly here.
+#[test]
+fn a_grant_naming_the_user_as_well_as_a_group_is_not_group_only() {
+    let mut g = grant(
+        Effect::Allow,
+        &["contractors"],
+        &[],
+        scope_table("sales", "orders"),
+    );
+    g.principals.include.push(Principal {
+        kind: PrincipalKind::User,
+        r#ref: "alice".into(),
+    });
+    let mut subject = subject_in_group("contractors");
+    subject.user = "alice".into();
+
+    let d = evaluate(
+        &subject,
+        Action::Read,
+        &scope_table("sales", "orders"),
+        &[g],
+        &[],
+        &[],
+        &[],
+    );
+    assert!(
+        matches!(d.reasons.as_slice(), [Reason::AllowedByGrant { .. }]),
+        "the username item is what the engine will match, so this access is enforceable: {d:?}"
     );
 }

@@ -35,6 +35,7 @@ const ALL_KINDS_RESULT: ExplainResponse = {
   allowed: true,
   reasons: [
     { kind: "allowed_by_grant", grant_id: "grant-1" },
+    { kind: "allowed_by_group_only", grant_id: "grant-3" },
     { kind: "explicit_deny", grant_id: "grant-2" },
     { kind: "no_grant_matched" },
     { kind: "masked_by_rule", rule_id: "rule-1", mask_type: "MASK_HASH" },
@@ -77,7 +78,7 @@ beforeEach(() => {
 });
 
 describe("ExplainAccess — the reason class is the answer (D9)", () => {
-  test("each of the five reason classes renders with its own distinguishable label", async () => {
+  test("each reason class renders with its own distinguishable label", async () => {
     const user = userEvent.setup();
     renderPage();
     await submit(user);
@@ -88,6 +89,16 @@ describe("ExplainAccess — the reason class is the answer (D9)", () => {
     expect(result).toHaveTextContent("No grant matched");
     expect(result).toHaveTextContent("Masked by rule");
     expect(result).toHaveTextContent("Filtered by rule");
+
+    // SP4c review: an allow the DATA PLANE will refuse must not read like an
+    // enforceable one. It carries its own class on the wire now
+    // (`allowed_by_group_only`), so it must carry its own SENTENCE here.
+    expect(result).toHaveTextContent("Allowed by group only — the engine will refuse");
+    expect(
+      screen.getByText(
+        /a grant matches this subject only through a group.*no engine can see that membership/i,
+      ),
+    ).toBeInTheDocument();
 
     // no_grant_matched and explicit_deny are different administrative
     // problems and must not collapse into the same rendered sentence.

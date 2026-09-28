@@ -2222,6 +2222,60 @@ async fn explain_writes_nothing() {
     assert_eq!(f.compiled_policy_names().await, Vec::<String>::new());
 }
 
+/// **SP4c review.** A grant reachable only through a GROUP is allowed by the
+/// model and refused by every engine egret provisions (D7: no usersync, no
+/// group provider, so a Ranger item naming a group matches nobody). It must
+/// therefore not come back wearing `allowed_by_grant`'s wire string — the
+/// reason CLASS is this endpoint's whole deliverable, and the page's prose
+/// warning is not something a caller parsing JSON ever sees.
+///
+/// Asserted over HTTP rather than only on the evaluator, because the wire
+/// string is a separate mapping that can regress on its own.
+#[tokio::test]
+async fn explain_gives_a_group_only_allow_its_own_reason_class_on_the_wire() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    let mut grant = grant_body(f.catalog_id, "unused");
+    grant["principals"] = json!({
+        "include": [{ "kind": "group", "ref": "contractors" }],
+        "exclude": []
+    });
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/grants", &token, Some(grant)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let grant_id = body["id"].as_str().unwrap().to_string();
+
+    let mut ask = explain_body(f.catalog_id, unique("grouponly").as_str());
+    ask["subject"]["groups"] = json!(["contractors"]);
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", &token, Some(ask)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["allowed"], true,
+        "the MODEL allows it, and Cedar enforces exactly this on object access; body: {body}"
+    );
+    assert_eq!(
+        body["reasons"][0]["kind"], "allowed_by_group_only",
+        "an allow no engine will honour must not share `allowed_by_grant`'s wire string; \
+         body: {body}"
+    );
+    assert_eq!(
+        body["reasons"][0]["grant_id"], grant_id,
+        "and it must still name WHICH grant; body: {body}"
+    );
+}
+
 /// `explain` resolves the target's tags itself. If it made the caller supply
 /// them it would answer a question the caller had already decided.
 #[tokio::test]
@@ -3018,6 +3072,18 @@ async fn the_read_surface_names_the_catalog_and_the_tag_for_a_policy_read_only_c
     // HTTP recompiles every compiler-targeted profile in the installation
     // (see `TAG_FANOUT_LOCK`), and nothing here is about the fan-out — this is
     // a test of what the READ hands back.
+    //
+    // **But the ROW is still installation-wide, and that made this test a
+    // hazard to others (SP4c review).** Going through the store skips the
+    // fan-out this test causes, not the fan-out it CAUSES FOR SOMEBODY ELSE: a
+    // concurrent `preview_and_write_agree_about_a_tag_rules_fan_out` recompiles
+    // every profile between its preview and its write, and a tag rule that
+    // appeared in between makes the two summaries disagree — which is exactly
+    // the flake that run produced. So this test takes the same lock, AFTER its
+    // fixture setup (the helper's own warning: `setup` takes the lock itself),
+    // and deletes the row before releasing it. Avoiding the defect by running
+    // the suite differently would have left it for the next person.
+    let _fanout = exclusive(&f).await;
     let mut tx = f.db.pool.begin().await.expect("begin");
     let rule_id = egret_perm::create_rule_in_tx(
         &mut tx,
@@ -3096,4 +3162,13 @@ async fn the_read_surface_names_the_catalog_and_the_tag_for_a_policy_read_only_c
         json!(null),
         "a tag selector names no catalog, so inventing one would be a lie; row: {row}"
     );
+
+    // Remove the installation-wide row while the lock is still held, so no
+    // other test's fan-out can ever see it. Not hygiene: this row is the one
+    // that perturbed another test's assertion.
+    sqlx::query("DELETE FROM perm.rules WHERE id = $1")
+        .bind(rule_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("remove the installation-wide tag rule");
 }

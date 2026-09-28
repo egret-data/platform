@@ -69,7 +69,8 @@ use crate::grants::validate_grant_shape;
 use crate::rules::validate_rule_shape;
 use crate::trigger::{
     affected_services_for_grant, affected_services_for_rule, lock_services_in_tx,
-    merge_service_ids, recompile_service, recompile_services_in_tx, CompileSummary, SourceKind,
+    merge_service_ids, recompile_service, recompile_services_in_tx, CompileSummary, SkippedItem,
+    SourceKind,
 };
 
 mod error;
@@ -320,8 +321,14 @@ pub struct ExplainRequest {
 /// matched no grant at all, which is not the same as being denied by one.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ExplainReason {
-    /// `allowed_by_grant` | `explicit_deny` | `no_grant_matched` |
-    /// `masked_by_rule` | `filtered_by_rule` | `clearance_required`.
+    /// `allowed_by_grant` | `allowed_by_group_only` | `explicit_deny` |
+    /// `no_grant_matched` | `masked_by_rule` | `filtered_by_rule` |
+    /// `clearance_required`.
+    ///
+    /// `allowed_by_group_only` is an allow the DATA PLANE will refuse: the
+    /// grant matched only through a `group` principal, and no engine egret
+    /// provisions can see a group (D7). It is its own string because a caller
+    /// parsing `kind` never sees the prose the page shows beside it.
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_id: Option<Uuid>,
@@ -366,6 +373,13 @@ impl From<&Reason> for ExplainReason {
         match r {
             Reason::AllowedByGrant { grant_id } => {
                 out.kind = "allowed_by_grant".into();
+                out.grant_id = Some(*grant_id);
+            }
+            // SP4c review: the model allows it and no engine will, so it does
+            // not get to wear `allowed_by_grant`'s wire string — a caller
+            // parsing `kind` never sees the page's prose warning.
+            Reason::AllowedByGroupOnly { grant_id } => {
+                out.kind = "allowed_by_group_only".into();
                 out.grant_id = Some(*grant_id);
             }
             Reason::ExplicitDeny { grant_id } => {
@@ -459,6 +473,27 @@ pub struct SkipReport {
     pub reason: String,
 }
 
+impl From<SkippedItem> for SkipReport {
+    /// The ONE place a `SourceKind` becomes a wire string. `egret-controlplane`
+    /// reports clearance skips on the access-policy endpoint (SP4c review I5)
+    /// off this same conversion, so the two surfaces cannot spell a kind
+    /// differently for the same fact.
+    fn from(sk: SkippedItem) -> Self {
+        SkipReport {
+            source_kind: match sk.source_kind {
+                SourceKind::Grant => "grant".into(),
+                SourceKind::Rule => "rule".into(),
+                // SP4c Task 2: a gated tag whose clearance this profile could
+                // not express — `id` is the `tags.id`, not a grant or rule id
+                // (see `SkipReport::id`).
+                SourceKind::Clearance => "clearance".into(),
+            },
+            id: sk.id,
+            reason: sk.reason,
+        }
+    }
+}
+
 /// What a mutation's (or `compile`'s) recompile pass did, aggregated over
 /// every service it touched.
 #[derive(Debug, Default, Serialize, utoipa::ToSchema)]
@@ -484,18 +519,7 @@ impl CompileResponse {
             out.deleted += s.deleted;
             out.unchanged += s.unchanged;
             for sk in &s.skipped {
-                out.skipped.push(SkipReport {
-                    source_kind: match sk.source_kind {
-                        SourceKind::Grant => "grant".into(),
-                        SourceKind::Rule => "rule".into(),
-                        // SP4c Task 2: a gated tag whose clearance this
-                        // profile could not express — `id` is the `tags.id`,
-                        // not a grant or rule id (see `SkipReport::id`).
-                        SourceKind::Clearance => "clearance".into(),
-                    },
-                    id: sk.id,
-                    reason: sk.reason.clone(),
-                });
+                out.skipped.push(SkipReport::from(sk.clone()));
             }
         }
         out

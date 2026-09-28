@@ -116,6 +116,32 @@ pub enum Reason {
     AllowedByGrant {
         grant_id: Uuid,
     },
+    /// The grant matched, but ONLY through a `group` principal — so the model
+    /// allows it and **no engine will**.
+    ///
+    /// **Its own class, because the prose warning was not machine-readable
+    /// (SP4c review).** egret runs no usersync and writes no
+    /// `group-provider.properties`, so `getGroups(user)` is empty on every
+    /// engine egret provisions (D7, measured live): a Ranger policy item naming
+    /// a group matches nobody. A subject who reaches a grant only by group
+    /// membership is therefore allowed here and refused there. Reporting that
+    /// as [`Reason::AllowedByGrant`] gave it the SAME wire string as an
+    /// enforceable allow, so a caller parsing `kind` — the deliverable of this
+    /// whole mechanism — could not tell the two apart, whatever the page said in
+    /// prose beside it.
+    ///
+    /// `allowed` stays `true`: the stored model does allow it, and Cedar
+    /// enforces exactly this on control-plane object access. What is different
+    /// is the DATA PLANE, and that is what the class says.
+    ///
+    /// **The mirror case is NOT covered and is a known gap**: a `deny` that
+    /// matches only through a group is reported as [`Reason::ExplicitDeny`]
+    /// while the engine allows the access — wrong in the restrictive direction.
+    /// It is a different fix (a deny has no "allowed anyway" state to report)
+    /// and is recorded here rather than left to be rediscovered.
+    AllowedByGroupOnly {
+        grant_id: Uuid,
+    },
     ExplicitDeny {
         grant_id: Uuid,
     },
@@ -206,7 +232,15 @@ pub fn evaluate(
         };
     };
 
-    let mut reasons = vec![Reason::AllowedByGrant { grant_id: a.id }];
+    // Which principal actually let the subject in decides WHICH allow class
+    // this is: a match reached only through a `group` is unenforceable in every
+    // engine egret provisions (D7), and says so in its own reason class rather
+    // than borrowing the enforceable one's wire string.
+    let mut reasons = vec![if matched_only_via_group(subject, &a.principals) {
+        Reason::AllowedByGroupOnly { grant_id: a.id }
+    } else {
+        Reason::AllowedByGrant { grant_id: a.id }
+    }];
     for r in rules {
         if !selector_hits(&r.selector, target, tags_on) {
             continue;
@@ -233,6 +267,35 @@ pub fn evaluate(
         allowed: true,
         reasons,
     }
+}
+
+/// Ranger's built-in "everybody" group, the ONE group name that resolves with
+/// no group provider and no usersync.
+///
+/// It is the reason [`matched_only_via_group`] is not simply "every matching
+/// principal is a group": a grant naming `public` IS enforceable — SP4c's own
+/// clearance compiler puts this literal on the deny side of a tag policy to
+/// mean everybody, because D0 measured that it is the half of Ranger's
+/// deny/deny-exception pair that works. `egret_perm_compile::rules` aliases
+/// this constant rather than re-spelling it; two copies would drift, and a
+/// drift here would either report an enforceable allow as unenforceable or
+/// hide a real one.
+pub const PUBLIC_GROUP: &str = "public";
+
+/// Whether EVERY `include` principal that matched `s` is a `group` OTHER than
+/// [`PUBLIC_GROUP`].
+///
+/// Called only after [`matches_set`] has already said yes, so at least one
+/// include principal matches and `all` is never vacuously true on an empty
+/// iterator. A grant naming both a group and the subject's own username is NOT
+/// group-only: the username item is what the engine will match, so the access
+/// is enforceable and reporting it as unenforceable would be the same class of
+/// lie in the other direction.
+fn matched_only_via_group(s: &Subject, set: &PrincipalSet) -> bool {
+    set.include
+        .iter()
+        .filter(|p| matches_principal(s, p))
+        .all(|p| p.kind == PrincipalKind::Group && p.r#ref != PUBLIC_GROUP)
 }
 
 /// `include` minus `exclude` — the operator that lets egret drop Ranger's
