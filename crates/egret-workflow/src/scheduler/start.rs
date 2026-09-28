@@ -14,16 +14,28 @@ use egret_core::Error;
 /// The per-workspace feature key whose OFF row freezes every trigger in the
 /// workspace (W12 final review I3). Read from `workspace_features`, the table
 /// the route gate in `egret_workspace::context` (`WsContext`) reads through
-/// `WorkspaceRepo::disabled_features`, with the same rule: an absent row is ON,
-/// only `enabled = false` is OFF. Tied to the catalog by
-/// `fire.rs`'s `the_feature_key_is_the_one_the_route_gate_uses`.
+/// `WorkspaceRepo::disabled_features`, with the same rule: a row is what it
+/// says, and an absent row is the key's `default_enabled`
+/// ([`workflows_feature_default`], bound beside the key). Tied to the catalog
+/// by `fire.rs`'s `the_feature_key_is_the_one_the_route_gate_uses`.
 pub(crate) const WORKFLOWS_FEATURE: &str = "workflows";
+
+/// What an absent `workspace_features` row for [`WORKFLOWS_FEATURE`] means:
+/// the catalog's `default_enabled`, read rather than restated (W5a made
+/// "absent = on" a per-key property). `false` for a key the catalog does not
+/// hold, the fail-closed answer.
+pub(crate) fn workflows_feature_default() -> bool {
+    egret_workspace::features::default_enabled(WORKFLOWS_FEATURE).unwrap_or(false)
+}
 
 /// The four off switches that live outside the YAML, as one SQL fragment over
 /// a `workflow.flows` row aliased **`f`**: the flow is not deleted, its
 /// `state` is not `'disabled'`, its workspace is `active`, and the
-/// workspace's `workflows` feature is not OFF. `$feature` is the placeholder
-/// the caller binds [`WORKFLOWS_FEATURE`] to.
+/// workspace's `workflows` feature is ON. `$feature` is the placeholder the
+/// caller binds [`WORKFLOWS_FEATURE`] to and `$default` the one it binds
+/// [`workflows_feature_default`] to: the row's `enabled`, or the default when
+/// there is no row (W5a: "absent = on" is the catalog's per-key
+/// `default_enabled`, not a rule this SQL may restate).
 ///
 /// The other two of the six -- the flow YAML's `disabled` and the trigger's
 /// own `disabled` -- are copied onto the trigger's row by `sync`
@@ -33,20 +45,23 @@ pub(crate) const WORKFLOWS_FEATURE: &str = "workflows";
 /// The spelling of the last two is W12's (final review I3 and the user's
 /// decision of 2026-09-25): an `EXISTS` over `workspaces` requiring
 /// `status = 'active'`, the column and value `WsContext` and the webhook route
-/// refuse a non-active workspace on; and a `NOT EXISTS` over
-/// `workspace_features`, the rows the route gate reads.
+/// refuse a non-active workspace on; and a read of `workspace_features`, the
+/// rows the route gate reads -- a `NOT EXISTS` until W5a, a `COALESCE` with
+/// the bound default since.
 macro_rules! flow_is_on {
-    ($feature:literal) => {
+    ($feature:literal, $default:literal) => {
         concat!(
             " f.deleted_at IS NULL \
               AND f.state <> 'disabled' \
               AND EXISTS (SELECT 1 FROM workspaces w \
                            WHERE w.id = f.workspace_id AND w.status = 'active') \
-              AND NOT EXISTS (SELECT 1 FROM workspace_features wf \
-                               WHERE wf.workspace_id = f.workspace_id \
-                                 AND wf.feature = ",
+              AND COALESCE((SELECT wf.enabled FROM workspace_features wf \
+                             WHERE wf.workspace_id = f.workspace_id \
+                               AND wf.feature = ",
             $feature,
-            " AND NOT wf.enabled) "
+            "), ",
+            $default,
+            "::boolean) "
         )
     };
 }
@@ -101,13 +116,24 @@ pub(crate) fn classify(err: &Error) -> Started {
 #[cfg(test)]
 mod tests {
 
-    /// The fragment names the table alias `f` and the placeholder it was
-    /// given, and nothing else a caller would have to bind.
+    /// The fragment names the table alias `f` and the two placeholders it
+    /// was given, and nothing else a caller would have to bind.
     #[test]
-    fn the_off_switch_fragment_binds_only_the_feature() {
-        let sql = flow_is_on!("$7");
-        assert!(sql.contains("wf.feature = $7 AND NOT wf.enabled"), "{sql}");
+    fn the_off_switch_fragment_binds_only_the_feature_and_its_default() {
+        let sql = flow_is_on!("$7", "$8");
+        assert!(sql.contains("wf.feature = $7), $8::boolean)"), "{sql}");
         assert!(sql.contains("f.deleted_at IS NULL"), "{sql}");
         assert!(!sql.contains("$1"), "{sql}");
+    }
+
+    /// W5a: the default bound for `workflows` is the catalog's, and it is ON
+    /// -- so the predicate answers what it answered before the rewrite.
+    #[test]
+    fn the_workflows_default_is_read_from_the_catalog() {
+        assert_eq!(
+            Some(super::workflows_feature_default()),
+            egret_workspace::features::default_enabled(super::WORKFLOWS_FEATURE)
+        );
+        assert!(super::workflows_feature_default());
     }
 }

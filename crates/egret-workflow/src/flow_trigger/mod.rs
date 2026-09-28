@@ -158,7 +158,8 @@
 //! `NOT l.disabled` dropped (`refused` 0 -> 2: `evaluate`'s FlowDisabled and
 //! TriggerDisabled caught both, so only the `refused: 0` half of the assertion
 //! sees it); `f.deleted_at IS NULL`, `f.state <> 'disabled'`, the workspace's
-//! `status = 'active'` and the feature's `NOT EXISTS` each dropped (`fired`
+//! `status = 'active'` and the feature's `NOT EXISTS` (since W5a a `COALESCE`
+//! with the catalog default) each dropped (`fired`
 //! 2 -> 3). The last four live in `scheduler::start::flow_is_on!`, shared
 //! with `fire_due`.
 //!

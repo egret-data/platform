@@ -94,8 +94,9 @@ pub async fn grant(db: &Db, ws: Uuid, user: UserId, perms: &[&str]) {
 }
 
 /// Turn `feature` OFF for `ws` -- the row the platform-admin feature-toggle
-/// API would write. An absent row means enabled, so this is the only way to
-/// say "off"; mirrors `crates/egret-notebook/tests/feature_gate.rs`'s
+/// API would write. An absent row means the key's `default_enabled` (ON for
+/// every key but `workflow_containers`), so this is the only way to say "off"
+/// for those; mirrors `crates/egret-notebook/tests/feature_gate.rs`'s
 /// `disable`.
 pub async fn disable_feature(db: &Db, ws: Uuid, feature: &str) {
     sqlx::query(
@@ -106,6 +107,20 @@ pub async fn disable_feature(db: &Db, ws: Uuid, feature: &str) {
     .execute(&db.pool)
     .await
     .expect("disable feature");
+}
+
+/// Turn `feature` ON for `ws` with an explicit row -- the only way to turn on
+/// a feature whose `default_enabled` is false (`workflow_containers`, W5a).
+pub async fn enable_feature(db: &Db, ws: Uuid, feature: &str) {
+    sqlx::query(
+        "INSERT INTO workspace_features (workspace_id, feature, enabled) VALUES ($1, $2, true) \
+         ON CONFLICT (workspace_id, feature) DO UPDATE SET enabled = true",
+    )
+    .bind(ws)
+    .bind(feature)
+    .execute(&db.pool)
+    .await
+    .expect("enable feature");
 }
 
 /// A real `analytics.folders` row, for the folder-scoping tests
@@ -165,6 +180,12 @@ pub struct App {
 /// flow that names an object outside this crate, so its three ports never
 /// have to answer anything.
 pub async fn app(db: &Db) -> App {
+    app_with_scripts(db, egret_workflow::scripts::ScriptSettings::default()).await
+}
+
+/// [`app`], with the platform half of the W5a script-task gate
+/// (`plugin_configurations`, the default runner) set to `scripts`.
+pub async fn app_with_scripts(db: &Db, scripts: egret_workflow::scripts::ScriptSettings) -> App {
     let sessions = egret_auth::session::SessionService::new(
         db.clone(),
         chrono::Duration::hours(24),
@@ -191,6 +212,7 @@ pub async fn app(db: &Db) -> App {
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp,
         audit: audit_sink,
+        scripts,
     };
     let router = axum::Router::new()
         .nest("/api", egret_workflow::management_router())
@@ -229,6 +251,16 @@ pub fn audit_mutations(app: &App) -> Vec<(String, Option<String>, serde_json::Va
         }
     }
     out
+}
+
+/// A `WorkflowRefs` whose data-API and notebook ports must never be asked --
+/// for a direct `publish` of a flow that names neither.
+pub fn workflow_refs(db: &Db) -> egret_workflow::WorkflowRefs {
+    egret_workflow::WorkflowRefs {
+        flows: egret_workflow::FlowRepo::new(db.clone()),
+        dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
+        notebooks: std::sync::Arc::new(UnreachableNotebooks),
+    }
 }
 
 /// A port that must never be consulted -- every reference-resolving test in
@@ -491,6 +523,7 @@ pub async fn webhook_app_with_guard(
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp,
         audit: egret_audit::AuditSink::new(16).0,
+        scripts: Default::default(),
     };
     WebhookApp {
         router: axum::Router::new()

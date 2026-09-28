@@ -122,6 +122,7 @@ fn composed_app_with_workflow() -> axum::Router {
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp: Arc::new(DenyPdp),
         audit: egret_audit::AuditSink::new(16).0,
+        scripts: Default::default(),
     };
     build_router(
         AppState::without_db()
@@ -152,6 +153,7 @@ fn composed_app_with_workflow_webhooks_off() -> axum::Router {
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp: Arc::new(DenyPdp),
         audit: egret_audit::AuditSink::new(16).0,
+        scripts: Default::default(),
     };
     build_router(AppState::without_db().with_workflow(state))
 }

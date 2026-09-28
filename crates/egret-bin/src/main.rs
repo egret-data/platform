@@ -2309,6 +2309,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         authz: Authorizer::new(db.clone()),
         pdp: pdp.clone(),
         audit: audit_sink.clone(),
+        // W5a Task 2: the allowlist publish gates script tasks with. No
+        // default runner yet -- W5a Task 5 wires `workflow.container_runner`,
+        // and until then a script task without `taskRunner:` is refused at
+        // publish (nothing in this binary registers a script handler).
+        scripts: egret_workflow::scripts::ScriptSettings {
+            plugin_configurations: config.workflow.plugin_configurations.clone(),
+            default_runner: None,
+        },
     });
 
     let app = build_router(AppState {

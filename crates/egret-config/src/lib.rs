@@ -594,6 +594,73 @@ pub struct WorkflowConfig {
     /// `EGRET_WORKFLOW__LOG_RUN_MAX_BYTES=10485760` (10 MiB).
     #[serde(default = "default_log_run_max_bytes")]
     pub log_run_max_bytes: u64,
+
+    /// **Per-plugin-type settings, in Kestra's `kestra.plugins.configurations`
+    /// shape (W5a spec §4): a list of `{type, values}`.**
+    ///
+    /// W5a reads exactly one value from it, `values.allowed-images`, keyed by
+    /// the task-runner FQCN (`io.kestra.plugin.scripts.runner.docker.Docker`,
+    /// `io.kestra.plugin.ee.kubernetes.runner.Kubernetes`): the glob patterns
+    /// a script task's image must match before egret runs it.
+    ///
+    /// **The default is the empty list, and it allows no image at all.** No
+    /// entry for a runner, or an entry with an empty `allowed-images`, refuses
+    /// every image on that runner (`egret_workflow::scripts::gate`). This is
+    /// stricter than Kestra OSS, which has no allowlist, and it is deliberate
+    /// (the user's decision of 2026-09-28).
+    ///
+    /// `EGRET_WORKFLOW__PLUGIN_CONFIGURATIONS='[{type="io.kestra.plugin.scripts.runner.docker.Docker",values={allowed-images=["python:*"]}}]'`,
+    /// or a `[[workflow.plugin_configurations]]` table in `egret.toml`.
+    #[serde(default)]
+    pub plugin_configurations: PluginConfigurations,
+}
+
+/// Kestra's `kestra.plugins.configurations`: one `{type, values}` per plugin
+/// type. See [`WorkflowConfig::plugin_configurations`].
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct PluginConfigurations(pub Vec<PluginConfiguration>);
+
+impl PluginConfigurations {
+    /// The `allowed-images` of the entry for `plugin_type`, or `None` when no
+    /// entry names that type. When several entries name the same type, their
+    /// lists are concatenated (Kestra merges configurations for one type the
+    /// same way: every matching entry contributes).
+    pub fn allowed_images(&self, plugin_type: &str) -> Option<Vec<&str>> {
+        let mut found = false;
+        let mut out = Vec::new();
+        for entry in self.0.iter().filter(|e| e.r#type == plugin_type) {
+            found = true;
+            out.extend(entry.values.allowed_images.iter().map(String::as_str));
+        }
+        found.then_some(out)
+    }
+}
+
+/// One entry of [`PluginConfigurations`].
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginConfiguration {
+    /// The plugin FQCN the values apply to.
+    pub r#type: String,
+    #[serde(default)]
+    pub values: PluginConfigurationValues,
+}
+
+/// The `values` of a [`PluginConfiguration`].
+///
+/// `deny_unknown_fields`: Kestra's `values` is an open map, but egret reads one
+/// key from it, and a value egret would silently ignore (Kestra's Docker
+/// `volume-enabled`, say) is refused at boot with its name rather than accepted
+/// and not acted on.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginConfigurationValues {
+    /// Glob patterns (`*` any run of characters, `?` one character) matched
+    /// against a script task's image reference. See W5a spec §4 for the
+    /// normalisation applied to the reference before matching.
+    #[serde(default, rename = "allowed-images")]
+    pub allowed_images: Vec<String>,
 }
 
 /// `false` — see [`WorkflowConfig::worker_enabled`]. A named function rather
@@ -681,6 +748,7 @@ fn default_workflow() -> WorkflowConfig {
         log_retention_days: default_log_retention_days(),
         log_run_max_lines: default_log_run_max_lines(),
         log_run_max_bytes: default_log_run_max_bytes(),
+        plugin_configurations: PluginConfigurations::default(),
     }
 }
 
@@ -966,6 +1034,84 @@ impl Config {
 #[allow(clippy::result_large_err)]
 mod tests {
     use super::*;
+
+    /// W5a: no plugin configuration by default -- which allows no image.
+    #[test]
+    fn plugin_configurations_default_to_none() {
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.workflow.plugin_configurations,
+                PluginConfigurations::default()
+            );
+            assert_eq!(
+                cfg.workflow
+                    .plugin_configurations
+                    .allowed_images("io.kestra.plugin.scripts.runner.docker.Docker"),
+                None
+            );
+            Ok(())
+        });
+    }
+
+    /// W5a: the allowlist is reachable from the environment and from the file,
+    /// in Kestra's `{type, values}` shape with the `allowed-images` key.
+    #[test]
+    fn plugin_configurations_are_settable_from_env_and_file() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env(
+                "EGRET_WORKFLOW__PLUGIN_CONFIGURATIONS",
+                r#"[{type="io.kestra.plugin.scripts.runner.docker.Docker",values={allowed-images=["python:*","ubuntu:latest"]}}]"#,
+            );
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.workflow
+                    .plugin_configurations
+                    .allowed_images("io.kestra.plugin.scripts.runner.docker.Docker"),
+                Some(vec!["python:*", "ubuntu:latest"])
+            );
+            assert_eq!(
+                cfg.workflow
+                    .plugin_configurations
+                    .allowed_images("io.kestra.plugin.ee.kubernetes.runner.Kubernetes"),
+                None
+            );
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "egret.toml",
+                r#"
+[[workflow.plugin_configurations]]
+type = "io.kestra.plugin.ee.kubernetes.runner.Kubernetes"
+values = { allowed-images = [] }
+"#,
+            )?;
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.workflow
+                    .plugin_configurations
+                    .allowed_images("io.kestra.plugin.ee.kubernetes.runner.Kubernetes"),
+                Some(vec![])
+            );
+            Ok(())
+        });
+    }
+
+    /// A value egret does not read is refused at boot, by name, rather than
+    /// accepted and ignored.
+    #[test]
+    fn an_unknown_plugin_configuration_value_is_refused() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env(
+                "EGRET_WORKFLOW__PLUGIN_CONFIGURATIONS",
+                r#"[{type="io.kestra.plugin.scripts.runner.docker.Docker",values={volume-enabled=true}}]"#,
+            );
+            let err = Config::figment().extract::<Config>().unwrap_err();
+            assert!(err.to_string().contains("volume-enabled"), "{err}");
+            Ok(())
+        });
+    }
 
     #[test]
     fn defaults_load_without_any_env() {

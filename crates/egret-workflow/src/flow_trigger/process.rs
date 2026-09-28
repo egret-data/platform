@@ -18,7 +18,9 @@ use uuid::Uuid;
 
 use crate::models::{ExecutionKind, Flow, FlowTrigger, Label, State, Trigger, TriggerKind};
 use crate::runners::{render_str_guarded, GuardedRender, RenderContext};
-use crate::scheduler::start::{classify, flow_is_on, Started, WORKFLOWS_FEATURE};
+use crate::scheduler::start::{
+    classify, flow_is_on, workflows_feature_default, Started, WORKFLOWS_FEATURE,
+};
 use crate::trigger::flow::{
     evaluate, FiredExecution, ListeningFlow, Outcome, SourceExecution, WhenVerdict,
     WindowFreeFlowTrigger, DEFAULT_MAX_EXECUTION_DEPTH,
@@ -502,12 +504,13 @@ async fn process_one(
             AND $2 = ANY (l.states) \
             AND NOT l.disabled \
             AND",
-        flow_is_on!("$3"),
+        flow_is_on!("$3", "$4"),
         "ORDER BY f.namespace, f.flow_id, l.trigger_id",
     ))
     .bind(ev.workspace_id)
     .bind(&ev.state)
     .bind(WORKFLOWS_FEATURE)
+    .bind(workflows_feature_default())
     .fetch_all(&mut *tx)
     .await
     .map_err(db_err)?;

@@ -712,13 +712,17 @@ const LIVE: usize = 247;
 /// sweeping for "16" is looking for. **The figure is gone entirely now** —
 /// there is no numeral in this sentence to go stale.)
 ///
-/// `registry::known_type` is an allow-list of thirteen rows — **seven**
+/// `registry::known_type` is an allow-list of fifteen rows — **five**
 /// `egret.*` types (this sentence said "eight" from W6 until W10 Task 6 fix
-/// round 2; counted, not quoted, at `TASK_TYPES`),
-/// `core.http`/`core.slack`, and — **since W10 Task 6 fix round 1** — the four
+/// round 2, and "seven" until W5a Task 2 turned `egret.container` and
+/// `egret.script.python` into aliases; counted, not quoted, at `TASK_TYPES`),
+/// `core.http`/`core.slack`, — **since W10 Task 6 fix round 1** — the four
 /// Kestra FQCNs `worker::Handlers::with_core_tasks` implements
 /// (`…core.log.Log`, `…core.debug.Return`, `…core.execution.Fail`,
-/// `…core.flow.Sleep`) plus the `core.log` alias.
+/// `…core.flow.Sleep`) plus the `core.log` alias, and — **since W5a Task 2**
+/// — the four `io.kestra.plugin.scripts.{shell,python}.{Commands,Script}`
+/// FQCNs with the two `egret.*` aliases. The corpus writes none of the script
+/// types, so the last addition moves no count in this file.
 ///
 /// **That last clause is what makes [`LIVE`] 248.** This paragraph used to end
 /// *"the flows that DO reach a version are exactly the corpus flows whose every

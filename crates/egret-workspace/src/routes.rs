@@ -110,7 +110,12 @@ fn dto_with_features(
     let mut dto = WorkspaceDto::from(w);
     dto.features = crate::features::FEATURE_KEYS
         .iter()
-        .filter(|k| !off.is_some_and(|s| s.contains(**k)))
+        // With no set at all, each key is its catalog default (W5a: not
+        // "every key on" -- `workflow_containers` is off until a row says so).
+        .filter(|k| match off {
+            Some(s) => !s.contains(**k),
+            None => crate::features::default_enabled(k).unwrap_or(false),
+        })
         .map(|k| k.to_string())
         .collect();
     dto

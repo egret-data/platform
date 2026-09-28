@@ -69,7 +69,9 @@ pub struct TaskTypeSpec {
 /// mechanism facing this way would refuse to start any deployment that declines
 /// to wire `egret.sql`, `core.http` or the container tasks — which is every
 /// deployment, since `with_core_tasks` is four handlers and this table is
-/// thirteen rows (7 `egret.*`, 2 short `core.*`, 4 Kestra FQCNs). The
+/// fifteen rows (5 `egret.*`, 2 short `core.*`, 8 Kestra FQCNs -- W5a replaced
+/// the `egret.container`/`egret.script.python` rows with four script-task
+/// FQCNs that carry them as aliases). The
 /// asymmetry is deliberate, `main.rs` documents the shipping set, and what a
 /// flow using an unwired type gets is the loop above rather than a refusal.
 pub const TASK_TYPES: &[TaskTypeSpec] = &[
@@ -89,21 +91,37 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
             kind: RefKind::Notebook,
         }],
     },
+    // ── W5a: Kestra's four script tasks (`crate::scripts`) ─────────────────
+    //
+    // FQCN canonical (rule 4). W4's `egret.container` and `egret.script.python`
+    // had rows of their own until W5a; they are now ALIASES of `shell.Commands`
+    // and `python.Script` (W5a spec §3), so a flow saved with them still
+    // publishes -- `scripts::parse` accepts W4's `image` under those two
+    // spellings. No `RefField`: a script and an image name are not egret
+    // objects.
+    //
+    // W4 Task 5 fix round 1's reason for `egret.script.python` still stands:
+    // `egret.python` one row above is the NOTEBOOK-kernel task, with a
+    // required `notebook` reference, so the container-backed `script:` task
+    // took a different name rather than bending that one.
     TaskTypeSpec {
-        r#type: "egret.container",
+        r#type: crate::scripts::SHELL_COMMANDS,
+        aliases: &[crate::scripts::ALIAS_CONTAINER],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::scripts::SHELL_SCRIPT,
         aliases: &[],
         references: &[],
     },
-    // W4 Task 5, fix round 1. `egret.python` one row above is the
-    // NOTEBOOK-kernel task (programme spec §6.4: "`KernelLauncher`; cần port
-    // `egret-kernel-api` mới"), and its `notebook` reference is required. The
-    // container-backed inline-`script:` handler that task built is a different
-    // task, so it took a different name rather than bending this one; see
-    // `worker::handlers::python`'s module doc. No `RefField`: a script and an
-    // image name are not egret objects, exactly as for `egret.container`.
     TaskTypeSpec {
-        r#type: "egret.script.python",
+        r#type: crate::scripts::PYTHON_COMMANDS,
         aliases: &[],
+        references: &[],
+    },
+    TaskTypeSpec {
+        r#type: crate::scripts::PYTHON_SCRIPT,
+        aliases: &[crate::scripts::ALIAS_SCRIPT_PYTHON],
         references: &[],
     },
     TaskTypeSpec {
