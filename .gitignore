@@ -1,5 +1,8 @@
 # Rust
 /target
+# Worktree-local build dir the SP4 briefs mandate, to avoid the shared-target
+# collision that reports E0432 for symbols that plainly exist. 40G+, never commit.
+/target-check
 **/*.rs.bk
 Cargo.lock.orig
 
