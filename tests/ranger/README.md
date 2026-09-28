@@ -191,6 +191,13 @@ Floors are in cases per thousand, so they survive a change to
 produces. A floor that flaps gets deleted by the next person, which is worse
 than no floor: the tightest margin in the table below is 1.98x.
 
+Those floors were calibrated against the recorded seed, which on its own only
+shows they hold for the run that set them. Four unrelated seeds
+(`0xdead1`, `0xbeef2`, `0xc0ffee3`, `0x13579b`) were then run at 500 cases:
+all pass, and across 352 floored rows the tightest margin anywhere is **1.73x**
+(`ANCESTOR-shaped policy` and `policyType 2 (row filter)`). So the margin
+survives seed variation with room to spare, rather than being expected to.
+
 Measured at ranger 2.5.0 (Trino), 2000 cases, seed `0x54d000007`:
 
 | Axis | Cases | Rate | Floor |
