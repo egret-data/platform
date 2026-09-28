@@ -42,6 +42,12 @@ the live gate.
 - Long test suites are auto-backgrounded past ~120s. Commit **before** running
   one; a completion notification is a finished result, not a signal to wait.
 - Do not modify the kind `demo-trino` engine's data.
+- **The two engines run different Ranger plugin versions.** Measured
+  2026-09-28 (`docs/en/plans/2026-09-28-sp4d-plugin-version-result.md`):
+  Trino 470 loads `ranger-plugins-common-2.5.0`, StarRocks fe-ubuntu 4.1 loads
+  `2.8.0`. Plugin version is therefore an **input** to the evaluator alongside
+  engine type, and any gate that certifies only one version certifies only one
+  engine. Both jars are already in `~/.m2`, so covering both needs no network.
 
 ---
 
@@ -99,7 +105,7 @@ git commit -m "docs(sp4d): measure which Ranger version actually enforces"
 
 ---
 
-### Task 2: Retarget the harness to the enforcing version
+### Task 2: Retarget the harness to the enforcing versions
 
 **Files:**
 - Modify: `tests/ranger/pom.xml`
@@ -111,18 +117,30 @@ git commit -m "docs(sp4d): measure which Ranger version actually enforces"
 - Consumes: the version from Task 1.
 - Produces: a green harness at the enforcing version, the baseline Task 7 extends.
 
-- [ ] **Step 1: Bump the dependency.** `tests/ranger/pom.xml:6` currently pins
-`2.4.0`. Change it to the version Task 1 measured for Trino. All of 2.4.0,
-2.5.0, 2.7.0 and 2.8.0 are already in `~/.m2/repository/org/apache/ranger/ranger-plugins-common/`,
-so this needs no network.
+- [ ] **Step 1: Make the version a parameter, not a constant.**
+`tests/ranger/pom.xml:6` currently pins `2.4.0`, which is neither engine's
+version. Replace the literal with a property, e.g.
+`<ranger.version>2.5.0</ranger.version>`, overridable as
+`mvn test -Dranger.version=2.8.0`.
+
+Default to **2.5.0** (Trino, the engine this package's live gate uses). The
+harness must be runnable at **2.8.0** too, because that is what StarRocks
+enforces. All of 2.4.0, 2.5.0, 2.7.0 and 2.8.0 are already in
+`~/.m2/repository/org/apache/ranger/ranger-plugins-common/`, so this needs no
+network.
 
 - [ ] **Step 2: Run the existing four tests.**
 
 ```bash
 cd tests/ranger && mvn -q test
+cd tests/ranger && mvn -q test -Dranger.version=2.8.0
 ```
 
-Expected: `Tests run: 4, Failures: 0, Errors: 0`.
+Expected at **both** versions: `Tests run: 4, Failures: 0, Errors: 0`.
+
+If the two versions disagree on any of the four cases, that is a finding worth
+recording, not a test to loosen: it means Ranger's behaviour changed between
+the versions the two engines run, and the evaluator must model the difference.
 
 The README documents two 2.4.0-specific workarounds that may no longer apply at
 the new version: `JsonUtils.jsonToObject(Reader, Class)` did not exist, and
@@ -325,8 +343,9 @@ missing, not that the code is safe.
    time against context egret does not have.
 5. Engine parameterisation: the same policy set and request evaluated as
    `Trino` vs `StarRocks` may differ, because the service-defs differ (`column`
-   is a valid leaf in `starrocks.json`, not in `trino.json`) and StarRocks'
-   plugin has no tag policies at all.
+   is a valid leaf in `starrocks.json`, not in `trino.json`), StarRocks' plugin
+   has no tag policies at all, and the two run different Ranger versions
+   (2.5.0 vs 2.8.0). Plugin version is an explicit input, not a constant.
 
 - [ ] **Step 2: Run, confirm fail. Step 3: Implement. Step 4: Confirm green.**
 
@@ -383,8 +402,12 @@ Java verdict. On mismatch, print the case id, the seed, and the full policy JSON
 EGRET_TEST_RANGER_E2E=1 cargo test -p egret-ranger-eval --test differential
 ```
 
+Run the corpus at **both** plugin versions — 2.5.0 against the Trino
+service-def and 2.8.0 against the StarRocks one — since a gate at one version
+certifies only one engine.
+
 Start at a few hundred cases; raise until runtime is the binding constraint.
-Record the case count and the seed in the README.
+Record the case count, the seed, and both versions in the README.
 
 - [ ] **Step 5: Verify the gate can fail.** Deliberately break one evaluator rule
 (e.g. make ANCESTOR allow), re-run, confirm the differential test catches it,
@@ -424,6 +447,13 @@ exercises request construction rather than policy logic:
 5. A deny that an allow-exception cancels.
 6. A `public` grant against a user with no groups.
 
+Then **two StarRocks cases** on the live FE (`sp3c2-sr-live-fe-0` was running
+2026-09-28): the ANCESTOR case (1) and the column-wildcard case (2). StarRocks
+runs Ranger 2.8.0 against a different service-def, so a Trino-only live gate
+would leave the evaluator's StarRocks claim untested. If no StarRocks engine is
+running, record the cases as NOT MEASURED and say so — do not assume Trino's
+result carries over.
+
 - [ ] **Step 2: For each case**, predict with the evaluator first, **write the
 prediction down**, then run the query on Trino and record the verbatim engine
 output. Predicting after seeing the result proves nothing.
@@ -442,9 +472,9 @@ prediction, the exact query, the verbatim output, and the verdict.
 ## Definition of done
 
 - The harness certifies against the version Task 1 measured as enforcing.
-- `cargo test -p egret-ranger-eval` green; the differential gate green over a
-  recorded number of generated cases with a recorded seed and zero
-  `Undecidable`.
+- `cargo test -p egret-ranger-eval` green; the differential gate green at
+  **both** 2.5.0 (Trino) and 2.8.0 (StarRocks) over a recorded number of
+  generated cases with a recorded seed and zero `Undecidable`.
 - The differential gate has been **observed failing** on a deliberate break.
 - The live gate's result doc records a prediction made before each measurement.
 - `cargo fmt --check` and `cargo clippy` clean; full workspace build green.
