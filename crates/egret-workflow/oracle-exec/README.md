@@ -9012,7 +9012,16 @@ minutes; its timing test is the instrument, unmutated.
 8. **Line counts after a re-attach are short** (spec §11, added in fix
    round 1): `stdOutLineCount`/`stdErrLineCount` count only what the last
    holder read (live item 6 above). The stored lines are complete.
-9. *(Retired by fix round 1, kept as the record:)* the chart's Role granted
+9. **A missing `pods/exec` `get` degrades silently** (spec §11). The chart
+   grants it now, but an RBAC regression, or a cluster that authorises
+   WebSocket exec differently, brings back F1's behaviour without failing
+   anything: a run with no input or output files waits about 15 s for the
+   stderr sentinel on every run and then succeeds; a run with input or
+   output files never finishes (every exec is refused, the pod is kept, the
+   run re-attaches for ever). The only signal is a server-side WARN per
+   attempt. Measured live on kind 1.33 and by `k8s_runner_live`'s mutation,
+   where exactly the file-transfer cases fail and the other seven pass.
+10. *(Retired by fix round 1, kept as the record:)* the chart's Role granted
    `pods/exec` `create` only, and every exec was a 403 on Kubernetes 1.33
    (live item 5). It grants `get` too now, and `k8s_runner_live` runs as
    that Role, so the class is covered by a test rather than by this line.
