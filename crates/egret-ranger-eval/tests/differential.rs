@@ -90,8 +90,14 @@ use serde_json::{json, Map, Value};
 /// by hand without editing the file.
 const DEFAULT_SEED: u64 = 0x5_4d00_0007;
 
-/// Cases per engine. Two engines, so the corpus is twice this.
-const DEFAULT_CASES: usize = 600;
+/// Cases per engine. Two engines, so the corpus is twice this. Overridable
+/// with `EGRET_DIFF_CASES`.
+///
+/// 2000 is where runtime starts to be the binding constraint rather than
+/// coverage: 4000 cases take ~37s wall including three Maven runs, and raising
+/// it to 5000 per engine (10000 cases, ~63s, also run green) turned up nothing
+/// the smaller corpus had not already found.
+const DEFAULT_CASES: usize = 2000;
 
 // ── the deterministic generator ──────────────────────────────────────────
 
