@@ -566,6 +566,26 @@ fn accesses(rng: &mut Rng, profile: &Profile, shape: &Shape) -> Value {
         let is_allowed = !rng.chance(1, 10);
         out.push(json!({"type": access_type, "isAllowed": is_allowed}));
     }
+    // An access entry whose `type` Ranger reads as `""` — finding F3's most
+    // surprising row. `RangerPolicyItemAccess.setType(null)` substitutes `""`
+    // and an absent key leaves the constructor's own `""`, so all three
+    // spellings below are ONE value to Ranger, and none of them is an error.
+    // `""` equals no concrete access type under `equalsIgnoreCase`, so such
+    // an entry grants nothing — but that is a DECISION, and until now only a
+    // unit test said so. It is generated as an extra entry beside a real one
+    // most of the time, so it probes the reading without starving the corpus
+    // of matches.
+    if rng.chance(1, 9) {
+        let entry = match rng.below(3) {
+            0 => json!({"type": "", "isAllowed": true}),
+            1 => json!({"type": Value::Null, "isAllowed": true}),
+            _ => json!({"isAllowed": true}),
+        };
+        if rng.chance(1, 6) {
+            out.clear();
+        }
+        out.push(entry);
+    }
     Value::Array(out)
 }
 
@@ -1013,6 +1033,659 @@ fn java_outcome(policy_type: i32, verdict: &Value) -> Outcome {
     }
 }
 
+// ── coverage: what the corpus actually PRODUCED ──────────────────────────
+
+/// A structural property of a generated case, counted on every run.
+///
+/// The gate's weakest point, once it is green, is that "green" and "still
+/// testing the shape" become indistinguishable. A generator edit that quietly
+/// stops emitting `isExcludes` costs nothing visible: the corpus stays green,
+/// because agreement on cases that never exercise a rule is agreement about
+/// nothing. That is a silent, green failure — the worst kind, and the kind
+/// this whole package exists to eliminate elsewhere.
+///
+/// So every axis the plan names, and every axis a finding added, has a
+/// counter here and a floor that FAILS the run. The predicates are
+/// structural: they read the generated JSON and the request, never the
+/// outcome, so a counter cannot be satisfied by a decision that happened to
+/// come out a certain way.
+struct Axis {
+    name: &'static str,
+    /// Floor in cases per thousand, so it scales with `EGRET_DIFF_CASES`
+    /// instead of breaking the moment someone changes the corpus size.
+    ///
+    /// Each is set to roughly half of what the corpus measurably produces, so
+    /// ordinary seed variation cannot trip it. A floor that flaps gets
+    /// deleted by the next person, which is worse than no floor at all.
+    min_per_mille: u32,
+    /// `Some` when the axis only exists for one engine — Trino's `all` is the
+    /// only `impliedGrants` entry either service-def declares, so flooring it
+    /// for StarRocks would fail on a corpus that is perfectly healthy.
+    only: Option<EngineType>,
+}
+
+/// The axes, in the order [`axis_hits`] reports them. The two lists are
+/// checked against each other by name at runtime, because a silent
+/// misalignment here would attach every floor to the wrong counter — the same
+/// class of defect the table exists to catch.
+const AXES: &[Axis] = &[
+    // — policy types —
+    Axis {
+        name: "policyType 0 (access)",
+        min_per_mille: 250,
+        only: None,
+    },
+    Axis {
+        name: "policyType 1 (data mask)",
+        min_per_mille: 120,
+        only: None,
+    },
+    Axis {
+        name: "policyType 2 (row filter)",
+        min_per_mille: 120,
+        only: None,
+    },
+    Axis {
+        name: "row-filter case at TABLE granularity",
+        min_per_mille: 120,
+        only: None,
+    },
+    Axis {
+        name: "policy of a DIFFERENT type in the set",
+        min_per_mille: 80,
+        only: None,
+    },
+    // — resource shapes —
+    Axis {
+        name: "ANCESTOR-shaped policy (fewer levels than request)",
+        min_per_mille: 60,
+        only: None,
+    },
+    Axis {
+        name: "policy DEEPER than the request",
+        min_per_mille: 80,
+        only: None,
+    },
+    Axis {
+        name: "isExcludes",
+        min_per_mille: 100,
+        only: None,
+    },
+    Axis {
+        name: "multi-value level",
+        min_per_mille: 100,
+        only: None,
+    },
+    Axis {
+        name: "level with no usable values",
+        min_per_mille: 40,
+        only: None,
+    },
+    Axis {
+        name: "additionalResources",
+        min_per_mille: 100,
+        only: None,
+    },
+    // — wildcards, by position —
+    Axis {
+        name: "wildcard: leading *",
+        min_per_mille: 200,
+        only: None,
+    },
+    Axis {
+        name: "wildcard: trailing *",
+        min_per_mille: 200,
+        only: None,
+    },
+    Axis {
+        name: "wildcard: interior *",
+        min_per_mille: 150,
+        only: None,
+    },
+    Axis {
+        name: "wildcard: repeated *",
+        min_per_mille: 150,
+        only: None,
+    },
+    Axis {
+        name: "wildcard: leading ?",
+        min_per_mille: 100,
+        only: None,
+    },
+    Axis {
+        name: "wildcard: trailing ?",
+        min_per_mille: 100,
+        only: None,
+    },
+    Axis {
+        name: "wildcard: interior ?",
+        min_per_mille: 100,
+        only: None,
+    },
+    Axis {
+        name: "wildcard: repeated ?",
+        min_per_mille: 60,
+        only: None,
+    },
+    Axis {
+        name: "wildcard: `*` immediately before `?` (F1)",
+        min_per_mille: 100,
+        only: None,
+    },
+    Axis {
+        name: "policy value that is only `*`",
+        min_per_mille: 200,
+        only: None,
+    },
+    Axis {
+        name: "policy value differing from the request only by case",
+        min_per_mille: 100,
+        only: None,
+    },
+    // — request side —
+    Axis {
+        name: "request value `*`",
+        min_per_mille: 70,
+        only: None,
+    },
+    Axis {
+        name: "request value empty",
+        min_per_mille: 70,
+        only: None,
+    },
+    Axis {
+        name: "request with a gap in the hierarchy",
+        min_per_mille: 30,
+        only: None,
+    },
+    // — principals and buckets —
+    Axis {
+        name: "bucket policyItems",
+        min_per_mille: 280,
+        only: None,
+    },
+    Axis {
+        name: "bucket denyPolicyItems",
+        min_per_mille: 150,
+        only: None,
+    },
+    Axis {
+        name: "bucket allowExceptions",
+        min_per_mille: 60,
+        only: None,
+    },
+    Axis {
+        name: "bucket denyExceptions",
+        min_per_mille: 60,
+        only: None,
+    },
+    Axis {
+        name: "group `public`",
+        min_per_mille: 80,
+        only: None,
+    },
+    Axis {
+        name: "user `{USER}`",
+        min_per_mille: 80,
+        only: None,
+    },
+    Axis {
+        name: "policy item naming a role",
+        min_per_mille: 60,
+        only: None,
+    },
+    // — policy-level switches —
+    Axis {
+        name: "policyPriority override",
+        min_per_mille: 140,
+        only: None,
+    },
+    Axis {
+        name: "isDenyAllElse",
+        min_per_mille: 40,
+        only: None,
+    },
+    Axis {
+        name: "disabled policy",
+        min_per_mille: 70,
+        only: None,
+    },
+    Axis {
+        name: "impliedGrants via trino `all`",
+        min_per_mille: 60,
+        only: Some(EngineType::Trino),
+    },
+    Axis {
+        name: "access entry with isAllowed:false",
+        min_per_mille: 150,
+        only: None,
+    },
+    Axis {
+        name: "access entry whose type reads as `\"\"` (F3)",
+        min_per_mille: 40,
+        only: None,
+    },
+    // — mask / row-filter payloads —
+    Axis {
+        name: "dataMask item with NO dataMaskInfo (F2)",
+        min_per_mille: 40,
+        only: None,
+    },
+    Axis {
+        name: "rowFilter item with NO rowFilterInfo",
+        min_per_mille: 20,
+        only: None,
+    },
+    Axis {
+        name: "CUSTOM mask carrying a valueExpr",
+        min_per_mille: 40,
+        only: None,
+    },
+    Axis {
+        name: "mask conditionExpr",
+        min_per_mille: 20,
+        only: None,
+    },
+    Axis {
+        name: "filterExpr explicitly empty or null",
+        min_per_mille: 40,
+        only: None,
+    },
+    // — the deliberate shape —
+    Axis {
+        name: "eval-order duel",
+        min_per_mille: 55,
+        only: None,
+    },
+];
+
+/// Does `value` carry a wildcard in this position?
+fn wildcard_positions(value: &str, hits: &mut [bool; 9]) {
+    let chars: Vec<char> = value.chars().collect();
+    let stars = chars.iter().filter(|c| **c == '*').count();
+    let questions = chars.iter().filter(|c| **c == '?').count();
+    let only_stars = !chars.is_empty() && chars.iter().all(|c| *c == '*');
+    for (i, ch) in chars.iter().enumerate() {
+        let leading = i == 0;
+        let trailing = i + 1 == chars.len();
+        match ch {
+            // A value that is ONLY `*` is match-any and is counted on its own
+            // axis; it would otherwise dominate every positional counter.
+            '*' if !only_stars => {
+                if leading {
+                    hits[0] = true;
+                } else if trailing {
+                    hits[1] = true;
+                } else {
+                    hits[2] = true;
+                }
+            }
+            '?' => {
+                if leading {
+                    hits[4] = true;
+                } else if trailing {
+                    hits[5] = true;
+                } else {
+                    hits[6] = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if stars >= 2 && !only_stars {
+        hits[3] = true;
+    }
+    if questions >= 2 {
+        hits[7] = true;
+    }
+    if only_stars {
+        hits[8] = true;
+    }
+}
+
+/// Every axis this case exercises, as `(name, hit)` in `AXES` order.
+///
+/// Reads the generated JSON and the request only. Nothing here consults a
+/// decision: an axis must be satisfied by the case CONTAINING the shape, not
+/// by the shape happening to change an answer.
+fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
+    let policies = case.service_policies["policies"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let request_levels: Vec<(&str, &str)> = case
+        .request
+        .resource
+        .keys()
+        .map(|k| (k, case.request.resource.get(k).unwrap_or("")))
+        .collect();
+    let request_depth = request_levels.len();
+
+    let mut ancestor = false;
+    let mut deeper = false;
+    let mut excludes = false;
+    let mut multi_value = false;
+    let mut empty_values = false;
+    let mut additional = false;
+    let mut wc = [false; 9];
+    let mut case_only_difference = false;
+    let mut buckets = [false; 4];
+    let mut public_group = false;
+    let mut user_current = false;
+    let mut role_named = false;
+    let mut priority_override = false;
+    let mut deny_all_else = false;
+    let mut disabled = false;
+    let mut implied_all = false;
+    let mut explicit_deny = false;
+    let mut empty_access_type = false;
+    let mut mask_without_info = false;
+    let mut filter_without_info = false;
+    let mut custom_value_expr = false;
+    let mut condition_expr = false;
+    let mut filter_expr_blank = false;
+    let mut other_policy_type = false;
+    let mut star_then_question = false;
+
+    for policy in &policies {
+        if policy["policyType"].as_i64() != Some(i64::from(case.policy_type)) {
+            other_policy_type = true;
+            // A policy of another type is filed into a different evaluator
+            // list and cannot reach this decision, so its contents are not
+            // coverage of anything.
+            continue;
+        }
+        if policy["isEnabled"].as_bool() == Some(false) {
+            disabled = true;
+        }
+        if policy["policyPriority"].as_i64().unwrap_or(0) != 0 {
+            priority_override = true;
+        }
+        if policy["isDenyAllElse"].as_bool() == Some(true) {
+            deny_all_else = true;
+        }
+
+        let mut maps = vec![&policy["resources"]];
+        if let Some(extra) = policy["additionalResources"].as_array() {
+            additional = true;
+            maps.extend(extra.iter());
+        }
+        for map in maps {
+            let Some(map) = map.as_object() else { continue };
+            if map.len() < request_depth {
+                ancestor = true;
+            }
+            if map.len() > request_depth {
+                deeper = true;
+            }
+            for (level_name, level) in map {
+                if level["isExcludes"].as_bool() == Some(true) {
+                    excludes = true;
+                }
+                let values: Vec<&str> = level["values"]
+                    .as_array()
+                    .map(|v| v.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                if values.len() > 1 {
+                    multi_value = true;
+                }
+                if values.iter().all(|v| v.is_empty()) {
+                    empty_values = true;
+                }
+                for value in &values {
+                    wildcard_positions(value, &mut wc);
+                    if value.contains("*?") {
+                        star_then_question = true;
+                    }
+                    if let Some((_, request_value)) =
+                        request_levels.iter().find(|(n, _)| n == level_name)
+                    {
+                        if !value.is_empty()
+                            && value != request_value
+                            && value.eq_ignore_ascii_case(request_value)
+                        {
+                            case_only_difference = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        for (index, bucket) in [
+            "policyItems",
+            "denyPolicyItems",
+            "allowExceptions",
+            "denyExceptions",
+        ]
+        .iter()
+        .enumerate()
+        {
+            if policy[*bucket].as_array().is_some_and(|b| !b.is_empty()) {
+                buckets[index] = true;
+            }
+        }
+
+        for bucket in [
+            "policyItems",
+            "denyPolicyItems",
+            "allowExceptions",
+            "denyExceptions",
+            "dataMaskPolicyItems",
+            "rowFilterPolicyItems",
+        ] {
+            let Some(items) = policy[bucket].as_array() else {
+                continue;
+            };
+            for item in items {
+                if item["groups"]
+                    .as_array()
+                    .is_some_and(|g| g.iter().any(|v| v.as_str() == Some("public")))
+                {
+                    public_group = true;
+                }
+                if item["users"]
+                    .as_array()
+                    .is_some_and(|u| u.iter().any(|v| v.as_str() == Some("{USER}")))
+                {
+                    user_current = true;
+                }
+                if item["roles"].as_array().is_some_and(|r| !r.is_empty()) {
+                    role_named = true;
+                }
+                if let Some(accesses) = item["accesses"].as_array() {
+                    for access in accesses {
+                        if access["isAllowed"].as_bool() == Some(false) {
+                            explicit_deny = true;
+                        }
+                        // All three spellings are `""` to Ranger.
+                        match access.get("type") {
+                            None | Some(Value::Null) => empty_access_type = true,
+                            Some(Value::String(t)) if t.is_empty() => empty_access_type = true,
+                            Some(Value::String(t)) if t == "all" => implied_all = true,
+                            _ => {}
+                        }
+                    }
+                }
+                if bucket == "dataMaskPolicyItems" {
+                    match item.get("dataMaskInfo") {
+                        None | Some(Value::Null) => mask_without_info = true,
+                        Some(info) => {
+                            if info["valueExpr"].is_string() {
+                                custom_value_expr = true;
+                            }
+                            if info["conditionExpr"].is_string() {
+                                condition_expr = true;
+                            }
+                        }
+                    }
+                }
+                if bucket == "rowFilterPolicyItems" {
+                    match item.get("rowFilterInfo") {
+                        None | Some(Value::Null) => filter_without_info = true,
+                        Some(info) => match info.get("filterExpr") {
+                            None | Some(Value::Null) => filter_expr_blank = true,
+                            Some(Value::String(e)) if e.is_empty() => filter_expr_blank = true,
+                            _ => {}
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    let request_star = request_levels.iter().any(|(_, v)| *v == "*");
+    let request_empty = request_levels.iter().any(|(_, v)| v.is_empty());
+    // A gap: the request names a level whose parent it does not name.
+    let names: Vec<&str> = request_levels.iter().map(|(n, _)| *n).collect();
+    let request_gap = !names.is_empty() && {
+        let mut seen_missing = false;
+        let mut gap = false;
+        for level in HIERARCHY_ORDER {
+            if names.contains(level) {
+                if seen_missing {
+                    gap = true;
+                }
+            } else {
+                seen_missing = true;
+            }
+        }
+        gap
+    };
+
+    vec![
+        ("policyType 0 (access)", case.policy_type == 0),
+        ("policyType 1 (data mask)", case.policy_type == 1),
+        ("policyType 2 (row filter)", case.policy_type == 2),
+        (
+            "row-filter case at TABLE granularity",
+            case.policy_type == 2 && request_depth == 3 && !names.contains(&"column"),
+        ),
+        ("policy of a DIFFERENT type in the set", other_policy_type),
+        (
+            "ANCESTOR-shaped policy (fewer levels than request)",
+            ancestor,
+        ),
+        ("policy DEEPER than the request", deeper),
+        ("isExcludes", excludes),
+        ("multi-value level", multi_value),
+        ("level with no usable values", empty_values),
+        ("additionalResources", additional),
+        ("wildcard: leading *", wc[0]),
+        ("wildcard: trailing *", wc[1]),
+        ("wildcard: interior *", wc[2]),
+        ("wildcard: repeated *", wc[3]),
+        ("wildcard: leading ?", wc[4]),
+        ("wildcard: trailing ?", wc[5]),
+        ("wildcard: interior ?", wc[6]),
+        ("wildcard: repeated ?", wc[7]),
+        (
+            "wildcard: `*` immediately before `?` (F1)",
+            star_then_question,
+        ),
+        ("policy value that is only `*`", wc[8]),
+        (
+            "policy value differing from the request only by case",
+            case_only_difference,
+        ),
+        ("request value `*`", request_star),
+        ("request value empty", request_empty),
+        ("request with a gap in the hierarchy", request_gap),
+        ("bucket policyItems", buckets[0]),
+        ("bucket denyPolicyItems", buckets[1]),
+        ("bucket allowExceptions", buckets[2]),
+        ("bucket denyExceptions", buckets[3]),
+        ("group `public`", public_group),
+        ("user `{USER}`", user_current),
+        ("policy item naming a role", role_named),
+        ("policyPriority override", priority_override),
+        ("isDenyAllElse", deny_all_else),
+        ("disabled policy", disabled),
+        ("impliedGrants via trino `all`", implied_all),
+        ("access entry with isAllowed:false", explicit_deny),
+        (
+            "access entry whose type reads as `\"\"` (F3)",
+            empty_access_type,
+        ),
+        ("dataMask item with NO dataMaskInfo (F2)", mask_without_info),
+        ("rowFilter item with NO rowFilterInfo", filter_without_info),
+        ("CUSTOM mask carrying a valueExpr", custom_value_expr),
+        ("mask conditionExpr", condition_expr),
+        ("filterExpr explicitly empty or null", filter_expr_blank),
+        ("eval-order duel", case.duel),
+    ]
+}
+
+/// Every level name either engine declares, root first — used only to spot a
+/// gap in a request's hierarchy.
+const HIERARCHY_ORDER: &[&str] = &["catalog", "schema", "database", "table", "column"];
+
+/// Count the axes, print the table, and fail the run on any floor.
+fn report_coverage(profile: &Profile, cases: &[Case]) {
+    let mut counts = vec![0usize; AXES.len()];
+    for case in cases {
+        let hits = axis_hits(case);
+        assert_eq!(
+            hits.len(),
+            AXES.len(),
+            "AXES and axis_hits have drifted apart"
+        );
+        for (index, (name, hit)) in hits.iter().enumerate() {
+            assert_eq!(
+                *name, AXES[index].name,
+                "AXES[{index}] is `{}` but axis_hits reports `{name}` — every floor below \
+                 this point is attached to the wrong counter",
+                AXES[index].name
+            );
+            if *hit {
+                counts[index] += 1;
+            }
+        }
+    }
+
+    // Printed on EVERY run, not only on failure: a number nobody sees is a
+    // number nobody checks, and the whole point is to notice an axis thinning
+    // out before it reaches zero.
+    eprintln!(
+        "\ncoverage at ranger {} ({:?}), {} cases — cases exercising each axis:",
+        profile.ranger_version,
+        profile.engine,
+        cases.len()
+    );
+    let mut starved = Vec::new();
+    for (index, axis) in AXES.iter().enumerate() {
+        let count = counts[index];
+        let per_mille = 1000 * count / cases.len().max(1);
+        let applies = axis.only.is_none_or(|e| e == profile.engine);
+        let floor = axis.min_per_mille as usize;
+        let flag = if !applies {
+            "  n/a for this engine"
+        } else if per_mille < floor {
+            "  FLOOR"
+        } else {
+            ""
+        };
+        eprintln!(
+            "  {:6} {:>5}‰  (floor {:>4}‰)  {}{}",
+            count, per_mille, floor, axis.name, flag
+        );
+        if applies && per_mille < floor {
+            starved.push(format!(
+                "  {} — {count} cases ({per_mille}‰), floor {}‰",
+                axis.name, floor
+            ));
+        }
+    }
+    assert!(
+        starved.is_empty(),
+        "ranger {}: {} coverage axes have thinned out below their floor. The corpus has \
+         stopped exercising them, so agreement on it says nothing about them — a gate that \
+         fails SILENTLY and GREEN:\n{}",
+        profile.ranger_version,
+        starved.len(),
+        starved.join("\n")
+    );
+}
+
 // ── the gate ─────────────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -1326,7 +1999,12 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
         .map(|i| generate_case(&mut rng, profile, &def_json, i))
         .collect();
 
-    // Rust first, so a generator escape (an `Undecidable` the corpus is not
+    // Coverage first, before a JVM is started or a single decision is taken:
+    // if the corpus has stopped producing an axis, nothing downstream of here
+    // means what it says.
+    report_coverage(profile, &cases);
+
+    // Then Rust, so a generator escape (an `Undecidable` the corpus is not
     // supposed to contain) is reported before a JVM is ever started.
     let mut outcomes = Vec::with_capacity(cases.len());
     let mut escapes: Vec<String> = Vec::new();
