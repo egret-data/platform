@@ -236,6 +236,38 @@ struct SetAccessPolicy {
     required_groups: Vec<String>,
 }
 
+/// What a clearance write actually reached — **SP4c review I5.**
+///
+/// The endpoint used to answer a bare `{"ok": true}`, so a clearance authored
+/// on a Trino profile with no usable `tagService`, or one naming only groups,
+/// was reported as saved while the compiler had emitted nothing at all and the
+/// UI showed it as active. `skipped` carries exactly what the perm mutation
+/// responses already carry (`SkipReport`, same schema) and for the stated
+/// reason: an author needs to know at authoring time, not from a query that
+/// later returns rows it should not.
+///
+/// An EMPTY `skipped` is the normal answer and means every profile a clearance
+/// can reach compiled it.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+struct AccessPolicyWritten {
+    /// Always `true` — the write committed, or this response was never built.
+    ok: bool,
+    /// Every profile/item the accompanying recompile could not express.
+    skipped: Vec<egret_perm_compile::routes::SkipReport>,
+}
+
+impl AccessPolicyWritten {
+    fn from_skips(skipped: Vec<egret_perm_compile::SkippedItem>) -> Self {
+        AccessPolicyWritten {
+            ok: true,
+            skipped: skipped
+                .into_iter()
+                .map(egret_perm_compile::routes::SkipReport::from)
+                .collect(),
+        }
+    }
+}
+
 #[utoipa::path(
     put,
     path = "/api/control-plane/tags/{id}/access-policy",
@@ -243,7 +275,7 @@ struct SetAccessPolicy {
     params(("id" = Uuid, Path, description = "Tag id")),
     request_body = SetAccessPolicy,
     responses(
-        (status = 200, description = "Classification access policy set"),
+        (status = 200, description = "Classification access policy set", body = AccessPolicyWritten),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing tag:manage permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -254,7 +286,7 @@ async fn set_access_policy(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
     Json(body): Json<SetAccessPolicy>,
-) -> Result<Json<serde_json::Value>, CpError> {
+) -> Result<Json<AccessPolicyWritten>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "tag:manage").await?;
     // SECURITY (Access P3.4): parse each group id as a `Uuid` BEFORE it reaches
     // the repo / Cedar policy string. A non-uuid entry is rejected `400` — never
@@ -270,7 +302,8 @@ async fn set_access_policy(
     // The repo publishes `RolesChanged` on the shared bus so the Cedar PDP
     // reloads its policy set (the SAME reload event the role/permission CRUD
     // emits) — the PDP loader reading `classification_policies` stays fresh.
-    st.classification_policies
+    let skipped = st
+        .classification_policies
         .set_policy(
             id,
             &body.required_roles,
@@ -279,8 +312,10 @@ async fn set_access_policy(
         )
         .await?;
     // Return a JSON body (not a bare 200) so the FE `apiJson` can parse it —
-    // an empty 200 body throws "Unexpected end of JSON input" client-side.
-    Ok(Json(serde_json::json!({ "ok": true })))
+    // an empty 200 body throws "Unexpected end of JSON input" client-side — and
+    // carry what the recompile could NOT express (I5), rather than reporting a
+    // clearance as saved when no engine was given one.
+    Ok(Json(AccessPolicyWritten::from_skips(skipped)))
 }
 
 #[utoipa::path(
@@ -289,7 +324,7 @@ async fn set_access_policy(
     tag = "control-plane-tags",
     params(("id" = Uuid, Path, description = "Tag id")),
     responses(
-        (status = 200, description = "Classification access policy cleared"),
+        (status = 200, description = "Classification access policy cleared", body = AccessPolicyWritten),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing tag:manage permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -299,16 +334,24 @@ async fn clear_access_policy(
     State(st): State<CpState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, CpError> {
+) -> Result<Json<AccessPolicyWritten>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "tag:manage").await?;
-    st.classification_policies.clear_policy(id).await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    let skipped = st.classification_policies.clear_policy(id).await?;
+    Ok(Json(AccessPolicyWritten::from_skips(skipped)))
 }
 
 #[derive(utoipa::OpenApi)]
 #[openapi(
     paths(list_tags, create_tag, update_tag, delete_tag, set_access_policy, clear_access_policy),
-    components(schemas(TagDto, CreateTag, UpdateTag, SetAccessPolicy, ErrorBody)),
+    components(schemas(
+        TagDto,
+        CreateTag,
+        UpdateTag,
+        SetAccessPolicy,
+        AccessPolicyWritten,
+        egret_perm_compile::routes::SkipReport,
+        ErrorBody
+    )),
     tags((name = "control-plane-tags", description = "Platform classification-tag catalog (Access P3.1) + access policies (P3.3)")),
 )]
 pub struct ControlPlaneTagsApi;

@@ -9435,7 +9435,14 @@
         },
         "responses": {
           "200": {
-            "description": "Classification access policy set"
+            "description": "Classification access policy set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessPolicyWritten"
+                }
+              }
+            }
           },
           "401": {
             "description": "Not authenticated",
@@ -9488,7 +9495,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Classification access policy cleared"
+            "description": "Classification access policy cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessPolicyWritten"
+                }
+              }
+            }
           },
           "401": {
             "description": "Not authenticated",
@@ -29976,6 +29990,27 @@
           }
         }
       },
+      "AccessPolicyWritten": {
+        "type": "object",
+        "description": "What a clearance write actually reached — **SP4c review I5.**\n\nThe endpoint used to answer a bare `{\"ok\": true}`, so a clearance authored\non a Trino profile with no usable `tagService`, or one naming only groups,\nwas reported as saved while the compiler had emitted nothing at all and the\nUI showed it as active. `skipped` carries exactly what the perm mutation\nresponses already carry (`SkipReport`, same schema) and for the stated\nreason: an author needs to know at authoring time, not from a query that\nlater returns rows it should not.\n\nAn EMPTY `skipped` is the normal answer and means every profile a clearance\ncan reach compiled it.",
+        "required": [
+          "ok",
+          "skipped"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "description": "Always `true` — the write committed, or this response was never built."
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkipReport"
+            },
+            "description": "Every profile/item the accompanying recompile could not express."
+          }
+        }
+      },
       "AccessRequestDto": {
         "type": "object",
         "description": "A join request as seen by the requester.",
@@ -34523,7 +34558,7 @@
         "properties": {
           "kind": {
             "type": "string",
-            "description": "`allowed_by_grant` | `explicit_deny` | `no_grant_matched` |\n`masked_by_rule` | `filtered_by_rule` | `clearance_required`."
+            "description": "`allowed_by_grant` | `allowed_by_group_only` | `explicit_deny` |\n`no_grant_matched` | `masked_by_rule` | `filtered_by_rule` |\n`clearance_required`.\n\n`allowed_by_group_only` is an allow the DATA PLANE will refuse: the\ngrant matched only through a `group` principal, and no engine egret\nprovisions can see a group (D7). It is its own string because a caller\nparsing `kind` never sees the prose the page shows beside it."
           },
           "grant_id": {
             "type": [

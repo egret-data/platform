@@ -437,3 +437,83 @@ async fn deleting_a_gated_tag_reaps_its_clearance() {
         "fixture field kept for the StarRocks sibling"
     );
 }
+
+/// **SP4c review I5 — the clearance author is told what compiled, not just that
+/// the row was saved.**
+///
+/// A gate naming only GROUPS compiles to nothing on any engine: D7 measured that
+/// a Ranger item naming a group matches nobody, so a deny emitted for one would
+/// withhold the column from everybody, and `egret_perm_compile::clearance` skips
+/// it and REPORTS the skip. Until this fix the report stopped at a
+/// `tracing::warn!`: `set_policy` returned `()`, the endpoint answered
+/// `{"ok": true}`, and the UI showed the clearance as active over a data plane
+/// that had never been given one. That is the same "a create that succeeded but
+/// compiled nothing" fact the perm mutation responses already carry as
+/// `SkipReport`, on the one surface that dropped it.
+///
+/// Both directions are asserted against ONE fixture, because a test that only
+/// checked the group-only case is also passed by an implementation that reports
+/// every write as skipped.
+#[tokio::test]
+async fn a_group_only_gate_reports_its_skip_to_the_author() {
+    let Some(db) = connect().await else { return };
+    let _permit = SERIAL.acquire().await.expect("permit");
+    let f = seed(&db, "trino").await;
+    let tags = TagRepo::new(db.clone());
+    let pol = ClassificationPolicyRepo::new(db.clone(), EventBus::new());
+
+    let tag = tags
+        .create(&unique_key("clrskip-pii"), "GatedSkip", "", "#ff0000", None)
+        .await
+        .expect("create tag");
+    let (role_name, _username) = new_role_with_holder(&db, "clrskip-role").await;
+
+    // A ROLE gate compiles, so it reports NO skip — the discriminating half.
+    let skipped = pol
+        .set_policy(tag.id, &[role_name], &[], None)
+        .await
+        .expect("set a role gate");
+    assert!(
+        skipped.iter().all(|s| s.id != tag.id),
+        "a role gate this profile CAN express must not be reported as skipped: {skipped:?}"
+    );
+    assert_eq!(
+        clearance_policies(&db, f.tag_service_id, tag.id)
+            .await
+            .len(),
+        1,
+        "sanity: the role gate really did compile"
+    );
+
+    // The same tag, re-gated on a GROUP alone. Nothing can be compiled for it,
+    // and the author must be told so on the write itself.
+    let group_id = Uuid::new_v4();
+    let skipped = pol
+        .set_policy(tag.id, &[], &[group_id], None)
+        .await
+        .expect("set a group-only gate");
+    let mine: Vec<_> = skipped.iter().filter(|s| s.id == tag.id).collect();
+    assert_eq!(
+        mine.len(),
+        1,
+        "a group-only gate compiles to nothing, and the write must SAY so rather than answering \
+         ok over a clearance no engine will ever enforce: {skipped:?}"
+    );
+    assert!(
+        matches!(
+            mine[0].source_kind,
+            egret_perm_compile::SourceKind::Clearance
+        ),
+        "the skip is a CLEARANCE skip, and `id` is the tags.id: {mine:?}"
+    );
+    assert!(
+        mine[0].reason.contains("required_groups"),
+        "the reason must name what could not be expressed, not merely that something was: {mine:?}"
+    );
+    assert!(
+        clearance_policies(&db, f.tag_service_id, tag.id)
+            .await
+            .is_empty(),
+        "and the earlier role gate's deny must be gone — the gate no longer names a role"
+    );
+}

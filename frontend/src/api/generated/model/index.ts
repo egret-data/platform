@@ -11,6 +11,7 @@ export * from './accessItemInput';
 export * from './accessPolicyInput';
 export * from './accessPolicyInputAdditionalItem';
 export * from './accessPolicyInputResources';
+export * from './accessPolicyWritten';
 export * from './accessRequestDto';
 export * from './ack';
 export * from './action';
