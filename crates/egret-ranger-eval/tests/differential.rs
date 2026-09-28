@@ -136,10 +136,16 @@ impl Rng {
 /// (`a**b`), a pure run (`*`, `**`), `?` alone and mixed with `*`, the empty
 /// value Ranger's `init()` drops before building a matcher, and names that
 /// differ from a request value only by case.
+/// `?*?` WAS in this list and is now excluded by FINDING F1 (see
+/// `pinned_divergences`): a `*` immediately followed by a `?` is where this
+/// crate's wildcard matcher and `FilenameUtils.wildcardMatch` genuinely
+/// disagree, so the corpus cannot generate it while the gate is green. The
+/// shape stays under test as a pinned reproducer, which fails the moment the
+/// defect is fixed — so the exclusion cannot outlive it.
 const POLICY_VALUES: &[&str] = &[
-    "", "*", "**", "?", "??", "?*?", "a*b", "a**b", "*a*b*", "x?z", "sales", "SALES", "sal*es",
-    "*_tmp", "tmp_*", "or?er", "**x", "x**", "hive", "HIVE", "h?ve", "h*e", "*ve", "hi*", "col*",
-    "*d", "i?", "*s*", "s**s", "orders", "email",
+    "", "*", "**", "?", "??", "a*b", "a**b", "*a*b*", "x?z", "sales", "SALES", "sal*es", "*_tmp",
+    "tmp_*", "or?er", "**x", "x**", "hive", "HIVE", "h?ve", "h*e", "*ve", "hi*", "col*", "*d",
+    "i?", "*s*", "s**s", "orders", "email",
 ];
 
 /// Values a REQUEST resource level can carry. `*` and `""` are both here on
@@ -226,6 +232,7 @@ fn starrocks() -> Profile {
 
 /// One generated case, in both the shape Java reads and the shape this crate
 /// evaluates.
+#[derive(Clone)]
 struct Case {
     id: String,
     policy_type: i32,
@@ -449,6 +456,15 @@ fn resource_map(rng: &mut Rng, profile: &Profile, shape: &Shape, follow_shape: b
                     }
                     _ => rng.pick(POLICY_VALUES).to_string(),
                 };
+                // FINDING F1: a policy value in which a `*` is immediately
+                // followed by a `?` is a MEASURED divergence, excluded from
+                // the corpus and pinned by `pinned_divergences` instead. The
+                // guard sits here rather than only on the vocabulary because
+                // `covering_values` composes values of its own.
+                assert!(
+                    !value.contains("*?"),
+                    "generator emitted `{value}`, which trips FINDING F1"
+                );
                 values.push(value);
             }
         }
@@ -570,9 +586,13 @@ fn mask_item(rng: &mut Rng, profile: &Profile, shape: &Shape) -> Value {
         "roles": roles,
         "accesses": accesses(rng, profile, shape),
     });
-    // An item with NO dataMaskInfo reports nothing and lets the loop
-    // continue — a distinct state from a mask that reports MASK_NONE.
-    if !rng.chance(1, 12) {
+    // FINDING F2: a `dataMaskPolicyItems` entry with NO `dataMaskInfo` is a
+    // MEASURED divergence and is excluded from the corpus, pinned by
+    // `pinned_divergences` instead. This crate reads it as "reports nothing,
+    // keep looking"; Ranger's own model class cannot represent the absence, so
+    // the item DOES determine the result — with a null mask type — and the
+    // search stops there.
+    {
         let mask_type = rng.pick(profile.mask_types).to_string();
         let mut info = Map::new();
         info.insert("dataMaskType".to_string(), json!(mask_type));
@@ -882,7 +902,258 @@ fn ranger_dir() -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/ranger"))
 }
 
-fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
+// ── the two divergences this gate MEASURED ───────────────────────────────
+
+/// One construct the corpus excludes because Rust and the real engine were
+/// measured to disagree about it, kept under test as a minimal reproducer.
+///
+/// An exclusion that is only a comment rots: the defect gets fixed, nobody
+/// remembers the corpus was narrowed, and the axis stays dark. These pins
+/// assert the DISAGREEMENT, so the day the evaluator is corrected this test
+/// fails and says to widen the generator again.
+struct Pinned {
+    case: Case,
+    finding: &'static str,
+    /// What this crate answers, and what Ranger answers — recorded so a
+    /// change in EITHER side is visible, not just a change in the verdict.
+    egret: &'static str,
+    ranger: &'static str,
+}
+
+fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
+    let service_policies = |policies: Value| {
+        json!({
+            "serviceName": "trino_prod",
+            "serviceId": 1,
+            "policyVersion": 1,
+            "serviceDef": def_json,
+            "policies": policies,
+        })
+    };
+
+    vec![
+        // ── F1 ────────────────────────────────────────────────────────────
+        //
+        // `FilenameUtils.wildcardMatch` is NOT a classic greedy matcher with
+        // backtracking, which is what `crate::resource`'s reimplementation is.
+        // `splitOnTokens` turns `?*?` into ["?", "*", "?"], and a `*` token
+        // advances the text index only when it is the LAST token (`textIdx =
+        // filename.length()`) or when the NEXT token is a literal (via
+        // `checkIndexOf`). A `*` followed by `?` therefore consumes NOTHING:
+        //
+        //   FilenameUtils.wildcardMatch("HIVE", "?*?", INSENSITIVE) == false
+        //   FilenameUtils.wildcardMatch("HIVE", "*?",  INSENSITIVE) == false
+        //   FilenameUtils.wildcardMatch("ab",   "?*?", INSENSITIVE) == true
+        //
+        // (measured against commons-io on the 2.5.0 classpath). A classic
+        // matcher says true for all three.
+        //
+        // This is the FAIL-OPEN direction: the policy below ALLOWS, so egret
+        // grants a request the live Trino plugin refuses.
+        Pinned {
+            finding: "F1: `*` followed by `?` — egret's wildcard matcher is greedy, \
+                      FilenameUtils.wildcardMatch is not",
+            egret: "Allowed (classic wildcard match: `?*?` covers `HIVE`)",
+            ranger: "Denied (wildcardMatch(\"HIVE\", \"?*?\") is false, so no policy matched)",
+            case: Case {
+                id: "pin-f1-wildcard".to_string(),
+                policy_type: 0,
+                service_policies: service_policies(json!([{
+                    "id": 1, "name": "f1", "service": "trino_prod", "policyType": 0,
+                    "isEnabled": true, "policyPriority": 0,
+                    "resources": {
+                        "catalog": {"values": ["?*?"]},
+                        "schema":  {"values": ["hive"]},
+                        "table":   {"values": ["ab"]},
+                    },
+                    "policyItems": [{
+                        "users": ["dave"], "groups": [], "roles": [],
+                        "accesses": [{"type": "select", "isAllowed": true}],
+                    }],
+                }])),
+                request: AccessRequest {
+                    user: "dave".to_string(),
+                    groups: BTreeSet::new(),
+                    roles: BTreeSet::new(),
+                    access_type: "select".to_string(),
+                    resource: RequestResource::new()
+                        .with("catalog", "HIVE")
+                        .with("schema", "hive")
+                        .with("table", "ab"),
+                    owner: None,
+                },
+            },
+        },
+        // ── F2 ────────────────────────────────────────────────────────────
+        //
+        // `RangerPolicy$RangerDataMaskPolicyItem`'s no-arg constructor (the
+        // one Gson uses) delegates to the all-args constructor with nulls, and
+        // `setDataMaskInfo(null)` substitutes `new RangerPolicyItemDataMaskInfo()`.
+        // So `getDataMaskInfo()` is NEVER null on a deserialised item, the
+        // `ifnull` guard at offset 8 of
+        // `RangerDefaultDataMaskPolicyItemEvaluator.updateAccessResult` never
+        // fires, and the item runs the whole body: `setMaskType(null)` and then
+        // `policyEvaluator.updateAccessResult(result, matchType, true, …)`,
+        // which sets policyId, policyPriority and isAllowed. The item DETERMINES
+        // the result with a null mask type and the search stops.
+        //
+        // This crate reads the absent key as `MaskInfo: None` and models it as
+        // "reports nothing, keep looking", so it goes on to the next item and
+        // reports a mask Ranger never reaches.
+        Pinned {
+            finding: "F2: a dataMask item with no `dataMaskInfo` — Ranger's model class \
+                      cannot represent the absence, so the item still determines",
+            egret: "Masked(MASK_HASH) — the priority-1 policy reports nothing, so the priority-0 one decides",
+            ranger: "NoMask — the priority-1 policy DETERMINES with a null maskType and the search stops",
+            case: Case {
+                id: "pin-f2-missing-datamaskinfo".to_string(),
+                policy_type: 1,
+                service_policies: service_policies(json!([
+                    {
+                        // Ranger reaches this one first (higher priority) and
+                        // its ONLY matching item carries no `dataMaskInfo`.
+                        "id": 1, "name": "f2-high", "service": "trino_prod", "policyType": 1,
+                        "isEnabled": true, "policyPriority": 1,
+                        "resources": {
+                            "catalog": {"values": ["hive"]},
+                            "schema":  {"values": ["sales"]},
+                            "table":   {"values": ["orders"]},
+                            "column":  {"values": ["id"]},
+                        },
+                        "dataMaskPolicyItems": [{
+                            "users": ["dave"], "groups": [], "roles": [],
+                            "accesses": [{"type": "select", "isAllowed": true}],
+                        }],
+                    },
+                    {
+                        // …and this one, which egret reaches and Ranger does
+                        // not, carries a real mask.
+                        "id": 2, "name": "f2-low", "service": "trino_prod", "policyType": 1,
+                        "isEnabled": true, "policyPriority": 0,
+                        "resources": {
+                            "catalog": {"values": ["hive"]},
+                            "schema":  {"values": ["sales"]},
+                            "table":   {"values": ["orders"]},
+                            "column":  {"values": ["id"]},
+                        },
+                        "dataMaskPolicyItems": [{
+                            "users": ["dave"], "groups": [], "roles": [],
+                            "accesses": [{"type": "select", "isAllowed": true}],
+                            "dataMaskInfo": {"dataMaskType": "MASK_HASH"},
+                        }],
+                    },
+                ])),
+                request: AccessRequest {
+                    user: "dave".to_string(),
+                    groups: BTreeSet::new(),
+                    roles: BTreeSet::new(),
+                    access_type: "select".to_string(),
+                    resource: RequestResource::new()
+                        .with("catalog", "hive")
+                        .with("schema", "sales")
+                        .with("table", "orders")
+                        .with("column", "id"),
+                    owner: None,
+                },
+            },
+        },
+    ]
+}
+
+/// Assert both measured divergences still reproduce, so neither exclusion can
+/// quietly outlive the defect that justifies it.
+fn check_pinned_divergences(def_json: &Value, def: &ServiceDef, engine: &EngineConfig) {
+    let pins = pinned_divergences(def_json);
+    let cases: Vec<Case> = pins.iter().map(|p| p.case.clone()).collect();
+    let verdicts = ask_ranger(&cases, "trino", "2.5.0", "pinned");
+
+    for (pin, verdict) in pins.iter().zip(&verdicts) {
+        let set: ServicePolicySet = serde_json::from_value(pin.case.service_policies.clone())
+            .expect("parse pinned policy set");
+        let mine = rust_outcome(&pin.case, &set, def, engine);
+        let theirs = java_outcome(pin.case.policy_type, verdict);
+        assert_ne!(
+            mine, theirs,
+            "PINNED DIVERGENCE {} NO LONGER REPRODUCES.\n  \
+             This is good news: the evaluator now agrees with Ranger here. Delete this pin \
+             AND re-widen the generator, or the corpus stays narrower than the evaluator.\n  \
+             recorded egret: {}\n  recorded ranger: {}\n  both now say: {mine:?}",
+            pin.case.id, pin.egret, pin.ranger,
+        );
+        eprintln!(
+            "differential: pinned divergence {} still reproduces — {}\n    egret:  {mine:?}\n    ranger: {theirs:?}",
+            pin.case.id, pin.finding
+        );
+    }
+}
+
+/// Send `cases` through the real engine at one plugin version and read the
+/// verdicts back. Each run also executes the four hand-written anchor tests,
+/// which is deliberate: they carry known-good expected values and are the only
+/// thing in this harness that does not merely assert agreement.
+fn ask_ranger(cases: &[Case], service_type: &str, ranger_version: &str, tag: &str) -> Vec<Value> {
+    let dir = ranger_dir();
+    // The scratch path carries the pid: several agents share one temp
+    // directory and an unprefixed name is another run's file.
+    let work = std::env::temp_dir().join(format!(
+        "egret-ranger-diff-{ranger_version}-{tag}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let cases_path = work.join("cases.json");
+    let verdicts_path = work.join("verdicts.json");
+    // A stale verdicts file from an earlier run would be read as this run's
+    // answer if Maven failed to write one.
+    let _ = std::fs::remove_file(&verdicts_path);
+
+    let payload: Vec<Value> = cases.iter().map(|c| c.to_json(service_type)).collect();
+    std::fs::write(
+        &cases_path,
+        serde_json::to_vec(&Value::Array(payload)).expect("serialise cases"),
+    )
+    .expect("write cases.json");
+
+    eprintln!(
+        "differential: {} {tag} cases at ranger {ranger_version} ({service_type}); cases={}",
+        cases.len(),
+        cases_path.display()
+    );
+
+    let out = Command::new("mvn")
+        .args([
+            "-q".to_string(),
+            "test".to_string(),
+            format!("-Dranger.version={ranger_version}"),
+            format!("-Degret.cases={}", cases_path.display()),
+            format!("-Degret.verdicts={}", verdicts_path.display()),
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("run mvn");
+    assert!(
+        out.status.success(),
+        "mvn failed at ranger {ranger_version} (this run also executes the four hand-written \
+         anchor tests, so a failure here may be one of those):\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let verdicts: Vec<Value> =
+        serde_json::from_str(&std::fs::read_to_string(&verdicts_path).expect("read verdicts.json"))
+            .expect("parse verdicts.json");
+    assert_eq!(
+        verdicts.len(),
+        cases.len(),
+        "ranger {ranger_version} answered {} of {} cases",
+        verdicts.len(),
+        cases.len()
+    );
+    verdicts
+}
+
+/// The engine's service-def as the corpus uses it, plus the parsed form and
+/// the plugin config that goes with it.
+fn load_engine(profile: &Profile) -> (Value, ServiceDef, EngineConfig) {
     let mut def_json: Value =
         serde_json::from_str(&std::fs::read_to_string(profile.def_path).expect("read service-def"))
             .expect("parse service-def");
@@ -909,6 +1180,11 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
         engine: Some(profile.engine),
         plugin_version: Some(profile.plugin_version),
     };
+    (def_json, def, engine)
+}
+
+fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
+    let (def_json, def, engine) = load_engine(profile);
 
     let mut rng = Rng::new(seed ^ (profile.ranger_version.len() as u64) ^ profile.engine as u64);
     let cases: Vec<Case> = (0..count)
@@ -940,68 +1216,11 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
         escapes.join("\n")
     );
 
-    let dir = ranger_dir();
-    let stamp = format!(
-        "egret-ranger-diff-{}-{}",
+    let verdicts = ask_ranger(
+        &cases,
+        profile.engine.service_def_name(),
         profile.ranger_version,
-        std::process::id()
-    );
-    let work = std::env::temp_dir().join(stamp);
-    std::fs::create_dir_all(&work).expect("create work dir");
-    let cases_path = work.join("cases.json");
-    let verdicts_path = work.join("verdicts.json");
-    // A stale verdicts file from an earlier run would be read as this run's
-    // answer if Maven failed to write one.
-    let _ = std::fs::remove_file(&verdicts_path);
-
-    let payload: Vec<Value> = cases
-        .iter()
-        .map(|c| c.to_json(profile.engine.service_def_name()))
-        .collect();
-    std::fs::write(
-        &cases_path,
-        serde_json::to_vec(&Value::Array(payload)).expect("serialise cases"),
-    )
-    .expect("write cases.json");
-
-    eprintln!(
-        "differential: {} cases at ranger {} ({:?}); cases={}",
-        cases.len(),
-        profile.ranger_version,
-        profile.engine,
-        cases_path.display()
-    );
-
-    let out = Command::new("mvn")
-        .args([
-            "-q".to_string(),
-            "test".to_string(),
-            format!("-Dranger.version={}", profile.ranger_version),
-            format!("-Degret.cases={}", cases_path.display()),
-            format!("-Degret.verdicts={}", verdicts_path.display()),
-        ])
-        .current_dir(&dir)
-        .output()
-        .expect("run mvn");
-    assert!(
-        out.status.success(),
-        "mvn failed at ranger {} (this run also executes the four hand-written anchor \
-         tests, so a failure here may be one of those):\n--- stdout ---\n{}\n--- stderr ---\n{}",
-        profile.ranger_version,
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let verdicts: Vec<Value> =
-        serde_json::from_str(&std::fs::read_to_string(&verdicts_path).expect("read verdicts.json"))
-            .expect("parse verdicts.json");
-    assert_eq!(
-        verdicts.len(),
-        cases.len(),
-        "ranger {} answered {} of {} cases",
-        profile.ranger_version,
-        verdicts.len(),
-        cases.len()
+        "corpus",
     );
 
     let mut tally = Tally {
@@ -1121,6 +1340,12 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
         .ok()
         .map(|s| s.trim().parse().expect("EGRET_DIFF_CASES must be a number"))
         .unwrap_or(DEFAULT_CASES);
+
+    // The pins first: if a measured divergence no longer reproduces, the corpus
+    // is narrower than the evaluator and must be widened before anything it
+    // reports means what it says.
+    let (pin_def_json, pin_def, pin_engine) = load_engine(&trino());
+    check_pinned_divergences(&pin_def_json, &pin_def, &pin_engine);
 
     let mut total = Tally::default();
     for profile in [trino(), starrocks()] {
