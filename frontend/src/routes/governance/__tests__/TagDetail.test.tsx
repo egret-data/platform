@@ -104,4 +104,75 @@ describe("TagDetail", () => {
       expect.anything(),
     );
   });
+
+  // SP4c Task 5/D2: three facts the UI must say where the clearance is set,
+  // because none of them is enforced (or enforced evenly) by the engine and
+  // an operator who is not told will assume otherwise. Each assertion below
+  // is on the STATEMENT's content, not merely that "a warning" renders —
+  // a wording change is exactly what a later refactor would drop silently,
+  // and a shape-only test would pass against that.
+  describe("what the engine does not enforce", () => {
+    test("an ungated tag shows none of the three clearance warnings", async () => {
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      expect(screen.queryByText(/not enforced in the engine/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/withholds reads only/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/500 tagged columns/i)).not.toBeInTheDocument();
+    });
+
+    test("a group-only gate says neither a group nor a role name reaches the engine", async () => {
+      vi.mocked(tagsApi.useTags).mockReturnValue({
+        data: [{ ...TAG, required_groups: ["g1"] }],
+        isLoading: false,
+        isError: false,
+        error: null,
+      } as unknown as ReturnType<typeof tagsApi.useTags>);
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      expect(
+        screen.getByText(
+          /not enforced in the engine: no group provider or usersync means a group name never reaches trino or starrocks, and a role name does not either/i,
+        ),
+      ).toBeInTheDocument();
+    });
+
+    test("a role-gated tag says a StarRocks clearance withholds reads only", async () => {
+      vi.mocked(tagsApi.useTags).mockReturnValue({
+        data: [{ ...TAG, required_roles: ["finance_cleared"] }],
+        isLoading: false,
+        isError: false,
+        error: null,
+      } as unknown as ReturnType<typeof tagsApi.useTags>);
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      expect(
+        screen.getByText(
+          /on a starrocks engine this clearance withholds reads only: a user without it can still overwrite a column they cannot read/i,
+        ),
+      ).toBeInTheDocument();
+      // The group-only warning must NOT appear here — this gate has a role.
+      expect(screen.queryByText(/not enforced in the engine/i)).not.toBeInTheDocument();
+    });
+
+    test("a role-gated tag says the expansion ceiling fails every StarRocks profile's recompile", async () => {
+      vi.mocked(tagsApi.useTags).mockReturnValue({
+        data: [{ ...TAG, required_roles: ["finance_cleared"] }],
+        isLoading: false,
+        isError: false,
+        error: null,
+      } as unknown as ReturnType<typeof tagsApi.useTags>);
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      expect(
+        screen.getByText(/if this tag ever reaches more than 500 tagged columns/i),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/every starrocks profile.s recompile fails/i),
+      ).toBeInTheDocument();
+    });
+  });
 });

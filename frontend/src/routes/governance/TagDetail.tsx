@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowLeft, ChevronsUpDown, Lock, Plus, Trash2, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ChevronsUpDown, Lock, Plus, Trash2, X } from "lucide-react";
 
 import { type AccessGroup, type AccessRole, listGroups, listRoles } from "@/api/access";
 import {
@@ -306,6 +306,50 @@ export default function TagDetail() {
           <Alert variant="destructive">
             <AlertDescription>{clearanceError}</AlertDescription>
           </Alert>
+        )}
+
+        {requiredGroups.length > 0 && (
+          // SP4c D0/D0b narrow SP4a/SP4b's group finding: it is not only a
+          // group name that never reaches Trino or StarRocks — a ROLE name
+          // doesn't either. What actually reaches the engine is the
+          // enumerated USERNAMES of a required role's members, computed at
+          // compile time. A `required_groups` entry has no such expansion, so
+          // it is enforced on object access (Cedar) only, never at the query
+          // path (SQL Lab, a notebook). Same shape as SP4b's group warning in
+          // `PrincipalPicker` — REMOVE THIS once egret ships a group
+          // provider, the only thing that would make the underlying fact
+          // stale.
+          <Badge
+            variant="warning"
+            className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal"
+          >
+            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+            Not enforced in the engine: no group provider or usersync means a group name never
+            reaches Trino or StarRocks, and a role name does not either — only a required role&apos;s
+            enumerated members do. A group requirement is enforced on object access only; opening
+            the object is gated, but reading the same data through SQL Lab or a notebook is not.
+          </Badge>
+        )}
+
+        {gated && (
+          <>
+            <Badge
+              variant="warning"
+              className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal"
+            >
+              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+              On a StarRocks engine this clearance withholds reads only: a user without it can
+              still overwrite a column they cannot read. Trino withholds both reads and writes —
+              this is a real asymmetry between engines, not a rounding error, so do not assume a
+              StarRocks classification blocks writes the way a Trino one does.
+            </Badge>
+            <p className="text-xs text-muted-foreground">
+              Clearance is read installation-wide: if this tag ever reaches more than 500 tagged
+              columns, the StarRocks compiler refuses rather than truncating it, and every
+              StarRocks profile&apos;s recompile fails — including profiles that serve entirely
+              unrelated tables — until the tag is narrowed or untagged back under the limit.
+            </p>
+          </>
         )}
 
         <ClearanceTable
