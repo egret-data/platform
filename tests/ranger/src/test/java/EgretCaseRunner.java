@@ -145,6 +145,24 @@ public class EgretCaseRunner {
         return verdict;
     }
 
+    /**
+     * A FRESH request per evaluation, deliberately — do not hoist this out of
+     * the loop and reuse it.
+     *
+     * {@code RangerAccessRequestImpl.preProcess} early-returns when the
+     * context carries {@code ISREQUESTPREPROCESSED}, and that flag is cleared
+     * by {@code setResource} (which calls
+     * {@code RangerAccessRequestUtil.setIsRequestPreprocessed(context, FALSE)})
+     * but NOT by {@code setUser}, whose whole body is a {@code putfield}.
+     * Verified with {@code javap -c} on the 2.5.0 jar.
+     *
+     * So an "optimisation" that built one request and only changed the user
+     * between cases would keep a stale preprocessed context — including the
+     * {@code token:USER} the expression resolver reads — and every case after
+     * the first would be evaluated for the WRONG user. That fails OPEN, and
+     * silently: the corpus would still be green wherever the stale user
+     * happened to be allowed.
+     */
     private RangerAccessRequestImpl request(JsonObject req) {
         Map<String, Object> resource = new LinkedHashMap<>();
         for (Map.Entry<String, JsonElement> e : req.getAsJsonObject("resource").entrySet()) {

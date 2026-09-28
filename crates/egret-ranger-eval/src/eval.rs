@@ -575,8 +575,18 @@ pub fn evaluate(
     // order: in an all-hasDeny band no evaluator can set
     // `isAccessDetermined` except by denying, so every one of them runs and
     // any deny wins; in an all-non-deny band the first allow wins and the
-    // rest cannot deny. Only the reported `policy_id` of an allow can
-    // differ, which is why a stable name-then-id tie-break stands in for it.
+    // rest cannot deny. What CAN differ is which policy gets reported, so a
+    // stable name-then-id tie-break stands in for the score.
+    //
+    // That reported-id difference is REAL and is measured, not waved away:
+    // at the recorded corpus seed, 39 of 1972 compared ACCESS cases agree on
+    // allow/deny while naming a different policy — and **31 of those are
+    // DENIES**, not allows. (An earlier version of this comment said only an
+    // allow's id could differ. It was wrong, and wrong in the direction that
+    // makes the gap sound smaller than it is.) `tests/ranger/README.md`
+    // carries it as a declared divergence; nothing in this crate asserts a
+    // reported policy id for an ACCESS decision, which is why the gate is
+    // green in spite of it.
     sort_eval_order(&mut candidates);
 
     // ── the evaluator loop ─────────────────────────────────────────────

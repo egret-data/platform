@@ -89,14 +89,14 @@ Recorded run, 2026-09-28 (JDK 21 / Maven 3.9.11):
 | Seed | `0x54d000007` (`EGRET_DIFF_SEED`, hex) |
 | Cases | **2000 per engine — 4000 total** (`EGRET_DIFF_CASES`) |
 | Versions | **2.5.0** against the Trino service-def, **2.8.0** against the StarRocks one |
-| Compared and agreeing | **3866** |
+| Compared and agreeing | **3856** |
 | `Undecidable` other than `EvalOrderAmbiguous` | **0** (asserted) |
-| `EvalOrderAmbiguous` | 134 of 4000 — **3.4%** |
+| `EvalOrderAmbiguous` | 144 of 4000 — **3.6%** |
 | Deliberate eval-order duels | **489, all agreeing** |
 | Wall time | ~37s including three Maven runs |
 
 A wider sweep at 5000 per engine (10000 cases, ~64s) was also run green:
-**9596 compared and agreeing, 404 `EvalOrderAmbiguous` (4.0%), 1273 duels all
+**9595 compared and agreeing, 405 `EvalOrderAmbiguous` (4.0%), 1273 duels all
 agreeing.** The rate is stable across an order of magnitude of corpus size.
 
 These are the numbers AFTER the findings below were fixed and their
@@ -134,21 +134,62 @@ eye (`cp` is aliased to `cp -i` on this machine and silently refuses):
 Places where this crate is knowingly not byte-for-byte Ranger, with the reason
 each is acceptable. Anything not on this list and not `Undecidable` is a bug.
 
-- **Case folding of `İ` and friends.** `Equals`, `StartsWith` and `EndsWith`
-  fold the whole string with Rust's `to_lowercase` before comparing, while
-  Java compares per UTF-16 unit via `toUpperCase`/`toLowerCase`. The two
-  differ only for characters whose lowercase form is longer than one code
-  point (`İ` lowercases to two), which no catalog/schema/database/table/column
-  identifier on either engine admits.
+- **Case folding is NARROWER than Java's, in exactly two classes.** Measured
+  over a 1922-pair character cross product through the real
+  `String.regionMatches(true, …)` on the harness classpath: **22
+  disagreements, and in every one Java says `true` while this crate says
+  `false`. There are none the other way.**
 
-  The wildcard path deliberately does **not** do this, and the asymmetry is
-  worth knowing about: `wildcard_match` walks token by token doing index
-  arithmetic against the text, and a whole-string fold that changes the
-  string's LENGTH would shift every index away from the ones Java computes.
-  So it takes `ignore_case` and compares per position instead, which is what
-  `IOCase.checkRegionMatches` does. Its residual is narrower: a single
-  character whose Rust and Java case mappings disagree, rather than a length
-  change.
+  The direction is the point, and an earlier version of this section had it
+  backwards. Narrower means egret finds no match where Ranger finds one:
+  **fail-CLOSED for an allow rule, fail-OPEN for a deny or an `isExcludes`
+  rule.** Calling it "wider" implied it was uniformly safe. It is not.
+
+  The two classes:
+
+  1. **Dotted and dotless I** — `İ` (U+0130) and `ı` (U+0131) against `i` /
+     `I`. Java's chain maps `İ` to a single `i`; Rust's `char::to_lowercase`
+     yields TWO code points for it, so no single-character comparison reaches
+     Java's answer.
+  2. **Final sigma** — `ς` (U+03C2) against `σ` (U+03C3) and `Σ` (U+03A3).
+     This one is **not** a length problem: it is a missing UPPERCASE step.
+     `toUpperCase('ς') == toUpperCase('σ') == 'Σ'`, while lowercasing leaves
+     `ς` and `σ` distinct. Adding a `to_uppercase` step would close this class
+     and not the first.
+
+  No catalog/schema/database/table/column identifier on either engine admits
+  any of these code points. The set and its direction are pinned in
+  `resource.rs::case_folding_is_narrower_than_java_in_exactly_two_classes`, so
+  the README and the code cannot drift apart.
+
+  `Equals`, `StartsWith` and `EndsWith` fold the whole string; the wildcard
+  path deliberately does **not**, and the asymmetry is worth knowing about.
+  `wildcard_match` walks token by token doing index arithmetic against the
+  text, and a whole-string fold that changes the string's LENGTH would shift
+  every index away from the ones Java computes, so it compares per position
+  instead — which is what `IOCase.checkRegionMatches` does. Both paths
+  diverge in the same direction and on the same code points.
+
+- **The reported policy id of an ACCESS decision can differ.** Within one
+  `(policyPriority, hasDeny)` band Ranger picks by `getEvalOrder()` and this
+  crate by a name-then-id tie-break, so the two can agree on allow/deny while
+  naming different policies. Measured at the recorded seed: **39 of 1972
+  compared ACCESS cases, of which 31 are DENIES** — not, as an earlier comment
+  in `eval.rs` claimed, only allows. The allow/deny OUTCOME is unaffected (see
+  the duels below); nothing in this crate asserts a reported ACCESS policy id,
+  which is why the gate is green in spite of it.
+
+- **`isAccessDetermined` is not modelled.** Ranger sets it `true` even when
+  nothing matched at all, alongside `policyId = -1`: measured in **716 of 1972
+  compared ACCESS cases**. This crate reports that state as
+  `DenyReason::NoPolicyMatched` and makes no claim about the flag.
+
+  This vindicates the decision not to assert it. A naive assertion that
+  `NoPolicyMatched` means `isAccessDetermined == false` would have
+  manufactured ~716 failures that are not findings — and a gate that cries
+  wolf at that rate gets switched off, taking the real findings with it. The
+  verdict still records the flag, for a later task that measures the
+  end-of-loop `setPolicyId(-1)` fallback properly.
 
 - **Character indices stand in for Java's UTF-16 indices** throughout the
   matcher. They differ only for astral characters, which no engine's resource
@@ -189,7 +230,10 @@ the wrong counter — the same class of defect the table exists to catch.
 Floors are in cases per thousand, so they survive a change to
 `EGRET_DIFF_CASES`, and each is set near half of what the corpus measurably
 produces. A floor that flaps gets deleted by the next person, which is worse
-than no floor: the tightest margin in the table below is 1.98x.
+than no floor: across both engines at both corpus sizes, the tightest margin
+is 2.0x, re-checked after every change to the vocabularies (adding the
+backtracking texts diluted `request value *` and its floor was lowered to
+match, rather than left to flap).
 
 Those floors were calibrated against the recorded seed, which on its own only
 shows they hold for the run that set them. Four unrelated seeds
@@ -250,6 +294,21 @@ Measured at ranger 2.5.0 (Trino), 2000 cases, seed `0x54d000007`:
 `impliedGrants via trino \`all\`` is the one engine-specific row: StarRocks's
 service-def declares no `impliedGrants` at all, so the axis prints `n/a for
 this engine` there and is floored only for Trino.
+
+**Floors prove a shape is GENERATED, not that a rule is REACHED — and review
+found the difference the hard way.** Deleting the backtracking resume point in
+`wildcard_match` (`backtrack.push((wcs_idx, repeat))`) left all 131 unit tests
+green, the 53-row `FilenameUtils` oracle green, and the whole 4000-case gate
+green at the recorded seed with identical tallies. The corpus emitted plenty
+of wildcards; almost none of them could reach that line, because a value
+ending in `*` jumps to the end of the text and never needs a resume point, and
+the corpus's literal runs never recurred in a request value. Both halves are
+now closed: 27 measured rows in the unit table, `POLICY_VALUES` entries like
+`*ab*ab` that do NOT end in `*`, `REQUEST_VALUES` texts whose runs recur
+(`ababab`, `sisters`, `banana`, `assessors`), and a
+`wildcard: literal AFTER a *` axis with its own floor. Deleting the resume
+point now fails the unit table AND the corpus (7 of 485 disagreed at 500
+cases per engine).
 
 **The floors have been observed failing.** With `isExcludes` generation
 disabled the run stops with `isExcludes - 0 cases (0per-mille), floor
@@ -362,10 +421,14 @@ evidence.
 `access_order_duel` now builds it deliberately: one case in four of the ACCESS
 corpus is two policies at the SAME priority, both certainly matching, one
 reaching an allow and the other a deny, with ids AND names swapped half the
-time so a name-then-id tie-break cannot be right by luck. All three `hasDeny`
-combinations are generated, because `PolicyEvalOrderComparator.compareNormal`
-(disassembled from the 2.5.0 jar) sorts `hasDeny` FIRST and only then by
-`getEvalOrder()`, which makes them different questions.
+time so a name-then-id tie-break cannot be right by luck. Both constructible
+`hasDeny` combinations are generated — there are two, not three: a duel needs
+a policy that actually denies, and such a policy necessarily carries
+`denyPolicyItems`, so `hasDeny == false` on the denier cannot be built. What
+varies is whether the ALLOWER also carries (non-matching) deny items.
+`PolicyEvalOrderComparator.compareNormal`, disassembled from the 2.5.0 jar,
+sorts `hasDeny` FIRST and only then by `getEvalOrder()`, which makes those two
+different questions.
 
 **1281 duels across the 10000-case sweep, all agreeing.** Task 5's claim
 survives a test that could have killed it, and the `hasDeny` key in the

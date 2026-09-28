@@ -152,14 +152,45 @@ const POLICY_VALUES: &[&str] = &[
     "*?a", "a*b", "a**b", "*a*b*", "x?z", "sales", "SALES", "sal*es", "*_tmp", "tmp_*", "or?er",
     "**x", "x**", "hive", "HIVE", "h?ve", "h*e", "*ve", "hi*", "col*", "*d", "i?", "*s*", "s**s",
     "orders", "email",
+    // The BACKTRACKING resume point: a literal token after a `*`, where the
+    // first occurrence of that literal is a dead end and a later one works.
+    // Review deleted `backtrack.push` and the whole corpus stayed green,
+    // because almost every wildcard value here ended in `*` — and a trailing
+    // `*` jumps to the end of the text, so no resume point is ever needed.
+    // These do not end in `*`, and `REQUEST_VALUES` carries texts in which
+    // their literal runs RECUR, which is what makes the rule reachable.
+    "*ab*ab", "*a*a", "*s*s", "*ab*b", "*a*b*a", "*er*er",
 ];
 
 /// Values a REQUEST resource level can carry. `*` and `""` are both here on
 /// purpose: `RangerAbstractResourceMatcher.isAllValuesRequested` treats them
 /// alike and short-circuits before any policy value is read.
 const REQUEST_VALUES: &[&str] = &[
-    "hive", "HIVE", "sales", "Sales", "orders", "id", "email", "a", "ab", "abc", "hive_tmp",
-    "tmp_1", "*", "", "s", "xyz",
+    "hive",
+    "HIVE",
+    "sales",
+    "Sales",
+    "orders",
+    "id",
+    "email",
+    "a",
+    "ab",
+    "abc",
+    "hive_tmp",
+    "tmp_1",
+    "*",
+    "",
+    "s",
+    "xyz",
+    // Texts whose literal runs RECUR, so a pattern like `*ab*ab` — or the
+    // `a*b` that `covering_values` derives from `ababab` — has a first
+    // occurrence that dead-ends and a later one that works. Without a text
+    // like these, the resume point above is unreachable and the corpus is
+    // green whether or not it exists.
+    "ababab",
+    "sisters",
+    "banana",
+    "assessors",
 ];
 
 const POLICY_USERS: &[&str] = &["alice", "bob", "carol", "{USER}"];
@@ -771,17 +802,21 @@ fn policy(rng: &mut Rng, profile: &Profile, shape: &Shape, id: i64, policy_type:
 /// counterexample needs, so that was absence of evidence, not evidence. This
 /// builds it on purpose.
 ///
-/// The three `hasDeny` combinations are all generated, because the comparator
-/// makes them different questions. `PolicyEvalOrderComparator.compareNormal`
-/// (disassembled from the 2.5.0 jar) is: `hasDeny` FIRST, then
-/// `getEvalOrder()`, then the policy name. So:
+/// BOTH constructible `hasDeny` combinations are generated — there are two,
+/// not three. A duel needs one policy that actually denies, and a policy that
+/// denies necessarily carries `denyPolicyItems`, so `hasDeny == false` on the
+/// denier is unrepresentable. What varies is the ALLOWER. The comparator
+/// makes the two cases different questions:
+/// `PolicyEvalOrderComparator.compareNormal` (disassembled from the 2.5.0
+/// jar) is `hasDeny` FIRST, then `getEvalOrder()`, then the policy name. So:
 ///
-/// * both `hasDeny`: one band, ordered only by the `getEvalOrder()` this crate
-///   does not compute — but no evaluator in such a band can break the engine
-///   loop, so every one runs and any deny wins. Order should not matter.
-/// * allow-policy WITHOUT deny items, deny-policy with them: the comparator
-///   itself puts the deny first, which is what makes the claim true. If the
-///   `hasDeny` key were missing, the loop could break on the allow
+/// * allower ALSO `hasDeny` (it carries deny items that match nobody): one
+///   band, ordered only by the `getEvalOrder()` this crate does not compute —
+///   but no evaluator in such a band can break the engine loop, so every one
+///   runs and any deny wins. Order should not matter.
+/// * allower WITHOUT deny items: the comparator itself puts the denier first,
+///   which is what makes the claim true. If the `hasDeny` key were missing,
+///   the loop could break on the allow
 ///   (`if (ret.getIsAllowed()) { if (!evaluator.hasDeny()) break; }`) and
 ///   never reach the deny — fail-open.
 ///
@@ -1164,11 +1199,16 @@ const AXES: &[Axis] = &[
     },
     Axis {
         name: "wildcard: repeated ?",
-        min_per_mille: 60,
+        min_per_mille: 50,
         only: None,
     },
     Axis {
         name: "wildcard: `*` immediately before `?` (F1)",
+        min_per_mille: 100,
+        only: None,
+    },
+    Axis {
+        name: "wildcard: literal AFTER a `*` (backtracking reachable)",
         min_per_mille: 100,
         only: None,
     },
@@ -1185,12 +1225,12 @@ const AXES: &[Axis] = &[
     // — request side —
     Axis {
         name: "request value `*`",
-        min_per_mille: 70,
+        min_per_mille: 50,
         only: None,
     },
     Axis {
         name: "request value empty",
-        min_per_mille: 70,
+        min_per_mille: 55,
         only: None,
     },
     Axis {
@@ -1386,6 +1426,10 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
     let mut filter_expr_blank = false;
     let mut other_policy_type = false;
     let mut star_then_question = false;
+    // `checkIndexOf` and its resume point are reached only when a LITERAL
+    // token follows a `*`. A value ending in `*` never gets there, which is
+    // exactly how the corpus stayed green with the resume point deleted.
+    let mut literal_after_star = false;
 
     for policy in &policies {
         if policy["policyType"].as_i64() != Some(i64::from(case.policy_type)) {
@@ -1436,6 +1480,11 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
                     wildcard_positions(value, &mut wc);
                     if value.contains("*?") {
                         star_then_question = true;
+                    }
+                    if let Some((_, after)) = value.split_once('*') {
+                        if after.chars().any(|c| c != '*' && c != '?') {
+                            literal_after_star = true;
+                        }
                     }
                     if let Some((_, request_value)) =
                         request_levels.iter().find(|(n, _)| n == level_name)
@@ -1582,6 +1631,10 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
             "wildcard: `*` immediately before `?` (F1)",
             star_then_question,
         ),
+        (
+            "wildcard: literal AFTER a `*` (backtracking reachable)",
+            literal_after_star,
+        ),
         ("policy value that is only `*`", wc[8]),
         (
             "policy value differing from the request only by case",
@@ -1724,9 +1777,16 @@ fn ranger_dir() -> PathBuf {
 struct Pinned {
     case: Case,
     finding: &'static str,
-    /// What BOTH sides must now answer. Spelled out so a regression says what
-    /// it was supposed to be, not just that two values differ.
+    /// What BOTH sides must now answer, in prose — for the failure message.
     expected: &'static str,
+    /// …and the same thing as a value, asserted separately.
+    ///
+    /// `assert_eq!(mine, theirs)` alone is not enough: a pin whose case
+    /// degenerated so that BOTH sides trivially answer `Denied` for some
+    /// unrelated reason would still pass, and the pin would have quietly
+    /// stopped pinning anything. The absolute expectation is the half that
+    /// notices.
+    outcome: Outcome,
 }
 
 fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
@@ -1764,6 +1824,7 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
             expected: "Denied — wildcardMatch(\"HIVE\", \"?*?\") is false, so no policy matched. \
                        A greedy matcher answers Allowed here, which is the fail-open direction \
                        this pin exists to keep shut.",
+            outcome: Outcome::Access { allowed: false },
             case: Case {
                 id: "pin-f1-wildcard".to_string(),
                 duel: false,
@@ -1815,6 +1876,11 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
                       mask type, because Ranger's model class cannot represent the absence",
             expected: "maskType null — the priority-1 policy determines and the priority-0 one \
                        is never reached. Reading the wire format literally answers MASK_HASH.",
+            outcome: Outcome::Mask {
+                mask_type: None,
+                masked_value: None,
+                mask_condition: None,
+            },
             case: Case {
                 id: "pin-f2-missing-datamaskinfo".to_string(),
                 duel: false,
@@ -1883,10 +1949,21 @@ fn check_pinned_divergences(def_json: &Value, def: &ServiceDef, engine: &EngineC
             .expect("parse pinned policy set");
         let mine = rust_outcome(&pin.case, &set, def, engine);
         let theirs = java_outcome(pin.case.policy_type, verdict);
+        // Two assertions, not one. Agreement says the two implementations
+        // still match each other; the absolute value says they still match
+        // what was MEASURED, so a case that degenerated into both sides
+        // answering the same thing for an unrelated reason cannot pass.
         assert_eq!(
             mine, theirs,
             "PINNED CASE {} HAS REGRESSED — {}\n  expected: {}\n  egret: {mine:?}\n  ranger: {theirs:?}",
             pin.case.id, pin.finding, pin.expected,
+        );
+        assert_eq!(
+            mine, pin.outcome,
+            "PINNED CASE {} no longer produces the outcome it was built to produce, even though \
+             both sides agree on it — the case has degenerated and the pin has stopped pinning \
+             anything.\n  expected: {}\n  both sides now say: {mine:?}",
+            pin.case.id, pin.expected,
         );
         eprintln!(
             "differential: pinned case {} agrees — {}",

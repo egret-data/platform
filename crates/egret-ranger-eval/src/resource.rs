@@ -764,11 +764,34 @@ fn check_index_of(
 ///
 /// Java tries `c1 == c2`, then `toUpperCase(c1) == toUpperCase(c2)`, then
 /// `toLowerCase(toUpperCase(c1)) == toLowerCase(toUpperCase(c2))` — all
-/// single-character mappings. Rust's `char::to_lowercase` can yield more than
-/// one character for a handful of code points (`İ`, `ẞ` in some directions),
-/// where this is wider than Java's; no catalog/schema/table/column identifier
-/// on either engine uses one, and the whole 3348-pair oracle in the tests
-/// below was measured against the real method.
+/// single-character mappings. This tries `a == b` and then one lowercase
+/// step, which is NOT the same, and the difference was measured rather than
+/// reasoned about: 1922 character pairs through the real
+/// `String.regionMatches(true, …)` on the harness classpath produce **22
+/// disagreements, and in every one Java is `true` while this is `false`**.
+///
+/// **This is strictly NARROWER than Java, never wider** — an earlier version
+/// of this comment said the opposite, which mattered because the direction IS
+/// the safety argument. Narrower means egret finds no match where Ranger
+/// finds one: fail-CLOSED for an allow rule, and fail-OPEN for a deny or an
+/// `isExcludes` rule, which is the direction that costs something.
+///
+/// Two classes, both pinned in
+/// [`tests::case_folding_is_narrower_than_java_in_exactly_two_classes`]:
+///
+/// 1. **Dotted and dotless I.** `İ` (U+0130) and `ı` (U+0131) against `i` /
+///    `I`. Java's second step maps `İ` to itself and its third maps it to a
+///    single `i`; Rust's `char::to_lowercase` yields TWO code points for
+///    `İ`, so no single-character comparison can reach Java's answer.
+/// 2. **Final sigma.** `ς` (U+03C2) against `σ` (U+03C3) and `Σ` (U+03A3).
+///    This one is not a length problem at all — it is the missing
+///    UPPERCASE step: `toUpperCase('ς') == toUpperCase('σ') == 'Σ'`, while
+///    lowercasing leaves `ς` and `σ` distinct. Adding a `to_uppercase` step
+///    would close this class and not the first; it is left alone here
+///    because this round corrects the claim rather than the semantics.
+///
+/// No catalog/schema/database/table/column identifier on either engine
+/// admits any of these code points.
 fn chars_equal(a: char, b: char, ignore_case: bool) -> bool {
     if a == b {
         return true;
@@ -970,6 +993,18 @@ mod tests {
     /// The first block is finding F1 — a `*` immediately followed by a `?`
     /// consumes NOTHING, which a greedy matcher gets wrong in the fail-open
     /// direction.
+    ///
+    /// The LAST block is the backtracking resume point, and it is here
+    /// because review found that deleting
+    /// `backtrack.push((wcs_idx, repeat))` left all 131 tests green AND the
+    /// whole 4000-case differential green at the recorded seed. Every row in
+    /// that block goes true → false without it. The corpus could not see it:
+    /// almost every `Wildcard`-classified value it emitted ended in `*` (a
+    /// trailing `*` jumps to the end of the text and never needs a resume
+    /// point), and its literal runs never recurred in a request value. That
+    /// is the difference between a shape being GENERATED and a rule being
+    /// REACHED, and it is why these rows are pinned by hand rather than left
+    /// to the generator.
     #[test]
     fn wildcard_match_reproduces_filenameutils() {
         let table: &[(&str, &str, bool, bool)] = &[
@@ -1027,12 +1062,100 @@ mod tests {
             ("x?z", "x_z", true, true),
             ("*_tmp", "hive_tmp", true, true),
             ("tmp_*", "tmp_1", true, true),
+            // ── the backtracking resume point ────────────────────────────
+            //
+            // A literal token AFTER a `*` is found with `checkIndexOf`, and
+            // the NEXT occurrence of that same literal is pushed as a resume
+            // point. Where the first occurrence is a dead end and a later one
+            // works, that push is the whole difference. Measured, like every
+            // other row here.
+            ("*ab*ab", "ababab", true, true),
+            ("*ab*ab", "ababab", false, true),
+            ("s**s", "sisters", true, true),
+            ("s**s", "sss", true, true),
+            ("s**s", "ssss", true, true),
+            ("*a*a", "banana", true, true),
+            ("*a*a", "ababa", true, true),
+            ("*a*a", "aaa", true, true),
+            ("*a*a?", "xabaxbay", true, true),
+            ("*a*a?", "aabaa", true, true),
+            ("*ab*b", "ababab", true, true),
+            ("*b*ab", "ababab", true, true),
+            ("*s*s", "assessors", true, true),
+            ("*s*s", "sisters", false, true),
+            ("*a*b*a", "ababa", true, true),
+            ("*a*b*a", "aabaa", true, true),
+            ("*ab*ab??", "ababab_x", true, true),
+            ("*ab*ab", "abab", true, true),
+            ("*ab*ab", "abcabc", true, false),
+            ("*ab*ab", "ab", true, false),
+            ("s**s", "sis", true, true),
+            ("s**s", "x", true, false),
+            ("*a*a", "x", true, false),
+            ("*ab*ac", "ababab", true, false),
+            ("*ba*ab", "ababab", true, true),
+            ("*ab*ab?", "xababy", true, true),
+            ("*ab*ab?", "ababab", true, false),
         ];
         for (pattern, text, ignore_case, expected) in table {
             assert_eq!(
                 wildcard_match(pattern, text, *ignore_case),
                 *expected,
                 "wildcardMatch({text:?}, {pattern:?}, ignoreCase={ignore_case})"
+            );
+        }
+    }
+
+    /// The case-folding divergence, measured against the real
+    /// `String.regionMatches(true, …)` over a 1922-pair cross product of every
+    /// code point with an awkward case mapping. Two properties are pinned:
+    /// the exact membership of the divergent set, and — the load-bearing one
+    /// — its DIRECTION.
+    #[test]
+    fn case_folding_is_narrower_than_java_in_exactly_two_classes() {
+        // Java says these are equal ignoring case; this crate says they are
+        // not. Measured, not predicted.
+        let java_yes_rust_no = [
+            ('i', '\u{0130}'),
+            ('i', '\u{0131}'),
+            ('I', '\u{0130}'),
+            ('I', '\u{0131}'),
+            ('\u{0130}', 'i'),
+            ('\u{0130}', 'I'),
+            ('\u{0130}', '\u{0131}'),
+            ('\u{0131}', 'i'),
+            ('\u{0131}', 'I'),
+            ('\u{0131}', '\u{0130}'),
+            ('\u{03C2}', '\u{03C3}'),
+            ('\u{03C2}', '\u{03A3}'),
+            ('\u{03C3}', '\u{03C2}'),
+            ('\u{03A3}', '\u{03C2}'),
+        ];
+        for (a, b) in java_yes_rust_no {
+            assert!(
+                !chars_equal(a, b, true),
+                "{a:?} vs {b:?}: this crate now agrees with Java here. If that is \
+                 deliberate, shrink the declared divergence in this test AND in \
+                 tests/ranger/README.md; the two must not drift apart."
+            );
+        }
+
+        // The direction is the claim that matters: NARROWER, never wider. The
+        // ordinary mappings all still work, so the divergence is confined to
+        // the set above rather than being a hole in case-insensitive matching.
+        for (a, b) in [
+            ('a', 'A'),
+            ('A', 'a'),
+            ('z', 'Z'),
+            ('k', 'K'),
+            ('s', 'S'),
+            ('\u{00E5}', '\u{00C5}'),
+            ('\u{00FF}', '\u{0178}'),
+        ] {
+            assert!(chars_equal(a, b, true), "{a:?} vs {b:?} must fold equal");
+            assert!(
+                !chars_equal(a, b, false),
+                "{a:?} vs {b:?} must differ when case-sensitive"
             );
         }
     }

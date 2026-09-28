@@ -36,6 +36,11 @@ public class EgretRangerEnforcementTest {
         m.put("catalog","hive"); m.put("schema","default"); m.put("table","t");
         return request(user, access, m);
     }
+    // A FRESH request per evaluation, deliberately. `preProcess` early-returns
+    // on `ISREQUESTPREPROCESSED`; `setResource` clears that flag, `setUser`
+    // does not (javap -c, 2.5.0). Reusing one request and only changing the
+    // user would evaluate every case after the first against a stale
+    // `token:USER` — failing OPEN, and silently.
     private RangerAccessRequestImpl request(String user, String access, Map<String,Object> m) {
         RangerAccessRequestImpl r = new RangerAccessRequestImpl();
         r.setResource(new RangerAccessResourceImpl(m));
