@@ -916,12 +916,19 @@ async fn a_path_that_escapes_the_working_directory_is_refused_by_the_runner() {
     );
     assert_eq!(out.exit_code, 0, "the exit code survives the refusal");
 
-    for t in [&t, &t2] {
-        assert!(
-            !container_exists(&container_name(t)),
-            "a refused run removes whatever it created"
-        );
-    }
+    // The input refusal came before `docker create`: nothing exists.
+    assert!(
+        !container_exists(&container_name(&t)),
+        "a run refused before `create` leaves nothing"
+    );
+    // The output refusal came after the command ran: the container stays for
+    // the post-commit `release` (final review I3), which removes it.
+    assert!(container_exists(&container_name(&t2)));
+    runner.release(&t2, &docker_spec()).await.expect("release");
+    assert!(
+        !container_exists(&container_name(&t2)),
+        "release removes what the refused run created"
+    );
 }
 
 /// **A symlinked output file cannot read the worker host's files.**
