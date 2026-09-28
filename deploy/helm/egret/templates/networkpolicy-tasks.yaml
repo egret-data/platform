@@ -4,13 +4,18 @@ and the Kubernetes API server. NetworkPolicy has no deny rule, so "open except"
 is written as the union of three allow rules that together leave those two
 out:
 
-  1. every pod in every namespace other than egret's own;
+  1. every pod in every namespace other than egret's own and the
+     `deniedNamespaces` (an in-cluster metadata Postgres outside egret's
+     namespace is denied here: `deniedCidrs` cannot subtract from a selector
+     rule);
   2. every pod in egret's own namespace except the Postgres pod
      (`app: postgres`, deps-postgres.yaml);
   3. every IP outside the cluster, i.e. 0.0.0.0/0 EXCEPT the pod and service
      CIDRs (in-cluster traffic is judged by rules 1-2, and some CNIs match
      ipBlock against pod IPs too), the API server's endpoints, and any
-     `deniedCidrs` (an external metadata Postgres goes here).
+     `deniedCidrs` (the cloud metadata service by default; an OUT-of-cluster
+     metadata Postgres goes here). The pod and service CIDRs have no default
+     and fail the render when unset, like the API server's.
 
 The API server is reached through the `kubernetes` Service, which CNIs
 enforce after DNAT, i.e. against its ENDPOINT addresses -- host-network IPs no
@@ -33,6 +38,9 @@ on a plain kind cluster. Enforcement needs Calico, Cilium, ...
 {{- range $np.apiServerCidrs }}{{ $api = append $api . }}{{ end }}
 {{- $ep := lookup "v1" "Endpoints" "default" "kubernetes" }}
 {{- if $ep }}{{ range $ep.subsets }}{{ range .addresses }}{{ $api = append $api (printf "%s/32" .ip) }}{{ end }}{{ end }}{{ end }}
+{{- if not (and $np.podCidr $np.serviceCidr) }}
+{{- fail "workflow.tasks.networkPolicy.podCidr and serviceCidr must be set to the cluster's pod and service CIDRs (kind: 10.244.0.0/16, 10.96.0.0/12): with wrong ones the rule that keeps task pods off egret's Postgres silently fails on CNIs that match ipBlock against pod IPs" }}
+{{- end }}
 {{- if not $api }}
 {{- fail "workflow.tasks.networkPolicy.apiServerCidrs is empty and the API server's endpoints could not be looked up: set the API server's addresses (kubectl get endpoints kubernetes -n default) so task pods cannot reach it" }}
 {{- end }}
@@ -48,7 +56,13 @@ spec:
     - to:
         - namespaceSelector:
             matchExpressions:
-              - { key: kubernetes.io/metadata.name, operator: NotIn, values: [{{ .Release.Namespace }}] }
+              - key: kubernetes.io/metadata.name
+                operator: NotIn
+                values:
+                  - {{ .Release.Namespace }}
+                  {{- range $np.deniedNamespaces }}
+                  - {{ . }}
+                  {{- end }}
     # 2. egret's namespace, except its metadata Postgres
     - to:
         - namespaceSelector:

@@ -179,6 +179,28 @@ pub fn check_script_tasks(flow: &Flow, gate: &ScriptGate<'_>) -> Result<()> {
             })
         };
         verdict.map_err(refuse)?;
+        // An explicit `taskRunner` must be the runner this deployment HAS
+        // (W5a Task 5 fix round 1). Without this a flow naming the other
+        // runner published and failed every run -- and with
+        // `container_runner = none` it published a task nothing is
+        // registered for, which `WorkerError::NoHandler` re-claims for ever.
+        match gate.default_runner {
+            None => {
+                return Err(Error::InvalidInput(format!(
+                    "task '{}': no container runner is configured on this egret \
+                     (workflow.container_runner is none), so nothing would run it",
+                    task.id
+                )))
+            }
+            Some(configured) if configured != runner => {
+                return Err(Error::InvalidInput(format!(
+                    "task '{}': {}",
+                    task.id,
+                    scripts::runner_unavailable(runner, configured)
+                )))
+            }
+            Some(_) => {}
+        }
     }
     Ok(())
 }

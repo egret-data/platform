@@ -55,11 +55,10 @@
 //!
 //! # Where egret differs from the artifact here, on the record
 //!
-//! * `outputFiles` takes literal names only, and a declared file the command
-//!   did not write fails the task (W4's rule, [`TaskCommands::output_files`]);
-//!   Kestra globs and silently omits a missing file (`output_files` cases).
-//! * The output value is the file's contents, not an internal-storage URI
-//!   (W9 owns storage).
+//! * `outputFiles` follows Kestra (a non-recursive glob; a missing file
+//!   ignored -- [`TaskCommands::output_files`]), but its value is the file's
+//!   CONTENTS under W4's 1 MiB per-file and total caps, not an
+//!   internal-storage URI (W9 owns storage); spec §2's table says so.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -333,10 +332,8 @@ impl TaskHandler for Script {
         // 4. the runner.
         if spec.kind != self.rt.runner_kind {
             return Ok(Outcome::failed_with(format!(
-                "{type_id}: `taskRunner` is '{}', but this egret runs script tasks on '{}' \
-                 (workflow.container_runner); remove `taskRunner` to use it",
-                spec.kind.fqcn(),
-                self.rt.runner_kind.fqcn()
+                "{type_id}: {}",
+                scripts::runner_unavailable(spec.kind, self.rt.runner_kind)
             )));
         }
 

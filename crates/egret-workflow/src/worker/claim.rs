@@ -1096,10 +1096,13 @@ pub async fn tick_with(
     if let Err(e) = wake(pool, n as i64).await {
         first_err = Some(e);
     }
+    // Read BEFORE the claim statement is sent, so the self-fence's clock
+    // (`under_lease`) can only start earlier than the `claimed_at` it wrote.
+    let leased_at = tokio::time::Instant::now();
     let claimed = claim(pool, n as i64).await?;
     let mut done = 0usize;
     for c in &claimed {
-        match run_one(pool, c, reg, timing).await {
+        match run_one(pool, c, reg, timing, leased_at).await {
             Ok(Committed::Yes) => done += 1,
             // The fence moved: the run is another worker's and this one
             // committed nothing, so it is not counted.
@@ -1172,6 +1175,7 @@ async fn run_one(
     c: &Claimed,
     reg: &dyn Registry,
     timing: WorkerTiming,
+    leased_at: tokio::time::Instant,
 ) -> Result<Committed> {
     let (input, budget) = input_for(pool, c, reg, timing.container_default_timeout).await?;
     let handler = async {
@@ -1185,7 +1189,16 @@ async fn run_one(
             other => cancel::guarded(reg, &input, other.duration()).await,
         }
     };
-    let (outcome, held) = match under_lease(pool, c, timing.renew_every(), handler).await {
+    let (outcome, held) = match under_lease(
+        pool,
+        c,
+        timing.renew_every(),
+        timing.working_timeout,
+        leased_at,
+        handler,
+    )
+    .await
+    {
         Leased::Kept { out, held } => (out, held),
         // **The fence moved: another worker holds this run now, and this one
         // records NOTHING** — no outcome, and no failed-attempt line, because
@@ -1198,8 +1211,9 @@ async fn run_one(
                 execution = %c.execution_id,
                 run = %c.id,
                 task_id = %c.task_id,
-                "this worker's lease on the run was taken by another; it stopped \
-                 following the task and records no outcome"
+                "this worker no longer holds the run (the fence moved, or no renewal \
+                 succeeded for working_timeout); it stopped following the task and \
+                 records no outcome"
             );
             input.log.finish().await;
             return Ok(Committed::LeaseLost);
@@ -1274,11 +1288,30 @@ enum Leased<T> {
 /// could commit on the server after its future was dropped, leaving
 /// `claimed_at` at a value this worker never saw and its own outcome refused.
 ///
-/// # A renewal that ERRORS is not a lost fence
+/// # A renewal that ERRORS is retried -- until the worker SELF-FENCES
 ///
-/// It is logged and the next tick tries again. If the database stays
-/// unreachable the lease lapses and `apply_outcome`'s fence refuses the
-/// outcome, which is the existing `LeaseLost` error — the safe answer.
+/// One failed renewal is logged and the next tick tries again. But a worker
+/// cut off from Postgres cannot tell whether the reaper has already taken its
+/// run, and -- since W5a names a container or pod by (run, attempt) so that the
+/// next holder re-attaches to it -- a worker still inside its handler could
+/// then DELETE that work on finish (`delete: true`) or KILL it when its own
+/// budget expires, under the new holder (W5a Task 5 fix round 1, review
+/// Important 4). So **once no renewal has succeeded for `fence_after`
+/// (`working_timeout`, the reaper's own threshold), the worker gives the run
+/// up exactly as on a moved fence**: the handler future is dropped (no
+/// outcome, no delete, no cancel), and [`Leased::Lost`] is returned. Kestra's
+/// worker does the same when its heartbeat fails.
+///
+/// The clock starts when the claim was TAKEN (`leased_at`, read before the
+/// claim statement was sent), and each success restarts it from before its
+/// renewal was sent -- both earlier than the `claimed_at` the database wrote,
+/// so the local deadline always falls at or before the instant the reaper
+/// could see the lease as expired. A renewal is awaited (the handler is not
+/// polled meanwhile) for up to the later of the deadline and one interval: a
+/// renewal that SUCCEEDS is proof the run is still this worker's, however
+/// late; anything else once the deadline has passed gives the run up. A
+/// renewal cut off by that limit that later commits server-side wrote a lease
+/// this worker has already abandoned.
 ///
 /// # What dropping `work` does, per handler
 ///
@@ -1294,25 +1327,81 @@ async fn under_lease<T>(
     pool: &PgPool,
     c: &Claimed,
     every: std::time::Duration,
+    fence_after: std::time::Duration,
+    leased_at: tokio::time::Instant,
     work: impl std::future::Future<Output = T>,
 ) -> Leased<T> {
-    let mut held = c.claimed_at;
+    under_lease_with(
+        |held| renew_lease(pool, c.id, held),
+        c.id,
+        c.claimed_at,
+        every,
+        fence_after,
+        leased_at,
+        work,
+    )
+    .await
+}
+
+/// [`under_lease`] over any renewal, so a test can make renewals fail.
+async fn under_lease_with<T, R, F>(
+    mut renew: R,
+    run: Uuid,
+    claimed_at: DateTime<Utc>,
+    every: std::time::Duration,
+    fence_after: std::time::Duration,
+    leased_at: tokio::time::Instant,
+    work: impl std::future::Future<Output = T>,
+) -> Leased<T>
+where
+    R: FnMut(DateTime<Utc>) -> F,
+    F: std::future::Future<Output = Result<Option<DateTime<Utc>>>>,
+{
+    let mut held = claimed_at;
+    let mut last_ok = leased_at;
     let mut work = std::pin::pin!(work);
-    let mut renew = tokio::time::interval(every);
-    renew.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut renew_tick = tokio::time::interval(every);
+    renew_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let self_fence = |why: &str| {
+        tracing::warn!(
+            run = %run,
+            "{why}: no lease renewal succeeded for {fence_after:?}, so this worker gives the \
+             run up (self-fence) and stops following it"
+        );
+        Leased::Lost
+    };
     loop {
+        // Wait for the next renewal, the deadline, or the work. The renewal
+        // is preferred: a renewal that SUCCEEDS is proof the run is still this
+        // worker's, whatever the local clock says (a run that waited behind
+        // its batch past the deadline keeps it if nobody reaped it). Reaching
+        // the deadline also tries one renewal first, for the same reason. The
+        // work future is not polled while a renewal is in flight, so waiting
+        // for an answer past the deadline is safe; it is the WORK that must
+        // not run on past the deadline unproven.
         tokio::select! {
             biased;
-            _ = renew.tick() => match renew_lease(pool, c.id, held).await {
-                Ok(Some(renewed)) => held = renewed,
-                Ok(None) => return Leased::Lost,
-                Err(e) => tracing::warn!(
-                    run = %c.id,
-                    error = %e,
-                    "could not renew the lease; retrying at the next renewal"
-                ),
-            },
+            _ = renew_tick.tick() => {}
+            _ = tokio::time::sleep_until(last_ok + fence_after) => {}
             out = &mut work => return Leased::Kept { out, held },
+        }
+        let sent = tokio::time::Instant::now();
+        let limit = std::cmp::max(last_ok + fence_after, sent + every);
+        match tokio::time::timeout_at(limit, renew(held)).await {
+            Ok(Ok(Some(renewed))) => {
+                held = renewed;
+                last_ok = sent;
+            }
+            Ok(Ok(None)) => return Leased::Lost,
+            Ok(Err(e)) => tracing::warn!(
+                run = %run,
+                error = %e,
+                "could not renew the lease; retrying at the next renewal"
+            ),
+            Err(_) => tracing::warn!(run = %run, "a lease renewal went unanswered"),
+        }
+        if tokio::time::Instant::now() >= last_ok + fence_after {
+            return self_fence("the last renewal did not succeed");
         }
     }
 }
@@ -2860,5 +2949,154 @@ mod tests {
             after,
             "a child of a parent with no CREATED child is not the decision point"
         );
+    }
+
+    // ---- the self-fence (W5a Task 5 fix round 1) ------------------------------
+
+    /// Work that never finishes on its own and records whether it was dropped.
+    struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    const EVERY: std::time::Duration = std::time::Duration::from_millis(60);
+    const FENCE: std::time::Duration = std::time::Duration::from_millis(200);
+
+    fn now_utc() -> DateTime<Utc> {
+        Utc::now()
+    }
+
+    /// **A worker cut off from Postgres gives the run up once no renewal has
+    /// succeeded for `working_timeout`** -- exactly as on a moved fence: the
+    /// handler future is DROPPED (so a runner's delete-on-finish and the
+    /// budget's `cancel`, both inside it, never run) and `Lost` is returned.
+    /// Every renewal here errors, as against an unreachable database.
+    #[tokio::test]
+    async fn a_worker_whose_renewals_keep_failing_self_fences_and_drops_the_handler() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let guard = Dropped(dropped.clone());
+        let work = async move {
+            let _g = guard;
+            std::future::pending::<()>().await
+        };
+        let n = calls.clone();
+        let started = tokio::time::Instant::now();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            under_lease_with(
+                move |_held| {
+                    n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { Err(Error::Internal(anyhow::anyhow!("database unreachable"))) }
+                },
+                Uuid::nil(),
+                now_utc(),
+                EVERY,
+                FENCE,
+                started,
+                work,
+            ),
+        )
+        .await
+        .expect("a worker that cannot renew must NOT keep following the task for ever");
+        assert!(matches!(out, Leased::Lost));
+        assert!(
+            started.elapsed() >= FENCE,
+            "not before the deadline: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the handler was dropped"
+        );
+        assert!(
+            calls.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "it did retry first"
+        );
+    }
+
+    /// A renewal that never ANSWERS (a partition that hangs the connection)
+    /// self-fences too; the work is not polled on past the deadline.
+    #[tokio::test]
+    async fn a_renewal_that_never_answers_self_fences() {
+        let started = tokio::time::Instant::now();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            under_lease_with(
+                |_held| std::future::pending::<Result<Option<DateTime<Utc>>>>(),
+                Uuid::nil(),
+                now_utc(),
+                EVERY,
+                FENCE,
+                started,
+                std::future::pending::<()>(),
+            ),
+        )
+        .await
+        .expect("a hung renewal must not hold the worker in the handler for ever");
+        assert!(matches!(out, Leased::Lost));
+    }
+
+    /// **The controls.** Renewals that succeed keep a handler running well
+    /// past `working_timeout`; errors that recover before the deadline do not
+    /// fence; and a successful renewal keeps a run whose deadline had already
+    /// passed at entry (it waited behind its batch) -- success is proof.
+    #[tokio::test]
+    async fn succeeding_renewals_keep_the_run_past_the_deadline() {
+        let ok = |_held: DateTime<Utc>| async { Ok(Some(Utc::now())) };
+        let out = under_lease_with(
+            ok,
+            Uuid::nil(),
+            now_utc(),
+            EVERY,
+            FENCE,
+            tokio::time::Instant::now(),
+            async {
+                tokio::time::sleep(FENCE * 3).await;
+                7
+            },
+        )
+        .await;
+        assert!(matches!(out, Leased::Kept { out: 7, .. }));
+
+        let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let m = n.clone();
+        let flaky = move |_held: DateTime<Utc>| {
+            let i = m.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if i % 2 == 1 {
+                    Err(Error::Internal(anyhow::anyhow!("blip")))
+                } else {
+                    Ok(Some(Utc::now()))
+                }
+            }
+        };
+        let out = under_lease_with(
+            flaky,
+            Uuid::nil(),
+            now_utc(),
+            EVERY,
+            FENCE,
+            tokio::time::Instant::now(),
+            async {
+                tokio::time::sleep(FENCE * 3).await;
+                8
+            },
+        )
+        .await;
+        assert!(
+            matches!(out, Leased::Kept { out: 8, .. }),
+            "one error in two is not a fence"
+        );
+
+        let late = tokio::time::Instant::now() - FENCE * 2;
+        let out = under_lease_with(ok, Uuid::nil(), now_utc(), EVERY, FENCE, late, async {
+            tokio::time::sleep(EVERY).await;
+            9
+        })
+        .await;
+        assert!(matches!(out, Leased::Kept { out: 9, .. }));
     }
 }

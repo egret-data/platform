@@ -86,6 +86,18 @@ pub struct ScriptSettings {
     pub default_runner: Option<RunnerKind>,
 }
 
+/// Why a task naming `asked` cannot run on a deployment whose
+/// `workflow.container_runner` is `configured` -- one sentence for publish and
+/// for the run-time refusal (`worker::handlers::script`).
+pub fn runner_unavailable(asked: RunnerKind, configured: RunnerKind) -> String {
+    format!(
+        "`taskRunner` is '{}', but this egret runs script tasks on '{}' \
+         (workflow.container_runner); remove `taskRunner` to use it",
+        asked.fqcn(),
+        configured.fqcn()
+    )
+}
+
 /// Which of the four script task types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScriptKind {
@@ -518,7 +530,25 @@ pub fn parse(type_id: &str, spec: &Value) -> Result<ScriptTask, Vec<ScriptRefusa
                     out.input_files = string_map(value, key, &mut errs);
                 }
             }
-            "outputFiles" => out.output_files = string_list(value, key, &mut errs),
+            "outputFiles" => {
+                out.output_files = string_list(value, key, &mut errs);
+                // A literal entry is judged now (W5a Task 5 fix round 1):
+                // `*`/`?` in the file name are implemented, `**`, `[...]`, a
+                // wildcard directory and an escaping path are refused by
+                // name. A `{{ }}` entry is judged after rendering, at run.
+                for rel in &out.output_files {
+                    if gate::is_unrendered(rel) {
+                        continue;
+                    }
+                    if let Some(problem) = crate::worker::commands::output_problem(rel) {
+                        errs.push(refusal(
+                            CODE_INVALID,
+                            key,
+                            format!("'outputFiles': {problem}"),
+                        ));
+                    }
+                }
+            }
             "failFast" => out.fail_fast = boolean(value, key, &mut errs).unwrap_or(true),
             "warningOnStdErr" => {
                 out.warning_on_std_err = boolean(value, key, &mut errs).unwrap_or(true)

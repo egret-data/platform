@@ -69,9 +69,9 @@ use super::transfer;
 use crate::logs::{LogLevel, LogRepo, RunIdentity};
 use crate::scripts::RunnerSpec;
 use crate::worker::commands::{
-    relative_problem, run_liveness, stream_line, CommandsResult, LineObserver, OrphanSweep,
-    StreamState, TaskCommands, TaskRunner, MAX_OUTPUT_FILE_BYTES, MAX_VARS_BYTES, RUN_NAME_PREFIX,
-    TASKRUN_LABEL, WORKING_DIR,
+    expand_outputs, output_problem, pattern_dirs, relative_problem, run_liveness, stream_line,
+    CommandsResult, LineObserver, OrphanSweep, StreamState, TaskCommands, TaskRunner,
+    MAX_OUTPUT_FILE_BYTES, MAX_VARS_BYTES, RUN_NAME_PREFIX, TASKRUN_LABEL, WORKING_DIR,
 };
 use crate::worker::TaskInput;
 
@@ -587,10 +587,46 @@ impl KubernetesRunner {
     ) -> Result<()> {
         let mut total = 0usize;
         for rel in &cmds.output_files {
-            if let Some(problem) = relative_problem(rel) {
+            if let Some(problem) = output_problem(rel) {
                 result.failure = Some(problem);
                 return Ok(());
             }
+        }
+        // Patterns (W5a Task 5 fix round 1): list each directory a pattern
+        // names in `files-out` -- `ls -A1p`, so a directory carries a `/` and
+        // is dropped (Kestra's glob visits files only) -- then read every
+        // match back like a literal name.
+        let mut listed = std::collections::BTreeMap::new();
+        for dir in pattern_dirs(&cmds.output_files) {
+            let path = if dir.is_empty() {
+                WORKING_DIR.to_string()
+            } else {
+                format!("{WORKING_DIR}/{dir}")
+            };
+            let out = self
+                .exec(
+                    name,
+                    FILES_OUT,
+                    vec!["ls".into(), "-A1p".into(), "--".into(), path],
+                    None,
+                    self.max_output_bytes,
+                )
+                .await?;
+            // A directory that does not exist lists nothing: its pattern
+            // matches nothing, as Kestra's.
+            let names: Vec<String> = if out.success {
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter(|l| !l.is_empty() && !l.ends_with('/'))
+                    .map(str::to_string)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            listed.insert(dir, names);
+        }
+        for (rel, _from_glob) in expand_outputs(&cmds.output_files, &listed) {
+            let rel = &rel;
             // The contents, their header, a possible long-name entry and the
             // end blocks. Past this the stream is cut and the header decides.
             let cap = self.max_output_bytes + 8 * 512;
@@ -615,7 +651,9 @@ impl KubernetesRunner {
             let entry = transfer::unpack_one(&out.stdout, self.max_output_bytes)
                 .map_err(|e| internal(&format!("reading {rel:?} out of files-out"), e))?;
             let bytes = match transfer::judge(rel, entry, self.max_output_bytes) {
-                Ok(b) => b,
+                Ok(Some(b)) => b,
+                // Not there: ignored, as Kestra (`missing_declared_file`).
+                Ok(None) => continue,
                 Err(problem) => {
                     result.failure = Some(problem);
                     break;

@@ -198,11 +198,15 @@ pub struct TaskCommands {
     /// `AbstractExecScript.outputFiles` — names relative to [`WORKING_DIR`],
     /// read back after the command exits.
     ///
-    /// **Literal names only, no globs.** Kestra's `CommandsWrapper` treats
-    /// `*`, `?` and `[` as a glob; egret refuses them, because a glob that
-    /// matched nothing would produce an output map missing a key the author
-    /// declared, and that absence is invisible until a later `{{ … }}` fails
-    /// somewhere else.
+    /// **As Kestra (W5a Task 5 fix round 1, the user's decision):** a literal
+    /// name, or a non-recursive glob -- `*` and `?` in the file name, matched
+    /// within one directory (`*.csv`, `sub/*.csv`) -- keying every FILE it
+    /// matches; and a declared file the command did not write is IGNORED (no
+    /// key, no failure). Measured: `w5a-scripts.json`
+    /// `egret_expected.output_files`. `**`, `[...]` and a wildcard directory
+    /// are refused by name ([`output_problem`]). W4 took literal names only
+    /// and failed a missing one. The 1 MiB per-file and total caps stay: the
+    /// value is the contents, not a storage URI (W9).
     pub output_files: Vec<String>,
 }
 
@@ -394,10 +398,20 @@ pub(crate) async fn stream_line(
 /// `cancel` with a name that no longer existed. Two things changed in W5a:
 ///
 /// 1. **A worker renews its lease while its handler runs, under a fence, and
-///    drops the handler's future the moment the fence moves** (Task 3,
-///    `worker::claim::under_lease`). A reaped worker is therefore no longer
-///    "still inside its handler": its future -- budget and all -- is gone, so
-///    the stale `cancel` that motivated the lease key is never issued.
+///    drops the handler's future when the fence moves** (Task 3,
+///    `worker::claim::under_lease`) -- **or when no renewal has succeeded for
+///    `working_timeout`, the reaper's own threshold** (Task 5 fix round 1).
+///    That second half is what makes this key safe, and the first version of
+///    this doc claimed it without it: a renewal that ERRORS used to be retried
+///    for ever, so a worker cut off from Postgres but not from Docker or the
+///    API server stayed inside its handler after being reaped, and could
+///    remove (`delete: true`, on finish) or kill (its own budget's `cancel`)
+///    the container the new holder had re-attached to. Now the worker gives
+///    the run up no later than the reaper could take it, with its future --
+///    budget, delete and all -- dropped, so neither is issued.
+///    *Residual, stated:* a worker whose process is frozen (not merely cut
+///    off) past the deadline resumes inside a poll of the handler before the
+///    fence is re-checked; the window is one poll.
 /// 2. **The new holder must FIND the old holder's container** to re-attach to
 ///    it (spec §5), which a lease-keyed name makes impossible: every claim
 ///    would create a second container while the first kept running (Task 3's
@@ -614,6 +628,7 @@ pub(crate) fn classify_marker(line: &str) -> Marker {
 /// `Err` is the message the **task** fails with — never a worker failure. The
 /// caller puts it in [`CommandsResult::failure`], so the exit code and the vars
 /// the command printed survive it.
+#[cfg(test)]
 pub(crate) fn ingest_output_file(
     result: &mut CommandsResult,
     staged_root: &std::path::Path,
@@ -622,7 +637,31 @@ pub(crate) fn ingest_output_file(
     max_total_bytes: usize,
     total: &mut usize,
 ) -> std::result::Result<(), String> {
-    if let Some(problem) = relative_problem(rel) {
+    ingest_output(
+        result,
+        staged_root,
+        rel,
+        max_file_bytes,
+        max_total_bytes,
+        total,
+        false,
+    )
+}
+
+/// [`ingest_output_file`], for a name that is either declared literally
+/// (`from_glob = false`) or one a declared glob matched (`true`). A glob that
+/// matched a DIRECTORY skips it -- Kestra's glob visits files only -- where a
+/// directory declared by name is refused.
+pub(crate) fn ingest_output(
+    result: &mut CommandsResult,
+    staged_root: &std::path::Path,
+    rel: &str,
+    max_file_bytes: usize,
+    max_total_bytes: usize,
+    total: &mut usize,
+    from_glob: bool,
+) -> std::result::Result<(), String> {
+    if let Some(problem) = output_problem(rel) {
         return Err(problem);
     }
 
@@ -647,14 +686,13 @@ pub(crate) fn ingest_output_file(
         let m = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // **A declared output that is not there fails the task.** The
-                // alternative is a key missing from `outputs`, which nothing
-                // notices until a later `{{ outputs.x.f }}` fails somewhere
-                // else with a message about the wrong task.
-                return Err(format!(
-                    "`outputFiles` declares {rel:?}, which the command did not leave in \
-                     {WORKING_DIR}"
-                ));
+                // **A declared output that is not there is IGNORED** -- no key,
+                // no failure -- the artifact's measured behaviour
+                // (`w5a-scripts.json` `egret_expected.output_files`:
+                // `missing_declared_file: "ignored"`, state SUCCESS). W4 failed
+                // the task here; W5a Task 5 fix round 1 follows Kestra, by the
+                // user's decision.
+                return Ok(());
             }
             Err(e) => {
                 return Err(format!(
@@ -676,6 +714,9 @@ pub(crate) fn ingest_output_file(
     }
     let meta = meta.expect("`relative_problem` refuses an empty name, so there is a segment");
 
+    if meta.is_dir() && from_glob {
+        return Ok(());
+    }
     if meta.is_dir() {
         return Err(format!(
             "`outputFiles` declares {rel:?}, which is a DIRECTORY. An output is JSON \
@@ -1520,14 +1561,33 @@ impl DockerRunner {
         result: &mut CommandsResult,
     ) -> Result<()> {
         let mut total = 0usize;
-        for (i, rel) in commands.output_files.iter().enumerate() {
-            // The name is vetted BEFORE it is interpolated into a `docker cp`
-            // argument, so `..` never reaches the daemon and the staged path
-            // cannot land outside `staging`.
-            if let Some(problem) = relative_problem(rel) {
+        // Every declared name is vetted BEFORE anything is interpolated into
+        // a `docker` argument, so `..` never reaches the daemon and a staged
+        // path cannot land outside `staging`.
+        for rel in &commands.output_files {
+            if let Some(problem) = output_problem(rel) {
                 result.failure = Some(problem);
                 return Ok(());
             }
+        }
+        // Patterns are resolved against `docker diff` -- the paths the
+        // container added, which works on a stopped container and moves no
+        // file contents -- then read back one file at a time like a literal.
+        let dirs = pattern_dirs(&commands.output_files);
+        let listed = if dirs.is_empty() {
+            std::collections::BTreeMap::new()
+        } else {
+            let out = self.cli(&["diff", name]).await?;
+            if !out.status.success() {
+                return Err(self
+                    .classify("diff", &String::from_utf8_lossy(&out.stderr))
+                    .await);
+            }
+            parse_docker_diff(&String::from_utf8_lossy(&out.stdout), &dirs)
+        };
+        let names = expand_outputs(&commands.output_files, &listed);
+        for (i, (rel, from_glob)) in names.iter().enumerate() {
+            let (rel, from_glob) = (rel.as_str(), *from_glob);
             // **One private root per declared name** — see
             // [`stage_destination`] for the whole argument. Nothing an author
             // declares can reach another declared name's staging tree.
@@ -1557,13 +1617,14 @@ impl DockerRunner {
             // A copy that failed while the daemon is up is left to the
             // filesystem: the file is simply not staged, and
             // `ingest_output_file` produces the author-facing message.
-            if let Err(problem) = ingest_output_file(
+            if let Err(problem) = ingest_output(
                 result,
                 &root,
                 rel,
                 self.max_output_bytes,
                 self.max_output_bytes,
                 &mut total,
+                from_glob,
             ) {
                 result.failure = Some(problem);
                 break;
@@ -2023,6 +2084,129 @@ pub(crate) fn relative_problem(rel: &str) -> Option<String> {
         ));
     }
     None
+}
+
+/// Is a declared output a pattern (`*` or `?` in its file name) rather than a
+/// literal name.
+pub(crate) fn is_pattern(rel: &str) -> bool {
+    rel.contains(['*', '?'])
+}
+
+/// [`relative_problem`] for a DECLARED output, which may be a non-recursive
+/// glob (W5a Task 5 fix round 1, following `w5a-scripts.json`
+/// `egret_expected.output_files`: `*.csv` keys `a.csv`, `b.csv` and not
+/// `sub/c.csv`).
+///
+/// `*` (any run of characters) and `?` (one character) are accepted in the
+/// FILE NAME -- the last segment -- and match within the one directory the
+/// rest of the name gives (`sub/*.csv`). Refused by name, never ignored: a
+/// wildcard in a directory segment, `**`, and `[...]` classes (not
+/// implemented; `scripts::parse` refuses a literal one at save).
+pub(crate) fn output_problem(rel: &str) -> Option<String> {
+    if rel.contains('[') || rel.contains("**") {
+        return Some(format!(
+            "{rel:?}: `**` and `[...]` in `outputFiles` are not implemented by egret \
+             (W5a); `*` and `?` in the file name are"
+        ));
+    }
+    let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
+    if is_pattern(dir) {
+        return Some(format!(
+            "{rel:?}: a wildcard in a directory of `outputFiles` is not implemented by \
+             egret (W5a); only the file name may be a pattern"
+        ));
+    }
+    let literal = file.replace(['*', '?'], "x");
+    let probe = if dir.is_empty() {
+        literal
+    } else {
+        format!("{dir}/{literal}")
+    };
+    relative_problem(&probe).map(|p| p.replace(&format!("{probe:?}"), &format!("{rel:?}")))
+}
+
+/// Resolve the declared outputs to the names to read back, given the entries
+/// directly inside each directory a pattern names (`listed[dir]`, `""` for
+/// the working directory). Literal names are kept, in declared order,
+/// whether or not they exist (a missing one is ignored when read); each
+/// pattern contributes its matches, sorted. A name is returned once. The
+/// `bool` is "from a glob". Pure: both runners list, then call this.
+pub(crate) fn expand_outputs(
+    declared: &[String],
+    listed: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for rel in declared {
+        if !is_pattern(rel) {
+            if seen.insert(rel.clone()) {
+                out.push((rel.clone(), false));
+            }
+            continue;
+        }
+        let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
+        let mut matched: Vec<String> = listed
+            .get(dir)
+            .into_iter()
+            .flatten()
+            .filter(|name| crate::scripts::gate::glob_match(file, name))
+            .map(|name| {
+                if dir.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{dir}/{name}")
+                }
+            })
+            .collect();
+        matched.sort();
+        for m in matched {
+            if seen.insert(m.clone()) {
+                out.push((m, true));
+            }
+        }
+    }
+    out
+}
+
+/// The directories whose entries [`expand_outputs`] needs listed.
+pub(crate) fn pattern_dirs(declared: &[String]) -> std::collections::BTreeSet<String> {
+    declared
+        .iter()
+        .filter(|rel| is_pattern(rel))
+        .map(|rel| rel.rsplit_once('/').map_or("", |(d, _)| d).to_string())
+        .collect()
+}
+
+/// `docker diff` lines (`A /egret/working-dir/sub/c.csv`), as the entries of
+/// each directory in `dirs` that are not a parent of another entry -- i.e.
+/// its files (and empty directories, which [`ingest_output`] skips for a
+/// glob).
+fn parse_docker_diff(
+    stdout: &str,
+    dirs: &std::collections::BTreeSet<String>,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let prefix = format!("{WORKING_DIR}/");
+    let paths: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| l.get(2..))
+        .filter_map(|p| p.strip_prefix(prefix.as_str()))
+        .filter(|p| !p.is_empty())
+        .collect();
+    let mut out: std::collections::BTreeMap<String, Vec<String>> =
+        dirs.iter().map(|d| (d.clone(), Vec::new())).collect();
+    for p in &paths {
+        let parent_of_another = paths
+            .iter()
+            .any(|q| q.len() > p.len() && q.starts_with(p) && q.as_bytes()[p.len()] == b'/');
+        if parent_of_another {
+            continue;
+        }
+        let (dir, name) = p.rsplit_once('/').unwrap_or(("", p));
+        if let Some(v) = out.get_mut(dir) {
+            v.push(name.to_string());
+        }
+    }
+    out
 }
 
 fn io_err(e: std::io::Error) -> Error {
@@ -2519,20 +2703,88 @@ mod tests {
         );
     }
 
-    /// **A declared output that is not in the copied working directory fails
-    /// the task, naming it** — and it is a `std::fs` answer now, not a guess at
-    /// a daemon's wording (fix round 1's Important 5).
+    /// **`outputFiles` follows the artifact, case for case** (W5a Task 5 fix
+    /// round 1, the user's decision): every `egret_expected.output_files` case
+    /// of `w5a-scripts.json` -- a literal file, a non-recursive `*.csv` that
+    /// keys `a.csv` and `b.csv` but not `sub/c.csv` or `x.txt`, and a declared
+    /// file the command never wrote, which is IGNORED (no key, no failure).
+    /// Driven through the two pure seams both runners use: `expand_outputs`
+    /// over the working directory's listing, then `ingest_output` per name.
     #[test]
-    fn a_declared_output_that_is_absent_fails_the_task_and_names_itself() {
-        let dir = staging("absent");
-        let mut r = CommandsResult::default();
-        let mut total = 0usize;
-        let err = ingest_output_file(&mut r, &dir, "gone.txt", 1024, 4096, &mut total)
-            .expect_err("an absent output must not be skipped");
-        assert!(err.contains("gone.txt"), "{err}");
-        assert!(err.contains("did not leave"), "{err}");
-        assert!(r.output_files.is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
+    fn output_files_follow_the_fixtures_cases() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/oracle-exec/w5a-scripts.json");
+        let fx: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let spec = &fx["egret_expected"]["output_files"];
+        assert_eq!(spec["missing_declared_file"], "ignored");
+        assert_eq!(spec["glob_descends_into_subdirectories"], false);
+        let strings = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect()
+        };
+        let cases = spec["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 3);
+        for case in cases {
+            let declared = strings(&case["declared"]);
+            let written = strings(&case["written"]);
+            let dir = staging("fixture-outputs");
+            for w in &written {
+                let p = dir.join(w);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, format!("contents of {w}")).unwrap();
+            }
+            // What a listing of each pattern's directory returns: its direct
+            // entries (a subdirectory included, which a glob then skips).
+            let mut listed = std::collections::BTreeMap::new();
+            for d in pattern_dirs(&declared) {
+                let mut names: Vec<String> = std::fs::read_dir(dir.join(&d))
+                    .map(|rd| {
+                        rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                names.sort();
+                listed.insert(d, names);
+            }
+            let mut r = CommandsResult::default();
+            let mut total = 0usize;
+            for (rel, from_glob) in expand_outputs(&declared, &listed) {
+                ingest_output(&mut r, &dir, &rel, 1024, 4096, &mut total, from_glob)
+                    .unwrap_or_else(|e| panic!("{case}: {rel}: {e}"));
+            }
+            let keys: Vec<String> = r.output_files.keys().cloned().collect();
+            assert_eq!(keys, strings(&case["keys"]), "{case}");
+            assert_eq!(case["state"], "SUCCESS");
+            for k in &keys {
+                assert_eq!(r.output_files[k], format!("contents of {k}"));
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// The pattern rules: `*`/`?` in the file name only; `**`, `[...]` and a
+    /// wildcard directory are refused by name; the literal rules still hold.
+    #[test]
+    fn an_output_pattern_is_a_file_name_glob_and_nothing_wider() {
+        assert_eq!(output_problem("*.csv"), None);
+        assert_eq!(output_problem("sub/data-?.csv"), None);
+        assert_eq!(output_problem("out.txt"), None);
+        for bad in ["**/x", "a/**", "[ab].csv", "*/x.csv", "../*.csv", "/tmp/*"] {
+            assert!(output_problem(bad).is_some(), "{bad} must be refused");
+        }
+        // An input name is still literal.
+        assert!(relative_problem("*.csv").is_some());
+        // `docker diff` parsing: files of the named directories only, no
+        // parent directories.
+        let diff = "C /egret\nA /egret/working-dir\nA /egret/working-dir/a.csv\n\
+                    A /egret/working-dir/sub\nA /egret/working-dir/sub/c.csv\nA /tmp/x\n";
+        let dirs = std::collections::BTreeSet::from(["".to_string(), "sub".to_string()]);
+        let listed = parse_docker_diff(diff, &dirs);
+        assert_eq!(listed[""], vec!["a.csv".to_string()]);
+        assert_eq!(listed["sub"], vec!["c.csv".to_string()]);
     }
 
     /// **A directory named as an output file fails the TASK, not the worker.**
@@ -2772,7 +3024,9 @@ mod tests {
         for (bad, needle) in [
             ("../secret", "climbs out"),
             ("/etc/passwd", "absolute path"),
-            ("*.csv", "glob"),
+            ("**/x.csv", "not implemented"),
+            ("[ab].csv", "not implemented"),
+            ("*/x.csv", "not implemented"),
             ("", "must not be empty"),
         ] {
             let err = ingest_output_file(&mut r, &dir, bad, 1024, 4096, &mut total)
@@ -2999,24 +3253,17 @@ mod tests {
                  leased for an hour, then repeats for ever",
             );
 
-        let why = out
-            .failure
-            .clone()
-            .expect("the child cannot be produced, so the task fails");
-        assert!(
-            why.contains("a/b.txt"),
-            "the failure must name the child, not egret's plumbing: {why}"
-        );
-        assert!(
-            !why.contains("File exists") && !why.contains("os error 17"),
-            "and it must not be a staging-collision message -- each declared name \
-             gets its own root precisely so they cannot collide: {why}"
-        );
+        // The child cannot exist (its parent is a file), so it is a declared
+        // file the command did not leave: IGNORED since W5a Task 5 fix round 1
+        // (Kestra's `missing_declared_file`) -- and never a staging
+        // collision, because each declared name gets its own root.
+        assert_eq!(out.failure, None, "{out:?}");
         assert_eq!(
             out.output_files.get("a").map(String::as_str),
             Some("regular-file"),
-            "the parent still came back; only the child failed"
+            "the parent came back"
         );
+        assert!(!out.output_files.contains_key("a/b.txt"), "{out:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3284,9 +3531,9 @@ mod tests {
     }
 
     /// **The same property end to end**: a declared `outputFiles` naming a
-    /// marker is a task failure, not a worker one.
+    /// marker is the author's (missing) file, never a worker failure.
     #[tokio::test]
-    async fn an_output_file_named_like_a_daemon_marker_fails_the_task() {
+    async fn an_output_file_named_like_a_daemon_marker_is_the_authors_missing_file() {
         let dir = staging("marker-output");
         let shim = dir.join("docker-shim.sh");
         std::fs::write(
@@ -3328,12 +3575,12 @@ mod tests {
                 "an author naming a file `docker.sock` must not be able to make egret \
                  report its own daemon as unreachable",
             );
-        let why = out.failure.clone().expect("the file is not there");
-        assert!(why.contains("docker.sock"), "{why}");
-        assert!(
-            why.contains("did not leave"),
-            "and it is the ordinary missing-output message: {why}"
-        );
+        // A file the daemon could not copy while it answers is simply not
+        // there -- the ordinary missing output, IGNORED since W5a Task 5 fix
+        // round 1 (Kestra's `missing_declared_file`), and still no worker
+        // failure.
+        assert_eq!(out.failure, None, "{out:?}");
+        assert!(out.output_files.is_empty(), "{out:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

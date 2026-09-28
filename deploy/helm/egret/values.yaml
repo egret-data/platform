@@ -126,18 +126,34 @@ workflow:
     maxResources: {}
     networkPolicy:
       enabled: true
-      # The cluster's pod and service CIDRs (kind's defaults below): excepted
-      # from the "outside the cluster" rule so in-cluster traffic is judged by
-      # the namespace/pod rules, which leave egret's Postgres out.
-      podCidr: 10.244.0.0/16
-      serviceCidr: 10.96.0.0/12
+      # REQUIRED (the render fails without them): the cluster's pod and
+      # service CIDRs. They are excepted from the "outside the cluster" rule so
+      # in-cluster traffic is judged only by the namespace/pod rules, which
+      # leave egret's Postgres out. Wrong values silently re-open Postgres on a
+      # CNI that matches ipBlock against pod IPs (Calico does), which is why
+      # there is no default. kind: 10.244.0.0/16 and 10.96.0.0/12.
+      podCidr: ""
+      serviceCidr: ""
       # The Kubernetes API server's endpoint addresses. Looked up from the
-      # `default/kubernetes` Endpoints at install; `helm template` cannot look
-      # up, so set them there (kubectl get endpoints kubernetes -n default).
+      # `default/kubernetes` Endpoints at install/upgrade only (the deprecated
+      # Endpoints API; control-plane IPs on EKS/GKE can change between
+      # upgrades -- re-run `helm upgrade`, or list them here); `helm template`
+      # cannot look up, so set them there (kubectl get endpoints kubernetes -n
+      # default). Empty after both: the render fails.
       apiServerCidrs: []
-      # Anything else task pods must not reach, e.g. an external metadata
-      # Postgres: ["10.0.12.7/32"].
-      deniedCidrs: []
+      # IPs task pods must not reach. The default is the cloud metadata
+      # service (node credentials on EKS/GKE without IMDSv2 hop limit or
+      # Workload Identity); remove it only deliberately. Add an OUT-OF-CLUSTER
+      # metadata Postgres here, e.g. "10.0.12.7/32". An IN-cluster address
+      # cannot be denied this way (in-cluster traffic is judged by selectors):
+      # use deniedNamespaces for that.
+      deniedCidrs: ["169.254.169.254/32"]
+      # Namespaces task pods must not reach at all, besides egret's own
+      # Postgres pod. A metadata Postgres run in-cluster outside egret's
+      # release namespace goes here (its whole namespace is denied).
+      deniedNamespaces: []
+      # IPv4 only: on a dual-stack cluster IPv6 egress is therefore DENIED
+      # (fail-closed), not open.
 
 ranger:
   enabled: false

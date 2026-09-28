@@ -884,33 +884,76 @@ async fn publish_is_refused_with_each_named_error() {
     assert_eq!(s, StatusCode::OK, "{body}");
 }
 
-/// With no default runner configured, a script task without `taskRunner:` is
-/// refused (nothing would run it); with one, it is gated on that runner.
+/// **A script task publishes only onto the runner this deployment has**
+/// (Task 5 fix round 1). With no runner configured (`container_runner =
+/// none`) every script task is refused -- with no `taskRunner:` AND with an
+/// explicit, allowlisted one, which used to publish and then re-claim for
+/// ever on `NoHandler`. With a runner configured, an explicit `taskRunner:`
+/// naming the OTHER runner is refused by name; naming the configured one
+/// publishes (the control).
 #[tokio::test]
-async fn publish_without_a_default_runner_refuses_an_absent_task_runner() {
+async fn publish_refuses_a_task_runner_this_egret_does_not_have() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
     common::enable_feature(&db, ws, "workflow_containers").await;
-    let mut s = settings(&[(scripts::DOCKER_RUNNER, &["*"])]);
+    let both: &[(&str, &[&str])] = &[
+        (scripts::DOCKER_RUNNER, &["*"]),
+        (scripts::KUBERNETES_RUNNER, &["*"]),
+    ];
+    let explicit = |ns: &str, runner: &str| {
+        flow(
+            ns,
+            &format!("{SHELL}    taskRunner:\n      type: {runner}\n"),
+        )
+    };
+
+    // `none`: refused with and without `taskRunner:`, even though both
+    // runners are allowlisted.
+    let mut s = settings(both);
     s.default_runner = None;
     let app = common::app_with_scripts(&db, s).await;
     let (st, body) = publish(&app, ws, user, &flow("w5a.norunner", SHELL)).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("no default container runner"), "{body}");
+    for (ns, runner) in [
+        ("w5a.none.docker", scripts::DOCKER_RUNNER),
+        ("w5a.none.k8s", scripts::KUBERNETES_RUNNER),
+    ] {
+        let (st, body) = publish(&app, ws, user, &explicit(ns, runner)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{runner}: {body}");
+        assert!(
+            body.contains("no container runner is configured"),
+            "{runner}: {body}"
+        );
+    }
+
+    // `kubernetes` configured: the Docker runner is refused by name, the
+    // Kubernetes one publishes.
+    let mut s = settings(both);
+    s.default_runner = Some(RunnerKind::Kubernetes);
+    let app = common::app_with_scripts(&db, s).await;
     let (st, body) = publish(
         &app,
         ws,
         user,
-        &flow(
-            "w5a.explicit",
-            &format!(
-                "{SHELL}    taskRunner:\n      type: {}\n",
-                scripts::DOCKER_RUNNER
-            ),
-        ),
+        &explicit("w5a.k8s.docker", scripts::DOCKER_RUNNER),
     )
     .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.contains("but this egret runs script tasks on 'io.kestra.plugin.ee.kubernetes.runner.Kubernetes'"),
+        "{body}"
+    );
+    let (st, body) = publish(
+        &app,
+        ws,
+        user,
+        &explicit("w5a.k8s.k8s", scripts::KUBERNETES_RUNNER),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let (st, body) = publish(&app, ws, user, &flow("w5a.k8s.default", SHELL)).await;
     assert_eq!(st, StatusCode::OK, "{body}");
 }
 
@@ -1136,4 +1179,31 @@ async fn a_rendered_image_outside_the_allowlist_fails_the_run_and_creates_nothin
         run_once(&pool, &reg, ws, source, json!({"image": "ubuntu:24.04"})).await;
     assert_eq!(state, "SUCCESS", "{message:?}");
     assert_eq!(spy.calls(), vec!["ubuntu:24.04".to_string()]);
+}
+
+/// **`outputFiles` at save** (Task 5 fix round 1): the fixture's glob
+/// (`*.csv`) and a pattern in a named directory save; `**`, `[...]` and a
+/// wildcard directory are refused by name rather than accepted and not
+/// honoured; a `{{ }}` entry is judged after rendering.
+#[test]
+fn output_file_patterns_save_and_unimplemented_ones_are_refused_by_name() {
+    for kind in ScriptKind::ALL {
+        let spec_of = |v: Value| with(kind, "outputFiles", v);
+        let declared = &expected()["output_files"]["cases"][1]["declared"];
+        assert_eq!(declared, &json!(["*.csv"]), "the fixture's glob case");
+        parse(kind.fqcn(), &spec_of(declared.clone())).expect("the measured glob saves");
+        parse(
+            kind.fqcn(),
+            &spec_of(json!(["sub/data-?.csv", "{{ inputs.f }}"])),
+        )
+        .expect("a file-name pattern and a template save");
+        for bad in ["**/x.csv", "[ab].csv", "*/x.csv", "/etc/passwd"] {
+            let r = refusals(kind.fqcn(), &spec_of(json!([bad])));
+            assert!(
+                r.iter()
+                    .any(|r| r.path == "outputFiles" && r.message.contains(bad)),
+                "{bad}: {r:?}"
+            );
+        }
+    }
 }

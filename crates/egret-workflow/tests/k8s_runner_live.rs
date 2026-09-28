@@ -413,22 +413,31 @@ async fn input_and_output_files_round_trip() {
     );
     assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
 
-    // A declared file the command did not write fails the task, by name.
+    // **Kestra's `outputFiles`, in a pod** (W5a Task 5 fix round 1): a
+    // declared file the command did not write is IGNORED, and a
+    // non-recursive glob keys each file it matches in its directory only
+    // (`w5a-scripts.json` `egret_expected.output_files`).
     let (t, _rec) = task();
-    let mut cmds = shell(&["echo x > there.txt"]);
-    cmds.output_files = vec!["there.txt".into(), "missing.txt".into()];
+    let mut cmds = shell(&[
+        "echo x > there.txt",
+        "echo a > a.csv",
+        "echo b > b.csv",
+        "mkdir -p sub d.csv && echo c > sub/c.csv",
+    ]);
+    cmds.output_files = vec!["there.txt".into(), "missing.txt".into(), "*.csv".into()];
     let out = r
         .run(&t, &cmds, &k8s_spec(), &NoObserver)
         .await
         .expect("no worker failure");
+    assert_eq!(out.failure, None, "a missing output is ignored: {out:?}");
     assert_eq!(
-        out.output_files.get("there.txt").map(String::as_str),
-        Some("x\n")
-    );
-    let why = out.failure.expect("a missing output fails the task");
-    assert!(
-        why.contains("missing.txt") && why.contains("did not leave"),
-        "{why}"
+        out.output_files,
+        BTreeMap::from([
+            ("a.csv".to_string(), "a\n".to_string()),
+            ("b.csv".to_string(), "b\n".to_string()),
+            ("there.txt".to_string(), "x\n".to_string()),
+        ]),
+        "`*.csv` is non-recursive and skips the directory `d.csv`"
     );
     assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
 }

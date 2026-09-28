@@ -43,7 +43,8 @@ Kestra (checkout `96893b589`, image `kestra/kestra:v2.0.0-rc13`):
 | không có allowlist image, không có công tắc theo từng tenant | feature `workflow_containers` (mặc định tắt) + `allowed-images` trong `plugin_configurations` | quyết định của người dùng: chặt hơn Kestra OSS |
 | container chỉ nhận diện qua label | pod còn có thêm một **tên xác định (deterministic)** | huỷ và gắn lại từ bất kỳ worker nào, lý do runner Docker của egret vốn đã đặt tên container |
 | heartbeat + coordinator liveness | worker gia hạn lease của nó (`claimed_at`) mỗi `working_timeout / 3`; reaper vốn đã chỉ thu hồi lease đã hết hạn | cùng một bảo đảm trên mô hình claim sẵn có của egret |
-| file output → URI internal-storage | nội dung nội tuyến, có giới hạn (như W4) | internal storage là W9 |
+| file output → URI internal-storage | nội dung nội tuyến, giới hạn 1 MiB mỗi file và 1 MiB tổng (giới hạn của W4); vượt một trong hai thì task thất bại | internal storage là W9; nội dung được lưu trên task run và render lại cho mọi task sau |
+| `outputFiles`: glob không đệ quy, file thiếu bị bỏ qua | **giống hệt** (Task 5 fix round 1, người dùng quyết định): `*`/`?` trong tên file khớp các file trong một thư mục; file khai báo mà lệnh không tạo ra thì bị bỏ qua; `**`, `[...]` và wildcard ở thư mục bị từ chối khi lưu | theo phép đo (`w5a-scripts.json` `egret_expected.output_files`); các dạng bị từ chối chưa được hiện thực |
 
 ## 3. Các kiểu task và thuộc tính
 

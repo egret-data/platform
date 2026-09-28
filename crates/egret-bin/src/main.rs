@@ -1870,10 +1870,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // does not fail the run: it propagates out of `run_one`, the run keeps its
     // lease, `reap` clears only `claimed_at` a `working_timeout` later, `claim`
     // re-selects it, and the cycle repeats for ever with one `warn` per cycle.
-    // `oracle-exec/README.md` item 19 carries this. Publish refuses a script
-    // task when no runner is configured (no default runner), so with `none`
-    // only a script task published under an earlier configuration can reach
-    // that loop.
+    // `oracle-exec/README.md` item 19 carries this. Publish
+    // (`publish::check_script_tasks`) refuses EVERY script task when no
+    // runner is configured -- with or without a `taskRunner:` -- and one whose
+    // `taskRunner:` names a runner other than the configured one. So with
+    // `none`, a script task reaches that loop only from a version published
+    // under an earlier configuration, or from an execution started without
+    // publish (a draft run); both are outside what this binary can refuse.
     //
     // W11: `spawn_with_logs` takes the `Handlers` unshared so it can give them
     // the Postgres log sink (`Handlers::with_log_sink`) before wrapping them;

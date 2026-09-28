@@ -24,8 +24,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::worker::commands::WORKING_DIR;
-
 const BLOCK: usize = 512;
 
 /// A ustar archive of `files` (name relative to the working directory →
@@ -265,13 +263,17 @@ fn check_sum(h: &[u8]) -> Result<(), String> {
 
 /// What the author is told about one declared output, given what the archive
 /// held — the Kubernetes counterpart of `commands::ingest_output_file`, with
-/// its messages. `Ok` is the file's text.
-pub fn judge(rel: &str, entry: Option<Entry>, max_file_bytes: usize) -> Result<Vec<u8>, String> {
+/// its messages. `Ok(Some)` is the file's text; `Ok(None)` a declared file
+/// the command did not leave, which is IGNORED as Kestra ignores it
+/// (`w5a-scripts.json` `egret_expected.output_files.missing_declared_file`).
+pub fn judge(
+    rel: &str,
+    entry: Option<Entry>,
+    max_file_bytes: usize,
+) -> Result<Option<Vec<u8>>, String> {
     match entry {
-        None => Err(format!(
-            "`outputFiles` declares {rel:?}, which the command did not leave in {WORKING_DIR}"
-        )),
-        Some(Entry::File(bytes)) => Ok(bytes),
+        None => Ok(None),
+        Some(Entry::File(bytes)) => Ok(Some(bytes)),
         Some(Entry::TooBig(len)) => Err(format!(
             "the output file {rel:?} is {len} bytes, over the {max_file_bytes} an output may \
              carry. egret has no internal storage for a workflow yet (W9 owns it), so an output \
@@ -369,7 +371,11 @@ mod tests {
 
     #[test]
     fn every_non_file_is_judged_by_name() {
-        assert!(judge("x", None, 1).unwrap_err().contains("did not leave"));
+        assert_eq!(
+            judge("x", None, 1).unwrap(),
+            None,
+            "a declared file the command did not leave is ignored, as Kestra"
+        );
         assert!(judge("x", Some(Entry::Directory), 1)
             .unwrap_err()
             .contains("DIRECTORY"));
@@ -384,7 +390,7 @@ mod tests {
             .contains("not a regular file"));
         assert_eq!(
             judge("x", Some(Entry::File(b"ok".to_vec())), 9).unwrap(),
-            b"ok"
+            Some(b"ok".to_vec())
         );
     }
 }

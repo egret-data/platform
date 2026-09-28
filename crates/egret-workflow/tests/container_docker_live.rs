@@ -495,14 +495,11 @@ async fn an_output_marker_printed_by_the_container_becomes_task_outputs() {
     );
 }
 
-/// **An output file comes back with its contents, and a declared file the
-/// command did not produce fails the task WITHOUT losing what it did
-/// produce.**
-///
-/// The second half is fix round 1's Important 1 seen end to end: the exit code
-/// and the marker vars survive the failure, because
-/// `RunnableTaskException(e, ScriptOutput)` is an exception carrying an Output.
-async fn an_output_file_comes_back_and_a_missing_one_fails_without_losing_the_rest() {
+/// **An output file comes back with its contents; a declared file the command
+/// did not produce is IGNORED; a non-recursive glob keys what it matches** --
+/// Kestra's `outputFiles`, case for case (`w5a-scripts.json`
+/// `egret_expected.output_files`, W5a Task 5 fix round 1, the user's decision).
+async fn output_files_follow_kestra_literal_missing_and_glob() {
     let h = shell();
     let t = task(
         container::TYPE_ID,
@@ -529,34 +526,36 @@ async fn an_output_file_comes_back_and_a_missing_one_fails_without_losing_the_re
     );
     assert_eq!(files["sub/inner.txt"], serde_json::json!("deep\n"));
 
+    // The fixture's glob case: `*.csv` over a.csv, b.csv, sub/c.csv, x.txt
+    // keys a.csv and b.csv; plus its missing case, ignored.
     let t = task(
         container::TYPE_ID,
         serde_json::json!({
             "image": SHELL_IMAGE,
-            "commands": ["echo '::{\"outputs\":{\"printed\":1}}::'"],
-            "outputFiles": ["never-written.txt"],
+            "commands": [
+                "echo a > a.csv", "echo b > b.csv", "echo x > x.txt",
+                "mkdir -p sub dir.csv && echo c > sub/c.csv",
+                "echo '::{\"outputs\":{\"printed\":1}}::'",
+            ],
+            "outputFiles": ["*.csv", "never.txt"],
         }),
     );
     let out = h
         .run(&t)
         .await
-        .expect("a missing output file is the author's flow, never a worker failure");
-    let msg = failed(&out);
-    assert!(
-        msg.contains("never-written.txt"),
-        "a declared output that is absent must fail the task NAMING it: {msg}"
+        .expect("a missing output is never a worker failure");
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "a declared file the command did not write is ignored: {out:?}"
     );
     let o = outputs(&out);
     assert_eq!(
-        o["exitCode"],
-        serde_json::json!(0),
-        "the exit code survives the output-file failure"
+        o["outputFiles"],
+        serde_json::json!({"a.csv": "a\n", "b.csv": "b\n"}),
+        "non-recursive, files only"
     );
-    assert_eq!(
-        o["vars"],
-        serde_json::json!({"printed": 1}),
-        "and so do the vars the command printed before it"
-    );
+    assert_eq!(o["vars"], serde_json::json!({"printed": 1}));
 }
 
 /// **A DIRECTORY named as an output file fails the task, not the worker.**
@@ -1032,28 +1031,21 @@ async fn a_parent_and_a_child_declared_together_never_wedges_the_run() {
          failure applies no outcome, so it stays RUNNING and leased for an hour",
     );
 
-    let msg = failed(&out);
-    assert!(
-        msg.contains("a/b.txt"),
-        "the failure must name the child the container could not produce: {msg}"
+    // The child cannot exist (its parent is a file), so it is a declared file
+    // the command did not leave: IGNORED since W5a Task 5 fix round 1
+    // (Kestra's `missing_declared_file`), and never egret's staging collision.
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "{out:?}"
     );
-    assert!(
-        !msg.contains("File exists") && !msg.contains("os error 17"),
-        "and it must not be egret's staging collision -- each declared name gets \
-         its own root precisely so they cannot collide: {msg}"
-    );
-
     let o = outputs(&out);
     assert_eq!(
-        o["outputFiles"]["a"],
-        serde_json::json!("regular-file\n"),
-        "the parent still came back; only the child failed: {o}"
+        o["outputFiles"],
+        serde_json::json!({"a": "regular-file\n"}),
+        "the parent came back; the impossible child is simply absent: {o}"
     );
-    assert_eq!(
-        o["vars"],
-        serde_json::json!({"ran": 1}),
-        "and the run's own outputs survive the failure: {o}"
-    );
+    assert_eq!(o["vars"], serde_json::json!({"ran": 1}), "{o}");
 }
 
 /// **An output file over the cap fails the task rather than being truncated**,
@@ -1149,7 +1141,7 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(a_new_holder_re_attaches_to_the_attempts_container_instead_of_starting_another),
         case!(a_symlinked_output_file_cannot_read_the_worker_hosts_files),
         case!(an_image_that_does_not_exist_fails_the_task_rather_than_the_worker),
-        case!(an_output_file_comes_back_and_a_missing_one_fails_without_losing_the_rest),
+        case!(output_files_follow_kestra_literal_missing_and_glob),
         case!(an_output_file_over_the_cap_fails_the_task_rather_than_being_truncated),
         case!(an_output_marker_printed_by_the_container_becomes_task_outputs),
         case!(python_runs_the_authors_script_and_its_numbers_come_from_cpython),
