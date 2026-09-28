@@ -37,8 +37,8 @@
 //!
 //! - the workflow scheduler (`egret_workflow::scheduler::fire_due`), whose claim
 //!   skips every `Schedule` trigger in a workspace with `workflows` OFF, reading
-//!   `workspace_features` with this module's rule (only `enabled = false` is
-//!   off) in SQL. A skipped trigger is frozen, not consumed, so turning the
+//!   `workspace_features` with this module's rule (a row is what it says; no
+//!   row is the key's `default_enabled`, bound into the SQL) in SQL. A skipped trigger is frozen, not consumed, so turning the
 //!   module back on recovers the missed ticks (W12 final review I3).
 
 use std::collections::HashSet;

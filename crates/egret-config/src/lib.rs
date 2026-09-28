@@ -656,7 +656,9 @@ pub struct PluginConfiguration {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginConfigurationValues {
-    /// Glob patterns (`*` any run of characters, `?` one character) matched
+    /// Glob patterns (`*` any run of characters except `/`, `?` one character
+    /// other than `/`; no `**`, so a pattern cannot reach another registry
+    /// host -- see `egret_workflow::scripts::gate::glob_match`) matched
     /// against a script task's image reference. See W5a spec §4 for the
     /// normalisation applied to the reference before matching.
     #[serde(default, rename = "allowed-images")]

@@ -157,7 +157,8 @@ pub fn check_script_tasks(flow: &Flow, gate: &ScriptGate<'_>) -> Result<()> {
             (None, Some(default)) => default,
             (None, None) => {
                 return Err(Error::InvalidInput(format!(
-                    "task '{}': no 'taskRunner' and no default container runner is                      configured, so nothing would run it",
+                    "task '{}': no 'taskRunner' and no default container runner is \
+                     configured, so nothing would run it",
                     task.id
                 )))
             }

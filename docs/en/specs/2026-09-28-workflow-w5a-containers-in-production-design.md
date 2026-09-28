@@ -69,6 +69,7 @@ Properties implemented: `containerImage`, `commands` (Commands) / `script` (Scri
   - a digest reference (`name@sha256:…`) is matched as written, with no tag added (measured: the artifact ran `python@sha256:…` as written);
   - otherwise the tag is the part after a `:` that follows the last `/`, so the port in `host:5000/img` is not a tag; a reference with no tag gets `:latest` (`host:5000/img` → `host:5000/img:latest`);
   - the default images are matched the same way: `ubuntu` → `ubuntu:latest`, `python:3.13-slim` unchanged.
+  - *Glob semantics (added in Task 2's fix round 1):* `*` matches any run of characters **except `/`**, `?` one character other than `/`, and there is no `**`. A star therefore cannot reach another registry host: `python:3*` does not match `python:3000/x/img` (host `python`, port 3000), and `registry.company.com/*` does not match `registry.company.com.evil.io/x`. Allowing a deeper path under a registry takes one `*` per level (`registry.company.com/*/*`).
 - **One gate function, two call sites** (the W13b lesson: drafts save despite validation errors and still run):
   - **at publish**, a literal image outside the allowlist, a disabled feature or a refused runner/property is a named 400;
   - **at run**, after rendering (the image may be a `{{ }}` expression), the handler calls the same function. On refusal the task is FAILED with the reason, and **no pod or container is created**.

@@ -673,6 +673,29 @@ fn the_gate_accepts_a_matching_glob_and_a_tagless_image() {
     assert_eq!(check(true, "python", k, &pc), Ok(()));
 }
 
+/// **A star never crosses `/`**, so a glob cannot forge a registry host: a
+/// tag glob does not match a host-and-port reference, and a registry prefix
+/// does not match a longer host that starts with it.
+#[test]
+fn a_glob_cannot_reach_another_registry_host() {
+    let k = RunnerKind::Kubernetes;
+    let pc = configs(&[(
+        scripts::KUBERNETES_RUNNER,
+        &["python:3*", "python*", "registry.company.com/*"],
+    )]);
+    // The controls: each pattern does admit what it was written for.
+    assert_eq!(check(true, "python:3.13-slim", k, &pc), Ok(()));
+    assert_eq!(check(true, "registry.company.com/img:1", k, &pc), Ok(()));
+    // `python:3000/x/img` is host `python`, port 3000.
+    assert!(check(true, "python:3000/x/img", k, &pc).is_err());
+    assert!(check(true, "python:3000/x/img:1", k, &pc).is_err());
+    assert!(check(true, "python.attacker.io/x:1", k, &pc).is_err());
+    assert!(check(true, "registry.company.com.evil.io/x", k, &pc).is_err());
+    // One level only: a deeper path needs `/*/*`.
+    assert!(check(true, "registry.company.com/team/img:1", k, &pc).is_err());
+    assert!(!gate::glob_match("python:3*", "python:3000/x/img:latest"));
+}
+
 /// An unrendered image skips only the image match: the feature and the
 /// allowlist's existence are still refused.
 #[test]

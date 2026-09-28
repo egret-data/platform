@@ -71,6 +71,7 @@ Các thuộc tính được cài đặt: `containerImage`, `commands` (Commands)
   - một reference dạng digest (`name@sha256:…`) được so khớp đúng như viết, không thêm tag (đã đo: artifact chạy `python@sha256:…` đúng như viết);
   - ngoài ra, tag là phần sau một dấu `:` nằm sau dấu `/` cuối cùng, nên port trong `host:5000/img` không phải tag; reference không có tag được thêm `:latest` (`host:5000/img` → `host:5000/img:latest`);
   - các image mặc định được so khớp theo cùng cách: `ubuntu` → `ubuntu:latest`, `python:3.13-slim` giữ nguyên.
+  - *Ngữ nghĩa glob (thêm ở vòng sửa 1 của Task 2):* `*` khớp một dãy ký tự bất kỳ **trừ `/`**, `?` khớp một ký tự khác `/`, và không có `**`. Vì vậy một dấu sao không thể vươn tới một registry host khác: `python:3*` không khớp `python:3000/x/img` (host `python`, cổng 3000), và `registry.company.com/*` không khớp `registry.company.com.evil.io/x`. Muốn cho phép đường dẫn sâu hơn dưới một registry thì viết một `*` cho mỗi cấp (`registry.company.com/*/*`).
 - **Một hàm gate, hai điểm gọi** (bài học của W13b: bản nháp vẫn lưu được dù có lỗi validate và vẫn chạy được):
   - **lúc publish**, một image dạng literal nằm ngoài allowlist, một feature đang tắt hoặc một runner/thuộc tính bị từ chối là một lỗi 400 có tên;
   - **lúc chạy**, sau khi render (image có thể là một biểu thức `{{ }}`), handler gọi đúng hàm đó. Khi bị từ chối, task chuyển FAILED kèm lý do, và **không pod hay container nào được tạo ra**.

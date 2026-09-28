@@ -184,37 +184,44 @@ pub fn normalise_image_ref(image: &str) -> String {
     }
 }
 
-/// Glob match over the whole of `text`: `*` matches any run of characters
-/// (including none, and including `/` and `:`), `?` exactly one character,
-/// anything else itself. Patterns are not normalised: write `ubuntu:latest`
-/// or `ubuntu:*`, not `ubuntu`, since the image side always carries a tag or
-/// a digest.
+/// Glob match over the whole of `text`, **within path segments**:
+///
+/// * `*` matches any run of characters (including none) **except `/`**;
+/// * `?` matches exactly one character **other than `/`**;
+/// * anything else matches itself. There is no `**`: two stars are two `*`,
+///   and neither crosses a `/`.
+///
+/// Why `/` is the boundary: an image reference names a registry host only
+/// through its first `/`-separated segment (`host[:port]/repo…`). If a star
+/// could cross `/`, a tag glob such as `python:3*` would also match
+/// `python:3000/x/img`, a reference to the registry host `python` on port
+/// 3000, and `python*` would match `python.attacker.io/x`. With the boundary,
+/// the segments before the last `/` (the host included) can only be matched
+/// by literal text or by a star that stays inside one segment, and a pattern
+/// with no `/` can only match a reference with no `/`, i.e. a Docker Hub
+/// official image. To allow everything under a registry, write one star per
+/// level: `registry.company.com/*` (one level) or
+/// `registry.company.com/*/*` (two).
+///
+/// Patterns are not normalised: write `ubuntu:latest` or `ubuntu:*`, not
+/// `ubuntu`, since the image side always carries a tag or a digest.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
-    let (mut pi, mut ti) = (0usize, 0usize);
-    // The position after the last `*` in the pattern, and the text position
-    // it was tried against, to backtrack to.
-    let mut star: Option<(usize, usize)> = None;
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some((pi + 1, ti));
-            pi += 1;
-        } else if let Some((sp, st)) = star {
-            pi = sp;
-            ti = st + 1;
-            star = Some((sp, st + 1));
-        } else {
-            return false;
+    // memo[pi][ti]: does p[pi..] match t[ti..]? Filled back to front.
+    let mut memo = vec![vec![false; t.len() + 1]; p.len() + 1];
+    memo[p.len()][t.len()] = true;
+    for pi in (0..p.len()).rev() {
+        for ti in (0..=t.len()).rev() {
+            memo[pi][ti] = match p[pi] {
+                // Match nothing, or one non-`/` character and stay on `*`.
+                '*' => memo[pi + 1][ti] || (ti < t.len() && t[ti] != '/' && memo[pi][ti + 1]),
+                '?' => ti < t.len() && t[ti] != '/' && memo[pi + 1][ti + 1],
+                c => ti < t.len() && t[ti] == c && memo[pi + 1][ti + 1],
+            };
         }
     }
-    while pi < p.len() && p[pi] == '*' {
-        pi += 1;
-    }
-    pi == p.len()
+    memo[0][0]
 }
 
 #[cfg(test)]
@@ -224,7 +231,11 @@ mod tests {
     #[test]
     fn glob_basics() {
         assert!(glob_match("python:*", "python:3.13-slim"));
-        assert!(glob_match("*", "anything/at:all"));
+        assert!(glob_match("*", "anything:at-all"));
+        assert!(!glob_match("*", "any/thing"));
+        assert!(!glob_match("?", "/"));
+        assert!(glob_match("reg.io/*/*", "reg.io/team/img:1"));
+        assert!(!glob_match("reg.io/**", "reg.io/team/img:1"), "no `**`");
         assert!(glob_match("python:3.1?-slim", "python:3.13-slim"));
         assert!(!glob_match("python:*", "pythonx:1"));
         assert!(!glob_match("python", "python:latest"));
