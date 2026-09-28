@@ -139,3 +139,44 @@ d3member / notebook   TRINO ROWS:     {'id': [1,2,3], 'secret': ['classified-one
 analyst / StarRocks   INSERT INTO sp4a10_wh.sp4a.gate VALUES (90,'write-before-clearance','plain90')
                       → finished     (so StarRocks CAN write this Iceberg table; row 90 was then deleted through Trino)
 ```
+
+### The view surfaces, and the one that could not be measured
+
+Built as `admin` on the same fixture table, so case 4 has something to read
+through:
+
+| surface | engine | state |
+|---|---|---|
+| view `sp4a10_wh.sp4a.gate_v` | Trino | created (`CREATE OR REPLACE VIEW … AS SELECT id, secret, plain FROM sp4a10_wh.sp4a.gate`) |
+| **materialized view** | **Trino** | **cannot exist.** `CREATE MATERIALIZED VIEW sp4a10_wh.sp4a.gate_mv …` → `engine: createMaterializedView is not supported for Iceberg REST catalog` |
+| view `default_catalog.sp4cgate.gate_v` | StarRocks | created |
+| materialized view `default_catalog.sp4cgate.gate_mv` | StarRocks | created and refreshed (`REFRESH … WITH SYNC MODE`), returns 3 rows to `admin` |
+
+Pre-clearance, `analyst` reads every one of these **except** the StarRocks
+materialized view:
+
+```text
+analyst / Trino view       SELECT id, secret FROM sp4a10_wh.sp4a.gate_v ORDER BY id
+                           → finished, [[1,'classified-one'],[2,'classified-two'],[3,'classified-three']]
+analyst / StarRocks view   SELECT id, secret FROM sp4cgate.gate_v ORDER BY id
+                           → finished, [[1,'classified-one'],[2,'classified-two'],[3,'classified-three']]
+analyst / StarRocks MV     SELECT id, secret FROM sp4cgate.gate_mv ORDER BY id
+                           → failed: engine: Server error: `ERROR 5204 (42000): Access denied; you need
+                             (at least one of) the SELECT privilege(s) on COLUMN id for this operation.'
+```
+
+That last refusal is **a missing grant, not a clearance** — a StarRocks
+materialized view is a real table in `default_catalog`, and `default_catalog` is
+not a `registry.catalogs` row, so `perm.grants` (whose `Scope` requires a catalog
+**uuid**) cannot express a grant on it. The obvious workaround, a hand-written
+Ranger policy, is refused by egret itself:
+
+```text
+POST /api/control-plane/policies {resources: {catalog: default_catalog, database: sp4cgate, …}}
+→ 409 conflict: profile 55 is compiled by the SP4a permission model — edit its grants and rules
+  instead of writing a policy directly; the next recompile would silently overwrite this change
+```
+
+So the StarRocks **materialized-view** half of case 4 is **BLOCKED** on this
+deployment and is reported as such below, rather than being read as a clearance
+result. The StarRocks **view** half is measurable, and is measured.
