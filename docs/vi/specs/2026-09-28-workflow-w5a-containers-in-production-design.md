@@ -51,12 +51,12 @@ Kestra (checkout `96893b589`, image `kestra/kestra:v2.0.0-rc13`):
 
 Các thuộc tính được cài đặt: `containerImage`, `commands` (Commands) / `script` (Script), `beforeCommands`, `interpreter`, `env`, `inputFiles` (chỉ nội dung nội tuyến), `outputFiles`, `failFast`, `warningOnStdErr`, `timeout`, `taskRunner`.
 
-- **Image mặc định** theo từng kiểu task là image của Kestra, **được đo ở Task 1**, và phải qua được allowlist như mọi image khác.
-- **Bị từ chối lúc lưu**, kèm lỗi có tên rõ ràng, không bao giờ bị bỏ qua âm thầm: `namespaceFiles`, `outputDirectory`, `inputFiles` được đưa dưới dạng storage URI, `targetOS`, và bất kỳ thuộc tính nào khác mà Task 1 phát hiện image chấp nhận nhưng W5a không cài đặt.
-- `warningOnStdErr` đặt trạng thái task thành **WARNING** khi stderr có dòng (đã đo ở W11; egret có `Warning` từ W8).
+- **Image mặc định** theo từng kiểu task là image của Kestra, **được đo ở Task 1** (`oracle-exec/w5a-scripts.json`): `ubuntu` cho `shell.*` và `python:3.13-slim` cho `python.*`. Chúng phải qua được allowlist như mọi image khác.
+- **Bị từ chối lúc lưu**, kèm lỗi có tên rõ ràng, không bao giờ bị bỏ qua âm thầm: `namespaceFiles`, `outputDirectory`, `inputFiles` được đưa dưới dạng storage URI, `targetOS`, và bất kỳ thuộc tính nào khác mà Task 1 phát hiện image chấp nhận nhưng W5a không cài đặt (đã đo: `runner` đã deprecated, và trên `python.*` là `dependencies`, `dependencyCacheEnabled`, `packageManager`, `pythonVersion`, `uvAutoInstallEnabled`, `uvInstallerSha256`, `uvInstallerVersion`; danh sách theo từng kiểu là `egret_expected.task_types` trong fixture). Bản thân Kestra từ chối thuộc tính lạ lúc lưu (`Unrecognized field …`, đã đo).
+- `warningOnStdErr` được chấp nhận và **không có tác dụng gì**, đúng như trên artifact. *Sửa theo phép đo của Task 1:* với `true`, `false` hay không đặt, một script ghi ra stderr rồi thoát 0 kết thúc **SUCCESS**, và dòng stderr được log ở mức ERROR (như W11 đã đo); field của Kestra ghi `"Not used anymore, will be removed soon"`. Bản nháp trước nói nó đặt WARNING; điều đó chưa từng được đo.
 
 `taskRunner:` chấp nhận:
-- `io.kestra.plugin.scripts.runner.docker.Docker`: `pullPolicy`, `cpu`, `memory`, `delete` (mặc định `true`). Các thuộc tính Docker khác của Kestra (volumes, privileged, networkMode, …) bị từ chối lúc lưu.
+- `io.kestra.plugin.scripts.runner.docker.Docker`: `pullPolicy`, `cpu`, `memory`, `delete` (mặc định `true`). Các thuộc tính Docker khác của Kestra (volumes, privileged, networkMode, …, và `image` bị ẩn khỏi schema nhưng Kestra vẫn nhận) bị từ chối lúc lưu.
 - `io.kestra.plugin.ee.kubernetes.runner.Kubernetes`: `pullPolicy`, `resources` (`request`/`limit` cho cpu và memory, giới hạn trần bởi config), `delete` (mặc định `true`). Namespace, service account, node selector và tương tự **không** cho tác giả flow đặt; chúng đến từ config.
 - `io.kestra.plugin.core.runner.Process`: **bị từ chối lúc lưu**.
 - Vắng mặt: dùng runner mặc định đã cấu hình.
@@ -64,7 +64,7 @@ Các thuộc tính được cài đặt: `containerImage`, `commands` (Commands)
 ## 4. Governance
 
 - **Feature `workflow_containers`**, yêu cầu `workflows`. Đây là feature đầu tiên **tắt mặc định**: catalog feature có thêm `default_enabled: bool`, và với khoá này, không có hàng nghĩa là *tắt*. Các khoá hiện có vẫn giữ `true`, nên hành vi của chúng không đổi.
-- **Allowlist image:** `workflow.plugin_configurations`, một danh sách `{type, values}` đánh khoá theo FQCN của runner (đúng hình dạng `kestra.plugins.configurations` của Kestra). `values.allowed-images` là một danh sách glob pattern được so khớp với image reference đúng như viết, sau khi mặc định tag là `latest` (Task 1 kiểm tra Kestra làm gì với một image không có tag). **Không có mục nào, hoặc danh sách rỗng, thì không image nào được phép.**
+- **Allowlist image:** `workflow.plugin_configurations`, một danh sách `{type, values}` đánh khoá theo FQCN của runner (đúng hình dạng `kestra.plugins.configurations` của Kestra). `values.allowed-images` là một danh sách glob pattern được so khớp với image reference đúng như viết, sau khi mặc định tag là `latest` (đã đo ở Task 1: `containerImage: python` khiến Docker pull `python:latest`). **Không có mục nào, hoặc danh sách rỗng, thì không image nào được phép.**
 - **Một hàm gate, hai điểm gọi** (bài học của W13b: bản nháp vẫn lưu được dù có lỗi validate và vẫn chạy được):
   - **lúc publish**, một image dạng literal nằm ngoài allowlist, một feature đang tắt hoặc một runner/thuộc tính bị từ chối là một lỗi 400 có tên;
   - **lúc chạy**, sau khi render (image có thể là một biểu thức `{{ }}`), handler gọi đúng hàm đó. Khi bị từ chối, task chuyển FAILED kèm lý do, và **không pod hay container nào được tạo ra**.

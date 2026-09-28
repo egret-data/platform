@@ -49,12 +49,12 @@ Ported, with Kestra's FQCNs: `io.kestra.plugin.scripts.shell.Commands`, `io.kest
 
 Properties implemented: `containerImage`, `commands` (Commands) / `script` (Script), `beforeCommands`, `interpreter`, `env`, `inputFiles` (inline contents only), `outputFiles`, `failFast`, `warningOnStdErr`, `timeout`, `taskRunner`.
 
-- **Default images** per task type are Kestra's, **measured in Task 1**, and must pass the allowlist like any other image.
-- **Refused at save**, with a named error, never silently ignored: `namespaceFiles`, `outputDirectory`, `inputFiles` given as a storage URI, `targetOS`, and any other property Task 1 finds the image accepts that W5a does not implement.
-- `warningOnStdErr` sets the task state to **WARNING** when stderr has lines (measured in W11; egret has `Warning` since W8).
+- **Default images** per task type are Kestra's, **measured in Task 1** (`oracle-exec/w5a-scripts.json`): `ubuntu` for `shell.*` and `python:3.13-slim` for `python.*`. They must pass the allowlist like any other image.
+- **Refused at save**, with a named error, never silently ignored: `namespaceFiles`, `outputDirectory`, `inputFiles` given as a storage URI, `targetOS`, and any other property Task 1 finds the image accepts that W5a does not implement (measured: the deprecated `runner`, and on `python.*` `dependencies`, `dependencyCacheEnabled`, `packageManager`, `pythonVersion`, `uvAutoInstallEnabled`, `uvInstallerSha256`, `uvInstallerVersion`; the per-type lists are `egret_expected.task_types` in the fixture). Kestra itself refuses an unknown property at save (`Unrecognized field …`, measured).
+- `warningOnStdErr` is accepted and has **no effect**, as on the artifact. *Amended by Task 1's measurement:* with `true`, `false` or unset, a script that writes to stderr and exits 0 ends **SUCCESS**, and the stderr line is logged at ERROR (as W11 measured); Kestra's field reads `"Not used anymore, will be removed soon"`. An earlier draft said it set WARNING; that was not measured.
 
 `taskRunner:` accepts:
-- `io.kestra.plugin.scripts.runner.docker.Docker`: `pullPolicy`, `cpu`, `memory`, `delete` (default `true`). Other Kestra Docker properties (volumes, privileged, networkMode, …) are refused at save.
+- `io.kestra.plugin.scripts.runner.docker.Docker`: `pullPolicy`, `cpu`, `memory`, `delete` (default `true`). Other Kestra Docker properties (volumes, privileged, networkMode, …, and the schema-hidden `image` that Kestra still accepts) are refused at save.
 - `io.kestra.plugin.ee.kubernetes.runner.Kubernetes`: `pullPolicy`, `resources` (`request`/`limit` for cpu and memory, capped by config), `delete` (default `true`). Namespace, service account, node selector and similar are **not** author-settable; they come from config.
 - `io.kestra.plugin.core.runner.Process`: **refused at save**.
 - Absent: the configured default runner.
@@ -62,7 +62,7 @@ Properties implemented: `containerImage`, `commands` (Commands) / `script` (Scri
 ## 4. Governance
 
 - **Feature `workflow_containers`**, requiring `workflows`. It is the first feature that is **off by default**: the feature catalog gains a `default_enabled: bool`, and for this key an absent row means *disabled*. Existing keys keep `true`, so their behaviour does not change.
-- **Image allowlist:** `workflow.plugin_configurations`, a list of `{type, values}` keyed by runner FQCN (Kestra's `kestra.plugins.configurations` shape). `values.allowed-images` is a list of glob patterns matched against the image reference as written, after defaulting the tag to `latest` (Task 1 checks what Kestra does with a tagless image). **No entry, or an empty list, allows no image.**
+- **Image allowlist:** `workflow.plugin_configurations`, a list of `{type, values}` keyed by runner FQCN (Kestra's `kestra.plugins.configurations` shape). `values.allowed-images` is a list of glob patterns matched against the image reference as written, after defaulting the tag to `latest` (measured in Task 1: `containerImage: python` makes Docker pull `python:latest`). **No entry, or an empty list, allows no image.**
 - **One gate function, two call sites** (the W13b lesson: drafts save despite validation errors and still run):
   - **at publish**, a literal image outside the allowlist, a disabled feature or a refused runner/property is a named 400;
   - **at run**, after rendering (the image may be a `{{ }}` expression), the handler calls the same function. On refusal the task is FAILED with the reason, and **no pod or container is created**.
