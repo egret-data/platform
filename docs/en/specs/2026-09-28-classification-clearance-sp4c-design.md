@@ -13,13 +13,25 @@ So the two mechanisms can disagree about the same column, and nothing reconciles
 
 **User decision (2026-09-28): clearance must reach the data plane.** A tag requiring role X means that column is refused at the engine to anyone without X. Effective access becomes the intersection.
 
-## D0 — What must be measured before anything is designed
+## D0 — MEASURED: a Ranger policy item naming a role matches nobody, and a role-named `denyExceptions` denies everybody
 
-SP4a's D7 measured that **groups never reach an engine**: Trino has no group provider, egret writes none, there is no usersync, so a Ranger policy item naming a group matches nobody. That measurement is why the workspace-assignment grant compiles to an enumerated member list instead of a group.
+**Measured 2026-09-28. Full working: `docs/en/plans/2026-09-28-sp4c-d0-result.md`.** Method is D7's: upstream source (Apache Ranger `3.0.0-SNAPSHOT` at `0274a6a0bc96`, Trino's built-in `plugin/trino-ranger`), corroborated by a passive log read of the running coordinator. No query was run and nothing on the cluster was changed, because a denied query has many possible causes.
 
-**Nobody has measured the same question for roles.** Ranger has a `roles` bucket and the perm model already has `PrincipalKind::Role`, so the obvious implementation names the role and stops. But Ranger roles are defined **in Ranger**, and egret pushes nothing to Ranger. If a Ranger policy item naming a role matches nobody for the same reason a group does, then naming the role is a control that silently does nothing — and this whole design collapses into "enumerate the role's members and recompile when membership changes", exactly as SP4a had to do for workspace members.
+**Roles are exactly as unresolvable as groups, for a different reason, and they fail in the opposite direction.**
 
-**This is task zero, and it decides the rest.** Measure it the way D7 was measured — by mechanism, not by a failed query, because a denied query has many possible causes. Establish whether the Trino plugin resolves a role name at all, and where it would get the membership from. Write the result into this spec before any code is written.
+1. **Nothing in egret can serve a Ranger role.** The plugin fetches roles from `/service/roles/download/<service>` (`RangerRESTUtils.java:47`, `RangerAdminRESTClient.getRolesIfUpdated:207`) — a separate document with its own version counter, fetched by `RangerRolesProvider`. egret's `/service` surface is six GET routes (`ranger/routes.rs:15-31`, `api/crud.rs:18-24`) and **none of them is a roles route**, so the poll 404s. A role definition cannot ride in the policy payload either: the `ServicePolicies` envelope (`egret-policy-api/src/dto.rs:21-42`) has no roles member, and neither does Ranger's. No writer exists anywhere in `crates/` or `deploy/`.
+2. **The plugin has no other source of membership.** Trino's built-in plugin constructs every request with `userRoles` hardcoded `null` (`RangerTrinoAccessRequest.java`, fifth `super(...)` argument) and no-ops every SQL-role hook (`RangerSystemAccessControl.java:684-702`). `null` normalises to an empty set (`RangerAccessRequestImpl:290`), which `RangerDefaultRequestProcessor:131-138` can only fill from `RangerRolesUtil`'s maps — built solely from the downloaded document and left empty when it is `null` (`RangerRolesUtil.java:44-75`). The fallback rewrite of roles into users (`RangerDefaultPolicyEvaluator:1025`) reads the same empty map *and* is gated on `disableRoleResolution`, which defaults to `true`.
+3. **Live corroboration.** The coordinator's own log carries `PolicyEngineOptions: { ... disableRoleResolution: true ... }` and, every 30 seconds for the life of the pod, `Error getting Roles; service not found. ... response=404, lastKnownRoleVersion=-1`. `lastKnownRoleVersion` never leaves `-1`: the plugin has never held a role document. That is the plugin's own state, not an inference from a deny.
+
+**The failure direction — this is the part that changes D1.** Ranger has no set-difference; a policy item matches only when its principal set *intersects* the request's, and the role clause short-circuits on an empty set (`RangerDefaultPolicyItemEvaluator:131-132`). An unmatched item is not neutral, it means whatever its bucket means: in `policyItems` it grants nobody, in `denyPolicyItems` it denies nobody, and **in `denyExceptions` it excepts nobody, so the deny stands for everyone** — the discard happens only when some exception evaluator returns `isMatch == true` (`RangerDefaultPolicyEvaluator:1331-1361`). A clearance written as *deny `{public}` except role `analyst`* would therefore refuse the tagged column to every user **including the cleared ones**. That is fail-closed on data and fail-open on availability: nothing leaks, and the control over-blocks loudly instead of silently doing nothing.
+
+Two adjacent facts were checked because either could have made the deny shape inert on its own, and both came back favourable: **deny and exceptions are evaluated** despite egret's service-defs carrying `"options": null`, since `ServiceDefUtil.getOption_enableDenyAndExceptionsInPolicies:84-96` defaults the option to `true`; and **`{public}` in a deny item still matches everybody** with no group provider, because the group check needs only a non-null `userGroups` and `setUserGroups` normalises `null` to an empty set. The "everyone" half of the pair is expressible; only the "except these" half is not.
+
+**Therefore: clearance compiles to the role's members enumerated at compile time**, as bare usernames in `denyExceptions`, and the Ranger `roles` bucket is not used. D3's third trigger — role membership changing — is no longer conditional; it is required.
+
+**A latent SP4a defect this surfaced, to be raised separately rather than absorbed here.** `egret-perm-compile/src/grants.rs:105` already compiles a `PrincipalKind::Role` grant straight into the Ranger `roles` bucket, so that grant matches nobody in the engine — while egret's own evaluator matches it (`egret-perm/src/eval.rs:160`) and `explain` will report an access the engine does not grant. Same class of divergence D7 found for groups, on a path D7 did not look at.
+
+**Scope of the measurement.** Trino only. StarRocks has its own plugin and native roles and may populate `userRoles` where Trino passes `null`; its behaviour was **not** measured and this conclusion must not be carried to it. The plugin's on-disk role cache was not inspected (it needs an `exec` into `demo-trino`, which is off limits); the mechanism makes it irrelevant, since a cache can only replay a download that succeeded and none ever did.
 
 ## D1 — Clearance compiles to a tag-based deny, which amends SP4a's D2
 
@@ -33,7 +45,7 @@ Two properties of Ranger make this the right layer, and both were established du
 
 ## D2 — `required_groups` cannot be enforced at the engine, and the UI must say so
 
-D7's measurement already settles half of this: a group named in a Ranger policy matches nobody. So a tag gated **only** by `required_groups` cannot be enforced at the data plane today, whatever D0 concludes about roles.
+D7's measurement already settles half of this: a group named in a Ranger policy matches nobody. So a tag gated **only** by `required_groups` cannot be enforced at the data plane today — and D0 has now measured that a role name is no better, so what the UI must say is narrower than "roles work, groups do not": neither principal *name* reaches the engine, and what is enforced is the member set egret enumerated at compile time.
 
 That is not a reason to silently skip it. The classification UI must say, where the clearance is set, that a group-only gate is enforced on object access and **not** in the engine — the same shape as SP4b's group warning, and for the same measured reason. A control that appears to withhold data while withholding nothing is the failure this programme keeps refusing to ship.
 
@@ -42,7 +54,7 @@ That is not a reason to silently skip it. The classification UI must say, where 
 A compiled clearance deny depends on the tag's gate, on which columns carry the tag, and on who holds the clearing role. So it goes stale from three directions:
 - a tag's `required_roles` / `required_groups` changing — **new**
 - a tag assignment changing — **exists** (SP4a Task 7)
-- membership of a clearing role changing — **new**, and only if D0 concludes we must enumerate members
+- membership of a clearing role changing — **new**, and **required**: D0 measured that a role name is unresolvable in the engine, so the members are enumerated at compile time and go stale when membership changes
 
 Each must recompile in the same transaction as its write, using the seam SP4a established: affected services expanded through `services_and_tag_services_via`, locked ascending, with the `debug_assert!(service_ids.is_sorted())` gate. SP4a shipped the "a write without its recompile" defect on four separate paths, so the enumeration of writers comes before the fix, not after.
 
