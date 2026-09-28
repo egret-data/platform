@@ -168,10 +168,18 @@ pub struct MaskInfo {
 }
 
 /// A `rowFilterPolicyItems[].rowFilterInfo` object.
+///
+/// `filter_expr` is an `Option` because Ranger distinguishes the two states:
+/// `RangerDefaultRowFilterPolicyItemEvaluator`'s constructor sets its
+/// `rowFilterExpr` field to null when `getFilterExpr()` is null (the
+/// `ifnull 67` at offset 33), so `updateAccessResult` never calls
+/// `setFilterExpr` and the guard `if (result.getFilterExpr() != null)`
+/// fails — the item determines nothing. An explicit empty string is NOT
+/// null and does mark the result. Folding both onto `""` would erase that.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RowFilterInfo {
     #[serde(default, rename = "filterExpr")]
-    pub filter_expr: String,
+    pub filter_expr: Option<String>,
 }
 
 /// Which of a policy's six item lists a [`PolicyItem`]-scoped
@@ -301,6 +309,48 @@ fn default_true() -> bool {
 /// naive `{TOKEN}` scan would otherwise try to treat as its own opener.
 fn contains_expression_marker(s: &str) -> bool {
     contains_ranger_request_expr(s) || contains_braced_token(s)
+}
+
+/// `RangerRequestExprResolver.hasExpressions(String)` — **exactly**, and
+/// nothing more: `PATTERN.matcher(s).find()` with
+/// `PATTERN = \$\{\{(?<expr>.*?)\}\}`, read from the `static {}` block of
+/// both the 2.5.0 and the 2.8.0 jar.
+///
+/// This is the ONE predicate that decides whether Ranger resolves a mask
+/// value, a mask condition or a row-filter expression at request time:
+/// `RangerDefaultDataMaskPolicyItemEvaluator` and
+/// `RangerDefaultRowFilterPolicyItemEvaluator` construct a resolver only
+/// `if (StringUtils.isNotBlank(expr) && RangerRequestExprResolver.hasExpressions(expr))`
+/// and otherwise report the string verbatim.
+///
+/// It is deliberately NARROWER than [`contains_expression_marker`], which
+/// also flags a bare `{TOKEN}`. `{TOKEN}` expansion is
+/// `StringTokenReplacer`, referenced in the whole 2.5.0 jar only by
+/// `ResourceMatcher`, `RangerAbstractPolicyEvaluator` and `PolicyEngine`
+/// — i.e. by resource matching, never by the mask or row-filter evaluator.
+/// So a CUSTOM mask's `{col}` is a literal as far as Ranger's decision is
+/// concerned (the host plugin's `maskTypes[].transformer` substitutes it
+/// afterwards), and reporting it verbatim is Ranger's own answer, not a
+/// guess. Using the broader predicate for a mask would make every CUSTOM
+/// mask undecidable.
+pub fn has_request_expression(s: &str) -> bool {
+    contains_ranger_request_expr(s)
+}
+
+/// `JavaScriptEdits.hasDoubleBrackets(String)`:
+/// `StringUtils.contains(s, "[[") && StringUtils.contains(s, "]]")` — both
+/// substrings, identical in 2.5.0 and 2.8.0.
+///
+/// `RangerDefaultRowFilterPolicyItemEvaluator`'s constructor REWRITES the
+/// filter expression when this holds, via `replaceDoubleBrackets`, whose
+/// `DOUBLE_BRACKET_REGEX` is
+/// `\[\[([}{\$"a-zA-Z0-9_.\[\]]+)(\,['\"](.+?)['\"])*\]\]` and which turns
+/// `[[expr,'delim']]` into `expr.split("delim")`. This crate carries no
+/// regex engine and does not reproduce the rewrite, so a row filter for
+/// which this holds is reported as undecidable rather than echoed back
+/// unrewritten.
+pub fn has_double_brackets(s: &str) -> bool {
+    s.contains("[[") && s.contains("]]")
 }
 
 /// Rule 1 of [`contains_expression_marker`]: `${{ ... }}`. Byte comparisons
@@ -648,11 +698,15 @@ fn build_policy_item(
         }
     }
     if let Some(row_filter_info) = &raw.row_filter_info {
-        if contains_expression_marker(&row_filter_info.filter_expr) {
+        if row_filter_info
+            .filter_expr
+            .as_deref()
+            .is_some_and(contains_expression_marker)
+        {
             unmodelled.push(Unmodelled::RowFilterExpressionMarker {
                 bucket,
                 item_index: index,
-                expr: row_filter_info.filter_expr.clone(),
+                expr: row_filter_info.filter_expr.clone().unwrap_or_default(),
             });
         }
     }

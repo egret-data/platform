@@ -1409,12 +1409,10 @@ fn an_owner_item_reached_through_implied_grants_still_raises_the_cause() {
         &no_superusers(),
     );
     assert!(
-        causes(&d)
-            .iter()
-            .any(|c| matches!(
-                c,
-                UndecidableCause::ResourceOwnerUnknown { policy_id, .. } if *policy_id == Some(1)
-            )),
+        causes(&d).iter().any(|c| matches!(
+            c,
+            UndecidableCause::ResourceOwnerUnknown { policy_id, .. } if *policy_id == Some(1)
+        )),
         "row 3 control: {d:?}"
     );
 }
@@ -1441,12 +1439,10 @@ fn the_allow_side_of_the_owner_implied_grant_defect() {
         &no_superusers(),
     );
     assert!(
-        causes(&d)
-            .iter()
-            .any(|c| matches!(
-                c,
-                UndecidableCause::ResourceOwnerUnknown { policy_id, .. } if *policy_id == Some(1)
-            )),
+        causes(&d).iter().any(|c| matches!(
+            c,
+            UndecidableCause::ResourceOwnerUnknown { policy_id, .. } if *policy_id == Some(1)
+        )),
         "{d:?}"
     );
 

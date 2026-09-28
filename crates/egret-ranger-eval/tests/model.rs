@@ -106,7 +106,7 @@ fn parses_captured_service_policies_fixture() {
         .row_filter_info
         .as_ref()
         .expect("rowFilterInfo present");
-    assert_eq!(rf_info.filter_expr, "country = 'US'");
+    assert_eq!(rf_info.filter_expr.as_deref(), Some("country = 'US'"));
     assert!(
         rowfilter.unmodelled.is_empty(),
         "{:?}",

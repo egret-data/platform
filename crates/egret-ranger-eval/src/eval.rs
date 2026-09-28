@@ -76,7 +76,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{
-    AccessEntry, ItemBucket, PolicyItem, RangerPolicy, ServicePolicySet, Unmodelled,
+    has_double_brackets, has_request_expression, AccessEntry, ItemBucket, PolicyItem, RangerPolicy,
+    ServicePolicySet, Unmodelled,
 };
 use crate::resource::{match_policy_resources, MatchType, RequestResource};
 use crate::servicedef::{ServiceDef, ServiceDefIssue};
@@ -125,11 +126,74 @@ pub struct AccessRequest {
     pub owner: Option<String>,
 }
 
+/// Which engine's Ranger plugin a decision is being reproduced for.
+///
+/// The engine is NOT a synonym for the service-def — the def is a separate
+/// input, because a download carries its own. It is a cross-check: the two
+/// engines' resource vocabularies differ (Trino's middle level is `schema`,
+/// StarRocks' is `database`) and their access-type vocabularies are
+/// partly disjoint (`use` on Trino only, `update` on StarRocks only), so
+/// pairing the wrong def with an engine answers "nothing matched" with full
+/// confidence. Declaring the engine turns that into
+/// [`UndecidableCause::EngineMismatch`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineType {
+    Trino,
+    StarRocks,
+}
+
+impl EngineType {
+    /// The service-def `name` this engine's plugin downloads policies for.
+    pub fn service_def_name(self) -> &'static str {
+        match self {
+            EngineType::Trino => "trino",
+            EngineType::StarRocks => "starrocks",
+        }
+    }
+
+    /// The `ranger-plugins-common` version the engine egret provisions
+    /// actually loads, measured on the running pods and recorded in
+    /// `docs/en/plans/2026-09-28-sp4d-plugin-version-result.md`:
+    /// `trinodb/trino:470` ships 2.5.0, `starrocks/fe-ubuntu:4.1-latest`
+    /// ships 2.8.0.
+    pub fn plugin_version(self) -> PluginVersion {
+        match self {
+            EngineType::Trino => PluginVersion::Ranger2_5_0,
+            EngineType::StarRocks => PluginVersion::Ranger2_8_0,
+        }
+    }
+}
+
+/// The `ranger-plugins-common` version whose behaviour a decision is
+/// reproducing.
+///
+/// Only the two versions this crate has actually been read against exist as
+/// variants, so a version it has NOT been verified against cannot be
+/// expressed — an unrepresentable state needs no runtime guard.
+///
+/// Every fidelity claim in this module was checked in both jars. On the
+/// path a Trino or StarRocks check takes — a non-tag request, a concrete
+/// access type, `ResourceMatchingScope.SELF` — they reduce identically for
+/// access (Task 5) and, measured for this task, for masking and
+/// row-filtering too: `RangerDefaultPolicyEvaluator.evaluate` is shared by
+/// all three policy types and admits exactly `SELF | SELF_AND_ALL_DESCENDANTS`
+/// in both; `getMatchingPolicyItem`'s `tableswitch`, the single-list
+/// overload, `RangerDefault{DataMask,RowFilter}PolicyItemEvaluator`'s
+/// constructor and `updateAccessResult`, `RangerRequestExprResolver.PATTERN`
+/// and `JavaScriptEdits` are byte-identical apart from the
+/// `commons-lang` → `commons-lang3` move in `StringUtils`, which changes no
+/// behaviour here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginVersion {
+    Ranger2_5_0,
+    Ranger2_8_0,
+}
+
 /// Plugin-side configuration the engine consults but a policy download does
 /// not carry.
 ///
-/// Both fields are `Option`: `None` means "the caller did not measure this",
-/// which is not the same as "empty" and must not be treated as such.
+/// Every field is an `Option`: `None` means "the caller did not measure
+/// this", which is not the same as "empty" and must not be treated as such.
 /// `isSuperUser` is checked BEFORE any policy and wins with
 /// `policyPriority = Integer.MAX_VALUE`, so an unknown superuser list makes
 /// every decision unknowable. Both live Trino instances were measured to
@@ -141,6 +205,13 @@ pub struct EngineConfig {
     pub super_users: Option<BTreeSet<String>>,
     /// `ranger.plugin.super.groups`.
     pub super_groups: Option<BTreeSet<String>>,
+    /// Which engine's plugin this is. `None` leaves the cross-check off.
+    pub engine: Option<EngineType>,
+    /// Which `ranger-plugins-common` it loads. `None` leaves the
+    /// cross-check off; `Some` must agree with
+    /// [`EngineType::plugin_version`] when [`EngineConfig::engine`] is also
+    /// set.
+    pub plugin_version: Option<PluginVersion>,
 }
 
 impl EngineConfig {
@@ -149,6 +220,8 @@ impl EngineConfig {
         EngineConfig {
             super_users: Some(BTreeSet::new()),
             super_groups: Some(BTreeSet::new()),
+            engine: None,
+            plugin_version: None,
         }
     }
 }
@@ -223,6 +296,165 @@ pub enum UndecidableCause {
         policy_name: String,
         access_type: String,
     },
+    /// A matched mask policy's `dataMaskInfo.valueExpr` or `.conditionExpr`
+    /// carries a `${{ … }}` request-time expression, so
+    /// `RangerDefaultDataMaskPolicyItemEvaluator` reports
+    /// `resolver.resolveExpressions(request)` rather than the literal — a
+    /// resolution against request context (user attributes, tags, the
+    /// UserStore) that egret does not have.
+    ///
+    /// The predicate is [`crate::model::has_request_expression`], i.e.
+    /// Ranger's own `hasExpressions`, and NOT the broader
+    /// `Unmodelled::MaskExpressionMarker` — see that function's doc for why
+    /// a CUSTOM mask's `{col}` is a literal here.
+    MaskExpression {
+        policy_id: Option<i64>,
+        policy_name: String,
+        item_index: usize,
+        expr: String,
+    },
+    /// The row-filter counterpart:
+    /// `rowFilterInfo.filterExpr` carries a `${{ … }}` expression.
+    RowFilterExpression {
+        policy_id: Option<i64>,
+        policy_name: String,
+        item_index: usize,
+        expr: String,
+    },
+    /// A matched row-filter policy's `filterExpr` satisfies
+    /// `JavaScriptEdits.hasDoubleBrackets`, so the evaluator's constructor
+    /// rewrites it with `replaceDoubleBrackets` before anything else sees
+    /// it. This crate carries no regex engine and does not reproduce the
+    /// rewrite.
+    RowFilterDoubleBrackets {
+        policy_id: Option<i64>,
+        policy_name: String,
+        item_index: usize,
+        expr: String,
+    },
+    /// Two or more mask (or row-filter) policies tie at the same
+    /// `(policyPriority, hasDeny)` and produce DIFFERENT results, so which
+    /// one Ranger reports is decided by
+    /// `RangerOptimizedPolicyEvaluator.getEvalOrder()` — a
+    /// resource-specificity score this crate does not reproduce.
+    ///
+    /// For an ACCESS decision the same gap is harmless: within one band the
+    /// allow/deny outcome does not depend on order (see the sort in
+    /// [`evaluate`]). For a mask it is not, because the engine's
+    /// arbitration for policy types 1 and 2 is `>=`, not `>`
+    /// (`evaluatePoliciesForOneAccessTypeNoAudit`, `if_icmplt` at offset
+    /// 529 versus `if_icmple` at 505) — the FIRST matching evaluator is
+    /// final and the others never run, so the reported mask type is a
+    /// function of an order this crate cannot compute.
+    EvalOrderAmbiguous {
+        policy_ids: Vec<Option<i64>>,
+        policy_names: Vec<String>,
+    },
+    /// [`EngineConfig::engine`] names one engine and the service-def's
+    /// `name` is another's (or is absent). The two engines' resource and
+    /// access-type vocabularies differ, so evaluating against the wrong def
+    /// silently produces "nothing matched".
+    EngineMismatch {
+        declared: EngineType,
+        service_def_name: String,
+    },
+    /// [`EngineConfig::plugin_version`] disagrees with the version measured
+    /// for [`EngineConfig::engine`] ([`EngineType::plugin_version`]). The
+    /// deployment being described is not one this crate has been read
+    /// against.
+    PluginVersionMismatch {
+        engine: EngineType,
+        declared: PluginVersion,
+        measured: PluginVersion,
+    },
+}
+
+// ── mask and row-filter results ──────────────────────────────────────────
+
+/// What a masking decision produced: the three fields
+/// `RangerDefaultDataMaskPolicyItemEvaluator.updateAccessResult` writes
+/// onto `RangerAccessResult`, verbatim.
+///
+/// A mask is DATA, not a verdict. The same method reports `isAllowed = true`
+/// unconditionally (the `iconst_1` it passes to
+/// `RangerPolicyEvaluator.updateAccessResult`), so the allow half carries no
+/// information and collapsing a mask into allow/deny would throw away the
+/// only part that does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaskResult {
+    pub policy_id: Option<i64>,
+    pub policy_name: String,
+    /// `setMaskType(dataMaskInfo.getDataMaskType())`. Never resolved.
+    pub mask_type: String,
+    /// `setMaskedValue(...)`: `dataMaskInfo.getValueExpr()` verbatim.
+    /// `None` when the policy carries none — Ranger calls
+    /// `setMaskedValue(null)`.
+    pub masked_value: Option<String>,
+    /// `setMaskCondition(...)`: `dataMaskInfo.getConditionExpr()` verbatim.
+    pub mask_condition: Option<String>,
+}
+
+/// The three-valued masking result. See [`Decision`] for the contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaskDecision {
+    /// `RangerAccessResult.getMaskType()` stays null: no mask policy
+    /// determined anything and the host applies no transform. Distinct from
+    /// a `MASK_NONE` mask, which is a policy deciding not to transform.
+    NoMask,
+    Masked(MaskResult),
+    Undecidable {
+        why: Vec<UndecidableCause>,
+    },
+}
+
+/// What a row-filter decision produced: `RangerAccessResult.filterExpr`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowFilterResult {
+    pub policy_id: Option<i64>,
+    pub policy_name: String,
+    /// `setFilterExpr(rowFilterExpr)` — the policy's `filterExpr`, verbatim
+    /// (this crate refuses rather than reproducing the double-bracket
+    /// rewrite; see [`UndecidableCause::RowFilterDoubleBrackets`]).
+    pub filter_expr: String,
+}
+
+/// The three-valued row-filter result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowFilterDecision {
+    NoFilter,
+    Filtered(RowFilterResult),
+    Undecidable { why: Vec<UndecidableCause> },
+}
+
+/// Which of Ranger's three policy worlds a decision is being taken in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecisionKind {
+    Access,
+    DataMask,
+    RowFilter,
+}
+
+impl DecisionKind {
+    /// Ranger's raw `policyType` code. `RangerPolicyRepository.init` files
+    /// a policy by this RAW value, so it is the value the candidate filter
+    /// tests.
+    fn policy_type_code(self) -> i32 {
+        match self {
+            DecisionKind::Access => 0,
+            DecisionKind::DataMask => 1,
+            DecisionKind::RowFilter => 2,
+        }
+    }
+
+    /// The single item bucket `getMatchingPolicyItem` reads for this kind.
+    /// `None` for access, which reads four.
+    fn sub_bucket(self) -> Option<ItemBucket> {
+        match self {
+            DecisionKind::Access => None,
+            DecisionKind::DataMask => Some(ItemBucket::DataMaskPolicyItems),
+            DecisionKind::RowFilter => Some(ItemBucket::RowFilterPolicyItems),
+        }
+    }
 }
 
 /// The three-valued result. See the module doc for the contract.
@@ -258,60 +490,11 @@ pub fn evaluate(
 ) -> Decision {
     let mut why: Vec<UndecidableCause> = Vec::new();
 
-    // ── the superuser short-circuit, first, exactly as the engine does ──
-    //
-    //   if (isSuperUser || accessType.equals(SUPER_USER_ACCESS)) {
-    //       ret.setIsAllowed(isSuperUser);
-    //       ret.setIsAccessDetermined(true);
-    //       ret.setPolicyId(-1);
-    //       ret.setPolicyPriority(Integer.MAX_VALUE);
-    //   }
-    //
-    // MAX_VALUE beats every policy priority, and the resource-policy loop's
-    // `ret.getPolicyPriority() > evaluator.getPolicyPriority()` check then
-    // determines the result before the first evaluator's items run — so a
-    // superuser allow is final and is reported without weighing anything
-    // else, unmodelled constructs included.
-    let mut super_config_known = true;
-    let mut is_super_user = false;
-    match &engine.super_users {
-        Some(users) => is_super_user |= users.contains(&request.user),
-        None => super_config_known = false,
-    }
-    match &engine.super_groups {
-        // `hasSuperGroup` requires a non-empty request group set, which
-        // `is_disjoint` gives for free.
-        Some(groups) => is_super_user |= !groups.is_disjoint(&request.groups),
-        None => super_config_known = false,
-    }
-    if is_super_user {
+    if request_preamble(policies, request, service_def, engine, &mut why) == SuperUser::Yes {
         return Decision::Allowed {
             policy_id: Some(SUPERUSER_POLICY_ID),
             policy_name: "superuser".to_string(),
         };
-    }
-    if !super_config_known {
-        why.push(UndecidableCause::SuperUsersUnknown);
-    }
-
-    // ── request-shape constructs this module does not model ────────────
-    if matches!(
-        request.access_type.as_str(),
-        ANY_ACCESS | ADMIN_ACCESS | SUPER_USER_ACCESS
-    ) {
-        why.push(UndecidableCause::PseudoAccessType(
-            request.access_type.clone(),
-        ));
-    }
-
-    // ── envelope- and service-def-level constructs ─────────────────────
-    for construct in &policies.unmodelled {
-        why.push(UndecidableCause::EnvelopeConstruct(construct.clone()));
-    }
-    for issue in service_def.issues() {
-        if issue_affects_access(issue) {
-            why.push(UndecidableCause::ServiceDef(issue.clone()));
-        }
     }
 
     let implied = service_def.implied_access_grants();
@@ -343,12 +526,18 @@ pub fn evaluate(
         // (audit) and every unknown code ONTO access, which is right for
         // picking a resource hierarchy and wrong here — so it is the
         // raw-code test that decides, and the typed one is not consulted.
-        .filter(|p| p.policy_type == 0)
+        .filter(|p| p.policy_type == DecisionKind::Access.policy_type_code())
         .map(|policy| PolicyView::build(policy, request, service_def))
         .collect();
 
     for view in &candidates {
-        view.collect_causes(request, &implied, &all_access_types, &mut why);
+        view.collect_causes(
+            DecisionKind::Access,
+            request,
+            &implied,
+            &all_access_types,
+            &mut why,
+        );
     }
 
     if !why.is_empty() {
@@ -380,14 +569,7 @@ pub fn evaluate(
     // any deny wins; in an all-non-deny band the first allow wins and the
     // rest cannot deny. Only the reported `policy_id` of an allow can
     // differ, which is why a stable name-then-id tie-break stands in for it.
-    candidates.sort_by(|a, b| {
-        b.policy
-            .policy_priority
-            .cmp(&a.policy.policy_priority)
-            .then_with(|| b.has_deny.cmp(&a.has_deny))
-            .then_with(|| a.policy.name.cmp(&b.policy.name))
-            .then_with(|| a.policy.id.cmp(&b.policy.id))
-    });
+    sort_eval_order(&mut candidates);
 
     // ── the evaluator loop ─────────────────────────────────────────────
     //
@@ -475,6 +657,149 @@ pub fn evaluate(
     }
 }
 
+/// Whether the request's principal short-circuits every policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuperUser {
+    Yes,
+    No,
+}
+
+/// Everything the engine checks before it reaches the first policy, and
+/// everything about the download and the service-def that is true whatever
+/// the policy type. Shared by [`evaluate`], [`evaluate_data_mask`] and
+/// [`evaluate_row_filter`], because
+/// `evaluatePoliciesForOneAccessTypeNoAudit` runs all of it before the
+/// `policyType` is branched on (the superuser block at offsets 114-165 and
+/// `evaluateTagPolicies` at 168 both precede it).
+fn request_preamble(
+    policies: &ServicePolicySet,
+    request: &AccessRequest,
+    service_def: &ServiceDef,
+    engine: &EngineConfig,
+    why: &mut Vec<UndecidableCause>,
+) -> SuperUser {
+    // ── the engine/service-def cross-check ─────────────────────────────
+    //
+    // Not Ranger's — Ranger cannot be handed the wrong def, its plugin
+    // downloads its own. It is egret's, and it exists because the failure
+    // it catches is silent: `schema` vs `database` means no hierarchy
+    // contains the policy's keys and every match comes back NONE, which is
+    // indistinguishable from "no policy applies".
+    if let Some(declared) = engine.engine {
+        if service_def.name() != declared.service_def_name() {
+            why.push(UndecidableCause::EngineMismatch {
+                declared,
+                service_def_name: service_def.name().to_string(),
+            });
+        }
+        if let Some(version) = engine.plugin_version {
+            if version != declared.plugin_version() {
+                why.push(UndecidableCause::PluginVersionMismatch {
+                    engine: declared,
+                    declared: version,
+                    measured: declared.plugin_version(),
+                });
+            }
+        }
+    }
+
+    // ── the superuser short-circuit, first, exactly as the engine does ──
+    //
+    //   if (isSuperUser || accessType.equals(SUPER_USER_ACCESS)) {
+    //       ret.setIsAllowed(isSuperUser);
+    //       ret.setIsAccessDetermined(true);
+    //       ret.setPolicyId(-1);
+    //       ret.setPolicyPriority(Integer.MAX_VALUE);
+    //   }
+    //
+    // MAX_VALUE beats every policy priority, and the resource-policy loop's
+    // priority check then determines the result before the first
+    // evaluator's items run — so a superuser allow is final and is reported
+    // without weighing anything else, unmodelled constructs included.
+    //
+    // For a MASK or ROW-FILTER request the same block runs and the same
+    // MAX_VALUE wins, but nothing ever sets `maskType` or `filterExpr`:
+    // the loop resets only `isAccessDetermined` (offset 391), the `>=`
+    // arbitration for policy types 1 and 2 re-determines it on the first
+    // evaluator, and `evaluate`'s `if (!isAccessDetermined)` guard then
+    // skips `evaluatePolicyItems` entirely. A superuser's columns come back
+    // UNMASKED and unfiltered — which is why the callers below map
+    // `SuperUser::Yes` onto `NoMask` / `NoFilter`, not onto a mask.
+    let mut super_config_known = true;
+    let mut is_super_user = false;
+    match &engine.super_users {
+        Some(users) => is_super_user |= users.contains(&request.user),
+        None => super_config_known = false,
+    }
+    match &engine.super_groups {
+        // `hasSuperGroup` requires a non-empty request group set, which
+        // `is_disjoint` gives for free.
+        Some(groups) => is_super_user |= !groups.is_disjoint(&request.groups),
+        None => super_config_known = false,
+    }
+    if is_super_user {
+        return SuperUser::Yes;
+    }
+    if !super_config_known {
+        why.push(UndecidableCause::SuperUsersUnknown);
+    }
+
+    // ── request-shape constructs this module does not model ────────────
+    if matches!(
+        request.access_type.as_str(),
+        ANY_ACCESS | ADMIN_ACCESS | SUPER_USER_ACCESS
+    ) {
+        why.push(UndecidableCause::PseudoAccessType(
+            request.access_type.clone(),
+        ));
+    }
+
+    // ── envelope- and service-def-level constructs ─────────────────────
+    //
+    // `evaluateTagPolicies` runs for policy types 1 and 2 as well as 0, so
+    // `tagPolicies` can decide a mask; `policyDeltas` makes `policies`
+    // partial whatever is being asked; `securityZones` and `serviceConfig`
+    // likewise.
+    for construct in &policies.unmodelled {
+        why.push(UndecidableCause::EnvelopeConstruct(construct.clone()));
+    }
+    for issue in service_def.issues() {
+        if issue_affects_access(issue) {
+            why.push(UndecidableCause::ServiceDef(issue.clone()));
+        }
+    }
+
+    SuperUser::No
+}
+
+/// `Collections.sort(evaluators, EVAL_ORDER_COMPARATOR)`, which
+/// `RangerPolicyRepository.init` applies to all three evaluator lists
+/// (three `Collections.sort` calls, one per list, same comparator).
+///
+/// `PolicyEvalOrderComparator`:
+///
+/// ```java
+/// Integer.compare(other.getPolicyPriority(), me.getPolicyPriority())   // DESC
+/// then: hasDeny() first
+/// then: Integer.compare(me.getEvalOrder(), other.getEvalOrder())
+/// then: compareStrings(policy name)
+/// ```
+///
+/// `getEvalOrder()` is `RangerOptimizedPolicyEvaluator.computeEvalOrder()`,
+/// a resource-specificity score, and is NOT reproduced. A stable
+/// name-then-id tie-break stands in for it; what that costs differs by
+/// policy type and is spelled out at each caller.
+fn sort_eval_order(candidates: &mut [PolicyView<'_>]) {
+    candidates.sort_by(|a, b| {
+        b.policy
+            .policy_priority
+            .cmp(&a.policy.policy_priority)
+            .then_with(|| b.has_deny.cmp(&a.has_deny))
+            .then_with(|| a.policy.name.cmp(&b.policy.name))
+            .then_with(|| a.policy.id.cmp(&b.policy.id))
+    });
+}
+
 #[derive(Debug, Clone)]
 struct Outcome {
     allowed: bool,
@@ -534,34 +859,45 @@ impl<'a> PolicyView<'a> {
     /// defensible, appended to `why`.
     fn collect_causes(
         &self,
+        kind: DecisionKind,
         request: &AccessRequest,
         implied: &BTreeMap<&str, BTreeSet<&str>>,
         all_access_types: &BTreeSet<&str>,
         why: &mut Vec<UndecidableCause>,
     ) {
-        let mut push = |construct: &Unmodelled| {
-            why.push(UndecidableCause::PolicyConstruct {
-                policy_id: self.policy.id,
-                policy_name: self.policy.name.clone(),
-                construct: construct.clone(),
-            });
-        };
+        {
+            let mut push = |construct: &Unmodelled| {
+                why.push(UndecidableCause::PolicyConstruct {
+                    policy_id: self.policy.id,
+                    policy_name: self.policy.name.clone(),
+                    construct: construct.clone(),
+                });
+            };
 
-        for construct in &self.policy.unmodelled {
-            // A construct that decides whether the policy MATCHES has to be
-            // reported whether or not `matched` came out true — `matched`
-            // is exactly what it makes unreliable.
-            let always = matches!(
-                construct,
-                Unmodelled::ResourceValueExpressionMarker { .. } | Unmodelled::ZoneName(_)
-            );
-            if always || (self.matched && construct_affects_access(construct)) {
-                push(construct);
+            for construct in &self.policy.unmodelled {
+                // A construct that decides whether the policy MATCHES has
+                // to be reported whether or not `matched` came out true —
+                // `matched` is exactly what it makes unreliable.
+                let always = matches!(
+                    construct,
+                    Unmodelled::ResourceValueExpressionMarker { .. } | Unmodelled::ZoneName(_)
+                );
+                if always || (self.matched && construct_affects(kind, construct)) {
+                    push(construct);
+                }
             }
         }
 
         if !self.matched {
             return;
+        }
+
+        // The mask / row-filter expressions, tested with Ranger's own
+        // `hasExpressions` rather than with the reader's broader
+        // `Unmodelled::{Mask,RowFilter}ExpressionMarker` — see
+        // [`crate::model::has_request_expression`].
+        if let Some(bucket) = kind.sub_bucket() {
+            self.collect_sub_expression_causes(kind, bucket, why);
         }
 
         // `{OWNER}` with no owner supplied.
@@ -579,7 +915,7 @@ impl<'a> PolicyView<'a> {
         // is now three-valued and IS the detector, so there is exactly one
         // place an item's access list is tested and the guard cannot drift
         // from the guarded again.
-        let owner_unknown = access_buckets(self.policy).any(|items| {
+        let owner_unknown = decided_buckets(kind, self.policy).any(|items| {
             items
                 .iter()
                 .any(|item| item_is_match(item, request, implied) == ItemMatch::NeedsOwner)
@@ -652,6 +988,124 @@ impl<'a> PolicyView<'a> {
         }
     }
 
+    /// A `${{ … }}` expression (or a double-bracket row filter) in the one
+    /// bucket this decision reads.
+    ///
+    /// Reported for any policy whose RESOURCES matched, whether or not its
+    /// items match this principal — the same rule the `Unmodelled` sweep
+    /// above follows, and the same reason: a construct this crate cannot
+    /// evaluate is exactly what makes "it would not have been chosen"
+    /// unreliable.
+    fn collect_sub_expression_causes(
+        &self,
+        kind: DecisionKind,
+        bucket: ItemBucket,
+        why: &mut Vec<UndecidableCause>,
+    ) {
+        for (item_index, item) in sub_items(bucket, self.policy).iter().enumerate() {
+            match kind {
+                DecisionKind::Access => {}
+                DecisionKind::DataMask => {
+                    let Some(info) = &item.data_mask_info else {
+                        continue;
+                    };
+                    for expr in [&info.value_expr, &info.condition_expr]
+                        .into_iter()
+                        .flatten()
+                    {
+                        if has_request_expression(expr) {
+                            why.push(UndecidableCause::MaskExpression {
+                                policy_id: self.policy.id,
+                                policy_name: self.policy.name.clone(),
+                                item_index,
+                                expr: expr.clone(),
+                            });
+                        }
+                    }
+                }
+                DecisionKind::RowFilter => {
+                    let Some(expr) = item
+                        .row_filter_info
+                        .as_ref()
+                        .and_then(|i| i.filter_expr.as_ref())
+                    else {
+                        continue;
+                    };
+                    // ORDER MATTERS, and it is Ranger's: the constructor
+                    // rewrites double brackets FIRST and only then asks
+                    // `hasExpressions` of the REWRITTEN string. So a
+                    // double-bracket expression is undecidable regardless
+                    // of what the original contained.
+                    if has_double_brackets(expr) {
+                        why.push(UndecidableCause::RowFilterDoubleBrackets {
+                            policy_id: self.policy.id,
+                            policy_name: self.policy.name.clone(),
+                            item_index,
+                            expr: expr.clone(),
+                        });
+                    } else if has_request_expression(expr) {
+                        why.push(UndecidableCause::RowFilterExpression {
+                            policy_id: self.policy.id,
+                            policy_name: self.policy.name.clone(),
+                            item_index,
+                            expr: expr.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// `getMatchingPolicyItem(request, dataMaskEvaluators)` /
+    /// `(request, rowFilterEvaluators)` — the SINGLE-list overload, which
+    /// passes `null` as the exception list, followed by the matched item's
+    /// own `updateAccessResult`.
+    ///
+    /// `None` means the policy determines nothing, which is NOT the same as
+    /// "no item matched": a matched item whose `dataMaskInfo` is null
+    /// returns from `updateAccessResult` at its first `ifnull` without
+    /// touching the result, and `getMatchingPolicyItem` has already
+    /// committed to that item — later items in the same policy are never
+    /// tried. The engine loop then moves on to the next policy.
+    fn decide_sub(
+        &self,
+        kind: DecisionKind,
+        request: &AccessRequest,
+        implied: &BTreeMap<&str, BTreeSet<&str>>,
+    ) -> Option<SubResult> {
+        if !self.matched {
+            return None;
+        }
+        let bucket = kind.sub_bucket()?;
+        let item = sub_items(bucket, self.policy)
+            .iter()
+            .find(|i| item_is_match(i, request, implied) == ItemMatch::Yes)?;
+
+        match kind {
+            DecisionKind::Access => None,
+            DecisionKind::DataMask => item.data_mask_info.as_ref().map(|info| {
+                SubResult::Mask(MaskResult {
+                    policy_id: self.policy.id,
+                    policy_name: self.policy.name.clone(),
+                    mask_type: info.mask_type.clone(),
+                    masked_value: info.value_expr.clone(),
+                    mask_condition: info.condition_expr.clone(),
+                })
+            }),
+            DecisionKind::RowFilter => item
+                .row_filter_info
+                .as_ref()
+                .and_then(|i| i.filter_expr.clone())
+                .map(|filter_expr| {
+                    SubResult::RowFilter(RowFilterResult {
+                        policy_id: self.policy.id,
+                        policy_name: self.policy.name.clone(),
+                        filter_expr,
+                    })
+                }),
+        }
+    }
+
     /// `RangerDefaultPolicyEvaluator.evaluatePolicyItems` for one policy:
     /// what, if anything, this policy determines.
     fn decide(
@@ -719,6 +1173,175 @@ impl<'a> PolicyView<'a> {
         }
 
         None
+    }
+}
+
+/// One policy's mask or row-filter contribution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SubResult {
+    Mask(MaskResult),
+    RowFilter(RowFilterResult),
+}
+
+/// Evaluate one data-mask request against one policy download.
+///
+/// Pure, like [`evaluate`], and the same three-valued contract: a mask this
+/// evaluator cannot pin down names itself as an [`UndecidableCause`]
+/// instead of being guessed at.
+///
+/// **A mask is data.** `RangerDefaultDataMaskPolicyItemEvaluator.updateAccessResult`
+/// writes `maskType`, `maskedValue` and `maskCondition` and then reports
+/// allow unconditionally, so [`MaskDecision::Masked`] carries those three
+/// fields and there is no allow/deny to return. Whether the column may be
+/// read at all is a separate question, answered by [`evaluate`] — Ranger
+/// asks it separately too, with a separate `evaluatePolicies` call.
+pub fn evaluate_data_mask(
+    policies: &ServicePolicySet,
+    request: &AccessRequest,
+    service_def: &ServiceDef,
+    engine: &EngineConfig,
+) -> MaskDecision {
+    match evaluate_sub(
+        DecisionKind::DataMask,
+        policies,
+        request,
+        service_def,
+        engine,
+    ) {
+        Err(why) => MaskDecision::Undecidable { why },
+        Ok(None) => MaskDecision::NoMask,
+        Ok(Some(SubResult::Mask(m))) => MaskDecision::Masked(m),
+        Ok(Some(SubResult::RowFilter(_))) => {
+            unreachable!("DataMask kind yields only SubResult::Mask")
+        }
+    }
+}
+
+/// Evaluate one row-filter request against one policy download. See
+/// [`evaluate_data_mask`]; the shape is the same and the source is
+/// `RangerDefaultRowFilterPolicyItemEvaluator`.
+pub fn evaluate_row_filter(
+    policies: &ServicePolicySet,
+    request: &AccessRequest,
+    service_def: &ServiceDef,
+    engine: &EngineConfig,
+) -> RowFilterDecision {
+    match evaluate_sub(
+        DecisionKind::RowFilter,
+        policies,
+        request,
+        service_def,
+        engine,
+    ) {
+        Err(why) => RowFilterDecision::Undecidable { why },
+        Ok(None) => RowFilterDecision::NoFilter,
+        Ok(Some(SubResult::RowFilter(f))) => RowFilterDecision::Filtered(f),
+        Ok(Some(SubResult::Mask(_))) => {
+            unreachable!("RowFilter kind yields only SubResult::RowFilter")
+        }
+    }
+}
+
+/// The body shared by [`evaluate_data_mask`] and [`evaluate_row_filter`].
+///
+/// It differs from [`evaluate`] in exactly the four ways the jars say it
+/// should, and in no others:
+///
+/// 1. the candidate filter is `policyType == 1` / `== 2`, because
+///    `RangerPolicyRepository.init` files by the RAW code into three
+///    disjoint lists and `getLikelyMatchPolicyEvaluators` returns only the
+///    one the request asks for;
+/// 2. `getMatchingPolicyItem` takes the SINGLE-list overload, so there is
+///    no deny bucket, no exception veto, and `isDenyAllElse` is inert (its
+///    fallback in `evaluatePolicyItems` is guarded by
+///    `policyType == null || policyType == 0`);
+/// 3. a matched item reports DATA, and a matched item with no
+///    `dataMaskInfo` / `filterExpr` reports nothing at all and lets the
+///    loop continue;
+/// 4. the engine's priority arbitration is `>=`, not `>`, so the first
+///    matching evaluator in eval order is final — which makes the
+///    unreproduced `getEvalOrder()` load-bearing and a genuine tie
+///    [`UndecidableCause::EvalOrderAmbiguous`].
+fn evaluate_sub(
+    kind: DecisionKind,
+    policies: &ServicePolicySet,
+    request: &AccessRequest,
+    service_def: &ServiceDef,
+    engine: &EngineConfig,
+) -> Result<Option<SubResult>, Vec<UndecidableCause>> {
+    let mut why: Vec<UndecidableCause> = Vec::new();
+
+    if request_preamble(policies, request, service_def, engine, &mut why) == SuperUser::Yes {
+        return Ok(None);
+    }
+
+    let implied = service_def.implied_access_grants();
+    let all_access_types: BTreeSet<&str> = service_def
+        .access_types()
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect();
+
+    let mut candidates: Vec<PolicyView<'_>> = policies
+        .policies
+        .iter()
+        .filter(|p| p.is_enabled)
+        .filter(|p| p.policy_type == kind.policy_type_code())
+        .map(|policy| PolicyView::build(policy, request, service_def))
+        .collect();
+
+    for view in &candidates {
+        view.collect_causes(kind, request, &implied, &all_access_types, &mut why);
+    }
+    if !why.is_empty() {
+        return Err(why);
+    }
+
+    sort_eval_order(&mut candidates);
+
+    // The deciding band. Evaluators run in `EVAL_ORDER_COMPARATOR` order;
+    // the first one that writes a mask wins, because on the NEXT iteration
+    // `result.getIsAllowed()` is true and
+    // `result.getPolicyPriority() >= evaluator.getPolicyPriority()` holds
+    // for every later (lower- or equal-priority) evaluator, which sets
+    // `isAccessDetermined` and makes `evaluate`'s
+    // `if (!isAccessDetermined)` guard skip its items. (And when the
+    // winner has no deny items of its own, offset 553 has already set the
+    // flag before the loop even advances.)
+    //
+    // Which evaluator is "first" is decided within a `(priority, hasDeny)`
+    // band by `getEvalOrder()`, which this crate does not compute. So the
+    // band decides, not the order inside it: if the band holds one yield
+    // the answer is that yield, and if it holds several DIFFERENT ones
+    // there is no answer to give.
+    let mut deciding: Vec<(&PolicyView<'_>, SubResult)> = Vec::new();
+    let mut band: Option<(i32, bool)> = None;
+    for view in &candidates {
+        let this_band = (view.policy.policy_priority, view.has_deny);
+        if band.is_some_and(|b| b != this_band) {
+            break;
+        }
+        if let Some(found) = view.decide_sub(kind, request, &implied) {
+            band = Some(this_band);
+            deciding.push((view, found));
+        }
+    }
+
+    match deciding.len() {
+        0 => Ok(None),
+        1 => Ok(Some(deciding.pop().expect("length checked").1)),
+        _ => {
+            // A tie that all agree on is not a tie the caller can act
+            // wrongly on — but the reported policy id still differs, and
+            // this crate does not report a policy it cannot name.
+            Err(vec![UndecidableCause::EvalOrderAmbiguous {
+                policy_ids: deciding.iter().map(|(v, _)| v.policy.id).collect(),
+                policy_names: deciding
+                    .iter()
+                    .map(|(v, _)| v.policy.name.clone())
+                    .collect(),
+            }])
+        }
     }
 }
 
@@ -927,6 +1550,27 @@ fn access_buckets(policy: &RangerPolicy) -> impl Iterator<Item = &[PolicyItem]> 
     .into_iter()
 }
 
+/// The one bucket `getMatchingPolicyItem` reads for policy type 1 or 2.
+fn sub_items(bucket: ItemBucket, policy: &RangerPolicy) -> &[PolicyItem] {
+    match bucket {
+        ItemBucket::DataMaskPolicyItems => policy.data_mask_policy_items.as_slice(),
+        ItemBucket::RowFilterPolicyItems => policy.row_filter_policy_items.as_slice(),
+        _ => &[],
+    }
+}
+
+/// The buckets whose items actually decide `kind`: four for access, one for
+/// masking, one for row-filtering.
+fn decided_buckets(
+    kind: DecisionKind,
+    policy: &RangerPolicy,
+) -> Box<dyn Iterator<Item = &[PolicyItem]> + '_> {
+    match kind.sub_bucket() {
+        None => Box::new(access_buckets(policy)),
+        Some(bucket) => Box::new(std::iter::once(sub_items(bucket, policy))),
+    }
+}
+
 /// All six buckets — what `RangerOptimizedPolicyEvaluator.preprocessPolicyItems`
 /// folds into its `accessPerms` pre-filter.
 fn all_buckets(policy: &RangerPolicy) -> impl Iterator<Item = &[PolicyItem]> {
@@ -965,24 +1609,45 @@ fn all_buckets(policy: &RangerPolicy) -> impl Iterator<Item = &[PolicyItem]> {
 /// measured by scanning the whole 2.5.0 jar) are handled by
 /// [`match_user_group_and_owner`] and anything else is a literal that
 /// matches nobody, exactly as Ranger treats it.
-fn construct_affects_access(construct: &Unmodelled) -> bool {
+fn construct_affects(kind: DecisionKind, construct: &Unmodelled) -> bool {
     match construct {
         Unmodelled::ValiditySchedules
         | Unmodelled::PolicyConditions
         | Unmodelled::ZoneName(_)
         | Unmodelled::ResourceValueExpressionMarker { .. } => true,
-        Unmodelled::ItemConditions { bucket, .. } => matches!(
-            bucket,
-            ItemBucket::PolicyItems
-                | ItemBucket::DenyPolicyItems
-                | ItemBucket::AllowExceptions
-                | ItemBucket::DenyExceptions
-        ),
+        // Item conditions are evaluated by `isMatch` through
+        // `matchCustomConditions`, and `isMatch` is what BOTH the access
+        // path and the single-list mask/row-filter path call. So a
+        // condition decides exactly when its bucket is one this kind of
+        // decision reads — for a mask policy that is
+        // `dataMaskPolicyItems` alone, and a condition sitting in an
+        // `allowExceptions` bucket of the same policy cannot reach the
+        // decision at all.
+        Unmodelled::ItemConditions { bucket, .. } => match kind.sub_bucket() {
+            None => matches!(
+                bucket,
+                ItemBucket::PolicyItems
+                    | ItemBucket::DenyPolicyItems
+                    | ItemBucket::AllowExceptions
+                    | ItemBucket::DenyExceptions
+            ),
+            Some(decided) => *bucket == decided,
+        },
         // Envelope-scoped; reported from `policies.unmodelled`, never here.
         Unmodelled::SecurityZones
         | Unmodelled::TagPolicies
         | Unmodelled::PolicyDeltas
         | Unmodelled::ServiceConfig => true,
+        // The reader's mask/row-filter expression markers fire on a bare
+        // `{TOKEN}` as well as on `${{ … }}`, which is right for a resource
+        // value (`StringTokenReplacer` does expand those) and WRONG for a
+        // mask: no token replacer runs there. These are therefore not used
+        // as a trigger at all; the mask and row-filter paths test
+        // `has_request_expression` / `has_double_brackets` directly in
+        // [`PolicyView::collect_sub_expression_causes`], which is both
+        // narrower (no false `Undecidable` for every CUSTOM mask) and
+        // wider (it catches `conditionExpr` expressions and double
+        // brackets, which the markers do not distinguish).
         Unmodelled::MaskExpressionMarker { .. }
         | Unmodelled::MaskConditionExpr { .. }
         | Unmodelled::RowFilterExpressionMarker { .. }
