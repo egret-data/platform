@@ -6,6 +6,7 @@ import { AlertTriangle, ArrowLeft, ChevronsUpDown, Lock, Plus, Trash2, X } from 
 
 import { type AccessGroup, type AccessRole, listGroups, listRoles } from "@/api/access";
 import {
+  type AccessPolicyWritten,
   useClearTagAccessPolicy,
   useDeleteTag,
   useSetTagAccessPolicy,
@@ -136,7 +137,22 @@ export default function TagDetail() {
       setRequiredRoles(tag?.required_roles ?? []);
       setRequiredGroups(tag?.required_groups ?? []);
     };
-    const onSuccess = (label: string) => () => {
+    // **SP4c review I5.** The endpoint now says what the accompanying recompile
+    // could NOT express, and a success toast that ignored it would be the same
+    // "saved, therefore enforced" claim the whole clearance surface exists to
+    // avoid: a group-only gate, or a Trino profile with no usable tag service,
+    // saves the row and gives no engine anything. The skip is shown where the
+    // clearance is authored, not only in the server log.
+    const onSuccess = (label: string) => (res: AccessPolicyWritten) => {
+      const skipped = res?.skipped ?? [];
+      if (skipped.length > 0) {
+        const msg = `Saved, but not compiled into any engine: ${skipped
+          .map((s) => s.reason)
+          .join(" ")}`;
+        setClearanceError(msg);
+        toast.warning("Clearance saved but not enforced in any engine");
+        return;
+      }
       setClearanceError(null);
       toast.success(label);
     };
@@ -187,7 +203,18 @@ export default function TagDetail() {
     })),
   ];
 
+  // **Only a ROLE compiles to anything in an engine.** A groups-only gate is
+  // skipped by the compiler outright (`clearance.rs`: a Ranger item naming a
+  // group matches nobody, so a deny emitted for it would withhold the column
+  // from everybody), so the three statements below — reads-only, the view
+  // bypass, the expansion ceiling — would all be describing a control that does
+  // not exist. Claiming withholding where there is none is precisely the
+  // failure those statements were written to prevent; the group-only warning
+  // above is what a groups-only gate gets, and it says the opposite.
+  // Any clearance at all gates OBJECT access through Cedar, which is what the
+  // header badge reports.
   const gated = requiredRoles.length > 0 || requiredGroups.length > 0;
+  const engineGated = requiredRoles.length > 0;
 
   return (
     <div className="space-y-6">
@@ -331,7 +358,7 @@ export default function TagDetail() {
           </Badge>
         )}
 
-        {gated && (
+        {engineGated && (
           <>
             {/* SP4c Task 7. The earlier wording here claimed Trino withheld
                 both reads and writes while StarRocks withheld reads only, and
@@ -370,10 +397,11 @@ export default function TagDetail() {
               everybody, the cleared included.
             </Badge>
             <p className="text-xs text-muted-foreground">
-              Clearance is read installation-wide: if this tag ever reaches more than 500 tagged
-              columns, the StarRocks compiler refuses rather than truncating it, and every
-              StarRocks profile&apos;s recompile fails — including profiles that serve entirely
-              unrelated tables — until the tag is narrowed or untagged back under the limit.
+              A StarRocks clearance expands to one policy per tagged column, counted per profile:
+              if more than 500 of this tag&apos;s columns are visible to one StarRocks profile,
+              that profile&apos;s recompile fails outright rather than truncating the clearance,
+              and every write that would recompile it fails with it — until the tag is narrowed or
+              untagged back under the limit. Profiles that see fewer are unaffected.
             </p>
           </>
         )}

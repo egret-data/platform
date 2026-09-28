@@ -119,14 +119,14 @@ describe("TagDetail", () => {
   // something the system CANNOT do, which is precisely the kind of sentence
   // a refactor drops without noticing.
   describe("what the engine does not enforce", () => {
-    test("an ungated tag shows none of the four clearance warnings", async () => {
+    test("an ungated tag shows none of the clearance warnings", async () => {
       renderPage();
       await screen.findByRole("heading", { name: "PII" });
 
       expect(screen.queryByText(/not enforced in the engine/i)).not.toBeInTheDocument();
       expect(screen.queryByText(/withholds reads only/i)).not.toBeInTheDocument();
       expect(screen.queryByText(/a view over a classified column/i)).not.toBeInTheDocument();
-      expect(screen.queryByText(/500 tagged columns/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/500 of this tag.s columns/i)).not.toBeInTheDocument();
     });
 
     test("a group-only gate says neither a group nor a role name reaches the engine", async () => {
@@ -208,7 +208,14 @@ describe("TagDetail", () => {
       ).toBeInTheDocument();
     });
 
-    test("a role-gated tag says the expansion ceiling fails every StarRocks profile's recompile", async () => {
+    // The ceiling is PER PROFILE, not installation-wide: the compiler counts
+    // `tagged_columns_for_service_via`, which joins the profile's own attached
+    // catalogs, so a profile serving unrelated tables sees none of this tag's
+    // columns and is not affected. The earlier wording said every StarRocks
+    // profile's recompile fails "including profiles that serve entirely
+    // unrelated tables", which overstates the blast radius of a limit an
+    // operator plans capacity against.
+    test("a role-gated tag says the expansion ceiling is counted PER StarRocks profile", async () => {
       vi.mocked(tagsApi.useTags).mockReturnValue({
         data: [{ ...TAG, required_roles: ["finance_cleared"] }],
         isLoading: false,
@@ -219,11 +226,79 @@ describe("TagDetail", () => {
       await screen.findByRole("heading", { name: "PII" });
 
       expect(
-        screen.getByText(/if this tag ever reaches more than 500 tagged columns/i),
+        screen.getByText(
+          /if more than 500 of this tag.s columns are visible to one starrocks profile, that profile.s recompile fails outright rather than truncating the clearance/i,
+        ),
       ).toBeInTheDocument();
+      expect(screen.getByText(/profiles that see fewer are unaffected/i)).toBeInTheDocument();
       expect(
-        screen.getByText(/every starrocks profile.s recompile fails/i),
+        screen.queryByText(/including profiles that serve entirely unrelated tables/i),
+      ).not.toBeInTheDocument();
+    });
+
+    // **I2.** A groups-only gate compiles to NOTHING (`clearance.rs` skips it:
+    // a Ranger item naming a group matches nobody), so every one of the three
+    // engine statements would be describing a control that does not exist —
+    // claiming withholding where there is none, inside the very statements
+    // written to prevent that. The four presence tests above all render a
+    // ROLE-gated tag, so none of them could see this.
+    test("a groups-only gate shows the group warning and NONE of the engine statements", async () => {
+      vi.mocked(tagsApi.useTags).mockReturnValue({
+        data: [{ ...TAG, required_roles: [], required_groups: ["g1"] }],
+        isLoading: false,
+        isError: false,
+        error: null,
+      } as unknown as ReturnType<typeof tagsApi.useTags>);
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      // The one statement that IS true of a groups-only gate.
+      expect(screen.getByText(/not enforced in the engine/i)).toBeInTheDocument();
+      // And the three that are not.
+      expect(screen.queryByText(/withholds reads only/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/neither engine withholds writes/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/a view over a classified column/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/500 of this tag.s columns/i)).not.toBeInTheDocument();
+      // It is still gated for OBJECT access, which the header badge reports.
+      expect(screen.getByText("Gated")).toBeInTheDocument();
+    });
+
+    // **SP4c review I5.** The write now reports what it could NOT compile, and
+    // a success toast that ignored it would be the same "saved, therefore
+    // enforced" claim this whole surface exists to avoid. The author is told
+    // where the clearance is authored, not only in the server log.
+    test("a clearance the recompile could not express is reported, not reported as saved", async () => {
+      const user = userEvent.setup();
+      // The mutate stub resolves through its onSuccess, the way the real hook
+      // does, with a skip on the wire.
+      setMutate.mockImplementation(
+        (
+          _vars: unknown,
+          opts: { onSuccess: (r: { ok: boolean; skipped: { reason: string }[] }) => void },
+        ) =>
+          opts.onSuccess({
+            ok: true,
+            skipped: [
+              {
+                source_kind: "clearance",
+                id: "t1",
+                reason:
+                  "this Trino profile has no usable `tagService`, and a Trino clearance is a TAG policy",
+              },
+            ],
+          }),
+      );
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      await user.click(screen.getByRole("combobox", { name: "Role to add" }));
+      await user.click(await screen.findByText("finance_cleared"));
+      await user.click(screen.getByRole("button", { name: "Add clearance" }));
+
+      expect(
+        await screen.findByText(/saved, but not compiled into any engine/i),
       ).toBeInTheDocument();
+      expect(screen.getByText(/has no usable .?tagService/i)).toBeInTheDocument();
     });
   });
 });

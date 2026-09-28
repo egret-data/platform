@@ -95,26 +95,40 @@ export function useDeleteTag() {
 }
 
 /**
+ * What a clearance write actually reached (SP4c review I5). `skipped` is empty
+ * on the normal path; a non-empty entry means the recompile could NOT express
+ * the clearance somewhere — a group-only gate, or a Trino profile with no
+ * usable tag service — so the row was saved and no engine was given anything.
+ * The endpoint used to answer a bare `{ ok: true }` either way.
+ */
+export interface AccessPolicyWritten {
+  ok: boolean;
+  skipped: { source_kind: string; id: string; reason: string }[];
+}
+
+/**
  * Sets the clearance policy for a tag: objects carrying it become openable
  * only by principals holding one of `required_roles` OR belonging to one of
  * `required_groups` (Cedar PDP-enforced). Passing both as empty arrays
  * clears the gate — same effect as `useClearTagAccessPolicy`, kept separate
  * for callers that always PUT.
+ *
+ * Resolves with the server's [`AccessPolicyWritten`]; a caller that discards it
+ * is back to reporting "saved" over a clearance no engine enforces.
  */
 export function useSetTagAccessPolicy() {
   const queryClient = useQueryClient();
   return useMutation<
-    void,
+    AccessPolicyWritten,
     Error,
     { id: string; required_roles: string[]; required_groups: string[] }
   >({
-    mutationFn: async ({ id, required_roles, required_groups }) => {
-      await apiJson<void>(`/control-plane/tags/${id}/access-policy`, {
+    mutationFn: ({ id, required_roles, required_groups }) =>
+      apiJson<AccessPolicyWritten>(`/control-plane/tags/${id}/access-policy`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ required_roles, required_groups }),
-      });
-    },
+      }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: tagsQueryKey }),
   });
 }
@@ -122,10 +136,9 @@ export function useSetTagAccessPolicy() {
 /** Clears a tag's clearance policy — objects carrying it are no longer gated. */
 export function useClearTagAccessPolicy() {
   const queryClient = useQueryClient();
-  return useMutation<void, Error, string>({
-    mutationFn: async (id) => {
-      await apiJson<void>(`/control-plane/tags/${id}/access-policy`, { method: "DELETE" });
-    },
+  return useMutation<AccessPolicyWritten, Error, string>({
+    mutationFn: (id) =>
+      apiJson<AccessPolicyWritten>(`/control-plane/tags/${id}/access-policy`, { method: "DELETE" }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: tagsQueryKey }),
   });
 }
