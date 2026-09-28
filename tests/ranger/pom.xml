@@ -6,4 +6,23 @@
     <dependency><groupId>org.apache.ranger</groupId><artifactId>ranger-plugins-common</artifactId><version>${ranger.version}</version></dependency>
     <dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version><scope>test</scope></dependency>
   </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <!-- Surefire's default includes are Test*, *Test, *Tests, *TestCase, none
+               of which matches EgretCaseRunner. Named explicitly rather than
+               renaming the class, so the differential runner keeps a name that
+               says what it is and cannot be mistaken for the four hand-written
+               anchor tests it must stay separate from. -->
+          <includes>
+            <include>EgretRangerEnforcementTest.java</include>
+            <include>EgretCaseRunner.java</include>
+          </includes>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
 </project>
