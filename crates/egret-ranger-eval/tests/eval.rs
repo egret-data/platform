@@ -26,7 +26,7 @@ use egret_ranger_eval::eval::{
 };
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::RequestResource;
-use egret_ranger_eval::servicedef::ServiceDef;
+use egret_ranger_eval::servicedef::{ServiceDef, ServiceDefIssue};
 use serde_json::{json, Value};
 
 // ── fixtures and helpers ─────────────────────────────────────────────────
@@ -539,11 +539,22 @@ fn a_chained_implied_grant_is_undecidable() {
     };
 
     let d = evaluate(&set, &request, &def, &no_superusers());
+    // Named exactly, so the test cannot pass on some other service-def issue.
     assert!(
-        causes(&d)
-            .iter()
-            .any(|c| matches!(c, UndecidableCause::ServiceDef(_))),
+        causes(&d).iter().any(|c| matches!(
+            c,
+            UndecidableCause::ServiceDef(ServiceDefIssue::ChainedImpliedGrants { implying, implied })
+                if implying == "admin" && implied == "write"
+        )),
         "{d:?}"
+    );
+
+    // And the control: the def egret actually ships declares only a FLAT
+    // `all => [select, insert, …]`, so it raises no service-def cause at all.
+    assert!(
+        trino_def().issues().is_empty(),
+        "{:?}",
+        trino_def().issues()
     );
 }
 
