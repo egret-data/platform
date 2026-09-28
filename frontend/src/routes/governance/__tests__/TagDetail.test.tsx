@@ -105,19 +105,27 @@ describe("TagDetail", () => {
     );
   });
 
-  // SP4c Task 5/D2: three facts the UI must say where the clearance is set,
-  // because none of them is enforced (or enforced evenly) by the engine and
-  // an operator who is not told will assume otherwise. Each assertion below
-  // is on the STATEMENT's content, not merely that "a warning" renders —
-  // a wording change is exactly what a later refactor would drop silently,
-  // and a shape-only test would pass against that.
+  // SP4c Task 5/D2, corrected and extended by Task 7: four facts the UI must
+  // say where the clearance is set, because none of them is enforced by the
+  // engine and an operator who is not told will assume otherwise. Each
+  // assertion below is on the STATEMENT's content, not merely that "a
+  // warning" renders — a wording change is exactly what a later refactor
+  // would drop silently, and a shape-only test would pass against that.
+  //
+  // Two of these statements were MEASURED FALSE before Task 7
+  // (`docs/en/plans/2026-09-28-sp4c-live-result.md`): the write sentence
+  // claimed Trino withheld writes and called the difference an asymmetry,
+  // and nothing said a view bypasses the clearance at all. Both now describe
+  // something the system CANNOT do, which is precisely the kind of sentence
+  // a refactor drops without noticing.
   describe("what the engine does not enforce", () => {
-    test("an ungated tag shows none of the three clearance warnings", async () => {
+    test("an ungated tag shows none of the four clearance warnings", async () => {
       renderPage();
       await screen.findByRole("heading", { name: "PII" });
 
       expect(screen.queryByText(/not enforced in the engine/i)).not.toBeInTheDocument();
       expect(screen.queryByText(/withholds reads only/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/a view over a classified column/i)).not.toBeInTheDocument();
       expect(screen.queryByText(/500 tagged columns/i)).not.toBeInTheDocument();
     });
 
@@ -138,7 +146,13 @@ describe("TagDetail", () => {
       ).toBeInTheDocument();
     });
 
-    test("a role-gated tag says a StarRocks clearance withholds reads only", async () => {
+    // SP4c Task 7. The assertion is on BOTH halves of the corrected sentence:
+    // that the clearance withholds reads only on both engines, and that
+    // NEITHER engine withholds writes. The second half is the one the gate
+    // falsified — the old wording said Trino withheld both — so a test that
+    // only matched "withholds reads only" would have passed against the false
+    // sentence too.
+    test("a role-gated tag says NEITHER engine withholds writes", async () => {
       vi.mocked(tagsApi.useTags).mockReturnValue({
         data: [{ ...TAG, required_roles: ["finance_cleared"] }],
         isLoading: false,
@@ -150,11 +164,48 @@ describe("TagDetail", () => {
 
       expect(
         screen.getByText(
-          /on a starrocks engine this clearance withholds reads only: a user without it can still overwrite a column they cannot read/i,
+          /this clearance withholds reads only, on trino and on starrocks alike: a user without it can still overwrite a column they cannot read/i,
         ),
       ).toBeInTheDocument();
+      expect(screen.getByText(/neither engine withholds writes/i)).toBeInTheDocument();
+      // And the asymmetry the live gate falsified must not come back.
+      expect(screen.queryByText(/on a starrocks engine this clearance/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/trino withholds both reads and writes/i)).not.toBeInTheDocument();
       // The group-only warning must NOT appear here — this gate has a role.
       expect(screen.queryByText(/not enforced in the engine/i)).not.toBeInTheDocument();
+    });
+
+    // SP4c Task 7 / D0b / D5: the view bypass, measured on both engines. The
+    // Trino half is asserted separately because it is the surprising one —
+    // an operator told only "views are not covered" would not expect a
+    // CLEARED user to be blocked by an uncleared view owner, and a test that
+    // stopped at the first sentence would pass against a warning that left
+    // the two-directional failure out.
+    test("a role-gated tag says a view bypasses the clearance on both engines, in both directions", async () => {
+      vi.mocked(tagsApi.useTags).mockReturnValue({
+        data: [{ ...TAG, required_roles: ["finance_cleared"] }],
+        isLoading: false,
+        isError: false,
+        error: null,
+      } as unknown as ReturnType<typeof tagsApi.useTags>);
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      expect(
+        screen.getByText(
+          /a view over a classified column is not covered on either engine: reading the column through a view returns it in full to a user without clearance/i,
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          /on trino a view runs with its owner.s rights, so it fails both ways/i,
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          /a cleared owner.s view hands the column to the uncleared, and an uncleared owner.s view blocks everybody, the cleared included/i,
+        ),
+      ).toBeInTheDocument();
     });
 
     test("a role-gated tag says the expansion ceiling fails every StarRocks profile's recompile", async () => {
