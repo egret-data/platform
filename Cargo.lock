@@ -3632,6 +3632,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-ranger-eval"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "egret-secrets"
 version = "0.1.0"
 dependencies = [

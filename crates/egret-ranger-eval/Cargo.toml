@@ -1,0 +1,21 @@
+[package]
+name = "egret-ranger-eval"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# SP4d Task 3: a typed READER for Ranger policy bodies. `policy_jsonb` is
+# stored as the client's original Ranger JSON verbatim; nothing else in the
+# repo models it for reading (the only typed shapes are the writer's,
+# `egret_policy::admin::ranger_json`, documented lossy for policies egret
+# did not author). This crate builds the evaluator SP4d needs on top of that
+# reader (resource matching, precedence, mask/row-filter — later tasks).
+#
+# Deliberately pure: no sqlx, no tokio, no network, no filesystem in library
+# code — mirrors the discipline documented at `crates/egret-perm/src/eval.rs`.
+# No dependency on `egret-policy`: the writer's lossiness is exactly what
+# this crate exists to not repeat, so it models the JSON shape itself rather
+# than reusing those types.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
