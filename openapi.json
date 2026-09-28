@@ -9435,7 +9435,14 @@
         },
         "responses": {
           "200": {
-            "description": "Classification access policy set"
+            "description": "Classification access policy set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessPolicyWritten"
+                }
+              }
+            }
           },
           "401": {
             "description": "Not authenticated",
@@ -9488,7 +9495,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Classification access policy cleared"
+            "description": "Classification access policy cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessPolicyWritten"
+                }
+              }
+            }
           },
           "401": {
             "description": "Not authenticated",
@@ -29976,6 +29990,27 @@
           }
         }
       },
+      "AccessPolicyWritten": {
+        "type": "object",
+        "description": "What a clearance write actually reached — **SP4c review I5.**\n\nThe endpoint used to answer a bare `{\"ok\": true}`, so a clearance authored\non a Trino profile with no usable `tagService`, or one naming only groups,\nwas reported as saved while the compiler had emitted nothing at all and the\nUI showed it as active. `skipped` carries exactly what the perm mutation\nresponses already carry (`SkipReport`, same schema) and for the stated\nreason: an author needs to know at authoring time, not from a query that\nlater returns rows it should not.\n\nAn EMPTY `skipped` is the normal answer and means every profile a clearance\ncan reach compiled it.",
+        "required": [
+          "ok",
+          "skipped"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "description": "Always `true` — the write committed, or this response was never built."
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkipReport"
+            },
+            "description": "Every profile/item the accompanying recompile could not express."
+          }
+        }
+      },
       "AccessRequestDto": {
         "type": "object",
         "description": "A join request as seen by the requester.",
@@ -34523,7 +34558,7 @@
         "properties": {
           "kind": {
             "type": "string",
-            "description": "`allowed_by_grant` | `explicit_deny` | `no_grant_matched` |\n`masked_by_rule` | `filtered_by_rule`."
+            "description": "`allowed_by_grant` | `allowed_by_group_only` | `explicit_deny` |\n`no_grant_matched` | `masked_by_rule` | `filtered_by_rule` |\n`clearance_required`.\n\n`allowed_by_group_only` is an allow the DATA PLANE will refuse: the\ngrant matched only through a `group` principal, and no engine egret\nprovisions can see a group (D7). It is its own string because a caller\nparsing `kind` never sees the prose the page shows beside it."
           },
           "grant_id": {
             "type": [
@@ -34550,6 +34585,23 @@
               "string",
               "null"
             ]
+          },
+          "tag": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`clearance_required` only: the gating tag's key."
+          },
+          "required_roles": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "`clearance_required` only: the role(s) that would clear it — holding\nany ONE is enough (`egret_perm_compile::clearance`'s \"OR across\nroles\" semantics)."
           }
         }
       },
@@ -34600,7 +34652,7 @@
       },
       "ExplainSubject": {
         "type": "object",
-        "description": "The caller `explain` decides about.\n\n**No `workspaces` field (SP4a Task 15, D3 defect 2 — removed, not just\nignored).** It used to be caller-supplied, `#[serde(default)]` to\n`vec![]`, and the evaluator trusted it verbatim — so a caller naming just\na `user` (the natural way to call this endpoint) silently got `denied`\nfor every `workspace_members` grant, however real the compiled Ranger\npolicy made that access: the live gate measured exactly that. `explain`\nnow resolves `user`'s CURRENT workspace memberships itself\n(`crate::members::workspaces_for_username`), off the same\n`access_grants`/`users.username` truth the compiler's own expansion reads\n— a caller-supplied list is a second, driftable copy of a fact the\ndatabase already answers, and keeping the field would let a caller\noverride that fact when what it should be describing is the caller's\nprincipal, not a value only egret can verify.",
+        "description": "The caller `explain` decides about.\n\n**No `workspaces` field (SP4a Task 15, D3 defect 2 — removed, not just\nignored).** It used to be caller-supplied, `#[serde(default)]` to\n`vec![]`, and the evaluator trusted it verbatim — so a caller naming just\na `user` (the natural way to call this endpoint) silently got `denied`\nfor every `workspace_members` grant, however real the compiled Ranger\npolicy made that access: the live gate measured exactly that. `explain`\nnow resolves `user`'s CURRENT workspace memberships itself\n(`crate::members::workspaces_for_username`), off the same\n`access_grants`/`users.username` truth the compiler's own expansion reads\n— a caller-supplied list is a second, driftable copy of a fact the\ndatabase already answers, and keeping the field would let a caller\noverride that fact when what it should be describing is the caller's\nprincipal, not a value only egret can verify.\n\n**And no `roles` field either (SP4c Task 7 — the same defect, on the field\nnext to it, removed for the same reason).** The SP4c live gate\n(`docs/en/plans/2026-09-28-sp4c-live-result.md`) measured both directions\nof it: naming only a `user` returned `clearance_required` for the subject\nthe engine had just served the classified column to, and\n`{\"user\":\"analyst\",\"roles\":[\"sp4c_cleared\"]}` returned `allowed` for the\nsubject the engine refuses — a caller asserting a role it does not hold was\nbelieved, so the diagnostic could be told a lie and would repeat it.\n`explain` now reads the subject's roles from `access_grants`\n(`crate::members::roles_for_username`) through the same live/`allow`/\nunexpired predicate the clearance compiler's own expansion uses. **This is\nnot a \"what-if\" endpoint**: D9 (SP4b) defines it as answering why a subject\n**is** allowed or refused, and a field that let a caller invent the\nsubject's clearance would answer a different question while looking\nauthoritative.\n\n`groups` remains caller-supplied and is deliberately left so: egret runs no\nusersync and no group provider, so a group name reaches no engine at all\n(D7/D2) and the UI already says the field is matched here and nowhere else.\nResolving it server-side would give the field an authority the data plane\ndoes not honour, which is the opposite of the fix above.",
         "required": [
           "user"
         ],
@@ -34609,12 +34661,6 @@
             "type": "string"
           },
           "groups": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "roles": {
             "type": "array",
             "items": {
               "type": "string"
@@ -39019,7 +39065,7 @@
       },
       "SkipReport": {
         "type": "object",
-        "description": "A grant or rule a recompile could not express and left uncompiled. Surfaced\non the response rather than only in the logs: a create that succeeded but\ncompiled nothing for a service is a fact the author needs at authoring\ntime, not one a steward discovers from a query that returns no rows.",
+        "description": "A grant, a rule, or a tag's classification clearance that a recompile could\nnot express and left uncompiled. Surfaced\non the response rather than only in the logs: a create that succeeded but\ncompiled nothing for a service is a fact the author needs at authoring\ntime, not one a steward discovers from a query that returns no rows.",
         "required": [
           "source_kind",
           "id",
@@ -39028,11 +39074,12 @@
         "properties": {
           "source_kind": {
             "type": "string",
-            "description": "`grant` | `rule`."
+            "description": "`grant` | `rule` | `clearance`."
           },
           "id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "The `perm.grants`/`perm.rules` id — or, for `clearance`, the `tags.id`\nwhose classification gate could not be expressed (SP4c Task 2)."
           },
           "reason": {
             "type": "string"

@@ -222,12 +222,17 @@ impl TagRepo {
     }
 
     /// Delete a tag. `tag_assignments` and `catalog_tag_assignments` cascade
-    /// (FK `ON DELETE CASCADE`, migrations 0080/0081) — a tag with no
-    /// `perm.rules` row selecting it never fed a compiled policy in the
-    /// first place (`egret-perm-compile::trigger`'s `compile_desired` only
-    /// ever resolves a tag's columns for a key a LIVE rule names), so
-    /// cascading those assignments away here creates no SP4a staleness (D5)
-    /// to recompile out of.
+    /// (FK `ON DELETE CASCADE`, migrations 0080/0081).
+    ///
+    /// **A tag with no `perm.rules` row selecting it USED to feed no compiled
+    /// policy, and SP4c ended that.** The pre-SP4c justification — that
+    /// `compile_desired` only resolves a tag's columns for a key a LIVE rule
+    /// names, so cascading the assignments away creates no staleness to
+    /// recompile out of — is no longer true, and the body below says so three
+    /// lines down: `classification_policies` cascades with the row too, so
+    /// deleting a GATED tag removes a clearance that IS compiled, whether or not
+    /// any rule selects the tag. The recompile in the body is therefore not
+    /// optional, and this doc no longer argues the opposite of it.
     ///
     /// A tag a `perm.rules` row still SELECTS (`perm.rules.tag_key REFERENCES
     /// tags(key)`, migration 0154, no `ON DELETE` clause — the default
@@ -242,9 +247,24 @@ impl TagRepo {
     /// as — the caller should be told to delete/retarget the rule first, not
     /// shown an opaque internal error.
     pub async fn delete(&self, id: Uuid) -> Result<(), BiError> {
-        sqlx::query("DELETE FROM tags WHERE id = $1")
+        // **SP4c Task 3: deleting a tag is a write to input 1 AND to input 2.**
+        // `classification_policies` and `catalog_tag_assignments` both cascade
+        // away with the row (FKs, migrations 0081/0082), so a GATED tag's delete
+        // removes its clearance — and before SP4c that reached nothing, because
+        // a tag with no `perm.rules` row selecting it fed no compiled policy and
+        // this function therefore recompiled nothing. A clearance changes that:
+        // the compiled deny survives the tag, is served to every plugin, and
+        // nothing would ever sweep it again. That is SP4a Task 7's "a deleted
+        // rule's policy is enforced forever" Critical, one input over — and a
+        // clearance that cannot be lifted by deleting the tag is the one-way
+        // door SP4a had to reopen once already.
+        //
+        // In the SAME transaction, like every other recompile on this seam: the
+        // alternative is a committed delete with a deny nobody can remove.
+        let mut tx = self.db.pool.begin().await?;
+        let affected = sqlx::query("DELETE FROM tags WHERE id = $1")
             .bind(id)
-            .execute(&self.db.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| {
                 if let sqlx::Error::Database(ref dbe) = e {
@@ -257,7 +277,15 @@ impl TagRepo {
                     }
                 }
                 BiError::Db(e)
-            })?;
+            })?
+            .rows_affected();
+        // No row deleted is no state change: recompiling would be a lock
+        // acquisition and a full compile for an idempotent no-op.
+        if affected > 0 {
+            // The skips are logged inside; a 204 has no body to carry them.
+            let _ = ClassificationPolicyRepo::recompile_for_clearance_in_tx(&mut tx).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -379,16 +407,22 @@ impl ClassificationPolicyRepo {
     ///
     /// CLEARANCE (Access P3.4): cleared = >=1 required ROLE OR >=1 required GROUP.
     /// BOTH lists empty = NO gate (informational tag only).
+    ///
+    /// Returns whatever the accompanying recompile could NOT express — a
+    /// group-only gate, or a Trino profile with no usable tag service — so the
+    /// endpoint can tell the author, instead of answering `{"ok": true}` over a
+    /// clearance no engine will ever enforce.
     pub async fn set_policy(
         &self,
         tag_id: Uuid,
         required_roles: &[String],
         required_groups: &[Uuid],
         by: Option<Uuid>,
-    ) -> Result<(), BiError> {
+    ) -> Result<Vec<egret_perm_compile::SkippedItem>, BiError> {
         for role in required_roles {
             validate_role_name(role)?;
         }
+        let mut tx = self.db.pool.begin().await?;
         sqlx::query(
             "INSERT INTO classification_policies \
                  (tag_id, required_roles, required_groups, created_by, updated_at) \
@@ -402,21 +436,98 @@ impl ClassificationPolicyRepo {
         .bind(required_roles)
         .bind(required_groups)
         .bind(by)
-        .execute(&self.db.pool)
+        .execute(&mut *tx)
         .await?;
+        let skipped = Self::recompile_for_clearance_in_tx(&mut tx).await?;
+        tx.commit().await?;
         self.bus.publish(RolesChanged);
-        Ok(())
+        Ok(skipped)
     }
 
     /// Remove a tag's classification policy (idempotent — deletes zero or one row).
-    /// Publishes `RolesChanged` so the PDP reloads its policy set.
-    pub async fn clear_policy(&self, tag_id: Uuid) -> Result<(), BiError> {
+    /// Publishes `RolesChanged` so the PDP reloads its policy set. Returns what
+    /// the recompile could not express, for the same reason [`Self::set_policy`]
+    /// does.
+    pub async fn clear_policy(
+        &self,
+        tag_id: Uuid,
+    ) -> Result<Vec<egret_perm_compile::SkippedItem>, BiError> {
+        let mut tx = self.db.pool.begin().await?;
         sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
             .bind(tag_id)
-            .execute(&self.db.pool)
+            .execute(&mut *tx)
             .await?;
+        let skipped = Self::recompile_for_clearance_in_tx(&mut tx).await?;
+        tx.commit().await?;
         self.bus.publish(RolesChanged);
-        Ok(())
+        Ok(skipped)
+    }
+
+    /// **SP4c Task 3, input 1 of three: the tag's own GATE.** Recompile every
+    /// profile a clearance can reach, on the CALLER's transaction — so the gate
+    /// and the engine policy it compiles to commit together or not at all.
+    ///
+    /// Until SP4c a `classification_policies` write reached the data plane
+    /// through nothing at all: the gate was enforced only by Cedar, on
+    /// control-plane object actions, and the compiler had never read the table.
+    /// Now that a gate compiles to an engine DENY, a write without its recompile
+    /// is the SP4a defect class this programme shipped four separate times — and
+    /// in both directions here. A missed `set_policy` leaves the classified
+    /// column readable by everyone while the UI shows the clearance as active; a
+    /// missed `clear_policy` leaves a deny nobody can lift, which is the one-way
+    /// door SP4a already had to reopen once.
+    ///
+    /// **A recompile FAILURE fails the write**, deliberately, exactly as
+    /// `CatalogTagRepo::recompile_bound_services_in_tx` does: a stored-but-
+    /// uncompiled clearance is worse than a rejected one, because egret's UI
+    /// shows it as enforced.
+    ///
+    /// `recompile_services_in_tx` takes the locks itself, expanded with each
+    /// profile's TAG service and ASCENDING (`lock_services_in_tx`) — the
+    /// ordering that turns two overlapping recompiles into a queue instead of a
+    /// deadlock. Nothing is locked here by hand, so there is no second ordering
+    /// to keep in step with it.
+    /// **The skips are RETURNED, not only logged (SP4c review I5).** A clearance
+    /// authored on a Trino profile with no usable `tagService` compiles nothing
+    /// at all, and a group-only gate compiles nothing on any engine — and the
+    /// endpoint used to answer `{"ok": true}` either way, so the UI showed the
+    /// clearance as active while the data plane had never heard of it. That is
+    /// the same failure the compiler already refuses elsewhere: `SkipReport` is
+    /// on the perm mutation responses precisely because "a create that succeeded
+    /// but compiled nothing is a fact the author needs at authoring time, not
+    /// one a steward discovers from a query that returns no rows". The clearance
+    /// author gets the same courtesy. Still logged, because a skip on the tag
+    /// DELETE path has no response to ride on.
+    pub(crate) async fn recompile_for_clearance_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<Vec<egret_perm_compile::SkippedItem>, BiError> {
+        let services = egret_perm_compile::affected_services_for_classification(&mut **tx).await?;
+        let mut skipped: Vec<egret_perm_compile::SkippedItem> = Vec::new();
+        for summary in egret_perm_compile::recompile_services_in_tx(tx, &services).await? {
+            if !summary.skipped.is_empty() {
+                tracing::warn!(
+                    skipped_count = summary.skipped.len(),
+                    "a clearance write's recompile skipped some items — a group-only gate, or a \
+                     Trino profile with no tag service"
+                );
+            }
+            // **Deduplicated across profiles.** A clearance is
+            // installation-wide, so the SAME unexpressible gate is reported
+            // once per profile in the affected set — and an author reading "3
+            // skipped" for one gate would reasonably think three different
+            // things went wrong. The triple is the identity: two profiles that
+            // skipped the same tag for DIFFERENT reasons (one group-only, one
+            // with no tag service) stay two entries, because those are two
+            // facts.
+            for item in &summary.skipped {
+                if !skipped.iter().any(|s: &egret_perm_compile::SkippedItem| {
+                    s.id == item.id && s.source_kind == item.source_kind && s.reason == item.reason
+                }) {
+                    skipped.push(item.clone());
+                }
+            }
+        }
+        Ok(skipped)
     }
 
     /// The required-role and required-group lists for one tag, or `None` if no

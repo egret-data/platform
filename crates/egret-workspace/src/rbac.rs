@@ -81,6 +81,49 @@ impl Authorizer {
             }
         }
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+
+        // **SP4c Task 3, input 3: who holds the clearing role.** This method
+        // REPLACES a user's whole platform role set, so the affected services are
+        // the union over the roles they are about to LOSE and the ones they are
+        // about to gain — the old half read before the DELETE, because after it
+        // there is nothing left to read it from. A role whose holders are
+        // enumerated into a clearance's `denyExceptions` or a `role` grant's users
+        // goes stale here exactly as it does at the single-role grant handler;
+        // this path just changes several at once.
+        let mut affected: Vec<i64> = Vec::new();
+        let losing: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT r.name FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
+              WHERE ag.principal_type = 'user' AND ag.principal_id = $1 \
+                AND ag.scope_type = 'platform' ORDER BY r.name",
+        )
+        .bind(user_id.0)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        for name in losing
+            .iter()
+            .map(String::as_str)
+            .chain(roles.iter().map(String::as_str))
+        {
+            affected.extend(
+                egret_perm_compile::affected_services_for_role_membership(&mut tx, name)
+                    .await
+                    .map_err(|e| Error::Internal(anyhow::anyhow!(e)))?,
+            );
+        }
+        affected.sort_unstable();
+        affected.dedup();
+        // Ascending, and BEFORE any `access_grants` row is touched — the global
+        // lock order `egret_perm_compile::lock_services_in_tx` documents, which is
+        // what turns two overlapping recompiles into a queue instead of a deadlock.
+        debug_assert!(
+            affected.is_sorted(),
+            "profile locks must be taken ascending"
+        );
+        egret_perm_compile::lock_services_in_tx(&mut tx, &affected)
+            .await
+            .map_err(|e| Error::Internal(anyhow::anyhow!(e)))?;
+
         sqlx::query(
             "DELETE FROM access_grants \
              WHERE principal_type = 'user' AND principal_id = $1 AND scope_type = 'platform'",
@@ -108,6 +151,12 @@ impl Authorizer {
             .await
             .map_err(db_err)?;
         }
+        // A recompile FAILURE fails the whole replace, deliberately: a committed
+        // role set whose engine policies were never rewritten is worse than a
+        // rejected one, because egret's UI shows the new set as in force.
+        egret_perm_compile::recompile_services_in_tx(&mut tx, &affected)
+            .await
+            .map_err(|e| Error::Internal(anyhow::anyhow!(e)))?;
         tx.commit().await.map_err(db_err)?;
         Ok(())
     }

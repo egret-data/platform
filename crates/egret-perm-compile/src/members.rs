@@ -1,5 +1,19 @@
-//! Expanding a `workspace_members` principal into the member list enumerated
-//! at compile time — SP4a **D3**, on the branch D7's live measurement forced.
+//! Expanding a principal that stands for PEOPLE — `workspace_members` (SP4a
+//! **D3**, on the branch D7's live measurement forced) and, since **SP4c Task
+//! 2b**, `role` — into the member list enumerated at compile time.
+//!
+//! **Why `role` is here too, and why it was a defect that it was not.** D0
+//! (`docs/en/plans/2026-09-28-sp4c-d0-result.md`) measured that a Ranger policy
+//! item naming a ROLE matches nobody on the Trino path egret provisions: the
+//! roles document is fetched from a `/service/roles/download/<svc>` route egret
+//! does not serve, so `lastKnownRoleVersion` never leaves `-1`, and Trino's
+//! plugin passes `userRoles` as a hardcoded `null` with `disableRoleResolution`
+//! defaulting true. Until SP4c, `compile_grant` put a `role` principal straight
+//! into that bucket, so a role grant matched nobody in the engine while
+//! `egret_perm::eval::matches_principal` matched it — meaning `explain`
+//! reported an access the engine did not grant. A role now expands to its
+//! holders' usernames exactly as a workspace does, through the one
+//! [`role_usernames`] SP4c's clearance compiler also uses.
 //!
 //! **Why enumeration and not a Ranger group.** D7
 //! (`docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`) measured on
@@ -71,9 +85,114 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use uuid::Uuid;
 
-use egret_auth::users::ensure_username_via;
+use egret_auth::users::{ensure_username_via, usernames_via};
 use egret_core::UserId;
 use egret_perm::{CompileError, Grant, Principal, PrincipalKind, PrincipalSet, Rule};
+
+/// The usernames of the users currently holding each role NAME in `roles` —
+/// the expansion SP4c needs twice over (**SP4c Task 2 and Task 2b**).
+///
+/// **Why a role name has to be expanded at all.** D0
+/// (`docs/en/plans/2026-09-28-sp4c-d0-result.md`) measured on the Trino path
+/// egret provisions that a Ranger policy item naming a ROLE matches nobody: the
+/// plugin fetches roles from `/service/roles/download/<service>`, a separate
+/// document with its own version counter that egret's six `/service` GET routes
+/// do not include, so the poll 404s and `lastKnownRoleVersion` never leaves
+/// `-1`; Trino's built-in plugin also passes `userRoles` as a hardcoded `null`
+/// and defaults `disableRoleResolution` to `true`. A role name is therefore
+/// exactly as unresolvable as a group (D7), and the only enforceable form of
+/// "the holders of role X" is the member list enumerated at compile time.
+///
+/// **A role is scope-free here, deliberately.** `access_grants` scopes a role
+/// grant to the platform, a workspace or an object, but the thing being
+/// compiled is a COLUMN read, which carries no workspace context on any engine
+/// — and `egret_perm::eval::matches_principal` matches
+/// `PrincipalKind::Role` against a flat `Subject::roles` with no scope either.
+/// Reading any live `allow` grant of the role therefore keeps the compiler and
+/// the evaluator in agreement, which is the property SP4c Task 2b exists to
+/// restore. It is WIDER than Cedar's object-level check in one corner (Cedar
+/// loads the grants for the resource's OWN workspace, so a role held only in
+/// another workspace does not clear an object there); an engine read cannot
+/// tell those apart, and narrowing to platform scope would instead DENY people
+/// Cedar clears.
+///
+/// **`effect = 'allow'` only**, mirroring the Cedar PDP's own clearance read
+/// (`egret_auth::pdp`: a `deny`-effect grant strips access, so its role name
+/// must not count as holding the role) and `expand_enumerated_principals`'s
+/// membership predicate.
+///
+/// **The name emitted is the STORED `users.username`, read and never minted.**
+/// `usernames_via` is the read-only, never-minting half of the username API:
+/// `ensure_username` lowercases, slugifies and appends `-2`/`-3` on collision,
+/// so a re-derived slug names the WRONG person while compiling, deploying and
+/// reporting success. A holder with no username yet is absent from the map and
+/// is logged, not guessed — and absent is the right answer, not merely the safe
+/// one: the bare username is the only identity an engine ever sees for a
+/// person, so a user without one is not a principal on any engine, cannot
+/// appear in an `include` item either, and therefore cannot be granted the
+/// access an `exclude` would have subtracted.
+///
+/// Ordering is sorted + deduplicated because the compiled body is diffed
+/// byte-for-byte against what is stored (`apply_diff_in_tx`); an unstable
+/// principal order would rewrite every policy on every recompile.
+pub(crate) async fn role_usernames(
+    conn: &mut sqlx::PgConnection,
+    roles: &[String],
+) -> Result<BTreeMap<String, Vec<String>>, CompileError> {
+    // Every requested role appears in the map, even with no holders, so a
+    // caller can tell "expanded to nobody" from "never looked up".
+    let mut out: BTreeMap<String, Vec<String>> = roles
+        .iter()
+        .map(|r| (r.clone(), Vec::new()))
+        .collect::<BTreeMap<_, _>>();
+    if out.is_empty() {
+        return Ok(out);
+    }
+    let wanted: Vec<String> = out.keys().cloned().collect();
+
+    let holders: Vec<(String, Uuid)> = sqlx::query_as(
+        "SELECT r.name, ag.principal_id \
+           FROM access_grants ag \
+           JOIN roles r ON r.id = ag.role_id \
+          WHERE ag.principal_type = 'user' \
+            AND r.name = ANY($1) \
+            AND ag.effect = 'allow' \
+            AND (ag.expires_at IS NULL OR ag.expires_at > now())",
+    )
+    .bind(&wanted)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(e.to_string()))?;
+
+    let ids: Vec<Uuid> = {
+        let mut set: BTreeSet<Uuid> = BTreeSet::new();
+        for (_, id) in &holders {
+            set.insert(*id);
+        }
+        set.into_iter().collect()
+    };
+    let names = usernames_via(conn, &ids)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+
+    for (role, user_id) in &holders {
+        match names.get(user_id) {
+            Some(name) => out.entry(role.clone()).or_default().push(name.clone()),
+            None => tracing::warn!(
+                %user_id,
+                role = %role,
+                "a holder of this role has no `users.username` yet, so it is not named in the \
+                 compiled policy — that identity does not exist on any engine either (the bare \
+                 username is what an engine sees), and it is never guessed from the email"
+            ),
+        }
+    }
+    for names in out.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    Ok(out)
+}
 
 /// One workspace-membership row as read for expansion: who, and the username
 /// the engine will see (NULL until it is minted).
@@ -84,18 +203,26 @@ struct MemberRow {
     username: Option<String>,
 }
 
-/// Collect every workspace id a `workspace_members` principal in `grants` or
-/// `rules` names. A ref that does not parse as a uuid is NOT collected — see
-/// [`expand_workspace_members`] for why that is the same answer the evaluator
-/// gives.
-fn referenced_workspaces(grants: &[Grant], rules: &[Rule]) -> BTreeSet<Uuid> {
-    let mut out = BTreeSet::new();
+/// Every workspace id a `workspace_members` principal names, and every role
+/// NAME a `role` principal names, across `grants` and `rules`. A workspace ref
+/// that does not parse as a uuid is NOT collected — see
+/// [`expand_enumerated_principals`] for why that is the same answer the
+/// evaluator gives.
+fn referenced_principals(grants: &[Grant], rules: &[Rule]) -> (BTreeSet<Uuid>, BTreeSet<String>) {
+    let mut workspaces = BTreeSet::new();
+    let mut roles = BTreeSet::new();
     let mut scan = |set: &PrincipalSet| {
         for p in set.include.iter().chain(set.exclude.iter()) {
-            if p.kind == PrincipalKind::WorkspaceMembers {
-                if let Ok(id) = p.r#ref.parse::<Uuid>() {
-                    out.insert(id);
+            match p.kind {
+                PrincipalKind::WorkspaceMembers => {
+                    if let Ok(id) = p.r#ref.parse::<Uuid>() {
+                        workspaces.insert(id);
+                    }
                 }
+                PrincipalKind::Role => {
+                    roles.insert(p.r#ref.clone());
+                }
+                _ => {}
             }
         }
     };
@@ -105,35 +232,58 @@ fn referenced_workspaces(grants: &[Grant], rules: &[Rule]) -> BTreeSet<Uuid> {
     for r in rules {
         scan(&r.exempt);
     }
-    out
+    (workspaces, roles)
 }
 
-/// Replace every `workspace_members` principal in `grants` and `rules` with
-/// the `User` principals it stands for, read from the database on `conn`.
+/// Replace every `workspace_members` **and every `role`** principal in `grants`
+/// and `rules` with the `User` principals it stands for, read from the database
+/// on `conn`.
 ///
-/// Runs ONE query for every workspace referenced by the whole model, then
-/// mints a username for any member that has none (module doc). After this
-/// returns, no `PrincipalKind::WorkspaceMembers` survives anywhere in
-/// `grants`/`rules` — which is what lets `compile_grant`/`compile_rule` keep
-/// refusing that kind outright as a defence in depth: reaching them with an
-/// unexpanded principal is a bug in THIS function, not an authoring mistake,
-/// and a refusal says so loudly instead of emitting a policy that silently
-/// grants nobody (an `include` that fails closed) or silently grants everybody
-/// the subtract was meant to remove (an `exclude` that fails OPEN — the reason
-/// dropping was never an option; see `grants.rs`'s module doc).
+/// Runs ONE query for every workspace referenced by the whole model (minting a
+/// username for any member that has none — module doc) and ONE for every role
+/// name ([`role_usernames`], which reads and never mints). After this returns,
+/// no `PrincipalKind::WorkspaceMembers` and no `PrincipalKind::Role` survives
+/// anywhere in `grants`/`rules` — which is what lets
+/// `compile_grant`/`compile_rule` refuse both kinds outright as a defence in
+/// depth: reaching them with an unexpanded principal is a bug in THIS function,
+/// not an authoring mistake, and a refusal says so loudly instead of emitting a
+/// policy that silently grants nobody (an `include` that fails closed) or
+/// silently grants everybody the subtract was meant to remove (an `exclude`
+/// that fails OPEN — the reason dropping was never an option; see `grants.rs`'s
+/// module doc).
+///
+/// **`role` joined this function in SP4c Task 2b, and it is a FIX.** Before it,
+/// `compile_grant` put a `role` principal straight into the Ranger `roles`
+/// bucket (`grants.rs:105`), which D0 measured is never populated — so a role
+/// grant matched nobody in the engine while `egret_perm::eval` matched it
+/// happily and `explain` reported an access the engine did not grant. Same
+/// divergence class D7 found for groups, on a path D7 did not look at. It is
+/// the same expansion SP4c's clearance compiler needs, which is why both go
+/// through [`role_usernames`] rather than through two copies of "who holds this
+/// role".
+///
+/// **The ORDER of the two expansions matters, and members go first.** Workspace
+/// membership MINTS a missing username; a role expansion only READS one. A
+/// person named on one side of a subtract by their workspace and on the other
+/// by a role must therefore be resolved to the same name on both sides, or the
+/// `exclude` half would silently lose them and the compiled policy would grant
+/// more than the model states. Expanding members first means any mint has
+/// already happened — on this same connection, so the role read sees it — and
+/// the only names a role expansion can still omit belong to people who have no
+/// engine identity at all and so cannot be named by any `include` item either.
 ///
 /// **A ref that does not parse as a uuid expands to nothing**, rather than
 /// erroring. That is exactly what the evaluator does with it
 /// (`egret_perm::eval::matches_principal` → `parse::<Uuid>().map(...).
 /// unwrap_or(false)`), and requirement 3 of this work is that the oracle and
 /// the compiler answer identically for the same model. It is logged.
-pub(crate) async fn expand_workspace_members(
+pub(crate) async fn expand_enumerated_principals(
     conn: &mut sqlx::PgConnection,
     grants: &mut [Grant],
     rules: &mut [Rule],
 ) -> Result<(), CompileError> {
-    let wanted = referenced_workspaces(grants, rules);
-    if wanted.is_empty() {
+    let (wanted, wanted_roles) = referenced_principals(grants, rules);
+    if wanted.is_empty() && wanted_roles.is_empty() {
         return Ok(());
     }
     let ids: Vec<Uuid> = wanted.iter().copied().collect();
@@ -142,8 +292,11 @@ pub(crate) async fn expand_workspace_members(
     // AccessGrantStore::grants_for`'s workspace arm plus
     // `egret_auth::effective`'s `effect = 'allow'` filter — minus the
     // `user_groups` join (module doc, narrowing 1).
-    let rows: Vec<MemberRow> = sqlx::query_as(
-        "SELECT ag.scope_id AS workspace_id, ag.principal_id AS user_id, \
+    let rows: Vec<MemberRow> = if ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as(
+            "SELECT ag.scope_id AS workspace_id, ag.principal_id AS user_id, \
                 u.username::text AS username \
            FROM access_grants ag \
            JOIN users u ON u.id = ag.principal_id \
@@ -152,11 +305,12 @@ pub(crate) async fn expand_workspace_members(
             AND ag.scope_id = ANY($1) \
             AND ag.effect = 'allow' \
             AND (ag.expires_at IS NULL OR ag.expires_at > now())",
-    )
-    .bind(&ids)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(|e| CompileError::Db(e.to_string()))?;
+        )
+        .bind(&ids)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?
+    };
 
     // Mint a username for anyone who has none, so the policy names the
     // principal the engine will actually see rather than silently omitting
@@ -211,18 +365,24 @@ pub(crate) async fn expand_workspace_members(
         members.entry(*id).or_default();
     }
 
+    // AFTER the mints above, so a person reachable both as a workspace member
+    // and as a role holder resolves to the SAME name on both sides of a
+    // subtract (see this function's doc comment).
+    let roles: Vec<String> = wanted_roles.into_iter().collect();
+    let role_members = role_usernames(conn, &roles).await?;
+
     for g in grants.iter_mut() {
-        substitute(&mut g.principals, &members);
+        substitute(&mut g.principals, &members, &role_members);
     }
     for r in rules.iter_mut() {
-        substitute(&mut r.exempt, &members);
+        substitute(&mut r.exempt, &members, &role_members);
     }
     Ok(())
 }
 
 /// The workspace ids `username` currently has a live, direct
 /// (`principal_type = 'user'`), `allow`, unexpired membership in — the exact
-/// predicate [`expand_workspace_members`] reads, in the OTHER direction
+/// predicate [`expand_enumerated_principals`] reads, in the OTHER direction
 /// (workspace -> members here reads member -> workspaces), off the SAME
 /// `access_grants` rows joined on the STORED `users.username`.
 ///
@@ -259,21 +419,87 @@ pub(crate) async fn workspaces_for_username(
     Ok(ids)
 }
 
-/// Rewrite one `PrincipalSet` in place: every `WorkspaceMembers` entry becomes
-/// the `User` entries it stands for, everything else is carried through
-/// untouched and in its original order. Duplicates are collapsed — a grant
-/// that names `alice` explicitly AND the workspace she belongs to must not
-/// emit `alice` twice into the same Ranger item.
-fn substitute(set: &mut PrincipalSet, members: &HashMap<Uuid, Vec<String>>) {
-    substitute_one(&mut set.include, members);
-    substitute_one(&mut set.exclude, members);
+/// Every role NAME `username` currently holds through a live, direct
+/// (`principal_type = 'user'`), `allow`, unexpired `access_grants` row — the
+/// exact predicate [`role_usernames`] reads, in the OTHER direction (role ->
+/// holders there, holder -> roles here), off the SAME rows joined on the
+/// STORED `users.username`.
+///
+/// **SP4c Task 7, and it is SP4a Task 15's D3 defect 2 on the field next to
+/// the one that was fixed.** `/perm/explain` used to take its subject's roles
+/// from the REQUEST BODY (`ExplainSubject::roles`, caller-supplied,
+/// `#[serde(default)]` to `vec![]`), and the live gate
+/// (`docs/en/plans/2026-09-28-sp4c-live-result.md`) measured it wrong in both
+/// directions at once: asked the natural way, naming only a user, it reported
+/// `clearance_required` for the subject the engine had served the column to in
+/// the same minute; asked with `{"user":"analyst","roles":["sp4c_cleared"]}` it
+/// reported `allowed` for the subject the engine refuses, because a caller
+/// asserting a role it does not hold was simply believed. A diagnostic that can
+/// be told a lie repeats it. This function is `explain`'s read, called with
+/// `body.subject.user` in place of that list, so the evaluator matches a
+/// `role` principal against the same fact the clearance compiler expands.
+///
+/// **Scope-free, deliberately**, exactly as in [`role_usernames`]: a role grant
+/// can be scoped to the platform, a workspace or an object, but
+/// `egret_perm::eval::matches_principal` matches `PrincipalKind::Role` against
+/// a flat `Subject::roles` with no scope, and the compiled engine policy names
+/// the holders of the role with no scope either. Reading any live `allow` grant
+/// of the role is what keeps the three in agreement.
+///
+/// A username with no `users` row (never minted, or simply wrong) resolves to
+/// no roles, which is correct — that identity does not exist on any engine
+/// either, so no compiled `denyExceptions` entry can name it.
+pub(crate) async fn roles_for_username(
+    conn: &mut sqlx::PgConnection,
+    username: &str,
+) -> Result<Vec<String>, CompileError> {
+    let mut names: Vec<String> = sqlx::query_scalar(
+        "SELECT r.name FROM access_grants ag \
+           JOIN roles r ON r.id = ag.role_id \
+           JOIN users u ON u.id = ag.principal_id \
+          WHERE u.username = $1 \
+            AND ag.principal_type = 'user' \
+            AND ag.effect = 'allow' \
+            AND (ag.expires_at IS NULL OR ag.expires_at > now())",
+    )
+    .bind(username)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(e.to_string()))?;
+    // One person can hold the same role through more than one grant (platform
+    // and workspace, say); the evaluator asks only whether the name is in the
+    // list, so the duplicate would be noise in every `explain` response.
+    names.sort();
+    names.dedup();
+    Ok(names)
 }
 
-fn substitute_one(list: &mut Vec<Principal>, members: &HashMap<Uuid, Vec<String>>) {
-    if !list
-        .iter()
-        .any(|p| p.kind == PrincipalKind::WorkspaceMembers)
-    {
+/// Rewrite one `PrincipalSet` in place: every `WorkspaceMembers` and every
+/// `Role` entry becomes the `User` entries it stands for, everything else is
+/// carried through untouched and in its original order. Duplicates are
+/// collapsed — a grant that names `alice` explicitly AND the workspace she
+/// belongs to (or a role she holds) must not emit `alice` twice into the same
+/// Ranger item.
+fn substitute(
+    set: &mut PrincipalSet,
+    members: &HashMap<Uuid, Vec<String>>,
+    role_members: &BTreeMap<String, Vec<String>>,
+) {
+    substitute_one(&mut set.include, members, role_members);
+    substitute_one(&mut set.exclude, members, role_members);
+}
+
+fn substitute_one(
+    list: &mut Vec<Principal>,
+    members: &HashMap<Uuid, Vec<String>>,
+    role_members: &BTreeMap<String, Vec<String>>,
+) {
+    if !list.iter().any(|p| {
+        matches!(
+            p.kind,
+            PrincipalKind::WorkspaceMembers | PrincipalKind::Role
+        )
+    }) {
         return;
     }
     let mut out: Vec<Principal> = Vec::with_capacity(list.len());
@@ -296,13 +522,22 @@ fn substitute_one(list: &mut Vec<Principal>, members: &HashMap<Uuid, Vec<String>
                          a live allow grant"
                     );
                 }
-                names
-                    .into_iter()
-                    .map(|name| Principal {
-                        kind: PrincipalKind::User,
-                        r#ref: name,
-                    })
-                    .collect()
+                as_users(names)
+            }
+            PrincipalKind::Role => {
+                let names = role_members.get(&p.r#ref).cloned().unwrap_or_default();
+                if names.is_empty() {
+                    tracing::warn!(
+                        role = %p.r#ref,
+                        "a role principal expanded to no engine principal — no such role, or \
+                         nobody holds it with a live allow grant and a minted username. The \
+                         Ranger `roles` bucket is NOT used as a fallback: D0 measured that it \
+                         matches nobody, so naming the role there would be a control that does \
+                         nothing (in an include) or one that denies everybody (in a \
+                         denyException)"
+                    );
+                }
+                as_users(names)
             }
             _ => vec![p],
         };
@@ -316,6 +551,16 @@ fn substitute_one(list: &mut Vec<Principal>, members: &HashMap<Uuid, Vec<String>
         }
     }
     *list = out;
+}
+
+fn as_users(names: Vec<String>) -> Vec<Principal> {
+    names
+        .into_iter()
+        .map(|name| Principal {
+            kind: PrincipalKind::User,
+            r#ref: name,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -345,7 +590,7 @@ mod tests {
             include: vec![user("carol"), ws_principal(ws)],
             exclude: vec![],
         };
-        substitute(&mut set, &members);
+        substitute(&mut set, &members, &BTreeMap::new());
         assert_eq!(
             set.include,
             vec![user("carol"), user("alice"), user("bob-2")],
@@ -362,7 +607,7 @@ mod tests {
             include: vec![user("alice"), ws_principal(ws)],
             exclude: vec![],
         };
-        substitute(&mut set, &members);
+        substitute(&mut set, &members, &BTreeMap::new());
         assert_eq!(set.include, vec![user("alice")]);
     }
 
@@ -379,7 +624,7 @@ mod tests {
             include: vec![ws_principal(ws)],
             exclude: vec![ws_principal(ws)],
         };
-        substitute(&mut set, &members);
+        substitute(&mut set, &members, &BTreeMap::new());
         assert!(set.include.is_empty());
         assert!(set.exclude.is_empty());
     }
@@ -395,12 +640,12 @@ mod tests {
             }],
             exclude: vec![],
         };
-        substitute(&mut set, &HashMap::new());
+        substitute(&mut set, &HashMap::new(), &BTreeMap::new());
         assert!(set.include.is_empty());
     }
 
     #[test]
-    fn referenced_workspaces_skips_unparseable_refs() {
+    fn referenced_principals_skips_unparseable_workspace_refs() {
         let ws = Uuid::new_v4();
         let mut set = PrincipalSet::default();
         set.include.push(ws_principal(ws));
@@ -421,7 +666,7 @@ mod tests {
             principals: set,
             origin: egret_perm::GrantOrigin::Explicit,
         };
-        let found = referenced_workspaces(&[grant], &[]);
+        let (found, _) = referenced_principals(&[grant], &[]);
         assert_eq!(found.into_iter().collect::<Vec<_>>(), vec![ws]);
     }
 }

@@ -66,7 +66,9 @@
 //! `workspace_members` (`egret_perm::assignment`). D7 measured that a Ranger
 //! GROUP item matches nobody on any engine egret provisions, so that principal
 //! compiles to **the member list enumerated at compile time**, as bare
-//! usernames — [`crate::members::expand_workspace_members`], run here on the
+//! usernames — [`crate::members::expand_enumerated_principals`], which since
+//! SP4c Task 2b expands a `role` principal the same way and for the same
+//! measured reason, run here on the
 //! caller's own connection before anything is compiled, so `compile_grant`
 //! and `compile_rule` stay free of I/O and keep refusing the unexpanded kind
 //! as a defence in depth.
@@ -110,8 +112,8 @@ use egret_policy::admin::access_to_ranger_json;
 use egret_policy::{
     catalogs_for_service_via, compiler_targeted_services_via, get_service_by_id_via,
     service_id_by_name_via, services_and_tag_services_via, services_for_catalog_via,
-    tag_name_for_key_via, tagged_columns_for_service_via, PolicyStore, COMPILER_GRANT_PREFIX,
-    COMPILER_RULE_PREFIX,
+    tag_name_for_key_via, tagged_columns_for_service_via, PolicyStore, COMPILER_CLEARANCE_PREFIX,
+    COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
 };
 
 use crate::grants::compile_grant;
@@ -209,11 +211,16 @@ pub const PROFILE_EXPANSION_CEILING: usize = 1000;
 // copies of this string WILL drift, and a drift makes a policy the sweep
 // reaps look editable to the guard, or the reverse.
 
-/// Which half of the `perm` model a compiled policy (or a skip) came from.
+/// Which half of the `perm` model a compiled policy (or a skip) came from —
+/// plus, since SP4c Task 2, a third source that is not in the `perm` model at
+/// all: a TAG's classification clearance (`classification_policies`), compiled
+/// by [`crate::clearance`]. Its `SkippedItem::id` is the `tags.id`, not a
+/// grant or rule id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
     Grant,
     Rule,
+    Clearance,
 }
 
 impl SourceKind {
@@ -221,6 +228,7 @@ impl SourceKind {
         match self {
             SourceKind::Grant => "grant",
             SourceKind::Rule => "rule",
+            SourceKind::Clearance => "clearance",
         }
     }
 }
@@ -420,10 +428,12 @@ async fn compile_desired(
 
     let mut all_grants = list_grants_via(conn).await.map_err(db_err)?;
     let mut all_rules = list_rules_via(conn).await.map_err(db_err)?;
-    // D3: turn every `workspace_members` principal into the members it stands
-    // for BEFORE anything is compiled, so the pure compilers below never see
-    // one. See `crate::members` for what a member is and what it costs.
-    crate::members::expand_workspace_members(conn, &mut all_grants, &mut all_rules).await?;
+    // D3: turn every `workspace_members` principal — and, since SP4c Task 2b,
+    // every `role` principal — into the people it stands for BEFORE anything is
+    // compiled, so the pure compilers below never see one. See `crate::members`
+    // for what a member is, what it costs, and why a role name cannot be left
+    // for Ranger to resolve.
+    crate::members::expand_enumerated_principals(conn, &mut all_grants, &mut all_rules).await?;
 
     let mut desired: BTreeMap<PolicyKey, DesiredPolicy> = BTreeMap::new();
     let mut skipped: Vec<SkippedItem> = Vec::new();
@@ -472,7 +482,7 @@ async fn compile_desired(
             Err(CompileError::UnexpandedPrincipalKind { kind }) => {
                 let reason = format!(
                     "principal kind {kind:?} reached the compiler unexpanded — a bug in \
-                     `crate::members::expand_workspace_members`, not in the grant"
+                     `crate::members::expand_enumerated_principals`, not in the grant"
                 );
                 tracing::warn!(
                     service_id,
@@ -504,6 +514,41 @@ async fn compile_desired(
             &mut skipped,
         )
         .await?;
+    }
+
+    // **SP4c Task 2: a classification's CLEARANCE, which AMENDS SP4a's D2**
+    // ("tags drive rules only, never access") — the argument is at the site,
+    // in `crate::clearance`'s module doc, because a classification exists to
+    // withhold data and a mask still answers the query. Clearances come from
+    // `classification_policies`, not from the `perm` model.
+    //
+    // **Installation-wide on Trino, service-scoped on StarRocks** (SP4c Task
+    // 2d). A Trino clearance is one TAG policy carrying no catalog resource, so
+    // it compiles identically into every Trino profile with a tag service. A
+    // StarRocks clearance expands to one ACCESS deny per tagged column
+    // reachable from THIS service — the same `tagged_columns_for_service_via`
+    // expansion a tag-selected rule uses above — so `service_id` and the
+    // profile's own name both have to reach the compiler.
+    let clearances = crate::clearance::compile_clearance(
+        conn,
+        engine,
+        service_id,
+        &svc.name,
+        tag_service.as_deref(),
+    )
+    .await?;
+    skipped.extend(clearances.skipped);
+    for (name, body) in clearances.policies {
+        let target = target_service_id(&body, &writable, &format!("clearance {name}"))?;
+        desired.insert(
+            (target, name),
+            DesiredPolicy {
+                body,
+                source_kind: SourceKind::Clearance,
+                grant_id: None,
+                rule_id: None,
+            },
+        );
     }
 
     Ok(Some(Compiled {
@@ -635,7 +680,7 @@ async fn compile_one_rule(
         Err(CompileError::UnexpandedPrincipalKind { kind }) => {
             let reason = format!(
                 "principal kind {kind:?} reached the compiler unexpanded — a bug in \
-                 `crate::members::expand_workspace_members`, not in the rule"
+                 `crate::members::expand_enumerated_principals`, not in the rule"
             );
             tracing::warn!(
                 service_id,
@@ -787,11 +832,17 @@ async fn apply_diff_in_tx(
 
     let existing: Vec<ExistingPolicyRow> = sqlx::query_as(
         "SELECT id, service_id, name, policy_jsonb FROM policy.authz_policies \
-         WHERE service_id = ANY($1) AND (name LIKE $2 || '%' OR name LIKE $3 || '%')",
+         WHERE service_id = ANY($1) \
+           AND (name LIKE $2 || '%' OR name LIKE $3 || '%' OR name LIKE $4 || '%')",
     )
     .bind(sweep)
     .bind(COMPILER_GRANT_PREFIX)
     .bind(COMPILER_RULE_PREFIX)
+    // SP4c Task 2: a clearance deny is reaped by this same sweep when its
+    // gate is removed — the prefix has to be here or a lifted clearance
+    // would be enforced forever (SP4a Task 7 fix round 1's Critical, one
+    // source over).
+    .bind(COMPILER_CLEARANCE_PREFIX)
     .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;
@@ -893,7 +944,7 @@ async fn apply_diff_in_tx(
 
     for ((service_id, name), dp) in desired {
         debug_assert!(
-            name.starts_with(COMPILER_GRANT_PREFIX) || name.starts_with(COMPILER_RULE_PREFIX),
+            egret_policy::is_compiler_owned_policy_name(&name),
             "compiled policy name {name:?} does not carry this compiler's own prefix — \
              the existing-state sweep above would never find it again"
         );
@@ -994,6 +1045,21 @@ async fn record_compiled(
     policy_id: i64,
     dp: &DesiredPolicy,
 ) -> Result<(), CompileError> {
+    // **A CLEARANCE records no provenance row, deliberately** (SP4c Task 2).
+    // `perm.compiled` is grant/rule-shaped in the schema itself — `source_kind`
+    // is `CHECK (source_kind IN ('grant','rule'))` and each of the two ids is
+    // CHECKed against it (`migrations/0154_perm_model.sql`) — and a clearance
+    // comes from `classification_policies`, so it has neither id to record.
+    // Widening that schema would buy nothing here: since Task 7's fix round 1
+    // the sweep's source of truth is `policy.authz_policies` scoped by this
+    // compiler's own name prefixes, never `perm.compiled`, and a clearance
+    // policy's NAME already carries the `tags.id` it came from
+    // (`COMPILER_CLEARANCE_PREFIX{tag_id}`), so the provenance question is
+    // answered by the row that decides reaping rather than by a second table
+    // that can cascade away beneath it.
+    if dp.source_kind == SourceKind::Clearance {
+        return Ok(());
+    }
     sqlx::query(
         "INSERT INTO perm.compiled (service_id, policy_id, source_kind, grant_id, rule_id) \
          VALUES ($1, $2, $3, $4, $5) \
@@ -1162,15 +1228,26 @@ pub async fn affected_services_for_rule(
 ///
 /// The set is the one a tag-RULE mutation uses, for the same reason (see this
 /// module's Task 9 section): a tag is installation-wide, so any profile this
-/// compiler targets may carry a policy naming it. It is empty when no live
-/// rule selects the key at all — then nothing anywhere was compiled from that
-/// name, and a rename is a pure display change.
+/// compiler targets may carry a policy naming it. It is empty when nothing live
+/// compiles from that name at all — then a rename is a pure display change.
+///
+/// **SP4c Task 3 widened the "nothing compiles from it" test, and that was a
+/// real fail-OPEN gap, not a tidy-up.** Until SP4c a tag's name reached a
+/// compiled policy only through a `perm.rules` tag selector, so this function
+/// early-returned on `perm.rules` alone. A CLEARANCE also stamps `tags.name`
+/// into a Trino tag policy's `tag` resource ([`crate::clearance`]) — and a gated
+/// tag needs no rule. So renaming a gated-but-unruled tag returned an EMPTY
+/// affected set, the clearance deny kept naming the OLD tag, and at the next tag
+/// map refresh the deny matched nothing: the classified column started answering
+/// queries, triggered by nothing more than a display rename. Found by
+/// re-deriving this list for Task 3 rather than inheriting it, which is the
+/// method SP4a's fourth missing recompile taught.
 pub async fn affected_services_for_tag_rename(
     conn: &mut sqlx::PgConnection,
     tag_key: &str,
 ) -> Result<Vec<i64>, CompileError> {
     let selected: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM perm.rules WHERE selector_kind = 'tag' AND tag_key = $1)",
+        "SELECT EXISTS (SELECT 1 FROM perm.rules WHERE selector_kind = 'tag' AND tag_key = $1)               OR EXISTS (SELECT 1 FROM classification_policies cp JOIN tags t ON t.id = cp.tag_id                           WHERE t.key = $1 AND cardinality(cp.required_roles) > 0)",
     )
     .bind(tag_key)
     .fetch_one(&mut *conn)
@@ -1180,6 +1257,110 @@ pub async fn affected_services_for_tag_rename(
         return Ok(Vec::new());
     }
     let mut ids = compiler_targeted_services_via(conn).await.map_err(db_err)?;
+    normalize_service_order(&mut ids);
+    Ok(ids)
+}
+
+/// The services a change to a TAG's CLEARANCE (`classification_policies`) can
+/// change the compiled output of — SP4c Task 3, input 1 of three.
+///
+/// **Installation-wide, on purpose, and not because it was easier.** A Trino
+/// clearance is one tag policy carrying no catalog resource at all, so it
+/// compiles identically into every Trino profile that has a tag service; and a
+/// StarRocks clearance expands into every StarRocks profile from which any
+/// column carrying the tag is reachable. Deriving the narrow StarRocks set would
+/// mean walking `catalog_tag_assignments → catalogs → attachments → engines` for
+/// the tag here, duplicating a resolution `compile_clearance` already does
+/// per-service — and getting it wrong in the narrow direction is the failure
+/// this function exists to prevent, while getting it wrong WIDE costs one
+/// recompile that writes nothing (`apply_diff_in_tx` diffs each body
+/// byte-for-byte, so a profile whose output did not change is `unchanged`).
+///
+/// Unlike [`affected_services_for_tag_rename`] there is no "nothing references
+/// it" early return, because the write being accompanied IS the reference: after
+/// a `set_policy` the gate exists, and after a `clear_policy` the compiled deny
+/// must be reaped from wherever it was filed.
+pub async fn affected_services_for_classification(
+    conn: &mut sqlx::PgConnection,
+) -> Result<Vec<i64>, CompileError> {
+    let mut ids = compiler_targeted_services_via(conn).await.map_err(db_err)?;
+    normalize_service_order(&mut ids);
+    Ok(ids)
+}
+
+/// The services a change to who holds ROLE `role_name` can change the compiled
+/// output of — SP4c Task 3, input 3 of three.
+///
+/// **ONE trigger, TWO consumers, deliberately not two triggers.** A role name is
+/// unresolvable in every engine egret provisions (D0 measured it on Trino: the
+/// plugin polls a `/service/roles/download/<svc>` route egret does not serve, so
+/// `lastKnownRoleVersion` never leaves `-1`, `userRoles` is a hardcoded `null`
+/// and `disableRoleResolution` defaults true; D0b re-derived it for StarRocks,
+/// where `setUserRoles` is never called anywhere in `fe/`). So egret enumerates
+/// the holders at compile time in **two** places — a clearance's
+/// `denyExceptions` ([`crate::clearance`], SP4c Task 2/2d) and a `role`
+/// principal in a grant ([`crate::members`], SP4c Task 2b) — and both read the
+/// same `role_usernames`. Two triggers over one enumeration is two chances for
+/// one of them to be forgotten, which is the shape of the defect SP4a shipped
+/// four times; so this returns the UNION and each consumer contributes its own
+/// arm below.
+///
+/// - **Clearance arm:** installation-wide when any `classification_policies` row
+///   names this role, for the reason
+///   [`affected_services_for_classification`] gives.
+/// - **Grant arm:** catalog-scoped, exactly like [`affected_services_for_grant`]
+///   — a `role` principal in `perm.grant_principals` only reaches the profiles
+///   bound to that grant's catalog.
+///
+/// **There is deliberately no rule-EXEMPTION arm**, and that is not the
+/// defensive omission it looks like. `validate_rule_shape` refuses a `Role` in
+/// an exemption and `compile_rule` answers
+/// [`CompileError::UnexpressibleExemption`] for one that got in anyway — so such
+/// a row has never compiled to anything that could be stale, and adding the arm
+/// would make every membership write on that role FAIL the compile it triggered,
+/// turning an unreachable row into an outage on an unrelated path.
+///
+/// Empty when nothing in the installation names the role, which is the common
+/// case: then a membership write compiles nothing and costs two queries.
+pub async fn affected_services_for_role_membership(
+    conn: &mut sqlx::PgConnection,
+    role_name: &str,
+) -> Result<Vec<i64>, CompileError> {
+    // Clearance: does any gated tag name this role? `required_roles` is a
+    // `text[]`, so this is a containment test, not a join.
+    let clears: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM classification_policies WHERE $1 = ANY(required_roles))",
+    )
+    .bind(role_name)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+
+    let mut ids: Vec<i64> = Vec::new();
+    if clears {
+        ids.extend(compiler_targeted_services_via(conn).await.map_err(db_err)?);
+    }
+
+    // Grants: a `role` principal in either mode. `exclude` matters as much as
+    // `include` — a role in an `exclude` compiles to `allowExceptions`, and a
+    // stale exclusion keeps granting someone the model no longer grants.
+    let catalogs: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT g.catalog_id FROM perm.grants g \
+           JOIN perm.grant_principals p ON p.grant_id = g.id \
+          WHERE p.kind = 'role'::perm.principal_kind AND p.ref = $1",
+    )
+    .bind(role_name)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    for catalog_id in catalogs {
+        ids.extend(
+            services_for_catalog_via(conn, catalog_id)
+                .await
+                .map_err(db_err)?,
+        );
+    }
+
     normalize_service_order(&mut ids);
     Ok(ids)
 }

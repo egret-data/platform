@@ -56,11 +56,12 @@ use egret_core::http::ErrorBody;
 use egret_perm::{
     create_grant_in_tx, create_rule_in_tx, delete_grant_in_tx, delete_rule_in_tx, evaluate,
     get_grant_via, get_rule_via, list_grants_via, list_rules_via, update_grant_in_tx,
-    update_rule_in_tx, Action, Decision, Effect, Grant, GrantOrigin, PermStore, PrincipalKind,
-    PrincipalSet, Reason, Rule, RuleKind, Scope, Selector, Subject,
+    update_rule_in_tx, Action, ClearanceGate, Decision, Effect, Grant, GrantOrigin, PermStore,
+    PrincipalKind, PrincipalSet, Reason, Rule, RuleKind, Scope, Selector, Subject,
 };
 use egret_policy::{
-    catalog_names_for_ids_via, tag_keys_for_resource_via, tag_names_for_keys_via, PolicyStore,
+    catalog_names_for_ids_via, clearance_gates_for_tags_via, tag_keys_for_resource_via,
+    tag_names_for_keys_via, PolicyStore,
 };
 use sqlx::{Postgres, Transaction};
 
@@ -68,7 +69,8 @@ use crate::grants::validate_grant_shape;
 use crate::rules::validate_rule_shape;
 use crate::trigger::{
     affected_services_for_grant, affected_services_for_rule, lock_services_in_tx,
-    merge_service_ids, recompile_service, recompile_services_in_tx, CompileSummary, SourceKind,
+    merge_service_ids, recompile_service, recompile_services_in_tx, CompileSummary, SkippedItem,
+    SourceKind,
 };
 
 mod error;
@@ -273,13 +275,33 @@ pub struct RuleView {
 /// database already answers, and keeping the field would let a caller
 /// override that fact when what it should be describing is the caller's
 /// principal, not a value only egret can verify.
+///
+/// **And no `roles` field either (SP4c Task 7 — the same defect, on the field
+/// next to it, removed for the same reason).** The SP4c live gate
+/// (`docs/en/plans/2026-09-28-sp4c-live-result.md`) measured both directions
+/// of it: naming only a `user` returned `clearance_required` for the subject
+/// the engine had just served the classified column to, and
+/// `{"user":"analyst","roles":["sp4c_cleared"]}` returned `allowed` for the
+/// subject the engine refuses — a caller asserting a role it does not hold was
+/// believed, so the diagnostic could be told a lie and would repeat it.
+/// `explain` now reads the subject's roles from `access_grants`
+/// (`crate::members::roles_for_username`) through the same live/`allow`/
+/// unexpired predicate the clearance compiler's own expansion uses. **This is
+/// not a "what-if" endpoint**: D9 (SP4b) defines it as answering why a subject
+/// **is** allowed or refused, and a field that let a caller invent the
+/// subject's clearance would answer a different question while looking
+/// authoritative.
+///
+/// `groups` remains caller-supplied and is deliberately left so: egret runs no
+/// usersync and no group provider, so a group name reaches no engine at all
+/// (D7/D2) and the UI already says the field is matched here and nowhere else.
+/// Resolving it server-side would give the field an authority the data plane
+/// does not honour, which is the opposite of the fix above.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ExplainSubject {
     pub user: String,
     #[serde(default)]
     pub groups: Vec<String>,
-    #[serde(default)]
-    pub roles: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -299,8 +321,14 @@ pub struct ExplainRequest {
 /// matched no grant at all, which is not the same as being denied by one.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ExplainReason {
-    /// `allowed_by_grant` | `explicit_deny` | `no_grant_matched` |
-    /// `masked_by_rule` | `filtered_by_rule`.
+    /// `allowed_by_grant` | `allowed_by_group_only` | `explicit_deny` |
+    /// `no_grant_matched` | `masked_by_rule` | `filtered_by_rule` |
+    /// `clearance_required`.
+    ///
+    /// `allowed_by_group_only` is an allow the DATA PLANE will refuse: the
+    /// grant matched only through a `group` principal, and no engine egret
+    /// provisions can see a group (D7). It is its own string because a caller
+    /// parsing `kind` never sees the prose the page shows beside it.
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_id: Option<Uuid>,
@@ -310,6 +338,14 @@ pub struct ExplainReason {
     pub mask_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filter_expr: Option<String>,
+    /// `clearance_required` only: the gating tag's key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// `clearance_required` only: the role(s) that would clear it — holding
+    /// any ONE is enough (`egret_perm_compile::clearance`'s "OR across
+    /// roles" semantics).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_roles: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -331,10 +367,19 @@ impl From<&Reason> for ExplainReason {
             rule_id: None,
             mask_type: None,
             filter_expr: None,
+            tag: None,
+            required_roles: None,
         };
         match r {
             Reason::AllowedByGrant { grant_id } => {
                 out.kind = "allowed_by_grant".into();
+                out.grant_id = Some(*grant_id);
+            }
+            // SP4c review: the model allows it and no engine will, so it does
+            // not get to wear `allowed_by_grant`'s wire string — a caller
+            // parsing `kind` never sees the page's prose warning.
+            Reason::AllowedByGroupOnly { grant_id } => {
+                out.kind = "allowed_by_group_only".into();
                 out.grant_id = Some(*grant_id);
             }
             Reason::ExplicitDeny { grant_id } => {
@@ -354,6 +399,14 @@ impl From<&Reason> for ExplainReason {
                 out.kind = "filtered_by_rule".into();
                 out.rule_id = Some(*rule_id);
                 out.filter_expr = Some(filter_expr.clone());
+            }
+            Reason::ClearanceRequired {
+                tag,
+                required_roles,
+            } => {
+                out.kind = "clearance_required".into();
+                out.tag = Some(tag.clone());
+                out.required_roles = Some(required_roles.clone());
             }
         }
         out
@@ -405,16 +458,40 @@ pub struct PreviewResponse {
     pub compile: CompileResponse,
 }
 
-/// A grant or rule a recompile could not express and left uncompiled. Surfaced
+/// A grant, a rule, or a tag's classification clearance that a recompile could
+/// not express and left uncompiled. Surfaced
 /// on the response rather than only in the logs: a create that succeeded but
 /// compiled nothing for a service is a fact the author needs at authoring
 /// time, not one a steward discovers from a query that returns no rows.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SkipReport {
-    /// `grant` | `rule`.
+    /// `grant` | `rule` | `clearance`.
     pub source_kind: String,
+    /// The `perm.grants`/`perm.rules` id — or, for `clearance`, the `tags.id`
+    /// whose classification gate could not be expressed (SP4c Task 2).
     pub id: Uuid,
     pub reason: String,
+}
+
+impl From<SkippedItem> for SkipReport {
+    /// The ONE place a `SourceKind` becomes a wire string. `egret-controlplane`
+    /// reports clearance skips on the access-policy endpoint (SP4c review I5)
+    /// off this same conversion, so the two surfaces cannot spell a kind
+    /// differently for the same fact.
+    fn from(sk: SkippedItem) -> Self {
+        SkipReport {
+            source_kind: match sk.source_kind {
+                SourceKind::Grant => "grant".into(),
+                SourceKind::Rule => "rule".into(),
+                // SP4c Task 2: a gated tag whose clearance this profile could
+                // not express — `id` is the `tags.id`, not a grant or rule id
+                // (see `SkipReport::id`).
+                SourceKind::Clearance => "clearance".into(),
+            },
+            id: sk.id,
+            reason: sk.reason,
+        }
+    }
 }
 
 /// What a mutation's (or `compile`'s) recompile pass did, aggregated over
@@ -442,14 +519,7 @@ impl CompileResponse {
             out.deleted += s.deleted;
             out.unchanged += s.unchanged;
             for sk in &s.skipped {
-                out.skipped.push(SkipReport {
-                    source_kind: match sk.source_kind {
-                        SourceKind::Grant => "grant".into(),
-                        SourceKind::Rule => "rule".into(),
-                    },
-                    id: sk.id,
-                    reason: sk.reason.clone(),
-                });
+                out.skipped.push(SkipReport::from(sk.clone()));
             }
         }
         out
@@ -1232,14 +1302,41 @@ async fn explain(
     // expansion reads, rather than trusting a caller-supplied list — see
     // `ExplainSubject`'s doc comment for what trusting one instead cost.
     let workspaces = crate::members::workspaces_for_username(&mut conn, &body.subject.user).await?;
+    // SP4c Task 7: the same, for the roles a clearance is checked against. A
+    // `roles` in the request body is now an unknown field and is ignored, not
+    // honoured — the live gate measured that honouring one answered `allowed`
+    // for the very user both engines refuse.
+    let roles = crate::members::roles_for_username(&mut conn, &body.subject.user).await?;
+
+    // SP4c Task 4/D4: the clearance gates `evaluate` must agree with the
+    // compiled engine about — only tags whose `required_roles` is non-empty,
+    // since a `required_groups`-only gate compiles to no engine deny at all
+    // (D2/D7) and reporting a denial for one here would disagree with the
+    // engine in the direction opposite the bug this task fixes.
+    let clearances: Vec<ClearanceGate> = clearance_gates_for_tags_via(&mut conn, &tags)
+        .await?
+        .into_iter()
+        .map(|(tag, required_roles)| ClearanceGate {
+            tag,
+            required_roles,
+        })
+        .collect();
 
     let subject = Subject {
         user: body.subject.user,
         groups: body.subject.groups,
-        roles: body.subject.roles,
+        roles,
         workspaces,
     };
-    let decision = evaluate(&subject, body.action, &body.target, &grants, &rules, &tags);
+    let decision = evaluate(
+        &subject,
+        body.action,
+        &body.target,
+        &grants,
+        &rules,
+        &tags,
+        &clearances,
+    );
     let mut out = ExplainResponse::from(decision);
     out.tags = tags;
     Ok(Json(out))

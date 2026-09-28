@@ -18,8 +18,14 @@
  */
 export interface ExplainReason {
   /**
-     * `allowed_by_grant` | `explicit_deny` | `no_grant_matched` |
-     * `masked_by_rule` | `filtered_by_rule`.
+     * `allowed_by_grant` | `allowed_by_group_only` | `explicit_deny` |
+     * `no_grant_matched` | `masked_by_rule` | `filtered_by_rule` |
+     * `clearance_required`.
+     *
+     * `allowed_by_group_only` is an allow the DATA PLANE will refuse: the
+     * grant matched only through a `group` principal, and no engine egret
+     * provisions can see a group (D7). It is its own string because a caller
+     * parsing `kind` never sees the prose the page shows beside it.
      */
   kind: string;
   /** @nullable */
@@ -30,4 +36,16 @@ export interface ExplainReason {
   mask_type?: string | null;
   /** @nullable */
   filter_expr?: string | null;
+  /**
+     * `clearance_required` only: the gating tag's key.
+     * @nullable
+     */
+  tag?: string | null;
+  /**
+     * `clearance_required` only: the role(s) that would clear it — holding
+     * any ONE is enough (`egret_perm_compile::clearance`'s "OR across
+     * roles" semantics).
+     * @nullable
+     */
+  required_roles?: string[] | null;
 }

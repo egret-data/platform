@@ -53,6 +53,18 @@ impl From<CatalogError> for CpError {
     }
 }
 
+/// A recompile that accompanies a control-plane write failing — SP4c Task 3's
+/// role-membership path. Same `Internal` treatment `CatalogError::Compile`
+/// already gets, and for the same reason: the transaction rolled the write back
+/// with it, so the caller's state is unchanged and there is nothing they can fix
+/// by editing their request.
+impl From<egret_perm::CompileError> for CpError {
+    fn from(e: egret_perm::CompileError) -> Self {
+        tracing::error!(error = %e, "a control-plane write's policy recompile failed");
+        CpError::Internal
+    }
+}
+
 impl From<egret_storage::StorageRegistryError> for CpError {
     fn from(e: egret_storage::StorageRegistryError) -> Self {
         use egret_storage::StorageRegistryError as E;

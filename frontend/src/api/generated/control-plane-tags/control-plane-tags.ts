@@ -25,6 +25,7 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AccessPolicyWritten,
   CreateTag,
   ErrorBody,
   SetAccessPolicy,
@@ -473,7 +474,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       return useMutation(getControlPlaneTagsUpdateTagMutationOptions(options), queryClient);
     }
     export type controlPlaneTagsSetAccessPolicyResponse200 = {
-  data: void
+  data: AccessPolicyWritten
   status: 200
 }
 
@@ -567,7 +568,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       return useMutation(getControlPlaneTagsSetAccessPolicyMutationOptions(options), queryClient);
     }
     export type controlPlaneTagsClearAccessPolicyResponse200 = {
-  data: void
+  data: AccessPolicyWritten
   status: 200
 }
 

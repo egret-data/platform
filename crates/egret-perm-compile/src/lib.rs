@@ -41,18 +41,28 @@
 //! why a `WorkspaceMembers`-only refusal is skipped rather than aborting the
 //! whole recompile.
 
+// SP4c Task 2: compiling a classification's clearance into a tag-service DENY
+// — the one place egret emits a tag ACCESS policy, which AMENDS SP4a's D2. The
+// argument is in that module's own doc comment, at the site.
+pub(crate) mod clearance;
 pub mod grants;
 pub(crate) mod members;
+pub mod role_membership;
 pub mod routes;
 pub mod rules;
 pub mod trigger;
 
 pub use grants::{compile_grant, validate_grant_shape};
+pub use role_membership::{
+    assign_platform_role_and_recompile, delete_platform_role_and_recompile,
+    unassign_platform_role_and_recompile,
+};
 pub use routes::{openapi, perm_router, PermHttpError, PermState};
 pub use rules::{compile_rule, validate_rule_shape, ResolvedNames, TaggedColumn};
 pub use trigger::{
-    affected_services_for_grant, affected_services_for_rule, affected_services_for_tag_rename,
-    affected_services_for_workspace_members, lock_services_in_tx, merge_service_ids,
-    recompile_service, recompile_service_in_tx, recompile_services_in_tx, CompileSummary,
-    SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING, PROFILE_EXPANSION_CEILING,
+    affected_services_for_classification, affected_services_for_grant,
+    affected_services_for_role_membership, affected_services_for_rule,
+    affected_services_for_tag_rename, affected_services_for_workspace_members, lock_services_in_tx,
+    merge_service_ids, recompile_service, recompile_service_in_tx, recompile_services_in_tx,
+    CompileSummary, SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING, PROFILE_EXPANSION_CEILING,
 };

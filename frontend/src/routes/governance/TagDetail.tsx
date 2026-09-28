@@ -2,10 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowLeft, ChevronsUpDown, Lock, Plus, Trash2, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ChevronsUpDown, Lock, Plus, Trash2, X } from "lucide-react";
 
 import { type AccessGroup, type AccessRole, listGroups, listRoles } from "@/api/access";
 import {
+  type AccessPolicyWritten,
   useClearTagAccessPolicy,
   useDeleteTag,
   useSetTagAccessPolicy,
@@ -136,7 +137,22 @@ export default function TagDetail() {
       setRequiredRoles(tag?.required_roles ?? []);
       setRequiredGroups(tag?.required_groups ?? []);
     };
-    const onSuccess = (label: string) => () => {
+    // **SP4c review I5.** The endpoint now says what the accompanying recompile
+    // could NOT express, and a success toast that ignored it would be the same
+    // "saved, therefore enforced" claim the whole clearance surface exists to
+    // avoid: a group-only gate, or a Trino profile with no usable tag service,
+    // saves the row and gives no engine anything. The skip is shown where the
+    // clearance is authored, not only in the server log.
+    const onSuccess = (label: string) => (res: AccessPolicyWritten) => {
+      const skipped = res?.skipped ?? [];
+      if (skipped.length > 0) {
+        const msg = `Saved, but not compiled into any engine: ${skipped
+          .map((s) => s.reason)
+          .join(" ")}`;
+        setClearanceError(msg);
+        toast.warning("Clearance saved but not enforced in any engine");
+        return;
+      }
       setClearanceError(null);
       toast.success(label);
     };
@@ -187,7 +203,18 @@ export default function TagDetail() {
     })),
   ];
 
+  // **Only a ROLE compiles to anything in an engine.** A groups-only gate is
+  // skipped by the compiler outright (`clearance.rs`: a Ranger item naming a
+  // group matches nobody, so a deny emitted for it would withhold the column
+  // from everybody), so the three statements below — reads-only, the view
+  // bypass, the expansion ceiling — would all be describing a control that does
+  // not exist. Claiming withholding where there is none is precisely the
+  // failure those statements were written to prevent; the group-only warning
+  // above is what a groups-only gate gets, and it says the opposite.
+  // Any clearance at all gates OBJECT access through Cedar, which is what the
+  // header badge reports.
   const gated = requiredRoles.length > 0 || requiredGroups.length > 0;
+  const engineGated = requiredRoles.length > 0;
 
   return (
     <div className="space-y-6">
@@ -306,6 +333,77 @@ export default function TagDetail() {
           <Alert variant="destructive">
             <AlertDescription>{clearanceError}</AlertDescription>
           </Alert>
+        )}
+
+        {requiredGroups.length > 0 && (
+          // SP4c D0/D0b narrow SP4a/SP4b's group finding: it is not only a
+          // group name that never reaches Trino or StarRocks — a ROLE name
+          // doesn't either. What actually reaches the engine is the
+          // enumerated USERNAMES of a required role's members, computed at
+          // compile time. A `required_groups` entry has no such expansion, so
+          // it is enforced on object access (Cedar) only, never at the query
+          // path (SQL Lab, a notebook). Same shape as SP4b's group warning in
+          // `PrincipalPicker` — REMOVE THIS once egret ships a group
+          // provider, the only thing that would make the underlying fact
+          // stale.
+          <Badge
+            variant="warning"
+            className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal"
+          >
+            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+            Not enforced in the engine: no group provider or usersync means a group name never
+            reaches Trino or StarRocks, and a role name does not either — only a required role&apos;s
+            enumerated members do. A group requirement is enforced on object access only; opening
+            the object is gated, but reading the same data through SQL Lab or a notebook is not.
+          </Badge>
+        )}
+
+        {engineGated && (
+          <>
+            {/* SP4c Task 7. The earlier wording here claimed Trino withheld
+                both reads and writes while StarRocks withheld reads only, and
+                called that an asymmetry. The live gate
+                (`docs/en/plans/2026-09-28-sp4c-live-result.md`, case 5)
+                measured the uncleared subject INSERT *and* DELETE through a
+                live clearance on Trino: the compiled deny names a COLUMN
+                resource while Trino's write check presents a TABLE one, so
+                D1's `insert, delete` never matches. There is no asymmetry —
+                neither engine withholds a write. */}
+            <Badge
+              variant="warning"
+              className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal"
+            >
+              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+              This clearance withholds reads only, on Trino and on StarRocks alike: a user without
+              it can still overwrite a column they cannot read. Neither engine withholds writes —
+              measured, an uncleared user inserted and deleted through a live clearance on Trino —
+              so do not assume a classification blocks writes on either one.
+            </Badge>
+            {/* SP4c Task 7 / D0b / D5. A view is not covered on either engine,
+                and Trino's DEFINER-rights model makes the hole two-directional.
+                Ruling (2026-09-28): state the limit, do not block view
+                creation — so this sentence IS the control, and an operator
+                told only "views are not covered" would not expect a CLEARED
+                user to be blocked by an uncleared owner. */}
+            <Badge
+              variant="warning"
+              className="w-fit items-start gap-1.5 whitespace-normal text-left font-normal"
+            >
+              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+              A view over a classified column is not covered on either engine: reading the column
+              through a view returns it in full to a user without clearance. On Trino a view runs
+              with its owner&apos;s rights, so it fails both ways — a cleared owner&apos;s view
+              hands the column to the uncleared, and an uncleared owner&apos;s view blocks
+              everybody, the cleared included.
+            </Badge>
+            <p className="text-xs text-muted-foreground">
+              A StarRocks clearance expands to one policy per tagged column, counted per profile:
+              if more than 500 of this tag&apos;s columns are visible to one StarRocks profile,
+              that profile&apos;s recompile fails outright rather than truncating the clearance,
+              and every write that would recompile it fails with it — until the tag is narrowed or
+              untagged back under the limit. Profiles that see fewer are unaffected.
+            </p>
+          </>
         )}
 
         <ClearanceTable

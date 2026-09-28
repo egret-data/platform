@@ -233,17 +233,12 @@ impl UserRepo {
     /// (`egret-policy::admin::list_principals`) must be able to tell them
     /// apart so it can refuse to offer a user with no `ref` to write, rather
     /// than inventing one.
+    /// A thin wrapper over [`usernames_via`] so there is ONE implementation of
+    /// this read — see that function's doc for why a connection-generic form
+    /// exists.
     pub async fn usernames(&self, ids: &[Uuid]) -> Result<std::collections::HashMap<Uuid, String>> {
-        let rows: Vec<(Uuid, Option<String>)> =
-            sqlx::query_as("SELECT id, username::text FROM users WHERE id = ANY($1)")
-                .bind(ids)
-                .fetch_all(&self.db.pool)
-                .await
-                .map_err(db_err)?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|(id, u)| u.map(|u| (id, u)))
-            .collect())
+        let mut conn = self.db.pool.acquire().await.map_err(db_err)?;
+        usernames_via(&mut conn, ids).await
     }
 
     /// Hard-delete `target` and dependents in one transaction. `target`'s notebooks
@@ -480,6 +475,40 @@ fn slugify_localpart(email: &str) -> String {
     } else {
         slug
     }
+}
+
+/// Connection-generic core of [`UserRepo::usernames`] — SP4c Task 2.
+///
+/// **Read-only, and that is the point: this NEVER mints.** A user missing from
+/// the returned map has no `users.username` allocated yet (no query run, no
+/// notebook opened, no engine token issued), which is a real, distinct state
+/// from "has a username" — and therefore also a real, distinct state from
+/// "exists on the engine at all", since the bare username is the only identity
+/// Trino/StarRocks ever see for a person (`X-Trino-User`).
+///
+/// **Why `egret-perm-compile` reads rather than re-derives.** `ensure_username`
+/// lowercases the email local-part, slugifies it and resolves collisions with a
+/// `-2`, `-3`, … suffix, so two humans whose local parts slug to the same base
+/// differ only by a suffix nothing local can predict. A re-derived slug names
+/// the WRONG person while compiling, deploying and reporting success. SP4c's
+/// clearance compiler (`egret_perm_compile::clearance`) and its role-grant
+/// expansion (`egret_perm_compile::members::role_usernames`) both go through
+/// here, on the caller's own connection, so a compile inside an open
+/// transaction sees that transaction's own writes.
+pub async fn usernames_via(
+    conn: &mut sqlx::PgConnection,
+    ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, String>> {
+    let rows: Vec<(Uuid, Option<String>)> =
+        sqlx::query_as("SELECT id, username::text FROM users WHERE id = ANY($1)")
+            .bind(ids)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, u)| u.map(|u| (id, u)))
+        .collect())
 }
 
 #[cfg(test)]

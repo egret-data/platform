@@ -33,6 +33,35 @@
 //!   its oracle, the compiler will agree — the oracle is blind to this whole
 //!   class of dead grant, and nothing downstream of `evaluate` alone can
 //!   catch it.
+//! - **`Role` principals were in that same bound, and are NOT any more (SP4c
+//!   Task 2b).** SP4c's D0 measured that a Ranger item naming a role matches
+//!   nobody either, for its own reason (the plugin downloads roles from a route
+//!   egret does not serve, and Trino's plugin passes `userRoles` as `null`) —
+//!   so `explain` was reporting an access the engine did not grant, exactly as
+//!   for a group. Unlike a group, a role's membership IS knowable from
+//!   `access_grants`, so the compiler now expands a `role` principal into its
+//!   holders' usernames (`egret_perm_compile::members`) instead of naming the
+//!   role. This function is unchanged — matching `Subject::roles` by name is
+//!   still the right oracle semantics — but the divergence it could not see is
+//!   closed on the compiler's side, and
+//!   `egret-perm-compile/tests/role_grants.rs` asserts the two now AGREE about
+//!   a role-granted subject.
+//! - **A tag's clearance (SP4c Task 4) is the fourth thing this function can
+//!   see that the model above did not.** `egret_perm_compile::clearance`
+//!   compiles a gated tag's clearance to a `{public}` deny excepting the
+//!   required role's members, enumerated the same way a `Role` grant is
+//!   (D0/D0b) — so, exactly like a `Role` grant, `Subject::roles` is the right
+//!   oracle semantics and no DB read belongs in this function. Unlike a
+//!   grant, a clearance is not in `grants` at all (D1 amends SP4a's D2 that
+//!   tags drive rules only, never access) and it wins over every grant rather
+//!   than competing with one — so `evaluate` checks it first, before any
+//!   grant, matching the tag-first short-circuit D1 relies on. Only a tag
+//!   whose `required_roles` is non-empty is passed in [`ClearanceGate`]: a
+//!   `required_groups`-only gate compiles to nothing (D2/D7 — a group name
+//!   matches nobody in the engine, so a deny for it would withhold the column
+//!   from everybody, not from the intended few), and reporting a denial for
+//!   it here would make `explain` disagree with the engine in the opposite
+//!   direction from the bug this task fixes.
 
 use uuid::Uuid;
 
@@ -53,17 +82,82 @@ pub struct Subject {
     pub workspaces: Vec<Uuid>,
 }
 
+/// One tag's clearance gate, as `egret_perm_compile::clearance` compiles it —
+/// only ever passed for a tag whose `required_roles` is non-empty, since a
+/// `required_groups`-only gate compiles to no engine deny at all (D2/D7) and
+/// `evaluate` must not report a denial the engine does not enforce.
+/// `required_roles`' membership is knowable the same way a `Role` grant's is
+/// (D0/D0b): `Subject::roles` already carries it, so this struct names the
+/// tag and the roles that clear it, not any member list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClearanceGate {
+    /// `tags.key` — the same identifier `tags_on` and `selector_hits` use,
+    /// so a caller does not need a second tag lookup to line the two up.
+    pub tag: String,
+    pub required_roles: Vec<String>,
+}
+
 /// Why the decision came out the way it did. `NoGrantMatched` and
 /// `ExplicitDeny` are deliberately distinct: a subject a grant's `exclude`
 /// subtracted matches no grant at all, and collapsing that into "denied"
 /// would say something the model never asserted.
+///
+/// `ClearanceRequired` is likewise its own class, not a flavour of
+/// `ExplicitDeny` or `NoGrantMatched` (SP4c Task 4/D4). Both of those would
+/// tell an administrator to look at a grant; a clearance denial has no grant
+/// to look at — the wrong grant does not exist to fix, a person needs the
+/// clearing role. SP4b's five reason classes are independent for exactly this
+/// reason: collapsing this into `ExplicitDeny` (or reporting `NoGrantMatched`,
+/// today's status quo) would make two different facts about the model read as
+/// the same sentence, "denied," which is the failure this whole mechanism
+/// exists to prevent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
-    AllowedByGrant { grant_id: Uuid },
-    ExplicitDeny { grant_id: Uuid },
+    AllowedByGrant {
+        grant_id: Uuid,
+    },
+    /// The grant matched, but ONLY through a `group` principal — so the model
+    /// allows it and **no engine will**.
+    ///
+    /// **Its own class, because the prose warning was not machine-readable
+    /// (SP4c review).** egret runs no usersync and writes no
+    /// `group-provider.properties`, so `getGroups(user)` is empty on every
+    /// engine egret provisions (D7, measured live): a Ranger policy item naming
+    /// a group matches nobody. A subject who reaches a grant only by group
+    /// membership is therefore allowed here and refused there. Reporting that
+    /// as [`Reason::AllowedByGrant`] gave it the SAME wire string as an
+    /// enforceable allow, so a caller parsing `kind` — the deliverable of this
+    /// whole mechanism — could not tell the two apart, whatever the page said in
+    /// prose beside it.
+    ///
+    /// `allowed` stays `true`: the stored model does allow it, and Cedar
+    /// enforces exactly this on control-plane object access. What is different
+    /// is the DATA PLANE, and that is what the class says.
+    ///
+    /// **The mirror case is NOT covered and is a known gap**: a `deny` that
+    /// matches only through a group is reported as [`Reason::ExplicitDeny`]
+    /// while the engine allows the access — wrong in the restrictive direction.
+    /// It is a different fix (a deny has no "allowed anyway" state to report)
+    /// and is recorded here rather than left to be rediscovered.
+    AllowedByGroupOnly {
+        grant_id: Uuid,
+    },
+    ExplicitDeny {
+        grant_id: Uuid,
+    },
     NoGrantMatched,
-    MaskedByRule { rule_id: Uuid, mask_type: String },
-    FilteredByRule { rule_id: Uuid, filter_expr: String },
+    MaskedByRule {
+        rule_id: Uuid,
+        mask_type: String,
+    },
+    FilteredByRule {
+        rule_id: Uuid,
+        filter_expr: String,
+    },
+    ClearanceRequired {
+        tag: String,
+        required_roles: Vec<String>,
+    },
 }
 
 /// The decision. `allowed` is the boolean an enforcer would ask for;
@@ -74,11 +168,16 @@ pub struct Decision {
     pub reasons: Vec<Reason>,
 }
 
-/// D2 in code. Deny beats allow regardless of grant order; a target not
-/// reached by any grant is `NoGrantMatched`, never a deny; masks and row
-/// filters are evaluated only once access is allowed, and apply "however
-/// the access was granted" — they are checked against `target`, not against
-/// the grant that let the subject in.
+/// D2 in code, amended by SP4c D1/D4 for clearance. Deny beats allow
+/// regardless of grant order; a target not reached by any grant is
+/// `NoGrantMatched`, never a deny; masks and row filters are evaluated only
+/// once access is allowed, and apply "however the access was granted" — they
+/// are checked against `target`, not against the grant that let the subject
+/// in. A clearance gate on a tag present on `target` is checked FIRST, ahead
+/// of every grant: D1 compiles it to a tag policy that wins over any resource
+/// grant by evaluating first, and this function must decide in the same
+/// order or `explain` and the compiled policy could disagree about the same
+/// subject — exactly the disagreement SP4c exists to close.
 pub fn evaluate(
     subject: &Subject,
     action: Action,
@@ -86,7 +185,24 @@ pub fn evaluate(
     grants: &[Grant],
     rules: &[Rule],
     tags_on: &[String],
+    clearances: &[ClearanceGate],
 ) -> Decision {
+    // Cleared = holds AT LEAST ONE of the gate's required roles — the same
+    // "OR across roles" semantics `egret_perm_compile::clearance` compiles
+    // (its `cleared` exception list is the union of each role's members).
+    if let Some(gate) = clearances.iter().find(|g| {
+        tags_on.iter().any(|t| t == &g.tag)
+            && !g.required_roles.iter().any(|r| subject.roles.contains(r))
+    }) {
+        return Decision {
+            allowed: false,
+            reasons: vec![Reason::ClearanceRequired {
+                tag: gate.tag.clone(),
+                required_roles: gate.required_roles.clone(),
+            }],
+        };
+    }
+
     let applicable = |g: &Grant| {
         g.actions.contains(&action)
             && covers(&g.scope, target)
@@ -116,7 +232,15 @@ pub fn evaluate(
         };
     };
 
-    let mut reasons = vec![Reason::AllowedByGrant { grant_id: a.id }];
+    // Which principal actually let the subject in decides WHICH allow class
+    // this is: a match reached only through a `group` is unenforceable in every
+    // engine egret provisions (D7), and says so in its own reason class rather
+    // than borrowing the enforceable one's wire string.
+    let mut reasons = vec![if matched_only_via_group(subject, &a.principals) {
+        Reason::AllowedByGroupOnly { grant_id: a.id }
+    } else {
+        Reason::AllowedByGrant { grant_id: a.id }
+    }];
     for r in rules {
         if !selector_hits(&r.selector, target, tags_on) {
             continue;
@@ -143,6 +267,35 @@ pub fn evaluate(
         allowed: true,
         reasons,
     }
+}
+
+/// Ranger's built-in "everybody" group, the ONE group name that resolves with
+/// no group provider and no usersync.
+///
+/// It is the reason [`matched_only_via_group`] is not simply "every matching
+/// principal is a group": a grant naming `public` IS enforceable — SP4c's own
+/// clearance compiler puts this literal on the deny side of a tag policy to
+/// mean everybody, because D0 measured that it is the half of Ranger's
+/// deny/deny-exception pair that works. `egret_perm_compile::rules` aliases
+/// this constant rather than re-spelling it; two copies would drift, and a
+/// drift here would either report an enforceable allow as unenforceable or
+/// hide a real one.
+pub const PUBLIC_GROUP: &str = "public";
+
+/// Whether EVERY `include` principal that matched `s` is a `group` OTHER than
+/// [`PUBLIC_GROUP`].
+///
+/// Called only after [`matches_set`] has already said yes, so at least one
+/// include principal matches and `all` is never vacuously true on an empty
+/// iterator. A grant naming both a group and the subject's own username is NOT
+/// group-only: the username item is what the engine will match, so the access
+/// is enforceable and reporting it as unenforceable would be the same class of
+/// lie in the other direction.
+fn matched_only_via_group(s: &Subject, set: &PrincipalSet) -> bool {
+    set.include
+        .iter()
+        .filter(|p| matches_principal(s, p))
+        .all(|p| p.kind == PrincipalKind::Group && p.r#ref != PUBLIC_GROUP)
 }
 
 /// `include` minus `exclude` — the operator that lets egret drop Ranger's

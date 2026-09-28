@@ -1,0 +1,481 @@
+//! SP4c **Task 2b**: a `role` grant reaches the engine, or stops claiming to.
+//!
+//! **The defect, found by D0 in already-merged code.** `grants.rs` compiled a
+//! `PrincipalKind::Role` straight into the Ranger `roles` bucket, which D0
+//! measured is never populated on the Trino path egret provisions: the plugin
+//! fetches roles from a `/service/roles/download/<svc>` route egret does not
+//! serve, so `lastKnownRoleVersion` never leaves `-1`, and Trino's plugin passes
+//! `userRoles` as a hardcoded `null`. So a role grant matched NOBODY in the
+//! engine — while `egret_perm::eval` matched it happily, meaning `explain`
+//! reported an access the engine did not grant. Same divergence class D7 found
+//! for groups, on a path D7 did not look at, and SP4b's picker offers `role` as
+//! an ordinary choice.
+//!
+//! A role grant now compiles to its holders' STORED usernames, through the same
+//! expansion SP4c Task 2's clearance uses.
+//!
+//! **The agreement test is the one that would have caught this originally.** A
+//! test that only asserted "the compiled body has a `roles` bucket naming the
+//! role" passed against the defect, because the body was correct Ranger — it
+//! just named a principal nothing resolves. So the assertions here are which
+//! USERNAMES the policy names, that the role name appears NOWHERE in the body,
+//! and that `evaluate` (what `explain` answers with) and the compiled policy
+//! agree about the same subject.
+//!
+//! Its own test binary, so `egret-test-db` gives it a private database: a role
+//! grant is catalog-scoped, but the model is read whole on every recompile and
+//! a concurrently deleted role would race this file's assertions.
+//!
+//! DB-gated; self-skips only under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS:
+//!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
+//!   env -u EGRET_ALLOW_DB_SKIP cargo test -p egret-perm-compile --test role_grants
+
+use egret_metastore::Db;
+use egret_perm::{
+    evaluate, Action, Decision, Effect, Grant, GrantOrigin, PermStore, Principal, PrincipalKind,
+    PrincipalSet, Reason, Scope, Subject as EvalSubject,
+};
+use egret_perm_compile::recompile_service;
+use egret_policy::{PolicyStore, COMPILER_GRANT_PREFIX};
+use serde_json::Value;
+use uuid::Uuid;
+
+async fn test_db() -> Option<Db> {
+    let dsn = egret_test_db::url().await?;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    Some(db)
+}
+
+fn unique(prefix: &str) -> String {
+    format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..12])
+}
+
+struct Fixture {
+    perm: PermStore,
+    policy: PolicyStore,
+    service_id: i64,
+    catalog_id: Uuid,
+}
+
+/// A StarRocks profile with one engine bound to it and one registry catalog
+/// attached — StarRocks so nothing here needs a tag service; a role GRANT is a
+/// plain resource access policy.
+async fn seed(db: &Db) -> Fixture {
+    let pool = &db.pool;
+    let perm = PermStore::new(pool.clone());
+    let policy = PolicyStore::new(db.clone());
+
+    egret_policy::seed_starrocks(&policy)
+        .await
+        .expect("seed starrocks service-def");
+    let service = policy
+        .create_service(&unique("sr_rolegrant"), "starrocks", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    let workspace_id: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
+            .bind(unique("rolegrant-ws"))
+            .bind("Role Grant WS")
+            .fetch_one(pool)
+            .await
+            .expect("workspace");
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','egret-rolegrant-test','AKIATEST') RETURNING id",
+    )
+    .bind(unique("rolegrant-sc"))
+    .fetch_one(pool)
+    .await
+    .expect("storage connection");
+    let warehouse_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(unique("rolegrant_wh"))
+    .bind(workspace_id)
+    .bind(sc_id)
+    .fetch_one(pool)
+    .await
+    .expect("warehouse");
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+    )
+    .bind(unique("rolegrant-eng"))
+    .bind(service.id)
+    .fetch_one(pool)
+    .await
+    .expect("engine");
+    let catalog_name = unique("rolegrant_cat");
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(&catalog_name)
+    .bind(warehouse_id)
+    .fetch_one(pool)
+    .await
+    .expect("registry catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(engine_id)
+    .bind(catalog_id)
+    .execute(pool)
+    .await
+    .expect("attach catalog");
+
+    Fixture {
+        perm,
+        policy,
+        service_id: service.id,
+        catalog_id,
+    }
+}
+
+async fn new_user(db: &Db, email: &str, username: Option<&str>) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name, username) VALUES ('local',$1,$2,$3) RETURNING id",
+    )
+    .bind(email)
+    .bind("Test User")
+    .bind(username)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert user")
+}
+
+async fn new_role(db: &Db, name: &str) -> Uuid {
+    sqlx::query_scalar("INSERT INTO roles (scope, name) VALUES ('platform', $1) RETURNING id")
+        .bind(name)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert role")
+}
+
+async fn grant_role(db: &Db, user_id: Uuid, role_id: Uuid) {
+    let res = sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL)",
+    )
+    .bind(user_id)
+    .bind(role_id)
+    .execute(&db.pool)
+    .await
+    .expect("role grant");
+    assert_eq!(res.rows_affected(), 1, "the role grant row must exist");
+}
+
+fn role_principal(name: &str) -> Principal {
+    Principal {
+        kind: PrincipalKind::Role,
+        r#ref: name.to_string(),
+    }
+}
+
+fn user_principal(name: &str) -> Principal {
+    Principal {
+        kind: PrincipalKind::User,
+        r#ref: name.to_string(),
+    }
+}
+
+/// A read grant on the fixture's whole catalog with the given principal set.
+fn read_grant(catalog_id: Uuid, principals: PrincipalSet) -> Grant {
+    Grant {
+        id: Uuid::nil(),
+        effect: Effect::Allow,
+        actions: vec![Action::Read],
+        scope: Scope {
+            catalog_id,
+            schema: None,
+            table: None,
+            column: None,
+        },
+        principals,
+        origin: GrantOrigin::Explicit,
+    }
+}
+
+async fn compiled_policy(db: &Db, service_id: i64, grant_id: Uuid) -> Option<Value> {
+    sqlx::query_scalar(
+        "SELECT policy_jsonb FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(service_id)
+    .bind(format!("{COMPILER_GRANT_PREFIX}{grant_id}"))
+    .fetch_optional(&db.pool)
+    .await
+    .expect("policy read")
+}
+
+fn users_of(item: &Value) -> Vec<String> {
+    item["users"]
+        .as_array()
+        .expect("users")
+        .iter()
+        .map(|v| v.as_str().expect("username").to_string())
+        .collect()
+}
+
+/// The single allow item of a compiled access policy.
+fn only_item(body: &Value) -> &Value {
+    let items = body["policyItems"].as_array().expect("policyItems");
+    assert_eq!(
+        items.len(),
+        1,
+        "an expanded grant is ONE item with many users: {body:#}"
+    );
+    &items[0]
+}
+
+/// **The headline of Task 2b.** A role grant compiles to its holders' STORED
+/// usernames — and the role NAME appears nowhere in the body, because the bucket
+/// that would hold it matches nobody. The holder here carries a
+/// collision-suffixed username, so a re-derivation from the email would name the
+/// wrong person and this test would fail.
+#[tokio::test]
+async fn a_role_grant_names_its_holders_usernames_and_never_a_roles_bucket() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let local = unique("dupe");
+    let first = new_user(&db, &format!("{local}@egret.local"), Some(&local)).await;
+    let holder = new_user(
+        &db,
+        &format!("{local}@other.local"),
+        Some(&format!("{local}-2")),
+    )
+    .await;
+    let outsider = new_user(
+        &db,
+        &format!("{}@egret.local", unique("outsider")),
+        Some("rolegrant-outsider"),
+    )
+    .await;
+    let role_name = unique("data-reader");
+    let role_id = new_role(&db, &role_name).await;
+    grant_role(&db, holder, role_id).await;
+    let _ = (first, outsider); // neither holds the role
+
+    let grant_id = f
+        .perm
+        .create_grant(&read_grant(
+            f.catalog_id,
+            PrincipalSet {
+                include: vec![role_principal(&role_name)],
+                exclude: vec![],
+            },
+        ))
+        .await
+        .expect("create role grant");
+
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let body = compiled_policy(&db, f.service_id, grant_id)
+        .await
+        .expect("a role grant must compile to a policy");
+    let item = only_item(&body);
+    assert_eq!(
+        users_of(item),
+        vec![format!("{local}-2")],
+        "the role's holder is named by their STORED username — a re-derivation would name \
+         {local:?}, which is a DIFFERENT person"
+    );
+    assert!(
+        item["roles"].as_array().expect("roles").is_empty(),
+        "the Ranger `roles` bucket is never populated on the Trino path egret provisions (D0), \
+         so a grant naming the role there matches nobody: {body:#}"
+    );
+    assert!(
+        !serde_json::to_string(&body).unwrap().contains(&role_name),
+        "the role NAME must not appear anywhere in the compiled body: {body:#}"
+    );
+    assert!(
+        !users_of(item).iter().any(|u| u == "rolegrant-outsider"),
+        "a non-holder must not be named: {body:#}"
+    );
+}
+
+/// **The agreement test.** egret's own oracle (`evaluate`, what `explain`
+/// answers with) matches a `role` principal against `Subject::roles` by name;
+/// the compiler matches it by naming usernames. Before Task 2b those two
+/// disagreed — the oracle allowed, the engine denied, and `explain` reported an
+/// access nobody had. They must now say the SAME thing, for a holder and for a
+/// non-holder.
+#[tokio::test]
+async fn explain_and_the_compiled_policy_agree_about_a_role_granted_subject() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let holder = new_user(
+        &db,
+        &format!("{}@egret.local", unique("oracle-h")),
+        Some("oracle-holder"),
+    )
+    .await;
+    let stranger = new_user(
+        &db,
+        &format!("{}@egret.local", unique("oracle-s")),
+        Some("oracle-stranger"),
+    )
+    .await;
+    let role_name = unique("oracle-role");
+    let role_id = new_role(&db, &role_name).await;
+    grant_role(&db, holder, role_id).await;
+    let _ = stranger;
+
+    let grant_id = f
+        .perm
+        .create_grant(&read_grant(
+            f.catalog_id,
+            PrincipalSet {
+                include: vec![role_principal(&role_name)],
+                exclude: vec![],
+            },
+        ))
+        .await
+        .expect("create role grant");
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let grants: Vec<Grant> = f
+        .perm
+        .list_grants()
+        .await
+        .expect("grants")
+        .into_iter()
+        .filter(|g| g.id == grant_id)
+        .collect();
+    assert_eq!(grants.len(), 1, "exactly this fixture's grant");
+    let target = Scope {
+        catalog_id: f.catalog_id,
+        schema: Some("sales".into()),
+        table: Some("orders".into()),
+        column: Some("id".into()),
+    };
+
+    let decision = evaluate(
+        &EvalSubject {
+            user: "oracle-holder".into(),
+            groups: vec![],
+            roles: vec![role_name.clone()],
+            workspaces: vec![],
+        },
+        Action::Read,
+        &target,
+        &grants,
+        &[],
+        &[],
+        &[],
+    );
+    assert_eq!(
+        decision,
+        Decision {
+            allowed: true,
+            reasons: vec![Reason::AllowedByGrant { grant_id }],
+        },
+        "the oracle allows the role holder"
+    );
+
+    let stranger_decision = evaluate(
+        &EvalSubject {
+            user: "oracle-stranger".into(),
+            groups: vec![],
+            roles: vec![],
+            workspaces: vec![],
+        },
+        Action::Read,
+        &target,
+        &grants,
+        &[],
+        &[],
+        &[],
+    );
+    assert!(
+        !stranger_decision.allowed,
+        "the oracle refuses a non-holder: {stranger_decision:?}"
+    );
+
+    // …and the compiled policy says exactly the same, by naming one and not the
+    // other. Disagreement here is the defect: `explain` would report an access
+    // the engine does not grant.
+    let body = compiled_policy(&db, f.service_id, grant_id)
+        .await
+        .expect("policy");
+    let users = users_of(only_item(&body));
+    assert_eq!(
+        users,
+        vec!["oracle-holder".to_string()],
+        "the engine must grant exactly whom the oracle allows: {body:#}"
+    );
+    assert!(!users.iter().any(|u| u == "oracle-stranger"));
+}
+
+/// The `exclude` half is the one that fails OPEN when it is got wrong: a
+/// subtract that evaporates grants MORE than the model states. A role named in
+/// an `exclude` must therefore expand too, into `allowExceptions`.
+#[tokio::test]
+async fn a_role_in_an_exclude_subtracts_its_holders() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+
+    let alice = new_user(
+        &db,
+        &format!("{}@egret.local", unique("exc-a")),
+        Some("exc-alice"),
+    )
+    .await;
+    let bob = new_user(
+        &db,
+        &format!("{}@egret.local", unique("exc-b")),
+        Some("exc-bob"),
+    )
+    .await;
+    let role_name = unique("contractor");
+    let role_id = new_role(&db, &role_name).await;
+    grant_role(&db, bob, role_id).await;
+    let _ = alice;
+
+    let grant_id = f
+        .perm
+        .create_grant(&read_grant(
+            f.catalog_id,
+            PrincipalSet {
+                include: vec![user_principal("exc-alice"), user_principal("exc-bob")],
+                exclude: vec![role_principal(&role_name)],
+            },
+        ))
+        .await
+        .expect("create grant");
+    recompile_service(&f.perm, &f.policy, f.service_id)
+        .await
+        .expect("recompile");
+
+    let body = compiled_policy(&db, f.service_id, grant_id)
+        .await
+        .expect("policy");
+    let exceptions = body["allowExceptions"].as_array().expect("allowExceptions");
+    assert_eq!(
+        exceptions.len(),
+        1,
+        "the exclude must compile to one exception item: {body:#}"
+    );
+    assert_eq!(
+        users_of(&exceptions[0]),
+        vec!["exc-bob".to_string()],
+        "the excluded role's holder is named by username — an exception naming the ROLE matches \
+         nobody, so the subtract would evaporate and the grant would reach them: {body:#}"
+    );
+    assert_eq!(
+        users_of(only_item(&body)),
+        vec!["exc-alice".to_string(), "exc-bob".to_string()],
+        "the include side is untouched — Ranger applies the exception, not egret: {body:#}"
+    );
+}

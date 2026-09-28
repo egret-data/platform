@@ -86,13 +86,37 @@ pub const COMPILER_GRANT_PREFIX: &str = "perm-grant-";
 /// (`egret-perm-compile::rules::compile_rule`) produces. Same rationale as
 /// [`COMPILER_GRANT_PREFIX`].
 pub const COMPILER_RULE_PREFIX: &str = "perm-rule-";
+/// Name prefix every CLEARANCE policy the compiler
+/// (`egret-perm-compile::clearance::compile_clearance`) produces —
+/// `format!("{COMPILER_CLEARANCE_PREFIX}{tag_id}")`, one per gated tag. Same
+/// rationale for living here as [`COMPILER_GRANT_PREFIX`].
+///
+/// **This one is a tag ACCESS policy, and that AMENDS SP4a's D2** ("tags drive
+/// rules only, never access" — see `admin`'s re-export of
+/// `tag_access_to_ranger_json`, which stayed unreachable until SP4c, and
+/// `egret-perm-compile::clearance`'s module doc for the whole argument). A
+/// classification exists to WITHHOLD data, and neither of D2's permitted tag
+/// shapes can do that: a mask and a row filter both still answer the query. So
+/// a clearance compiles to a tag-service DENY whose `denyExceptions` name the
+/// cleared users. A future reader who finds a compiled tag access policy under
+/// this prefix is looking at that amendment, not at a bug.
+///
+/// It needs a prefix of its OWN rather than riding on the grant prefix because
+/// its name is keyed by `tags.id`, not by a `perm.grants` id: the editor's
+/// reserved-name guard and `apply_diff_in_tx`'s existing-state sweep both key
+/// on these prefixes, and a clearance filed under `perm-grant-` would be
+/// indistinguishable from a grant whose row no longer exists.
+pub const COMPILER_CLEARANCE_PREFIX: &str = "perm-clearance-";
 
 /// Whether `name` identifies a policy the SP4a permission-model compiler
-/// owns (produced by `compile_grant`/`compile_rule` and reachable by
-/// `apply_diff_in_tx`'s existing-state sweep) — see [`COMPILER_GRANT_PREFIX`]
-/// / [`COMPILER_RULE_PREFIX`].
+/// owns (produced by `compile_grant`/`compile_rule`/`compile_clearance` and
+/// reachable by `apply_diff_in_tx`'s existing-state sweep) — see
+/// [`COMPILER_GRANT_PREFIX`] / [`COMPILER_RULE_PREFIX`] /
+/// [`COMPILER_CLEARANCE_PREFIX`].
 pub fn is_compiler_owned_policy_name(name: &str) -> bool {
-    name.starts_with(COMPILER_GRANT_PREFIX) || name.starts_with(COMPILER_RULE_PREFIX)
+    name.starts_with(COMPILER_GRANT_PREFIX)
+        || name.starts_with(COMPILER_RULE_PREFIX)
+        || name.starts_with(COMPILER_CLEARANCE_PREFIX)
 }
 
 /// SP4a Task 8 fix round 3: refuse a human write that would put (or leave) a
@@ -119,7 +143,8 @@ fn refuse_reserved_name(name: &str) -> Result<(), PolicyStoreError> {
     if is_compiler_owned_policy_name(name) {
         return Err(PolicyStoreError::CompilerOwned(format!(
             "policy name {name:?} starts with a prefix reserved for the SP4a permission model \
-             ({COMPILER_GRANT_PREFIX:?} / {COMPILER_RULE_PREFIX:?}) — only its compiler writes \
+             ({COMPILER_GRANT_PREFIX:?} / {COMPILER_RULE_PREFIX:?} / \
+             {COMPILER_CLEARANCE_PREFIX:?}) — only its compiler writes \
              policies there; rename this policy instead of retrying"
         )));
     }
@@ -231,20 +256,23 @@ async fn refuse_if_compiler_owned_policies_remain(
 ) -> Result<(), PolicyStoreError> {
     let count: i64 = sqlx::query_scalar::<_, i64>(
         r#"SELECT count(*) FROM policy.authz_policies
-           WHERE service_id = $1 AND (name LIKE $2 || '%' OR name LIKE $3 || '%')"#,
+           WHERE service_id = $1
+             AND (name LIKE $2 || '%' OR name LIKE $3 || '%' OR name LIKE $4 || '%')"#,
     )
     .bind(service_id)
     .bind(COMPILER_GRANT_PREFIX)
     .bind(COMPILER_RULE_PREFIX)
+    .bind(COMPILER_CLEARANCE_PREFIX)
     .fetch_one(&mut *conn)
     .await?;
     if count > 0 {
         let noun = if count == 1 { "policy" } else { "policies" };
         return Err(PolicyStoreError::CompilerOwned(format!(
             "profile {service_id} still holds {count} {noun} compiled by the SP4a permission \
-             model (named with the perm-grant-/perm-rule- prefix) — delete the grants/rules \
-             that produce them first, or wait for the next recompile to reap them, before \
-             deleting the profile itself"
+             model (named with the perm-grant-/perm-rule-/perm-clearance- prefix) — delete the \
+             grants/rules that produce them, or the classification clearance behind them, \
+             first, or wait for the next recompile to reap them, before deleting the profile \
+             itself"
         )));
     }
     Ok(())
@@ -771,6 +799,32 @@ pub async fn tag_keys_for_resource_via(
     .bind(schema)
     .bind(table)
     .bind(column)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// The clearance gate for each of `tag_keys` that `egret_perm::evaluate` can
+/// actually agree with the compiled engine about (SP4c Task 4/D4): one
+/// `(tag key, required_roles)` pair per gated tag whose `required_roles` is
+/// non-empty. A `required_groups`-only gate is deliberately excluded — D2/D7
+/// measured that a group name matches nobody in the engine, so
+/// `egret_perm_compile::clearance` compiles it to NO deny at all, and
+/// `explain` reporting a denial for it would disagree with the engine in the
+/// direction opposite the bug SP4c Task 4 fixes.
+pub async fn clearance_gates_for_tags_via(
+    conn: &mut sqlx::PgConnection,
+    tag_keys: &[String],
+) -> Result<Vec<(String, Vec<String>)>, PolicyStoreError> {
+    if tag_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as::<_, (String, Vec<String>)>(
+        r#"SELECT t.key, cp.required_roles
+             FROM classification_policies cp
+             JOIN tags t ON t.id = cp.tag_id
+            WHERE t.key = ANY($1) AND cardinality(cp.required_roles) > 0"#,
+    )
+    .bind(tag_keys)
     .fetch_all(&mut *conn)
     .await?)
 }

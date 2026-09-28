@@ -444,7 +444,21 @@ async fn assign_user_role(
     Json(body): Json<AssignRoleInput>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
-    st.roles.assign("user", id, body.role_id).await?;
+    // **SP4c Task 3, input 3: who holds the clearing role.** The grant and the
+    // recompile it forces share one transaction. A role NAME is unresolvable in
+    // every engine egret provisions (D0/D0b), so egret enumerates a role's
+    // HOLDERS at compile time — into a clearance's `denyExceptions` and into a
+    // `role` grant's users — and that enumeration is stale the moment this row is
+    // written. See `egret_perm_compile::role_membership` for why the recompile
+    // cannot live inside `egret_auth::roles` (it would be a dependency cycle).
+    egret_perm_compile::assign_platform_role_and_recompile(
+        st.roles.pool(),
+        "user",
+        id,
+        body.role_id,
+    )
+    .await
+    .map_err(CpError::from)?;
     st.audit.emit(egret_audit::mutation_for(
         &p,
         None,
@@ -484,7 +498,14 @@ async fn unassign_user_role(
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
     guard_last_admin(&st, role_id).await?;
-    st.roles.unassign("user", id, role_id).await?;
+    // SP4c Task 3: the REVOKE direction, which is the one that fails OPEN when
+    // its recompile is missed — the revoked holder stays named in every clearance
+    // exception and every role-granted policy, still reading a classified column
+    // whose clearance was taken away, with the `access_grants` row egret's own UI
+    // reads showing the revoke as done.
+    egret_perm_compile::unassign_platform_role_and_recompile(st.roles.pool(), "user", id, role_id)
+        .await
+        .map_err(CpError::from)?;
     st.audit.emit(egret_audit::mutation_for(
         &p,
         None,
@@ -1094,7 +1115,19 @@ async fn delete_role(
             "Seeded roles cannot be deleted".to_string(),
         ));
     }
-    st.roles.delete(id).await?;
+    // **A role delete IS a role-membership write.** `access_grants.role_id` is
+    // `ON DELETE CASCADE` (migration 0068), so this revokes the role from every
+    // holder at once — and if the role was clearing a classification, the
+    // compiled `denyExceptions` would go on naming the ex-holders until
+    // something recompiled, letting them read the classified column after the
+    // clearance was taken away. Same three calls as assign/unassign, in the same
+    // transaction; see `egret_perm_compile::role_membership`.
+    egret_perm_compile::delete_platform_role_and_recompile(st.roles.pool(), id)
+        .await
+        .map_err(CpError::from)?;
+    // The repo publishes this itself on the non-transactional path; here the
+    // transaction was owned above, so it is published after the commit.
+    st.roles.publish_roles_changed();
     Ok(StatusCode::NO_CONTENT)
 }
 

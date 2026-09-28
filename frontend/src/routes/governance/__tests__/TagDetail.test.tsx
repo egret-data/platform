@@ -104,4 +104,209 @@ describe("TagDetail", () => {
       expect.anything(),
     );
   });
+
+  // SP4c Task 5/D2, corrected and extended by Task 7: four facts the UI must
+  // say where the clearance is set, because none of them is enforced by the
+  // engine and an operator who is not told will assume otherwise. Each
+  // assertion below is on the STATEMENT's content, not merely that "a
+  // warning" renders — a wording change is exactly what a later refactor
+  // would drop silently, and a shape-only test would pass against that.
+  //
+  // Two of these statements were MEASURED FALSE before Task 7
+  // (`docs/en/plans/2026-09-28-sp4c-live-result.md`): the write sentence
+  // claimed Trino withheld writes and called the difference an asymmetry,
+  // and nothing said a view bypasses the clearance at all. Both now describe
+  // something the system CANNOT do, which is precisely the kind of sentence
+  // a refactor drops without noticing.
+  describe("what the engine does not enforce", () => {
+    test("an ungated tag shows none of the clearance warnings", async () => {
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      expect(screen.queryByText(/not enforced in the engine/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/withholds reads only/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/a view over a classified column/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/500 of this tag.s columns/i)).not.toBeInTheDocument();
+    });
+
+    test("a group-only gate says neither a group nor a role name reaches the engine", async () => {
+      vi.mocked(tagsApi.useTags).mockReturnValue({
+        data: [{ ...TAG, required_groups: ["g1"] }],
+        isLoading: false,
+        isError: false,
+        error: null,
+      } as unknown as ReturnType<typeof tagsApi.useTags>);
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      expect(
+        screen.getByText(
+          /not enforced in the engine: no group provider or usersync means a group name never reaches trino or starrocks, and a role name does not either/i,
+        ),
+      ).toBeInTheDocument();
+    });
+
+    // SP4c Task 7. The assertion is on BOTH halves of the corrected sentence:
+    // that the clearance withholds reads only on both engines, and that
+    // NEITHER engine withholds writes. The second half is the one the gate
+    // falsified — the old wording said Trino withheld both — so a test that
+    // only matched "withholds reads only" would have passed against the false
+    // sentence too.
+    test("a role-gated tag says NEITHER engine withholds writes", async () => {
+      vi.mocked(tagsApi.useTags).mockReturnValue({
+        data: [{ ...TAG, required_roles: ["finance_cleared"] }],
+        isLoading: false,
+        isError: false,
+        error: null,
+      } as unknown as ReturnType<typeof tagsApi.useTags>);
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      expect(
+        screen.getByText(
+          /this clearance withholds reads only, on trino and on starrocks alike: a user without it can still overwrite a column they cannot read/i,
+        ),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/neither engine withholds writes/i)).toBeInTheDocument();
+      // And the asymmetry the live gate falsified must not come back.
+      expect(screen.queryByText(/on a starrocks engine this clearance/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/trino withholds both reads and writes/i)).not.toBeInTheDocument();
+      // The group-only warning must NOT appear here — this gate has a role.
+      expect(screen.queryByText(/not enforced in the engine/i)).not.toBeInTheDocument();
+    });
+
+    // SP4c Task 7 / D0b / D5: the view bypass, measured on both engines. The
+    // Trino half is asserted separately because it is the surprising one —
+    // an operator told only "views are not covered" would not expect a
+    // CLEARED user to be blocked by an uncleared view owner, and a test that
+    // stopped at the first sentence would pass against a warning that left
+    // the two-directional failure out.
+    test("a role-gated tag says a view bypasses the clearance on both engines, in both directions", async () => {
+      vi.mocked(tagsApi.useTags).mockReturnValue({
+        data: [{ ...TAG, required_roles: ["finance_cleared"] }],
+        isLoading: false,
+        isError: false,
+        error: null,
+      } as unknown as ReturnType<typeof tagsApi.useTags>);
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      expect(
+        screen.getByText(
+          /a view over a classified column is not covered on either engine: reading the column through a view returns it in full to a user without clearance/i,
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          /on trino a view runs with its owner.s rights, so it fails both ways/i,
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          /a cleared owner.s view hands the column to the uncleared, and an uncleared owner.s view blocks everybody, the cleared included/i,
+        ),
+      ).toBeInTheDocument();
+    });
+
+    // The ceiling is PER PROFILE, not installation-wide: the compiler counts
+    // `tagged_columns_for_service_via`, which joins the profile's own attached
+    // catalogs, so a profile serving unrelated tables sees none of this tag's
+    // columns and is not affected. The earlier wording said every StarRocks
+    // profile's recompile fails "including profiles that serve entirely
+    // unrelated tables", which overstates the blast radius of a limit an
+    // operator plans capacity against.
+    test("a role-gated tag says the expansion ceiling is counted PER StarRocks profile", async () => {
+      vi.mocked(tagsApi.useTags).mockReturnValue({
+        data: [{ ...TAG, required_roles: ["finance_cleared"] }],
+        isLoading: false,
+        isError: false,
+        error: null,
+      } as unknown as ReturnType<typeof tagsApi.useTags>);
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      expect(
+        screen.getByText(
+          /if more than 500 of this tag.s columns are visible to one starrocks profile, that profile.s recompile fails outright rather than truncating the clearance/i,
+        ),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/profiles that see fewer are unaffected/i)).toBeInTheDocument();
+      expect(
+        screen.queryByText(/including profiles that serve entirely unrelated tables/i),
+      ).not.toBeInTheDocument();
+    });
+
+    // **I2.** A groups-only gate compiles to NOTHING (`clearance.rs` skips it:
+    // a Ranger item naming a group matches nobody), so every one of the three
+    // engine statements would be describing a control that does not exist —
+    // claiming withholding where there is none, inside the very statements
+    // written to prevent that. The four presence tests above all render a
+    // ROLE-gated tag, so none of them could see this.
+    test("a groups-only gate shows the group warning and NONE of the engine statements", async () => {
+      vi.mocked(tagsApi.useTags).mockReturnValue({
+        data: [{ ...TAG, required_roles: [], required_groups: ["g1"] }],
+        isLoading: false,
+        isError: false,
+        error: null,
+      } as unknown as ReturnType<typeof tagsApi.useTags>);
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      // The one statement that IS true of a groups-only gate.
+      expect(screen.getByText(/not enforced in the engine/i)).toBeInTheDocument();
+      // And the three that are not.
+      expect(screen.queryByText(/withholds reads only/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/neither engine withholds writes/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/a view over a classified column/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/500 of this tag.s columns/i)).not.toBeInTheDocument();
+      // It is still gated for OBJECT access, which the header badge reports.
+      expect(screen.getByText("Gated")).toBeInTheDocument();
+    });
+
+    // **SP4c review I5.** The write now reports what it could NOT compile, and
+    // a success toast that ignored it would be the same "saved, therefore
+    // enforced" claim this whole surface exists to avoid. The author is told
+    // where the clearance is authored, not only in the server log.
+    test("a clearance the recompile could not express is reported, not reported as saved", async () => {
+      const user = userEvent.setup();
+      // The mutate stub resolves through its onSuccess, the way the real hook
+      // does, with a skip on the wire.
+      setMutate.mockImplementation(
+        (
+          _vars: unknown,
+          opts: {
+            onSuccess: (r: {
+              ok: boolean;
+              // The whole SkipReport, not just `reason`: narrowing it here made
+              // `tsc` reject the literal below while vitest still passed, so the
+              // gate failed on a shape the runtime never minded.
+              skipped: { source_kind: string; id: string; reason: string }[];
+            }) => void;
+          },
+        ) =>
+          opts.onSuccess({
+            ok: true,
+            skipped: [
+              {
+                source_kind: "clearance",
+                id: "t1",
+                reason:
+                  "this Trino profile has no usable `tagService`, and a Trino clearance is a TAG policy",
+              },
+            ],
+          }),
+      );
+      renderPage();
+      await screen.findByRole("heading", { name: "PII" });
+
+      await user.click(screen.getByRole("combobox", { name: "Role to add" }));
+      await user.click(await screen.findByText("finance_cleared"));
+      await user.click(screen.getByRole("button", { name: "Add clearance" }));
+
+      expect(
+        await screen.findByText(/saved, but not compiled into any engine/i),
+      ).toBeInTheDocument();
+      expect(screen.getByText(/has no usable .?tagService/i)).toBeInTheDocument();
+    });
+  });
 });

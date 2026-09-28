@@ -60,6 +60,28 @@ pub enum CompileError {
         count: usize,
         ceiling: usize,
     },
+    /// The per-CLEARANCE equivalent of [`Self::ExpansionCeiling`] — SP4c Task
+    /// 2d. A clearance on StarRocks expands to one access deny per tagged
+    /// column (D0b: that engine has no tag service, so there is nothing to
+    /// short-circuit on and nothing to resolve the tag at query time), and
+    /// unlike a row filter it does NOT dedup, because an access deny carries a
+    /// column resource — so the emitted count is exactly N.
+    ///
+    /// **Named after the TAG rather than a rule**, for the reason
+    /// [`Self::ProfileExpansionCeiling`] is named after the profile: a
+    /// clearance is not a `perm.rules` row, so an operator handed
+    /// "compiling rule X" would go looking through the rule list for something
+    /// that is not there. The clearance's input is
+    /// `classification_policies.tag_id`, and that is what this names.
+    #[error(
+        "compiling the clearance on tag {tag:?} would expand to {count} per-column denies, over \
+         the ceiling of {ceiling}"
+    )]
+    ClearanceExpansionCeiling {
+        tag: String,
+        count: usize,
+        ceiling: usize,
+    },
     /// The per-rule [`Self::ExpansionCeiling`] bounds one rule; this bounds the
     /// profile's SUM across every rule and grant compiled for it — the gap
     /// SP4a Task 12 closes (see `egret-perm-compile::trigger::

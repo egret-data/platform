@@ -39,20 +39,37 @@ pub use ranger_json::{AccessItemInput, AccessPolicyInput, ResourceLevel};
 // see `egret-perm-compile/src/grants.rs`'s module doc). Something outside
 // `egret-policy` has to render it before it can be written to
 // `policy.authz_policies.policy_jsonb`, so `access_to_ranger_json` (the plain,
-// resource-addressed renderer) is re-exported here too. `tag_access_to_ranger_json`
-// stays crate-private and unreachable — D2 forbids egret ever emitting a tag
-// *access* policy, and that is the one Ranger tag-first short-circuit hazard
-// this boundary still has to hold the line on; a plain resource-addressed
-// access policy carries no such hazard, the same distinction Task 5 already
-// drew for `tag_masking_to_ranger_json`/`tag_rowfilter_to_ranger_json` below.
+// resource-addressed renderer) is re-exported here too.
 pub use ranger_json::access_to_ranger_json;
+// **SP4c Task 2 AMENDS SP4a's D2, and this is the site.** Until SP4c,
+// `tag_access_to_ranger_json` stayed crate-private and unreachable on the
+// strength of D2 ("tags drive rules only, never access"): a tag ACCESS policy
+// reintroduces Ranger's tag-first short-circuit, which was the one hazard this
+// boundary held the line on.
+//
+// SP4c's whole subject is a classification's CLEARANCE, and a clearance cannot
+// be expressed as either shape D2 permits — a mask and a row filter both still
+// ANSWER the query, and a classification exists to WITHHOLD the data. The only
+// Ranger shape that withholds "everyone except these people" is a deny with
+// `denyExceptions`, keyed on the tag so it follows the tag wherever it is
+// assigned. So the amendment is deliberate and narrow: exactly one compiler
+// (`egret-perm-compile::clearance`, name prefix
+// `COMPILER_CLEARANCE_PREFIX`) emits a tag access policy, and it emits only a
+// DENY — never an allow, which is the direction that could short-circuit ahead
+// of a compiled deny grant. The tag-first short-circuit is what makes a
+// clearance deny WIN over any resource grant, which is precisely what a
+// clearance has to do (design spec `2026-09-28-classification-clearance-sp4c-design.md`,
+// D1). Hand-written tag access policies stay refused: `apply_diff_in_tx` stamps
+// the tag service `origin = 'generated'` (SP4a Important 5), so
+// `refuse_if_generated` keeps `create_policy` out of it.
+pub use ranger_json::tag_access_to_ranger_json;
 // SP4a Task 5 (egret-perm's rule compiler) also needs the tag MASKING and
-// ROW-FILTER builders. D2 forbids only `tag_access_to_ranger_json` — a tag
+// ROW-FILTER builders. D2 forbade only `tag_access_to_ranger_json` — a tag
 // ACCESS policy reintroduces Ranger's tag-first short-circuit; a tag
 // masking/row-filter policy carries no such hazard, and egret already emits
 // both through the hand-authored editor path (`tag_editor_to_ranger_json`,
-// above). `tag_access_to_ranger_json` itself stays unreachable outside this
-// module.
+// above). SP4c Task 2 amends that half of D2 — see the
+// `tag_access_to_ranger_json` re-export just above.
 pub use ranger_json::{tag_masking_to_ranger_json, tag_rowfilter_to_ranger_json};
 pub use reader::{EngineBinding, EngineBindingReader, EngineReadError};
 use std::sync::Arc;
