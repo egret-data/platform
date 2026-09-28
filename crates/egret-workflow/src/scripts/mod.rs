@@ -292,6 +292,10 @@ pub enum PullPolicy {
 pub struct ResourceAmounts {
     pub cpu: Option<String>,
     pub memory: Option<String>,
+    /// `ephemeral-storage` (final review I5). **Never the author's**: Kestra's
+    /// `resources` has no such key and the parser refuses it, so only egret's
+    /// `workflow.kubernetes.{default,max}_resources` set it.
+    pub ephemeral_storage: Option<String>,
 }
 
 /// Kubernetes `resources`: `request`/`limit` for cpu and memory, nothing else.

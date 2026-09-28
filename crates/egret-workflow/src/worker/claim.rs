@@ -212,11 +212,6 @@ impl Claimed {
                 render,
                 timeout: budget.duration(),
                 principal: self.principal_id.map(egret_core::UserId),
-                // **The lease token, handed to the handler.** See
-                // `TaskInput::claimed_at`: a handler that holds an external
-                // resource names it after this and not after `run_id` alone,
-                // so a reaped worker cannot reach its replacement's resource.
-                claimed_at: self.claimed_at,
                 log: crate::logs::RunLog::new(
                     crate::logs::RunIdentity {
                         workspace_id: self.workspace_id,
@@ -1175,9 +1170,26 @@ pub async fn tick_with(
 /// See [`under_lease`]: every `working_timeout / 3`, fenced, starting before
 /// the handler is polled. The outcome is then fenced on the **latest**
 /// renewed lease, which is why a renewed copy of `c` reaches
-/// [`apply_outcome`] rather than `c` itself. [`TaskInput::claimed_at`] stays
-/// the claim's value: it names external resources (a container), and a name
-/// that changed at every renewal would lose them.
+/// [`apply_outcome`] rather than `c` itself. The handler never sees the lease:
+/// what it holds is named by `(run, attempt)` (see [`TaskHandler::cancel`]'s
+/// *READ THIS* section), which a renewal does not change.
+///
+/// # What the run held is released AFTER the commit (W5a final review I3)
+///
+/// [`Registry::release`] is called only once the outcome's transaction has
+/// committed — never on a lost lease, never on a handler `Err`, never on a
+/// failed commit. A script task's pod or container is deleted there, not in
+/// the handler, so:
+///
+/// * **the commit failed** (Postgres blip, failover): the run stays RUNNING,
+///   its lease expires, and the next claim **re-attaches** to the finished
+///   pod and collects the same outcome — the task is not run a second time;
+/// * **egret died between the commit and the release**: the run is terminal
+///   and its pod is deleted by the orphan sweep on the reaper's tick.
+///
+/// A release that fails is logged; the committed outcome stands.
+///
+/// [`TaskHandler::cancel`]: super::TaskHandler::cancel
 async fn run_one(
     pool: &PgPool,
     c: &Claimed,
@@ -1247,6 +1259,16 @@ async fn run_one(
     let mut tx = pool.begin().await.map_err(db_err)?;
     apply_outcome(&mut tx, &renewed, &outcome).await?;
     tx.commit().await.map_err(db_err)?;
+    // Only now: see "released AFTER the commit" above.
+    if let Err(e) = reg.release(&input).await {
+        tracing::warn!(
+            execution = %c.execution_id,
+            run = %c.id,
+            task_id = %c.task_id,
+            "the run's outcome is committed, but what it held could not be released \
+             (the orphan sweep will remove it): {e}"
+        );
+    }
     Ok(Committed::Yes)
 }
 
@@ -1302,9 +1324,10 @@ enum Leased<T> {
 /// cut off from Postgres cannot tell whether the reaper has already taken its
 /// run, and -- since W5a names a container or pod by (run, attempt) so that the
 /// next holder re-attaches to it -- a worker still inside its handler could
-/// then DELETE that work on finish (`delete: true`) or KILL it when its own
-/// budget expires, under the new holder (W5a Task 5 fix round 1, review
-/// Important 4). So **once no renewal has succeeded for `fence_after`
+/// then KILL that work when its own budget expires, under the new holder (W5a
+/// Task 5 fix round 1, review Important 4; the delete on finish it also
+/// feared now happens only after a COMMITTED outcome, which a worker that
+/// lost the run cannot make -- final review I3). So **once no renewal has succeeded for `fence_after`
 /// (`working_timeout`, the reaper's own threshold), the worker gives the run
 /// up exactly as on a moved fence**: the handler future is dropped (no
 /// outcome, no delete, no cancel), and [`Leased::Lost`] is returned. Kestra's
@@ -2978,8 +3001,8 @@ mod tests {
 
     /// **A worker cut off from Postgres gives the run up once no renewal has
     /// succeeded for `working_timeout`** -- exactly as on a moved fence: the
-    /// handler future is DROPPED (so a runner's delete-on-finish and the
-    /// budget's `cancel`, both inside it, never run) and `Lost` is returned.
+    /// handler future is DROPPED (so the budget's `cancel`, inside it, never
+    /// runs) and `Lost` is returned.
     /// Every renewal here errors, as against an unreachable database.
     #[tokio::test]
     async fn a_worker_whose_renewals_keep_failing_self_fences_and_drops_the_handler() {

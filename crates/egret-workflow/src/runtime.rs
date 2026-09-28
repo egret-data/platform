@@ -677,31 +677,31 @@ pub async fn handlers_for(
     use crate::worker::handlers::script::{register, PgFeatureState, ScriptRuntime};
 
     let mut handlers = Handlers::with_core_tasks();
-    let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) = match cfg
-        .container_runner
-    {
-        egret_config::ContainerRunner::None => return Ok((handlers, None)),
-        egret_config::ContainerRunner::Docker => {
-            let r = Arc::new(DockerRunner::new().with_logs(LogRepo::new(pool.clone())));
-            (RunnerKind::Docker, r.clone(), r)
-        }
-        egret_config::ContainerRunner::Kubernetes => {
-            let pod = pod_config(&cfg.kubernetes);
-            pod.validate()
-                .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e}")))?;
-            let client = kube::Client::try_default().await.map_err(|e| {
+    let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) =
+        match cfg.container_runner {
+            egret_config::ContainerRunner::None => return Ok((handlers, None)),
+            egret_config::ContainerRunner::Docker => {
+                let r = Arc::new(DockerRunner::new().with_logs(LogRepo::new(pool.clone())));
+                (RunnerKind::Docker, r.clone(), r)
+            }
+            egret_config::ContainerRunner::Kubernetes => {
+                let pod = pod_config(&cfg.kubernetes);
+                pod.validate()
+                    .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e}")))?;
+                let client = kube::Client::try_default().await.map_err(|e| {
                     egret_core::Error::Internal(anyhow::anyhow!(
-                        "workflow.container_runner is kubernetes but no cluster client could be                          built: {e}"
+                        "workflow.container_runner is kubernetes but no cluster client could be \
+                         built: {e}"
                     ))
                 })?;
-            let r = Arc::new(crate::worker::k8s::KubernetesRunner::new(
-                client,
-                pod,
-                LogRepo::new(pool.clone()),
-            ));
-            (RunnerKind::Kubernetes, r.clone(), r)
-        }
-    };
+                let r = Arc::new(crate::worker::k8s::KubernetesRunner::new(
+                    client,
+                    pod,
+                    LogRepo::new(pool.clone()),
+                ));
+                (RunnerKind::Kubernetes, r.clone(), r)
+            }
+        };
     register(
         &mut handlers,
         Arc::new(ScriptRuntime {
@@ -720,6 +720,7 @@ pub fn pod_config(k: &egret_config::WorkflowKubernetesConfig) -> crate::worker::
         crate::scripts::ResourceAmounts {
             cpu: a.cpu.clone(),
             memory: a.memory.clone(),
+            ephemeral_storage: a.ephemeral_storage.clone(),
         }
     }
     fn both(r: &egret_config::TaskResources) -> crate::scripts::Resources {

@@ -28,6 +28,19 @@
 //! runs with what it may have (Kubernetes' own `LimitRange` behaves the same
 //! way for defaults). A request left above its limit after capping is lowered
 //! to the limit, because the API refuses `request > limit`.
+//!
+//! # Node disk: `ephemeral-storage` and `emptyDir.sizeLimit` (final review I5)
+//!
+//! `main` gets an `ephemeral-storage` request and limit from egret's config
+//! only (the author has no such key), defaulted and capped like cpu and
+//! memory. The limit is also the `sizeLimit` of the two volumes `main` writes
+//! to -- the working directory and the stderr file's -- and the markers
+//! volume gets a fixed 1 MiB. So a task that writes without bound is evicted
+//! by the kubelet (it enforces both: the pod's summed container limits over
+//! its containers' disk and its `emptyDir`s, and each `sizeLimit`), and the
+//! runner FAILS the task with the kubelet's message -- rather than filling
+//! the node until `DiskPressure` evicts everything on it, egret included. With
+//! no limit configured anywhere the volumes have no `sizeLimit` either.
 
 use std::collections::BTreeMap;
 
@@ -100,6 +113,8 @@ const HELPER_REQUEST_CPU: &str = "10m";
 const HELPER_REQUEST_MEMORY: &str = "16Mi";
 const HELPER_LIMIT_CPU: &str = "200m";
 const HELPER_LIMIT_MEMORY: &str = "64Mi";
+/// The markers volume holds two empty files.
+const MARKERS_SIZE_LIMIT: &str = "1Mi";
 
 /// egret's side of the pod: where it runs and under what bounds. Built from
 /// `workflow.kubernetes.*` (W5a Task 5); never author-settable.
@@ -209,11 +224,12 @@ pub fn files_out_script() -> String {
 /// dropped — computes the same name and finds the pod; attempt N+1 (a retry)
 /// computes a different one and can never adopt attempt N's pod.
 ///
-/// The Docker runner's name carries the lease instead ([`container_name`]),
-/// because its `cancel` had to be safe against a reaped worker still inside
-/// its handler. W5a Task 3 removed that case: a worker that loses its fence has
-/// its handler future dropped before it can reach `cancel`, so the lease no
-/// longer needs to be part of the address.
+/// The Docker runner names its container the same way ([`container_name`]
+/// calls this). W4 put the lease in that name so a reaped worker still inside
+/// its handler could not reach its replacement's container; W5a took it out,
+/// because `claim::under_lease` now drops a handler whose fence moved, or
+/// whose renewals failed for `working_timeout`, before it can reach `cancel`
+/// or the post-commit release (see `TaskHandler::cancel`'s *READ THIS*).
 ///
 /// `attempt` is `TaskInput::attempt`, 1-based. 10 + 32 + 1 + ≤10 characters,
 /// inside a DNS label's 63.
@@ -343,9 +359,12 @@ pub fn build(
             ),
         ],
         volumes: Some(vec![
-            empty_dir(WORKING_DIR_VOLUME),
-            empty_dir(MARKERS_VOLUME),
-            empty_dir(STREAMS_VOLUME),
+            empty_dir(
+                WORKING_DIR_VOLUME,
+                resources.limit.ephemeral_storage.as_deref(),
+            ),
+            empty_dir(MARKERS_VOLUME, Some(MARKERS_SIZE_LIMIT)),
+            empty_dir(STREAMS_VOLUME, resources.limit.ephemeral_storage.as_deref()),
         ]),
         ..Default::default()
     };
@@ -393,10 +412,14 @@ fn mount(volume: &str, path: &str) -> VolumeMount {
     }
 }
 
-fn empty_dir(name: &str) -> Volume {
+/// An `emptyDir` on the node's disk, bounded by `size_limit` when one is set.
+fn empty_dir(name: &str, size_limit: Option<&str>) -> Volume {
     Volume {
         name: name.to_string(),
-        empty_dir: Some(EmptyDirVolumeSource::default()),
+        empty_dir: Some(EmptyDirVolumeSource {
+            medium: None,
+            size_limit: size_limit.map(|l| Quantity(l.to_string())),
+        }),
         ..Default::default()
     }
 }
@@ -412,10 +435,12 @@ fn helper(cfg: &PodConfig, name: &str, script: String, mounts: &[(&str, &str)]) 
             &ResourceAmounts {
                 cpu: Some(HELPER_REQUEST_CPU.into()),
                 memory: Some(HELPER_REQUEST_MEMORY.into()),
+                ephemeral_storage: None,
             },
             &ResourceAmounts {
                 cpu: Some(HELPER_LIMIT_CPU.into()),
                 memory: Some(HELPER_LIMIT_MEMORY.into()),
+                ephemeral_storage: None,
             },
         )),
         security_context: Some(container_security()),
@@ -431,6 +456,9 @@ fn requirements(request: &ResourceAmounts, limit: &ResourceAmounts) -> ResourceR
         }
         if let Some(mem) = &a.memory {
             m.insert("memory".to_string(), Quantity(mem.clone()));
+        }
+        if let Some(disk) = &a.ephemeral_storage {
+            m.insert("ephemeral-storage".to_string(), Quantity(disk.clone()));
         }
         (!m.is_empty()).then_some(m)
     };
@@ -497,14 +525,25 @@ pub fn effective_resources(
         &m.request.memory,
         &m.limit.memory,
     )?;
+    // Never the author's (the parser refuses the key): egret's default,
+    // capped by egret's maximum, exactly as cpu and memory.
+    let (req_disk, lim_disk) = one(
+        "ephemeral-storage",
+        d.request.ephemeral_storage.clone(),
+        d.limit.ephemeral_storage.clone(),
+        &m.request.ephemeral_storage,
+        &m.limit.ephemeral_storage,
+    )?;
     Ok(Resources {
         request: ResourceAmounts {
             cpu: req_cpu,
             memory: req_mem,
+            ephemeral_storage: req_disk,
         },
         limit: ResourceAmounts {
             cpu: lim_cpu,
             memory: lim_mem,
+            ephemeral_storage: lim_disk,
         },
     })
 }
@@ -601,7 +640,6 @@ mod tests {
             render: crate::runners::RenderContext::new(),
             timeout: None,
             principal: None,
-            claimed_at: chrono::Utc::now(),
             log: crate::logs::RunLog::discard(),
         }
     }
@@ -615,20 +653,24 @@ mod tests {
                 request: ResourceAmounts {
                     cpu: Some("100m".into()),
                     memory: Some("128Mi".into()),
+                    ephemeral_storage: Some("256Mi".into()),
                 },
                 limit: ResourceAmounts {
                     cpu: Some("1".into()),
                     memory: Some("512Mi".into()),
+                    ephemeral_storage: Some("10Gi".into()),
                 },
             },
             max_resources: Resources {
                 request: ResourceAmounts {
                     cpu: Some("1".into()),
                     memory: Some("1Gi".into()),
+                    ..Default::default()
                 },
                 limit: ResourceAmounts {
                     cpu: Some("2".into()),
                     memory: Some("2Gi".into()),
+                    ephemeral_storage: Some("10Gi".into()),
                 },
             },
             image_pull_secrets: vec!["regcred".into(), "other".into()],
@@ -790,6 +832,114 @@ mod tests {
         assert_eq!(q(&r.limits, "memory").as_deref(), Some("512Mi"));
     }
 
+    /// **Node disk is bounded** (final review I5): `main` gets egret's
+    /// `ephemeral-storage` request and limit, and every `emptyDir` has a
+    /// `sizeLimit` -- the working directory and the stderr volume at the
+    /// limit, the markers at 1 MiB -- so a task that writes without bound is
+    /// evicted (and FAILED) instead of filling the node. The helpers get none:
+    /// the pod's own limit is `main`'s, which the kubelet sums over every
+    /// container and `emptyDir`.
+    #[test]
+    fn ephemeral_storage_is_limited_and_every_empty_dir_is_sized() {
+        let p = built(&cmds(), &k8s());
+        let r = container(&p, MAIN).resources.as_ref().expect("resources");
+        assert_eq!(
+            q(&r.requests, "ephemeral-storage").as_deref(),
+            Some("256Mi")
+        );
+        assert_eq!(q(&r.limits, "ephemeral-storage").as_deref(), Some("10Gi"));
+        let sizes: BTreeMap<&str, Option<String>> = pod_spec(&p)
+            .volumes
+            .as_ref()
+            .expect("volumes")
+            .iter()
+            .map(|v| {
+                let e = v.empty_dir.as_ref().expect("every volume is an emptyDir");
+                assert_eq!(e.medium, None, "on the node's disk, not in memory");
+                (v.name.as_str(), e.size_limit.as_ref().map(|q| q.0.clone()))
+            })
+            .collect();
+        assert_eq!(
+            sizes,
+            BTreeMap::from([
+                (WORKING_DIR_VOLUME, Some("10Gi".to_string())),
+                (STREAMS_VOLUME, Some("10Gi".to_string())),
+                (MARKERS_VOLUME, Some("1Mi".to_string())),
+            ])
+        );
+        // The cap applies to egret's own default, as to cpu and memory.
+        let mut c = cfg();
+        c.max_resources.limit.ephemeral_storage = Some("2Gi".into());
+        c.max_resources.request.ephemeral_storage = Some("64Mi".into());
+        let p = build(&task(), &cmds(), &k8s(), &c).expect("builds");
+        let r = container(&p, MAIN).resources.as_ref().expect("resources");
+        assert_eq!(q(&r.limits, "ephemeral-storage").as_deref(), Some("2Gi"));
+        assert_eq!(q(&r.requests, "ephemeral-storage").as_deref(), Some("64Mi"));
+        let working = pod_spec(&p)
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == WORKING_DIR_VOLUME)
+            .and_then(|v| v.empty_dir.as_ref())
+            .and_then(|e| e.size_limit.clone())
+            .map(|q| q.0);
+        assert_eq!(
+            working.as_deref(),
+            Some("2Gi"),
+            "the sizeLimit is the CAPPED limit"
+        );
+        let r = container(&p, FILES_OUT)
+            .resources
+            .as_ref()
+            .expect("resources");
+        assert_eq!(
+            q(&r.limits, "ephemeral-storage"),
+            None,
+            "the helpers get none"
+        );
+        // With no limit configured anywhere, nothing is invented.
+        let mut c = cfg();
+        c.default_resources.limit.ephemeral_storage = None;
+        c.default_resources.request.ephemeral_storage = None;
+        c.max_resources.limit.ephemeral_storage = None;
+        let p = build(&task(), &cmds(), &k8s(), &c).expect("builds");
+        let r = container(&p, MAIN).resources.as_ref().expect("resources");
+        assert_eq!(q(&r.limits, "ephemeral-storage"), None);
+        let working = pod_spec(&p)
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == WORKING_DIR_VOLUME)
+            .and_then(|v| v.empty_dir.as_ref())
+            .and_then(|e| e.size_limit.clone());
+        assert_eq!(working, None);
+    }
+
+    /// The author cannot reach ephemeral storage: Kestra's `resources` has no
+    /// such key, so the parser refuses it at save.
+    #[test]
+    fn the_author_cannot_set_ephemeral_storage() {
+        let refused = crate::scripts::parse(
+            crate::scripts::SHELL_COMMANDS,
+            &serde_json::json!({
+                "commands": ["true"],
+                "taskRunner": {
+                    "type": crate::scripts::KUBERNETES_RUNNER,
+                    "resources": {"limit": {"ephemeral-storage": "1Ti"}},
+                },
+            }),
+        )
+        .expect_err("refused");
+        assert!(
+            refused
+                .iter()
+                .any(|r| r.message.contains("ephemeral-storage")),
+            "{refused:?}"
+        );
+    }
+
     #[test]
     fn resources_over_the_maximum_are_capped_and_those_under_it_kept() {
         let mut s = k8s();
@@ -797,10 +947,12 @@ mod tests {
             request: ResourceAmounts {
                 cpu: Some("4".into()),        // over max.request.cpu = 1
                 memory: Some("200Mi".into()), // under
+                ..Default::default()
             },
             limit: ResourceAmounts {
                 cpu: Some("1500m".into()),   // under max.limit.cpu = 2
                 memory: Some("64Gi".into()), // over max.limit.memory = 2Gi
+                ..Default::default()
             },
         });
         let p = built(&cmds(), &s);
@@ -826,10 +978,12 @@ mod tests {
             request: ResourceAmounts {
                 cpu: Some("900m".into()),
                 memory: None,
+                ..Default::default()
             },
             limit: ResourceAmounts {
                 cpu: Some("300m".into()),
                 memory: None,
+                ..Default::default()
             },
         });
         let p = built(&cmds(), &s);
@@ -846,6 +1000,7 @@ mod tests {
             limit: ResourceAmounts {
                 cpu: None,
                 memory: Some("lots".into()),
+                ..Default::default()
             },
         });
         let err = build(&task(), &cmds(), &s, &cfg()).expect_err("refused");
@@ -1139,6 +1294,7 @@ mod tests {
             request: ResourceAmounts {
                 cpu: s("1"),
                 memory: s("1Gi"),
+                ..Default::default()
             },
             limit: ResourceAmounts::default(),
         };
@@ -1156,12 +1312,14 @@ mod tests {
             limit: ResourceAmounts {
                 cpu: s("500m"),
                 memory: s("256Mi"),
+                ..Default::default()
             },
         };
         let author = Resources {
             request: ResourceAmounts {
                 cpu: s("2"),
                 memory: s("1Gi"),
+                ..Default::default()
             },
             limit: ResourceAmounts::default(),
         };

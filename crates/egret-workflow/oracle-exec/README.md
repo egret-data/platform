@@ -8955,7 +8955,10 @@ input and output files round-trip; a non-zero exit fails and keeps outputs;
 cancel deletes the pod; a second `run` for the same attempt re-attaches rather
 than re-creating; a line written just before the reclaim is not lost; the
 orphan sweep deletes pods of terminal runs only (and the Docker sweep,
-containers). `tests/container_docker_live.rs` covers the Docker runner,
+containers); and, from the final review, a Role without `pods/exec` `get`
+and an unpullable helper image each FAIL the task by name in bounded time,
+and a task writing past its ephemeral-storage limit is evicted and FAILED
+with the kubelet's reason. `tests/container_docker_live.rs` covers the Docker runner,
 re-attach included. These ran on the shared `egret` kind cluster (kindnet),
 in their own namespace.
 
@@ -9004,15 +9007,23 @@ minutes; its timing test is the instrument, unmutated.
    and writes one WARN saying so.
 6. **Deferred minors** carried in the tasks' reviews: the helper image is
    pinned by tag, not digest; a symlinked parent directory in `outputFiles`
-   is followed inside `files-out`; an unschedulable pod gives no reason; a
-   re-attached run whose feature was turned off is FAILED while its
-   container keeps running; the self-fence tests use real 60/200 ms timers.
+   is followed inside `files-out`; an unschedulable pod gives no reason;
+   the self-fence tests use real 60/200 ms timers. *(The re-attached run
+   whose feature was turned off, FAILED while its container ran on, is
+   fixed by the final review: the re-claim adopts the container and the run
+   finishes, spec §4.)*
 7. **The ratchet cannot judge any of this in either direction**, for the
    three reasons above.
 8. **Line counts after a re-attach are short** (spec §11, added in fix
    round 1): `stdOutLineCount`/`stdErrLineCount` count only what the last
    holder read (live item 6 above). The stored lines are complete.
-9. **A missing `pods/exec` `get` degrades silently** (spec §11). The chart
+9. *(Retired by the final review's I4, kept as the record:)* **a missing
+   `pods/exec` `get` degraded silently**. It now FAILS the task naming the
+   missing verb, and the first refusal is an ERROR line with the RBAC hint;
+   a helper image that cannot be pulled fails the task naming
+   `workflow.kubernetes.helper_image`. Both measured live by
+   `k8s_runner_live` (a Role without the verb; an unpullable helper). What
+   it said: the chart
    grants it now, but an RBAC regression, or a cluster that authorises
    WebSocket exec differently, brings back F1's behaviour without failing
    anything: a run with no input or output files waits about 15 s for the
@@ -9025,6 +9036,20 @@ minutes; its timing test is the instrument, unmutated.
    `pods/exec` `create` only, and every exec was a 403 on Kubernetes 1.33
    (live item 5). It grants `get` too now, and `k8s_runner_live` runs as
    that Role, so the class is covered by a test rather than by this line.
+11. **The outcome commits before the pod is deleted** (final review I3).
+   A commit that fails after the task finished leaves the pod, and the next
+   claim re-attaches and records the same outcome (`tests/scripts_gate.rs`,
+   a commit made to fail by a deferred trigger). Still at-least-once: a
+   finished pod deleted by someone else before the re-claim is re-created,
+   and the task runs again (spec §11).
+12. **Node disk is bounded on Kubernetes only** (final review I5):
+   `ephemeral-storage` on `main` and a `sizeLimit` on every `emptyDir`
+   (default 10 GiB); a task writing past it is evicted and FAILED with the
+   kubelet's message (measured live by `k8s_runner_live`). The Docker runner
+   has no portable disk limit and has none (spec §11).
+13. **The e2e above ran a hand-patched Role** (live item 5) against a
+   backend built at `a30f3683`; the committed Role and the final review's
+   fixes were exercised by `k8s_runner_live`, not by a second e2e install.
 
 **Decisions the user made (2026-09-28)**, recorded here because the tests
 enforce them and a reader could mistake them for accidents: W5 split into

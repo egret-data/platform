@@ -4,15 +4,21 @@
 //! run ─ build ─ get-or-create ─┬─ wait for files-in running ─ upload + verify + `ready`
 //!                              └─ wait for main started
 //!       follow main's log (timestamps; sinceTime on re-attach) ─ ingest_line ─ RunLog
-//!       main terminated → exit code ─ download outputFiles (exec + tar) ─ delete / `ended`
+//!       main terminated → exit code ─ download outputFiles (exec + tar)
+//! commit the outcome ─ release: delete / `ended`
 //! ```
 //!
 //! # What ends a pod, and what never does
 //!
-//! * **`run` returning** — `Ok` (whatever the exit code) or an author error —
+//! * **`release`, after the run's outcome COMMITTED** (final review I3) —
 //!   deletes the pod with grace 0 when `taskRunner.delete` (default `true`);
 //!   with `delete: false` it uploads the `ended` marker instead, so the sidecar
 //!   exits and the pod completes rather than holding its resources for ever.
+//!   **`run` returning deletes nothing**: if it did, a commit that failed
+//!   after the task finished would leave no pod, and the next claim would run
+//!   the task again. As it is, the next claim re-attaches to the finished pod
+//!   and collects the same outcome; a crash after the commit leaves a pod of a
+//!   terminal run, which the orphan sweep deletes.
 //! * **`cancel`** (a timeout, a kill) — delete with grace 0.
 //! * **Dropping the `run` future deletes NOTHING.** That is the carry from W5a
 //!   Task 3: a worker that loses its lease has its handler future dropped, and
@@ -82,9 +88,15 @@ const EXEC_TIMEOUT: Duration = Duration::from_secs(120);
 /// How many times an upload is attempted when the exec itself fails (Kestra's
 /// `UPLOAD_RETRY_MAX_ATTEMPTS` is 5; egret's pod is fresh and local).
 const UPLOAD_ATTEMPTS: u32 = 3;
+/// How long a container may sit in `ErrImagePull` before the pull is judged
+/// to have failed for good (final review I4). `ErrImagePull` is the first,
+/// retried, failure of a pull and normally turns into `ImagePullBackOff`
+/// (terminal below) within seconds; this bounds the case where it does not.
+const PULL_FAILURE_BOUND: Duration = Duration::from_secs(90);
 /// A waiting reason after which a container will not start without a change
 /// to its spec. `ErrImagePull` is left out: it is the first, retried, failure
-/// of a pull and becomes `ImagePullBackOff` when it persists.
+/// of a pull and becomes `ImagePullBackOff` when it persists
+/// ([`PULL_FAILURE_BOUND`] covers it otherwise).
 const START_FAILURES: &[&str] = &[
     "ImagePullBackOff",
     "ErrImageNeverPull",
@@ -106,6 +118,10 @@ pub struct KubernetesRunner {
     max_output_bytes: usize,
     max_vars_bytes: usize,
     poll: Duration,
+    /// Set once the first `pods/exec` 403 has been logged at ERROR (final
+    /// review I4): the operator gets one loud line with the RBAC hint, and
+    /// every task that meets the same refusal fails naming it.
+    exec_forbidden_logged: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for KubernetesRunner {
@@ -127,6 +143,7 @@ impl KubernetesRunner {
             max_output_bytes: MAX_OUTPUT_FILE_BYTES,
             max_vars_bytes: MAX_VARS_BYTES,
             poll: Duration::from_millis(500),
+            exec_forbidden_logged: Default::default(),
         }
     }
 
@@ -222,10 +239,27 @@ impl KubernetesRunner {
     ) -> Result<CommandsResult> {
         // ---- start: upload the inputs, wait for main ---------------------
         let mut uploaded = cmds.input_files.is_empty();
+        let mut pulling_since: Option<tokio::time::Instant> = None;
         loop {
             let p = self.get(name).await?;
             if let Some(e) = start_failure(&p) {
                 return Err(e);
+            }
+            match pull_error(&p) {
+                Some(cs) => {
+                    let since = *pulling_since.get_or_insert_with(tokio::time::Instant::now);
+                    if since.elapsed() >= PULL_FAILURE_BOUND {
+                        return Err(start_error(
+                            cs,
+                            "ErrImagePull",
+                            &format!(
+                                "the image could not be pulled for {PULL_FAILURE_BOUND:?}: {}",
+                                waiting_message(cs)
+                            ),
+                        ));
+                    }
+                }
+                None => pulling_since = None,
             }
             if matches!(
                 phase(status_of(&p, MAIN)),
@@ -290,12 +324,20 @@ impl KubernetesRunner {
         let stdout = async {
             let r = self.pump_stdout(name, since, &tx_out).await;
             drop(tx_out);
-            if r.is_ok() && split {
-                // Everything `main` wrote is in the file now: close the stream.
-                self.end_stderr(name, &sentinel).await;
+            let (mut evicted, mut ended) = (None, None);
+            if r.is_ok() {
+                // An evicted pod's helpers are gone too: no exec can reach
+                // them, so this is decided BEFORE any exec (final review I5).
+                evicted = self.eviction(name).await;
+                if evicted.is_none() && split {
+                    // Everything `main` wrote is in the file now: close the
+                    // stream.
+                    ended = self.end_stderr(name, &sentinel).await;
+                }
             }
-            let _ = done_tx.send(if r.is_ok() { Pump::Done } else { Pump::Failed });
-            r
+            let fine = r.is_ok() && evicted.is_none() && ended.is_none();
+            let _ = done_tx.send(if fine { Pump::Done } else { Pump::Failed });
+            (r, evicted, ended)
         };
         let stderr = async {
             let Some(tx_err) = tx_err else { return };
@@ -336,9 +378,16 @@ impl KubernetesRunner {
                 .await;
             }
         };
-        let (out, (), ()) = tokio::join!(stdout, stderr, consume);
+        let ((out, evicted, ended), (), ()) = tokio::join!(stdout, stderr, consume);
         let (exit, reason) = out?;
         result.exit_code = exit;
+        if let Some(why) = evicted {
+            result.failure = Some(why);
+            return Ok(result);
+        }
+        if let Some(e) = ended {
+            return Err(e);
+        }
 
         // ---- outputs --------------------------------------------------------
         if !cmds.output_files.is_empty() && result.failure.is_none() {
@@ -406,7 +455,12 @@ impl KubernetesRunner {
 
     /// Append this call's end sentinel to the stderr file, after `main` has
     /// terminated, so the stderr follower knows it has read everything.
-    async fn end_stderr(&self, name: &str, sentinel: &str) {
+    ///
+    /// `Some` is a failure no later claim can get past -- the exec was refused
+    /// (a `pods/exec` 403, final review I4) or the pod is gone -- and the task
+    /// fails with it. Anything else is a WARN, and the stderr follower's
+    /// drain bound ends the stream.
+    async fn end_stderr(&self, name: &str, sentinel: &str) -> Option<Error> {
         let cmd = vec![
             "sh".to_string(),
             "-c".to_string(),
@@ -415,11 +469,28 @@ impl KubernetesRunner {
             sentinel.to_string(),
         ];
         match self.exec(name, FILES_OUT, cmd, None, 4096).await {
-            Ok(o) if o.success => {}
+            Ok(o) if o.success => None,
             Ok(o) => {
-                tracing::warn!(pod = %name, "could not end main's stderr stream: {}", o.stderr)
+                tracing::warn!(pod = %name, "could not end main's stderr stream: {}", o.stderr);
+                None
             }
-            Err(e) => tracing::warn!(pod = %name, "could not end main's stderr stream: {e}"),
+            Err(e @ Error::InvalidInput(_)) => Some(e),
+            Err(e) => {
+                tracing::warn!(pod = %name, "could not end main's stderr stream: {e}");
+                None
+            }
+        }
+    }
+
+    /// Why the pod was evicted, if the kubelet evicted it -- the pod's own
+    /// message, e.g. *Pod ephemeral local storage usage exceeds the total
+    /// limit of containers 10Gi* or *Usage of EmptyDir volume "working-dir"
+    /// exceeds the limit* (final review I5). A read that fails is `None`: the
+    /// next step meets the same API and decides.
+    async fn eviction(&self, name: &str) -> Option<String> {
+        match self.pods().get_opt(name).await {
+            Ok(Some(p)) => eviction_of(&p),
+            _ => None,
         }
     }
 
@@ -753,6 +824,7 @@ impl KubernetesRunner {
         let mut proc = match self.pods().exec(name, cmd, &ap).await {
             Ok(p) => p,
             Err(kube::Error::Api(ae)) if ae.code == 404 => return Err(deleted(name)),
+            Err(e) if is_forbidden(&e) => return Err(self.exec_forbidden(container, e)),
             Err(e) => return Err(internal(&format!("exec in {container}"), e)),
         };
         let status = proc
@@ -791,6 +863,48 @@ impl KubernetesRunner {
             success,
         })
     }
+}
+
+impl KubernetesRunner {
+    /// A `pods/exec` 403: the task fails naming the missing permission, and
+    /// the first one in this process is logged at ERROR with the same hint
+    /// (final review I4). Classed as the task's failure (`InvalidInput`), not
+    /// egret's outage (`Internal`): no later claim can get past a Role that
+    /// refuses it, so re-attaching would only hold the pod for ever.
+    fn exec_forbidden(&self, container: &str, e: kube::Error) -> Error {
+        let msg = exec_forbidden_message(&self.cfg.namespace, container, &e);
+        if !self
+            .exec_forbidden_logged
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::error!(namespace = %self.cfg.namespace, "{msg}");
+        }
+        Error::InvalidInput(msg)
+    }
+}
+
+/// Whether the API server refused the request as FORBIDDEN -- a plain API
+/// error, or (WebSocket exec) the upgrade answered 403 instead of 101.
+fn is_forbidden(e: &kube::Error) -> bool {
+    match e {
+        kube::Error::Api(ae) => ae.code == 403,
+        kube::Error::UpgradeConnection(kube::client::UpgradeConnectionError::ProtocolSwitch(
+            status,
+        )) => status.as_u16() == 403,
+        _ => false,
+    }
+}
+
+/// The message a `pods/exec` 403 fails the task with: what was refused, and
+/// what the operator must grant.
+fn exec_forbidden_message(namespace: &str, container: &str, e: &dyn std::fmt::Display) -> String {
+    format!(
+        "egret may not exec into the task pod's {container} container: the task namespace \
+         {namespace:?} Role lacks `pods/exec` `get` (WebSocket exec on Kubernetes >= 1.30 is \
+         authorised as `get`) or `create` ({e}). The Role must grant `pods/exec` get and \
+         create, as the chart's rbac-tasks.yaml does; an operator must fix it, and retrying \
+         the task will not help"
+    )
 }
 
 /// How the stdout follower ended, for the stderr follower's bound.
@@ -1022,21 +1136,41 @@ impl TaskRunner for KubernetesRunner {
             tracing::info!(run = %task.run_id, pod = %name, "re-attaching to the task's existing pod");
         }
         let outcome = self.drive(task, commands, observer, &name, !created).await;
-
-        match &outcome {
-            Err(Error::Internal(e)) => tracing::warn!(
-                run = %task.run_id,
-                pod = %name,
-                "the task pod is kept for a later claim to re-attach to: {e}"
-            ),
-            _ if spec.delete => {
-                if let Err(e) = self.delete_pod(&name).await {
-                    tracing::warn!(run = %task.run_id, pod = %name, "{e}");
-                }
-            }
-            _ => self.signal_ended(&name).await,
-        }
+        kept_on_internal(task, &name, &outcome);
+        // Nothing is deleted or signalled here, whatever the outcome:
+        // `release`, after the outcome commits (final review I3).
         outcome
+    }
+
+    /// The attempt's pod, only if it already exists: followed to its end as
+    /// a re-attach. `None` when there is no pod, or it is being deleted.
+    async fn adopt(
+        &self,
+        task: &TaskInput,
+        commands: &TaskCommands,
+        _spec: &RunnerSpec,
+        observer: &dyn LineObserver,
+    ) -> Result<Option<CommandsResult>> {
+        let name = pod_name(task.run_id, attempt_of(task));
+        let existing = self
+            .pods()
+            .get_opt(&name)
+            .await
+            .map_err(|e| internal("reading the task pod", e))?;
+        match existing {
+            Some(p) if p.metadata.deletion_timestamp.is_none() => {
+                tracing::info!(
+                    run = %task.run_id,
+                    pod = %name,
+                    "re-attaching to the task's existing pod, which passed the gate when it \
+                     was created"
+                );
+                let outcome = self.drive(task, commands, observer, &name, true).await;
+                kept_on_internal(task, &name, &outcome);
+                outcome.map(Some)
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Delete the attempt's pod with grace 0 — Kestra's `killGracePeriod`
@@ -1044,6 +1178,31 @@ impl TaskRunner for KubernetesRunner {
     async fn cancel(&self, task: &TaskInput) -> Result<()> {
         self.delete_pod(&pod_name(task.run_id, attempt_of(task)))
             .await
+    }
+
+    /// After the commit: delete the pod (grace 0) when `spec.delete`, else
+    /// upload the `ended` marker so `files-out` exits and the kept pod
+    /// completes instead of holding its resources.
+    async fn release(&self, task: &TaskInput, spec: &RunnerSpec) -> Result<()> {
+        let name = pod_name(task.run_id, attempt_of(task));
+        if spec.delete {
+            self.delete_pod(&name).await
+        } else {
+            self.signal_ended(&name).await;
+            Ok(())
+        }
+    }
+}
+
+/// The WARN a kept pod gets: a worker failure leaves the pod for the next
+/// claim to re-attach to.
+fn kept_on_internal(task: &TaskInput, name: &str, outcome: &Result<CommandsResult>) {
+    if let Err(Error::Internal(e)) = outcome {
+        tracing::warn!(
+            run = %task.run_id,
+            pod = %name,
+            "the task pod is kept for a later claim to re-attach to: {e}"
+        );
     }
 }
 
@@ -1198,10 +1357,18 @@ fn phase(cs: Option<&ContainerStatus>) -> Phase {
 
 /// Why this pod will never run `main` to completion, if it will not.
 ///
-/// A start failure of `main` is the **author's** (the image is theirs);
-/// one of a helper is **egret's** (its image, its configuration), so that one
-/// is a worker failure and the pod is kept.
+/// **Every such failure fails the task** (final review I4), because no later
+/// claim can get past it: a start failure of `main` is the **author's** (the
+/// image is theirs); one of a helper is **egret's configuration** (its image,
+/// `workflow.kubernetes.helper_image`), and the message says an operator
+/// must fix it. It used to be a worker failure, which kept the pod and
+/// re-attached every `working_timeout` for ever -- with the chart's default
+/// `egret-task-helper:dev`, which is not pullable from a registry, that was
+/// every script task with files.
 fn start_failure(p: &Pod) -> Option<Error> {
+    // `start_failure` sees the pod after `main` may have finished: an
+    // eviction is decided by [`eviction_of`], not here.
+
     let s = p.status.as_ref()?;
     for cs in s
         .init_container_statuses
@@ -1216,24 +1383,16 @@ fn start_failure(p: &Pod) -> Option<Error> {
             continue;
         };
         if START_FAILURES.contains(&reason) {
-            let msg = format!(
-                "the {} container could not start: {reason}: {}",
-                cs.name,
-                w.message.as_deref().unwrap_or("")
-            );
-            return Some(if cs.name == MAIN {
-                Error::InvalidInput(msg)
-            } else {
-                internal("starting a helper container", msg)
-            });
+            return Some(start_error(cs, reason, &waiting_message(cs)));
         }
     }
     if let Phase::Terminated { exit, .. } = phase(status_of(p, FILES_IN)) {
         if exit != 0 {
-            return Some(internal(
-                "the files-in container",
-                format!("exited {exit} before the input files were ready"),
-            ));
+            return Some(Error::InvalidInput(format!(
+                "egret's files-in helper container exited {exit} before the input files were \
+                 ready; its image is egret's `workflow.kubernetes.helper_image`, which an \
+                 operator must fix (retrying the task will not help)"
+            )));
         }
     }
     if s.phase.as_deref() == Some("Failed")
@@ -1246,6 +1405,66 @@ fn start_failure(p: &Pod) -> Option<Error> {
         )));
     }
     None
+}
+
+/// The waiting container stuck in `ErrImagePull`, if one is.
+fn pull_error(p: &Pod) -> Option<&ContainerStatus> {
+    let s = p.status.as_ref()?;
+    s.init_container_statuses
+        .iter()
+        .flatten()
+        .chain(s.container_statuses.iter().flatten())
+        .find(|cs| {
+            cs.state
+                .as_ref()
+                .and_then(|st| st.waiting.as_ref())
+                .and_then(|w| w.reason.as_deref())
+                == Some("ErrImagePull")
+        })
+}
+
+fn waiting_message(cs: &ContainerStatus) -> String {
+    cs.state
+        .as_ref()
+        .and_then(|st| st.waiting.as_ref())
+        .and_then(|w| w.message.clone())
+        .unwrap_or_default()
+}
+
+/// A container that will not start: the author's on `main`, egret's
+/// configuration on a helper. Both fail the task, by name.
+fn start_error(cs: &ContainerStatus, reason: &str, detail: &str) -> Error {
+    if cs.name == MAIN {
+        Error::InvalidInput(format!(
+            "the main container could not start: {reason}: {detail}"
+        ))
+    } else {
+        Error::InvalidInput(format!(
+            "egret's {} helper container could not start: {reason}: {detail}. Its image \
+             ({:?}) is egret's `workflow.kubernetes.helper_image`: an operator must make it \
+             pullable from the task namespace (build deploy/docker/task-helper.Dockerfile and \
+             push it, or point the setting at a published copy); retrying the task will not \
+             help",
+            cs.name, cs.image
+        ))
+    }
+}
+
+/// The kubelet's eviction of the pod, as the task's failure message (final
+/// review I5): the pod's phase is `Failed` with reason `Evicted`, and its
+/// message says which bound was crossed -- the pod's ephemeral-storage limit
+/// or an `emptyDir`'s `sizeLimit`.
+fn eviction_of(p: &Pod) -> Option<String> {
+    let s = p.status.as_ref()?;
+    if s.reason.as_deref() != Some("Evicted") {
+        return None;
+    }
+    Some(format!(
+        "the task's pod was evicted by the kubelet: {} (the working directory and the \
+         container's own disk are bounded by egret's `workflow.kubernetes` ephemeral-storage \
+         limit)",
+        s.message.as_deref().unwrap_or("no reason given")
+    ))
 }
 
 #[cfg(test)]
@@ -1355,6 +1574,10 @@ mod tests {
         }
     }
 
+    /// **A container that will not start FAILS the task, whoever's image it
+    /// is** (final review I4): `main`'s is the author's; a helper's names
+    /// egret's `helper_image` setting and says an operator must fix it.
+    /// Neither is `Internal`, which kept the pod and re-attached for ever.
     #[test]
     fn an_image_that_will_not_pull_is_the_authors_on_main_and_egrets_on_a_helper() {
         let waiting = |reason: &str| ContainerState {
@@ -1364,14 +1587,43 @@ mod tests {
             }),
             ..Default::default()
         };
+        match start_failure(&pod_with(MAIN, waiting("ImagePullBackOff"))) {
+            Some(Error::InvalidInput(m)) => {
+                assert!(m.contains("main container could not start"), "{m}");
+                assert!(!m.contains("helper_image"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+        for helper in [FILES_OUT, FILES_IN] {
+            for reason in ["ImagePullBackOff", "ErrImageNeverPull", "InvalidImageName"] {
+                match start_failure(&pod_with(helper, waiting(reason))) {
+                    Some(Error::InvalidInput(m)) => {
+                        assert!(m.contains(helper) && m.contains(reason), "{m}");
+                        assert!(m.contains("workflow.kubernetes.helper_image"), "{m}");
+                        assert!(m.contains("nope"), "the kubelet's own words: {m}");
+                    }
+                    other => panic!("{helper} {reason}: {other:?}"),
+                }
+            }
+        }
+        // `files-in` exiting non-zero is egret's too, and just as final.
+        let exited = ContainerState {
+            terminated: Some(ContainerStateTerminated {
+                exit_code: 2,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         assert!(matches!(
-            start_failure(&pod_with(MAIN, waiting("ImagePullBackOff"))),
-            Some(Error::InvalidInput(_))
+            start_failure(&pod_with(FILES_IN, exited)),
+            Some(Error::InvalidInput(m)) if m.contains("files-in") && m.contains("exited 2")
         ));
-        assert!(matches!(
-            start_failure(&pod_with(FILES_OUT, waiting("ImagePullBackOff"))),
-            Some(Error::Internal(_))
-        ));
+        assert_eq!(
+            pull_error(&pod_with(FILES_OUT, waiting("ErrImagePull"))).map(|c| c.name.as_str()),
+            Some(FILES_OUT),
+            "ErrImagePull is watched against PULL_FAILURE_BOUND"
+        );
+        assert!(pull_error(&pod_with(FILES_OUT, waiting("ContainerCreating"))).is_none());
         assert!(
             start_failure(&pod_with(MAIN, waiting("ErrImagePull"))).is_none(),
             "the first pull failure is retried by the kubelet"
@@ -1392,5 +1644,70 @@ mod tests {
                 reason: Some("Error".into())
             }
         );
+    }
+
+    /// **A `pods/exec` 403 is recognised in both of the shapes kube returns
+    /// it** -- a plain API error, and (WebSocket exec, measured in W5a Task 6:
+    /// `failed to switch protocol: 403 Forbidden`) an upgrade answered 403 --
+    /// and nothing else is: a 404, a 500 or another upgrade status stays the
+    /// runner's to classify. The message names the missing verbs.
+    #[test]
+    fn an_exec_403_is_forbidden_in_both_shapes_and_names_the_role() {
+        use kube::client::UpgradeConnectionError::ProtocolSwitch;
+        let api = |code: u16| {
+            kube::Error::Api(kube::core::ErrorResponse {
+                status: "Failure".into(),
+                message: "m".into(),
+                reason: "r".into(),
+                code,
+            })
+        };
+        let upgrade = |code: u16| {
+            kube::Error::UpgradeConnection(ProtocolSwitch(
+                axum::http::StatusCode::from_u16(code).expect("a status"),
+            ))
+        };
+        assert!(is_forbidden(&api(403)));
+        assert!(is_forbidden(&upgrade(403)));
+        for other in [api(404), api(500), upgrade(400), upgrade(500)] {
+            assert!(!is_forbidden(&other), "{other}");
+        }
+        let m = exec_forbidden_message("egret-tasks", FILES_OUT, &upgrade(403));
+        for needle in [
+            "`pods/exec` `get`",
+            "`create`",
+            "\"egret-tasks\"",
+            "files-out",
+            "403",
+        ] {
+            assert!(m.contains(needle), "{needle}: {m}");
+        }
+    }
+
+    /// **An evicted pod is the task's failure, carrying the kubelet's reason**
+    /// (final review I5); a pod that merely failed, or succeeded, is not an
+    /// eviction.
+    #[test]
+    fn an_eviction_is_named_with_the_kubelets_message() {
+        let pod = |reason: Option<&str>, message: Option<&str>| Pod {
+            status: Some(PodStatus {
+                phase: Some("Failed".into()),
+                reason: reason.map(Into::into),
+                message: message.map(Into::into),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let why = eviction_of(&pod(
+            Some("Evicted"),
+            Some("Usage of EmptyDir volume \"working-dir\" exceeds the limit \"10Gi\"."),
+        ))
+        .expect("an eviction");
+        assert!(
+            why.contains("evicted") && why.contains("working-dir"),
+            "{why}"
+        );
+        assert!(eviction_of(&pod(None, None)).is_none());
+        assert!(eviction_of(&pod(Some("DeadlineExceeded"), Some("x"))).is_none());
     }
 }

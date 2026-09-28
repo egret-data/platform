@@ -689,12 +689,15 @@ pub struct WorkflowKubernetesConfig {
     #[serde(default = "default_task_namespace")]
     pub namespace: String,
     /// Requests and limits a task gets where its `taskRunner.resources` says
-    /// nothing. Default: request `100m`/`128Mi`, limit `1`/`512Mi`.
+    /// nothing. Default: request `100m`/`128Mi`/ephemeral-storage `256Mi`,
+    /// limit `1`/`512Mi`/ephemeral-storage `10Gi`.
     #[serde(default = "default_task_resources")]
     pub default_resources: TaskResources,
     /// The most a task may ask for; an author's request or limit above it is
     /// capped to it, and an unset side here means no cap on that side.
-    /// Default: limit `2`/`2Gi`, no request cap.
+    /// Default: limit `2`/`2Gi`/ephemeral-storage `10Gi`, no request cap. A
+    /// limit left unset everywhere becomes this cap, so with the defaults no
+    /// task pod is ever without an ephemeral-storage limit.
     #[serde(default = "default_task_max_resources")]
     pub max_resources: TaskResources,
     /// Names of existing `kubernetes.io/dockerconfigjson` Secrets in the task
@@ -746,6 +749,18 @@ pub struct TaskResourceAmounts {
     pub cpu: Option<String>,
     #[serde(default)]
     pub memory: Option<String>,
+    /// Kubernetes `ephemeral-storage`: the node disk a task pod may use --
+    /// its working directory, its stderr file and `main`'s own writable layer
+    /// and logs. A task has no say in it (Kestra's `resources` has no such
+    /// key). The limit is also the working directory's and the stderr
+    /// volume's `emptyDir.sizeLimit`, so a task that writes past it is evicted
+    /// by the kubelet and FAILED with the kubelet's reason, instead of filling
+    /// the node until `DiskPressure` evicts its neighbours. Spelled
+    /// `ephemeral_storage` in TOML and env
+    /// (`EGRET_WORKFLOW__KUBERNETES__MAX_RESOURCES__LIMIT__EPHEMERAL_STORAGE`),
+    /// like every other key here.
+    #[serde(default)]
+    pub ephemeral_storage: Option<String>,
 }
 
 /// `egret-tasks` -- see [`WorkflowKubernetesConfig::namespace`].
@@ -759,10 +774,12 @@ fn default_task_resources() -> TaskResources {
         request: TaskResourceAmounts {
             cpu: Some("100m".to_string()),
             memory: Some("128Mi".to_string()),
+            ephemeral_storage: Some("256Mi".to_string()),
         },
         limit: TaskResourceAmounts {
             cpu: Some("1".to_string()),
             memory: Some("512Mi".to_string()),
+            ephemeral_storage: Some("10Gi".to_string()),
         },
     }
 }
@@ -774,6 +791,7 @@ fn default_task_max_resources() -> TaskResources {
         limit: TaskResourceAmounts {
             cpu: Some("2".to_string()),
             memory: Some("2Gi".to_string()),
+            ephemeral_storage: Some("10Gi".to_string()),
         },
     }
 }
@@ -1300,6 +1318,19 @@ values = { allowed-images = [] }
             assert_eq!(k.default_resources.limit.memory.as_deref(), Some("512Mi"));
             assert_eq!(k.max_resources.limit.cpu.as_deref(), Some("2"));
             assert_eq!(k.max_resources.request, TaskResourceAmounts::default());
+            // Final review I5: the node's disk is bounded by default.
+            assert_eq!(
+                k.default_resources.limit.ephemeral_storage.as_deref(),
+                Some("10Gi")
+            );
+            assert_eq!(
+                k.default_resources.request.ephemeral_storage.as_deref(),
+                Some("256Mi")
+            );
+            assert_eq!(
+                k.max_resources.limit.ephemeral_storage.as_deref(),
+                Some("10Gi")
+            );
             // The serde fallback for a `[workflow]` section that predates the
             // keys agrees with the defaults layer.
             assert_eq!(default_workflow().container_runner, ContainerRunner::None);
@@ -1346,6 +1377,10 @@ values = { allowed-images = [] }
                 "EGRET_WORKFLOW__KUBERNETES__DEFAULT_RESOURCES__REQUEST__CPU",
                 "250m",
             );
+            jail.set_env(
+                "EGRET_WORKFLOW__KUBERNETES__MAX_RESOURCES__LIMIT__EPHEMERAL_STORAGE",
+                "4Gi",
+            );
             let cfg: Config = Config::figment().extract()?;
             let k = &cfg.workflow.kubernetes;
             assert_eq!(k.namespace, "tasks-x");
@@ -1354,6 +1389,10 @@ values = { allowed-images = [] }
             assert_eq!(k.image_pull_secrets, vec!["regcred".to_string()]);
             assert_eq!(k.max_resources.limit.memory.as_deref(), Some("1Gi"));
             assert_eq!(k.default_resources.request.cpu.as_deref(), Some("250m"));
+            assert_eq!(
+                k.max_resources.limit.ephemeral_storage.as_deref(),
+                Some("4Gi")
+            );
             Ok(())
         });
     }

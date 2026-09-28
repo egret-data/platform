@@ -122,6 +122,10 @@ workflow:
     imagePullSecrets: []
     # Unset keys keep egret's defaults (request 100m/128Mi, limit 1/512Mi;
     # max limit 2/2Gi). e.g. defaultResources: { limit: { memory: 1Gi } }
+    # Node disk: `ephemeral_storage` (default request 256Mi, limit 10Gi, max
+    # limit 10Gi). The limit is also the task's working-directory emptyDir
+    # sizeLimit; a task that writes past it is evicted and FAILED with the
+    # kubelet's reason. e.g. maxResources: { limit: { ephemeral_storage: 20Gi } }
     defaultResources: {}
     maxResources: {}
     networkPolicy:

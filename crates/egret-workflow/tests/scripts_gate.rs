@@ -696,6 +696,62 @@ fn a_glob_cannot_reach_another_registry_host() {
     assert!(!gate::glob_match("python:3*", "python:3000/x/img:latest"));
 }
 
+/// **A flag-shaped or malformed image is refused by the gate, even where a
+/// star would match it** (final review I1). On the Docker runner the image is
+/// an argv slot of `docker create`, so `--privileged` was a FLAG, and it
+/// matched `*` as `--privileged:latest`. The control: a well-formed image
+/// passes the same allowlist.
+#[test]
+fn a_flag_shaped_or_malformed_image_is_refused_even_by_a_star() {
+    let pc = configs(&[
+        (scripts::DOCKER_RUNNER, &["*", "*:*", "*/*", "*/*/*"]),
+        (scripts::KUBERNETES_RUNNER, &["*", "*:*", "*/*", "*/*/*"]),
+    ]);
+    for runner in [RunnerKind::Docker, RunnerKind::Kubernetes] {
+        assert_eq!(
+            check(true, "alpine:3.20", runner, &pc),
+            Ok(()),
+            "the control"
+        );
+        for bad in [
+            "--privileged",
+            "-v",
+            "--privileged:latest",
+            " alpine",
+            "alpine 3",
+            "alpine\n-v",
+            "alpine\t",
+            "alp\u{7}ine",
+            ".alpine",
+            "/alpine",
+            "alpine;id",
+            "",
+        ] {
+            let err = check(true, bad, runner, &pc).unwrap_err();
+            assert!(
+                matches!(err, gate::GateRefusal::MalformedImage { .. }),
+                "{bad:?} on {runner:?}: {err:?}"
+            );
+            assert_eq!(err.code(), "script_image_malformed");
+            assert!(
+                err.to_string()
+                    .contains("not a well-formed image reference"),
+                "{err}"
+            );
+        }
+    }
+    // The references the allowlist's own tests use stay well-formed.
+    for good in [
+        "python:3.13-slim",
+        "registry.local:5000/team/img:1.2",
+        "python@sha256:0123abcd",
+        "[::1]:5000/img:1",
+        "ubuntu",
+    ] {
+        assert_eq!(gate::image_ref_problem(good), None, "{good}");
+    }
+}
+
 /// An unrendered image skips only the image match: the feature and the
 /// allowlist's existence are still refused.
 #[test]
@@ -1068,6 +1124,23 @@ impl egret_workflow::worker::commands::TaskRunner for SpyRunner {
     async fn cancel(&self, _task: &egret_workflow::worker::TaskInput) -> egret_core::Result<()> {
         Ok(())
     }
+    /// Nothing ever exists to adopt: this runner creates nothing.
+    async fn adopt(
+        &self,
+        _task: &egret_workflow::worker::TaskInput,
+        _commands: &egret_workflow::worker::commands::TaskCommands,
+        _spec: &scripts::RunnerSpec,
+        _observer: &dyn egret_workflow::worker::commands::LineObserver,
+    ) -> egret_core::Result<Option<egret_workflow::worker::commands::CommandsResult>> {
+        Ok(None)
+    }
+    async fn release(
+        &self,
+        _task: &egret_workflow::worker::TaskInput,
+        _spec: &scripts::RunnerSpec,
+    ) -> egret_core::Result<()> {
+        Ok(())
+    }
 }
 
 /// The production registry's shape over a spy runner: the core tasks plus the
@@ -1231,4 +1304,382 @@ fn too_many_or_too_long_output_patterns_are_refused_at_save() {
             .any(|r| r.path == "outputFiles" && r.message.contains("over the 255")),
         "{r:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Final review fixes: I1 at publish, I3 (release after commit), and the
+// feature-off re-attach (spec §4)
+// ---------------------------------------------------------------------------
+
+/// **Publish refuses a flag-shaped image under an allow-everything list**
+/// (final review I1): the one gate is what publish calls, so the refusal is a
+/// named 400 before a flow can ever reach a runner. The control publishes a
+/// well-formed image under the same list.
+#[tokio::test]
+async fn publish_refuses_a_flag_shaped_image_even_under_a_star() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    common::enable_feature(&db, ws, "workflow_containers").await;
+    let app = common::app_with_scripts(
+        &db,
+        settings(&[(scripts::DOCKER_RUNNER, &["*", "*:*", "*/*"])]),
+    )
+    .await;
+    let (s, body) = publish(
+        &app,
+        ws,
+        user,
+        &flow(
+            "w5a.flag",
+            &format!("{SHELL}    containerImage: \"--privileged\"\n"),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("not a well-formed image reference"), "{body}");
+    let (s, body) = publish(
+        &app,
+        ws,
+        user,
+        &flow(
+            "w5a.flag.ok",
+            &format!("{SHELL}    containerImage: alpine:3\n"),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+}
+
+/// A daemon in miniature: work is keyed by the runner's own name for the
+/// (run, attempt), `run` re-attaches to work that exists and creates it
+/// otherwise, `adopt` only re-attaches, and `release` removes it. The counts
+/// are the instrument: a second `create` for one attempt is a second
+/// execution of the task.
+#[derive(Debug, Default)]
+struct FakeDaemon {
+    work: std::sync::Mutex<
+        std::collections::BTreeMap<String, egret_workflow::worker::commands::CommandsResult>,
+    >,
+    creates: std::sync::Mutex<usize>,
+    reattaches: std::sync::Mutex<usize>,
+    released: std::sync::Mutex<Vec<String>>,
+}
+
+impl FakeDaemon {
+    fn creates(&self) -> usize {
+        *self.creates.lock().unwrap()
+    }
+    fn reattaches(&self) -> usize {
+        *self.reattaches.lock().unwrap()
+    }
+    fn holds(&self, name: &str) -> bool {
+        self.work.lock().unwrap().contains_key(name)
+    }
+    fn existing(&self, name: &str) -> Option<egret_workflow::worker::commands::CommandsResult> {
+        let found = self.work.lock().unwrap().get(name).cloned();
+        if found.is_some() {
+            *self.reattaches.lock().unwrap() += 1;
+        }
+        found
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_workflow::worker::commands::TaskRunner for FakeDaemon {
+    async fn run(
+        &self,
+        task: &egret_workflow::worker::TaskInput,
+        _commands: &egret_workflow::worker::commands::TaskCommands,
+        _spec: &scripts::RunnerSpec,
+        _observer: &dyn egret_workflow::worker::commands::LineObserver,
+    ) -> egret_core::Result<egret_workflow::worker::commands::CommandsResult> {
+        let name = egret_workflow::worker::commands::container_name(task);
+        if let Some(done) = self.existing(&name) {
+            return Ok(done);
+        }
+        let n = {
+            let mut c = self.creates.lock().unwrap();
+            *c += 1;
+            *c
+        };
+        // The "execution" number is part of the result, so a second create
+        // would also be visible in the committed outputs.
+        let mut result = egret_workflow::worker::commands::CommandsResult::default();
+        result.vars.insert("execution".into(), json!(n));
+        self.work.lock().unwrap().insert(name, result.clone());
+        Ok(result)
+    }
+    async fn adopt(
+        &self,
+        task: &egret_workflow::worker::TaskInput,
+        _commands: &egret_workflow::worker::commands::TaskCommands,
+        _spec: &scripts::RunnerSpec,
+        _observer: &dyn egret_workflow::worker::commands::LineObserver,
+    ) -> egret_core::Result<Option<egret_workflow::worker::commands::CommandsResult>> {
+        Ok(self.existing(&egret_workflow::worker::commands::container_name(task)))
+    }
+    async fn cancel(&self, task: &egret_workflow::worker::TaskInput) -> egret_core::Result<()> {
+        self.work
+            .lock()
+            .unwrap()
+            .remove(&egret_workflow::worker::commands::container_name(task));
+        Ok(())
+    }
+    async fn release(
+        &self,
+        task: &egret_workflow::worker::TaskInput,
+        spec: &scripts::RunnerSpec,
+    ) -> egret_core::Result<()> {
+        let name = egret_workflow::worker::commands::container_name(task);
+        if spec.delete {
+            self.work.lock().unwrap().remove(&name);
+        }
+        self.released.lock().unwrap().push(name);
+        Ok(())
+    }
+}
+
+fn daemon_registry(
+    pool: &sqlx::PgPool,
+    daemon: std::sync::Arc<FakeDaemon>,
+) -> egret_workflow::worker::Handlers {
+    use egret_workflow::worker::handlers::script::{register, PgFeatureState, ScriptRuntime};
+    let mut reg = egret_workflow::worker::Handlers::with_core_tasks();
+    register(
+        &mut reg,
+        std::sync::Arc::new(ScriptRuntime {
+            runner_kind: RunnerKind::Docker,
+            runner: daemon,
+            plugin_configurations: configs(&[(scripts::DOCKER_RUNNER, &["ubuntu:*"])]),
+            features: std::sync::Arc::new(PgFeatureState::new(pool.clone())),
+        }),
+    );
+    reg
+}
+
+/// Make the NEXT commit that records an outcome for `execution`'s run `t`
+/// fail AT COMMIT -- a deferred constraint trigger, so the handler has run,
+/// `apply_outcome` has written everything, and `COMMIT` itself is what
+/// errors (a Postgres blip or failover at the worst moment). Returns the
+/// statement that disarms it.
+async fn fail_the_commit_of(pool: &sqlx::PgPool, execution: uuid::Uuid) -> Vec<String> {
+    let tag = uuid::Uuid::new_v4().simple().to_string();
+    let func = format!("workflow.w5a_fail_commit_{tag}");
+    let trig = format!("w5a_fail_commit_{tag}");
+    for ddl in [
+        format!(
+            "CREATE FUNCTION {func}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+               BEGIN RAISE EXCEPTION 'w5a test: the commit fails'; END $$"
+        ),
+        format!(
+            "CREATE CONSTRAINT TRIGGER {trig} AFTER UPDATE ON workflow.task_runs \
+               DEFERRABLE INITIALLY DEFERRED FOR EACH ROW \
+               WHEN (NEW.execution_id = '{execution}' AND NEW.task_id = 't' \
+                     AND NEW.outputs IS NOT NULL) \
+               EXECUTE FUNCTION {func}()"
+        ),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(ddl))
+            .execute(pool)
+            .await
+            .expect("arm the commit failure");
+    }
+    vec![
+        format!("DROP TRIGGER {trig} ON workflow.task_runs"),
+        format!("DROP FUNCTION {func}()"),
+    ]
+}
+
+async fn disarm(pool: &sqlx::PgPool, statements: Vec<String>) {
+    for ddl in statements {
+        sqlx::query(sqlx::AssertSqlSafe(ddl))
+            .execute(pool)
+            .await
+            .expect("disarm the commit failure");
+    }
+}
+
+async fn run_state(pool: &sqlx::PgPool, execution: uuid::Uuid) -> (String, Option<Value>) {
+    sqlx::query_as(
+        "SELECT state, outputs FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 't'",
+    )
+    .bind(execution)
+    .fetch_one(pool)
+    .await
+    .expect("the run")
+}
+
+/// Hand the run back to the claim queue exactly as the reaper does for a
+/// worker that died: the lease is expired, then `reap` clears it and leaves
+/// the attempt open.
+async fn expire_the_lease(pool: &sqlx::PgPool, execution: uuid::Uuid) {
+    sqlx::query(
+        "UPDATE workflow.task_runs SET claimed_at = now() - interval '2 hours' \
+         WHERE execution_id = $1 AND claimed_at IS NOT NULL",
+    )
+    .bind(execution)
+    .execute(pool)
+    .await
+    .expect("backdate the lease");
+    let n = egret_workflow::worker::reap(pool, std::time::Duration::from_secs(3600))
+        .await
+        .expect("reap");
+    assert_eq!(n, 1, "the one lease is reclaimed");
+}
+
+/// **A commit that fails after the task finished never runs the task a
+/// second time** (final review I3). The container is released only after the
+/// outcome commits, so it is still there when the commit fails; the next
+/// claim re-attaches to it and records the SAME outcome. Deleting before the
+/// commit (the code before the fix) leaves nothing to re-attach to, and the
+/// second claim creates -- runs -- the task again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_failed_commit_re_attaches_on_the_next_claim_and_never_runs_the_task_twice(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    common::enable_feature(&db, ws, "workflow_containers").await;
+    let daemon = std::sync::Arc::new(FakeDaemon::default());
+    let reg = daemon_registry(&pool, daemon.clone());
+    let ex = egret_workflow::worker::start_execution(
+        &pool,
+        ws,
+        None,
+        &flow("w5a.commit", SHELL),
+        json!({}),
+    )
+    .await
+    .expect("start the execution");
+    let armed = fail_the_commit_of(&pool, ex).await;
+
+    // 1. The task runs; its commit fails.
+    let first = egret_workflow::worker::tick_with(
+        &pool,
+        8,
+        &reg,
+        egret_workflow::worker::WorkerTiming::default(),
+    )
+    .await;
+    assert!(first.is_err(), "the commit failed: {first:?}");
+    assert_eq!(daemon.creates(), 1, "the task ran once");
+    let (state, _) = run_state(&pool, ex).await;
+    assert_eq!(state, "RUNNING", "nothing was recorded");
+    let names: Vec<String> = daemon.work.lock().unwrap().keys().cloned().collect();
+    assert_eq!(names.len(), 1, "{names:?}");
+    let name = names[0].clone();
+    assert!(
+        daemon.holds(&name),
+        "the finished container outlives the failed commit: nothing is released before the \
+         outcome is recorded ({name}; released {:?})",
+        daemon.released.lock().unwrap()
+    );
+
+    // 2. The lease expires; the next claim re-attaches.
+    disarm(&pool, armed).await;
+    expire_the_lease(&pool, ex).await;
+    egret_workflow::worker::tick_with(
+        &pool,
+        8,
+        &reg,
+        egret_workflow::worker::WorkerTiming::default(),
+    )
+    .await
+    .expect("the second claim commits");
+
+    let (state, outputs) = run_state(&pool, ex).await;
+    assert_eq!(state, "SUCCESS");
+    assert_eq!(
+        daemon.creates(),
+        1,
+        "ONE execution of the task, ever: the second claim re-attached"
+    );
+    assert_eq!(daemon.reattaches(), 1);
+    assert_eq!(
+        outputs.expect("outputs")["vars"],
+        json!({"execution": 1}),
+        "the recorded outcome is the first (only) execution's"
+    );
+    assert!(
+        !daemon.holds(&name),
+        "and once the outcome committed, the container was released"
+    );
+}
+
+/// **A run already in a container finishes when the feature is turned off**
+/// (spec §4; the final review's must-fix minor). The first claim ran the task
+/// and lost its commit; the workspace then turned `workflow_containers` off.
+/// The re-claim's gate refuses, but the container exists for this
+/// (run, attempt) -- it passed the gate when it was created -- so the run
+/// adopts it and ends SUCCESS with its outputs, and nothing new is created.
+/// The control is the first test in this block: with no container, the same
+/// refusal FAILS the run and creates nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_already_in_a_container_finishes_after_the_feature_is_turned_off(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    common::enable_feature(&db, ws, "workflow_containers").await;
+    let daemon = std::sync::Arc::new(FakeDaemon::default());
+    let reg = daemon_registry(&pool, daemon.clone());
+    let ex = egret_workflow::worker::start_execution(
+        &pool,
+        ws,
+        None,
+        &flow("w5a.off.adopt", SHELL),
+        json!({}),
+    )
+    .await
+    .expect("start the execution");
+    let armed = fail_the_commit_of(&pool, ex).await;
+    let first = egret_workflow::worker::tick_with(
+        &pool,
+        8,
+        &reg,
+        egret_workflow::worker::WorkerTiming::default(),
+    )
+    .await;
+    assert!(first.is_err(), "{first:?}");
+    assert_eq!(daemon.creates(), 1);
+    disarm(&pool, armed).await;
+
+    // The workspace turns the feature off while the container exists.
+    sqlx::query(
+        "INSERT INTO workspace_features (workspace_id, feature, enabled) VALUES ($1, $2, false) \
+         ON CONFLICT (workspace_id, feature) DO UPDATE SET enabled = false",
+    )
+    .bind(ws)
+    .bind(scripts::FEATURE_KEY)
+    .execute(&pool)
+    .await
+    .expect("turn the feature off");
+
+    expire_the_lease(&pool, ex).await;
+    egret_workflow::worker::tick_with(
+        &pool,
+        8,
+        &reg,
+        egret_workflow::worker::WorkerTiming::default(),
+    )
+    .await
+    .expect("the re-claim commits");
+    let (state, outputs) = run_state(&pool, ex).await;
+    assert_eq!(
+        state, "SUCCESS",
+        "the run in a container finished: {outputs:?}"
+    );
+    assert_eq!(outputs.expect("outputs")["vars"], json!({"execution": 1}));
+    assert_eq!(daemon.creates(), 1, "nothing new was created past the gate");
+    assert_eq!(daemon.reattaches(), 1);
+
+    // And a NEW run of the same flow is refused, creating nothing.
+    let (state, message) =
+        run_once(&pool, &reg, ws, &flow("w5a.off.adopt", SHELL), json!({})).await;
+    assert_eq!(state, "FAILED");
+    assert!(message
+        .unwrap_or_default()
+        .contains("'workflow_containers' feature is disabled"));
+    assert_eq!(daemon.creates(), 1, "the gate still stands before new work");
 }

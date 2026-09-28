@@ -72,11 +72,12 @@ Các thuộc tính được cài đặt: `containerImage`, `commands` (Commands)
   - một reference dạng digest (`name@sha256:…`) được so khớp đúng như viết, không thêm tag (đã đo: artifact chạy `python@sha256:…` đúng như viết);
   - ngoài ra, tag là phần sau một dấu `:` nằm sau dấu `/` cuối cùng, nên port trong `host:5000/img` không phải tag; reference không có tag được thêm `:latest` (`host:5000/img` → `host:5000/img:latest`);
   - các image mặc định được so khớp theo cùng cách: `ubuntu` → `ubuntu:latest`, `python:3.13-slim` giữ nguyên.
+  - *Chỉ nhận tham chiếu đúng dạng (final review I1):* trước khi so khớp, gate từ chối một image không phải là tham chiếu đúng dạng: rỗng, bắt đầu bằng bất cứ gì ngoài chữ cái hoặc chữ số ASCII (hoặc `[` cho host IPv6), hoặc chứa khoảng trắng, ký tự điều khiển hay ký tự mà không tham chiếu nào có. Một image bắt đầu bằng `-` từng là một **flag** của `docker create` trên runner Docker (`--privileged` khớp `*` dưới dạng `--privileged:latest`, và phần đuôi interpreter của tác giả cung cấp `-v /:/host …`); runner Docker cũng đặt `--` trước image. Trên Kubernetes, image là một trường của pod, nơi một chuỗi như vậy chỉ là một tên không pull được.
   - *Ngữ nghĩa glob (thêm ở vòng sửa 1 của Task 2):* `*` khớp một dãy ký tự bất kỳ **trừ `/`**, `?` khớp một ký tự khác `/`, và không có `**`. Vì vậy một dấu sao không thể vươn tới một registry host khác: `python:3*` không khớp `python:3000/x/img` (host `python`, cổng 3000), và `registry.company.com/*` không khớp `registry.company.com.evil.io/x`. Muốn cho phép đường dẫn sâu hơn dưới một registry thì viết một `*` cho mỗi cấp (`registry.company.com/*/*`).
 - **Một hàm gate, hai điểm gọi** (bài học của W13b: bản nháp vẫn lưu được dù có lỗi validate và vẫn chạy được):
   - **lúc publish**, một image dạng literal nằm ngoài allowlist, một feature đang tắt hoặc một runner/thuộc tính bị từ chối là một lỗi 400 có tên;
   - **lúc chạy**, sau khi render (image có thể là một biểu thức `{{ }}`), handler gọi đúng hàm đó. Khi bị từ chối, task chuyển FAILED kèm lý do, và **không pod hay container nào được tạo ra**.
-- Tắt feature chặn các run mới ngay tại gate lúc chạy; các run đã ở trong pod thì chạy cho xong.
+- Tắt feature chặn các run mới ngay tại gate lúc chạy; các run đã ở trong pod thì chạy cho xong. *Chính xác là (final review):* khi gate lúc chạy từ chối, handler yêu cầu runner **nhận lại (adopt)** container hay pod đã tồn tại cho (run, attempt) này — nó đã qua gate lúc được tạo — và theo nó đến hết; `adopt` không bao giờ tạo mới, nên nếu không có thì run chuyển FAILED kèm lý do từ chối và không gì được tạo ra. Điều này đúng cả khi allowlist bị thu hẹp, như với feature.
 
 ## 5. Runner Kubernetes
 
@@ -85,6 +86,7 @@ Các thuộc tính được cài đặt: `containerImage`, `commands` (Commands)
 - namespace `workflow.kubernetes.namespace` (pod security `restricted`);
 - `automountServiceAccountToken: false`, `runAsNonRoot: true`, `runAsUser: workflow.kubernetes.run_as_user`, capability bị drop, `seccompProfile: RuntimeDefault`;
 - resources: mặc định theo config, request của tác giả bị giới hạn trần bởi `max_resources`;
+- đĩa của node (final review I5, quyết định của người dùng): `main` nhận request và limit `ephemeral-storage` chỉ từ config (`default_resources`/`max_resources`, mặc định request 256Mi, limit 10Gi, trần limit 10Gi; `resources` của Kestra không có khoá này, nên tác giả không đặt được), và mọi `emptyDir` đều có `sizeLimit`: thư mục làm việc và volume stderr bằng đúng limit đó, volume marker 1 MiB. Một task ghi vượt mức sẽ bị kubelet evict và chuyển FAILED kèm thông điệp của kubelet, thay vì lấp đầy node cho tới khi `DiskPressure` evict các pod bên cạnh;
 - `imagePullPolicy` lấy từ `pullPolicy`; `imagePullSecrets` lấy từ config;
 - một `emptyDir` dùng chung làm thư mục làm việc; biến môi trường `WORKING_DIR` trỏ vào đó.
 
@@ -93,19 +95,21 @@ Các thuộc tính được cài đặt: `containerImage`, `commands` (Commands)
 2. `main`: image của flow, chạy `interpreter [beforeCommands + commands]` trong thư mục làm việc;
 3. sidecar `files-out` (helper image): giữ pod sống sau khi `main` thoát để egret có thể download `outputFiles` bằng exec + tar.
 
-**Lifecycle:** tạo; upload input files; theo dõi log của `main` (`pods/log?follow`) đưa vào `ingest_line` → `RunLog` (W11); chờ `main` kết thúc rồi đọc exit code của nó từ pod status; download output files; **xoá pod** (trừ khi `delete: false`), kể cả khi thất bại.
+**Lifecycle:** tạo; upload input files; theo dõi log của `main` (`pods/log?follow`) đưa vào `ingest_line` → `RunLog` (W11); chờ `main` kết thúc rồi đọc exit code của nó từ pod status; download output files; **commit outcome; rồi mới xoá pod** (trừ khi `delete: false`, khi đó cho `files-out` thoát), kể cả khi thất bại. *Thứ tự (final review I3):* pod chỉ bị xoá **sau khi** transaction của outcome đã commit. Nếu commit thất bại, run vẫn RUNNING, lease hết hạn, và lần claim kế tiếp **gắn lại** vào pod đã xong và ghi đúng outcome đó — task không chạy lại. Nếu egret chết giữa lúc commit và lúc xoá, run đã kết thúc và orphan sweep xoá pod.
+
+**Những lỗi mà không lần claim nào sau vượt qua được thì làm task FAILED** (final review I4), có tên: một 403 trên `pods/exec` (Role thiếu `get` hoặc `create`; lần đầu còn được ghi log ở mức ERROR kèm gợi ý RBAC), một helper container không khởi động được (`ImagePullBackOff`, `ErrImageNeverPull`, `InvalidImageName`, … — thông điệp nêu tên `workflow.kubernetes.helper_image`), `ErrImagePull` kéo dài 90 s, `files-in` thoát với mã khác 0, và một lần bị evict. Chỉ lỗi mà một lần claim sau có thể vượt qua (API server không trả lời) mới giữ pod lại để gắn lại.
 
 **Timeout và kill:** xoá pod với grace 0; khi timeout, task chuyển FAILED kèm dòng `Timeout after …` của W11.
 
-**Gắn lại (re-attach):** lúc claim, tra pod theo tên. Đang chạy: gắn lại và theo dõi log từ `sinceTime` = dòng cuối cùng đã lưu của lần thử run đó (W11), nên chỉ vài dòng lặp lại. Đã kết thúc: download output rồi xoá. Không tồn tại: tạo mới.
+**Gắn lại (re-attach):** lúc claim, tra pod theo tên. Đang chạy: gắn lại và theo dõi log từ `sinceTime` = dòng cuối cùng đã lưu của lần thử run đó (W11), nên chỉ vài dòng lặp lại. Đã kết thúc: download output, commit, rồi xoá. Không tồn tại: tạo mới.
 
-**Pod mồ côi:** reaper, trên tick sẵn có của nó, xoá các pod mang label của egret mà run của chúng đã ở trạng thái kết thúc (egret chết giữa lúc download output và lúc xoá).
+**Pod mồ côi:** reaper, trên tick sẵn có của nó, xoá các pod mang label của egret mà run của chúng đã ở trạng thái kết thúc (egret chết giữa lúc commit outcome và lúc xoá).
 
 **RBAC:** một Role trong namespace của task: `pods` get/list/watch/create/delete, `pods/log` get, `pods/exec` get và create; gắn (bound) vào ServiceAccount của egret. *(`get` trên `pods/exec` được thêm theo quyết định của người dùng, 2026-09-28: exec qua WebSocket trên Kubernetes >= 1.30 được phân quyền như `get` (đo trên kind 1.33 trong e2e của W5a Task 6); chỉ có `create` thì mọi exec đều bị 403.)*
 
 **NetworkPolicy:** pod của task không được tới Postgres metadata của egret hay Kubernetes API server; mọi egress khác đều mở.
 
-Runner Docker cũng có cùng hành vi gắn lại theo tên và xoá khi xong; nó vốn đã đặt tên container.
+Runner Docker cũng có cùng hành vi gắn lại theo tên và xoá sau khi commit; nó vốn đã đặt tên container. Nó **không có giới hạn đĩa**: Docker không có giới hạn đĩa theo container nào dùng được ở mọi nơi (`--storage-opt size=` cần overlay2 trên xfs với `pquota`), nên một task trên runner Docker có thể lấp đầy đĩa của daemon — thêm một lý do để nó chỉ dành cho phát triển cục bộ (§11).
 
 ## 6. Gia hạn lease và timeout mặc định
 
@@ -120,7 +124,7 @@ Runner Docker cũng có cùng hành vi gắn lại theo tên và xoá khi xong; 
 - `container_runner`: `none` | `docker` | `kubernetes`, mặc định `none`. Với `none`, registry trên production không đổi; nếu không, bốn kiểu script và hai alias được đăng ký.
 - `container_default_timeout_s` (3600).
 - `plugin_configurations`: `[{type, values}]`.
-- `kubernetes`: `namespace`, `default_resources`, `max_resources`, `image_pull_secrets`, `run_as_user`, `helper_image`.
+- `kubernetes`: `namespace`, `default_resources`, `max_resources`, `image_pull_secrets`, `run_as_user`, `helper_image`. `default_resources` và `max_resources` mỗi cái có `request` và `limit` với `cpu`, `memory` và `ephemeral_storage` (mặc định: request `100m`/`128Mi`/`256Mi`, limit `1`/`512Mi`/`10Gi`; trần limit `2`/`2Gi`/`10Gi`), ví dụ `EGRET_WORKFLOW__KUBERNETES__MAX_RESOURCES__LIMIT__EPHEMERAL_STORAGE=20Gi`; `workflow.tasks.{default,max}Resources` của chart render ra đúng các biến đó.
 
 Helm chart: `workflow.containerRunner`; một namespace cho task, Role, RoleBinding và NetworkPolicy, mô phỏng theo `namespace-kernels.yaml`, `rbac-kernels.yaml` và `networkpolicy-kernels.yaml`. Helper image được build từ một Dockerfile trong repo.
 
@@ -139,6 +143,11 @@ Helm chart: `workflow.containerRunner`; một namespace cho task, Role, RoleBind
 |---|---|
 | một flow `shell.Commands` chạy trong một pod trên kind, các dòng log đọc được qua API của W11, `outputFiles` được trả về, pod bị xoá | pod không bị xoá / log không được theo dõi |
 | một worker bị kill giữa chừng: lần claim kế tiếp gắn lại đúng pod đó; chỉ từng tồn tại một pod, chỉ một outcome được ghi | tạo mới thay vì gắn lại |
+| một commit thất bại sau khi task đã xong: lần claim kế tiếp gắn lại, task chỉ chạy một lần (final review I3) | xoá trước khi commit |
+| feature bị tắt trong khi container của một run đang tồn tại: lần claim lại nhận nó và run chạy xong; một run mới bị từ chối, không gì được tạo | từ chối mà không nhận lại |
+| một image dạng flag (`--privileged`) bị gate từ chối lúc publish và lúc chạy, và không bao giờ là một flag của `docker create` | bỏ kiểm tra đúng dạng / bỏ `--` |
+| một Role thiếu `get` trên `pods/exec`, và một helper image không pull được, làm task FAILED có tên trong thời gian có giới hạn (sống, kind) | 403 của exec / lỗi khởi động helper bị xếp là sự cố của egret |
+| một task ghi vượt giới hạn ephemeral-storage bị evict và FAILED kèm lý do của kubelet (sống, kind); pod spec: limit và mọi `sizeLimit` | bỏ limit hay một `sizeLimit` |
 | một task lâu hơn `working_timeout` không bị reap trong khi worker của nó còn sống; bị reap sau khi worker chết | không gia hạn lease |
 | timeout xoá pod, FAILED kèm `Timeout after …` | timeout mà không xoá pod |
 | feature tắt → bị từ chối lúc publish và lúc chạy, không pod nào được tạo | gate lúc chạy bị bỏ qua |
@@ -159,4 +168,6 @@ W5b (image plugin host, shim, `kestra.<FQCN>`, allowlist jar); internal storage,
 - Gắn lại có thể lặp lại vài dòng log quanh thời điểm thu hồi.
 - `pods/exec` trong namespace của task cho phép egret exec vào pod của task; namespace đó không chứa gì khác.
 - Sau khi gắn lại, `stdOutLineCount` và `stdErrLineCount` chỉ đếm các dòng mà holder cuối cùng đọc được: các dòng holder trước đã lưu bị bỏ qua như dòng phát lại và không được đếm. Bản thân các dòng log đã lưu vẫn đầy đủ; chỉ con số là thiếu (đo trong e2e của W5a Task 6: run bị kill đếm 35 trên 40 dòng stdout).
-- **Nếu thiếu `get` trên `pods/exec`** — do RBAC bị hồi quy, hoặc một cluster phân quyền exec qua WebSocket theo cách khác — egret suy giảm một cách im lặng chứ không báo lỗi. Run không có file vào/ra phải chờ khoảng 15 s cho sentinel của stderr ở mọi lần chạy, rồi thành công. Run có file vào hoặc ra không bao giờ kết thúc: mọi exec đều bị từ chối, runner giữ pod lại cho lần claim sau, và run gắn lại mãi mãi. Tín hiệu duy nhất là một dòng WARN phía server cho mỗi attempt. (Đo trong W5a Task 6: sống trên kind 1.33 với chỉ `create`, và bằng mutation bỏ `get` khỏi chart trong `k8s_runner_live`.)
+- **Một outcome, at-least-once quanh lần commit — chính xác là:** pod chỉ bị xoá sau khi outcome đã commit, nên một commit thất bại dẫn tới gắn lại chứ không chạy lại. Phần còn at-least-once: một pod đã xong mà biến mất giữa một commit thất bại và lần claim kế tiếp (operator xoá nó, node của nó bị mất) thì không thể gắn lại, nên lần claim đó tạo pod mới và task chạy lại, như runner của Kestra sẽ chạy lại nó. Một lần crash sau commit để pod lại cho tới tick kế tiếp của orphan sweep. Một pod `delete: false` mà marker `ended` chưa bao giờ được gửi (egret chết sau commit) giữ sidecar của nó chạy mãi, và sweep để yên nó như tác giả yêu cầu.
+- **Thiếu `get` trên `pods/exec` giờ làm task thất bại** (final review I4; trước đây nó suy giảm im lặng): task chuyển FAILED, nêu tên verb còn thiếu, và lần từ chối đầu tiên được ghi log ở mức ERROR kèm gợi ý RBAC. Một run không có file vào lẫn ra gặp lần từ chối khi nó kết thúc luồng stderr, nên cũng thất bại thay vì chờ 15 s rồi thành công. Pod được giải phóng sau khi thất bại đó đã commit. (Đo sống trên kind với Role của chart bỏ đi verb đó, `k8s_runner_live`.) Việc kiểm tra các verb của Role lúc khởi động được hoãn lại.
+- **Runner Docker không có giới hạn đĩa** (final review I5): Docker không có giới hạn đĩa theo container nào dùng được ở mọi nơi, nên ephemeral storage chỉ được giới hạn trên runner Kubernetes. Runner Docker dành cho phát triển cục bộ và kiểm thử, và chart từ chối nó.

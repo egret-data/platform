@@ -140,10 +140,12 @@ fn pod_config() -> PodConfig {
             request: ResourceAmounts {
                 cpu: Some("50m".into()),
                 memory: Some("32Mi".into()),
+                ..Default::default()
             },
             limit: ResourceAmounts {
                 cpu: Some("500m".into()),
                 memory: Some("128Mi".into()),
+                ephemeral_storage: Some("1Gi".into()),
             },
         },
         max_resources: Resources {
@@ -151,6 +153,7 @@ fn pod_config() -> PodConfig {
             limit: ResourceAmounts {
                 cpu: Some("1".into()),
                 memory: Some("256Mi".into()),
+                ..Default::default()
             },
         },
         image_pull_secrets: vec![],
@@ -220,7 +223,6 @@ fn task_for(ws: Uuid, execution: Uuid, run: Uuid) -> (TaskInput, Arc<Recorder>) 
         render: egret_workflow::runners::RenderContext::new(),
         timeout: None,
         principal: None,
-        claimed_at: chrono::Utc::now(),
         log: RunLog::new(
             RunIdentity {
                 workspace_id: ws,
@@ -408,8 +410,18 @@ async fn a_shell_command_runs_in_a_pod_and_the_pod_is_deleted() {
     );
     assert_eq!(uids.lock().unwrap().len(), 1, "exactly one pod was created");
     assert!(
+        pods(&c)
+            .get_opt(&name_of(&t))
+            .await
+            .unwrap()
+            .is_some_and(|p| p.metadata.deletion_timestamp.is_none()),
+        "the pod outlives `run` (final review I3): a commit that fails after this point \
+         leaves it for the next claim to re-attach to"
+    );
+    r.release(&t, &k8s_spec()).await.expect("release");
+    assert!(
         wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await,
-        "`delete: true` (the default) removes the pod when the run returns"
+        "`delete: true` (the default): release removes the pod"
     );
 }
 
@@ -442,6 +454,7 @@ async fn a_non_shell_interpreter_keeps_the_merged_stream_and_says_so() {
         "{lines:?}"
     );
     assert_eq!((out.stdout_line_count, out.stderr_line_count), (2, 0));
+    r.release(&t, &k8s_spec()).await.expect("release");
 }
 
 /// Inline input files arrive in the working dir by exec + tar; declared output
@@ -474,6 +487,8 @@ async fn input_and_output_files_round_trip() {
             ("n.txt".to_string(), "700\n".to_string()),
         ])
     );
+    // Final review I3: `run` deletes nothing; `release` (after the commit) does.
+    r.release(&t, &k8s_spec()).await.expect("release");
     assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
 
     // **Kestra's `outputFiles`, in a pod** (W5a Task 5 fix round 1): a
@@ -502,6 +517,8 @@ async fn input_and_output_files_round_trip() {
         ]),
         "`*.csv` is non-recursive and skips the directory `d.csv`"
     );
+    // Final review I3: `run` deletes nothing; `release` (after the commit) does.
+    r.release(&t, &k8s_spec()).await.expect("release");
     assert!(wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await);
 }
 
@@ -527,6 +544,8 @@ async fn a_nonzero_exit_fails_and_keeps_outputs() {
         Some("partial\n")
     );
     assert_eq!(out.failure, None);
+    // Final review I3: `run` deletes nothing; `release` (after the commit) does.
+    r.release(&t, &k8s_spec()).await.expect("release");
     assert!(
         wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await,
         "deleted on failure too"
@@ -636,6 +655,8 @@ async fn a_second_run_call_for_the_same_attempt_reattaches_not_recreates() {
         1,
         "ONE pod ever: the second call re-attached rather than recreated"
     );
+    // Final review I3: `run` deletes nothing; `release` (after the commit) does.
+    r.release(&t2, &k8s_spec()).await.expect("release");
     assert!(wait_gone(&c, &name, Duration::from_secs(20)).await);
 }
 
@@ -701,6 +722,8 @@ async fn a_line_written_just_before_the_reclaim_is_not_lost() {
         !texts.contains(&"one".to_string()),
         "the stored overlap is dropped by exact text: {texts:?}"
     );
+    // Final review I3: `run` deletes nothing; `release` (after the commit) does.
+    r.release(&t2, &k8s_spec()).await.expect("release");
     assert!(wait_gone(&c, &name, Duration::from_secs(20)).await);
 }
 
@@ -791,6 +814,8 @@ async fn a_non_shell_reattach_keeps_the_lines_written_before_the_reclaim() {
     assert!(texts.contains(&"two".to_string()), "{texts:?}");
     assert!(!texts.contains(&"one".to_string()), "{texts:?}");
     assert!(texts.iter().any(|t| t.contains("not a shell")), "{texts:?}");
+    // Final review I3: `run` deletes nothing; `release` (after the commit) does.
+    r.release(&t2, &k8s_spec()).await.expect("release");
     assert!(wait_gone(&c, &name, Duration::from_secs(20)).await);
 }
 
@@ -1049,6 +1074,221 @@ async fn create_runner_identity() {
     );
 }
 
+/// A ServiceAccount in [`NS`] bound to a Role of exactly `rules`, and a
+/// client impersonating it -- for a case that needs a DIFFERENT Role than the
+/// chart's (a regression the operator could make).
+async fn client_with_role(sa: &str, rules: Vec<PolicyRule>) -> kube::Client {
+    let c = client().await;
+    let pp = PostParams::default();
+    let meta = |name: &str| ObjectMeta {
+        name: Some(name.to_string()),
+        namespace: Some(NS.to_string()),
+        ..Default::default()
+    };
+    Api::<ServiceAccount>::namespaced(c.clone(), NS)
+        .create(
+            &pp,
+            &ServiceAccount {
+                metadata: meta(sa),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create the service account");
+    Api::<Role>::namespaced(c.clone(), NS)
+        .create(
+            &pp,
+            &Role {
+                metadata: meta(sa),
+                rules: Some(rules),
+            },
+        )
+        .await
+        .expect("create the Role");
+    Api::<RoleBinding>::namespaced(c.clone(), NS)
+        .create(
+            &pp,
+            &RoleBinding {
+                metadata: meta(sa),
+                role_ref: RoleRef {
+                    api_group: "rbac.authorization.k8s.io".into(),
+                    kind: "Role".into(),
+                    name: sa.into(),
+                },
+                subjects: Some(vec![Subject {
+                    kind: "ServiceAccount".into(),
+                    name: sa.into(),
+                    namespace: Some(NS.into()),
+                    ..Default::default()
+                }]),
+            },
+        )
+        .await
+        .expect("bind the Role");
+    let opts = kube::config::KubeConfigOptions {
+        context: Some(CONTEXT.to_string()),
+        ..Default::default()
+    };
+    let mut cfg = kube::Config::from_kubeconfig(&opts)
+        .await
+        .unwrap_or_else(|e| panic!("no kubeconfig context {CONTEXT}: {e}"));
+    cfg.auth_info.impersonate = Some(format!("system:serviceaccount:{NS}:{sa}"));
+    let rc = kube::Client::try_from(cfg).expect("an impersonating kube client");
+    for _ in 0..40 {
+        if Api::<Pod>::namespaced(rc.clone(), NS)
+            .list(&ListParams::default())
+            .await
+            .is_ok()
+        {
+            return rc;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    panic!("{sa} never became able to list pods in {NS}");
+}
+
+/// Delete `name` as the admin and wait until it is gone.
+async fn remove_pod(c: &kube::Client, name: &str) {
+    let _ = pods(c)
+        .delete(name, &DeleteParams::default().grace_period(0))
+        .await;
+    assert!(wait_gone(c, name, Duration::from_secs(30)).await, "{name}");
+}
+
+/// **A Role without `pods/exec` `get` FAILS the task, naming the missing
+/// verb, in bounded time** (final review I4). Measured in W5a Task 6: with
+/// `create` only, every exec on Kubernetes 1.33 is a 403 (WebSocket exec is
+/// authorised as `get`). Before this fix a task with files re-attached for
+/// ever, and one without files waited 15 s and succeeded with its stderr
+/// stream unterminated; both now fail with the reason. The Role here is the
+/// chart's minus that one verb; the control is every other case in this file,
+/// which runs as the chart's full Role.
+async fn an_exec_the_role_refuses_fails_the_task_naming_the_missing_verb() {
+    let c = client().await;
+    let rules: Vec<PolicyRule> = chart_role_rules()
+        .into_iter()
+        .map(|mut r| {
+            if r.resources
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&"pods/exec".to_string())
+            {
+                r.verbs.retain(|v| v != "get");
+            }
+            r
+        })
+        .collect();
+    assert!(
+        rules.iter().any(|r| r
+            .resources
+            .as_deref()
+            .unwrap_or_default()
+            .contains(&"pods/exec".to_string())
+            && r.verbs == vec!["create".to_string()]),
+        "the Role under test is the chart's minus `pods/exec` `get`: {rules:?}"
+    );
+    let rc = client_with_role("egret-task-runner-noget", rules).await;
+    let r = KubernetesRunner::new(rc, pod_config(), LogRepo::new(pool().await));
+
+    let no_files = shell(&["echo hi", "echo oops >&2"]);
+    let mut with_files = shell(&["cat in.txt > out.txt"]);
+    with_files.input_files = BTreeMap::from([("in.txt".to_string(), "x".to_string())]);
+    with_files.output_files = vec!["out.txt".into()];
+    for (what, cmds) in [
+        ("no files", no_files),
+        ("input and output files", with_files),
+    ] {
+        let (t, _rec) = task();
+        let started = std::time::Instant::now();
+        let got = tokio::time::timeout(
+            Duration::from_secs(120),
+            r.run(&t, &cmds, &k8s_spec(), &NoObserver),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{what}: the run must END, not re-attach for ever"));
+        match &got {
+            Err(egret_core::Error::InvalidInput(m)) => {
+                assert!(
+                    m.contains("`pods/exec` `get`") && m.contains(NS),
+                    "{what}: the reason names the verb and the namespace: {m}"
+                );
+            }
+            other => panic!("{what}: a task failure (not Internal, not Ok) expected: {other:?}"),
+        }
+        eprintln!("{what}: failed with the reason in {:?}", started.elapsed());
+        remove_pod(&c, &name_of(&t)).await;
+    }
+}
+
+/// **A helper image that cannot be pulled FAILS the task, naming egret's
+/// setting, in bounded time** (final review I4). The chart's default
+/// `egret-task-helper:dev` is not in any registry; before this fix a task
+/// with files held its pod and re-attached every `working_timeout` for ever.
+async fn an_unpullable_helper_image_fails_the_task_naming_the_setting() {
+    let c = client().await;
+    let mut cfg = pod_config();
+    cfg.helper_image = "egret.invalid/egret-task-helper:no-such-tag".into();
+    let r = KubernetesRunner::new(runner_client().await, cfg, LogRepo::new(pool().await));
+    let (t, _rec) = task();
+    let mut cmds = shell(&["cat in.txt"]);
+    cmds.input_files = BTreeMap::from([("in.txt".to_string(), "x".to_string())]);
+    let started = std::time::Instant::now();
+    let got = tokio::time::timeout(
+        Duration::from_secs(180),
+        r.run(&t, &cmds, &k8s_spec(), &NoObserver),
+    )
+    .await
+    .expect("the run must END, not re-attach for ever");
+    match &got {
+        Err(egret_core::Error::InvalidInput(m)) => {
+            assert!(
+                m.contains("workflow.kubernetes.helper_image")
+                    && m.contains("egret.invalid/egret-task-helper:no-such-tag"),
+                "{m}"
+            );
+        }
+        other => panic!("a task failure naming the setting expected: {other:?}"),
+    }
+    eprintln!("helper pull failure reported in {:?}", started.elapsed());
+    remove_pod(&c, &name_of(&t)).await;
+}
+
+/// **A task that writes past its ephemeral-storage limit is evicted, and the
+/// task FAILS with the kubelet's reason** (final review I5) -- instead of
+/// filling the node. The limit here is 16 MiB (the config's, so the working
+/// directory's `sizeLimit` too); the task writes 64 MiB and then waits.
+async fn a_task_that_fills_its_disk_is_evicted_and_fails_saying_so() {
+    let c = client().await;
+    let mut cfg = pod_config();
+    cfg.default_resources.request.ephemeral_storage = Some("8Mi".into());
+    cfg.default_resources.limit.ephemeral_storage = Some("16Mi".into());
+    let r = KubernetesRunner::new(runner_client().await, cfg, LogRepo::new(pool().await));
+    let (t, _rec) = task();
+    let cmds = shell(&[
+        "dd if=/dev/zero of=big bs=1048576 count=64 2>/dev/null || true",
+        "echo wrote",
+        "sleep 240",
+    ]);
+    let started = std::time::Instant::now();
+    let got = tokio::time::timeout(
+        Duration::from_secs(200),
+        r.run(&t, &cmds, &k8s_spec(), &NoObserver),
+    )
+    .await
+    .expect("the eviction must end the run well before `sleep 240` would");
+    let why = match &got {
+        Ok(out) => out.failure.clone().unwrap_or_else(|| panic!("{out:?}")),
+        Err(egret_core::Error::InvalidInput(m)) => m.clone(),
+        Err(e) => panic!("a task failure expected, not a worker failure: {e:?}"),
+    };
+    assert!(
+        why.to_lowercase().contains("evicted") && why.contains("exceeds"),
+        "the kubelet's own reason reaches the task: {why}"
+    );
+    eprintln!("evicted in {:?}: {why}", started.elapsed());
+    remove_pod(&c, &name_of(&t)).await;
+}
+
 async fn delete_namespace() -> bool {
     let api = namespaces().await;
     let _ = api.delete(NS, &DeleteParams::default()).await;
@@ -1081,6 +1321,9 @@ fn cases() -> Vec<(&'static str, Case)> {
         case!(a_non_shell_reattach_keeps_the_lines_written_before_the_reclaim),
         case!(the_orphan_sweep_deletes_pods_of_terminal_runs_only),
         case!(the_docker_orphan_sweep_removes_containers_of_terminal_runs_only),
+        case!(an_exec_the_role_refuses_fails_the_task_naming_the_missing_verb),
+        case!(an_unpullable_helper_image_fails_the_task_naming_the_setting),
+        case!(a_task_that_fills_its_disk_is_evicted_and_fails_saying_so),
     ]
 }
 

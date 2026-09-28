@@ -253,6 +253,13 @@ impl Registry for Handlers {
             ))),
         }
     }
+    /// The same lookup; a type with no handler has nothing to free.
+    async fn release(&self, task: &TaskInput) -> Result<()> {
+        match self.get(&task.type_id) {
+            Some(h) => h.release(task).await,
+            None => Ok(()),
+        }
+    }
     fn log_sink(&self) -> (Arc<dyn LogSink>, LogLimits) {
         Handlers::log_sink(self)
     }

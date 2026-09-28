@@ -21,10 +21,20 @@
 //!    deployment does not have fails, saying which one it has;
 //! 5. **run** it.
 //!
-//! **Every refusal in 1-4 is `Outcome::failed_with(reason)` and the runner is
-//! never called**, so no container or pod exists for a refused run. The one
-//! exception is a feature state that cannot be READ: that is egret's outage,
-//! an `Err`, and the run stays leased for the reaper -- never run on a guess.
+//! **Every refusal in 1-4 is `Outcome::failed_with(reason)` and no runner
+//! creates anything**, so no container or pod exists for a refused run. The
+//! one exception is a feature state that cannot be READ: that is egret's
+//! outage, an `Err`, and the run stays leased for the reaper -- never run on
+//! a guess.
+//!
+//! The one runner call a gate refusal makes is [`TaskRunner::adopt`], which
+//! never creates: a container or pod that ALREADY exists for this
+//! (run, attempt) passed the gate when it was created, and is followed to its
+//! end (spec §4, "runs already in a pod finish"; the final review's must-fix
+//! minor).
+//!
+//! The container or pod is deleted by [`TaskHandler::release`], which the
+//! worker calls only after the outcome has committed (final review I3).
 //!
 //! # The script, as Kestra composes it (measured, `w5a-scripts.json`)
 //!
@@ -320,31 +330,54 @@ impl TaskHandler for Script {
             .features
             .containers_enabled(task.workspace_id)
             .await?;
-        if let Err(refusal) = gate::check(&gate::GateInput {
+        let refused = gate::check(&gate::GateInput {
             feature_enabled,
             image: &cmds.container_image,
             runner: spec.kind,
             plugin_configurations: &self.rt.plugin_configurations,
-        }) {
-            return Ok(Outcome::failed_with(format!("{type_id}: {refusal}")));
-        }
+        })
+        .err();
 
-        // 4. the runner.
-        if spec.kind != self.rt.runner_kind {
-            return Ok(Outcome::failed_with(format!(
-                "{type_id}: {}",
-                scripts::runner_unavailable(spec.kind, self.rt.runner_kind)
-            )));
-        }
-
-        // 5. run.
         let hint = NameHintSink::default();
         let python = matches!(
             parsed.kind,
             ScriptKind::PythonCommands | ScriptKind::PythonScript
         );
         let observer: &dyn LineObserver = if python { &hint } else { &NoObserver };
-        match self.rt.runner.run(task, &cmds, &spec, observer).await {
+
+        let ran = match refused {
+            // **A refusal is final only if nothing is running yet** (spec §4:
+            // "runs already in a pod finish"; the final review's must-fix
+            // minor). A pod or container that already exists for this
+            // (run, attempt) passed the gate when it was created; a re-claim
+            // after the feature was turned off -- or the allowlist narrowed --
+            // adopts it and finishes. `adopt` never creates, so the gate still
+            // stands between the task and any NEW work.
+            Some(refusal) => {
+                let adopted = if spec.kind == self.rt.runner_kind {
+                    self.rt.runner.adopt(task, &cmds, &spec, observer).await
+                } else {
+                    Ok(None)
+                };
+                match adopted {
+                    Ok(Some(result)) => Ok(result),
+                    Ok(None) => return Ok(Outcome::failed_with(format!("{type_id}: {refusal}"))),
+                    Err(e) => Err(e),
+                }
+            }
+            None => {
+                // 4. the runner.
+                if spec.kind != self.rt.runner_kind {
+                    return Ok(Outcome::failed_with(format!(
+                        "{type_id}: {}",
+                        scripts::runner_unavailable(spec.kind, self.rt.runner_kind)
+                    )));
+                }
+                // 5. run.
+                self.rt.runner.run(task, &cmds, &spec, observer).await
+            }
+        };
+        match ran {
             Ok(result) => {
                 if result.exit_code != 0 {
                     task.log
@@ -369,6 +402,27 @@ impl TaskHandler for Script {
     /// to choose.
     async fn cancel(&self, task: &TaskInput) -> Result<()> {
         self.rt.runner.cancel(task).await
+    }
+
+    /// **After the outcome committed** (`claim::run_one`; final review I3):
+    /// the configured runner deletes the attempt's container or pod, or keeps
+    /// it for `taskRunner.delete: false`. The runner's `run` never does.
+    ///
+    /// The spec is re-parsed from the task -- `delete` is a literal boolean
+    /// at save (a `{{ }}` there is refused), so this is the value `run` saw.
+    /// A task that does not parse, or names another runner, never reached a
+    /// runner, so there is nothing to free.
+    async fn release(&self, task: &TaskInput) -> Result<()> {
+        let Ok(parsed) = scripts::parse(task.type_id.as_str(), &task.spec) else {
+            return Ok(());
+        };
+        let spec = parsed
+            .task_runner
+            .unwrap_or_else(|| RunnerSpec::defaults(self.rt.runner_kind));
+        if spec.kind != self.rt.runner_kind {
+            return Ok(());
+        }
+        self.rt.runner.release(task, &spec).await
     }
 }
 
@@ -1075,5 +1129,89 @@ mod tests {
         }
         // `egret.python` is still the NOTEBOOK task and is not served here.
         assert!(reg.get("egret.python").is_none());
+    }
+
+    // ---- the final review's fixes -------------------------------------------
+
+    /// **A refused run whose container already exists is adopted and
+    /// finishes** (spec §4, "runs already in a pod finish"): the gate refuses
+    /// (the feature is off now), the runner is asked to ADOPT -- never to run
+    /// -- and the adopted result is the outcome. The control: with nothing to
+    /// adopt, the same refusal fails the run, and still nothing was run.
+    #[tokio::test]
+    async fn a_refused_run_adopts_its_existing_container_and_never_creates_one() {
+        let spy = Spy::ok(CommandsResult::default());
+        *spy.adoptable.lock().unwrap() = Some(CommandsResult {
+            exit_code: 0,
+            ..CommandsResult::default()
+        });
+        let h = script(scripts::ALIAS_CONTAINER, spy.clone(), false, &["*"]);
+        let out = h
+            .run(&input(scripts::ALIAS_CONTAINER, alias_spec()))
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        assert_eq!(*spy.adopt_calls.lock().unwrap(), 1);
+        assert!(
+            spy.seen.lock().unwrap().is_empty(),
+            "`run` (create) never called"
+        );
+
+        let spy = Spy::ok(CommandsResult::default());
+        let h = script(scripts::ALIAS_CONTAINER, spy.clone(), false, &["*"]);
+        let out = h
+            .run(&input(scripts::ALIAS_CONTAINER, alias_spec()))
+            .await
+            .expect("no worker error");
+        assert_eq!(out.state, RunState::Failed);
+        assert!(
+            out.message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("feature is disabled"),
+            "{:?}",
+            out.message
+        );
+        assert_eq!(*spy.adopt_calls.lock().unwrap(), 1);
+        assert!(spy.seen.lock().unwrap().is_empty());
+    }
+
+    /// **A run the gate admits never asks to adopt**: `run` is the one call.
+    #[tokio::test]
+    async fn an_admitted_run_is_run_not_adopted() {
+        let spy = Spy::ok(CommandsResult::default());
+        let h = open(spy.clone());
+        h.run(&input(scripts::ALIAS_CONTAINER, alias_spec()))
+            .await
+            .expect("no worker error");
+        assert_eq!(*spy.adopt_calls.lock().unwrap(), 0);
+        assert_eq!(spy.seen.lock().unwrap().len(), 1);
+    }
+
+    /// **`release` hands the runner the task's own `delete`** (final review
+    /// I3) -- the default `true`, or the author's `false` -- and a task naming
+    /// the runner this deployment does not have releases nothing, because no
+    /// runner ever held anything for it.
+    #[tokio::test]
+    async fn release_passes_the_tasks_delete_to_the_configured_runner_only() {
+        let spy = Spy::ok(CommandsResult::default());
+        let h = open(spy.clone());
+        let t = input(scripts::ALIAS_CONTAINER, alias_spec());
+        h.release(&t).await.expect("released");
+        let mut kept = alias_spec();
+        kept["taskRunner"] = serde_json::json!({"type": scripts::DOCKER_RUNNER, "delete": false});
+        h.release(&input(scripts::ALIAS_CONTAINER, kept))
+            .await
+            .expect("released");
+        let mut other = alias_spec();
+        other["taskRunner"] = serde_json::json!({"type": scripts::KUBERNETES_RUNNER});
+        h.release(&input(scripts::ALIAS_CONTAINER, other))
+            .await
+            .expect("nothing to release");
+        let name = crate::worker::commands::container_name(&t);
+        assert_eq!(
+            spy.released.lock().unwrap().as_slice(),
+            [(name.clone(), true), (name, false)]
+        );
     }
 }

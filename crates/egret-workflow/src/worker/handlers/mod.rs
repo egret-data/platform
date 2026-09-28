@@ -193,7 +193,6 @@ pub(crate) mod testing {
             // would make `commands::container_name`'s output differ between
             // two runs of the same test. `handlers::container`'s tests build
             // their own input when they need two DIFFERENT leases.
-            claimed_at: chrono::DateTime::UNIX_EPOCH,
             // `tracing`, under a nil identity. A test that reads the lines
             // uses `recorded` instead.
             log: RunLog::discard(),

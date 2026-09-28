@@ -361,6 +361,13 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
     /// worker lost its lease, W5a Task 3) safe: dropping never deletes, and
     /// the next holder of the lease finds the same pod. [`DockerRunner`] does
     /// the same with its container since W5a Task 5.
+    ///
+    /// # `run` never deletes what it ran (W5a final review I3)
+    ///
+    /// Whatever `run` returns, the container or pod is left in place:
+    /// [`release`](Self::release) deletes it, and `claim::run_one` calls that
+    /// (through the handler) only **after the outcome committed**. A runner
+    /// that deleted here would turn a failed commit into a second execution.
     async fn run(
         &self,
         task: &TaskInput,
@@ -369,11 +376,40 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
         observer: &dyn LineObserver,
     ) -> Result<CommandsResult>;
 
+    /// [`run`](Self::run), **but only if the work for `task`'s (run, attempt)
+    /// already exists and was started** -- a re-attach, never a create.
+    /// `Ok(None)` when there is nothing to adopt; nothing is created then.
+    ///
+    /// This is how the script handler keeps W5a spec §4's promise that "runs
+    /// already in a pod finish" when the gate would now refuse the task (the
+    /// workspace turned `workflow_containers` off, or the allowlist changed,
+    /// after the pod was created): the pod passed the gate when it was
+    /// created, and a re-claim adopts it rather than failing the run and
+    /// leaving the pod for the sweep. Because this cannot create, the gate is
+    /// never bypassed for new work.
+    async fn adopt(
+        &self,
+        task: &TaskInput,
+        commands: &TaskCommands,
+        spec: &RunnerSpec,
+        observer: &dyn LineObserver,
+    ) -> Result<Option<CommandsResult>>;
+
     /// Stop whatever `task` is running, addressed by **identity**.
     ///
     /// The caller is [`cancel::guarded`](super::TaskHandler::cancel) by way of
     /// a handler, and it has no handle to pass: see [`container_name`].
     async fn cancel(&self, task: &TaskInput) -> Result<()>;
+
+    /// Free `task`'s container or pod once its outcome has **committed**
+    /// (`TaskHandler::release`): delete it when `spec.delete` (the default),
+    /// otherwise leave it, as the author asked -- the Kubernetes runner lets
+    /// its `files-out` sidecar exit so the kept pod completes. A container or
+    /// pod that is not there is `Ok(())`.
+    ///
+    /// No default body, for `cancel`'s reason: every runner says what freeing
+    /// means to it.
+    async fn release(&self, task: &TaskInput, spec: &RunnerSpec) -> Result<()>;
 }
 
 /// Something that sees each line a runner writes, before it goes to
@@ -449,10 +485,13 @@ pub(crate) async fn stream_line(
 ///    this doc claimed it without it: a renewal that ERRORS used to be retried
 ///    for ever, so a worker cut off from Postgres but not from Docker or the
 ///    API server stayed inside its handler after being reaped, and could
-///    remove (`delete: true`, on finish) or kill (its own budget's `cancel`)
-///    the container the new holder had re-attached to. Now the worker gives
-///    the run up no later than the reaper could take it, with its future --
-///    budget, delete and all -- dropped, so neither is issued.
+///    kill (its own budget's `cancel`) the container the new holder had
+///    re-attached to. Now the worker gives the run up no later than the
+///    reaper could take it, with its future -- budget and all -- dropped, so
+///    no `cancel` is issued. (Removing the container on finish, the other
+///    half of that fear, is gone too: `release` runs only after a COMMITTED
+///    outcome, which a worker that lost the run cannot make -- final review
+///    I3.)
 ///    *Residual, stated:* a worker whose process is frozen (not merely cut
 ///    off) past the deadline resumes inside a poll of the handler before the
 ///    fence is re-checked; the window is one poll.
@@ -1292,10 +1331,11 @@ impl TaskRunner for DockerRunner {
     ///   and lines repeat), waits for the exit code and collects the outputs;
     /// * **being removed**: a cancel won; the task fails saying so.
     ///
-    /// Then, exactly as the Kubernetes runner: `Ok` or an author error removes
-    /// the container when `delete` (default `true`) and keeps it otherwise;
-    /// **a worker failure** (`Error::Internal`, the daemon went away) keeps it
-    /// for the next claim to re-attach to; and **dropping this future removes
+    /// Then, exactly as the Kubernetes runner: **`run` removes nothing**.
+    /// [`release`](TaskRunner::release) removes the container (`delete`,
+    /// default `true`) once the outcome has committed (final review I3); a
+    /// worker failure (`Error::Internal`, the daemon went away) leaves it for
+    /// the next claim to re-attach to; and **dropping this future removes
     /// nothing** -- there is no `Drop` on this path, so a worker whose lease was
     /// taken (W5a Task 3) leaves the container running for the new holder.
     async fn run(
@@ -1341,27 +1381,47 @@ impl TaskRunner for DockerRunner {
             }
         };
 
-        match &result {
-            Err(Error::Internal(e)) => tracing::warn!(
+        if let Err(Error::Internal(e)) = &result {
+            tracing::warn!(
                 run = %task.run_id,
                 container = %name,
                 "the task container is kept for a later claim to re-attach to: {e}"
-            ),
-            _ if spec.delete => match self.cli(&["rm", "--force", &name]).await {
-                Ok(out) if !out.status.success() => tracing::warn!(
+            );
+        }
+        // Nothing is removed here, whatever the result: `release`, after the
+        // outcome commits (final review I3).
+        result
+    }
+
+    /// The container, only if one was **started** for this (run, attempt):
+    /// followed to its end exactly as [`run`](TaskRunner::run)'s re-attach.
+    /// A container that was created and never started ran nothing of the
+    /// author's, so there is nothing to finish: `None`, and `release` removes
+    /// it once the refusal commits.
+    async fn adopt(
+        &self,
+        task: &TaskInput,
+        commands: &TaskCommands,
+        _spec: &RunnerSpec,
+        observer: &dyn LineObserver,
+    ) -> Result<Option<CommandsResult>> {
+        let name = container_name(task);
+        match self.find(&name).await? {
+            Found::Started => {
+                tracing::info!(
                     run = %task.run_id,
                     container = %name,
-                    "could not remove the container after the run: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-                Err(e) => tracing::warn!(run = %task.run_id, container = %name, "{e}"),
-                Ok(_) => {}
-            },
-            // `delete: false` -- measured on the artifact: the container is
-            // kept, exited. The orphan sweep leaves it too (its label).
-            _ => {}
+                    "re-attaching to the task's existing container, which passed the gate \
+                     when it was created"
+                );
+                let result = self.reattach(task, commands, observer, &name).await;
+                if let Err(Error::Internal(e)) = &result {
+                    tracing::warn!(run = %task.run_id, container = %name, "the task container is kept for a later claim to re-attach to: {e}");
+                }
+                result.map(Some)
+            }
+            Found::Absent | Found::Created | Found::Going => Ok(None),
         }
-        result
     }
 
     /// Remove the attempt's container: `docker rm --force`, which is
@@ -1390,6 +1450,16 @@ impl TaskRunner for DockerRunner {
         Err(self
             .classify("rm", &String::from_utf8_lossy(&out.stderr))
             .await)
+    }
+
+    /// `docker rm --force` when `spec.delete` (the default); with
+    /// `delete: false` the container is kept, exited -- measured on the
+    /// artifact -- and the orphan sweep leaves it too (its label).
+    async fn release(&self, task: &TaskInput, spec: &RunnerSpec) -> Result<()> {
+        if !spec.delete {
+            return Ok(());
+        }
+        self.cancel(task).await
     }
 }
 
@@ -1950,6 +2020,12 @@ fn parse_docker_ps(stdout: &str) -> Vec<(String, uuid::Uuid)> {
 /// * `cpu.cpus` → `--cpus`, `memory.memory` → `--memory`, as written; a value
 ///   the daemon cannot parse fails `create`, i.e. the task, with its words.
 /// * `delete: false` → the [`DELETE_LABEL`] label, which the orphan sweep reads.
+///
+/// **No disk bound** (final review I5, a known limit): Docker has no portable
+/// per-container disk limit -- `--storage-opt size=` works only on overlay2
+/// over xfs with `pquota` -- so a task on this runner can fill the daemon's
+/// disk. The Kubernetes runner bounds it (`ephemeral-storage` and
+/// `emptyDir.sizeLimit`); this runner is for local development and tests.
 pub(crate) fn create_args(
     task: &TaskInput,
     commands: &TaskCommands,
@@ -1999,6 +2075,13 @@ pub(crate) fn create_args(
     // the daemon concatenates the two.
     create.push("--entrypoint".into());
     create.push(argv[0].clone());
+    // `--` ends `docker create`'s flags, so the image can only ever be the
+    // IMAGE positional. Without it an image spelled like a flag
+    // (`--privileged`) WAS a flag, and the author's interpreter tail then
+    // supplied the rest (`-v /:/host alpine …`) -- final review I1. The gate
+    // refuses such an image first (`gate::image_ref_problem`); this is the
+    // second line, and it holds on its own.
+    create.push("--".into());
     create.push(commands.container_image.clone());
     create.extend(argv[1..].iter().cloned());
     create
@@ -2458,26 +2541,30 @@ mod tests {
     use crate::logs::fixture;
     use crate::worker::handlers::testing::input;
 
-    fn leased(secs: i64) -> TaskInput {
+    /// A task input for run 7; `task` is the task id, so two inputs can
+    /// differ in everything but the run and the attempt.
+    fn leased(task: i64) -> TaskInput {
         TaskInput {
             run_id: uuid::Uuid::from_u128(7),
-            claimed_at: chrono::DateTime::from_timestamp(secs, 0).expect("a valid instant"),
+            task_id: format!("t{task}"),
             ..input("egret.container", serde_json::json!({}))
         }
     }
 
-    /// **The name is the (run, attempt) re-attach key, and the lease is NOT in
-    /// it** (W5a Task 5; see [`container_name`] for the argument).
+    /// **The name is the (run, attempt) re-attach key, and nothing else**
+    /// (W5a Task 5; see [`container_name`] for the argument). `TaskInput`
+    /// carries no lease since the final review (I2), so a lease-keyed name is
+    /// not even expressible.
     ///
-    /// Two holders of one attempt -- differing only in the lease -- compute the
-    /// same name, which is what lets the second find the first's container; a
-    /// retry (the next attempt) gets a different one; and the name is the pod
-    /// name, so the two runners address their work identically.
+    /// Two holders of one attempt compute the same name, which is what lets
+    /// the second find the first's container; a retry (the next attempt) gets
+    /// a different one; and the name is the pod name, so the two runners
+    /// address their work identically.
     #[test]
     fn the_container_name_is_the_attempt_and_not_the_lease() {
         let a = leased(1_700_000_000);
         let b = leased(1_700_000_001);
-        assert_eq!(a.run_id, b.run_id, "the two differ ONLY in the lease");
+        assert_eq!(a.run_id, b.run_id, "one run, one attempt, two holders");
         assert_eq!(
             container_name(&a),
             container_name(&b),
@@ -2556,6 +2643,7 @@ mod tests {
             .position(|a| a == "alpine:3.20")
             .expect("the image");
         assert_eq!(&d[at + 1..], ["-c".to_string(), "echo hi".to_string()]);
+        assert_eq!(d[at - 1], "--", "flags end before the image: {d:?}");
 
         for (policy, want) in [
             (crate::scripts::PullPolicy::Always, "always"),
@@ -2578,6 +2666,52 @@ mod tests {
                 "`delete: false` must be visible to the orphan sweep: {a:?}"
             );
         }
+    }
+
+    /// **An image spelled like a flag stays the IMAGE** (final review I1): the
+    /// only `--` in the argv ends the flags immediately before it, so
+    /// `--privileged` and the author's interpreter tail (`-v /:/host …`) are
+    /// the positional image and CMD, never `docker create` options. The gate
+    /// refuses such an image first; this pins the runner's own defence.
+    #[test]
+    fn a_flag_shaped_image_is_never_a_docker_create_flag() {
+        let task = leased(1_700_000_000);
+        let cmds = TaskCommands {
+            container_image: "--privileged".into(),
+            interpreter: vec![
+                "/bin/sh".into(),
+                "-v".into(),
+                "/:/host".into(),
+                "alpine:3.20".into(),
+                "sh".into(),
+                "-c".into(),
+            ],
+            commands: vec!["id".into()],
+            ..TaskCommands::default()
+        };
+        let a = create_args(
+            &task,
+            &cmds,
+            &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+            "n",
+        );
+        let ends: Vec<usize> = a
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x.as_str() == "--")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(ends.len(), 1, "exactly one end-of-flags marker: {a:?}");
+        let end = ends[0];
+        assert_eq!(
+            a[end + 1],
+            "--privileged",
+            "the image is the first positional"
+        );
+        assert!(
+            !a[..end].iter().any(|x| x == "--privileged" || x == "-v"),
+            "nothing the author wrote is before `--`: {a:?}"
+        );
     }
 
     /// The sweep's parser keeps only egret task containers and drops the ones

@@ -185,6 +185,13 @@ pub(super) mod testing {
         /// The `taskRunner:` spec each run was given.
         pub specs: Mutex<Vec<crate::scripts::RunnerSpec>>,
         pub cancelled: Mutex<Vec<String>>,
+        /// `(container name, delete)` for every `release`.
+        pub released: Mutex<Vec<(String, bool)>>,
+        /// What `adopt` answers: `Some` = a started container exists for the
+        /// attempt and finished with this; `None` (the default) = nothing.
+        pub adoptable: Mutex<Option<CommandsResult>>,
+        /// How many times `adopt` was asked.
+        pub adopt_calls: Mutex<usize>,
         answer: Mutex<Option<Result<CommandsResult>>>,
         /// `(is_stderr, line)` to stream, in order. `None` streams the one
         /// stdout line the argv would print.
@@ -261,6 +268,25 @@ pub(super) mod testing {
                 .lock()
                 .unwrap()
                 .push(crate::worker::commands::container_name(task));
+            Ok(())
+        }
+
+        async fn adopt(
+            &self,
+            _task: &TaskInput,
+            _commands: &TaskCommands,
+            _spec: &crate::scripts::RunnerSpec,
+            _observer: &dyn crate::worker::commands::LineObserver,
+        ) -> Result<Option<CommandsResult>> {
+            *self.adopt_calls.lock().unwrap() += 1;
+            Ok(self.adoptable.lock().unwrap().clone())
+        }
+
+        async fn release(&self, task: &TaskInput, spec: &crate::scripts::RunnerSpec) -> Result<()> {
+            self.released
+                .lock()
+                .unwrap()
+                .push((crate::worker::commands::container_name(task), spec.delete));
             Ok(())
         }
     }

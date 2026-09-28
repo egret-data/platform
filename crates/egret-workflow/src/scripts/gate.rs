@@ -26,7 +26,17 @@
 //! 2. `plugin_configurations` must hold an entry for the runner's FQCN, and
 //!    its `allowed-images` must be non-empty: **no entry, or an empty list,
 //!    allows no image**;
-//! 3. the image, normalised by [`normalise_image_ref`], must match one of the
+//! 3. the image must be a well-formed reference ([`image_ref_problem`]): it
+//!    starts with an ASCII letter or digit (or `[`, an IPv6 host) and holds
+//!    only the characters an image reference can hold -- so no leading `-`,
+//!    no whitespace, no control character, not empty. **This is a security rule, not tidiness** (final
+//!    review I1): the Docker runner passes the image as one argv slot of
+//!    `docker create`, which parses flags up to the first positional
+//!    argument, so `--privileged` as an image was a FLAG -- and it matched
+//!    `*`. The runner also puts `--` before the image (defence in depth); the
+//!    Kubernetes runner writes the image into a struct field, where a
+//!    flag-shaped string is only an unpullable name;
+//! 4. the image, normalised by [`normalise_image_ref`], must match one of the
 //!    glob patterns ([`glob_match`]).
 
 use std::fmt;
@@ -55,6 +65,11 @@ pub enum GateRefusal {
     NoPluginConfiguration { runner: &'static str },
     /// The runner's entry has an empty `allowed-images`.
     EmptyAllowlist { runner: &'static str },
+    /// The image is not a well-formed image reference ([`image_ref_problem`]).
+    MalformedImage {
+        image: String,
+        problem: &'static str,
+    },
     /// The image matched none of the runner's patterns.
     ImageNotAllowed {
         image: String,
@@ -70,6 +85,7 @@ impl GateRefusal {
             GateRefusal::FeatureDisabled => "workflow_containers_disabled",
             GateRefusal::NoPluginConfiguration { .. } => "script_runner_not_configured",
             GateRefusal::EmptyAllowlist { .. } => "script_allowlist_empty",
+            GateRefusal::MalformedImage { .. } => "script_image_malformed",
             GateRefusal::ImageNotAllowed { .. } => "script_image_not_allowed",
         }
     }
@@ -94,6 +110,10 @@ impl fmt::Display for GateRefusal {
                 "the 'allowed-images' list for task runner '{runner}' is empty, so no image \
                  is allowed on it"
             ),
+            GateRefusal::MalformedImage { image, problem } => write!(
+                f,
+                "image {image:?} is not a well-formed image reference: {problem}"
+            ),
             GateRefusal::ImageNotAllowed {
                 image,
                 matched_as,
@@ -116,6 +136,12 @@ pub fn check(input: &GateInput) -> Result<(), GateRefusal> {
         input.runner,
         input.plugin_configurations,
     )?;
+    if let Some(problem) = image_ref_problem(input.image) {
+        return Err(GateRefusal::MalformedImage {
+            image: input.image.to_string(),
+            problem,
+        });
+    }
     let matched_as = normalise_image_ref(input.image);
     if allowed.iter().any(|p| glob_match(p, &matched_as)) {
         Ok(())
@@ -156,6 +182,40 @@ fn allowlist(
         return Err(GateRefusal::EmptyAllowlist { runner });
     }
     Ok(allowed)
+}
+
+/// Why `image` is not a well-formed image reference, or `None` if it is.
+///
+/// The shape of the distribution reference grammar
+/// (`distribution/reference`), not all of it: a reference starts with a
+/// domain or path component, both of which start with a letter or digit (or
+/// a `[` opening an IPv6 host), and
+/// every character in it is one of `[A-Za-z0-9._:/@+-]` (plus `[`/`]` around
+/// an IPv6 registry host). Anything else -- a leading `-` (a `docker create`
+/// FLAG, final review I1), whitespace, a control character, the empty string
+/// -- cannot name an image, so it is refused rather than matched: a pattern
+/// such as `*` must never be what admits it.
+pub fn image_ref_problem(image: &str) -> Option<&'static str> {
+    let Some(first) = image.chars().next() else {
+        return Some("it is empty");
+    };
+    if first == '-' {
+        return Some("it starts with '-', which a container CLI would read as a flag");
+    }
+    // `[` opens an IPv6 registry host (`[::1]:5000/img`).
+    if !(first.is_ascii_alphanumeric() || first == '[') {
+        return Some("it must start with an ASCII letter or digit");
+    }
+    if image.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Some("it contains whitespace or a control character");
+    }
+    if !image
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "._:/@+-[]".contains(c))
+    {
+        return Some("it contains a character no image reference holds");
+    }
+    None
 }
 
 /// True if `image` is a `{{ }}`/`{% %}` expression that must be rendered

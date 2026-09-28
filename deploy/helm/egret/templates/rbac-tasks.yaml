@@ -4,7 +4,8 @@ task namespace only (W5a spec §5, RBAC):
 
   pods       get/list/watch/create/delete  -- look up by name (re-attach),
                                               create, list for the orphan
-                                              sweep, delete on finish/cancel
+                                              sweep, delete after the outcome
+                                              commits or on cancel
   pods/log   get                           -- follow main's and files-out's log
   pods/exec  get/create                    -- move input/output files by
                                               exec + tar, and the markers.

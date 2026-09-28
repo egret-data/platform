@@ -70,11 +70,12 @@ Properties implemented: `containerImage`, `commands` (Commands) / `script` (Scri
   - a digest reference (`name@sha256:…`) is matched as written, with no tag added (measured: the artifact ran `python@sha256:…` as written);
   - otherwise the tag is the part after a `:` that follows the last `/`, so the port in `host:5000/img` is not a tag; a reference with no tag gets `:latest` (`host:5000/img` → `host:5000/img:latest`);
   - the default images are matched the same way: `ubuntu` → `ubuntu:latest`, `python:3.13-slim` unchanged.
+  - *Well-formed references only (final review I1):* before the match, the gate refuses an image that is not a well-formed reference: empty, starting with anything but an ASCII letter or digit (or `[` for an IPv6 host), or holding whitespace, a control character or a character no reference holds. A `-`-led image was a `docker create` **flag** on the Docker runner (`--privileged` matched `*` as `--privileged:latest`, and the author's interpreter tail supplied `-v /:/host …`); the Docker runner also puts `--` before the image. On Kubernetes the image is a field of the pod, where such a string is only an unpullable name.
   - *Glob semantics (added in Task 2's fix round 1):* `*` matches any run of characters **except `/`**, `?` one character other than `/`, and there is no `**`. A star therefore cannot reach another registry host: `python:3*` does not match `python:3000/x/img` (host `python`, port 3000), and `registry.company.com/*` does not match `registry.company.com.evil.io/x`. Allowing a deeper path under a registry takes one `*` per level (`registry.company.com/*/*`).
 - **One gate function, two call sites** (the W13b lesson: drafts save despite validation errors and still run):
   - **at publish**, a literal image outside the allowlist, a disabled feature or a refused runner/property is a named 400;
   - **at run**, after rendering (the image may be a `{{ }}` expression), the handler calls the same function. On refusal the task is FAILED with the reason, and **no pod or container is created**.
-- Turning the feature off stops new runs at the run-time gate; runs already in a pod finish.
+- Turning the feature off stops new runs at the run-time gate; runs already in a pod finish. *Exactly (final review):* when the run-time gate refuses, the handler asks the runner to **adopt** the container or pod that already exists for this (run, attempt) — it passed the gate when it was created — and follows it to its end; `adopt` never creates, so without one the run is FAILED with the refusal and nothing is created. This holds for a narrowed allowlist as for the feature.
 
 ## 5. The Kubernetes runner
 
@@ -83,6 +84,7 @@ Properties implemented: `containerImage`, `commands` (Commands) / `script` (Scri
 - namespace `workflow.kubernetes.namespace` (pod security `restricted`);
 - `automountServiceAccountToken: false`, `runAsNonRoot: true`, `runAsUser: workflow.kubernetes.run_as_user`, dropped capabilities, `seccompProfile: RuntimeDefault`;
 - resources: config defaults, author requests capped by `max_resources`;
+- node disk (final review I5, user decision): `main` gets an `ephemeral-storage` request and limit from config only (`default_resources`/`max_resources`, defaults request 256Mi, limit 10Gi, max limit 10Gi; Kestra's `resources` has no such key, so the author cannot set it), and every `emptyDir` has a `sizeLimit`: the working directory and the stderr volume at that limit, the markers volume at 1 MiB. A task that writes past it is evicted by the kubelet and FAILED with the kubelet's message, instead of filling the node until `DiskPressure` evicts its neighbours;
 - `imagePullPolicy` from `pullPolicy`; `imagePullSecrets` from config;
 - a shared `emptyDir` as the working directory; `WORKING_DIR` env var set to it.
 
@@ -91,19 +93,21 @@ Properties implemented: `containerImage`, `commands` (Commands) / `script` (Scri
 2. `main`: the flow's image, running `interpreter [beforeCommands + commands]` in the working directory;
 3. sidecar `files-out` (the helper image): keeps the pod alive after `main` exits so egret can download `outputFiles` by exec + tar.
 
-**Lifecycle:** create; upload input files; follow `main`'s log (`pods/log?follow`) into `ingest_line` → `RunLog` (W11); wait for `main` to terminate and read its exit code from the pod status; download output files; **delete the pod** (unless `delete: false`), on failure too.
+**Lifecycle:** create; upload input files; follow `main`'s log (`pods/log?follow`) into `ingest_line` → `RunLog` (W11); wait for `main` to terminate and read its exit code from the pod status; download output files; **commit the outcome; then delete the pod** (unless `delete: false`, which lets `files-out` exit instead), on failure too. *Order (final review I3):* the pod is deleted only **after** the outcome's transaction commits. If the commit fails, the run stays RUNNING, its lease expires, and the next claim **re-attaches** to the finished pod and records the same outcome — the task is not run again. If egret dies between the commit and the delete, the run is terminal and the orphan sweep deletes the pod.
+
+**Failures no later claim can get past fail the task** (final review I4), by name: a `pods/exec` 403 (the Role lacks `get` or `create`; the first one is also logged at ERROR with the RBAC hint), a helper container that cannot start (`ImagePullBackOff`, `ErrImageNeverPull`, `InvalidImageName`, … — the message names `workflow.kubernetes.helper_image`), `ErrImagePull` that lasts 90 s, `files-in` exiting non-zero, and an eviction. Only a failure that a later claim might get past (the API server did not answer) keeps the pod for a re-attach.
 
 **Timeout and kill:** delete the pod with grace 0; on a timeout the task is FAILED with W11's `Timeout after …` line.
 
-**Re-attach:** on claim, look the pod up by name. Running: re-attach and follow the log from `sinceTime` = the run attempt's last stored line (W11), so few lines repeat. Terminated: download outputs and delete. Absent: create.
+**Re-attach:** on claim, look the pod up by name. Running: re-attach and follow the log from `sinceTime` = the run attempt's last stored line (W11), so few lines repeat. Terminated: download outputs, commit, then delete. Absent: create.
 
-**Orphans:** the reaper, on its existing tick, deletes pods carrying egret's labels whose run is terminal (egret died between downloading outputs and deleting).
+**Orphans:** the reaper, on its existing tick, deletes pods carrying egret's labels whose run is terminal (egret died between committing the outcome and deleting).
 
 **RBAC:** a Role in the task namespace: `pods` get/list/watch/create/delete, `pods/log` get, `pods/exec` get and create; bound to egret's ServiceAccount. *(`get` on `pods/exec` added by user decision, 2026-09-28: WebSocket exec on Kubernetes >= 1.30 is authorised as `get` (measured on kind 1.33 in W5a Task 6's e2e); with `create` alone every exec is a 403.)*
 
 **NetworkPolicy:** task pods may not reach egret's metadata Postgres or the Kubernetes API server; all other egress is open.
 
-The Docker runner gets the same re-attach-by-name and delete-on-finish behaviour; it already names containers.
+The Docker runner gets the same re-attach-by-name and delete-after-commit behaviour; it already names containers. It has **no disk bound**: Docker has no portable per-container disk limit (`--storage-opt size=` needs overlay2 on xfs with `pquota`), so a task on the Docker runner can fill the daemon's disk — one more reason it is for local development only (§11).
 
 ## 6. Lease renewal and the default timeout
 
@@ -118,7 +122,7 @@ The Docker runner gets the same re-attach-by-name and delete-on-finish behaviour
 - `container_runner`: `none` | `docker` | `kubernetes`, default `none`. With `none` the production registry is unchanged; otherwise the four script types and the two aliases are registered.
 - `container_default_timeout_s` (3600).
 - `plugin_configurations`: `[{type, values}]`.
-- `kubernetes`: `namespace`, `default_resources`, `max_resources`, `image_pull_secrets`, `run_as_user`, `helper_image`.
+- `kubernetes`: `namespace`, `default_resources`, `max_resources`, `image_pull_secrets`, `run_as_user`, `helper_image`. `default_resources` and `max_resources` each have `request` and `limit` with `cpu`, `memory` and `ephemeral_storage` (defaults: request `100m`/`128Mi`/`256Mi`, limit `1`/`512Mi`/`10Gi`; max limit `2`/`2Gi`/`10Gi`), e.g. `EGRET_WORKFLOW__KUBERNETES__MAX_RESOURCES__LIMIT__EPHEMERAL_STORAGE=20Gi`; the chart's `workflow.tasks.{default,max}Resources` render to the same variables.
 
 Helm chart: `workflow.containerRunner`; a task namespace, Role, RoleBinding and NetworkPolicy, modelled on `namespace-kernels.yaml`, `rbac-kernels.yaml` and `networkpolicy-kernels.yaml`. The helper image is built from a Dockerfile in the repo.
 
@@ -137,6 +141,11 @@ Helm chart: `workflow.containerRunner`; a task namespace, Role, RoleBinding and 
 |---|---|
 | a `shell.Commands` flow runs in a pod on kind, its lines readable through W11's API, its `outputFiles` returned, the pod deleted | the pod not deleted / logs not followed |
 | a worker killed mid-run: the next claim re-attaches to the same pod; one pod ever exists, one outcome recorded | create instead of re-attach |
+| a commit that fails after the task finished: the next claim re-attaches, the task runs once (final review I3) | delete before the commit |
+| feature turned off while a run's container exists: the re-claim adopts it and the run finishes; a new run is refused, nothing created | refuse without adopting |
+| a flag-shaped image (`--privileged`) is refused by the gate at publish and at run, and is never a `docker create` flag | the well-formedness check dropped / `--` dropped |
+| a Role without `pods/exec` `get`, and an unpullable helper image, FAIL the task by name in bounded time (live, kind) | an exec 403 / helper start failure classed as egret's outage |
+| a task writing past its ephemeral-storage limit is evicted and FAILED with the kubelet's reason (live, kind); pod spec: the limit and every `sizeLimit` | the limit or a `sizeLimit` dropped |
 | a task longer than `working_timeout` is not reaped while its worker lives; reaped after the worker dies | no lease renewal |
 | timeout deletes the pod, FAILED with `Timeout after …` | timeout without pod deletion |
 | feature off → refused at publish and at run, no pod created | the run-time gate skipped |
@@ -157,4 +166,6 @@ W5b (plugin host image, shim, `kestra.<FQCN>`, jar allowlist); internal storage,
 - Re-attach may repeat a few log lines around the reclaim instant.
 - `pods/exec` in the task namespace lets egret exec into task pods; the namespace holds nothing else.
 - After a re-attach, `stdOutLineCount` and `stdErrLineCount` count only the lines the last holder read: the lines an earlier holder stored are dropped as replayed and not counted. The stored log lines themselves are complete; only the counts are short (measured in W5a Task 6's e2e: the killed run counted 35 of its 40 stdout lines).
-- **If `pods/exec` `get` is ever missing** — an RBAC regression, or a cluster that authorises WebSocket exec differently — egret degrades silently rather than failing. A run with no input or output files waits about 15 s for the stderr sentinel on every run, then succeeds. A run with input or output files never finishes: every exec is refused, the runner keeps the pod for a later claim, and the run re-attaches for ever. The only signal is a server-side WARN per attempt. (Measured in W5a Task 6: live on kind 1.33 with `create` only, and by the mutation that drops `get` from the chart in `k8s_runner_live`.)
+- **One outcome, at-least-once around the commit — exactly:** the pod is deleted only after the outcome commits, so a failed commit re-attaches rather than re-runs. What remains at-least-once: a finished pod that disappears between a failed commit and the next claim (an operator deleted it, its node was lost) cannot be re-attached to, so that claim creates a new one and the task runs again, as Kestra's runner would re-run it. A crash after the commit leaves the pod until the orphan sweep's next tick. A `delete: false` pod whose `ended` marker was never sent (egret died after the commit) keeps its sidecar running, and the sweep leaves it alone as the author asked.
+- **A missing `pods/exec` `get` now fails the task** (final review I4; it used to degrade silently): the task is FAILED naming the missing verb, and the first such refusal is logged at ERROR with the RBAC hint. A run with neither input nor output files meets the refusal when it ends its stderr stream, so it fails too rather than waiting 15 s and succeeding. The pod is released after the failure commits. (Measured live on kind with the chart's Role minus that verb, `k8s_runner_live`.) A startup check of the Role's verbs is deferred.
+- **The Docker runner has no disk bound** (final review I5): Docker has no portable per-container disk limit, so ephemeral storage is bounded on the Kubernetes runner only. The Docker runner is for local development and tests, and the chart refuses it.

@@ -322,11 +322,38 @@ fn recorded(type_id: &str, spec: serde_json::Value) -> (TaskInput, Arc<Recorder>
     (t, rec)
 }
 
-/// A [`TaskInput`] with a **fresh** run id and a lease of `now`, so two tests
-/// can never address the same container.
+/// This process's workspace id, on every task it runs: the label the suite's
+/// cleanup removes by. Since final review I3 a handler's `run` leaves its
+/// container for the post-commit `release`, which a test calling `run`
+/// directly does not reach.
+fn suite_workspace() -> Uuid {
+    static WS: std::sync::OnceLock<Uuid> = std::sync::OnceLock::new();
+    *WS.get_or_init(Uuid::new_v4)
+}
+
+/// Remove every container this process created (its workspace label), and
+/// nothing else on the daemon.
+fn remove_this_suites_containers() {
+    let out = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "-aq",
+            "--filter",
+            &format!("label=egret.io/workspace-id={}", suite_workspace()),
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("docker ps");
+    for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+        force_remove(id);
+    }
+}
+
+/// A [`TaskInput`] with a **fresh** run id, so two tests can never address
+/// the same container.
 fn task(type_id: &str, spec: serde_json::Value) -> TaskInput {
     TaskInput {
-        workspace_id: Uuid::new_v4(),
+        workspace_id: suite_workspace(),
         execution_id: Uuid::new_v4(),
         run_id: Uuid::new_v4(),
         task_id: "t".to_string(),
@@ -337,7 +364,6 @@ fn task(type_id: &str, spec: serde_json::Value) -> TaskInput {
         render: egret_workflow::runners::RenderContext::new(),
         timeout: None,
         principal: None,
-        claimed_at: chrono::Utc::now(),
         log: RunLog::discard(),
     }
 }
@@ -464,9 +490,16 @@ async fn a_container_runs_and_both_of_its_streams_reach_the_sink() {
         Some(LogLevel::Error),
         "and the stream it came from must survive the trip: stderr is ERROR (W11 Task 1)"
     );
+    // Final review I3: `run` removes nothing; the worker's post-commit
+    // `release` does, and only then.
+    assert!(
+        container_exists(&container_name(&t)),
+        "the container outlives `run`, so a failed commit can re-attach to it"
+    );
+    h.release(&t).await.expect("released");
     assert!(
         !container_exists(&container_name(&t)),
-        "a finished run removes its container -- `$default$delete` is true"
+        "release removes the container -- `$default$delete` is true"
     );
 }
 
@@ -609,6 +642,7 @@ async fn a_non_zero_exit_fails_the_task_and_set_e_stops_at_the_first_failure() {
         !texts.contains(&"after".to_string()),
         "`set -e` ends the script at the first failing line: {texts:?}"
     );
+    shell().release(&t).await.expect("released");
     assert!(!container_exists(&container_name(&t)));
 }
 
@@ -732,7 +766,6 @@ async fn a_new_holder_re_attaches_to_the_attempts_container_instead_of_starting_
         let (t, rec) = recorded(container::TYPE_ID, serde_json::json!({}));
         (
             TaskInput {
-                claimed_at: chrono::Utc::now() + chrono::Duration::seconds(30),
                 spec: a.spec.clone(),
                 log: t.log,
                 ..a.clone()
@@ -740,7 +773,8 @@ async fn a_new_holder_re_attaches_to_the_attempts_container_instead_of_starting_
             rec,
         )
     };
-    assert_ne!(a.claimed_at, b.claimed_at, "B holds a different lease");
+    // B is a different holder (its own log), and `TaskInput` carries no
+    // lease at all: the name can only be the (run, attempt) re-attach key.
     assert_eq!(a.attempt, b.attempt, "of the same attempt");
 
     let out = h
@@ -1229,6 +1263,7 @@ fn main() {
                     }
                 }
             }
+            remove_this_suites_containers();
         }
     }
 
