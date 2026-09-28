@@ -90,10 +90,14 @@
 //!   `insert`/`update`/`delete` this compiler withholds on Trino can therefore
 //!   NEVER match at column granularity here: emitting them would be decoration
 //!   that reads as protection. **So a user without clearance can still
-//!   OVERWRITE a column they cannot read** — a real asymmetry with Trino, not a
-//!   rounding error. Buying the write half needs a *table*-level deny, which
-//!   would block every untagged column of that table too; that is a user
-//!   ruling, not a compiler decision, and the ruling so far is "reads only".
+//!   OVERWRITE a column they cannot read** — and the live gate measured that
+//!   this is true of **Trino too**, so it is not an asymmetry between the
+//!   engines: the uncleared subject INSERTed and DELETEd through a live Trino
+//!   clearance, because the deny names a *column* resource while the write check
+//!   presents a *table* one. Neither engine withholds a write. Buying the write
+//!   half needs a *table*-level deny, which would block every untagged column of
+//!   that table too; that is a user ruling, not a compiler decision, and the
+//!   ruling so far is "reads only".
 //! - **No dedup, so the count is exactly N.** A tag-selected ROW FILTER dedups
 //!   per table because `rowFilterDef` declares no column resource, so two
 //!   tagged columns of one table are the same filter. An access deny DOES carry
@@ -120,10 +124,19 @@
 //! that withholds some of the columns it claims to, which is the failure this
 //! programme keeps refusing to ship.
 //!
-//! A StarRocks clearance is **not** a view-proof control: `ColumnPrivilege`
-//! routes a `View` to `checkViewPrivilege` and a materialized view to
-//! `checkMaterializedViewAction`, neither of which descends to base-table
-//! columns (D0b, read in source and NOT yet measured live — Task 6 owns that).
+//! A clearance is **not** a view-proof control, on either engine, and this is
+//! MEASURED (live case 4, `docs/en/plans/2026-09-28-sp4c-live-result.md`):
+//! `ColumnPrivilege` routes a `View` to `checkViewPrivilege` and a materialized
+//! view to `checkMaterializedViewAction`, neither of which descends to
+//! base-table columns, and a StarRocks view returned every classified value to
+//! the uncleared subject. **Trino is worse, not better**: its views are
+//! DEFINER-rights, so a view owned by a CLEARED user hands the whole column to
+//! an uncleared reader whose direct read is refused in the same minute, and a
+//! view owned by an UNCLEARED user blocks everybody including the cleared. The
+//! materialized-view half remains source-only — the gate recorded both MVs as
+//! BLOCKED (§4c) and declined to call them measured. The ruling is to state the
+//! limit, not to block view creation, so it is stated in D0b, in D5's
+//! acceptance criterion, and in the UI where a clearance is authored.
 
 use std::collections::BTreeMap;
 
@@ -446,26 +459,35 @@ fn skip(g: &GateRow, reason: String) -> SkippedItem {
 /// plugin does not declare is silently ignored: the policy compiles, deploys,
 /// and withholds nothing — `egret_perm::actions`' own warning).
 ///
-/// **Trino: both actions, not just `read`.** A classification withholds the
-/// DATA, not only the `SELECT`: an uncleared user who could still `INSERT` into
-/// a classified column would be writing into data they are not cleared to see,
-/// and under-denying is the one failure direction a read test cannot notice.
-/// That is `select`/`insert`/`delete`.
+/// **Trino gets `select`/`insert`/`delete`, and the live gate measured that the
+/// write halves are INERT.** The intent was that a classification withholds the
+/// DATA and not only the `SELECT` — an uncleared user who could still `INSERT`
+/// into a classified column would be writing into data they are not cleared to
+/// see. What actually happens (live case 5,
+/// `docs/en/plans/2026-09-28-sp4c-live-result.md`) is that the uncleared subject
+/// INSERTed **and** DELETEd through a live clearance: the compiled deny names a
+/// *column* resource while Trino's write check presents a *table* one, so
+/// `insert`/`delete` match nothing. **They are kept, but they are not
+/// protection**, and this comment says so rather than arguing for them: leaving
+/// the earlier justification standing is how the next reader rebuilds the wrong
+/// model of what a clearance does. Buying the write half means a *table*-level
+/// deny, which over-blocks every untagged column of that table — a user ruling,
+/// not a compiler decision, and the ruling is reads-only.
 ///
-/// **StarRocks: `select` ALONE, by user ruling (2026-09-28) — and this is an
-/// asymmetry with Trino, not a simplification.** D0b measured that
-/// `checkColumnAction` has exactly ONE caller and it passes
+/// **StarRocks: `select` ALONE, by user ruling (2026-09-28) — and it is NOT an
+/// asymmetry with Trino, because neither engine withholds a write.** D0b
+/// measured that `checkColumnAction` has exactly ONE caller and it passes
 /// `PrivilegeType.SELECT` (`ColumnPrivilege.java:152`), and that egret's own
 /// `starrocks.json` restricts the `column` resource to
 /// `accessTypeRestrictions: ["select"]`. So the `insert`/`update`/`delete` this
-/// function yields for Trino can never MATCH at column granularity here.
+/// function yields for Trino can never MATCH at column granularity here either.
 /// Emitting them anyway would be decoration that reads as protection — a policy
 /// listing four withheld accesses while withholding one — which is precisely the
-/// failure mode this programme keeps refusing to ship. **The consequence is
-/// real: a user without clearance can still overwrite a StarRocks column they
-/// cannot read.** Buying the write half needs a *table*-level deny, which would
-/// block every untagged column of that table too; that is a user ruling, and the
-/// ruling is reads-only. SP4c Task 5 says so in the UI.
+/// failure mode this programme keeps refusing to ship, and it is the same
+/// judgement the Trino paragraph above now records against Trino's own body.
+/// **The consequence is real on BOTH engines: a user without clearance can still
+/// overwrite a column they cannot read.** SP4c Task 5/7 says exactly that in the
+/// UI.
 fn withheld_accesses(engine: EngineType) -> Result<Vec<String>, CompileError> {
     let actions: &[Action] = match engine {
         EngineType::Trino => &[Action::Read, Action::Write],
