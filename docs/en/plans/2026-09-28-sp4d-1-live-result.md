@@ -645,6 +645,12 @@ user       : d3member
 ── case sp4d1/t2/item      access Allowed { 8773 }   mask  NoMask   filter NoFilter
 ```
 
+The last line reads `sp4d1/t2/item`, the same resource string as S2 in §10.5 — and it is **not**
+S2. This one is user `d3member` on the shared, compiler-owned profile `sp4a-sr-crosscheck` (55),
+allowed by the pre-existing broad grant `8773`. S2 is user `sp4dsr` on the private, hand-made
+profile `sp4d1-sr-gate` (57), allowed by `8859`. Different subject, different profile, different
+policy — the same three tables, because both engines read one Iceberg warehouse.
+
 **F2 — egret's rule compiler produces order-ambiguous policy pairs, and the evaluator refuses
 them.** The two halves are NOT the same, and the difference is worth stating plainly because
 short summaries of F2 have got it wrong:
@@ -743,10 +749,30 @@ Three obstacles, each recorded with what was tried:
    Ranger is consulted (`RangerAccessController.java:115-117`, recorded in SP4c), so a `root`
    measurement proves nothing about a deny.
 
-Building a private StarRocks the way the private Trino was built is possible in principle but is
-not proportionate: it needs an FE **and** a CN, its own metadata, the external Iceberg catalog
-re-registered and an authentication chain configured — the same four repairs SP4c had to make —
-for two cases.
+**A cost estimate that was wrong, kept because being wrong about it is the useful part.** This
+paragraph originally read: *"Building a private StarRocks the way the private Trino was built is
+possible in principle but is not proportionate: it needs an FE **and** a CN, its own metadata,
+the external Iceberg catalog re-registered and an authentication chain configured — the same four
+repairs SP4c had to make — for two cases."* §10 then did exactly that, so the estimate is
+refuted by the section immediately below it.
+
+What it got wrong:
+
+- **One of the four costs did not apply at all.** No authentication chain was configured. SP4c
+  needed one because it queried as an egret user through the delegated JWT path; §10 queries as a
+  **native** StarRocks user created on its own FE, so `egret_oidc` and `authentication_chain`
+  never enter. Choosing the subject differently deleted the cost.
+- **Two of the remaining three were cheap, not hard.** FE + CN is one manifest, and the Iceberg
+  catalog is one `CREATE EXTERNAL CATALOG` copied from `SHOW CREATE CATALOG` on a provisioned FE.
+  Its own metadata costs nothing when nothing needs to survive the run.
+- **The real costs were two things this paragraph did not name**: the CN cannot register until
+  root's password is set on a fresh FE, and a one-CN `shared_data` FE starves the first scan
+  behind `_statistics_` table creation. Both are recorded in §10.1 and in the recipe.
+
+Measured rather than estimated: the instrument existed for **6 minutes 37 seconds**, requested
+4 GiB of a node with ~11 GiB spare, and pulled no images. What made the estimate wrong was
+treating SP4c's repair list — which was about making a *shared* engine work for a delegated
+subject — as the cost of building a private one for a native subject.
 
 **What the shared StarRocks contributed anyway:** case 7 (§7), which needs no query and no
 authentication, and §8's predictions against the policy set that *does* exist — one of which (F2)
@@ -840,12 +866,21 @@ last query. The plugin is demonstrably live on this profile — 42
 optimizeTagTrieForRetrieval: false, optimizeTagTrieForSpace: false, enableResourceMatcherReuse: true }
 ```
 
-`enableResourceMatcherReuse` is the field 2.8.0 adds and 2.5.0 does not have, so the version claim
-is read off the running plugin rather than off the image tag.
+`enableResourceMatcherReuse` is present in **both** StarRocks dumps in this document — this one
+and the shared FE's (§7) — and absent from the Trino dump (§5). That is an observation across
+three running plugins, and it is deliberately not stated as more: every StarRocks dump here is
+2.8.0 and the only Trino dump is 2.5.0, so engine and version move together and this contrast
+alone cannot separate "2.8.0 adds the field" from "the StarRocks plugin reports it". What
+actually pins the version is Task 7's differential corpus, which runs against the
+`ranger-plugins-common-2.8.0` jar itself. The dump's value here is narrower and still worth
+having: the plugin this FE loaded reports the same option set as the shared FE's, so the private
+instrument is not a different build wearing the same image tag.
 
 ### 10.4 The prediction, made before any query as `sp4dsr`
 
-Printed at **2026-09-28T20:29:46Z**; the queries ran at **20:29:55Z**.
+Printed at **2026-09-28T20:29:46Z**; the queries ran at **20:29:55Z**. This is the tool's own
+output, pasted; only the download's *directory* is elided (it was a session scratchpad), and the
+recipe in §12 writes the same filename so the two can be compared line for line.
 
 ```text
 download   : …/sr-gate-dl.json
@@ -909,9 +944,25 @@ match and grants nothing. That is the Trino T1 shape reproduced on a different e
 different plugin version, a different service-def and a different middle-level name — and the
 evaluator predicted both halves from `MatchType::Ancestor` not being an allow.
 
-S1 and S2 differ only in the `table` and `column: "*"` levels, and they came out deny and allow.
-The measurement is **sensitive**, not uniformly denying, so S1's denial means the shape and not
-the setup.
+S1 and S2 came out deny and allow, so the measurement is **sensitive** rather than uniformly
+denying. Stating the warrant exactly, because an earlier draft of this paragraph (and
+`dff960f6`'s commit message, which carries the same overstatement) said the two "differ only in
+the `table` and `column: "*"` levels" — which the policy JSON at §10.2 refutes. They differ in
+**two** ways:
+
+1. **The levels named** — S1 stops at `{catalog, database}`, S2 continues to `table` and
+   `column: ["*"]`. This is the variable under test.
+2. **The fixture named** — S1's `database` is `sp4d1a` and it reads `t1`; S2's is `sp4d1` and it
+   reads `t2`. This is *not* controlled by the pair itself. It is deliberate — the two mirror the
+   Trino T1/T2 fixtures so the engines are directly comparable — but it means the pair alone
+   cannot rule out "`t1` is simply unreadable".
+
+**What rules that out is the `root` data-path control, not the pair.** `root` bypasses Ranger and
+read four rows from **both** `sp4d1a.t1` and `sp4d1.t2` minutes earlier (§10.5), so both fixtures
+are demonstrably readable. With that in hand, S1's refusal is an authorization refusal — and it
+says so itself: `ERROR 5204 … Access denied … SELECT privilege(s) on COLUMN item`, not a missing
+table, a missing file or an empty scan. Only then does S1's denial mean the shape and not the
+setup.
 
 One consequence worth stating for SP4d-2: the engines disagree about the *message* but not about
 the decision. Trino says `Cannot select from columns [item, id] in table or view t1`, StarRocks
@@ -986,8 +1037,8 @@ The StarRocks side is the same three steps with `starrocks` as the engine argume
 ```bash
 kubectl --context kind-egret exec -n egret-engines sp4d1-sr-gate-fe-0 -- \
   curl -s http://egret.egret-system.svc.cluster.local:8080/service/plugins/policies/download/sp4d1-sr-gate \
-  > /tmp/sr.json
-cargo run -p egret-ranger-eval --example live_gate -- /tmp/sr.json starrocks sp4dsr sp4a10_wh \
+  > /tmp/sr-gate-dl.json
+cargo run -p egret-ranger-eval --example live_gate -- /tmp/sr-gate-dl.json starrocks sp4dsr sp4a10_wh \
   sp4d1a/t1/item sp4d1/t2/item
 kubectl --context kind-egret exec -n egret-engines sp4d1-sr-gate-fe-0 -- \
   head -c 120 /tmp/ranger/sp4d1-sr-gate/policycache/starrocks_sp4d1-sr-gate.json
