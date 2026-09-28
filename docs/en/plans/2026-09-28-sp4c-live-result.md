@@ -332,3 +332,121 @@ Same query, same engines, same minute, same deny policy — one subject refused 
 the other served, the only difference being one `access_grants` row. That is what
 makes case 1 a **clearance** and not an outage, and it is the observation D0b said
 the gate owed.
+
+---
+
+## Case 4 — the view bypass. **FAILED on both engines. Measured Critical.**
+
+D0b read in the StarRocks source that `checkViewPrivilege` and
+`checkMaterializedViewAction` never descend to base-table columns, and said no
+query had confirmed it and nobody had checked Trino. Both are now measured, and
+**a view leaks the classified column in full on both engines.**
+
+### 4a. StarRocks — the view leaks, outright
+
+`default_catalog.sp4cgate.gate_v` is `SELECT id, secret, plain FROM
+sp4a10_wh.sp4a.gate`. Read by `analyst`, who is refused the base column in the
+same minute:
+
+```text
+analyst / StarRocks  SELECT id, secret FROM sp4a10_wh.sp4a.gate ORDER BY id
+                     → failed: engine: Server error: `ERROR 5204 (42000): Access denied; you need
+                       (at least one of) the SELECT privilege(s) on COLUMN secret for this operation.'
+
+analyst / StarRocks  SELECT id, secret FROM sp4cgate.gate_v ORDER BY id
+                     → finished, [[1,'classified-one'],[2,'classified-two'],[3,'classified-three']]
+```
+
+Every classified value, to a subject the clearance refuses. The column deny is
+simply not consulted on this path — and note `analyst` holds **no** egret grant on
+`default_catalog` at all, so this is not a grant that was too wide: the view
+answers a subject with nothing.
+
+### 4b. Trino — the view leaks whenever its OWNER is cleared
+
+Trino behaves differently and is not safe either. Its view is DEFINER-rights, so
+the base-table check is made against the **view owner**:
+
+- With the owner (`admin`) **not** cleared, every reader is refused — including the
+  cleared `d3member`, and including `admin`:
+  ```text
+  analyst  / Trino  SELECT id, secret FROM sp4a10_wh.sp4a.gate_v ORDER BY id
+  d3member / Trino  (same query)
+                    → failed: engine: Access Denied: View owner does not have sufficient privileges:
+                      View owner 'admin' cannot create view that selects from gate
+  ```
+- Give the **owner** the clearing role and the same view hands the full classified
+  column to the **uncleared** reader. `sp4c_cleared` was assigned to `admin`
+  (`denyExceptions` recompiled to `["admin","d3member"]` on both policies within
+  the poll), then, as `analyst`:
+  ```text
+  analyst / Trino  SELECT id, secret FROM sp4a10_wh.sp4a.gate_v ORDER BY id
+                   → finished, [[1,'classified-one'],[2,'classified-two'],[3,'classified-three'],[91,'written-by-uncleared']]
+  analyst / Trino  SELECT id, secret FROM sp4a10_wh.sp4a.gate ORDER BY id      (the base table, same minute)
+                   → failed: engine: Access Denied: Cannot select from columns [id, secret] in table or view gate
+  ```
+  The role was then removed from `admin`; `denyExceptions` went back to
+  `["d3member"]` and the view read returned to `View owner 'admin' cannot create
+  view that selects from gate`.
+
+**So on Trino a clearance is bypassed by any view owned by a cleared principal,
+and simultaneously over-blocks — a cleared user cannot read through a view owned
+by an uncleared one.** Both halves are the same mechanism and neither is what a
+classification is supposed to do.
+
+### 4c. The materialized views
+
+| | result |
+|---|---|
+| Trino MV | **BLOCKED — cannot exist.** `CREATE MATERIALIZED VIEW sp4a10_wh.sp4a.gate_mv …` → `engine: createMaterializedView is not supported for Iceberg REST catalog` |
+| StarRocks MV | **BLOCKED — not measurable on this deployment.** The MV exists and refreshes, but an uncleared reader is refused it for a reason that is not the clearance: `ERROR 5204 (42000): Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN id for this operation.` An MV is a real table in `default_catalog`, which is not a `registry.catalogs` row, so `perm.grants` cannot express a read on it, and `POST /api/control-plane/policies` refuses a hand-written one: `409 conflict: profile 55 is compiled by the SP4a permission model`. A refusal that cannot be told from a clearance is not a measurement, so it is reported as BLOCKED rather than as a pass. |
+
+**Verdict: case 4 FAILED.** The per-column approach does not achieve SP4c's goal
+against a view, on either engine. This is reported as measured rather than
+adjusted: the case was not narrowed to make it pass.
+
+---
+
+## Case 5 — StarRocks withholds reads only. **PASS as stated for StarRocks — and the same is now measured to be TRUE OF TRINO, which the UI says the opposite of.**
+
+The uncleared `analyst`, against the column they cannot read:
+
+```text
+analyst / StarRocks  INSERT INTO sp4a10_wh.sp4a.gate VALUES (91,'written-by-uncleared','plain91')
+                     → finished
+d3member / StarRocks SELECT id, secret FROM sp4a10_wh.sp4a.gate WHERE id = 91
+                     → finished, [[91, 'written-by-uncleared']]        (the write really landed)
+analyst / StarRocks  SELECT id, secret FROM sp4a10_wh.sp4a.gate WHERE id = 91
+                     → failed: engine: Server error: `ERROR 5204 (42000): Access denied; you need
+                       (at least one of) the SELECT privilege(s) on COLUMN secret for this operation.'
+```
+
+So the system behaves exactly as the UI states for StarRocks: **a user without
+clearance can overwrite a column they cannot read.** PASS.
+
+**But the contrast the case was written to draw does not exist.** The same probe
+on Trino, whose compiled deny carries `select, insert, delete`:
+
+```text
+analyst / Trino  INSERT INTO sp4a10_wh.sp4a.gate VALUES (92,'trino-write-by-uncleared','plain92')
+                 → finished
+d3member / Trino SELECT id, secret FROM sp4a10_wh.sp4a.gate WHERE id IN (91,92) ORDER BY id
+                 → finished, [[92,'trino-write-by-uncleared'], [91,'written-by-uncleared']]
+analyst / Trino  DELETE FROM sp4a10_wh.sp4a.gate WHERE id = 92
+                 → finished       (and row 92 is gone: SELECT id … → [[91],[1],[2],[3]])
+```
+
+The uncleared subject **inserted and then deleted** through the clearance. The
+`insert` and `delete` accesses in policy 8840 are dead weight for the same reason
+D0b measured them to be dead on StarRocks — the tag is attached to a **column**
+resource, while `checkCanInsertIntoTable` / `checkCanDeleteFromTable` present a
+**table** resource, which the tagged resource does not match.
+
+This falsifies the second sentence Task 5 put on `TagDetail`:
+
+> "On a StarRocks engine this clearance withholds reads only … Trino withholds
+> both reads and writes — this is a real asymmetry between engines, not a
+> rounding error…"
+
+**There is no asymmetry. Both engines withhold reads only.** The UI tells an
+author that a Trino classification blocks writes; measured, it does not.
