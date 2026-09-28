@@ -300,6 +300,7 @@ async fn a_shell_command_runs_in_a_pod_and_the_pod_is_deleted() {
                 "echo \"hello from $(id -u) in $PWD\"",
                 "echo to-stderr >&2",
                 "echo '::{\"outputs\":{\"n\":42}}::'",
+                "echo second-stderr 1>&2",
             ]),
             &k8s_spec(),
             &NoObserver,
@@ -319,10 +320,24 @@ async fn a_shell_command_runs_in_a_pod_and_the_pod_is_deleted() {
         )),
         "the line was computed in the pod, as uid 1000, in the working dir: {lines:?}"
     );
+    for err in ["to-stderr", "second-stderr"] {
+        assert!(
+            lines.contains(&(LogLevel::Error, err.to_string())),
+            "stderr is carried through files-out and logged at ERROR, as W11 measured: \
+             {lines:?}"
+        );
+    }
     assert!(
-        lines.contains(&(LogLevel::Info, "to-stderr".to_string())),
-        "pods/log merges the streams: stderr arrives as an INFO line, as in Kestra's \
-         PodCreate: {lines:?}"
+        !lines
+            .iter()
+            .any(|(l, t)| *l != LogLevel::Error && t.contains("stderr")),
+        "no stderr line also arrives on the stdout stream: {lines:?}"
+    );
+    assert_eq!(out.stdout_line_count, 2, "hello + the marker line: {out:?}");
+    assert_eq!(out.stderr_line_count, 2, "{out:?}");
+    assert!(
+        !lines.iter().any(|(_, t)| t.contains("##egret:stderr:end")),
+        "the end sentinel is not a line: {lines:?}"
     );
     assert!(
         !rec.texts().iter().any(|l| l.contains("::{")),
@@ -333,6 +348,37 @@ async fn a_shell_command_runs_in_a_pod_and_the_pod_is_deleted() {
         wait_gone(&c, &name_of(&t), Duration::from_secs(20)).await,
         "`delete: true` (the default) removes the pod when the run returns"
     );
+}
+
+/// A non-shell interpreter cannot have egret's redirect prepended: its stderr
+/// stays merged (INFO, counted as stdout), and one WARN line says so.
+async fn a_non_shell_interpreter_keeps_the_merged_stream_and_says_so() {
+    let r = runner().await;
+    let (t, rec) = task();
+    let mut cmds = shell(&["echo out-line", "echo err-line >&2"]);
+    // busybox's sh, reached through a program that is not a known shell name.
+    cmds.interpreter = vec!["/bin/busybox".into(), "sh".into(), "-c".into()];
+    let out = r
+        .run(&t, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("no worker failure");
+    assert_eq!(out.exit_code, 0, "{out:?}");
+    let lines = rec.lines();
+    assert!(
+        lines.contains(&(LogLevel::Info, "out-line".to_string())),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&(LogLevel::Info, "err-line".to_string())),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|(l, t)| *l == LogLevel::Warn && t.contains("not a shell")),
+        "{lines:?}"
+    );
+    assert_eq!((out.stdout_line_count, out.stderr_line_count), (2, 0));
 }
 
 /// Inline input files arrive in the working dir by exec + tar; declared output
@@ -521,8 +567,74 @@ async fn a_second_run_call_for_the_same_attempt_reattaches_not_recreates() {
     assert!(wait_gone(&c, &name, Duration::from_secs(20)).await);
 }
 
-/// The sweep deletes pods of terminal runs (and of runs with no row), and
-/// leaves a live run's pod and a `delete: false` pod alone.
+/// A line written on the node just before the reclaim, and never stored, is
+/// not lost — even when the previous holder's stored `ts` (egret's clock) is
+/// past the next second boundary. The overlap that WAS stored is not repeated.
+async fn a_line_written_just_before_the_reclaim_is_not_lost() {
+    let c = client().await;
+    let pool = pool().await;
+    let (ws, _user) = common::seed_workspace(&common::db().await.unwrap()).await;
+    let execution = insert_execution(&pool, ws).await;
+    let run = insert_run(&pool, execution, 0, "RUNNING").await;
+    let r = runner().await;
+    let cmds = shell(&["echo one", "sleep 3", "echo almost", "sleep 5", "echo two"]);
+    let (t1, rec1) = task_for(ws, execution, run);
+    let name = name_of(&t1);
+    {
+        let spec = k8s_spec();
+        let first = r.run(&t1, &cmds, &spec, &NoObserver);
+        tokio::pin!(first);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            tokio::select! {
+                res = &mut first => panic!("the first call finished early: {res:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+            if rec1.texts().iter().any(|l| l == "one") {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "never saw `one`");
+        }
+    } // <- dropped right after `one`, before `almost` is written
+      // `almost` is written (~3 s after `one`) while nobody is attached.
+    tokio::time::sleep(Duration::from_millis(3600)).await;
+    // The previous holder stored `one` with egret's clock 1.5 s AHEAD of the
+    // node: ⌊that⌋ is after `almost` was written, which is exactly the
+    // window a margin-less sinceTime loses.
+    sqlx::query(
+        "INSERT INTO workflow.task_logs \
+           (workspace_id, execution_id, task_run_id, task_id, attempt, level, ts, message) \
+         VALUES ($1, $2, $3, 't', 0, 2, now() + interval '1.5 seconds', 'one')",
+    )
+    .bind(ws)
+    .bind(execution)
+    .bind(run)
+    .execute(&pool)
+    .await
+    .expect("store the first holder's line");
+
+    let (t2, rec2) = task_for(ws, execution, run);
+    let out = r
+        .run(&t2, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("the second holder finishes the run");
+    assert_eq!(out.exit_code, 0);
+    let texts = rec2.texts();
+    assert!(
+        texts.contains(&"almost".to_string()),
+        "the unstored line before the reclaim is replayed: {texts:?}"
+    );
+    assert!(texts.contains(&"two".to_string()), "{texts:?}");
+    assert!(
+        !texts.contains(&"one".to_string()),
+        "the stored overlap is dropped by exact text: {texts:?}"
+    );
+    assert!(wait_gone(&c, &name, Duration::from_secs(20)).await);
+}
+
+/// The sweep deletes pods of terminal runs only: a live run's pod, a
+/// `delete: false` pod, and a pod whose run this database does not know
+/// (another egret's, or another test suite's) all survive.
 async fn the_orphan_sweep_deletes_pods_of_terminal_runs_only() {
     let c = client().await;
     let pool = pool().await;
@@ -555,10 +667,9 @@ async fn the_orphan_sweep_deletes_pods_of_terminal_runs_only() {
     assert_eq!(standing, 4, "the namespace holds only this case's pods");
 
     let n = sweep_orphans(&c, &cfg, &pool).await.expect("sweep");
-    assert_eq!(n, 2, "the terminal run's pod and the row-less one");
+    assert_eq!(n, 1, "only the terminal run's pod");
     assert!(wait_gone(&c, &names[&done], Duration::from_secs(20)).await);
-    assert!(wait_gone(&c, &names[&rowless], Duration::from_secs(20)).await);
-    for run in [live, kept] {
+    for run in [live, kept, rowless] {
         let p = pods(&c).get_opt(&names[&run]).await.unwrap();
         assert!(
             p.is_some_and(|p| p.metadata.deletion_timestamp.is_none()),
@@ -566,7 +677,7 @@ async fn the_orphan_sweep_deletes_pods_of_terminal_runs_only() {
             names[&run]
         );
     }
-    for run in [live, kept] {
+    for run in [live, kept, rowless] {
         let _ = pods(&c)
             .delete(&names[&run], &DeleteParams::default().grace_period(0))
             .await;
@@ -721,6 +832,8 @@ fn cases() -> Vec<(&'static str, Case)> {
         case!(a_nonzero_exit_fails_and_keeps_outputs),
         case!(cancel_deletes_the_pod),
         case!(a_second_run_call_for_the_same_attempt_reattaches_not_recreates),
+        case!(a_line_written_just_before_the_reclaim_is_not_lost),
+        case!(a_non_shell_interpreter_keeps_the_merged_stream_and_says_so),
         case!(the_orphan_sweep_deletes_pods_of_terminal_runs_only),
         case!(the_docker_orphan_sweep_removes_containers_of_terminal_runs_only),
     ]

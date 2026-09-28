@@ -253,6 +253,32 @@ impl LogRepo {
         .map_err(db_err)
     }
 
+    /// The messages of one task-run attempt stored at or after `from`, in
+    /// `id` order, at most `limit` of them. W5a Task 4 fix round 1: a
+    /// Kubernetes re-attach drops the overlap it replays by exact text.
+    pub async fn messages_since(
+        &self,
+        execution: Uuid,
+        task_run: Uuid,
+        attempt: i32,
+        from: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        sqlx::query_scalar(
+            "SELECT message FROM workflow.task_logs \
+              WHERE execution_id = $1 AND task_run_id = $2 AND attempt = $3 AND ts >= $4 \
+              ORDER BY id LIMIT $5",
+        )
+        .bind(execution)
+        .bind(task_run)
+        .bind(attempt)
+        .bind(from)
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)
+    }
+
     /// Delete at most `batch` lines produced (`ts`) more than
     /// `older_than_days` days ago; returns how many went. The retention
     /// ticker calls this until it returns less than `batch`.

@@ -65,6 +65,22 @@ pub const READY_MARKER: &str = "ready";
 /// on it (Kestra: "Signaled sidecar to exit gracefully before pod deletion").
 pub const ENDED_MARKER: &str = "ended";
 
+/// The `emptyDir` carrying `main`'s stderr to `files-out`, mounted in those
+/// two only (fix round 1, Important 1).
+pub const STREAMS_VOLUME: &str = "egret-streams";
+/// Where it is mounted.
+pub const STREAMS_DIR: &str = "/egret/streams";
+/// The file `main`'s fd 2 is redirected to.
+pub const STDERR_FILE: &str = "/egret/streams/stderr";
+/// The line egret puts in front of the author's joined script when the
+/// interpreter is a shell: every later write to fd 2 — the author's, the
+/// shell's own error messages, `set -e`'s — lands in [`STDERR_FILE`], which
+/// `files-out` streams to its own log. Append (`>>`) because a re-attached
+/// pod's file is never truncated.
+pub const STDERR_REDIRECT: &str = "exec 2>>/egret/streams/stderr";
+/// The interpreters [`STDERR_REDIRECT`] is valid in: POSIX-family shells.
+const SHELLS: &[&str] = &["sh", "bash", "dash", "ash", "ksh", "zsh", "mksh"];
+
 /// The four labels spec §5 names.
 pub const WORKSPACE_LABEL: &str = "egret.io/workspace-id";
 pub const EXECUTION_LABEL: &str = "egret.io/execution-id";
@@ -91,8 +107,9 @@ const HELPER_LIMIT_MEMORY: &str = "64Mi";
 pub struct PodConfig {
     /// The task namespace (Pod Security `restricted`).
     pub namespace: String,
-    /// `runAsUser` for every container. Must be non-zero: `runAsNonRoot`
-    /// makes the kubelet refuse uid 0.
+    /// `runAsUser` for every container. Must be positive: `runAsNonRoot`
+    /// makes the kubelet refuse uid 0, and [`PodConfig::validate`] refuses it
+    /// first, with a message that names the setting.
     pub run_as_user: i64,
     /// egret's helper image (`deploy/docker/task-helper.Dockerfile`): needs
     /// `sh`, `sleep`, `tar`, `touch` and `wc`.
@@ -103,6 +120,86 @@ pub struct PodConfig {
     pub max_resources: Resources,
     /// Names of existing `kubernetes.io/dockerconfigjson` Secrets.
     pub image_pull_secrets: Vec<String>,
+}
+
+impl PodConfig {
+    /// egret's own configuration, judged before any pod is built.
+    ///
+    /// `run_as_user <= 0` is refused: with `runAsNonRoot: true` the kubelet
+    /// refuses uid 0 as `CreateContainerConfigError` on `main`, which the
+    /// runner would otherwise report as the AUTHOR's start failure; a negative
+    /// uid is refused by the API server with a message about the pod.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.run_as_user <= 0 {
+            return Err(format!(
+                "workflow.kubernetes.run_as_user is {}; task pods run with runAsNonRoot, so \
+                 it must be a positive uid",
+                self.run_as_user
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Whether `main`'s stderr can be separated from its stdout: the interpreter
+/// is a shell (basename in [`SHELLS`]) whose last argument is a short-option
+/// cluster containing `c` (`-c`, `-lc`, `-ec`) — i.e. the joined script is
+/// shell source that [`STDERR_REDIRECT`] can lead.
+///
+/// # A non-shell interpreter keeps the merged stream
+///
+/// `interpreter: ["python", "-c"]` runs the script as Python, where no line
+/// egret could prepend redirects fd 2 without changing the author's program.
+/// Its stderr then reaches `pods/log` merged with stdout and is logged at
+/// **INFO** and counted as stdout — the one case where the Kubernetes runner
+/// differs from the Docker runner (W11: stderr = ERROR). Refusing such an
+/// interpreter was rejected: the flow runs correctly and only the level of
+/// its stderr lines differs, and Kestra accepts any interpreter. The runner
+/// writes one WARN line saying so at the start of such a task.
+pub fn stderr_is_separable(cmds: &TaskCommands) -> bool {
+    let default: Vec<String>;
+    let interp: &[String] = if cmds.interpreter.is_empty() {
+        default = crate::worker::commands::DEFAULT_INTERPRETER
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        &default
+    } else {
+        &cmds.interpreter
+    };
+    if interp.len() < 2 {
+        return false;
+    }
+    let prog = interp[0].rsplit('/').next().unwrap_or("");
+    let flag = interp[interp.len() - 1].as_str();
+    SHELLS.contains(&prog) && flag.starts_with('-') && !flag.starts_with("--") && flag.contains('c')
+}
+
+/// `main`'s argv: W4's `interpreter ++ [joined]` ([`TaskCommands::argv`]),
+/// with [`STDERR_REDIRECT`] as the joined script's first line when the
+/// interpreter is a shell ([`stderr_is_separable`]).
+pub fn main_argv(cmds: &TaskCommands) -> Vec<String> {
+    let mut argv = cmds.argv();
+    if stderr_is_separable(cmds) {
+        if let Some(script) = argv.pop() {
+            argv.push(format!("{STDERR_REDIRECT}\n{script}"));
+        }
+    }
+    argv
+}
+
+/// `files-out`'s command: stream [`STDERR_FILE`] to this container's own
+/// log (`tail -F`, from the first line, retried until the file exists), then
+/// wait for [`ENDED_MARKER`]. Nothing else writes to this container's stdout,
+/// so its log IS `main`'s stderr (plus the end sentinel egret appends).
+pub fn files_out_script() -> String {
+    format!(
+        "touch {STDERR_FILE}\n\
+         tail -n +1 -F {STDERR_FILE} 2>/dev/null &\n\
+         while [ ! -f {MARKERS_DIR}/{ENDED_MARKER} ]\n\
+         do\n  sleep 0.5\n\
+         done\n"
+    )
 }
 
 /// The pod of one task-run attempt: `egret-run-<run id, hyphenless>-<attempt>`.
@@ -165,6 +262,7 @@ pub fn build(
     spec: &RunnerSpec,
     cfg: &PodConfig,
 ) -> Result<Pod, String> {
+    cfg.validate()?;
     let resources = effective_resources(spec.resources.as_ref(), cfg)?;
     let has_inputs = !cmds.input_files.is_empty();
 
@@ -183,11 +281,15 @@ pub fn build(
         name: MAIN.to_string(),
         image: Some(cmds.container_image.clone()),
         image_pull_policy: Some(pull_policy(spec.pull_policy).to_string()),
-        // `TaskCommands::argv` — W4's rule, one copy of it.
-        command: Some(cmds.argv()),
+        // `TaskCommands::argv` — W4's rule, one copy of it — led by the
+        // stderr redirect when the interpreter is a shell.
+        command: Some(main_argv(cmds)),
         working_dir: Some(WORKING_DIR.to_string()),
         env: Some(env),
-        volume_mounts: Some(vec![mount(WORKING_DIR_VOLUME, WORKING_DIR)]),
+        volume_mounts: Some(vec![
+            mount(WORKING_DIR_VOLUME, WORKING_DIR),
+            mount(STREAMS_VOLUME, STREAMS_DIR),
+        ]),
         resources: Some(requirements(&resources.request, &resources.limit)),
         security_context: Some(container_security()),
         ..Default::default()
@@ -216,11 +318,34 @@ pub fn build(
                 .map(|n| LocalObjectReference { name: n.clone() })
                 .collect()
         }),
-        init_containers: has_inputs.then(|| vec![helper(cfg, FILES_IN, READY_MARKER)]),
-        containers: vec![main, helper(cfg, FILES_OUT, ENDED_MARKER)],
+        init_containers: has_inputs.then(|| {
+            vec![helper(
+                cfg,
+                FILES_IN,
+                wait_script(READY_MARKER),
+                &[
+                    (WORKING_DIR_VOLUME, WORKING_DIR),
+                    (MARKERS_VOLUME, MARKERS_DIR),
+                ],
+            )]
+        }),
+        containers: vec![
+            main,
+            helper(
+                cfg,
+                FILES_OUT,
+                files_out_script(),
+                &[
+                    (WORKING_DIR_VOLUME, WORKING_DIR),
+                    (MARKERS_VOLUME, MARKERS_DIR),
+                    (STREAMS_VOLUME, STREAMS_DIR),
+                ],
+            ),
+        ],
         volumes: Some(vec![
             empty_dir(WORKING_DIR_VOLUME),
             empty_dir(MARKERS_VOLUME),
+            empty_dir(STREAMS_VOLUME),
         ]),
         ..Default::default()
     };
@@ -276,20 +401,13 @@ fn empty_dir(name: &str) -> Volume {
     }
 }
 
-fn helper(cfg: &PodConfig, name: &str, marker: &str) -> Container {
+fn helper(cfg: &PodConfig, name: &str, script: String, mounts: &[(&str, &str)]) -> Container {
     Container {
         name: name.to_string(),
         image: Some(cfg.helper_image.clone()),
         image_pull_policy: Some("IfNotPresent".to_string()),
-        command: Some(vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            wait_script(marker),
-        ]),
-        volume_mounts: Some(vec![
-            mount(WORKING_DIR_VOLUME, WORKING_DIR),
-            mount(MARKERS_VOLUME, MARKERS_DIR),
-        ]),
+        command: Some(vec!["sh".to_string(), "-c".to_string(), script]),
+        volume_mounts: Some(mounts.iter().map(|(v, p)| mount(v, p)).collect()),
         resources: Some(requirements(
             &ResourceAmounts {
                 cpu: Some(HELPER_REQUEST_CPU.into()),
@@ -326,7 +444,16 @@ fn requirements(request: &ResourceAmounts, limit: &ResourceAmounts) -> ResourceR
 /// The author's `resources`, defaulted from config and capped by it.
 ///
 /// Per resource (cpu, memory): request = author's, else the default's; limit
-/// likewise. Each is then lowered to its cap — `max.request` for a request,
+/// likewise. **A value still absent where a maximum is set becomes that
+/// maximum** (fix round 1, Important 2): an absent limit is *unlimited*, which
+/// is above every cap, so leaving it absent would let the task escape
+/// `max_resources` whenever neither the author nor the defaults name one. An
+/// absent request with `max.request` set becomes `max.request` for the same
+/// reason (Kubernetes would otherwise default the request to the limit, which
+/// may be above `max.request`); with only `max.limit` set it stays absent and
+/// Kubernetes defaults it to the (capped) limit.
+///
+/// Each is then lowered to its cap — `max.request` for a request,
 /// `max.limit` for a limit, and a request is ALSO capped by `max.limit` (a
 /// request above the most a task may use is never satisfiable usefully).
 /// Finally a request above its own limit is lowered to the limit.
@@ -346,6 +473,8 @@ pub fn effective_resources(
                max_req: &Option<String>,
                max_lim: &Option<String>|
      -> Result<(Option<String>, Option<String>), String> {
+        let lim = lim.or_else(|| max_lim.clone());
+        let req = req.or_else(|| max_req.clone());
         let lim = cap(what, "limit", lim, &[max_lim])?;
         let req = cap(what, "request", req, &[max_req, max_lim])?;
         let req = match (&req, &lim) {
@@ -830,7 +959,11 @@ mod tests {
             .collect();
         assert_eq!(
             vols,
-            vec![(WORKING_DIR_VOLUME, true), (MARKERS_VOLUME, true)]
+            vec![
+                (WORKING_DIR_VOLUME, true),
+                (MARKERS_VOLUME, true),
+                (STREAMS_VOLUME, true)
+            ]
         );
 
         let main = container(&p, MAIN);
@@ -843,7 +976,10 @@ mod tests {
             .collect();
         assert_eq!(
             mounts,
-            vec![(WORKING_DIR_VOLUME, WORKING_DIR)],
+            vec![
+                (WORKING_DIR_VOLUME, WORKING_DIR),
+                (STREAMS_VOLUME, STREAMS_DIR)
+            ],
             "main does NOT mount the markers"
         );
         let env: Vec<(String, Option<String>)> = main
@@ -860,7 +996,10 @@ mod tests {
                 ("B".to_string(), Some("2".to_string())),
             ]
         );
-        for helper in [FILES_IN, FILES_OUT] {
+        for (helper, want) in [
+            (FILES_IN, vec![WORKING_DIR, MARKERS_DIR]),
+            (FILES_OUT, vec![WORKING_DIR, MARKERS_DIR, STREAMS_DIR]),
+        ] {
             let h = every_container(&p)
                 .into_iter()
                 .find(|c| c.name == helper)
@@ -871,7 +1010,7 @@ mod tests {
                 .flatten()
                 .map(|m| m.mount_path.as_str())
                 .collect();
-            assert_eq!(m, vec![WORKING_DIR, MARKERS_DIR], "{helper}");
+            assert_eq!(m, want, "{helper}");
         }
     }
 
@@ -884,19 +1023,149 @@ mod tests {
             vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
-                "set -e\necho a\necho b".to_string()
+                "exec 2>>/egret/streams/stderr\nset -e\necho a\necho b".to_string()
             ],
-            "W4's rule: interpreter ++ [ (beforeCommands ++ commands).join('\\n') ]"
+            "W4's rule: interpreter ++ [ (beforeCommands ++ commands).join('\\n') ], \
+             led by the stderr redirect"
         );
         assert!(main.args.is_none());
 
         let mut c = cmds();
         c.interpreter = vec!["/bin/bash".into(), "-lc".into()];
         let p = built(&c, &k8s());
+        let mut want = c.argv();
+        let script = want.pop().unwrap();
+        want.push(format!("{STDERR_REDIRECT}\n{script}"));
         assert_eq!(
             container(&p, MAIN).command.clone().unwrap(),
-            c.argv(),
-            "the argv is TaskCommands::argv, not a second copy of the rule"
+            want,
+            "the argv is TaskCommands::argv plus one leading line, not a second copy of the rule"
         );
+    }
+
+    #[test]
+    fn stderr_is_redirected_only_when_the_interpreter_is_a_shell() {
+        for (interp, separable) in [
+            (vec![], true),
+            (vec!["/bin/sh", "-c"], true),
+            (vec!["sh", "-c"], true),
+            (vec!["/usr/bin/bash", "-lc"], true),
+            (vec!["bash", "-ec"], true),
+            (vec!["python", "-c"], false),
+            (vec!["/usr/bin/env", "sh", "-c"], false),
+            (vec!["/bin/sh"], false),
+            (vec!["/bin/sh", "-x"], false),
+            (vec!["/bin/sh", "--c"], false),
+        ] {
+            let mut c = cmds();
+            c.interpreter = interp.iter().map(|s| s.to_string()).collect();
+            assert_eq!(stderr_is_separable(&c), separable, "{interp:?}");
+            let argv = main_argv(&c);
+            assert_eq!(
+                argv.last().unwrap().starts_with(STDERR_REDIRECT),
+                separable,
+                "{interp:?}: {argv:?}"
+            );
+            if !separable {
+                assert_eq!(argv, c.argv(), "a non-shell argv is W4's, untouched");
+            }
+        }
+    }
+
+    #[test]
+    fn files_out_streams_the_stderr_file_and_prints_nothing_else() {
+        let script = files_out_script();
+        assert!(
+            script.contains("tail -n +1 -F /egret/streams/stderr"),
+            "{script}"
+        );
+        assert!(script.contains("/egret/markers/ended"), "{script}");
+        assert!(
+            !script.contains("echo"),
+            "files-out's log IS main's stderr, so the helper itself prints nothing: {script}"
+        );
+    }
+
+    #[test]
+    fn a_non_positive_run_as_user_is_refused_by_name() {
+        for uid in [0, -1] {
+            let mut cfg = cfg();
+            cfg.run_as_user = uid;
+            let err = cfg.validate().expect_err("refused");
+            assert!(
+                err.contains("run_as_user") && err.contains(&uid.to_string()),
+                "{err}"
+            );
+            assert!(build(&task(), &cmds(), &k8s(), &cfg).is_err());
+        }
+        assert!(cfg().validate().is_ok());
+    }
+
+    fn limits(
+        r: &Resources,
+    ) -> (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) {
+        (
+            r.request.cpu.clone(),
+            r.request.memory.clone(),
+            r.limit.cpu.clone(),
+            r.limit.memory.clone(),
+        )
+    }
+
+    #[test]
+    fn an_absent_value_with_a_maximum_set_becomes_the_maximum() {
+        let s = |v: &str| Some(v.to_string());
+        // No defaults at all; the operator set only maxima.
+        let mut c = cfg();
+        c.default_resources = Resources::default();
+
+        // Both maxima set: absent request -> max.request, absent limit -> max.limit.
+        let r = effective_resources(None, &c).unwrap();
+        assert_eq!(limits(&r), (s("1"), s("1Gi"), s("2"), s("2Gi")));
+
+        // Only max.limit set: the limit is the max; the request stays absent
+        // (Kubernetes defaults it to the capped limit).
+        c.max_resources.request = ResourceAmounts::default();
+        let r = effective_resources(None, &c).unwrap();
+        assert_eq!(limits(&r), (None, None, s("2"), s("2Gi")));
+
+        // Only max.request set: the request is the max, no limit exists to cap.
+        c.max_resources = Resources {
+            request: ResourceAmounts {
+                cpu: s("1"),
+                memory: s("1Gi"),
+            },
+            limit: ResourceAmounts::default(),
+        };
+        let r = effective_resources(None, &c).unwrap();
+        assert_eq!(limits(&r), (s("1"), s("1Gi"), None, None));
+
+        // No maxima: nothing is invented.
+        c.max_resources = Resources::default();
+        let r = effective_resources(None, &c).unwrap();
+        assert_eq!(limits(&r), (None, None, None, None));
+
+        // An author's request above an absent-then-maxed limit is lowered to it.
+        c.max_resources = Resources {
+            request: ResourceAmounts::default(),
+            limit: ResourceAmounts {
+                cpu: s("500m"),
+                memory: s("256Mi"),
+            },
+        };
+        let author = Resources {
+            request: ResourceAmounts {
+                cpu: s("2"),
+                memory: s("1Gi"),
+            },
+            limit: ResourceAmounts::default(),
+        };
+        let r = effective_resources(Some(&author), &c).unwrap();
+        assert_eq!(limits(&r), (s("500m"), s("256Mi"), s("500m"), s("256Mi")));
     }
 }
