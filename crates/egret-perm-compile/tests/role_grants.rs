@@ -373,6 +373,7 @@ async fn explain_and_the_compiled_policy_agree_about_a_role_granted_subject() {
         &grants,
         &[],
         &[],
+        &[],
     );
     assert_eq!(
         decision,
@@ -393,6 +394,7 @@ async fn explain_and_the_compiled_policy_agree_about_a_role_granted_subject() {
         Action::Read,
         &target,
         &grants,
+        &[],
         &[],
         &[],
     );

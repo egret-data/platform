@@ -56,11 +56,12 @@ use egret_core::http::ErrorBody;
 use egret_perm::{
     create_grant_in_tx, create_rule_in_tx, delete_grant_in_tx, delete_rule_in_tx, evaluate,
     get_grant_via, get_rule_via, list_grants_via, list_rules_via, update_grant_in_tx,
-    update_rule_in_tx, Action, Decision, Effect, Grant, GrantOrigin, PermStore, PrincipalKind,
-    PrincipalSet, Reason, Rule, RuleKind, Scope, Selector, Subject,
+    update_rule_in_tx, Action, ClearanceGate, Decision, Effect, Grant, GrantOrigin, PermStore,
+    PrincipalKind, PrincipalSet, Reason, Rule, RuleKind, Scope, Selector, Subject,
 };
 use egret_policy::{
-    catalog_names_for_ids_via, tag_keys_for_resource_via, tag_names_for_keys_via, PolicyStore,
+    catalog_names_for_ids_via, clearance_gates_for_tags_via, tag_keys_for_resource_via,
+    tag_names_for_keys_via, PolicyStore,
 };
 use sqlx::{Postgres, Transaction};
 
@@ -300,7 +301,7 @@ pub struct ExplainRequest {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ExplainReason {
     /// `allowed_by_grant` | `explicit_deny` | `no_grant_matched` |
-    /// `masked_by_rule` | `filtered_by_rule`.
+    /// `masked_by_rule` | `filtered_by_rule` | `clearance_required`.
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_id: Option<Uuid>,
@@ -310,6 +311,14 @@ pub struct ExplainReason {
     pub mask_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filter_expr: Option<String>,
+    /// `clearance_required` only: the gating tag's key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// `clearance_required` only: the role(s) that would clear it — holding
+    /// any ONE is enough (`egret_perm_compile::clearance`'s "OR across
+    /// roles" semantics).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_roles: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -331,6 +340,8 @@ impl From<&Reason> for ExplainReason {
             rule_id: None,
             mask_type: None,
             filter_expr: None,
+            tag: None,
+            required_roles: None,
         };
         match r {
             Reason::AllowedByGrant { grant_id } => {
@@ -354,6 +365,14 @@ impl From<&Reason> for ExplainReason {
                 out.kind = "filtered_by_rule".into();
                 out.rule_id = Some(*rule_id);
                 out.filter_expr = Some(filter_expr.clone());
+            }
+            Reason::ClearanceRequired {
+                tag,
+                required_roles,
+            } => {
+                out.kind = "clearance_required".into();
+                out.tag = Some(tag.clone());
+                out.required_roles = Some(required_roles.clone());
             }
         }
         out
@@ -1240,13 +1259,35 @@ async fn explain(
     // `ExplainSubject`'s doc comment for what trusting one instead cost.
     let workspaces = crate::members::workspaces_for_username(&mut conn, &body.subject.user).await?;
 
+    // SP4c Task 4/D4: the clearance gates `evaluate` must agree with the
+    // compiled engine about — only tags whose `required_roles` is non-empty,
+    // since a `required_groups`-only gate compiles to no engine deny at all
+    // (D2/D7) and reporting a denial for one here would disagree with the
+    // engine in the direction opposite the bug this task fixes.
+    let clearances: Vec<ClearanceGate> = clearance_gates_for_tags_via(&mut conn, &tags)
+        .await?
+        .into_iter()
+        .map(|(tag, required_roles)| ClearanceGate {
+            tag,
+            required_roles,
+        })
+        .collect();
+
     let subject = Subject {
         user: body.subject.user,
         groups: body.subject.groups,
         roles: body.subject.roles,
         workspaces,
     };
-    let decision = evaluate(&subject, body.action, &body.target, &grants, &rules, &tags);
+    let decision = evaluate(
+        &subject,
+        body.action,
+        &body.target,
+        &grants,
+        &rules,
+        &tags,
+        &clearances,
+    );
     let mut out = ExplainResponse::from(decision);
     out.tags = tags;
     Ok(Json(out))

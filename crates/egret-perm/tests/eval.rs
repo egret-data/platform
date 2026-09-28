@@ -4,8 +4,8 @@
 //! Pure (no DB) — the evaluator is a function of its arguments only.
 
 use egret_perm::{
-    evaluate, Action, Effect, Grant, GrantOrigin, Principal, PrincipalKind, PrincipalSet, Reason,
-    Rule, RuleKind, Scope, Selector, Subject,
+    evaluate, Action, ClearanceGate, Effect, Grant, GrantOrigin, Principal, PrincipalKind,
+    PrincipalSet, Reason, Rule, RuleKind, Scope, Selector, Subject,
 };
 use uuid::Uuid;
 
@@ -142,6 +142,7 @@ fn deny_beats_allow_regardless_of_order() {
             &grants,
             &[],
             &[],
+            &[],
         );
         assert!(!d.allowed, "deny must win in either order");
         assert!(matches!(d.reasons[0], Reason::ExplicitDeny { .. }));
@@ -176,7 +177,8 @@ fn the_subtract_removes_a_member_of_an_included_group() {
             &scope_table("sales", "orders"),
             &[g.clone()],
             &[],
-            &[]
+            &[],
+            &[],
         )
         .allowed
     );
@@ -185,6 +187,7 @@ fn the_subtract_removes_a_member_of_an_included_group() {
         Action::Read,
         &scope_table("sales", "orders"),
         &[g],
+        &[],
         &[],
         &[],
     );
@@ -205,6 +208,7 @@ fn no_grant_at_all_is_a_distinct_reason_from_an_explicit_deny() {
         &[],
         &[],
         &[],
+        &[],
     );
     assert!(!d.allowed);
     assert!(matches!(d.reasons[0], Reason::NoGrantMatched));
@@ -221,6 +225,7 @@ fn a_mask_applies_even_when_access_came_from_a_wider_grant() {
         &[g],
         &[r],
         &["pii".into()],
+        &[],
     );
     assert!(d.allowed, "the grant still allows the read");
     assert!(
@@ -248,6 +253,7 @@ fn an_exempt_principal_escapes_the_mask() {
         &[g],
         &[r],
         &["pii".into()],
+        &[],
     );
     assert!(d.allowed);
     assert!(!d
@@ -267,7 +273,8 @@ fn a_grant_on_a_schema_covers_a_table_beneath_it_but_not_a_sibling_schema() {
             &scope_table("sales", "orders"),
             &[g.clone()],
             &[],
-            &[]
+            &[],
+            &[],
         )
         .allowed
     );
@@ -278,7 +285,8 @@ fn a_grant_on_a_schema_covers_a_table_beneath_it_but_not_a_sibling_schema() {
             &scope_table("hr", "salaries"),
             &[g],
             &[],
-            &[]
+            &[],
+            &[],
         )
         .allowed
     );
@@ -306,6 +314,7 @@ fn a_write_is_refused_by_a_read_only_grant() {
         &[g],
         &[],
         &[],
+        &[],
     );
     assert!(!d.allowed, "a read-only grant must not authorize a write");
     assert!(matches!(d.reasons[0], Reason::NoGrantMatched));
@@ -331,6 +340,7 @@ fn a_grant_in_one_catalog_does_not_cover_a_target_in_another() {
         Action::Read,
         &target,
         &[g],
+        &[],
         &[],
         &[],
     );
@@ -367,7 +377,8 @@ fn a_grant_scope_value_globs_like_ranger_not_only_the_literal_star() {
             &scope_table("sales", "orders"),
             &[g.clone()],
             &[],
-            &[]
+            &[],
+            &[],
         )
         .allowed,
         "\"ord*\" must glob-match \"orders\", the way the engine does"
@@ -379,7 +390,8 @@ fn a_grant_scope_value_globs_like_ranger_not_only_the_literal_star() {
             &scope_table("sales", "customers"),
             &[g],
             &[],
-            &[]
+            &[],
+            &[],
         )
         .allowed,
         "\"ord*\" must not match a table it does not prefix"
@@ -401,6 +413,7 @@ fn a_tag_selector_never_hits_a_schema_level_target() {
         &[g],
         &[r],
         &["pii".into()],
+        &[],
     );
     assert!(d.allowed);
     assert!(
@@ -429,6 +442,7 @@ fn a_path_selected_row_filter_applies_like_a_tag_selected_mask() {
         &[g],
         &[r],
         &[],
+        &[],
     );
     assert!(d.allowed);
     assert!(
@@ -436,5 +450,118 @@ fn a_path_selected_row_filter_applies_like_a_tag_selected_mask() {
             .iter()
             .any(|x| matches!(x, Reason::FilteredByRule { .. })),
         "a path-selected row filter covering the target must apply"
+    );
+}
+
+/// SP4c Task 4/D4: a subject blocked by clearance must get its OWN reason,
+/// not `no_grant_matched` (today's wrong answer — nobody needs to add a
+/// grant, somebody needs clearance) and not `explicit_deny` either
+/// (collapsing the two is how both would end up reading "denied", which
+/// SP4b's five independent reason classes exist to prevent). An `allow`
+/// grant that would otherwise let the subject through proves the clearance
+/// check runs BEFORE grants, matching D1's tag-first short-circuit — a
+/// clearance must win over a resource grant, not merely apply where none
+/// exists.
+#[test]
+fn clearance_blocks_even_when_a_grant_would_otherwise_allow() {
+    let g = grant(
+        Effect::Allow,
+        &["everyone"],
+        &[],
+        scope_table("sales", "orders"),
+    );
+    let gate = ClearanceGate {
+        tag: "pii".into(),
+        required_roles: vec!["analyst".into()],
+    };
+    let subject = subject_in_group("everyone");
+
+    let d = evaluate(
+        &subject,
+        Action::Read,
+        &scope_column("sales", "orders", "ssn"),
+        &[g],
+        &[],
+        &["pii".into()],
+        &[gate],
+    );
+    assert!(!d.allowed, "an uncleared subject must be refused: {d:?}");
+    match d.reasons.as_slice() {
+        [Reason::ClearanceRequired {
+            tag,
+            required_roles,
+        }] => {
+            assert_eq!(tag, "pii", "the reason must name the gating tag");
+            assert_eq!(required_roles, &vec!["analyst".to_string()]);
+        }
+        other => panic!("expected ClearanceRequired alone, got {other:?}"),
+    }
+}
+
+/// A subject holding ONE of several required roles is cleared — the "OR
+/// across roles" semantics `egret_perm_compile::clearance` compiles (its
+/// exception list is the union of every required role's members) — and, once
+/// cleared, evaluation proceeds to the grants exactly as if no gate existed.
+#[test]
+fn a_subject_holding_any_required_role_is_cleared_and_grants_still_apply() {
+    let g = grant(
+        Effect::Allow,
+        &["everyone"],
+        &[],
+        scope_table("sales", "orders"),
+    );
+    let gate = ClearanceGate {
+        tag: "pii".into(),
+        required_roles: vec!["analyst".into(), "auditor".into()],
+    };
+    let mut subject = subject_in_group("everyone");
+    subject.roles = vec!["auditor".into()];
+
+    let d = evaluate(
+        &subject,
+        Action::Read,
+        &scope_column("sales", "orders", "ssn"),
+        &[g],
+        &[],
+        &["pii".into()],
+        &[gate],
+    );
+    assert!(
+        d.allowed,
+        "a subject holding any required role is cleared: {d:?}"
+    );
+    assert!(matches!(
+        d.reasons.as_slice(),
+        [Reason::AllowedByGrant { .. }]
+    ));
+}
+
+/// A gate on a tag NOT present on the target must not fire — `evaluate` only
+/// consults `tags_on`, exactly as a rule's tag selector does, never a gate's
+/// mere presence in the caller-supplied list.
+#[test]
+fn a_clearance_gate_for_an_absent_tag_does_not_block() {
+    let g = grant(
+        Effect::Allow,
+        &["everyone"],
+        &[],
+        scope_table("sales", "orders"),
+    );
+    let gate = ClearanceGate {
+        tag: "financial".into(),
+        required_roles: vec!["analyst".into()],
+    };
+    let d = evaluate(
+        &subject_in_group("everyone"),
+        Action::Read,
+        &scope_table("sales", "orders"),
+        &[g],
+        &[],
+        &[], // no tags on this target at all
+        &[gate],
+    );
+    assert!(
+        d.allowed,
+        "a clearance gate for a tag the target does not carry must not block: {d:?}"
     );
 }

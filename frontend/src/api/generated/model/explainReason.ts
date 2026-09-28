@@ -19,7 +19,7 @@
 export interface ExplainReason {
   /**
      * `allowed_by_grant` | `explicit_deny` | `no_grant_matched` |
-     * `masked_by_rule` | `filtered_by_rule`.
+     * `masked_by_rule` | `filtered_by_rule` | `clearance_required`.
      */
   kind: string;
   /** @nullable */
@@ -30,4 +30,16 @@ export interface ExplainReason {
   mask_type?: string | null;
   /** @nullable */
   filter_expr?: string | null;
+  /**
+     * `clearance_required` only: the gating tag's key.
+     * @nullable
+     */
+  tag?: string | null;
+  /**
+     * `clearance_required` only: the role(s) that would clear it — holding
+     * any ONE is enough (`egret_perm_compile::clearance`'s "OR across
+     * roles" semantics).
+     * @nullable
+     */
+  required_roles?: string[] | null;
 }

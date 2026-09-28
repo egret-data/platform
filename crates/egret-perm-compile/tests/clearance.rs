@@ -26,9 +26,12 @@
 //! `tags.id` this test itself created, never to a count of everything.
 
 use egret_metastore::Db;
-use egret_perm::PermStore;
+use egret_perm::{
+    evaluate, Action, ClearanceGate, Effect, Grant, GrantOrigin, PermStore, Principal,
+    PrincipalKind, PrincipalSet, Reason, Scope, Subject as EvalSubject,
+};
 use egret_perm_compile::{recompile_service, SourceKind};
-use egret_policy::{PolicyStore, COMPILER_CLEARANCE_PREFIX};
+use egret_policy::{clearance_gates_for_tags_via, PolicyStore, COMPILER_CLEARANCE_PREFIX};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -152,6 +155,19 @@ async fn gate(db: &Db, tag_id: Uuid, roles: &[&str], groups: &[Uuid]) {
     .execute(&db.pool)
     .await
     .expect("classification policy");
+}
+
+/// `tags.key` for `tag_id` — `new_tag` returns `(id, name)` because most of
+/// this file addresses a tag by its NAME (what a Ranger tag policy resource
+/// matches); the eval-agreement test below needs the KEY instead, the
+/// identifier `tag_keys_for_resource_via`/`clearance_gates_for_tags_via` and
+/// `egret_perm::eval`'s `tags_on` all key on.
+async fn tag_key(db: &Db, tag_id: Uuid) -> String {
+    sqlx::query_scalar("SELECT key FROM tags WHERE id = $1")
+        .bind(tag_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("tag key")
 }
 
 fn clearance_name(tag_id: Uuid) -> String {
@@ -450,4 +466,168 @@ async fn lifting_a_clearance_reaps_the_deny() {
         None,
         "the lifted clearance's deny must be reaped, not enforced forever"
     );
+}
+
+/// **SP4c Task 4/D4.** `explain` must give a subject blocked by clearance its
+/// own reason, and that reason must AGREE with the policy actually compiled —
+/// not merely say something plausible. This test ties both to the SAME
+/// artifact: it reads the real `denyExceptions` usernames off the compiled
+/// policy (exactly as the first test in this file does) and then calls
+/// `egret_perm::evaluate` — the function `explain` answers with — for the
+/// cleared username and the uncleared one, checking the decision matches which
+/// side of that list each username is actually on.
+///
+/// The grant used here would ALLOW the read on its own (D1: a clearance must
+/// win over any resource grant, not merely apply where none exists), so a
+/// `evaluate` that forgot to check clearance first would report
+/// `AllowedByGrant` for the uncleared subject — which is exactly the bug this
+/// task closes (`explain` used to answer `no_grant_matched`, the ALSO wrong
+/// answer, since a grant existed and the deny was the correct reason).
+#[tokio::test]
+async fn explain_and_the_compiled_policy_agree_about_a_blocked_subject() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+    let (tag_id, _tag_name) = new_tag(&db).await;
+    let key = tag_key(&db, tag_id).await;
+
+    let role_name = unique("clearance-explain");
+    let role_id = new_role(&db, &role_name).await;
+    let cleared_user = new_user(
+        &db,
+        &format!("{}@egret.local", unique("expl-cleared")),
+        Some("expl-cleared"),
+    )
+    .await;
+    let uncleared_user = new_user(
+        &db,
+        &format!("{}@egret.local", unique("expl-uncleared")),
+        Some("expl-uncleared"),
+    )
+    .await;
+    grant_role(&db, cleared_user, role_id).await;
+    let _ = uncleared_user;
+
+    gate(&db, tag_id, &[&role_name], &[]).await;
+    recompile_service(&f.perm, &f.policy, f.profile_id)
+        .await
+        .expect("recompile");
+
+    // The real artifact: who the compiled deny actually excepts.
+    let body = clearance_policy(&db, f.tag_service_id, tag_id)
+        .await
+        .expect("clearance policy must exist");
+    let excepted = users_of(&body["denyExceptions"].as_array().expect("denyExceptions")[0]);
+    assert_eq!(
+        excepted,
+        vec!["expl-cleared".to_string()],
+        "sanity: the compiled deny excepts exactly the cleared username"
+    );
+
+    // The same clearance gate, resolved the way `explain`'s route resolves
+    // it — through the store function, not re-derived from `gate()`'s inputs.
+    let mut conn = db.pool.acquire().await.expect("conn");
+    let gates = clearance_gates_for_tags_via(&mut conn, &[key.clone()])
+        .await
+        .expect("clearance gates");
+    assert_eq!(gates.len(), 1, "one gated tag: {gates:?}");
+    let clearances: Vec<ClearanceGate> = gates
+        .into_iter()
+        .map(|(tag, required_roles)| ClearanceGate {
+            tag,
+            required_roles,
+        })
+        .collect();
+
+    // A grant that would allow the read on its own, standing in for the
+    // resource grant an uncleared subject might otherwise hold — D1 requires
+    // clearance to win over it, not merely apply in its absence.
+    let allow_everyone = Grant {
+        id: Uuid::new_v4(),
+        effect: Effect::Allow,
+        actions: vec![Action::Read],
+        scope: Scope {
+            catalog_id: Uuid::nil(),
+            schema: None,
+            table: None,
+            column: None,
+        },
+        principals: PrincipalSet {
+            include: vec![Principal {
+                kind: PrincipalKind::Group,
+                r#ref: "public".into(),
+            }],
+            exclude: vec![],
+        },
+        origin: GrantOrigin::Explicit,
+    };
+    let target = Scope {
+        catalog_id: Uuid::nil(),
+        schema: Some("sales".into()),
+        table: Some("orders".into()),
+        column: Some("ssn".into()),
+    };
+    let tags_on = vec![key.clone()];
+
+    let cleared_subject = EvalSubject {
+        user: "expl-cleared".into(),
+        groups: vec!["public".into()],
+        roles: vec![role_name.clone()],
+        workspaces: vec![],
+    };
+    let cleared_decision = evaluate(
+        &cleared_subject,
+        Action::Read,
+        &target,
+        std::slice::from_ref(&allow_everyone),
+        &[],
+        &tags_on,
+        &clearances,
+    );
+    assert!(
+        matches!(
+            cleared_decision.reasons.as_slice(),
+            [Reason::AllowedByGrant { .. }]
+        ),
+        "the cleared subject, whose username IS in the compiled denyExceptions, must be allowed \
+         by the underlying grant, not blocked by clearance: {cleared_decision:?}"
+    );
+
+    let uncleared_subject = EvalSubject {
+        user: "expl-uncleared".into(),
+        groups: vec!["public".into()],
+        roles: vec![],
+        workspaces: vec![],
+    };
+    let uncleared_decision = evaluate(
+        &uncleared_subject,
+        Action::Read,
+        &target,
+        std::slice::from_ref(&allow_everyone),
+        &[],
+        &tags_on,
+        &clearances,
+    );
+    assert!(
+        !uncleared_decision.allowed,
+        "the uncleared subject, whose username is NOT in the compiled denyExceptions, must be \
+         refused: {uncleared_decision:?}"
+    );
+    match uncleared_decision.reasons.as_slice() {
+        [Reason::ClearanceRequired {
+            tag,
+            required_roles,
+        }] => {
+            assert_eq!(tag, &key, "the reason must name the gating tag");
+            assert_eq!(
+                required_roles,
+                &vec![role_name.clone()],
+                "the reason must name the role that would clear it"
+            );
+        }
+        other => panic!(
+            "expected ClearanceRequired, not the pre-SP4c answers (no_grant_matched would say \
+             nobody needs to add a grant — one exists; explicit_deny would collapse this into \
+             ordinary policy) — got {other:?}"
+        ),
+    }
 }

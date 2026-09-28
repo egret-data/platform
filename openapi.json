@@ -34523,7 +34523,7 @@
         "properties": {
           "kind": {
             "type": "string",
-            "description": "`allowed_by_grant` | `explicit_deny` | `no_grant_matched` |\n`masked_by_rule` | `filtered_by_rule`."
+            "description": "`allowed_by_grant` | `explicit_deny` | `no_grant_matched` |\n`masked_by_rule` | `filtered_by_rule` | `clearance_required`."
           },
           "grant_id": {
             "type": [
@@ -34550,6 +34550,23 @@
               "string",
               "null"
             ]
+          },
+          "tag": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`clearance_required` only: the gating tag's key."
+          },
+          "required_roles": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "`clearance_required` only: the role(s) that would clear it — holding\nany ONE is enough (`egret_perm_compile::clearance`'s \"OR across\nroles\" semantics)."
           }
         }
       },

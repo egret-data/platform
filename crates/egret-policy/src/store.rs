@@ -803,6 +803,32 @@ pub async fn tag_keys_for_resource_via(
     .await?)
 }
 
+/// The clearance gate for each of `tag_keys` that `egret_perm::evaluate` can
+/// actually agree with the compiled engine about (SP4c Task 4/D4): one
+/// `(tag key, required_roles)` pair per gated tag whose `required_roles` is
+/// non-empty. A `required_groups`-only gate is deliberately excluded — D2/D7
+/// measured that a group name matches nobody in the engine, so
+/// `egret_perm_compile::clearance` compiles it to NO deny at all, and
+/// `explain` reporting a denial for it would disagree with the engine in the
+/// direction opposite the bug SP4c Task 4 fixes.
+pub async fn clearance_gates_for_tags_via(
+    conn: &mut sqlx::PgConnection,
+    tag_keys: &[String],
+) -> Result<Vec<(String, Vec<String>)>, PolicyStoreError> {
+    if tag_keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as::<_, (String, Vec<String>)>(
+        r#"SELECT t.key, cp.required_roles
+             FROM classification_policies cp
+             JOIN tags t ON t.id = cp.tag_id
+            WHERE t.key = ANY($1) AND cardinality(cp.required_roles) > 0"#,
+    )
+    .bind(tag_keys)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
 /// Connection-generic core of [`PolicyStore::tagged_columns_for_service`] —
 /// same rationale as [`get_service_by_id_via`].
 pub async fn tagged_columns_for_service_via(
