@@ -947,7 +947,7 @@ in the service-def.
 | profile `sp4d1-gate` (id 56) and its 16 policies | **kept** — additive, enforced by nothing now, and what makes the Trino gate re-runnable |
 | profile `sp4d1-sr-gate` (id 57) and its 3 policies | **kept**, for the same reason |
 | schemas `sp4a10_wh.sp4d1` / `.sp4d1a` and their 8 tables | **kept**, four rows each; read by BOTH private engines, which is what makes the two results comparable |
-| MinIO prefix `e2e/starrocks/sp4d1-sr-gate` | left in place — the private FE's shared-data volume; a few MB of internal metadata, no fixture data |
+| MinIO prefix `e2e/starrocks/sp4d1-sr-gate` | **deleted** — the private FE's shared-data volume, 60 objects / 53 KiB, all under one service uuid and all internal `db10002` (`_statistics_`), no fixture data. Listed in full before removal, deleted by exact prefix with no glob, and confirmed after: the eight sibling prefixes are byte-identical (`sp3c2-sr-live` still 1.8 MiB / 148 objects) and `e2e/starrocks` went 522 → 462 objects, exactly the 60 removed |
 | `sp3c2-trino-live`, `demo-trino`, `sp3c2-sr-live`, `femeta-live` | **untouched** — no ConfigMap, Deployment, StatefulSet, FE config, `authentication_chain` or policy of theirs was modified. The two refusals §9 records still stand; they were routed around, not overridden. |
 | `sp3c_live_wh` | untouched; confirmed still unwritable (`Failed checking new table's location: s3://e2e/sp3c-live/…`), the pre-existing defect SP4a recorded |
 | the impersonated session used for the first StarRocks attempt | discarded; the overlay expires 30 min after issue |

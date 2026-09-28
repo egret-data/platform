@@ -525,6 +525,23 @@ Keep the profiles and the fixture tables — they are additive, enforced by noth
 are gone, and they are what makes the check cheap to re-run. Both private engines read the same
 Iceberg warehouse, which is what makes the Trino and StarRocks results comparable.
 
+The private StarRocks also leaves a shared-data volume behind in MinIO, which the `kubectl delete`
+does not touch. Remove it — but **list before you remove**, and scope to the exact prefix:
+
+```bash
+M="kubectl --context kind-egret exec -n egret-system <minio-pod> -- sh -c"
+$M 'mc alias set loc http://127.0.0.1:9000 egret egretsecret; mc ls loc/e2e/starrocks/'          # the siblings that must survive
+$M 'mc ls --recursive loc/e2e/starrocks/sp4d1-sr-gate/; mc du loc/e2e/starrocks/sp4d1-sr-gate/'  # the set you are about to delete
+$M 'mc rm --recursive --force "loc/e2e/starrocks/sp4d1-sr-gate/"'                                 # exact prefix, trailing slash, no glob
+$M 'mc ls loc/e2e/starrocks/; mc du loc/e2e/starrocks/'                                           # confirm only yours went
+```
+
+Delete against a set you have **seen**, never against a pattern you believe. This repo has a
+recorded incident where a cleanup helper's `LIKE 'egret_t_%'` matched `egret_test` and dropped a
+live database; the shape to avoid is a pattern that looks specific and is not. A prefix with no
+trailing slash and a glob are both that shape. Check the sibling object counts before and after —
+the bucket total should fall by exactly the number you listed.
+
 ### 7.6 Contract notes this section adds
 
 6. **An ANCESTOR match is not an allow.** A policy naming fewer hierarchy levels than the request
