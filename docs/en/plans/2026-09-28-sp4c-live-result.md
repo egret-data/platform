@@ -180,3 +180,43 @@ POST /api/control-plane/policies {resources: {catalog: default_catalog, database
 So the StarRocks **materialized-view** half of case 4 is **BLOCKED** on this
 deployment and is reported as such below, rather than being read as a clearance
 result. The StarRocks **view** half is measurable, and is measured.
+
+---
+
+## 2. The deploy, verified by the pod and not by helm's report
+
+The image was rebuilt from this branch's tip (`259522a5`) and `kind load`ed.
+
+```text
+helm upgrade --install egret deploy/helm/egret -n egret-system --wait --timeout 12m \
+  --set oidc.enabled=true --set ingress.enabled=true --set kernel.launcher=kubernetes \
+  --set backend.replicas=2 --set sharedStore.enabled=true --set ranger.enabled=true
+REVISION: 69   STATUS: deployed
+```
+
+| check | result |
+|---|---|
+| `helm get values` after the upgrade | all **six** user-supplied values, `ranger.enabled: true` among them |
+| `kind load` | `Image: "egret-backend:dev" with ID "sha256:3796715e5314…" not yet present on node "egret-control-plane", loading...` |
+| node's image (`crictl images`) | `docker.io/library/egret-backend  dev  a17bbc90ff081  87.5MB` |
+| serving pods' `imageID` | `sha256:a17bbc90ff081556905ae063f1b52b2872863ecc68bcbf5d15e5e22254b0d90b` on **both** `egret-5bd56794cd-pm4mr` and `-qlkbt` — identical to that node image |
+| `EGRET_RANGER__ENABLED` read from **inside** each running pod | `true`, `true` |
+| `_sqlx_migrations` max | 157 |
+
+**The plugins are actually enforcing, checked before any pass was trusted.** Not
+`allow-all`, and not merely configured — a policy biting, on each engine, read as
+output:
+
+```text
+/etc/trino/access-control.properties (read from inside the running coordinator)
+  access-control.name=ranger
+  ranger.service.name=sp3c2-trino-live
+/opt/starrocks/fe/conf/fe.conf (read from inside the running FE)
+  access_control = ranger
+
+analyst / Trino      SELECT id, item, country FROM sp4a10_wh.sp4a.report ORDER BY id
+                     → [[1,'xxxx','XX'], [3,'xxxx','XX']]   (SP4a's mask AND its row filter, both biting)
+admin   / StarRocks  SELECT id, item FROM sp4a10_wh.sp4a.srcases ORDER BY id
+                     → [[3,'xxxx'], [4,'xxxx']]             (mask + `id > 2` filter, biting even for admin,
+                                                             because a mask is not an access check)
+```
