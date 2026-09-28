@@ -24,6 +24,23 @@ pub struct RoleRepo {
     bus: EventBus,
 }
 
+impl RoleRepo {
+    /// The pool behind this repo, so a caller can own a TRANSACTION spanning a
+    /// role-membership write and its consequences.
+    ///
+    /// **SP4c Task 3.** A platform role grant changes who holds a CLEARING role,
+    /// and that must be accompanied by a policy recompile in the SAME
+    /// transaction — a stored-but-uncompiled membership change is what leaves an
+    /// engine enforcing the previous holder set. The recompile lives in
+    /// `egret-perm-compile`, which depends on this crate, so it cannot be called
+    /// from here without a dependency cycle; the caller therefore drives both
+    /// halves, through [`Self::assign_in_tx`]/[`Self::unassign_in_tx`] and
+    /// `egret_perm_compile::role_membership`.
+    pub fn pool(&self) -> &sqlx::PgPool {
+        &self.db.pool
+    }
+}
+
 /// Fixed advisory-lock key serializing role-graph parent mutations (`set_parent`),
 /// so concurrent parent changes can't write-skew into a cycle. Arbitrary constant.
 const ROLE_GRAPH_LOCK_KEY: i64 = 0x_E6E7_C0DE_6A11;
@@ -334,6 +351,77 @@ impl RoleRepo {
         .await
         .map_err(db_err)?;
         Ok(())
+    }
+
+    /// [`Self::assign`] on a caller-supplied connection — the `*_in_tx` half of
+    /// the pair, so a caller can commit the grant and its consequences together.
+    ///
+    /// **SP4c Task 3 needs this and could not put the consequence here.** A
+    /// platform role grant changes who holds a CLEARING role, and egret
+    /// enumerates a role's holders at compile time (a role NAME matches nobody
+    /// in any engine egret provisions — D0/D0b), so the grant must be
+    /// accompanied by a recompile in the same transaction. That recompile lives
+    /// in `egret-perm-compile`, which depends on THIS crate — so it cannot be
+    /// called from here without a dependency cycle. The caller owns the
+    /// transaction instead; see `egret_controlplane::access`'s role handlers for
+    /// the shape, and `egret_perm_compile::affected_services_for_role_membership`
+    /// for the one trigger both consumers share.
+    pub async fn assign_in_tx(
+        conn: &mut sqlx::PgConnection,
+        ptype: &str,
+        pid: Uuid,
+        role_id: Uuid,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT $1, $2, $3, 'platform', NULL \
+             WHERE NOT EXISTS ( \
+               SELECT 1 FROM access_grants \
+               WHERE principal_type = $1 AND principal_id = $2 AND role_id = $3 AND scope_type = 'platform')",
+        )
+        .bind(ptype)
+        .bind(pid)
+        .bind(role_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// [`Self::unassign`] on a caller-supplied connection — see
+    /// [`Self::assign_in_tx`] for why the recompile cannot live in this crate.
+    pub async fn unassign_in_tx(
+        conn: &mut sqlx::PgConnection,
+        ptype: &str,
+        pid: Uuid,
+        role_id: Uuid,
+    ) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM access_grants \
+             WHERE principal_type = $1 AND principal_id = $2 AND role_id = $3 AND scope_type = 'platform'",
+        )
+        .bind(ptype)
+        .bind(pid)
+        .bind(role_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// The `roles.name` of `role_id`, or `None`. The name is what
+    /// `perm.grant_principals` and `classification_policies.required_roles` both
+    /// store, so it is the key every clearance/role-grant trigger is looked up
+    /// by — never the id.
+    pub async fn name_of_in_tx(
+        conn: &mut sqlx::PgConnection,
+        role_id: Uuid,
+    ) -> Result<Option<String>> {
+        sqlx::query_scalar("SELECT name FROM roles WHERE id = $1")
+            .bind(role_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_err)
     }
 
     /// Remove a platform role assignment from a principal.

@@ -10,6 +10,10 @@ egret-core = { workspace = true, features = ["http"] }
 egret-audit = { workspace = true }
 egret-auth.workspace = true
 egret-bi.workspace = true
+# SP4c Task 3: a role-membership write must recompile the engine policies that
+# enumerate that role's holders, in the same transaction (`role_membership`).
+egret-perm.workspace = true
+egret-perm-compile.workspace = true
 egret-catalog-engine.workspace = true
 egret-storage.workspace = true
 async-trait.workspace = true

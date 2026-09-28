@@ -444,7 +444,21 @@ async fn assign_user_role(
     Json(body): Json<AssignRoleInput>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
-    st.roles.assign("user", id, body.role_id).await?;
+    // **SP4c Task 3, input 3: who holds the clearing role.** The grant and the
+    // recompile it forces share one transaction. A role NAME is unresolvable in
+    // every engine egret provisions (D0/D0b), so egret enumerates a role's
+    // HOLDERS at compile time — into a clearance's `denyExceptions` and into a
+    // `role` grant's users — and that enumeration is stale the moment this row is
+    // written. See `egret_perm_compile::role_membership` for why the recompile
+    // cannot live inside `egret_auth::roles` (it would be a dependency cycle).
+    egret_perm_compile::assign_platform_role_and_recompile(
+        st.roles.pool(),
+        "user",
+        id,
+        body.role_id,
+    )
+    .await
+    .map_err(CpError::from)?;
     st.audit.emit(egret_audit::mutation_for(
         &p,
         None,
@@ -484,7 +498,14 @@ async fn unassign_user_role(
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
     guard_last_admin(&st, role_id).await?;
-    st.roles.unassign("user", id, role_id).await?;
+    // SP4c Task 3: the REVOKE direction, which is the one that fails OPEN when
+    // its recompile is missed — the revoked holder stays named in every clearance
+    // exception and every role-granted policy, still reading a classified column
+    // whose clearance was taken away, with the `access_grants` row egret's own UI
+    // reads showing the revoke as done.
+    egret_perm_compile::unassign_platform_role_and_recompile(st.roles.pool(), "user", id, role_id)
+        .await
+        .map_err(CpError::from)?;
     st.audit.emit(egret_audit::mutation_for(
         &p,
         None,

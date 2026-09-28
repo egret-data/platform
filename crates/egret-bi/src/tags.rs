@@ -242,9 +242,24 @@ impl TagRepo {
     /// as — the caller should be told to delete/retarget the rule first, not
     /// shown an opaque internal error.
     pub async fn delete(&self, id: Uuid) -> Result<(), BiError> {
-        sqlx::query("DELETE FROM tags WHERE id = $1")
+        // **SP4c Task 3: deleting a tag is a write to input 1 AND to input 2.**
+        // `classification_policies` and `catalog_tag_assignments` both cascade
+        // away with the row (FKs, migrations 0081/0082), so a GATED tag's delete
+        // removes its clearance — and before SP4c that reached nothing, because
+        // a tag with no `perm.rules` row selecting it fed no compiled policy and
+        // this function therefore recompiled nothing. A clearance changes that:
+        // the compiled deny survives the tag, is served to every plugin, and
+        // nothing would ever sweep it again. That is SP4a Task 7's "a deleted
+        // rule's policy is enforced forever" Critical, one input over — and a
+        // clearance that cannot be lifted by deleting the tag is the one-way
+        // door SP4a had to reopen once already.
+        //
+        // In the SAME transaction, like every other recompile on this seam: the
+        // alternative is a committed delete with a deny nobody can remove.
+        let mut tx = self.db.pool.begin().await?;
+        let affected = sqlx::query("DELETE FROM tags WHERE id = $1")
             .bind(id)
-            .execute(&self.db.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| {
                 if let sqlx::Error::Database(ref dbe) = e {
@@ -257,7 +272,14 @@ impl TagRepo {
                     }
                 }
                 BiError::Db(e)
-            })?;
+            })?
+            .rows_affected();
+        // No row deleted is no state change: recompiling would be a lock
+        // acquisition and a full compile for an idempotent no-op.
+        if affected > 0 {
+            ClassificationPolicyRepo::recompile_for_clearance_in_tx(&mut tx).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -389,6 +411,7 @@ impl ClassificationPolicyRepo {
         for role in required_roles {
             validate_role_name(role)?;
         }
+        let mut tx = self.db.pool.begin().await?;
         sqlx::query(
             "INSERT INTO classification_policies \
                  (tag_id, required_roles, required_groups, created_by, updated_at) \
@@ -402,8 +425,10 @@ impl ClassificationPolicyRepo {
         .bind(required_roles)
         .bind(required_groups)
         .bind(by)
-        .execute(&self.db.pool)
+        .execute(&mut *tx)
         .await?;
+        Self::recompile_for_clearance_in_tx(&mut tx).await?;
+        tx.commit().await?;
         self.bus.publish(RolesChanged);
         Ok(())
     }
@@ -411,11 +436,54 @@ impl ClassificationPolicyRepo {
     /// Remove a tag's classification policy (idempotent — deletes zero or one row).
     /// Publishes `RolesChanged` so the PDP reloads its policy set.
     pub async fn clear_policy(&self, tag_id: Uuid) -> Result<(), BiError> {
+        let mut tx = self.db.pool.begin().await?;
         sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
             .bind(tag_id)
-            .execute(&self.db.pool)
+            .execute(&mut *tx)
             .await?;
+        Self::recompile_for_clearance_in_tx(&mut tx).await?;
+        tx.commit().await?;
         self.bus.publish(RolesChanged);
+        Ok(())
+    }
+
+    /// **SP4c Task 3, input 1 of three: the tag's own GATE.** Recompile every
+    /// profile a clearance can reach, on the CALLER's transaction — so the gate
+    /// and the engine policy it compiles to commit together or not at all.
+    ///
+    /// Until SP4c a `classification_policies` write reached the data plane
+    /// through nothing at all: the gate was enforced only by Cedar, on
+    /// control-plane object actions, and the compiler had never read the table.
+    /// Now that a gate compiles to an engine DENY, a write without its recompile
+    /// is the SP4a defect class this programme shipped four separate times — and
+    /// in both directions here. A missed `set_policy` leaves the classified
+    /// column readable by everyone while the UI shows the clearance as active; a
+    /// missed `clear_policy` leaves a deny nobody can lift, which is the one-way
+    /// door SP4a already had to reopen once.
+    ///
+    /// **A recompile FAILURE fails the write**, deliberately, exactly as
+    /// `CatalogTagRepo::recompile_bound_services_in_tx` does: a stored-but-
+    /// uncompiled clearance is worse than a rejected one, because egret's UI
+    /// shows it as enforced.
+    ///
+    /// `recompile_services_in_tx` takes the locks itself, expanded with each
+    /// profile's TAG service and ASCENDING (`lock_services_in_tx`) — the
+    /// ordering that turns two overlapping recompiles into a queue instead of a
+    /// deadlock. Nothing is locked here by hand, so there is no second ordering
+    /// to keep in step with it.
+    pub(crate) async fn recompile_for_clearance_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), BiError> {
+        let services = egret_perm_compile::affected_services_for_classification(&mut **tx).await?;
+        for summary in egret_perm_compile::recompile_services_in_tx(tx, &services).await? {
+            if !summary.skipped.is_empty() {
+                tracing::warn!(
+                    skipped_count = summary.skipped.len(),
+                    "a clearance write's recompile skipped some items — a group-only gate, or a \
+                     Trino profile with no tag service"
+                );
+            }
+        }
         Ok(())
     }
 

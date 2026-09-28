@@ -81,9 +81,11 @@ impl MemberRepo {
         // `perm` model, which this write does not change, so reading it first
         // is correct and keeps every lock this request needs acquired in one
         // ascending pass (see the module doc).
-        let services = egret_perm_compile::affected_services_for_workspace_members(&mut *tx, ws.0)
-            .await
-            .map_err(compile_err)?;
+        // SP4c Task 3: the roles this write touches — the one being granted, plus
+        // any this principal already holds here and is about to lose.
+        let mut touched: Vec<String> = current_roles(&mut tx, ws, ptype, pid).await?;
+        touched.push(role.to_string());
+        let services = Self::affected_for_membership_write(&mut tx, ws, &touched).await?;
         if !services.is_empty() {
             egret_perm_compile::lock_services_in_tx(&mut tx, &services)
                 .await
@@ -135,9 +137,10 @@ impl MemberRepo {
     /// transaction rather than following it.
     pub async fn remove(&self, ws: WorkspaceId, ptype: &str, pid: Uuid) -> Result<()> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        let services = egret_perm_compile::affected_services_for_workspace_members(&mut *tx, ws.0)
-            .await
-            .map_err(compile_err)?;
+        // SP4c Task 3: read the roles being removed BEFORE the DELETE — after it
+        // there is nothing left to read them from.
+        let touched = current_roles(&mut tx, ws, ptype, pid).await?;
+        let services = Self::affected_for_membership_write(&mut tx, ws, &touched).await?;
         if !services.is_empty() {
             egret_perm_compile::lock_services_in_tx(&mut tx, &services)
                 .await
@@ -160,6 +163,51 @@ impl MemberRepo {
         }
         tx.commit().await.map_err(db_err)?;
         Ok(())
+    }
+
+    /// The workspace-membership affected set, WIDENED by SP4c Task 3 with the
+    /// role-membership set for every workspace role this write touches.
+    ///
+    /// **Why a workspace role grant is a write to a CLEARING role's membership.**
+    /// `roles` is `UNIQUE (scope, name)`, so a workspace role and a platform role
+    /// may share a name — and `egret_perm_compile`'s `role_usernames`, which
+    /// enumerates a role's holders for a clearance's `denyExceptions` and for a
+    /// `role` grant's users, matches on `r.name` with **no scope filter**,
+    /// deliberately (an engine read carries no workspace context on any engine, so
+    /// narrowing to platform scope would DENY people Cedar clears). So granting
+    /// someone the workspace role `analyst` makes them a holder of `analyst` as
+    /// far as every compiled clearance is concerned, and the enumeration goes
+    /// stale exactly as a platform grant's does.
+    ///
+    /// `roles` is the set of role NAMES this write adds or removes. Both halves
+    /// are needed: the removed one because a stale REVOKE fails open, the added
+    /// one because a stale GRANT denies someone who should be cleared.
+    async fn affected_for_membership_write(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        ws: WorkspaceId,
+        roles: &[String],
+    ) -> Result<Vec<i64>> {
+        let mut services =
+            egret_perm_compile::affected_services_for_workspace_members(&mut **tx, ws.0)
+                .await
+                .map_err(compile_err)?;
+        for role in roles {
+            services.extend(
+                egret_perm_compile::affected_services_for_role_membership(&mut **tx, role)
+                    .await
+                    .map_err(compile_err)?,
+            );
+        }
+        // Ascending and deduplicated: `lock_services_in_tx` takes one row lock per
+        // id in the order given, and that order is what turns two overlapping
+        // recompiles into a queue instead of a deadlock.
+        services.sort_unstable();
+        services.dedup();
+        debug_assert!(
+            services.is_sorted(),
+            "profile locks must be taken ascending"
+        );
+        Ok(services)
     }
 
     pub async fn list(&self, ws: WorkspaceId) -> Result<Vec<WorkspaceMember>> {
@@ -264,4 +312,26 @@ impl From<MemberRow> for WorkspaceMember {
 /// rather than an opaque 500.
 fn compile_err(e: impl std::fmt::Display) -> Error {
     Error::Internal(anyhow::anyhow!("permission recompile failed: {e}"))
+}
+
+/// The workspace-role NAMES `(ptype, pid)` currently holds in `ws`, read on the
+/// caller's transaction — SP4c Task 3 needs them before a write that replaces or
+/// removes them, because afterwards there is nothing left to read.
+async fn current_roles(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ws: WorkspaceId,
+    ptype: &str,
+    pid: Uuid,
+) -> Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT r.name FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
+          WHERE ag.principal_type = $1 AND ag.principal_id = $2 \
+            AND ag.scope_type = 'workspace' AND ag.scope_id = $3 ORDER BY r.name",
+    )
+    .bind(ptype)
+    .bind(pid)
+    .bind(ws.0)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)
 }

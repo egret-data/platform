@@ -1228,15 +1228,26 @@ pub async fn affected_services_for_rule(
 ///
 /// The set is the one a tag-RULE mutation uses, for the same reason (see this
 /// module's Task 9 section): a tag is installation-wide, so any profile this
-/// compiler targets may carry a policy naming it. It is empty when no live
-/// rule selects the key at all — then nothing anywhere was compiled from that
-/// name, and a rename is a pure display change.
+/// compiler targets may carry a policy naming it. It is empty when nothing live
+/// compiles from that name at all — then a rename is a pure display change.
+///
+/// **SP4c Task 3 widened the "nothing compiles from it" test, and that was a
+/// real fail-OPEN gap, not a tidy-up.** Until SP4c a tag's name reached a
+/// compiled policy only through a `perm.rules` tag selector, so this function
+/// early-returned on `perm.rules` alone. A CLEARANCE also stamps `tags.name`
+/// into a Trino tag policy's `tag` resource ([`crate::clearance`]) — and a gated
+/// tag needs no rule. So renaming a gated-but-unruled tag returned an EMPTY
+/// affected set, the clearance deny kept naming the OLD tag, and at the next tag
+/// map refresh the deny matched nothing: the classified column started answering
+/// queries, triggered by nothing more than a display rename. Found by
+/// re-deriving this list for Task 3 rather than inheriting it, which is the
+/// method SP4a's fourth missing recompile taught.
 pub async fn affected_services_for_tag_rename(
     conn: &mut sqlx::PgConnection,
     tag_key: &str,
 ) -> Result<Vec<i64>, CompileError> {
     let selected: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM perm.rules WHERE selector_kind = 'tag' AND tag_key = $1)",
+        "SELECT EXISTS (SELECT 1 FROM perm.rules WHERE selector_kind = 'tag' AND tag_key = $1)               OR EXISTS (SELECT 1 FROM classification_policies cp JOIN tags t ON t.id = cp.tag_id                           WHERE t.key = $1 AND cardinality(cp.required_roles) > 0)",
     )
     .bind(tag_key)
     .fetch_one(&mut *conn)
@@ -1246,6 +1257,110 @@ pub async fn affected_services_for_tag_rename(
         return Ok(Vec::new());
     }
     let mut ids = compiler_targeted_services_via(conn).await.map_err(db_err)?;
+    normalize_service_order(&mut ids);
+    Ok(ids)
+}
+
+/// The services a change to a TAG's CLEARANCE (`classification_policies`) can
+/// change the compiled output of — SP4c Task 3, input 1 of three.
+///
+/// **Installation-wide, on purpose, and not because it was easier.** A Trino
+/// clearance is one tag policy carrying no catalog resource at all, so it
+/// compiles identically into every Trino profile that has a tag service; and a
+/// StarRocks clearance expands into every StarRocks profile from which any
+/// column carrying the tag is reachable. Deriving the narrow StarRocks set would
+/// mean walking `catalog_tag_assignments → catalogs → attachments → engines` for
+/// the tag here, duplicating a resolution `compile_clearance` already does
+/// per-service — and getting it wrong in the narrow direction is the failure
+/// this function exists to prevent, while getting it wrong WIDE costs one
+/// recompile that writes nothing (`apply_diff_in_tx` diffs each body
+/// byte-for-byte, so a profile whose output did not change is `unchanged`).
+///
+/// Unlike [`affected_services_for_tag_rename`] there is no "nothing references
+/// it" early return, because the write being accompanied IS the reference: after
+/// a `set_policy` the gate exists, and after a `clear_policy` the compiled deny
+/// must be reaped from wherever it was filed.
+pub async fn affected_services_for_classification(
+    conn: &mut sqlx::PgConnection,
+) -> Result<Vec<i64>, CompileError> {
+    let mut ids = compiler_targeted_services_via(conn).await.map_err(db_err)?;
+    normalize_service_order(&mut ids);
+    Ok(ids)
+}
+
+/// The services a change to who holds ROLE `role_name` can change the compiled
+/// output of — SP4c Task 3, input 3 of three.
+///
+/// **ONE trigger, TWO consumers, deliberately not two triggers.** A role name is
+/// unresolvable in every engine egret provisions (D0 measured it on Trino: the
+/// plugin polls a `/service/roles/download/<svc>` route egret does not serve, so
+/// `lastKnownRoleVersion` never leaves `-1`, `userRoles` is a hardcoded `null`
+/// and `disableRoleResolution` defaults true; D0b re-derived it for StarRocks,
+/// where `setUserRoles` is never called anywhere in `fe/`). So egret enumerates
+/// the holders at compile time in **two** places — a clearance's
+/// `denyExceptions` ([`crate::clearance`], SP4c Task 2/2d) and a `role`
+/// principal in a grant ([`crate::members`], SP4c Task 2b) — and both read the
+/// same `role_usernames`. Two triggers over one enumeration is two chances for
+/// one of them to be forgotten, which is the shape of the defect SP4a shipped
+/// four times; so this returns the UNION and each consumer contributes its own
+/// arm below.
+///
+/// - **Clearance arm:** installation-wide when any `classification_policies` row
+///   names this role, for the reason
+///   [`affected_services_for_classification`] gives.
+/// - **Grant arm:** catalog-scoped, exactly like [`affected_services_for_grant`]
+///   — a `role` principal in `perm.grant_principals` only reaches the profiles
+///   bound to that grant's catalog.
+///
+/// **There is deliberately no rule-EXEMPTION arm**, and that is not the
+/// defensive omission it looks like. `validate_rule_shape` refuses a `Role` in
+/// an exemption and `compile_rule` answers
+/// [`CompileError::UnexpressibleExemption`] for one that got in anyway — so such
+/// a row has never compiled to anything that could be stale, and adding the arm
+/// would make every membership write on that role FAIL the compile it triggered,
+/// turning an unreachable row into an outage on an unrelated path.
+///
+/// Empty when nothing in the installation names the role, which is the common
+/// case: then a membership write compiles nothing and costs two queries.
+pub async fn affected_services_for_role_membership(
+    conn: &mut sqlx::PgConnection,
+    role_name: &str,
+) -> Result<Vec<i64>, CompileError> {
+    // Clearance: does any gated tag name this role? `required_roles` is a
+    // `text[]`, so this is a containment test, not a join.
+    let clears: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM classification_policies WHERE $1 = ANY(required_roles))",
+    )
+    .bind(role_name)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+
+    let mut ids: Vec<i64> = Vec::new();
+    if clears {
+        ids.extend(compiler_targeted_services_via(conn).await.map_err(db_err)?);
+    }
+
+    // Grants: a `role` principal in either mode. `exclude` matters as much as
+    // `include` — a role in an `exclude` compiles to `allowExceptions`, and a
+    // stale exclusion keeps granting someone the model no longer grants.
+    let catalogs: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT g.catalog_id FROM perm.grants g \
+           JOIN perm.grant_principals p ON p.grant_id = g.id \
+          WHERE p.kind = 'role'::perm.principal_kind AND p.ref = $1",
+    )
+    .bind(role_name)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    for catalog_id in catalogs {
+        ids.extend(
+            services_for_catalog_via(conn, catalog_id)
+                .await
+                .map_err(db_err)?,
+        );
+    }
+
     normalize_service_order(&mut ids);
     Ok(ids)
 }
