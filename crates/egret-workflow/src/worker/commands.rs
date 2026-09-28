@@ -157,6 +157,19 @@ pub const DEFAULT_INTERPRETER: [&str; 2] = ["/bin/sh", "-c"];
 /// [`ingest_output_file`] carries a running total and refuses on either.
 pub const MAX_OUTPUT_FILE_BYTES: usize = 1_048_576;
 
+/// The most bytes a directory LISTING for `outputFiles` globs may be -- the
+/// output of `docker diff` (Docker) or `ls -A1p` (Kubernetes). Past it the
+/// task fails by name; nothing is parsed (W5a Task 5 fix round 2: an author
+/// who creates 300 000 files must not be able to make the worker read, hold
+/// or scan an unbounded listing inside its handler, where the lease renewal,
+/// the budget and the self-fence cannot run).
+pub const MAX_LISTING_BYTES: usize = 1_048_576;
+
+/// The most names `outputFiles` may resolve to -- literal names and glob
+/// matches together -- before the task fails by name. Each one is a copy or
+/// an exec, and a key in the outputs map.
+pub const MAX_OUTPUT_NAMES: usize = 1_000;
+
 /// The most bytes the `::{…}::` markers may contribute in total.
 ///
 /// Same argument as [`MAX_OUTPUT_FILE_BYTES`], applied to the other channel:
@@ -734,12 +747,14 @@ pub(crate) fn ingest_output(
              answer"
         ));
     }
-    *total += len;
+    // The KEY counts too (fix round 2): many empty files matched by a glob
+    // would otherwise grow the outputs map with no bound.
+    *total += len + rel.len();
     if *total > max_total_bytes {
         return Err(format!(
-            "the output files declared by this task come to {total} bytes, over the \
-             {max_total_bytes} one task may carry. `outputFiles:` is an unbounded \
-             list, so a per-file cap alone bounds nothing"
+            "the output files declared by this task come to {total} bytes (names and \
+             contents), over the {max_total_bytes} one task may carry. `outputFiles:` is \
+             an unbounded list, so a per-file cap alone bounds nothing"
         ));
     }
     let bytes = std::fs::read(&path).map_err(|e| {
@@ -987,6 +1002,8 @@ pub struct DockerRunner {
     max_output_bytes: usize,
     /// [`MAX_VARS_BYTES`], as a field.
     max_vars_bytes: usize,
+    /// [`MAX_LISTING_BYTES`], as a field (a test drives the cap).
+    max_listing_bytes: usize,
     /// Where a re-attach reads the attempt's newest stored line from, so it
     /// follows the container's log from there rather than from its start
     /// (W5a Task 5). `None`: a re-attach replays the whole log.
@@ -1007,6 +1024,7 @@ impl DockerRunner {
             binary: "docker".to_string(),
             max_output_bytes: MAX_OUTPUT_FILE_BYTES,
             max_vars_bytes: MAX_VARS_BYTES,
+            max_listing_bytes: MAX_LISTING_BYTES,
             logs: None,
         }
     }
@@ -1038,6 +1056,59 @@ impl DockerRunner {
         self.max_output_bytes = max_output_bytes;
         self.max_vars_bytes = max_vars_bytes;
         self
+    }
+
+    /// The same runner with a smaller [`MAX_LISTING_BYTES`], for a test.
+    pub fn with_listing_cap(mut self, max_listing_bytes: usize) -> Self {
+        self.max_listing_bytes = max_listing_bytes;
+        self
+    }
+
+    /// Run one `docker` subcommand, keeping at most `cap` bytes of its
+    /// stdout: `Ok(None)` when it printed more (the process is killed at
+    /// that point, so an unbounded output is never read to its end).
+    async fn cli_capped(
+        &self,
+        args: &[&str],
+        cap: usize,
+    ) -> Result<Option<(std::process::ExitStatus, Vec<u8>, String)>> {
+        use tokio::io::AsyncReadExt;
+        let spawn_err = |e: std::io::Error| {
+            Error::Internal(anyhow::anyhow!(
+                "could not run `{} {}`: {e}",
+                self.binary,
+                args.first().copied().unwrap_or("")
+            ))
+        };
+        let mut child = Command::new(&self.binary)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(spawn_err)?;
+        let stdout = child.stdout.take().expect("stdout piped");
+        let mut stderr = child.stderr.take().expect("stderr piped");
+        let mut out = Vec::new();
+        let limit = u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1);
+        stdout
+            .take(limit)
+            .read_to_end(&mut out)
+            .await
+            .map_err(io_err)?;
+        if out.len() > cap {
+            let _ = child.kill().await;
+            return Ok(None);
+        }
+        let mut err = Vec::new();
+        let _ = (&mut stderr).take(64 * 1024).read_to_end(&mut err).await;
+        let status = child.wait().await.map_err(io_err)?;
+        Ok(Some((
+            status,
+            out,
+            String::from_utf8_lossy(&err).into_owned(),
+        )))
     }
 
     /// Run one `docker` subcommand to completion, capturing both streams.
@@ -1577,15 +1648,27 @@ impl DockerRunner {
         let listed = if dirs.is_empty() {
             std::collections::BTreeMap::new()
         } else {
-            let out = self.cli(&["diff", name]).await?;
-            if !out.status.success() {
-                return Err(self
-                    .classify("diff", &String::from_utf8_lossy(&out.stderr))
-                    .await);
+            match self
+                .cli_capped(&["diff", name], self.max_listing_bytes)
+                .await?
+            {
+                None => {
+                    result.failure = Some(listing_too_big(self.max_listing_bytes));
+                    return Ok(());
+                }
+                Some((status, _, stderr)) if !status.success() => {
+                    return Err(self.classify("diff", &stderr).await);
+                }
+                Some((_, stdout, _)) => parse_docker_diff(&String::from_utf8_lossy(&stdout), &dirs),
             }
-            parse_docker_diff(&String::from_utf8_lossy(&out.stdout), &dirs)
         };
-        let names = expand_outputs(&commands.output_files, &listed);
+        let names = match expand_outputs(&commands.output_files, &listed, MAX_OUTPUT_NAMES) {
+            Ok(n) => n,
+            Err(problem) => {
+                result.failure = Some(problem);
+                return Ok(());
+            }
+        };
         for (i, (rel, from_glob)) in names.iter().enumerate() {
             let (rel, from_glob) = (rel.as_str(), *from_glob);
             // **One private root per declared name** — see
@@ -2131,10 +2214,21 @@ pub(crate) fn output_problem(rel: &str) -> Option<String> {
 /// whether or not they exist (a missing one is ignored when read); each
 /// pattern contributes its matches, sorted. A name is returned once. The
 /// `bool` is "from a glob". Pure: both runners list, then call this.
+///
+/// `Err` (the task's message) when the names exceed `max_names` -- per
+/// pattern or in total ([`MAX_OUTPUT_NAMES`]).
 pub(crate) fn expand_outputs(
     declared: &[String],
     listed: &std::collections::BTreeMap<String, Vec<String>>,
-) -> Vec<(String, bool)> {
+    max_names: usize,
+) -> std::result::Result<Vec<(String, bool)>, String> {
+    let too_many = |what: &str| {
+        format!(
+            "`outputFiles` {what} more than {max_names} names; egret reads back at most \
+             {max_names} output files per task (each is a copy and an output key, stored on \
+             the task run: W9 owns storage)"
+        )
+    };
     let mut out: Vec<(String, bool)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for rel in declared {
@@ -2158,6 +2252,9 @@ pub(crate) fn expand_outputs(
                 }
             })
             .collect();
+        if matched.len() > max_names {
+            return Err(too_many(&format!("pattern {rel:?} matches")));
+        }
         matched.sort();
         for m in matched {
             if seen.insert(m.clone()) {
@@ -2165,7 +2262,19 @@ pub(crate) fn expand_outputs(
             }
         }
     }
-    out
+    if out.len() > max_names {
+        return Err(too_many("resolves to"));
+    }
+    Ok(out)
+}
+
+/// The task's message when a glob's directory listing is over
+/// [`MAX_LISTING_BYTES`].
+pub(crate) fn listing_too_big(cap: usize) -> String {
+    format!(
+        "the working directory's listing, needed to resolve the `outputFiles` glob, is \
+         over {cap} bytes (too many files); name the output files, or write fewer files"
+    )
 }
 
 /// The directories whose entries [`expand_outputs`] needs listed.
@@ -2194,11 +2303,19 @@ fn parse_docker_diff(
         .collect();
     let mut out: std::collections::BTreeMap<String, Vec<String>> =
         dirs.iter().map(|d| (d.clone(), Vec::new())).collect();
+    // Every proper ancestor of every path, once: linear in the listing's
+    // length (fix round 2 -- the first version compared every path with
+    // every other, quadratic in a listing the author controls).
+    let mut parents: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for p in &paths {
-        let parent_of_another = paths
-            .iter()
-            .any(|q| q.len() > p.len() && q.starts_with(p) && q.as_bytes()[p.len()] == b'/');
-        if parent_of_another {
+        for (i, b) in p.bytes().enumerate() {
+            if b == b'/' {
+                parents.insert(&p[..i]);
+            }
+        }
+    }
+    for p in &paths {
+        if parents.contains(p) {
             continue;
         }
         let (dir, name) = p.rsplit_once('/').unwrap_or(("", p));
@@ -2751,7 +2868,7 @@ mod tests {
             }
             let mut r = CommandsResult::default();
             let mut total = 0usize;
-            for (rel, from_glob) in expand_outputs(&declared, &listed) {
+            for (rel, from_glob) in expand_outputs(&declared, &listed, MAX_OUTPUT_NAMES).unwrap() {
                 ingest_output(&mut r, &dir, &rel, 1024, 4096, &mut total, from_glob)
                     .unwrap_or_else(|e| panic!("{case}: {rel}: {e}"));
             }
@@ -2763,6 +2880,120 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// **Fix round 2: an author-sized listing cannot wedge the worker.** An
+    /// 8 MB `docker diff` (a shim; 8 MB rather than endless so the unmutated
+    /// control's memory stays bounded) is cut at a 64 KiB listing cap and the task FAILS by name, promptly -- rather than the
+    /// handler reading, holding and scanning it while its lease renewal,
+    /// budget and self-fence cannot run.
+    #[tokio::test]
+    async fn a_listing_over_the_cap_fails_the_task_in_bounded_time() {
+        let dir = staging("endless-diff");
+        let shim = dir.join("docker-shim.sh");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             \x20 create) echo id ;;\n\
+             \x20 version) exit 0 ;;\n\
+             \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
+             \x20 diff) yes 'A /egret/working-dir/f.x' | head -c 8000000 ;;\n\
+             esac\nexit 0\n",
+        )
+        .expect("write shim");
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o700);
+        }
+        std::fs::set_permissions(&shim, perms).expect("chmod");
+
+        let runner =
+            DockerRunner::with_binary(shim.display().to_string()).with_listing_cap(64 * 1024);
+        let cmds = TaskCommands {
+            container_image: "alpine:3.20".into(),
+            commands: vec!["true".into()],
+            output_files: vec!["*.x".into()],
+            ..TaskCommands::default()
+        };
+        let started = std::time::Instant::now();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            runner.run(
+                &leased(1_700_000_000),
+                &cmds,
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+                &NoObserver,
+            ),
+        )
+        .await
+        .expect("an endless listing must be cut at the cap, not read to its end")
+        .expect("an author's listing is never a worker failure");
+        let why = out.failure.expect("over the cap fails the task");
+        assert!(why.contains("listing") && why.contains("65536"), "{why}");
+        assert!(out.output_files.is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The listing is parsed in LINEAR time: 200 000 paths well inside a
+    /// second-scale bound (the first version was quadratic).
+    #[test]
+    fn a_large_listing_parses_in_linear_time() {
+        let mut diff = String::from("A /egret/working-dir\nA /egret/working-dir/sub\n");
+        for i in 0..200_000 {
+            diff.push_str(&format!("A /egret/working-dir/sub/f{i}.x\n"));
+        }
+        let dirs = std::collections::BTreeSet::from(["sub".to_string()]);
+        let started = std::time::Instant::now();
+        let listed = parse_docker_diff(&diff, &dirs);
+        assert_eq!(listed["sub"].len(), 200_000);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Too many names -- one pattern's matches, or all names together -- fail
+    /// the task by name.
+    #[test]
+    fn too_many_output_names_fail_by_name() {
+        let listed = std::collections::BTreeMap::from([(
+            String::new(),
+            (0..11).map(|i| format!("f{i}.x")).collect::<Vec<_>>(),
+        )]);
+        let err = expand_outputs(&["*.x".to_string()], &listed, 10).unwrap_err();
+        assert!(err.contains("\"*.x\" matches more than 10"), "{err}");
+        let ok = expand_outputs(&["*.x".to_string()], &listed, 11).expect("at the cap");
+        assert_eq!(ok.len(), 11);
+        let declared: Vec<String> = (0..6).map(|i| format!("lit{i}")).collect();
+        let small = std::collections::BTreeMap::from([(
+            String::new(),
+            (0..6).map(|i| format!("g{i}.x")).collect::<Vec<_>>(),
+        )]);
+        let mut all = declared.clone();
+        all.push("*.x".into());
+        let err = expand_outputs(&all, &small, 10).unwrap_err();
+        assert!(err.contains("resolves to more than 10"), "{err}");
+    }
+
+    /// The output KEYS count toward the total: empty files cost their names.
+    #[test]
+    fn output_keys_count_toward_the_total() {
+        let dir = staging("keys");
+        for n in ["aaaa", "bbbb", "cccc"] {
+            std::fs::write(dir.join(n), "").unwrap();
+        }
+        let mut r = CommandsResult::default();
+        let mut total = 0usize;
+        ingest_output(&mut r, &dir, "aaaa", 100, 10, &mut total, true).expect("4 bytes");
+        ingest_output(&mut r, &dir, "bbbb", 100, 10, &mut total, true).expect("8 bytes");
+        let err = ingest_output(&mut r, &dir, "cccc", 100, 10, &mut total, true)
+            .expect_err("12 bytes of names is over 10");
+        assert!(err.contains("names and contents"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The pattern rules: `*`/`?` in the file name only; `**`, `[...]` and a
@@ -2844,7 +3075,8 @@ mod tests {
         ingest_output_file(&mut r, &dir, "b", 150, 250, &mut total).expect("b fits");
         let err = ingest_output_file(&mut r, &dir, "c", 150, 250, &mut total)
             .expect_err("three 100-byte files are over a 250-byte total");
-        assert!(err.contains("300 bytes"), "the TOTAL must be named: {err}");
+        // 3 x (100 bytes + a 1-byte name) since fix round 2 counts the key.
+        assert!(err.contains("303 bytes"), "the TOTAL must be named: {err}");
         assert!(err.contains("unbounded list"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }

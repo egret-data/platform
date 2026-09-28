@@ -69,9 +69,10 @@ use super::transfer;
 use crate::logs::{LogLevel, LogRepo, RunIdentity};
 use crate::scripts::RunnerSpec;
 use crate::worker::commands::{
-    expand_outputs, output_problem, pattern_dirs, relative_problem, run_liveness, stream_line,
-    CommandsResult, LineObserver, OrphanSweep, StreamState, TaskCommands, TaskRunner,
-    MAX_OUTPUT_FILE_BYTES, MAX_VARS_BYTES, RUN_NAME_PREFIX, TASKRUN_LABEL, WORKING_DIR,
+    expand_outputs, listing_too_big, output_problem, pattern_dirs, relative_problem, run_liveness,
+    stream_line, CommandsResult, LineObserver, OrphanSweep, StreamState, TaskCommands, TaskRunner,
+    MAX_LISTING_BYTES, MAX_OUTPUT_FILE_BYTES, MAX_OUTPUT_NAMES, MAX_VARS_BYTES, RUN_NAME_PREFIX,
+    TASKRUN_LABEL, WORKING_DIR,
 };
 use crate::worker::TaskInput;
 
@@ -609,9 +610,13 @@ impl KubernetesRunner {
                     FILES_OUT,
                     vec!["ls".into(), "-A1p".into(), "--".into(), path],
                     None,
-                    self.max_output_bytes,
+                    MAX_LISTING_BYTES + 1,
                 )
                 .await?;
+            if out.stdout.len() > MAX_LISTING_BYTES {
+                result.failure = Some(listing_too_big(MAX_LISTING_BYTES));
+                return Ok(());
+            }
             // A directory that does not exist lists nothing: its pattern
             // matches nothing, as Kestra's.
             let names: Vec<String> = if out.success {
@@ -625,8 +630,22 @@ impl KubernetesRunner {
             };
             listed.insert(dir, names);
         }
-        for (rel, _from_glob) in expand_outputs(&cmds.output_files, &listed) {
+        let names = match expand_outputs(&cmds.output_files, &listed, MAX_OUTPUT_NAMES) {
+            Ok(n) => n,
+            Err(problem) => {
+                result.failure = Some(problem);
+                return Ok(());
+            }
+        };
+        for (rel, from_glob) in names {
             let rel = &rel;
+            // An EXPANDED name is re-validated like a declared one (fix round
+            // 2): a file named `x\n..` lists as the line `..`, which `*`
+            // matches, and must never reach `tar -C <wd> -- ..`.
+            if let Some(problem) = output_problem(rel) {
+                result.failure = Some(problem);
+                break;
+            }
             // The contents, their header, a possible long-name entry and the
             // end blocks. Past this the stream is cut and the header decides.
             let cap = self.max_output_bytes + 8 * 512;
@@ -650,6 +669,10 @@ impl KubernetesRunner {
                 .await?;
             let entry = transfer::unpack_one(&out.stdout, self.max_output_bytes)
                 .map_err(|e| internal(&format!("reading {rel:?} out of files-out"), e))?;
+            // A glob visits files only: a directory it matched is skipped.
+            if from_glob && matches!(entry, Some(transfer::Entry::Directory)) {
+                continue;
+            }
             let bytes = match transfer::judge(rel, entry, self.max_output_bytes) {
                 Ok(Some(b)) => b,
                 // Not there: ignored, as Kestra (`missing_declared_file`).
@@ -659,10 +682,12 @@ impl KubernetesRunner {
                     break;
                 }
             };
-            total += bytes.len();
+            // The key counts toward the total too (fix round 2).
+            total += bytes.len() + rel.len();
             if total > self.max_output_bytes {
                 result.failure = Some(format!(
-                    "the output files declared by this task come to {total} bytes, over the \
+                    "the output files declared by this task come to {total} bytes (names and \
+                     contents), over the \
                      {} one task may carry. `outputFiles:` is an unbounded list, so a per-file \
                      cap alone bounds nothing",
                     self.max_output_bytes

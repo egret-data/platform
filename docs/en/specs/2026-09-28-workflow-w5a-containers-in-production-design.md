@@ -41,7 +41,7 @@ Kestra (checkout `96893b589`, image `kestra/kestra:v2.0.0-rc13`):
 | no image allowlist, no per-tenant switch | feature `workflow_containers` (default off) + `allowed-images` in `plugin_configurations` | user decision: stricter than Kestra OSS |
 | containers identified by labels only | pods also get a **deterministic name** | cancel and re-attach from any worker, the reason egret's Docker runner already names containers |
 | heartbeat + liveness coordinator | the worker renews its lease (`claimed_at`) every `working_timeout / 3`; the reaper already reclaims only expired leases | the same guarantee on egret's existing claim model |
-| output files → internal-storage URIs | inline contents, capped at 1 MiB per file and 1 MiB in total (W4's caps); a file over either fails the task | internal storage is W9; the contents are stored on the task run and re-rendered by every later task |
+| output files → internal-storage URIs | inline contents, capped at 1 MiB per file and 1 MiB in total, **names and contents** (W4's caps; the key counts since Task 5 fix round 2); at most 1,000 names per task (literals and glob matches); a glob's directory listing at most 1 MiB; over any cap fails the task by name | internal storage is W9; the contents are stored on the task run and re-rendered by every later task |
 | `outputFiles`: non-recursive glob, missing file ignored | **the same** (Task 5 fix round 1, user decision): `*`/`?` in the file name match files in one directory; a declared file the command did not write is ignored; `**`, `[...]` and a wildcard directory are refused at save | follows the measurement (`w5a-scripts.json` `egret_expected.output_files`); the refused forms are not implemented |
 
 ## 3. Task types and properties
