@@ -255,6 +255,18 @@ impl KubernetesRunner {
         // stream is in order, but a stderr line reaches egret up to `tail -F`'s
         // one-second poll after the stdout lines around it (Kestra's Docker
         // runner does not order across its two streams either).
+        // **The re-attach window is read BEFORE egret writes anything to this
+        // attempt's log** (fix round 2). `last_ts` is "the newest stored line of
+        // the attempt", whoever wrote it: a line this call writes first — the
+        // WARN below — can be flushed by the batching writer before the query
+        // runs, and `sinceTime` would then be THIS holder's now − margin,
+        // dropping every line `main` wrote while nobody was attached. Nothing
+        // on the path from `run` to here writes to `task.log`.
+        let (since, mut replayed) = if reattached {
+            self.reattach_window(task).await?
+        } else {
+            (None, Replayed::default())
+        };
         let split = pod_spec::stderr_is_separable(cmds);
         if !split {
             task.log
@@ -266,11 +278,6 @@ impl KubernetesRunner {
                 )
                 .await;
         }
-        let (since, mut replayed) = if reattached {
-            self.reattach_window(task).await?
-        } else {
-            (None, Replayed::default())
-        };
         let mut result = CommandsResult::default();
         let mut state = StreamState::default();
         let sentinel = format!("{STDERR_END_PREFIX}{}##", uuid::Uuid::new_v4().simple());

@@ -632,6 +632,96 @@ async fn a_line_written_just_before_the_reclaim_is_not_lost() {
     assert!(wait_gone(&c, &name, Duration::from_secs(20)).await);
 }
 
+/// A sink that STORES each line immediately (as a flushed `PgLogSink` batch
+/// would) and records it for the assertions.
+#[derive(Debug)]
+struct StoringRecorder {
+    repo: LogRepo,
+    rec: Arc<Recorder>,
+}
+
+#[async_trait::async_trait]
+impl LogSink for StoringRecorder {
+    async fn write(&self, line: LogLine) {
+        self.repo
+            .insert_batch(std::slice::from_ref(&line))
+            .await
+            .expect("store the line");
+        self.rec.write(line).await;
+    }
+}
+
+/// Fix round 2: with a non-shell interpreter egret writes a WARN line of its
+/// own. On a re-attach it must not be stored before the re-attach window is
+/// read, or `sinceTime` becomes this holder's own "now" − margin and every
+/// line written while nobody was attached is lost.
+async fn a_non_shell_reattach_keeps_the_lines_written_before_the_reclaim() {
+    let c = client().await;
+    let pool = pool().await;
+    let (ws, _user) = common::seed_workspace(&common::db().await.unwrap()).await;
+    let execution = insert_execution(&pool, ws).await;
+    let run = insert_run(&pool, execution, 0, "RUNNING").await;
+    let r = runner().await;
+    let mut cmds = shell(&["echo one", "sleep 1", "echo mid", "sleep 9", "echo two"]);
+    cmds.interpreter = vec!["/bin/busybox".into(), "sh".into(), "-c".into()];
+    let (t1, rec1) = task_for(ws, execution, run);
+    let name = name_of(&t1);
+    {
+        let spec = k8s_spec();
+        let first = r.run(&t1, &cmds, &spec, &NoObserver);
+        tokio::pin!(first);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            tokio::select! {
+                res = &mut first => panic!("the first call finished early: {res:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
+            if rec1.texts().iter().any(|l| l == "one") {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "never saw `one`");
+        }
+    } // <- dropped right after `one`
+      // What the first holder had stored.
+    sqlx::query(
+        "INSERT INTO workflow.task_logs \
+           (workspace_id, execution_id, task_run_id, task_id, attempt, level, ts, message) \
+         VALUES ($1, $2, $3, 't', 0, 2, now(), 'one')",
+    )
+    .bind(ws)
+    .bind(execution)
+    .bind(run)
+    .execute(&pool)
+    .await
+    .expect("store the first holder's line");
+    // Reclaimed well over the margin later: `mid` is > 5 s old by then.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+
+    let (mut t2, rec2) = task_for(ws, execution, run);
+    t2.log = RunLog::new(
+        t2.log.identity().clone(),
+        Arc::new(StoringRecorder {
+            repo: LogRepo::new(pool.clone()),
+            rec: rec2.clone(),
+        }),
+        LogLimits::default(),
+    );
+    let out = r
+        .run(&t2, &cmds, &k8s_spec(), &NoObserver)
+        .await
+        .expect("the second holder finishes the run");
+    assert_eq!(out.exit_code, 0);
+    let texts = rec2.texts();
+    assert!(
+        texts.contains(&"mid".to_string()),
+        "the line written while nobody was attached is replayed: {texts:?}"
+    );
+    assert!(texts.contains(&"two".to_string()), "{texts:?}");
+    assert!(!texts.contains(&"one".to_string()), "{texts:?}");
+    assert!(texts.iter().any(|t| t.contains("not a shell")), "{texts:?}");
+    assert!(wait_gone(&c, &name, Duration::from_secs(20)).await);
+}
+
 /// The sweep deletes pods of terminal runs only: a live run's pod, a
 /// `delete: false` pod, and a pod whose run this database does not know
 /// (another egret's, or another test suite's) all survive.
@@ -834,6 +924,7 @@ fn cases() -> Vec<(&'static str, Case)> {
         case!(a_second_run_call_for_the_same_attempt_reattaches_not_recreates),
         case!(a_line_written_just_before_the_reclaim_is_not_lost),
         case!(a_non_shell_interpreter_keeps_the_merged_stream_and_says_so),
+        case!(a_non_shell_reattach_keeps_the_lines_written_before_the_reclaim),
         case!(the_orphan_sweep_deletes_pods_of_terminal_runs_only),
         case!(the_docker_orphan_sweep_removes_containers_of_terminal_runs_only),
     ]
