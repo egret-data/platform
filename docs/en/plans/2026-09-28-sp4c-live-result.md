@@ -450,3 +450,67 @@ This falsifies the second sentence Task 5 put on `TagDetail`:
 
 **There is no asymmetry. Both engines withhold reads only.** The UI tells an
 author that a Trino classification blocks writes; measured, it does not.
+
+---
+
+## Case 6 — a rename does not break it. **PASS**
+
+Task 3 found that renaming a gated tag used to leave the deny naming the old tag,
+which fails open. The Trino clearance addresses the tag by `tags.name`, so the
+name is the field that matters (`PATCH /tags/{id}` carries `name`; `tags.key` is
+not renameable through that route).
+
+```text
+PATCH /api/control-plane/tags/3954a1a4-… {"name":"sp4cgate2"}  → 200
+```
+
+The compiled policy and the tag download both moved in the same write:
+
+```text
+policy 8840  resources.tag.values  → ["sp4cgate2"]          (was ["sp4cgate"])
+GET /service/tags/download/sp3c2-trino-live_tag
+             tagVersion 10, tags {"1":{"type":"sp4cgate2"}}, resource 1 = sp4a10_wh/sp4a/gate/secret
+classification_policies.required_roles → {sp4c_cleared}      (unchanged)
+denyExceptions on 8840 and 8841        → ["d3member"]        (unchanged)
+```
+
+and the clearance still discriminates, after the plugins' next poll:
+
+```text
+analyst  / Trino      → failed: engine: Access Denied: Cannot select from columns [id, secret] in table or view gate
+analyst  / StarRocks  → failed: engine: Server error: `ERROR 5204 (42000): Access denied; you need (at least one of)
+                        the SELECT privilege(s) on COLUMN secret for this operation.'
+d3member / Trino      → finished, [[91,'written-by-uncleared'],[1,'classified-one'],[2,'classified-two'],[3,'classified-three']]
+d3member / StarRocks  → finished, same four rows
+```
+
+No fail-open. **PASS.**
+
+---
+
+## An extra finding, not one of the six: `explain` disagrees with the engine about a cleared user
+
+Task 4 exists so `explain` names a clearance denial instead of reporting an access
+the engine does not grant. Called the natural way — naming only the user, as the
+endpoint's own `ExplainSubject` doc says a caller does — it is wrong in **both**
+directions, because `ExplainSubject.roles` is caller-supplied and defaults to
+empty while `workspaces` is resolved server-side:
+
+```text
+POST /api/control-plane/perm/explain {"subject":{"user":"d3member"},"action":"read",
+     "target":{catalog sp4a10_wh, schema sp4a, table gate, column secret}}
+→ {"allowed":false,"reasons":[{"kind":"clearance_required","tag":"sp4cgate","required_roles":["sp4c_cleared"]}]}
+  …for the user the engine served the column to, in the same minute.
+
+{"subject":{"user":"analyst","roles":["sp4c_cleared"]}, …}
+→ {"allowed":true,"reasons":[{"kind":"allowed_by_grant","grant_id":"c11e6fd0-…"}]}
+  …for the user the engine refuses. A caller asserting a role it does not hold is believed.
+```
+
+(With the role supplied truthfully, `{"user":"d3member","roles":["sp4c_cleared"]}`
+→ `allowed: true` — so the evaluator's logic is right and only its **input** is
+unresolved.) This is SP4a Task 15's D3 defect 2 exactly, on the field next to the
+one that was fixed: a caller-supplied copy of a fact only egret can verify.
+`explain` should resolve the subject's roles from `access_grants` the same way it
+now resolves workspace membership. Reported here rather than fixed, because this
+task is the gate.
