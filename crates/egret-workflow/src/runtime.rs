@@ -563,6 +563,7 @@ fn spawn_worker(
         "workflow worker started"
     );
 
+    let reg_for_sweep = reg.clone();
     // ── Ticker 1: the claim loop ────────────────────────────────────────────
     let timing = crate::worker::WorkerTiming {
         working_timeout: cfg.working_timeout,
@@ -606,7 +607,13 @@ fn spawn_worker(
         })
     };
 
-    // ── Ticker 2: the lease reaper ──────────────────────────────────────────
+    // ── Ticker 2: the lease reaper, and (W5a) the orphan sweep ───────────────
+    //
+    // The sweep rides the reaper's tick (spec §5, *Orphans*): it removes the
+    // containers or pods of runs that are TERMINAL (both halves, W5a Task 4
+    // fix round 1), so it can never touch a live run's work, and a pass that
+    // fails is logged and retried on the next tick like a failed reap.
+    let sweep = reg_for_sweep.orphan_sweep();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(cfg.reaper_interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -614,15 +621,119 @@ fn spawn_worker(
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = tick.tick() => {
-                    match crate::worker::reap(&pool, cfg.working_timeout).await {
-                        Ok(0) => {}
-                        Ok(n) => tracing::info!(reclaimed = n, "workflow leases reclaimed"),
-                        Err(e) => tracing::warn!(error = %e, "workflow reaper failed"),
-                    }
+                    reaper_pass(&pool, cfg.working_timeout, sweep.as_deref()).await;
                 }
             }
         }
         tracing::info!("workflow reaper stopped");
     });
     claim_loop
+}
+
+/// One reaper tick: reclaim expired leases, then sweep the orphans of ended
+/// runs when a container runner is configured. Each half logs its own
+/// failure; neither stops the loop.
+pub async fn reaper_pass(
+    pool: &PgPool,
+    working_timeout: Duration,
+    sweep: Option<&dyn crate::worker::commands::OrphanSweep>,
+) {
+    match crate::worker::reap(pool, working_timeout).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(reclaimed = n, "workflow leases reclaimed"),
+        Err(e) => tracing::warn!(error = %e, "workflow reaper failed"),
+    }
+    if let Some(sweep) = sweep {
+        match sweep.sweep_orphans(pool).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(removed = n, "task containers of ended runs removed"),
+            Err(e) => tracing::warn!(error = %e, "workflow orphan sweep failed"),
+        }
+    }
+}
+
+/// **The worker's registry for a deployment (W5a Task 5)**: `egret-bin`'s one
+/// call, so the decision is here where a test can reach it.
+///
+/// * `container_runner = none`: [`Handlers::with_core_tasks`], **exactly** --
+///   no script handler, no orphan sweep -- and `None` for the publish gate's
+///   default runner.
+/// * `docker` / `kubernetes`: the same, plus the four script types and their
+///   two aliases over ONE runner built here ([`crate::worker::handlers::script::register`]),
+///   with the run-time gate reading `workspace_features` from `pool` and the
+///   allowlist from `plugin_configurations`; the runner is also the registry's
+///   orphan sweep. Returns the runner kind, which publish uses for a task with
+///   no `taskRunner:`.
+///
+/// `Err` for a Kubernetes configuration egret refuses (`run_as_user <= 0`) or
+/// a cluster client that cannot be built: a deployment that asked for
+/// containers and cannot have them must not start as if it had none.
+pub async fn handlers_for(
+    cfg: &egret_config::WorkflowConfig,
+    pool: PgPool,
+) -> egret_core::Result<(Handlers, Option<crate::scripts::RunnerKind>)> {
+    use crate::scripts::RunnerKind;
+    use crate::worker::commands::{DockerRunner, OrphanSweep, TaskRunner};
+    use crate::worker::handlers::script::{register, PgFeatureState, ScriptRuntime};
+
+    let mut handlers = Handlers::with_core_tasks();
+    let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) = match cfg
+        .container_runner
+    {
+        egret_config::ContainerRunner::None => return Ok((handlers, None)),
+        egret_config::ContainerRunner::Docker => {
+            let r = Arc::new(DockerRunner::new().with_logs(LogRepo::new(pool.clone())));
+            (RunnerKind::Docker, r.clone(), r)
+        }
+        egret_config::ContainerRunner::Kubernetes => {
+            let pod = pod_config(&cfg.kubernetes);
+            pod.validate()
+                .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e}")))?;
+            let client = kube::Client::try_default().await.map_err(|e| {
+                    egret_core::Error::Internal(anyhow::anyhow!(
+                        "workflow.container_runner is kubernetes but no cluster client could be                          built: {e}"
+                    ))
+                })?;
+            let r = Arc::new(crate::worker::k8s::KubernetesRunner::new(
+                client,
+                pod,
+                LogRepo::new(pool.clone()),
+            ));
+            (RunnerKind::Kubernetes, r.clone(), r)
+        }
+    };
+    register(
+        &mut handlers,
+        Arc::new(ScriptRuntime {
+            runner_kind: kind,
+            runner,
+            plugin_configurations: cfg.plugin_configurations.clone(),
+            features: Arc::new(PgFeatureState::new(pool)),
+        }),
+    );
+    Ok((handlers.with_orphan_sweep(sweep), Some(kind)))
+}
+
+/// `workflow.kubernetes.*` in the runner's own vocabulary.
+pub fn pod_config(k: &egret_config::WorkflowKubernetesConfig) -> crate::worker::k8s::PodConfig {
+    fn side(a: &egret_config::TaskResourceAmounts) -> crate::scripts::ResourceAmounts {
+        crate::scripts::ResourceAmounts {
+            cpu: a.cpu.clone(),
+            memory: a.memory.clone(),
+        }
+    }
+    fn both(r: &egret_config::TaskResources) -> crate::scripts::Resources {
+        crate::scripts::Resources {
+            request: side(&r.request),
+            limit: side(&r.limit),
+        }
+    }
+    crate::worker::k8s::PodConfig {
+        namespace: k.namespace.clone(),
+        run_as_user: k.run_as_user,
+        helper_image: k.helper_image.clone(),
+        default_resources: both(&k.default_resources),
+        max_resources: both(&k.max_resources),
+        image_pull_secrets: k.image_pull_secrets.clone(),
+    }
 }

@@ -44,6 +44,7 @@ pub mod fail;
 pub mod log;
 pub mod python;
 pub mod ret;
+pub mod script;
 pub mod sleep;
 pub mod sql;
 

@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::commands::OrphanSweep;
 use super::handlers::{LogSink, TracingSink};
 use super::{handlers, Outcome, Registry, TaskHandler, TaskInput, WorkerError};
 use crate::logs::LogLimits;
@@ -65,6 +66,9 @@ pub struct Handlers {
     /// Where each attempt's [`RunLog`](crate::logs::RunLog) writes, and its
     /// cap. `None` is `tracing` under the default limits.
     log: Option<(Arc<dyn LogSink>, LogLimits)>,
+    /// What the reaper's tick sweeps for work left behind by ended runs
+    /// (W5a): the configured container runner, or nothing.
+    sweep: Option<Arc<dyn OrphanSweep>>,
 }
 
 impl std::fmt::Debug for Handlers {
@@ -132,6 +136,14 @@ impl Handlers {
     /// `limits`. W11 Task 4 passes the Postgres-backed sink here.
     pub fn with_log_sink(mut self, sink: Arc<dyn LogSink>, limits: LogLimits) -> Self {
         self.log = Some((sink, limits));
+        self
+    }
+
+    /// The same registry, with the reaper's tick sweeping `sweep`'s orphans
+    /// (`OrphanSweep`, W5a Task 4) -- set by `runtime::handlers_for` when a
+    /// container runner is configured.
+    pub fn with_orphan_sweep(mut self, sweep: Arc<dyn OrphanSweep>) -> Self {
+        self.sweep = Some(sweep);
         self
     }
 
@@ -244,6 +256,9 @@ impl Registry for Handlers {
     fn log_sink(&self) -> (Arc<dyn LogSink>, LogLimits) {
         Handlers::log_sink(self)
     }
+    fn orphan_sweep(&self) -> Option<Arc<dyn OrphanSweep>> {
+        self.sweep.clone()
+    }
 }
 
 #[cfg(test)]
@@ -329,10 +344,21 @@ mod tests {
     /// spelling publish accepts for its row -- the canonical FQCN included.
     #[test]
     fn an_alias_typed_handler_is_served_under_every_spelling_of_its_row() {
+        struct AliasTyped;
+        #[async_trait::async_trait]
+        impl TaskHandler for AliasTyped {
+            fn type_id(&self) -> &'static str {
+                "egret.container"
+            }
+            async fn run(&self, _: &TaskInput) -> Result<Outcome> {
+                Ok(Outcome::success())
+            }
+            async fn cancel(&self, _: &TaskInput) -> Result<()> {
+                Ok(())
+            }
+        }
         let mut reg = Handlers::default();
-        reg.add_publishable(Arc::new(
-            crate::worker::handlers::container::Container::new(),
-        ));
+        reg.add_publishable(Arc::new(AliasTyped));
         assert_eq!(
             reg.type_ids(),
             vec!["egret.container", "io.kestra.plugin.scripts.shell.Commands"]

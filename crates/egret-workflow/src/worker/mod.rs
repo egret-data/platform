@@ -519,6 +519,14 @@ pub trait Registry: Send + Sync {
             crate::logs::LogLimits::default(),
         )
     }
+
+    /// What the reaper's tick should sweep for containers or pods of runs that
+    /// have ended (W5a spec §5, *Orphans*). A default of `None` is safe: a
+    /// registry with no container runner has nothing to leave behind.
+    /// [`Handlers`] answers with what [`Handlers::with_orphan_sweep`] was given.
+    fn orphan_sweep(&self) -> Option<std::sync::Arc<dyn commands::OrphanSweep>> {
+        None
+    }
 }
 
 /// The failures this module raises that are not database errors.

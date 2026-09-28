@@ -491,25 +491,7 @@ impl KubernetesRunner {
     /// ⌊newest⌋ are the overlap that is dropped by exact text
     /// ([`Replayed`]). No stored line: from the container's start.
     async fn reattach_window(&self, task: &TaskInput) -> Result<(Option<DateTime<Utc>>, Replayed)> {
-        let attempt = RunIdentity::stored_attempt(task.attempt);
-        let Some(last) = self
-            .logs
-            .last_ts(task.execution_id, task.run_id, attempt)
-            .await?
-        else {
-            return Ok((None, Replayed::default()));
-        };
-        let stored = self
-            .logs
-            .messages_since(
-                task.execution_id,
-                task.run_id,
-                attempt,
-                floor_to_second(last),
-                REPLAY_DEDUPE_MAX,
-            )
-            .await?;
-        Ok((Some(reattach_since(last)), Replayed::new(stored)))
+        reattach_window(&self.logs, task).await
     }
 
     /// Upload the input files into `files-in`, verify them, then `ready`.
@@ -788,6 +770,33 @@ const REPLAY_DEDUPE_MAX: i64 = 10_000;
 /// `sinceTime` for a re-attach whose newest stored line has `ts = last`.
 pub(crate) fn reattach_since(last: DateTime<Utc>) -> DateTime<Utc> {
     floor_to_second(last) - REATTACH_MARGIN
+}
+
+/// [`KubernetesRunner`]'s re-attach window, shared with the Docker runner's
+/// (W5a Task 5): `since` = ⌊newest stored `ts` of this attempt⌋ −
+/// [`REATTACH_MARGIN`], and the stored lines at or after ⌊newest⌋ as the
+/// overlap to drop. No stored line: `(None, empty)`, i.e. from the start.
+pub(crate) async fn reattach_window(
+    logs: &LogRepo,
+    task: &TaskInput,
+) -> Result<(Option<DateTime<Utc>>, Replayed)> {
+    let attempt = RunIdentity::stored_attempt(task.attempt);
+    let Some(last) = logs
+        .last_ts(task.execution_id, task.run_id, attempt)
+        .await?
+    else {
+        return Ok((None, Replayed::default()));
+    };
+    let stored = logs
+        .messages_since(
+            task.execution_id,
+            task.run_id,
+            attempt,
+            floor_to_second(last),
+            REPLAY_DEDUPE_MAX,
+        )
+        .await?;
+    Ok((Some(reattach_since(last)), Replayed::new(stored)))
 }
 
 /// The stored lines a re-attach will see again, as a multiset of their text:

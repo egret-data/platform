@@ -104,11 +104,10 @@
 //!   namespace files, Windows workers). [`TaskCommands::input_files`] carries
 //!   the one case a handler here actually needs — a script written by the
 //!   handler itself.
-//! * **No image pulling policy, no registry credentials, no resource limits.**
-//!   `Docker` has `pullPolicy`, `credentials`, `cpu`, `memory`, `shmSize`,
-//!   `deviceRequests`, `privileged`, `networkMode`. Adding any of them is a
-//!   property with a caller; none has one yet, and this package's standing rule
-//!   is that a field with no reader does not ship.
+//! * **No registry credentials, no `shmSize`, `deviceRequests`, `privileged`,
+//!   `networkMode`, volumes.** W5a Task 5 implements `pullPolicy`, `cpu.cpus`,
+//!   `memory.memory` and `delete` (see [`create_args`]); every other Kestra
+//!   `Docker` property is refused at save by `scripts::parse`, never ignored.
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
@@ -312,8 +311,8 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
     /// work up by that name and re-attaches to it if it exists, instead of
     /// creating a second one. That is what makes a dropped `run` future (the
     /// worker lost its lease, W5a Task 3) safe: dropping never deletes, and
-    /// the next holder of the lease finds the same pod. [`DockerRunner`]'s
-    /// name still carries the lease, so it cannot re-attach yet (Task 5).
+    /// the next holder of the lease finds the same pod. [`DockerRunner`] does
+    /// the same with its container since W5a Task 5.
     async fn run(
         &self,
         task: &TaskInput,
@@ -383,69 +382,49 @@ pub(crate) async fn stream_line(
     }
 }
 
-/// The container this run owns, named from its **lease**.
+/// The container this run attempt owns: `egret-run-<run id, hyphenless>-<attempt>`
+/// -- the Kubernetes runner's [`pod_name`](super::k8s::pod_name), exactly.
 ///
-/// # This is the answer to `TaskHandler::cancel`'s hazard note
+/// # W5a Task 5 moved the key from the LEASE to the ATTEMPT, and why that is
+/// # now safe
 ///
-/// That method's doc carries a section headed *READ THIS BEFORE IMPLEMENTING A
-/// HANDLER THAT HOLDS AN EXTERNAL RESOURCE*, written by W4 Task 3 for this
-/// task. Restated: [`cancel`](TaskRunner::cancel) is addressed by **run id**,
-/// not by a handle to the work, whereas Kestra's `TaskRunner.kill()` runs a
-/// `Runnable` captured over *this instance's* container id (fact 2). So a
-/// worker A whose lease [`reap`](super::reap) cleared — leaving
-/// `state = 'RUNNING'`, which is claimable — can still be inside its handler
-/// when worker B claims the same `run_id`, and A's own budget then expires and
-/// calls `cancel`. **If the container were named `egret-run-<run_id>`, A would
-/// kill B's container.** `attempt` does not disambiguate: the reaper leaves the
-/// attempt open, so A and B share it.
+/// W4 named the container after `(run_id, claimed_at)` so that a worker A,
+/// reaped while still inside its handler, could not kill the container of the
+/// worker B that claimed the same run: A's own budget would expire and call
+/// `cancel` with a name that no longer existed. Two things changed in W5a:
 ///
-/// The disambiguator is the lease token, [`TaskInput::claimed_at`] — the value
-/// the claim's own `UPDATE … SET claimed_at = now()` wrote and the value every
-/// [`apply_outcome`](super::apply_outcome) write is fenced on. A name built
-/// from `(run_id, claimed_at)` makes A's kill address a container that does not
-/// exist, which `docker rm --force` reports by exiting **0** (measured), so
-/// [`DockerRunner::cancel`] treats it as nothing to do — the artifact's own
-/// answer (fact 9: `NotFoundException` is caught and silently ignored).
+/// 1. **A worker renews its lease while its handler runs, under a fence, and
+///    drops the handler's future the moment the fence moves** (Task 3,
+///    `worker::claim::under_lease`). A reaped worker is therefore no longer
+///    "still inside its handler": its future -- budget and all -- is gone, so
+///    the stale `cancel` that motivated the lease key is never issued.
+/// 2. **The new holder must FIND the old holder's container** to re-attach to
+///    it (spec §5), which a lease-keyed name makes impossible: every claim
+///    would create a second container while the first kept running (Task 3's
+///    measured orphan). The attempt is the re-attach key because `reap`
+///    leaves the attempt open, so A and B compute the same name -- which is
+///    now the point.
 ///
-/// # Why not a handle registry inside the runner
-///
-/// Because a registry keyed by `run_id` has the identical bug — B overwrites
-/// A's entry in the same process — and a registry keyed by
-/// `(run_id, claimed_at)` is this function with more moving parts. More
-/// decisively, in production A and B are **different processes**: a registry
-/// cannot see across them, and the daemon can, because it is shared. The name
-/// is the only disambiguator that works in the case the hazard is actually
-/// about.
-///
-/// # The format
-///
-/// `egret-run-<run id, hyphenless>-<lease, microseconds since the epoch>`.
-/// Microseconds because that is Postgres `timestamptz`'s own resolution, so the
-/// token is carried without loss; a coarser unit would let two claims of one
-/// run collide, which is the whole failure this exists to prevent. Every
-/// character is in Docker's `[a-zA-Z0-9][a-zA-Z0-9_.-]*`.
-///
-/// `-` for a negative instant is in that set too, and a pre-epoch lease is
-/// unreachable in practice — `claimed_at` is `now()`. It is spelled `_` anyway
-/// rather than relying on that, because a name that fails to parse would make
-/// the failure a daemon error at run time rather than at review time.
+/// A `cancel` for the run (a kill, a budget that expired in the live holder)
+/// reaches the container whoever started it, which is what a kill means.
 pub fn container_name(task: &TaskInput) -> String {
-    let micros = task.claimed_at.timestamp_micros();
-    let lease = if micros < 0 {
-        format!("_{}", micros.unsigned_abs())
-    } else {
-        micros.to_string()
-    };
-    format!("egret-run-{}-{}", task.run_id.simple(), lease)
+    super::k8s::pod_name(task.run_id, super::k8s::pod_spec::attempt_of(task))
 }
+
+/// The label that marks a container the author asked to keep
+/// (`taskRunner.delete: false`); the orphan sweep leaves it alone, as the pod
+/// sweep leaves a pod with the same annotation.
+pub const DELETE_LABEL: &str = super::k8s::pod_spec::DELETE_ANNOTATION;
 
 /// The labels a container carries, so an operator can find one this worker
 /// left behind.
 ///
 /// `ScriptService.labels` writes `kestra.io/{namespace,flow-id,task-id,
 /// execution-id,taskrun-id,taskrun-attempt}` (fact 5). egret writes its own
-/// namespace and the same identifiers, plus the one Kestra has no equivalent
-/// of and this module depends on: the lease.
+/// namespace and the same identifiers -- the pod's four
+/// (`egret.io/{workspace-id,execution-id,taskrun-id,attempt}`, W5a spec §5)
+/// plus the task id. W4's `egret.io/lease` label is gone with the lease-keyed
+/// name ([`container_name`]): after a re-attach it would name the wrong holder.
 ///
 /// **The labels are diagnostics, not identity.** Nothing in this module looks a
 /// container up by them — [`container_name`] is the address — and that is
@@ -458,17 +437,19 @@ pub fn container_name(task: &TaskInput) -> String {
 pub fn labels(task: &TaskInput) -> Vec<(String, String)> {
     vec![
         (
-            "egret.io/workspace-id".into(),
+            super::k8s::pod_spec::WORKSPACE_LABEL.into(),
             task.workspace_id.to_string(),
         ),
         (
-            "egret.io/execution-id".into(),
+            super::k8s::pod_spec::EXECUTION_LABEL.into(),
             task.execution_id.to_string(),
         ),
         (TASKRUN_LABEL.into(), task.run_id.to_string()),
         ("egret.io/task-id".into(), task.task_id.clone()),
-        ("egret.io/taskrun-attempt".into(), task.attempt.to_string()),
-        ("egret.io/lease".into(), task.claimed_at.to_rfc3339()),
+        (
+            super::k8s::pod_spec::ATTEMPT_LABEL.into(),
+            super::k8s::pod_spec::attempt_of(task).to_string(),
+        ),
     ]
 }
 
@@ -965,6 +946,10 @@ pub struct DockerRunner {
     max_output_bytes: usize,
     /// [`MAX_VARS_BYTES`], as a field.
     max_vars_bytes: usize,
+    /// Where a re-attach reads the attempt's newest stored line from, so it
+    /// follows the container's log from there rather than from its start
+    /// (W5a Task 5). `None`: a re-attach replays the whole log.
+    logs: Option<crate::logs::LogRepo>,
 }
 
 impl Default for DockerRunner {
@@ -981,7 +966,15 @@ impl DockerRunner {
             binary: "docker".to_string(),
             max_output_bytes: MAX_OUTPUT_FILE_BYTES,
             max_vars_bytes: MAX_VARS_BYTES,
+            logs: None,
         }
+    }
+
+    /// The same runner, reading the re-attach window from `logs` -- what
+    /// production builds (`runtime::handlers_for`). See [`DockerRunner::run`].
+    pub fn with_logs(mut self, logs: crate::logs::LogRepo) -> Self {
+        self.logs = Some(logs);
+        self
     }
 
     /// The same runner over another binary. For a test, and for an operator
@@ -1076,16 +1069,53 @@ impl DockerRunner {
     }
 }
 
+/// What `docker inspect --format {{.State.Status}}` says about a task's
+/// container, as far as [`DockerRunner::run`] cares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Found {
+    /// No container by that name.
+    Absent,
+    /// Created and never started: nothing of the author's has run in it.
+    Created,
+    /// Being removed, or dead: a `cancel` got there first.
+    Going,
+    /// Running, paused, restarting or exited: its work happened, or is
+    /// happening, and a new holder re-attaches to it.
+    Started,
+}
+
 #[async_trait::async_trait]
 impl TaskRunner for DockerRunner {
-    /// `spec` is not read yet: `pullPolicy`, `delete`, `cpu` and `memory` on
-    /// the Docker runner are W5a Task 5's, which also wires this runner as
-    /// `taskRunner: io.kestra.plugin.scripts.runner.docker.Docker`.
+    /// Reads `spec.pull_policy` (`docker create --pull`), `spec.cpu`
+    /// (`--cpus`), `spec.memory` (`--memory`) and `spec.delete` (W5a Task 5);
+    /// `resources` is the Kubernetes runner's.
+    ///
+    /// # Re-attach, and what ends a container (W5a spec §5, as the pod)
+    ///
+    /// The container is looked up by [`container_name`] -- **(run, attempt)**
+    /// -- before anything is created:
+    ///
+    /// * **absent**: create it, copy the input files in, `start --attach`;
+    /// * **created, never started** (a holder died between `create` and
+    ///   `start`): nothing of the author's ran, so it is removed and created
+    ///   afresh -- the input copy may have been cut short;
+    /// * **running or exited**: this call adopts it, follows `docker logs
+    ///   --follow` from the attempt's newest stored line minus the margin
+    ///   ([`with_logs`](DockerRunner::with_logs); without it, from the start,
+    ///   and lines repeat), waits for the exit code and collects the outputs;
+    /// * **being removed**: a cancel won; the task fails saying so.
+    ///
+    /// Then, exactly as the Kubernetes runner: `Ok` or an author error removes
+    /// the container when `delete` (default `true`) and keeps it otherwise;
+    /// **a worker failure** (`Error::Internal`, the daemon went away) keeps it
+    /// for the next claim to re-attach to; and **dropping this future removes
+    /// nothing** -- there is no `Drop` on this path, so a worker whose lease was
+    /// taken (W5a Task 3) leaves the container running for the new holder.
     async fn run(
         &self,
         task: &TaskInput,
         commands: &TaskCommands,
-        _spec: &RunnerSpec,
+        spec: &RunnerSpec,
         observer: &dyn LineObserver,
     ) -> Result<CommandsResult> {
         // `Docker.run`'s own first act, and its own message.
@@ -1094,78 +1124,71 @@ impl TaskRunner for DockerRunner {
                 "This task runner needs the `containerImage` property to be set".to_string(),
             ));
         }
+        // An input name is the author's: refused before a container exists.
+        for rel in commands.input_files.keys() {
+            check_relative(rel)?;
+        }
 
         let name = container_name(task);
-        let argv = commands.argv();
+        let result = match self.find(&name).await? {
+            Found::Absent => {
+                self.create_and_run(task, commands, spec, observer, &name)
+                    .await
+            }
+            Found::Created => {
+                let out = self.cli(&["rm", "--force", &name]).await?;
+                if !out.status.success() {
+                    return Err(self
+                        .classify("rm", &String::from_utf8_lossy(&out.stderr))
+                        .await);
+                }
+                self.create_and_run(task, commands, spec, observer, &name)
+                    .await
+            }
+            Found::Going => Err(Error::InvalidInput(format!(
+                "the task's container {name} is being removed (the run was cancelled)"
+            ))),
+            Found::Started => {
+                tracing::info!(run = %task.run_id, container = %name, "re-attaching to the task's existing container");
+                self.reattach(task, commands, observer, &name).await
+            }
+        };
 
-        // ---- create ----------------------------------------------------
-        let mut create: Vec<String> = vec![
-            "create".into(),
-            "--name".into(),
-            name.clone(),
-            "--workdir".into(),
-            WORKING_DIR.into(),
-        ];
-        for (k, v) in labels(task) {
-            create.push("--label".into());
-            create.push(format!("{k}={v}"));
-        }
-        create.push("--env".into());
-        create.push(format!("{ENV_WORKING_DIR}={WORKING_DIR}"));
-        for (k, v) in &commands.env {
-            create.push("--env".into());
-            create.push(format!("{k}={v}"));
-        }
-        // `withEntrypoint(interpreter)` + `withCmd(joined)`. The CLI takes one
-        // string for `--entrypoint`, so the interpreter's head is the
-        // entrypoint and its tail leads the CMD — which produces the identical
-        // argv, because the daemon concatenates the two.
-        create.push("--entrypoint".into());
-        create.push(argv[0].clone());
-        create.push(commands.container_image.clone());
-        create.extend(argv[1..].iter().cloned());
-
-        let borrowed: Vec<&str> = create.iter().map(String::as_str).collect();
-        let created = self.cli(&borrowed).await?;
-        if !created.status.success() {
-            return Err(self
-                .classify("create", &String::from_utf8_lossy(&created.stderr))
-                .await);
-        }
-
-        // Everything from here on owns a container, so every exit runs through
-        // `remove`. `?` would leak one.
-        let result = self.run_created(task, commands, observer, &name).await;
-        let removed = self.cli(&["rm", "--force", &name]).await;
-        match removed {
-            Ok(out) if !out.status.success() => tracing::warn!(
+        match &result {
+            Err(Error::Internal(e)) => tracing::warn!(
                 run = %task.run_id,
                 container = %name,
-                "could not remove the container after the run: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
+                "the task container is kept for a later claim to re-attach to: {e}"
             ),
-            Err(e) => tracing::warn!(run = %task.run_id, container = %name, "{e}"),
-            Ok(_) => {}
+            _ if spec.delete => match self.cli(&["rm", "--force", &name]).await {
+                Ok(out) if !out.status.success() => tracing::warn!(
+                    run = %task.run_id,
+                    container = %name,
+                    "could not remove the container after the run: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                Err(e) => tracing::warn!(run = %task.run_id, container = %name, "{e}"),
+                Ok(_) => {}
+            },
+            // `delete: false` -- measured on the artifact: the container is
+            // kept, exited. The orphan sweep leaves it too (its label).
+            _ => {}
         }
         result
     }
 
-    /// [`container_name`]'s whole argument, applied: this addresses the
-    /// container by the name that carries **this worker's lease**, so a worker
-    /// whose lease was reaped names a container that no longer exists.
+    /// Remove the attempt's container: `docker rm --force`, which is
+    /// `killContainerCmd` + delete, Kestra's two shipped defaults
+    /// (`$default$killGracePeriod` = `Duration.ZERO`, `$default$delete` =
+    /// `true`) in one call. A grace period is deliberately not offered.
     ///
-    /// `docker rm --force` is `killContainerCmd` + delete, which are Kestra's
-    /// two shipped defaults (`$default$killGracePeriod` = `Duration.ZERO`,
-    /// `$default$delete` = `true`) in one call. A grace period is deliberately
-    /// not offered: it is a property with no reader, and the artifact's default
-    /// is not to have one.
+    /// **Addressed by (run, attempt), as the Kubernetes runner's pod** -- see
+    /// [`container_name`] for why that no longer lets a reaped worker kill its
+    /// replacement's work.
     ///
     /// **A container that is not there is `Ok(())`**, which is the artifact's
-    /// answer too — `Docker.kill`'s exception table catches
-    /// `NotFoundException` and returns without logging. It is also the only
-    /// answer that is true of the two ways it happens: the run already
-    /// finished, or this worker's lease is stale and the container belongs to
-    /// nobody by this name.
+    /// answer too -- `Docker.kill`'s exception table catches
+    /// `NotFoundException` and returns without logging.
     async fn cancel(&self, task: &TaskInput) -> Result<()> {
         let name = container_name(task);
         let out = self.cli(&["rm", "--force", &name]).await?;
@@ -1175,11 +1198,8 @@ impl TaskRunner for DockerRunner {
         // **There is deliberately no "No such container" branch**, and the
         // whole-branch review's Minor 2 is why: `docker rm --force` on a name
         // that does not exist exits **0** (measured, daemon 28.4.0), so that
-        // branch was unreachable — a guard nobody could see fire, which is the
-        // shape this package has refused throughout. The absent container is
-        // therefore handled by the success arm above, which is also the
-        // artifact's answer (`Docker.kill` catches `NotFoundException` and
-        // returns without logging).
+        // branch was unreachable. The absent container is handled by the
+        // success arm above.
         Err(self
             .classify("rm", &String::from_utf8_lossy(&out.stderr))
             .await)
@@ -1187,84 +1207,128 @@ impl TaskRunner for DockerRunner {
 }
 
 impl DockerRunner {
-    /// The half of [`TaskRunner::run`] that runs with a container in
-    /// existence.
+    /// The state of the container called `name`, per [`Found`].
     ///
-    /// Split out so the caller can remove the container on **every** path
-    /// without a `Drop` guard that would have to block on an async call.
-    async fn run_created(
+    /// A failed `inspect` is **absent** when the daemon answers the probe and
+    /// egret's outage when it does not -- the probe, not the stderr, decides
+    /// ([`_CLASSIFICATION_IS_A_PROBE_NOT_A_SUBSTRING_TEST`]).
+    async fn find(&self, name: &str) -> Result<Found> {
+        let out = self
+            .cli(&[
+                "inspect",
+                "--type",
+                "container",
+                "--format",
+                "{{.State.Status}}",
+                name,
+            ])
+            .await?;
+        if !out.status.success() {
+            if self.daemon_answers().await {
+                return Ok(Found::Absent);
+            }
+            return Err(Error::Internal(anyhow::anyhow!(
+                "the Docker daemon could not be reached, so the task's container could not be \
+                 looked up: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(match String::from_utf8_lossy(&out.stdout).trim() {
+            "created" => Found::Created,
+            "removing" | "dead" => Found::Going,
+            _ => Found::Started,
+        })
+    }
+
+    /// `docker create` with the task's name, labels, env, runner properties
+    /// and argv, then [`run_created`](Self::run_created).
+    async fn create_and_run(
+        &self,
+        task: &TaskInput,
+        commands: &TaskCommands,
+        spec: &RunnerSpec,
+        observer: &dyn LineObserver,
+        name: &str,
+    ) -> Result<CommandsResult> {
+        let borrowed_args = create_args(task, commands, spec, name);
+        let borrowed: Vec<&str> = borrowed_args.iter().map(String::as_str).collect();
+        let created = self.cli(&borrowed).await?;
+        if !created.status.success() {
+            return Err(self
+                .classify("create", &String::from_utf8_lossy(&created.stderr))
+                .await);
+        }
+        self.run_created(task, commands, observer, name).await
+    }
+
+    /// Adopt a container a previous holder started: follow its log from the
+    /// re-attach window, wait for its exit code, collect its outputs.
+    async fn reattach(
         &self,
         task: &TaskInput,
         commands: &TaskCommands,
         observer: &dyn LineObserver,
         name: &str,
     ) -> Result<CommandsResult> {
-        // ---- input files ------------------------------------------------
-        //
-        // `docker cp` into a container that has never started, which is
-        // Kestra's `copyArchiveToContainer` and the reason the working
-        // directory does not have to exist first: measured on this machine's
-        // daemon (28.4.0), a copy into `/egret/working-dir` creates it.
-        if !commands.input_files.is_empty() {
-            // **[`StagingDir`] removes itself however this scope ends** —
-            // including when `timeout::guard` drops the whole future mid-copy,
-            // which is the path an explicit cleanup could never cover (review
-            // Minor 3). Review Minor 2's `?`-before-cleanup leak is closed by
-            // the same thing, so the closure that used to force a single exit
-            // is gone with it.
-            // # `input_files` KEYS ARE NOT AUTHOR-SUPPLIED TODAY, AND THE NEXT
-            // # HANDLER AUTHOR MUST KEEP IT THAT WAY
-            //
-            // The `create_dir_all(...).map_err(io_err)?` below is the **closed
-            // Critical's exact shape**: an author-derived path handed to the
-            // filesystem, with an `io::Error` becoming `Error::Internal` and
-            // therefore a worker failure. It is unreachable only because **no
-            // handler lets an author name a key**: `handlers::python` writes the
-            // single constant `SCRIPT_FILE` and `handlers::container` passes an
-            // empty map. Nothing in the type system says so — `TaskCommands` is
-            // `pub` and its `input_files` is a plain `BTreeMap`.
-            //
-            // A handler that ever maps an author's value into a key here
-            // reintroduces the Critical in its original form. It should route
-            // through [`stage_destination`], whose `String` error cannot express
-            // a worker failure, exactly as the output path does.
-            let staging = tempdir(task)?;
-            for (rel, contents) in &commands.input_files {
-                check_relative(rel)?;
-                let path = staging.path().join(rel);
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(io_err)?;
-                }
-                std::fs::write(&path, contents).map_err(io_err)?;
-            }
-            let src = format!("{}/.", staging.path().display());
-            let dst = format!("{name}:{WORKING_DIR}");
-            let out = self.cli(&["cp", &src, &dst]).await?;
-            if !out.status.success() {
-                return Err(self
-                    .classify("cp", &String::from_utf8_lossy(&out.stderr))
-                    .await);
-            }
+        let (since, mut replayed) = match &self.logs {
+            Some(logs) => crate::worker::k8s::runner::reattach_window(logs, task).await?,
+            None => (None, crate::worker::k8s::runner::Replayed::default()),
+        };
+        let mut args: Vec<String> = vec!["logs".into(), "--follow".into()];
+        if let Some(since) = since {
+            args.push("--since".into());
+            args.push(since.timestamp().to_string());
         }
-
-        // ---- start, and stream --------------------------------------------
+        args.push(name.to_string());
         let mut child = Command::new(&self.binary)
-            .args(["start", "--attach", name])
+            .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // The attach is the long one, so it is the one most likely to be
-            // dropped mid-flight. `kill_on_drop` reaps the CLI; the container
-            // itself is the daemon's and is stopped by `cancel`.
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
-                Error::Internal(anyhow::anyhow!(
-                    "could not run `{} start`: {e}",
-                    self.binary
-                ))
+                Error::Internal(anyhow::anyhow!("could not run `{} logs`: {e}", self.binary))
             })?;
+        let mut result = self
+            .pump(task, observer, &mut child, Some(&mut replayed))
+            .await?;
+        child.wait().await.map_err(io_err)?;
 
+        // `docker wait` rather than `inspect`: the log stream can close a
+        // moment before the daemon records the exit, and `wait` returns the
+        // code once it has (immediately, for a container already exited).
+        let waited = self.cli(&["wait", name]).await?;
+        if !waited.status.success() {
+            return Err(self
+                .classify("wait", &String::from_utf8_lossy(&waited.stderr))
+                .await);
+        }
+        let raw = String::from_utf8_lossy(&waited.stdout).trim().to_string();
+        result.exit_code = raw.parse::<i32>().map_err(|_| {
+            Error::Internal(anyhow::anyhow!(
+                "docker wait returned {raw:?} for the exit code of {name}"
+            ))
+        })?;
+
+        if !commands.output_files.is_empty() && result.failure.is_none() {
+            let staging = tempdir(task)?;
+            self.collect_output_files(name, commands, staging.path(), &mut result)
+                .await?;
+        }
+        Ok(result)
+    }
+
+    /// Read both of `child`'s pipes to their end, every line through
+    /// [`stream_line`]; a line the previous holder already stored
+    /// (`replayed`) is dropped once.
+    async fn pump(
+        &self,
+        task: &TaskInput,
+        observer: &dyn LineObserver,
+        child: &mut tokio::process::Child,
+        mut replayed: Option<&mut crate::worker::k8s::runner::Replayed>,
+    ) -> Result<CommandsResult> {
         let mut out_lines = BufReader::new(child.stdout.take().expect("stdout piped")).lines();
         let mut err_lines = BufReader::new(child.stderr.take().expect("stderr piped")).lines();
 
@@ -1286,7 +1350,11 @@ impl DockerRunner {
                     None => { err_open = false; continue }
                 },
             };
-
+            if let Some(r) = replayed.as_deref_mut() {
+                if r.already_stored(&line) {
+                    continue;
+                }
+            }
             // **Every decision about this line is [`ingest_line`]'s**, and
             // this loop keeps only the pipes. See that function for why the
             // split is a merge condition and not a tidy-up.
@@ -1301,7 +1369,72 @@ impl DockerRunner {
             )
             .await;
         }
+        Ok(result)
+    }
 
+    /// The half of a fresh run that runs with a container in existence:
+    /// input files in, `start --attach`, exit code, output files out.
+    async fn run_created(
+        &self,
+        task: &TaskInput,
+        commands: &TaskCommands,
+        observer: &dyn LineObserver,
+        name: &str,
+    ) -> Result<CommandsResult> {
+        // ---- input files ------------------------------------------------
+        //
+        // `docker cp` into a container that has never started, which is
+        // Kestra's `copyArchiveToContainer` and the reason the working
+        // directory does not have to exist first: measured on this machine's
+        // daemon (28.4.0), a copy into `/egret/working-dir` creates it.
+        if !commands.input_files.is_empty() {
+            // **[`StagingDir`] removes itself however this scope ends** --
+            // including when `timeout::guard` drops the whole future mid-copy.
+            //
+            // # `input_files` KEYS ARE AUTHOR-SUPPLIED SINCE W5a
+            //
+            // `inputFiles:` is a script task property, so a key is the
+            // author's path. Everything decided about it must be a TASK
+            // failure, never a worker failure: [`check_relative`] (in `run`)
+            // refuses `..`, absolute paths, `.` and globs, and the staging
+            // writes below go through [`stage_input`], whose error type is
+            // `String` and becomes `InvalidInput` -- so `{"a": .., "a/b": ..}`
+            // (a file where a directory must go) fails the task instead of
+            // wedging the run as the closed Critical's shape did.
+            let staging = tempdir(task)?;
+            for (rel, contents) in &commands.input_files {
+                stage_input(staging.path(), rel, contents).map_err(Error::InvalidInput)?;
+            }
+            let src = format!("{}/.", staging.path().display());
+            let dst = format!("{name}:{WORKING_DIR}");
+            let out = self.cli(&["cp", &src, &dst]).await?;
+            if !out.status.success() {
+                return Err(self
+                    .classify("cp", &String::from_utf8_lossy(&out.stderr))
+                    .await);
+            }
+        }
+
+        // ---- start, and stream --------------------------------------------
+        let mut child = Command::new(&self.binary)
+            .args(["start", "--attach", name])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // The attach is the long one, so it is the one most likely to be
+            // dropped mid-flight. `kill_on_drop` reaps the CLI; the container
+            // itself is the daemon's and keeps running -- the next holder
+            // re-attaches to it, and `cancel` is what stops it.
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                Error::Internal(anyhow::anyhow!(
+                    "could not run `{} start`: {e}",
+                    self.binary
+                ))
+            })?;
+
+        let mut result = self.pump(task, observer, &mut child, None).await?;
         let status = child.wait().await.map_err(io_err)?;
 
         // ---- the exit code, read from the container and not from the CLI ---
@@ -1532,7 +1665,9 @@ pub(crate) struct RunLiveness {
 impl OrphanSweep for DockerRunner {
     async fn sweep_orphans(&self, pool: &sqlx::PgPool) -> Result<u64> {
         let label_filter = format!("label={TASKRUN_LABEL}");
-        let format = format!("{{{{.Names}}}}\t{{{{.Label \"{TASKRUN_LABEL}\"}}}}");
+        let format = format!(
+            "{{{{.Names}}}}\t{{{{.Label \"{TASKRUN_LABEL}\"}}}}\t{{{{.Label \"{DELETE_LABEL}\"}}}}"
+        );
         let out = self
             .cli(&[
                 "ps",
@@ -1573,19 +1708,112 @@ impl OrphanSweep for DockerRunner {
     }
 }
 
-/// `docker ps --format '{{.Names}}\t{{.Label "egret.io/taskrun-id"}}'`, parsed:
-/// the egret task containers only (name prefix AND a label that is a UUID).
+/// `docker ps --format '{{.Names}}\t{{.Label "egret.io/taskrun-id"}}\t{{.Label "egret.io/delete"}}'`,
+/// parsed: the egret task containers only (name prefix AND a label that is a
+/// UUID), **minus those the author asked to keep** (`delete: false`, the
+/// [`DELETE_LABEL`] -- the pod sweep's rule, W5a Task 5).
 fn parse_docker_ps(stdout: &str) -> Vec<(String, uuid::Uuid)> {
     stdout
         .lines()
         .filter_map(|l| {
-            let (name, id) = l.split_once('\t')?;
-            if !name.starts_with(RUN_NAME_PREFIX) {
+            let mut cols = l.split('\t');
+            let name = cols.next()?;
+            let id = cols.next()?;
+            let keep = cols.next().is_some_and(|d| d.trim() == "false");
+            if !name.starts_with(RUN_NAME_PREFIX) || keep {
                 return None;
             }
             Some((name.to_string(), uuid::Uuid::parse_str(id.trim()).ok()?))
         })
         .collect()
+}
+
+/// `docker create`'s argv for one task: name, working directory, labels, env,
+/// the `taskRunner:` properties the Docker runner implements, entrypoint,
+/// image and CMD. Pure, so the mapping is asserted without a daemon.
+///
+/// * `pullPolicy` → `--pull`: `IF_NOT_PRESENT` is `missing` (the CLI's own
+///   default, written out), `ALWAYS` is `always`, `NEVER` is `never`.
+/// * `cpu.cpus` → `--cpus`, `memory.memory` → `--memory`, as written; a value
+///   the daemon cannot parse fails `create`, i.e. the task, with its words.
+/// * `delete: false` → the [`DELETE_LABEL`] label, which the orphan sweep reads.
+pub(crate) fn create_args(
+    task: &TaskInput,
+    commands: &TaskCommands,
+    spec: &RunnerSpec,
+    name: &str,
+) -> Vec<String> {
+    let argv = commands.argv();
+    let mut create: Vec<String> = vec![
+        "create".into(),
+        "--name".into(),
+        name.to_string(),
+        "--workdir".into(),
+        WORKING_DIR.into(),
+        "--pull".into(),
+        match spec.pull_policy {
+            crate::scripts::PullPolicy::Always => "always",
+            crate::scripts::PullPolicy::IfNotPresent => "missing",
+            crate::scripts::PullPolicy::Never => "never",
+        }
+        .into(),
+    ];
+    if let Some(cpus) = &spec.cpu {
+        create.push("--cpus".into());
+        create.push(cpus.clone());
+    }
+    if let Some(memory) = &spec.memory {
+        create.push("--memory".into());
+        create.push(memory.clone());
+    }
+    for (k, v) in labels(task) {
+        create.push("--label".into());
+        create.push(format!("{k}={v}"));
+    }
+    if !spec.delete {
+        create.push("--label".into());
+        create.push(format!("{DELETE_LABEL}=false"));
+    }
+    create.push("--env".into());
+    create.push(format!("{ENV_WORKING_DIR}={WORKING_DIR}"));
+    for (k, v) in &commands.env {
+        create.push("--env".into());
+        create.push(format!("{k}={v}"));
+    }
+    // `withEntrypoint(interpreter)` + `withCmd(joined)`. The CLI takes one
+    // string for `--entrypoint`, so the interpreter's head is the entrypoint
+    // and its tail leads the CMD — which produces the identical argv, because
+    // the daemon concatenates the two.
+    create.push("--entrypoint".into());
+    create.push(argv[0].clone());
+    create.push(commands.container_image.clone());
+    create.extend(argv[1..].iter().cloned());
+    create
+}
+
+/// Write one author-named input file under the staging `root`.
+///
+/// `String` errors, as [`stage_destination`]: an author's `inputFiles` key
+/// must never be able to produce a worker failure. Parents are created by
+/// egret; a name whose parent is already a FILE (`{"a": …, "a/b": …}`) or
+/// that is itself a directory another name needs is refused with a message.
+pub(crate) fn stage_input(
+    root: &std::path::Path,
+    rel: &str,
+    contents: &str,
+) -> std::result::Result<(), String> {
+    if let Some(problem) = relative_problem(rel) {
+        return Err(problem);
+    }
+    let path = root.join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!("the input file {rel:?} cannot be placed: a parent of it is also declared as a file ({e})")
+        })?;
+    }
+    std::fs::write(&path, contents).map_err(|e| {
+        format!("the input file {rel:?} cannot be written: another input file needs it to be a directory ({e})")
+    })
 }
 
 /// Make the staging destination for **one** declared output name, under a root
@@ -1815,33 +2043,38 @@ mod tests {
         }
     }
 
-    /// **The lease is in the name, and this is the assertion that would fail if
-    /// it were not.**
+    /// **The name is the (run, attempt) re-attach key, and the lease is NOT in
+    /// it** (W5a Task 5; see [`container_name`] for the argument).
     ///
-    /// Two inputs that agree on everything the old `TaskInput` carried —
-    /// `run_id`, `execution_id`, `task_id`, `attempt` — and differ only in the
-    /// lease. If [`container_name`] dropped `claimed_at`, these two would be
-    /// equal, and a reaped worker's `cancel` would address its replacement's
-    /// container. The unit test says the names differ; the live suite's
-    /// `a_reaped_workers_cancel_cannot_reach_its_replacements_container` says
-    /// the daemon agrees.
+    /// Two holders of one attempt -- differing only in the lease -- compute the
+    /// same name, which is what lets the second find the first's container; a
+    /// retry (the next attempt) gets a different one; and the name is the pod
+    /// name, so the two runners address their work identically.
     #[test]
-    fn the_container_name_carries_the_lease_and_not_only_the_run() {
+    fn the_container_name_is_the_attempt_and_not_the_lease() {
         let a = leased(1_700_000_000);
         let b = leased(1_700_000_001);
         assert_eq!(a.run_id, b.run_id, "the two differ ONLY in the lease");
-        assert_eq!(a.attempt, b.attempt);
-        assert_ne!(
+        assert_eq!(
             container_name(&a),
             container_name(&b),
-            "a name that ignores `claimed_at` lets a reaped worker kill its \
-             replacement's container -- see `TaskHandler::cancel`'s hazard note"
+            "a new holder of the same attempt must find the old holder's container"
         );
         assert_eq!(
             container_name(&a),
-            "egret-run-00000000000000000000000000000007-1700000000000000",
-            "the format is pinned: a change to it is a change to what `cancel` \
-             addresses, and every running container's name at once"
+            "egret-run-00000000000000000000000000000007-1",
+            "the format is pinned: a change to it is a change to what `cancel` and \
+             re-attach address, and every running container's name at once"
+        );
+        let retry = TaskInput {
+            attempt: 2,
+            ..a.clone()
+        };
+        assert_ne!(container_name(&a), container_name(&retry));
+        assert_eq!(
+            container_name(&a),
+            crate::worker::k8s::pod_name(a.run_id, 1),
+            "the Docker and Kubernetes runners name an attempt's work the same way"
         );
     }
 
@@ -1849,8 +2082,11 @@ mod tests {
     /// `[a-zA-Z0-9][a-zA-Z0-9_.-]*`.
     #[test]
     fn every_name_this_produces_is_a_legal_container_name() {
-        for secs in [0_i64, 1, 1_700_000_000, -1, -1_700_000_000] {
-            let name = container_name(&leased(secs));
+        for attempt in [0_usize, 1, 7, usize::MAX] {
+            let name = container_name(&TaskInput {
+                attempt,
+                ..leased(1_700_000_000)
+            });
             let mut chars = name.chars();
             let first = chars.next().expect("non-empty");
             assert!(
@@ -1862,6 +2098,95 @@ mod tests {
                 "{name} holds a character docker will refuse"
             );
         }
+    }
+
+    /// **`docker create` carries the `taskRunner:` properties the Docker runner
+    /// implements** -- `pullPolicy`, `cpu.cpus`, `memory.memory`, `delete` --
+    /// and a default spec carries only `--pull missing`.
+    #[test]
+    fn create_args_carry_the_docker_runner_properties() {
+        let task = leased(1_700_000_000);
+        let cmds = TaskCommands {
+            container_image: "alpine:3.20".into(),
+            commands: vec!["echo hi".into()],
+            ..TaskCommands::default()
+        };
+        let pair = |args: &[String], flag: &str| -> Option<String> {
+            args.iter()
+                .position(|a| a == flag)
+                .map(|i| args[i + 1].clone())
+        };
+
+        let d = create_args(
+            &task,
+            &cmds,
+            &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+            "n",
+        );
+        assert_eq!(pair(&d, "--pull").as_deref(), Some("missing"));
+        assert_eq!(pair(&d, "--cpus"), None);
+        assert_eq!(pair(&d, "--memory"), None);
+        assert!(!d.iter().any(|a| a.starts_with(DELETE_LABEL)), "{d:?}");
+        // The image is followed by the CMD tail, and nothing after it is a flag.
+        let at = d
+            .iter()
+            .position(|a| a == "alpine:3.20")
+            .expect("the image");
+        assert_eq!(&d[at + 1..], ["-c".to_string(), "echo hi".to_string()]);
+
+        for (policy, want) in [
+            (crate::scripts::PullPolicy::Always, "always"),
+            (crate::scripts::PullPolicy::IfNotPresent, "missing"),
+            (crate::scripts::PullPolicy::Never, "never"),
+        ] {
+            let spec = RunnerSpec {
+                pull_policy: policy,
+                cpu: Some("1.5".into()),
+                memory: Some("256m".into()),
+                delete: false,
+                ..RunnerSpec::defaults(crate::scripts::RunnerKind::Docker)
+            };
+            let a = create_args(&task, &cmds, &spec, "n");
+            assert_eq!(pair(&a, "--pull").as_deref(), Some(want));
+            assert_eq!(pair(&a, "--cpus").as_deref(), Some("1.5"));
+            assert_eq!(pair(&a, "--memory").as_deref(), Some("256m"));
+            assert!(
+                a.contains(&format!("{DELETE_LABEL}=false")),
+                "`delete: false` must be visible to the orphan sweep: {a:?}"
+            );
+        }
+    }
+
+    /// The sweep's parser keeps only egret task containers and drops the ones
+    /// the author asked to keep.
+    #[test]
+    fn the_docker_sweep_parses_names_and_leaves_delete_false_alone() {
+        let a = uuid::Uuid::from_u128(1);
+        let b = uuid::Uuid::from_u128(2);
+        let out = format!(
+            "egret-run-x-1\t{a}\t\negret-run-y-1\t{b}\tfalse\nsomething-else\t{a}\t\negret-run-z-1\tnot-a-uuid\t\n"
+        );
+        assert_eq!(
+            parse_docker_ps(&out),
+            vec![("egret-run-x-1".to_string(), a)]
+        );
+    }
+
+    /// An author's `inputFiles` keys cannot produce a worker failure: a file
+    /// where a directory must go is a `String` error, i.e. a task failure.
+    #[test]
+    fn an_input_file_where_a_directory_must_go_is_the_authors_error() {
+        let root = staging("input-collision");
+        stage_input(&root, "a", "x").expect("a plain file stages");
+        let err = stage_input(&root, "a/b", "y").expect_err("`a` is a file");
+        assert!(err.contains("\"a/b\""), "{err}");
+        stage_input(&root, "sub/nested.txt", "n").expect("parents are created");
+        assert_eq!(
+            std::fs::read_to_string(root.join("sub/nested.txt")).unwrap(),
+            "n"
+        );
+        assert!(stage_input(&root, "../x", "y").is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// `ScriptService.scriptCommands`: the interpreter, then **one** element.
@@ -2475,7 +2800,8 @@ mod tests {
         let log = dir.join("argv.log");
         let shim = dir.join("docker-shim.sh");
         // A `docker` that records what it was asked and fakes just enough:
-        // `create` prints an id, `start` prints nothing, `inspect` prints 0,
+        // `create` prints an id, `start` prints nothing, `inspect` prints 0
+        // (and finds no container by name, so the run creates one),
         // and `cp` materialises a file at the destination so the pure seam has
         // something to ingest.
         std::fs::write(
@@ -2485,7 +2811,7 @@ mod tests {
                  echo \"$@\" >> {log}\n\
                  case \"$1\" in\n\
                  \x20 create) echo fake-container-id ;;\n\
-                 \x20 inspect) echo 0 ;;\n\
+                 \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
                  \x20 cp) case \"$3\" in *?) printf 'staged' > \"$3\" ;; esac ;;\n\
                  esac\n\
                  exit 0\n",
@@ -2635,7 +2961,7 @@ mod tests {
                  echo \"$@\" >> {log}\n\
                  case \"$1\" in\n\
                  \x20 create) echo fake-container-id ;;\n\
-                 \x20 inspect) echo 0 ;;\n\
+                 \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
                  \x20 cp) case \"$2\" in\n\
                  \x20        *a/b.txt) echo 'Error response from daemon: not a directory' >&2; exit 1 ;;\n\
                  \x20        *) printf 'regular-file' > \"$3\" ;;\n\
@@ -2719,7 +3045,7 @@ mod tests {
                  case \"$1\" in\n\
                  \x20 create) echo id ;;\n\
                  \x20 version) exit 0 ;;\n\
-                 \x20 inspect) echo 0 ;;\n\
+                 \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
                  \x20 cp) echo \"$3\" >> {log}; printf x > \"$3\" ;;\n\
                  esac\nexit 0\n",
                 log = log.display()
@@ -2827,7 +3153,7 @@ mod tests {
                  case \"$1\" in\n\
                  \x20 create) echo id ;;\n\
                  \x20 cp) echo \"$2\" >> {log}; exec sleep 300 ;;\n\
-                 \x20 inspect) echo 0 ;;\n\
+                 \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
                  esac\n\
                  exit 0\n",
                 log = log.display()
@@ -2969,7 +3295,7 @@ mod tests {
              case \"$1\" in\n\
              \x20 create) echo id ;;\n\
              \x20 version) exit 0 ;;\n\
-             \x20 inspect) echo 0 ;;\n\
+             \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
              \x20 cp) echo \"Error response from daemon: Could not find the file \
              /egret/working-dir/docker.sock in container c\" >&2; exit 1 ;;\n\
              esac\nexit 0\n",

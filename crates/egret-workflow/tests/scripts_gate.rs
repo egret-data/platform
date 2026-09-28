@@ -988,3 +988,152 @@ async fn the_ungated_publish_entry_point_refuses_script_tasks() {
         "{err:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// At run time: the same gate, through the worker (W5a Task 5)
+// ---------------------------------------------------------------------------
+
+/// A [`TaskRunner`] that records every call and creates nothing: the
+/// instrument for "no pod or container is created" is that the runner -- the
+/// only thing that could create one -- was never asked.
+#[derive(Debug, Default)]
+struct SpyRunner {
+    images: std::sync::Mutex<Vec<String>>,
+}
+
+impl SpyRunner {
+    fn calls(&self) -> Vec<String> {
+        self.images.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_workflow::worker::commands::TaskRunner for SpyRunner {
+    async fn run(
+        &self,
+        _task: &egret_workflow::worker::TaskInput,
+        commands: &egret_workflow::worker::commands::TaskCommands,
+        _spec: &scripts::RunnerSpec,
+        _observer: &dyn egret_workflow::worker::commands::LineObserver,
+    ) -> egret_core::Result<egret_workflow::worker::commands::CommandsResult> {
+        self.images
+            .lock()
+            .unwrap()
+            .push(commands.container_image.clone());
+        Ok(egret_workflow::worker::commands::CommandsResult::default())
+    }
+    async fn cancel(&self, _task: &egret_workflow::worker::TaskInput) -> egret_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// The production registry's shape over a spy runner: the core tasks plus the
+/// script handlers, reading `workspace_features` from the real database.
+fn worker_registry(
+    pool: &sqlx::PgPool,
+    spy: std::sync::Arc<SpyRunner>,
+    images: &[&str],
+) -> egret_workflow::worker::Handlers {
+    use egret_workflow::worker::handlers::script::{register, PgFeatureState, ScriptRuntime};
+    let mut reg = egret_workflow::worker::Handlers::with_core_tasks();
+    register(
+        &mut reg,
+        std::sync::Arc::new(ScriptRuntime {
+            runner_kind: RunnerKind::Docker,
+            runner: spy,
+            plugin_configurations: configs(&[(scripts::DOCKER_RUNNER, images)]),
+            features: std::sync::Arc::new(PgFeatureState::new(pool.clone())),
+        }),
+    );
+    reg
+}
+
+/// One tick; the run's `(state, message)`.
+async fn run_once(
+    pool: &sqlx::PgPool,
+    reg: &egret_workflow::worker::Handlers,
+    ws: uuid::Uuid,
+    source: &str,
+    inputs: Value,
+) -> (String, Option<String>) {
+    let ex = egret_workflow::worker::start_execution(pool, ws, None, source, inputs)
+        .await
+        .expect("start the execution");
+    egret_workflow::worker::tick_with(
+        pool,
+        8,
+        reg,
+        egret_workflow::worker::WorkerTiming::default(),
+    )
+    .await
+    .expect("a refusal is the task's failure, never the worker's");
+    sqlx::query_as(
+        "SELECT state, message FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 't'",
+    )
+    .bind(ex)
+    .fetch_one(pool)
+    .await
+    .expect("the run")
+}
+
+/// **A disabled feature fails the run and creates nothing.** A flow that
+/// reached a worker without passing publish (a draft run, a version published
+/// before the feature was turned off) is refused at run by the same gate,
+/// with the feature READ at run time; the runner is never called. The
+/// control: once the workspace turns the feature on, the same flow runs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_disabled_feature_fails_the_run_and_creates_nothing(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let spy = std::sync::Arc::new(SpyRunner::default());
+    let reg = worker_registry(&pool, spy.clone(), &["ubuntu:*"]);
+    let source = flow("w5a.run.off", SHELL);
+
+    let (state, message) = run_once(&pool, &reg, ws, &source, json!({})).await;
+    assert_eq!(state, "FAILED");
+    let message = message.expect("the reason");
+    assert!(
+        message.contains("'workflow_containers' feature is disabled"),
+        "{message}"
+    );
+    assert!(spy.calls().is_empty(), "no runner call: {:?}", spy.calls());
+
+    common::enable_feature(&db, ws, "workflow_containers").await;
+    let (state, message) = run_once(&pool, &reg, ws, &source, json!({})).await;
+    assert_eq!(state, "SUCCESS", "{message:?}");
+    assert_eq!(spy.calls(), vec!["ubuntu".to_string()]);
+}
+
+/// **A rendered image outside the allowlist fails the run and creates
+/// nothing** -- the case publish cannot judge, because the image is a
+/// `{{ }}` expression until the run renders it. The control renders an
+/// allowed image from the same flow and runs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_rendered_image_outside_the_allowlist_fails_the_run_and_creates_nothing(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    common::enable_feature(&db, ws, "workflow_containers").await;
+    let spy = std::sync::Arc::new(SpyRunner::default());
+    let reg = worker_registry(&pool, spy.clone(), &["ubuntu:*"]);
+    let source = "id: f\nnamespace: w5a.run.tpl\ninputs:\n  - id: image\n    type: STRING\n\
+                  tasks:\n  - id: t\n    type: io.kestra.plugin.scripts.shell.Commands\n\
+                  \x20   containerImage: \"{{ inputs.image }}\"\n    commands: [echo hi]\n";
+
+    let (state, message) = run_once(&pool, &reg, ws, source, json!({"image": "alpine:3"})).await;
+    assert_eq!(state, "FAILED");
+    let message = message.expect("the reason");
+    assert!(
+        message.contains("image 'alpine:3'") && message.contains("not in the 'allowed-images'"),
+        "{message}"
+    );
+    assert!(spy.calls().is_empty(), "no runner call: {:?}", spy.calls());
+
+    let (state, message) =
+        run_once(&pool, &reg, ws, source, json!({"image": "ubuntu:24.04"})).await;
+    assert_eq!(state, "SUCCESS", "{message:?}");
+    assert_eq!(spy.calls(), vec!["ubuntu:24.04".to_string()]);
+}

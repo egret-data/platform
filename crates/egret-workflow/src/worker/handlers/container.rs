@@ -1,198 +1,41 @@
-//! `egret.container` — run a command in a container image.
+//! The outcome and rendering helpers every script task shares, and the
+//! `egret.container` alias's name.
 //!
-//! # This handler ships with NO oracle coverage, and that is measured
+//! # W5a Task 5: the handler that lived here is `handlers::script::Script`
+//!
+//! W4 shipped `egret.container` as a handler of its own, with its own
+//! `deny_unknown_fields` property set (`image`, `commands`, ...). W5a made it
+//! an **alias** of `io.kestra.plugin.scripts.shell.Commands`
+//! (`spec::registry::TASK_TYPES`, W5a spec §3), parsed by `scripts::parse` --
+//! which still accepts W4's `image` as a synonym of `containerImage` on the
+//! aliases, so a flow saved before W5a keeps working -- and served by the one
+//! script handler, [`super::script`], which gates it at run time like every
+//! other script task. What stayed here is what that handler shares with the
+//! W4 contract: [`outcome_for`] (a failed command keeps its outputs,
+//! `RunnableTaskException(e, ScriptOutput)`), [`mapped`] (egret's outage vs
+//! the author's error), and the renderers.
+//!
+//! # No oracle coverage, measured
 //!
 //! `oracle-exec/corpus/` holds **345** flows and **zero** of them declare a
-//! script, container, shell or command task type — measured with
-//! `grep -rhoE 'type:\s*\S+' corpus | sort -u | grep -iE
-//! 'script|container|shell|command|docker|bash|python|node'`, which matches
-//! nothing. Kestra's own equivalents live in plugins (`plugin-script-*`,
-//! `plugin-docker`) that the corpus never reaches.
-//!
-//! **So the execution ratchet cannot move for this file, in either direction,
-//! and a green ratchet says nothing about it.** The instruments are the unit
-//! tests at the bottom of this module — which drive a fake
-//! [`TaskRunner`](crate::worker::commands::TaskRunner) and therefore judge the
-//! handler and not the daemon — and `tests/container_docker_live.rs`, which
-//! runs against a real Docker and **fails** when there is none. That split is
-//! `handlers::sql`'s exactly, and it exists for the reason that file gives: a
-//! fake decides what the outside world does, which is the class of defect it
-//! cannot see.
-//!
-//! # What it corresponds to in Kestra, and what it deliberately is not
-//!
-//! `io.kestra.plugin.scripts.shell.Commands` over the `Docker` task runner —
-//! `AbstractExecScript` (`commands`, `beforeCommands`, `env`, `outputFiles`,
-//! `interpreter`, `failFast`) plus `Docker` (`image`). It is **not** a port of
-//! the whole of either: `namespaceFiles`, `inputFiles`, `outputDirectory`,
-//! `targetOS`, `warningOnStdErr`, `pullPolicy`, `credentials` and the resource
-//! knobs are absent, each because it needs a seam this crate has not got, and
-//! `crate::worker::commands`'s module doc lists them one by one.
-//!
-//! # The type id is `egret.container` and not a Kestra FQCN
-//!
-//! The four core handlers register under Kestra's own class names because a
-//! corpus flow writes those and `executor::build_plan` puts them in
-//! `TaskKind::Runnable::type_id` verbatim. Nothing in the corpus writes this
-//! one, so there is no name to match; `egret.sql` set the precedent for egret's
-//! own short spelling and this follows it.
-//!
-//! # This handler has NO default budget, and that is a hazard on the shipping tick
-//!
-//! **Superseded by W5a Task 3, kept for the diagnosis.** The worker now gives
-//! every script and container task with no `timeout:` a default budget
-//! (`WorkerTiming::container_default_timeout`, 1 h — `worker::timeout::defaulted`),
-//! and renews the lease of the run it is executing (`worker::claim::under_lease`),
-//! which is fix 2's "refresh each lease" option applied at the claim rather than
-//! in a handler. The batch's pre-invocation window is narrowed, not closed; see
-//! `worker::claim::tick`'s doc, cause 1.
-//!
-//! The whole-branch review's Important 2, verified rather than accepted.
-//! `handlers::sql` falls back to its own `DEFAULT_TIMEOUT` (300s) when the
-//! author writes no `timeout:`; this handler and [`super::python`] fall back to
-//! nothing, so a container runs until it exits.
-//!
-//! That matters because of how the tick leases: `worker::claim` takes up to `n`
-//! rows in **one** `UPDATE … SET claimed_at = now() … LIMIT $1` and
-//! `worker::tick` then runs the handlers **sequentially**. So every lease in a
-//! batch is taken at the same instant, and one unbounded container can hold the
-//! *last* member's lease past
-//! [`DEFAULT_WORKING_TIMEOUT`](crate::worker::DEFAULT_WORKING_TIMEOUT) (one
-//! hour) **before that run's handler is ever invoked** — at which point the
-//! reaper hands it to another worker and it runs twice.
-//!
-//! **Nothing bounds this today.** The proposal, stated rather than taken:
-//!
-//! 1. give these handlers a `DEFAULT_TIMEOUT` the way `handlers::sql` has one,
-//!    enforced *inside* `DockerRunner` around the attach-and-wait and killing
-//!    the container on expiry (the kill path already exists — it is what
-//!    `cancel` does);
-//! 2. and fix the root cause, which is **not** this handler: with 12 bounded
-//!    `egret.sql` runs in one batch the same reap-before-invocation happens at
-//!    exactly the same threshold. Either the claim leases one run at a time,
-//!    or each lease is refreshed immediately before its handler runs, or the
-//!    reaper's timeout is measured per run rather than per batch. That is
-//!    `worker::claim`'s ruling to make, not a handler's.
-//!
-//! It was not implemented here because doing half of a two-part fix in a
-//! bookkeeping round is exactly how the whole-branch Critical came back: fix
-//! round 2 restored an older shape and reintroduced a defect a previous review
-//! had already closed. Bounding this handler alone would leave the batch
-//! property untouched while making it look addressed.
-//!
-//! # `TASK_TYPES` DOES hold it, and the sentence that used to stand here was
-//! # false
-//!
-//! This module shipped saying *"`crate::spec::registry::TASK_TYPES` does not
-//! hold it, so a flow using this type cannot be published"*. It has held
-//! `egret.container` since W1 (`spec/registry.rs`, commit `228173f9`), with
-//! `references: &[]` — no `RefField`, because an image name is not an egret
-//! object. The programme spec's own §6.4 table declares the same thing:
-//! *"`egret.container` | cùng launcher; image + command + file in/out — hợp
-//! đồng `TaskCommands`"*.
-//!
-//! So this handler is not a new name beside the table: it is the
-//! **implementation half** of a row that was already there, which is what that
-//! table's own doc says a handler is for. A flow writing `egret.container`
-//! publishes and now finds a handler.
-//!
-//! **The false sentence hid a real collision one row above it** — the
-//! `egret.python` entry, which declares a required `notebook` reference. See
-//! [`super::python`] for what that cost and what was done about it.
-//! [`the_publish_table_and_these_handlers_agree`] is the test that keeps this
-//! paragraph honest, because this package has now found four stale
-//! claims-lists in four tasks and prose cannot be the thing that holds.
+//! script, container, shell or command task type (`grep -rhoE 'type:\s*\S+'
+//! corpus | sort -u | grep -iE 'script|container|shell|command|docker|bash|python|node'`
+//! matches nothing). The execution ratchet cannot move for script tasks in
+//! either direction; the instruments are the unit tests over a fake
+//! [`TaskRunner`](crate::worker::commands::TaskRunner) ([`testing::Spy`]) and
+//! `tests/container_docker_live.rs` / `tests/k8s_runner_live.rs`.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use egret_core::{Error, Result};
-use serde::Deserialize;
 
-use super::super::commands::{CommandsResult, DockerRunner, NoObserver, TaskCommands, TaskRunner};
-use super::super::{Outcome, TaskHandler, TaskInput};
+use super::super::commands::CommandsResult;
+use super::super::Outcome;
 use crate::runners::render_str;
 
-/// The `type:` a flow writes.
-pub const TYPE_ID: &str = "egret.container";
-
-/// `egret.container`'s own properties.
-///
-/// `deny_unknown_fields` for [`handlers::sql`](super::sql)'s reason: a
-/// misspelled `outputfiles:` that was ignored would run the command and produce
-/// no files, and the author would be debugging an empty `{{ outputs.c.files }}`
-/// rather than a typo.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Spec {
-    /// `Docker.image`. Required — `Docker.run` refuses without it and so does
-    /// [`DockerRunner::run`], with the artifact's own message.
-    image: String,
-    /// `AbstractExecScript.commands`. One shell script, joined with `"\n"` by
-    /// [`TaskCommands::argv`].
-    commands: Vec<String>,
-    /// `AbstractExecScript.beforeCommands`.
-    #[serde(default, rename = "beforeCommands")]
-    before_commands: Vec<String>,
-    /// `AbstractExecScript.env`.
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    /// `AbstractExecScript.outputFiles`, literal names only.
-    #[serde(default, rename = "outputFiles")]
-    output_files: Vec<String>,
-    /// `AbstractExecScript.interpreter`, defaulting to `["/bin/sh", "-c"]`
-    /// inside [`TaskCommands::argv`] rather than here, so the default lives in
-    /// one place and both handlers get it.
-    #[serde(default)]
-    interpreter: Vec<String>,
-    /// `AbstractExecScript.failFast` — measured default **true**
-    /// (`$default$failFast` is `Property.ofValue(true)`), which prepends
-    /// `set -e` so a script's first failing line ends it.
-    ///
-    /// Without it a three-line script whose first line fails still exits 0 on
-    /// the third, and the run is a green that ran none of what it claimed.
-    #[serde(default = "yes", rename = "failFast")]
-    fail_fast: bool,
-}
-
-fn yes() -> bool {
-    true
-}
-
-/// `egret.container`, over a [`TaskRunner`].
-///
-/// Its log lines are the runner's: every stdout/stderr line goes to
-/// `task.log` through [`stream_line`](crate::worker::commands::stream_line).
-pub struct Container {
-    runner: Arc<dyn TaskRunner>,
-}
-
-impl std::fmt::Debug for Container {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Container")
-            .field("runner", &self.runner)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Default for Container {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Container {
-    /// The shipping handler: a [`DockerRunner`].
-    pub fn new() -> Self {
-        Self::with_runner(Arc::new(DockerRunner::new()))
-    }
-
-    /// The same handler over another runner — a Kubernetes one later, a fake
-    /// in a test.
-    pub fn with_runner(runner: Arc<dyn TaskRunner>) -> Self {
-        Self { runner }
-    }
-}
+/// W4's `type:`, now an alias of `io.kestra.plugin.scripts.shell.Commands`
+/// ([`crate::scripts::ALIAS_CONTAINER`]).
+pub const TYPE_ID: &str = crate::scripts::ALIAS_CONTAINER;
 
 /// `set -e`, `CommandsWrapper`'s own literal.
 pub(super) const EXIT_ON_ERROR: &str = "set -e";
@@ -251,11 +94,16 @@ pub(super) fn outcome_for(type_id: &str, result: &CommandsResult) -> Outcome {
     Outcome {
         state: crate::executor::RunState::Failed,
         outputs: Some(outputs),
-        message: Some(format!(
-            "{type_id}: the command exited with code {}",
-            result.exit_code
-        )),
+        message: Some(format!("{type_id}: {}", command_failed(result.exit_code))),
     }
+}
+
+/// Kestra's own words for a non-zero exit, measured (`w5a-scripts.json`
+/// `fail_fast.failure_log`: ERROR `Command failed with exit code <n>`). The
+/// script handler logs this line at ERROR and the outcome's message carries
+/// it after the type.
+pub(super) fn command_failed(exit_code: i32) -> String {
+    format!("Command failed with exit code {exit_code}")
 }
 
 /// One runner failure, split the way [`handlers::sql`](super::sql) splits a
@@ -318,111 +166,24 @@ pub(super) fn render_values(
         .collect()
 }
 
-#[async_trait::async_trait]
-impl TaskHandler for Container {
-    fn type_id(&self) -> &'static str {
-        TYPE_ID
-    }
-
-    async fn run(&self, task: &TaskInput) -> Result<Outcome> {
-        let spec: Spec = match serde_json::from_value(task.spec.clone()) {
-            Ok(s) => s,
-            Err(e) => return Ok(Outcome::failed_with(format!("{TYPE_ID}: {e}"))),
-        };
-
-        let image = match render_str(&spec.image, &task.render) {
-            Ok(v) => v,
-            Err(e) => {
-                return Ok(Outcome::failed_with(format!(
-                    "{TYPE_ID}: `image` did not render: {e}"
-                )))
-            }
-        };
-        let commands = match render_all(TYPE_ID, "commands", &spec.commands, &task.render) {
-            Ok(v) => v,
-            Err(o) => return Ok(o),
-        };
-        let mut before = match render_all(
-            TYPE_ID,
-            "beforeCommands",
-            &spec.before_commands,
-            &task.render,
-        ) {
-            Ok(v) => v,
-            Err(o) => return Ok(o),
-        };
-        if spec.fail_fast {
-            // `AbstractExecScript.mayAddExitOnErrorCommands` prepends it to the
-            // BEFORE commands, so it applies to those too.
-            before.insert(0, EXIT_ON_ERROR.to_string());
-        }
-        let env = match render_values(TYPE_ID, "env", &spec.env, &task.render) {
-            Ok(v) => v,
-            Err(o) => return Ok(o),
-        };
-        let output_files =
-            match render_all(TYPE_ID, "outputFiles", &spec.output_files, &task.render) {
-                Ok(v) => v,
-                Err(o) => return Ok(o),
-            };
-        let interpreter = match render_all(TYPE_ID, "interpreter", &spec.interpreter, &task.render)
-        {
-            Ok(v) => v,
-            Err(o) => return Ok(o),
-        };
-
-        let cmds = TaskCommands {
-            container_image: image,
-            interpreter,
-            before_commands: before,
-            commands,
-            env,
-            input_files: BTreeMap::new(),
-            output_files,
-        };
-
-        // W5a Task 5 replaces this with the task's own `taskRunner:`.
-        let spec = crate::scripts::RunnerSpec::defaults(crate::scripts::RunnerKind::Docker);
-        match self.runner.run(task, &cmds, &spec, &NoObserver).await {
-            Ok(result) => Ok(outcome_for(TYPE_ID, &result)),
-            Err(e) => mapped(TYPE_ID, e),
-        }
-    }
-
-    /// **This handler CAN cancel, and does** — the first in the crate that
-    /// can.
-    ///
-    /// `handlers::sql` refuses because `QueryExecPort` has no cancellation verb
-    /// and a dropped future tells a MySQL-protocol engine nothing. A container
-    /// is different in exactly the way that matters: the daemon is a second
-    /// channel to the work, addressable after the future that started it is
-    /// gone. `TaskHandler::cancel`'s doc calls the four core handlers' `Ok(())`
-    /// truthful because they hold nothing; this one is truthful because it
-    /// actually stops the container.
-    ///
-    /// The address is [`container_name`](crate::worker::commands::container_name),
-    /// which carries this worker's **lease**. That is what stops a reaped
-    /// worker from killing its replacement's container, and it is the whole of
-    /// why [`TaskInput::claimed_at`] exists.
-    async fn cancel(&self, task: &TaskInput) -> Result<()> {
-        self.runner.cancel(task).await
-    }
-}
-
 #[cfg(test)]
 pub(super) mod testing {
     //! A [`TaskRunner`] that answers however the test built it, and records
     //! what it was asked.
     //!
-    //! Shared with `handlers::python`'s tests, which need the same thing.
+    //! Used by `handlers::script`'s tests.
 
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::worker::commands::{TaskCommands, TaskRunner};
+    use crate::worker::TaskInput;
 
     #[derive(Debug, Default)]
     pub struct Spy {
         pub seen: Mutex<Vec<TaskCommands>>,
+        /// The `taskRunner:` spec each run was given.
+        pub specs: Mutex<Vec<crate::scripts::RunnerSpec>>,
         pub cancelled: Mutex<Vec<String>>,
         answer: Mutex<Option<Result<CommandsResult>>>,
         /// `(is_stderr, line)` to stream, in order. `None` streams the one
@@ -459,10 +220,11 @@ pub(super) mod testing {
             &self,
             task: &TaskInput,
             commands: &TaskCommands,
-            _spec: &crate::scripts::RunnerSpec,
+            spec: &crate::scripts::RunnerSpec,
             observer: &dyn crate::worker::commands::LineObserver,
         ) -> Result<CommandsResult> {
             self.seen.lock().unwrap().push(commands.clone());
+            self.specs.lock().unwrap().push(spec.clone());
             // A real runner streams; this one streams what the test gave it,
             // or the one line the argv would print, through the real runner's
             // own `stream_line` — so the levels, the markers and the
@@ -501,382 +263,5 @@ pub(super) mod testing {
                 .push(crate::worker::commands::container_name(task));
             Ok(())
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::testing::Spy;
-    use super::*;
-    use crate::executor::RunState;
-    use crate::logs::{fixture, LogLevel};
-    use crate::worker::handlers::testing::{input, recorded};
-
-    fn spec() -> serde_json::Value {
-        serde_json::json!({
-            "image": "alpine:3.20",
-            "commands": ["echo one", "echo two"],
-        })
-    }
-
-    /// The spec becomes a [`TaskCommands`], and `failFast` puts `set -e` at the
-    /// front of the joined script.
-    #[tokio::test]
-    async fn the_spec_becomes_one_shell_script_with_set_e_in_front() {
-        let spy = Spy::ok(CommandsResult::default());
-        let h = Container::with_runner(spy.clone());
-        let out = h
-            .run(&input(TYPE_ID, spec()))
-            .await
-            .expect("no worker error");
-        assert_eq!(out.state, RunState::Success);
-
-        let cmds = spy.only();
-        assert_eq!(cmds.container_image, "alpine:3.20");
-        assert_eq!(
-            cmds.argv(),
-            vec!["/bin/sh", "-c", "set -e\necho one\necho two"],
-            "`failFast` is Kestra's own default true, and without `set -e` a \
-             script whose first line fails still exits 0 on its last"
-        );
-    }
-
-    /// `failFast: false` takes it away, and nothing else changes.
-    #[tokio::test]
-    async fn fail_fast_false_drops_the_set_e_and_only_that() {
-        let spy = Spy::ok(CommandsResult::default());
-        let h = Container::with_runner(spy.clone());
-        let mut s = spec();
-        s["failFast"] = serde_json::json!(false);
-        h.run(&input(TYPE_ID, s)).await.expect("no worker error");
-        assert_eq!(
-            spy.only().argv(),
-            vec!["/bin/sh", "-c", "echo one\necho two"]
-        );
-    }
-
-    /// A non-zero exit is a FAILED task that still carries its outputs — the
-    /// artifact's `RunnableTaskException(e, ScriptOutput)`.
-    #[tokio::test]
-    async fn a_non_zero_exit_fails_the_task_and_keeps_its_outputs() {
-        let spy = Spy::ok(CommandsResult {
-            exit_code: 3,
-            stdout_line_count: 2,
-            stderr_line_count: 1,
-            vars: serde_json::json!({"n": 7})
-                .as_object()
-                .expect("an object")
-                .clone(),
-            ..CommandsResult::default()
-        });
-        let h = Container::with_runner(spy);
-        let out = h
-            .run(&input(TYPE_ID, spec()))
-            .await
-            .expect("no worker error");
-
-        assert_eq!(out.state, RunState::Failed);
-        assert_eq!(
-            out.message.as_deref(),
-            Some("egret.container: the command exited with code 3")
-        );
-        let outputs = out.outputs.expect("a failed command still carries outputs");
-        assert_eq!(outputs["exitCode"], serde_json::json!(3));
-        assert_eq!(outputs["vars"], serde_json::json!({"n": 7}));
-        assert_eq!(outputs["stdOutLineCount"], serde_json::json!(2));
-        assert_eq!(outputs["stdErrLineCount"], serde_json::json!(1));
-    }
-
-    /// A daemon that is not there is a WORKER failure; anything else fails the
-    /// task. The two are the same call with a different error, so they are
-    /// asserted together.
-    #[tokio::test]
-    async fn an_unreachable_daemon_aborts_the_tick_and_a_bad_image_fails_the_task() {
-        let spy = Spy::new(Err(Error::Internal(anyhow::anyhow!(
-            "Cannot connect to the Docker daemon"
-        ))));
-        let h = Container::with_runner(spy);
-        let err = h
-            .run(&input(TYPE_ID, spec()))
-            .await
-            .expect_err("egret's own outage must not fail the author's flow");
-        assert!(
-            err.to_string().contains("not the author's flow"),
-            "got {err}"
-        );
-
-        let spy = Spy::new(Err(Error::InvalidInput(
-            "docker create: Unable to find image 'nope:1' locally".into(),
-        )));
-        let h = Container::with_runner(spy);
-        let out = h
-            .run(&input(TYPE_ID, spec()))
-            .await
-            .expect("no worker error");
-        assert_eq!(out.state, RunState::Failed);
-        assert!(
-            out.message
-                .as_deref()
-                .expect("a message")
-                .contains("Unable to find image"),
-            "the engine's own words are the useful half in an authoring loop"
-        );
-    }
-
-    /// A spec that does not parse fails the task rather than the worker, and
-    /// an unknown field is refused rather than ignored.
-    #[tokio::test]
-    async fn a_misspelled_property_fails_the_task_and_says_so() {
-        let spy = Spy::ok(CommandsResult::default());
-        let h = Container::with_runner(spy.clone());
-        let out = h
-            .run(&input(
-                TYPE_ID,
-                serde_json::json!({"image": "alpine", "commands": ["true"], "outputfiles": ["a"]}),
-            ))
-            .await
-            .expect("a bad spec is the author's flow, not a worker failure");
-        assert_eq!(out.state, RunState::Failed);
-        assert!(
-            out.message
-                .as_deref()
-                .expect("a message")
-                .contains("outputfiles"),
-            "got {:?}",
-            out.message
-        );
-        assert!(
-            spy.seen.lock().unwrap().is_empty(),
-            "a spec that did not parse must not reach the runner"
-        );
-    }
-
-    /// Every string property renders, and a template that cannot fails the
-    /// task with the property's name in it.
-    #[tokio::test]
-    async fn the_properties_render_and_a_broken_one_names_itself() {
-        let spy = Spy::ok(CommandsResult::default());
-        let h = Container::with_runner(spy.clone());
-        let cx = crate::runners::RenderContext::from_json_object(&serde_json::json!({
-            "inputs": {"tag": "3.20", "who": "world"}
-        }))
-        .expect("an object");
-        let task = TaskInput {
-            render: cx,
-            ..input(
-                TYPE_ID,
-                serde_json::json!({
-                    "image": "alpine:{{ inputs.tag }}",
-                    "commands": ["echo {{ inputs.who }}"],
-                    "env": {"WHO": "{{ inputs.who }}"},
-                }),
-            )
-        };
-        h.run(&task).await.expect("no worker error");
-        let cmds = spy.only();
-        assert_eq!(cmds.container_image, "alpine:3.20");
-        assert_eq!(cmds.commands, vec!["echo world"]);
-        assert_eq!(cmds.env.get("WHO").map(String::as_str), Some("world"));
-
-        let spy = Spy::ok(CommandsResult::default());
-        let h = Container::with_runner(spy.clone());
-        let out = h
-            .run(&input(
-                TYPE_ID,
-                serde_json::json!({"image": "alpine", "commands": ["echo {{ nope.missing }}"]}),
-            ))
-            .await
-            .expect("an unrenderable template is a task failure, not a worker one");
-        assert_eq!(out.state, RunState::Failed);
-        assert!(
-            out.message
-                .as_deref()
-                .expect("a message")
-                .contains("`commands`"),
-            "got {:?} -- the author has to be told WHICH property",
-            out.message
-        );
-        assert!(spy.seen.lock().unwrap().is_empty());
-    }
-
-    /// The log is wired: a container's stdout is most of what it produces,
-    /// and a handler that streamed to nowhere would still pass every
-    /// assertion about its outputs.
-    #[tokio::test]
-    async fn the_log_sink_receives_the_runners_lines() {
-        let (task, rec) = recorded(TYPE_ID, spec());
-        let spy = Spy::ok(CommandsResult::default());
-        Container::with_runner(spy)
-            .run(&task)
-            .await
-            .expect("no worker error");
-        let lines = rec.texts();
-        assert_eq!(lines.len(), 1, "got {lines:?}");
-        assert_eq!(lines[0].0, LogLevel::Info);
-        assert!(lines[0].1.contains("echo one"), "got {:?}", lines[0].1);
-    }
-
-    /// **Both streams arrive on `task.log` at Task 1's levels, and marker
-    /// lines follow Task 1** — through the handler, over a runner that
-    /// streams through the shipping `stream_line`.
-    #[tokio::test]
-    async fn stdout_and_stderr_reach_task_log_at_the_measured_levels() {
-        let lines: Vec<(bool, String)> = vec![
-            (false, "out-line".into()),
-            (true, "err-line".into()),
-            (false, r#"::{"outputs":{"k":"v"}}::"#.into()),
-            (true, r#"::{"outputs":{"k2":"v2"}}::"#.into()),
-            (false, r#"x ::{"outputs":{"k3":"v3"}}::"#.into()),
-            (false, "##kestra:log:debug##".into()),
-            (false, "dbg-out".into()),
-            (true, "dbg-err".into()),
-            (false, "##kestra:log:info##".into()),
-            (false, "::{not json}::".into()),
-            (false, "after".into()),
-        ];
-        let (task, rec) = recorded(TYPE_ID, spec());
-        let spy = Spy::ok(CommandsResult::default()).streaming(lines);
-        Container::with_runner(spy)
-            .run(&task)
-            .await
-            .expect("no worker error");
-
-        let table = &fixture::w11()["level_table"];
-        let out = fixture::level(&table["stdout"]);
-        let err = fixture::level(&table["stderr"]);
-        let dbg = fixture::level(&table["stdout_inside_debug_bracket"]);
-        let warn = fixture::level(&table["invalid_marker_warning"]);
-        let bad = serde_json::from_str::<serde_json::Value>("{not json}")
-            .unwrap_err()
-            .to_string();
-        assert_eq!(
-            rec.texts(),
-            vec![
-                (out, "out-line".to_string()),
-                (err, "err-line".to_string()),
-                (out, r#"x ::{"outputs":{"k3":"v3"}}::"#.to_string()),
-                (dbg, "dbg-out".to_string()),
-                (err, "dbg-err".to_string()),
-                (warn, format!("Invalid outputs '{bad}'")),
-                (out, "after".to_string()),
-            ]
-        );
-        assert!(
-            rec.lines()
-                .iter()
-                .all(|l| l.task_run_id == Some(task.run_id)),
-            "every line carries this run's identity"
-        );
-    }
-
-    /// **The publish table and these two handlers agree — asserted, not
-    /// asserted in prose.**
-    ///
-    /// Fix round 1's Critical 2 was a false sentence in this module's doc
-    /// claiming `TASK_TYPES` did not hold `egret.container`, and the false
-    /// premise hid a live name collision on `egret.python`. This package has
-    /// now found four stale claims-lists in four tasks, so the claim is a test:
-    ///
-    /// 1. both handler ids are publishable (present in `TASK_TYPES`);
-    /// 2. neither declares a `RefField`, because an image name and a script are
-    ///    not egret objects — a row that grew one would silently make publish
-    ///    rewrite a field these handlers read verbatim;
-    /// 3. `egret.python` is still the **notebook** task, with its required
-    ///    `notebook` reference, and is **not** what `handlers::python` serves.
-    ///
-    /// Leg 3 is the one that fails if somebody renames the script handler back.
-    #[test]
-    fn the_publish_table_and_these_handlers_agree() {
-        use crate::spec::registry::{known_type, RefKind};
-
-        for id in [TYPE_ID, crate::worker::handlers::python::TYPE_ID] {
-            let row = known_type(id)
-                .unwrap_or_else(|| panic!("{id} is not in TASK_TYPES, so publish refuses it"));
-            assert!(
-                row.references.is_empty(),
-                "{id} declares {:?}; publish would rewrite a field these handlers read \
-                 verbatim",
-                row.references.iter().map(|r| r.field).collect::<Vec<_>>()
-            );
-        }
-
-        let notebook = known_type("egret.python").expect("the notebook task is still declared");
-        assert_eq!(
-            notebook.references.len(),
-            1,
-            "egret.python is the KernelLauncher task and its notebook reference is what \
-             makes it one"
-        );
-        assert_eq!(notebook.references[0].field, "notebook");
-        assert!(matches!(notebook.references[0].kind, RefKind::Notebook));
-        assert_ne!(
-            crate::worker::handlers::python::TYPE_ID,
-            "egret.python",
-            "the container-backed script handler must NOT take the notebook task's \
-             name: a `script:` flow fails publish on the missing `notebook` reference, \
-             and a `notebook:` flow fails at run time on `deny_unknown_fields`"
-        );
-    }
-
-    /// **A failure recorded after the command ran still carries its outputs.**
-    ///
-    /// Fix round 1's Important 1: an output-file problem used to discard the
-    /// exit code and every `::{…}::` var the command had printed. Fact 7 is
-    /// `RunnableTaskException(e, ScriptOutput)` — an exception carrying an
-    /// Output — and this is that.
-    #[tokio::test]
-    async fn a_failure_after_the_command_ran_keeps_the_exit_code_and_the_vars() {
-        let spy = Spy::ok(CommandsResult {
-            exit_code: 0,
-            stdout_line_count: 4,
-            vars: serde_json::json!({"printed": "before the problem"})
-                .as_object()
-                .expect("an object")
-                .clone(),
-            failure: Some("`outputFiles` declares \"gone.txt\", which the command did not leave in /egret/working-dir".to_string()),
-            ..CommandsResult::default()
-        });
-        let h = Container::with_runner(spy);
-        let out = h
-            .run(&input(TYPE_ID, spec()))
-            .await
-            .expect("no worker error");
-
-        assert_eq!(out.state, RunState::Failed);
-        assert!(
-            out.message
-                .as_deref()
-                .expect("a message")
-                .contains("gone.txt"),
-            "got {:?}",
-            out.message
-        );
-        let outputs = out
-            .outputs
-            .expect("a failure after the run still carries outputs");
-        assert_eq!(outputs["exitCode"], serde_json::json!(0));
-        assert_eq!(
-            outputs["vars"],
-            serde_json::json!({"printed": "before the problem"})
-        );
-        assert_eq!(outputs["stdOutLineCount"], serde_json::json!(4));
-    }
-
-    /// **`cancel` reaches the runner, addressed by the lease.**
-    #[tokio::test]
-    async fn cancel_asks_the_runner_to_stop_the_container_this_lease_owns() {
-        let spy = Spy::ok(CommandsResult::default());
-        let h = Container::with_runner(spy.clone());
-        let task = TaskInput {
-            run_id: uuid::Uuid::from_u128(9),
-            claimed_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("valid"),
-            ..input(TYPE_ID, spec())
-        };
-        h.cancel(&task).await.expect("a container can be stopped");
-        assert_eq!(
-            spy.cancelled.lock().unwrap().as_slice(),
-            ["egret-run-00000000000000000000000000000009-1700000000000000"],
-            "the address carries the lease, not only the run"
-        );
     }
 }

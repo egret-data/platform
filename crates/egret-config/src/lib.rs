@@ -629,6 +629,163 @@ pub struct WorkflowConfig {
     /// or a `[[workflow.plugin_configurations]]` table in `egret.toml`.
     #[serde(default)]
     pub plugin_configurations: PluginConfigurations,
+
+    /// **Where script tasks run (W5a spec §7), and it defaults to `none`.**
+    ///
+    /// `none`: the worker registers no script task handler, so its registry is
+    /// exactly what it was before W5a (`core.log.Log`, `core.debug.Return`,
+    /// `core.execution.Fail`, `core.flow.Sleep`), and publish refuses a script
+    /// task with no `taskRunner:` because nothing would run it. `docker`: the
+    /// local Docker daemon, through the `docker` CLI -- for development and
+    /// tests, never for production (a Docker socket in the server is root on
+    /// the node). `kubernetes`: one pod per task-run attempt in
+    /// [`WorkflowKubernetesConfig::namespace`], the production runner.
+    ///
+    /// Either runner registers the four script task types
+    /// (`io.kestra.plugin.scripts.{shell,python}.{Commands,Script}`) and the
+    /// two aliases `egret.container` and `egret.script.python`, and becomes the
+    /// runner of a script task with no `taskRunner:`. The runner is built once,
+    /// at start. A task naming the OTHER runner in its `taskRunner:` fails at
+    /// run with a message saying which runner this deployment has.
+    ///
+    /// `none` is the safe default for the same reason `worker_enabled` is
+    /// `false`: a deployment that says nothing keeps behaving exactly as it
+    /// did, and an operator who wants containers says so once, deliberately --
+    /// and still has to switch on the workspace feature `workflow_containers`
+    /// and allow images in [`WorkflowConfig::plugin_configurations`].
+    /// `EGRET_WORKFLOW__CONTAINER_RUNNER=kubernetes`.
+    #[serde(default)]
+    pub container_runner: ContainerRunner,
+
+    /// `[workflow.kubernetes]` -- the task pods' namespace and bounds, read
+    /// only when [`WorkflowConfig::container_runner`] is `kubernetes`. None of
+    /// it is author-settable. `EGRET_WORKFLOW__KUBERNETES__NAMESPACE=egret-tasks`.
+    #[serde(default)]
+    pub kubernetes: WorkflowKubernetesConfig,
+}
+
+/// [`WorkflowConfig::container_runner`].
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ContainerRunner {
+    /// No script task handler is registered.
+    #[default]
+    None,
+    /// The local Docker daemon (development and tests).
+    Docker,
+    /// One pod per task-run attempt (production).
+    Kubernetes,
+}
+
+/// `[workflow.kubernetes]`: egret's side of every task pod (W5a spec §5).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowKubernetesConfig {
+    /// The namespace task pods are created in. It must exist, enforce Pod
+    /// Security `restricted`, and grant egret's ServiceAccount exactly `pods`
+    /// get/list/watch/create/delete, `pods/log` get and `pods/exec` create --
+    /// which is what the chart's `workflow.containerRunner: kubernetes`
+    /// renders. Default `egret-tasks`.
+    #[serde(default = "default_task_namespace")]
+    pub namespace: String,
+    /// Requests and limits a task gets where its `taskRunner.resources` says
+    /// nothing. Default: request `100m`/`128Mi`, limit `1`/`512Mi`.
+    #[serde(default = "default_task_resources")]
+    pub default_resources: TaskResources,
+    /// The most a task may ask for; an author's request or limit above it is
+    /// capped to it, and an unset side here means no cap on that side.
+    /// Default: limit `2`/`2Gi`, no request cap.
+    #[serde(default = "default_task_max_resources")]
+    pub max_resources: TaskResources,
+    /// Names of existing `kubernetes.io/dockerconfigjson` Secrets in the task
+    /// namespace, attached to every task pod. Default none.
+    /// `EGRET_WORKFLOW__KUBERNETES__IMAGE_PULL_SECRETS='["regcred"]'`.
+    #[serde(default)]
+    pub image_pull_secrets: Vec<String>,
+    /// The uid every container of a task pod runs as. Must be positive: task
+    /// pods run with `runAsNonRoot`, and egret refuses to create a pod with
+    /// `0` rather than let the kubelet blame the author. Default `1000`.
+    #[serde(default = "default_task_run_as_user")]
+    pub run_as_user: i64,
+    /// egret's helper image (`deploy/docker/task-helper.Dockerfile`), which
+    /// moves input and output files in and out of a task pod. Default
+    /// `egret-task-helper:dev`.
+    #[serde(default = "default_task_helper_image")]
+    pub helper_image: String,
+}
+
+impl Default for WorkflowKubernetesConfig {
+    fn default() -> Self {
+        Self {
+            namespace: default_task_namespace(),
+            default_resources: default_task_resources(),
+            max_resources: default_task_max_resources(),
+            image_pull_secrets: Vec::new(),
+            run_as_user: default_task_run_as_user(),
+            helper_image: default_task_helper_image(),
+        }
+    }
+}
+
+/// Kubernetes requests and limits, as quantities written the Kubernetes way
+/// (`500m`, `1`, `256Mi`). `None` leaves that side unset.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskResources {
+    #[serde(default)]
+    pub request: TaskResourceAmounts,
+    #[serde(default)]
+    pub limit: TaskResourceAmounts,
+}
+
+/// One side of [`TaskResources`].
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskResourceAmounts {
+    #[serde(default)]
+    pub cpu: Option<String>,
+    #[serde(default)]
+    pub memory: Option<String>,
+}
+
+/// `egret-tasks` -- see [`WorkflowKubernetesConfig::namespace`].
+fn default_task_namespace() -> String {
+    "egret-tasks".to_string()
+}
+
+/// See [`WorkflowKubernetesConfig::default_resources`].
+fn default_task_resources() -> TaskResources {
+    TaskResources {
+        request: TaskResourceAmounts {
+            cpu: Some("100m".to_string()),
+            memory: Some("128Mi".to_string()),
+        },
+        limit: TaskResourceAmounts {
+            cpu: Some("1".to_string()),
+            memory: Some("512Mi".to_string()),
+        },
+    }
+}
+
+/// See [`WorkflowKubernetesConfig::max_resources`].
+fn default_task_max_resources() -> TaskResources {
+    TaskResources {
+        request: TaskResourceAmounts::default(),
+        limit: TaskResourceAmounts {
+            cpu: Some("2".to_string()),
+            memory: Some("2Gi".to_string()),
+        },
+    }
+}
+
+/// `1000` -- see [`WorkflowKubernetesConfig::run_as_user`].
+fn default_task_run_as_user() -> i64 {
+    1000
+}
+
+/// `egret-task-helper:dev` -- see [`WorkflowKubernetesConfig::helper_image`].
+fn default_task_helper_image() -> String {
+    "egret-task-helper:dev".to_string()
 }
 
 /// Kestra's `kestra.plugins.configurations`: one `{type, values}` per plugin
@@ -776,6 +933,8 @@ fn default_workflow() -> WorkflowConfig {
         log_run_max_lines: default_log_run_max_lines(),
         log_run_max_bytes: default_log_run_max_bytes(),
         plugin_configurations: PluginConfigurations::default(),
+        container_runner: ContainerRunner::None,
+        kubernetes: WorkflowKubernetesConfig::default(),
     }
 }
 
@@ -1121,6 +1280,127 @@ values = { allowed-images = [] }
                     .allowed_images("io.kestra.plugin.ee.kubernetes.runner.Kubernetes"),
                 Some(vec![])
             );
+            Ok(())
+        });
+    }
+
+    /// W5a Task 5: `container_runner` is `none` unless a deployment says
+    /// otherwise, and `[workflow.kubernetes]` has the documented defaults.
+    #[test]
+    fn container_runner_defaults_to_none_and_kubernetes_to_its_documented_values() {
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.workflow.container_runner, ContainerRunner::None);
+            let k = &cfg.workflow.kubernetes;
+            assert_eq!(k.namespace, "egret-tasks");
+            assert_eq!(k.run_as_user, 1000);
+            assert_eq!(k.helper_image, "egret-task-helper:dev");
+            assert!(k.image_pull_secrets.is_empty());
+            assert_eq!(k.default_resources.request.cpu.as_deref(), Some("100m"));
+            assert_eq!(k.default_resources.limit.memory.as_deref(), Some("512Mi"));
+            assert_eq!(k.max_resources.limit.cpu.as_deref(), Some("2"));
+            assert_eq!(k.max_resources.request, TaskResourceAmounts::default());
+            // The serde fallback for a `[workflow]` section that predates the
+            // keys agrees with the defaults layer.
+            assert_eq!(default_workflow().container_runner, ContainerRunner::None);
+            assert_eq!(
+                default_workflow().kubernetes,
+                WorkflowKubernetesConfig::default()
+            );
+            Ok(())
+        });
+    }
+
+    /// W5a Task 5: every `container_runner` spelling and every
+    /// `[workflow.kubernetes]` key is reachable from the environment.
+    #[test]
+    fn container_runner_and_kubernetes_are_settable_from_env() {
+        for (raw, want) in [
+            ("none", ContainerRunner::None),
+            ("docker", ContainerRunner::Docker),
+            ("kubernetes", ContainerRunner::Kubernetes),
+        ] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("EGRET_WORKFLOW__CONTAINER_RUNNER", raw);
+                let cfg: Config = Config::figment().extract()?;
+                assert_eq!(cfg.workflow.container_runner, want, "{raw}");
+                Ok(())
+            });
+        }
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_WORKFLOW__KUBERNETES__NAMESPACE", "tasks-x");
+            jail.set_env("EGRET_WORKFLOW__KUBERNETES__RUN_AS_USER", "4242");
+            jail.set_env(
+                "EGRET_WORKFLOW__KUBERNETES__HELPER_IMAGE",
+                "reg.io/helper:1",
+            );
+            jail.set_env(
+                "EGRET_WORKFLOW__KUBERNETES__IMAGE_PULL_SECRETS",
+                r#"["regcred"]"#,
+            );
+            jail.set_env(
+                "EGRET_WORKFLOW__KUBERNETES__MAX_RESOURCES__LIMIT__MEMORY",
+                "1Gi",
+            );
+            jail.set_env(
+                "EGRET_WORKFLOW__KUBERNETES__DEFAULT_RESOURCES__REQUEST__CPU",
+                "250m",
+            );
+            let cfg: Config = Config::figment().extract()?;
+            let k = &cfg.workflow.kubernetes;
+            assert_eq!(k.namespace, "tasks-x");
+            assert_eq!(k.run_as_user, 4242);
+            assert_eq!(k.helper_image, "reg.io/helper:1");
+            assert_eq!(k.image_pull_secrets, vec!["regcred".to_string()]);
+            assert_eq!(k.max_resources.limit.memory.as_deref(), Some("1Gi"));
+            assert_eq!(k.default_resources.request.cpu.as_deref(), Some("250m"));
+            Ok(())
+        });
+    }
+
+    /// W5a Task 5: the chart carries the lever with `none` as its default, and
+    /// the task namespace's Role is exactly the RBAC the spec allows --
+    /// `pods` get/list/watch/create/delete, `pods/log` get, `pods/exec`
+    /// create -- nothing more. (`helm template` is the full check; this pins
+    /// the text so an added verb or resource fails a unit test.)
+    #[test]
+    fn the_chart_carries_the_container_runner_and_the_exact_task_rbac() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/helm/egret");
+        let read = |p: &str| {
+            std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("cannot read {p}: {e}"))
+        };
+        assert!(read("templates/configmap-env.yaml").contains(
+            r#"EGRET_WORKFLOW__CONTAINER_RUNNER: "{{ .Values.workflow.containerRunner }}""#
+        ));
+        assert!(read("values.yaml").contains("  containerRunner: none\n"));
+        let rbac = read("templates/rbac-tasks.yaml");
+        let rules: Vec<&str> = rbac
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("resources:") || l.starts_with("verbs:"))
+            .collect();
+        assert_eq!(
+            rules,
+            vec![
+                r#"resources: ["pods"]"#,
+                r#"verbs: ["get","list","watch","create","delete"]"#,
+                r#"resources: ["pods/log"]"#,
+                r#"verbs: ["get"]"#,
+                r#"resources: ["pods/exec"]"#,
+                r#"verbs: ["create"]"#,
+            ]
+        );
+        assert_eq!(rbac.matches("apiGroups:").count(), 3);
+        assert!(!rbac.contains("ClusterRole"), "only in the task namespace");
+    }
+
+    /// An unknown runner is refused at boot, by name, not read as `none`.
+    #[test]
+    fn an_unknown_container_runner_is_refused() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_WORKFLOW__CONTAINER_RUNNER", "process");
+            let err = Config::figment().extract::<Config>().unwrap_err();
+            assert!(err.to_string().contains("process"), "{err}");
             Ok(())
         });
     }

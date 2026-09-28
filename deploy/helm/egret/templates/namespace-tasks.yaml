@@ -1,0 +1,19 @@
+{{- /*
+W5a: the namespace workflow script tasks run in, one pod per task-run attempt
+(`egret_workflow::worker::k8s`). Chart-managed like `namespace-kernels.yaml`,
+and for the same reason: it holds only pods this chart's backend creates.
+Pod Security `restricted` is ENFORCED, so the admission controller itself
+refuses a task pod that is not hardened (the runner builds every pod with
+runAsNonRoot, all capabilities dropped, seccomp RuntimeDefault and no
+service-account token). Rendered only when workflow.containerRunner is
+"kubernetes".
+*/ -}}
+{{- if eq .Values.workflow.containerRunner "kubernetes" }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.workflow.tasks.namespace }}
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+{{- end }}

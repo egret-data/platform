@@ -2101,3 +2101,149 @@ fn the_config_default_container_timeout_equals_the_workers_own() {
         }
     );
 }
+
+// ── W5a Task 5: the deployment's registry, and the orphan sweep's call site ──
+
+/// A pool that is never connected: `handlers_for` stores it for the run-time
+/// feature read and the re-attach window, and none of these tests runs a task.
+fn unconnected_pool() -> sqlx::PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+        .expect("a lazy pool parses")
+}
+
+/// **With `container_runner = none` (the default) the production registry is
+/// byte-for-byte what it was before W5a** -- `Handlers::with_core_tasks()`,
+/// no orphan sweep, no default runner for publish -- and with `docker` it is
+/// that plus exactly the four script types and their two aliases.
+#[tokio::test]
+async fn with_container_runner_none_the_registry_is_unchanged() {
+    use egret_workflow::scripts::RunnerKind;
+    use egret_workflow::worker::Handlers;
+
+    let mut cfg = egret_config::Config::default().workflow;
+    assert_eq!(
+        cfg.container_runner,
+        egret_config::ContainerRunner::None,
+        "`none` is the shipping default"
+    );
+    let (reg, default_runner) = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool())
+        .await
+        .expect("`none` needs nothing");
+    assert_eq!(reg.type_ids(), Handlers::with_core_tasks().type_ids());
+    assert_eq!(default_runner, None, "publish has no runner to default to");
+    assert!(reg.orphan_sweep().is_none(), "nothing to sweep");
+
+    // The control: the same call with a runner configured DOES register --
+    // so the equality above is not a function that never registers anything.
+    cfg.container_runner = egret_config::ContainerRunner::Docker;
+    let (reg, default_runner) = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool())
+        .await
+        .expect("the Docker runner is built without a daemon");
+    let core = Handlers::with_core_tasks().type_ids().len();
+    let added: Vec<&str> = reg
+        .type_ids()
+        .into_iter()
+        .filter(|id| Handlers::with_core_tasks().get(id).is_none())
+        .collect();
+    assert_eq!(
+        added,
+        vec![
+            "egret.container",
+            "egret.script.python",
+            "io.kestra.plugin.scripts.python.Commands",
+            "io.kestra.plugin.scripts.python.Script",
+            "io.kestra.plugin.scripts.shell.Commands",
+            "io.kestra.plugin.scripts.shell.Script",
+        ]
+    );
+    assert_eq!(reg.type_ids().len(), core + 6);
+    assert_eq!(default_runner, Some(RunnerKind::Docker));
+    assert!(
+        reg.orphan_sweep().is_some(),
+        "the runner is the reaper's sweep"
+    );
+}
+
+/// A Kubernetes configuration egret refuses stops the deployment at start,
+/// naming the setting -- before any cluster client is built.
+#[tokio::test]
+async fn a_refused_kubernetes_configuration_stops_the_process_at_start() {
+    let mut cfg = egret_config::Config::default().workflow;
+    cfg.container_runner = egret_config::ContainerRunner::Kubernetes;
+    cfg.kubernetes.run_as_user = 0;
+    let err = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool())
+        .await
+        .expect_err("runAsNonRoot pods cannot run as uid 0");
+    assert!(err.to_string().contains("run_as_user"), "{err}");
+}
+
+/// `workflow.kubernetes.*` reaches the runner's `PodConfig` field for field.
+#[test]
+fn the_kubernetes_config_becomes_the_pod_config() {
+    let mut k = egret_config::WorkflowKubernetesConfig {
+        namespace: "tasks-x".into(),
+        image_pull_secrets: vec!["regcred".into()],
+        ..Default::default()
+    };
+    k.max_resources.request.cpu = Some("3".into());
+    let pod = egret_workflow::runtime::pod_config(&k);
+    assert_eq!(pod.namespace, "tasks-x");
+    assert_eq!(pod.run_as_user, 1000);
+    assert_eq!(pod.helper_image, "egret-task-helper:dev");
+    assert_eq!(pod.image_pull_secrets, vec!["regcred".to_string()]);
+    assert_eq!(pod.default_resources.request.cpu.as_deref(), Some("100m"));
+    assert_eq!(pod.default_resources.limit.memory.as_deref(), Some("512Mi"));
+    assert_eq!(pod.max_resources.request.cpu.as_deref(), Some("3"));
+    assert_eq!(pod.max_resources.limit.memory.as_deref(), Some("2Gi"));
+}
+
+/// An [`OrphanSweep`](egret_workflow::worker::commands::OrphanSweep) that
+/// counts its calls.
+#[derive(Debug, Default)]
+struct CountingSweep {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl egret_workflow::worker::commands::OrphanSweep for CountingSweep {
+    async fn sweep_orphans(&self, _pool: &sqlx::PgPool) -> egret_core::Result<u64> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(0)
+    }
+}
+
+/// **The reaper's tick calls the registry's orphan sweep** (W5a spec §5,
+/// *Orphans*; the call site Task 4 left to Task 5) -- through the real
+/// `spawn`, so the wiring is what is judged. The claim loop is parked; only
+/// the reaper ticks.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_reaper_tick_sweeps_the_configured_runners_orphans(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let sweep = Arc::new(CountingSweep::default());
+    let reg = egret_workflow::worker::Handlers::with_core_tasks().with_orphan_sweep(sweep.clone());
+    let cancel = CancellationToken::new();
+    let cfg = RuntimeConfig {
+        tick_interval: Duration::from_secs(3600),
+        reaper_interval: Duration::from_millis(50),
+        ..fast(3_600_000, 1)
+    };
+    let handle = spawn(pool.clone(), Arc::new(reg), cfg, cancel.clone());
+    wait_until(
+        "three sweeps on the reaper's tick",
+        Duration::from_secs(10),
+        || {
+            let n = sweep.calls.load(Ordering::SeqCst);
+            async move {
+                if n >= 3 {
+                    Ok(())
+                } else {
+                    Err(format!("{n} sweeps"))
+                }
+            }
+        },
+    )
+    .await;
+    cancel.cancel();
+    handle.join().await;
+}

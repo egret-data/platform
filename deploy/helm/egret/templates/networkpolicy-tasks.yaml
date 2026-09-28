@@ -1,0 +1,72 @@
+{{- /*
+W5a spec §5: a task pod may reach anything EXCEPT egret's metadata Postgres
+and the Kubernetes API server. NetworkPolicy has no deny rule, so "open except"
+is written as the union of three allow rules that together leave those two
+out:
+
+  1. every pod in every namespace other than egret's own;
+  2. every pod in egret's own namespace except the Postgres pod
+     (`app: postgres`, deps-postgres.yaml);
+  3. every IP outside the cluster, i.e. 0.0.0.0/0 EXCEPT the pod and service
+     CIDRs (in-cluster traffic is judged by rules 1-2, and some CNIs match
+     ipBlock against pod IPs too), the API server's endpoints, and any
+     `deniedCidrs` (an external metadata Postgres goes here).
+
+The API server is reached through the `kubernetes` Service, which CNIs
+enforce after DNAT, i.e. against its ENDPOINT addresses -- host-network IPs no
+pod selector matches. So those addresses must be excepted by IP: the chart
+reads them from the `default/kubernetes` Endpoints at install (`lookup`) and
+adds `apiServerCidrs`; `helm template` cannot look anything up, so there it
+needs `apiServerCidrs`, and an empty result fails the render rather than
+shipping a policy that leaves the API open.
+
+Ingress: none (task pods serve nothing; exec and logs go through the kubelet,
+not the pod network).
+
+NOTE: kind's default CNI (kindnet) does NOT enforce NetworkPolicy -- as for
+the kernels' policy, this is the production posture and has no runtime effect
+on a plain kind cluster. Enforcement needs Calico, Cilium, ...
+*/ -}}
+{{- if and (eq .Values.workflow.containerRunner "kubernetes") .Values.workflow.tasks.networkPolicy.enabled }}
+{{- $np := .Values.workflow.tasks.networkPolicy }}
+{{- $api := list }}
+{{- range $np.apiServerCidrs }}{{ $api = append $api . }}{{ end }}
+{{- $ep := lookup "v1" "Endpoints" "default" "kubernetes" }}
+{{- if $ep }}{{ range $ep.subsets }}{{ range .addresses }}{{ $api = append $api (printf "%s/32" .ip) }}{{ end }}{{ end }}{{ end }}
+{{- if not $api }}
+{{- fail "workflow.tasks.networkPolicy.apiServerCidrs is empty and the API server's endpoints could not be looked up: set the API server's addresses (kubectl get endpoints kubernetes -n default) so task pods cannot reach it" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: egret-task-isolation, namespace: {{ .Values.workflow.tasks.namespace }} }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    # 1. every other namespace
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - { key: kubernetes.io/metadata.name, operator: NotIn, values: [{{ .Release.Namespace }}] }
+    # 2. egret's namespace, except its metadata Postgres
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Release.Namespace }} }
+          podSelector:
+            matchExpressions:
+              - { key: app, operator: NotIn, values: [postgres] }
+    # 3. outside the cluster, except the API server and the denied CIDRs
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - {{ $np.podCidr }}
+              - {{ $np.serviceCidr }}
+              {{- range (uniq $api) }}
+              - {{ . }}
+              {{- end }}
+              {{- range $np.deniedCidrs }}
+              - {{ . }}
+              {{- end }}
+{{- end }}

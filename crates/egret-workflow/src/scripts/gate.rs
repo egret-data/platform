@@ -6,8 +6,9 @@
 //!
 //! * **at publish** (`publish::publish_gated`), for a literal image; a
 //!   refusal is a named 400;
-//! * **at run**, after rendering, by the handler (W5a Task 5). A refusal there
-//!   is a FAILED task with the reason, and no pod or container is created.
+//! * **at run**, after rendering, by `worker::handlers::script::Script`. A
+//!   refusal there is a FAILED task with the reason, and no runner is called,
+//!   so no pod or container is created.
 //!
 //! An image written as a `{{ }}` expression cannot be matched before it is
 //! rendered, so publish calls [`check_unrendered`] for it: the same function

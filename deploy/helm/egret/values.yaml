@@ -96,6 +96,48 @@ workflow:
   # `cron:` schedule triggers. Off by default. Needs workerEnabled too: with the
   # scheduler on and the worker off, executions are created and nothing runs them.
   schedulerEnabled: false
+  # W5a: where script tasks (io.kestra.plugin.scripts.{shell,python}.*, and the
+  # aliases egret.container / egret.script.python) run. "none" (the default)
+  # registers no script handler: the worker is exactly what it was before W5a.
+  # "kubernetes" runs one pod per task-run attempt in `tasks.namespace` and
+  # renders that namespace (Pod Security restricted), a Role with exactly
+  # pods get/list/watch/create/delete, pods/log get and pods/exec create, its
+  # RoleBinding to egret's ServiceAccount, and the NetworkPolicy below.
+  # ("docker" is for local development only and is refused by this chart: a
+  # Docker socket in the server is root on the node.)
+  # Running a script task ALSO needs the workspace feature
+  # `workflow_containers` (off by default) and an allowed image below.
+  containerRunner: none
+  # `workflow.plugin_configurations` (Kestra's `kestra.plugins.configurations`
+  # shape), as the one env value egret reads. Empty allows NO image, e.g.:
+  # '[{type="io.kestra.plugin.ee.kubernetes.runner.Kubernetes",values={allowed-images=["python:3.13-slim","ubuntu:*"]}}]'
+  pluginConfigurations: ""
+  tasks:
+    namespace: egret-tasks
+    # deploy/docker/task-helper.Dockerfile; must be pullable from the task
+    # namespace (or `kind load`ed).
+    helperImage: egret-task-helper:dev
+    runAsUser: 1000
+    # Existing dockerconfigjson Secrets in the task namespace.
+    imagePullSecrets: []
+    # Unset keys keep egret's defaults (request 100m/128Mi, limit 1/512Mi;
+    # max limit 2/2Gi). e.g. defaultResources: { limit: { memory: 1Gi } }
+    defaultResources: {}
+    maxResources: {}
+    networkPolicy:
+      enabled: true
+      # The cluster's pod and service CIDRs (kind's defaults below): excepted
+      # from the "outside the cluster" rule so in-cluster traffic is judged by
+      # the namespace/pod rules, which leave egret's Postgres out.
+      podCidr: 10.244.0.0/16
+      serviceCidr: 10.96.0.0/12
+      # The Kubernetes API server's endpoint addresses. Looked up from the
+      # `default/kubernetes` Endpoints at install; `helm template` cannot look
+      # up, so set them there (kubectl get endpoints kubernetes -n default).
+      apiServerCidrs: []
+      # Anything else task pods must not reach, e.g. an external metadata
+      # Postgres: ["10.0.12.7/32"].
+      deniedCidrs: []
 
 ranger:
   enabled: false

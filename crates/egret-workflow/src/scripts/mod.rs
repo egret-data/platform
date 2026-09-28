@@ -12,8 +12,8 @@
 //! `retry`, `timeout`, `disabled`, `runIf`, `allowFailure`, `allowWarning`)
 //! and answers a [`ScriptTask`] or every [`ScriptRefusal`] it found.
 //! `spec::validate` reports those refusals as errors, so they block publish
-//! and show on a draft; [`gate`] is the governance check publish (and, from
-//! W5a Task 5, the handler at run time) calls after it.
+//! and show on a draft; [`gate`] is the governance check publish and the
+//! script handler (`worker::handlers::script`, at run time) call after it.
 //!
 //! # The property tables are Task 1's measurement
 //!
@@ -79,9 +79,10 @@ pub const PROCESS_RUNNER: &str = "io.kestra.plugin.core.runner.Process";
 #[derive(Debug, Clone, Default)]
 pub struct ScriptSettings {
     pub plugin_configurations: egret_config::PluginConfigurations,
-    /// The runner a script task with no `taskRunner:` runs on; `None` until
-    /// W5a Task 5 wires `workflow.container_runner`, in which case such a
-    /// task is refused at publish.
+    /// The runner a script task with no `taskRunner:` runs on:
+    /// `workflow.container_runner` (`runtime::handlers_for`). `None` when it
+    /// is `none`, in which case such a task is refused at publish -- nothing
+    /// would run it.
     pub default_runner: Option<RunnerKind>,
 }
 

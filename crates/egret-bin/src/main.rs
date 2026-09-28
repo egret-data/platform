@@ -1850,26 +1850,30 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // other. Its per-statement safety argument is `egret_workflow::scheduler`'s
     // module doc.
     //
-    // **`Handlers::with_core_tasks()` only, and that is deliberate.** It
-    // registers four handlers: `core.log.Log`, `core.debug.Return`,
-    // `core.execution.Fail` and `core.flow.Sleep`. `egret.sql` is not here
-    // because it needs an `Arc<dyn QueryExecPort>` that neither constructor
-    // takes; `egret.container` and `egret.script.python` are not here because
-    // running containers in a workspace's name on a schedule is the governance
-    // question W5 raises for plugin jars, arriving early, and it is a separate
-    // and deliberate decision (programme spec §3.3).
+    // **Which handlers run is `egret_workflow::runtime::handlers_for`'s
+    // decision (W5a Task 5), made there so a test can reach it.** With
+    // `workflow.container_runner = none` (the default) it is
+    // `Handlers::with_core_tasks()` exactly -- `core.log.Log`,
+    // `core.debug.Return`, `core.execution.Fail`, `core.flow.Sleep` -- as
+    // before W5a. With `docker` or `kubernetes` it adds Kestra's four script
+    // task types and W4's two aliases over ONE runner built here, gated at run
+    // time by the workspace feature `workflow_containers` (off by default) and
+    // the `plugin_configurations` image allowlist, and the reaper's tick
+    // sweeps that runner's orphans. A Kubernetes configuration egret refuses
+    // (or no cluster client) stops the process here rather than starting
+    // without the containers the operator asked for.
     //
-    // **A flow whose task type is unregistered HANGS, and this sentence used to
-    // claim the opposite.** `WorkerError::NoHandler` does not fail the run: it
-    // propagates out of `run_one`, the run keeps its lease, `reap` clears only
-    // `claimed_at` a `working_timeout` later, `claim` re-selects it on
-    // `state='RUNNING' AND claimed_at IS NULL`, and the cycle repeats for ever.
-    // No counter moves -- `attempts` is pushed only by `state.rs`'s StartRun /
-    // SkipRun, which are off the reclaim path -- so one `warn` per cycle
-    // (`runtime.rs:311`) is the only signal. With four handlers against
-    // thirteen publishable rows, **nine of thirteen types hang in production**.
-    // `oracle-exec/README.md` item 19 carries this and its second cause (a
-    // handler that OUTRUNS `working_timeout`; `Sleep::new()` is uncapped).
+    // `egret.sql` is not registered: it needs an `Arc<dyn QueryExecPort>`
+    // that nothing here provides.
+    //
+    // **A flow whose task type is unregistered HANGS.** `WorkerError::NoHandler`
+    // does not fail the run: it propagates out of `run_one`, the run keeps its
+    // lease, `reap` clears only `claimed_at` a `working_timeout` later, `claim`
+    // re-selects it, and the cycle repeats for ever with one `warn` per cycle.
+    // `oracle-exec/README.md` item 19 carries this. Publish refuses a script
+    // task when no runner is configured (no default runner), so with `none`
+    // only a script task published under an earlier configuration can reach
+    // that loop.
     //
     // W11: `spawn_with_logs` takes the `Handlers` unshared so it can give them
     // the Postgres log sink (`Handlers::with_log_sink`) before wrapping them;
@@ -1878,9 +1882,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // the claim loop's end, not by the token, so a tick in flight finishes
     // writing before the writer drains; `workflow_runtime.join()` below waits
     // for that at shutdown.
+    let (workflow_handlers, container_runner) =
+        egret_workflow::runtime::handlers_for(&config.workflow, db.pool.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("workflow.container_runner: {e}"))?;
     let workflow_runtime = egret_workflow::runtime::spawn_with_logs(
         db.pool.clone(),
-        egret_workflow::worker::Handlers::with_core_tasks(),
+        workflow_handlers,
         egret_workflow::RuntimeConfig {
             enabled: config.workflow.worker_enabled,
             tick_interval: std::time::Duration::from_secs(config.workflow.tick_interval_secs),
@@ -2312,13 +2320,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         authz: Authorizer::new(db.clone()),
         pdp: pdp.clone(),
         audit: audit_sink.clone(),
-        // W5a Task 2: the allowlist publish gates script tasks with. No
-        // default runner yet -- W5a Task 5 wires `workflow.container_runner`,
-        // and until then a script task without `taskRunner:` is refused at
-        // publish (nothing in this binary registers a script handler).
+        // W5a: the allowlist publish gates script tasks with, and the runner
+        // a script task with no `taskRunner:` runs on -- the one
+        // `handlers_for` built above, `None` with `container_runner = none`
+        // (publish then refuses such a task: nothing would run it).
         scripts: egret_workflow::scripts::ScriptSettings {
             plugin_configurations: config.workflow.plugin_configurations.clone(),
-            default_runner: None,
+            default_runner: container_runner,
         },
     });
 
