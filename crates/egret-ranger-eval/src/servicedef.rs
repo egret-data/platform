@@ -38,6 +38,23 @@ impl PolicyType {
     /// row-filter. Code `3` is `POLICY_TYPE_AUDIT`, which
     /// `getResourceHierarchies` maps onto access; any other code falls back
     /// to `serviceDef.resources` the same way `getResourceDefs` does.
+    ///
+    /// **Known divergence, for an audit policy only (code `3`).** Folding
+    /// audit onto access is right for picking the resource list, but it
+    /// loses one thing: `RangerDefaultPolicyResourceMatcher.init` guards its
+    /// failure teardown with `if (allMatchers == null && policyType !=
+    /// RangerPolicy.POLICY_TYPE_AUDIT)`, so an audit policy whose `init`
+    /// failed keeps its `serviceDefHelper` and can still reach the
+    /// `ANCESTOR` branch of `getMatchType`, where
+    /// [`crate::resource::match_resource_of_type`] returns
+    /// [`crate::resource::MatchType::None`] (its `init_failed` short-circuit).
+    /// This can only ever **under**-match, never over-match: `ANCESTOR` is
+    /// not an allow for a resource request in the first place
+    /// (`RangerDefaultPolicyEvaluator.evaluate` accepts it only for a
+    /// `RangerTagAccessRequest`). Recorded rather than fixed, because
+    /// reproducing it would mean threading an audit-only exception through
+    /// the whole init/hierarchy path for a case that cannot change a
+    /// decision.
     pub fn from_code(code: i32) -> PolicyType {
         match code {
             1 => PolicyType::DataMask,
@@ -322,14 +339,50 @@ impl ServiceDef {
 
 /// `ServiceDefUtil.normalizeDataMaskDef` / `normalizeRowFilterDef`: a
 /// mask/row-filter resource entry is merged **onto** the same-named access
-/// resource def, which is what supplies `parent` and `isValidLeaf` (both
-/// retained from the base) while the entry's own `matcherOptions` are
-/// overlaid key by key and its `matcher` wins when non-empty.
+/// resource def by `ServiceDefUtil.mergeResourceDef`.
 ///
 /// Without this, a captured download's `dataMaskDef.resources` — which
 /// carry neither `parent` nor `isValidLeaf`, only `matcherOptions` and
-/// `uiHint` — would parse as a forest of thirteen isolated roots and no
-/// masking policy would ever match past its first level.
+/// `uiHint` — would parse as a forest of isolated roots and no masking
+/// policy would ever match past its first level.
+///
+/// What the merge keeps and what it replaces is **not** symmetric, and the
+/// asymmetry decides how many mask hierarchies exist:
+///
+/// - `parent` is retained from the base. `mergeResourceDef` says so in its
+///   own comment: `// retain base values for: itemId, name, type, level,
+///   parent, lookupSupported`.
+/// - `matcher` wins from the overlay when non-empty; `matcherOptions` are
+///   overlaid key by key, so a key the overlay omits keeps the base's value.
+/// - `accessTypeRestrictions` wins from the overlay when non-empty.
+/// - **`isValidLeaf` is taken from the overlay, replacing the base's** —
+///   the one field a reader would most expect to be inherited, and is not.
+///   `mergeResourceDef` (2.8.0) ends with:
+///
+///   ```java
+///   boolean copyLeafValue = false;
+///   if (ret.getIsValidLeaf() != null) {
+///       if (!ret.getIsValidLeaf().equals(delta.getIsValidLeaf())) copyLeafValue = true;
+///   } else {
+///       if (delta.getIsValidLeaf() != null) copyLeafValue = true;
+///   }
+///   if (copyLeafValue) ret.setIsValidLeaf(delta.getIsValidLeaf());
+///   ```
+///
+///   That block is exactly an unconditional `ret = delta`, in all five
+///   cases: equal values (copy is a no-op), differing non-null values
+///   (copy), base non-null with a null overlay (`!ret.equals(null)` is
+///   true, so it copies the **null** in), null base with a non-null
+///   overlay (copy), and both null (copy is a no-op). So the assignment
+///   below is the rule, not a simplification of it.
+///
+/// This is what makes Trino's masking hierarchy a single
+/// `catalog/schema/table/column` chain: `catalog`, `schema` and `table` are
+/// `isValidLeaf: true` in `resources`, every `dataMaskDef` entry omits the
+/// field, and the merge therefore clears it — so none of the three is a
+/// hierarchy termination point for a mask policy. Retaining the base's
+/// value instead would invent three extra prefix hierarchies that Ranger
+/// does not have.
 fn normalize_sub_def(sub_resources: &Value, access: &[ResourceDef]) -> Vec<ResourceDef> {
     let Some(entries) = sub_resources.as_array() else {
         return Vec::new();
@@ -347,10 +400,14 @@ fn normalize_sub_def(sub_resources: &Value, access: &[ResourceDef]) -> Vec<Resou
             if !overlay.matcher.is_empty() {
                 merged.matcher = overlay.matcher;
             }
-            // Ranger overlays matcherOptions key by key, so a key the
-            // overlay omits keeps the base's value. `parse_resource` has
-            // already resolved defaults, so re-read the raw objects to tell
-            // "absent" from "explicitly default".
+            if !overlay.access_type_restrictions.is_empty() {
+                merged.access_type_restrictions = overlay.access_type_restrictions;
+            }
+            // The `copyLeafValue` block above, which reduces to this.
+            merged.is_valid_leaf = overlay.is_valid_leaf;
+            // `parse_resource` has already resolved matcher-option defaults,
+            // so re-read the raw object to tell "absent" from "explicitly
+            // default".
             merged.matcher_options =
                 merge_matcher_options(&base.matcher_options, &entry["matcherOptions"]);
             Some(merged)

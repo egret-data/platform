@@ -18,7 +18,7 @@ use egret_ranger_eval::model::{RangerPolicy, ResourceLevel};
 use egret_ranger_eval::resource::{
     match_policy_resources, match_resource, MatchType, RequestResource, ResourceMapSource,
 };
-use egret_ranger_eval::servicedef::ServiceDef;
+use egret_ranger_eval::servicedef::{PolicyType, ServiceDef};
 use serde_json::{json, Value};
 
 /// The embedded Trino service-def the seeder uses, read as a fixture.
@@ -457,6 +457,82 @@ fn a_policy_on_a_sibling_branch_does_not_match() {
     let req = request(&[("catalog", "hive"), ("schema", "sales")]);
 
     assert_eq!(match_resource(&policy, &req, &def), MatchType::None);
+}
+
+// ── 7. The mask/row-filter hierarchy is NOT the access one ───────────────
+
+/// A masking policy has exactly **one** resource hierarchy, the full
+/// `catalog/schema/table/column` chain — not one per `isValidLeaf` prefix
+/// the way an access policy does.
+///
+/// The reason is a single asymmetry in `ServiceDefUtil.mergeResourceDef`:
+/// `parent` is retained from the access def, but `isValidLeaf` is
+/// **replaced** by the `dataMaskDef` entry's (its `copyLeafValue` block is
+/// an unconditional assignment — see `normalize_sub_def`'s doc). Every
+/// `dataMaskDef` entry in both embedded defs omits `isValidLeaf`, so the
+/// merge clears the `true` that `catalog`, `schema` and `table` carry in
+/// `resources`, and none of them terminates a mask hierarchy any more.
+///
+/// StarRocks is the sharper case: all four of its access resources are
+/// `isValidLeaf: true`, so retaining the base value would produce four mask
+/// hierarchies where Ranger has one.
+#[test]
+fn mask_and_row_filter_hierarchies_drop_the_access_defs_valid_leaf_prefixes() {
+    let trino = ServiceDef::parse(&trino_def());
+    assert_eq!(
+        trino.hierarchies(PolicyType::DataMask),
+        [vec![
+            "catalog".to_string(),
+            "schema".into(),
+            "table".into(),
+            "column".into()
+        ]],
+        "masking has one hierarchy, the full chain"
+    );
+    assert_eq!(
+        trino.hierarchies(PolicyType::RowFilter),
+        [vec!["catalog".to_string(), "schema".into(), "table".into()]],
+        "row-filtering has one hierarchy, the full chain"
+    );
+    // The access hierarchies are untouched by the merge: still all 13,
+    // which is what the seeder in `egret-policy` builds its default
+    // policies from.
+    assert_eq!(trino.hierarchies(PolicyType::Access).len(), 13);
+
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../egret-policy/src/service-defs/starrocks.json"
+    );
+    let starrocks = ServiceDef::parse(
+        &serde_json::from_str::<Value>(&std::fs::read_to_string(path).expect("read starrocks def"))
+            .expect("parse starrocks def"),
+    );
+    assert_eq!(
+        starrocks.hierarchies(PolicyType::DataMask),
+        [vec![
+            "catalog".to_string(),
+            "database".into(),
+            "table".into(),
+            "column".into()
+        ]],
+    );
+}
+
+/// The same, off the captured `/policies/download` envelope rather than an
+/// embedded def — its `dataMaskDef.resources` carry `matcherOptions` and
+/// `uiHint` and nothing else, which is the shape the merge has to cope with.
+#[test]
+fn the_captured_envelopes_mask_hierarchy_is_also_one_chain() {
+    let def = ServiceDef::parse(&captured_envelope()["serviceDef"]);
+    assert_eq!(
+        def.hierarchies(PolicyType::DataMask),
+        [vec![
+            "catalog".to_string(),
+            "schema".into(),
+            "table".into(),
+            "column".into()
+        ]],
+    );
 }
 
 /// An empty policy resource map matches an empty request (Ranger's
