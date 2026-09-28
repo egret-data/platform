@@ -405,14 +405,17 @@ pub struct PreviewResponse {
     pub compile: CompileResponse,
 }
 
-/// A grant or rule a recompile could not express and left uncompiled. Surfaced
+/// A grant, a rule, or a tag's classification clearance that a recompile could
+/// not express and left uncompiled. Surfaced
 /// on the response rather than only in the logs: a create that succeeded but
 /// compiled nothing for a service is a fact the author needs at authoring
 /// time, not one a steward discovers from a query that returns no rows.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SkipReport {
-    /// `grant` | `rule`.
+    /// `grant` | `rule` | `clearance`.
     pub source_kind: String,
+    /// The `perm.grants`/`perm.rules` id — or, for `clearance`, the `tags.id`
+    /// whose classification gate could not be expressed (SP4c Task 2).
     pub id: Uuid,
     pub reason: String,
 }
@@ -446,6 +449,10 @@ impl CompileResponse {
                     source_kind: match sk.source_kind {
                         SourceKind::Grant => "grant".into(),
                         SourceKind::Rule => "rule".into(),
+                        // SP4c Task 2: a gated tag whose clearance this
+                        // profile could not express — `id` is the `tags.id`,
+                        // not a grant or rule id (see `SkipReport::id`).
+                        SourceKind::Clearance => "clearance".into(),
                     },
                     id: sk.id,
                     reason: sk.reason.clone(),

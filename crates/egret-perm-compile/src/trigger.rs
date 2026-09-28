@@ -110,8 +110,8 @@ use egret_policy::admin::access_to_ranger_json;
 use egret_policy::{
     catalogs_for_service_via, compiler_targeted_services_via, get_service_by_id_via,
     service_id_by_name_via, services_and_tag_services_via, services_for_catalog_via,
-    tag_name_for_key_via, tagged_columns_for_service_via, PolicyStore, COMPILER_GRANT_PREFIX,
-    COMPILER_RULE_PREFIX,
+    tag_name_for_key_via, tagged_columns_for_service_via, PolicyStore, COMPILER_CLEARANCE_PREFIX,
+    COMPILER_GRANT_PREFIX, COMPILER_RULE_PREFIX,
 };
 
 use crate::grants::compile_grant;
@@ -209,11 +209,16 @@ pub const PROFILE_EXPANSION_CEILING: usize = 1000;
 // copies of this string WILL drift, and a drift makes a policy the sweep
 // reaps look editable to the guard, or the reverse.
 
-/// Which half of the `perm` model a compiled policy (or a skip) came from.
+/// Which half of the `perm` model a compiled policy (or a skip) came from —
+/// plus, since SP4c Task 2, a third source that is not in the `perm` model at
+/// all: a TAG's classification clearance (`classification_policies`), compiled
+/// by [`crate::clearance`]. Its `SkippedItem::id` is the `tags.id`, not a
+/// grant or rule id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
     Grant,
     Rule,
+    Clearance,
 }
 
 impl SourceKind {
@@ -221,6 +226,7 @@ impl SourceKind {
         match self {
             SourceKind::Grant => "grant",
             SourceKind::Rule => "rule",
+            SourceKind::Clearance => "clearance",
         }
     }
 }
@@ -506,6 +512,30 @@ async fn compile_desired(
         .await?;
     }
 
+    // **SP4c Task 2: a classification's CLEARANCE, which AMENDS SP4a's D2**
+    // ("tags drive rules only, never access") — the argument is at the site,
+    // in `crate::clearance`'s module doc, because a classification exists to
+    // withhold data and a mask still answers the query. Clearances come from
+    // `classification_policies`, not from the `perm` model, and they are
+    // installation-wide for the same reason a Trino tag rule is: the body
+    // carries no catalog resource and the tag plugin resolves the tag wherever
+    // it is assigned.
+    let clearances =
+        crate::clearance::compile_clearance(conn, engine, tag_service.as_deref()).await?;
+    skipped.extend(clearances.skipped);
+    for (name, body) in clearances.policies {
+        let target = target_service_id(&body, &writable, &format!("clearance {name}"))?;
+        desired.insert(
+            (target, name),
+            DesiredPolicy {
+                body,
+                source_kind: SourceKind::Clearance,
+                grant_id: None,
+                rule_id: None,
+            },
+        );
+    }
+
     Ok(Some(Compiled {
         desired,
         skipped,
@@ -787,11 +817,17 @@ async fn apply_diff_in_tx(
 
     let existing: Vec<ExistingPolicyRow> = sqlx::query_as(
         "SELECT id, service_id, name, policy_jsonb FROM policy.authz_policies \
-         WHERE service_id = ANY($1) AND (name LIKE $2 || '%' OR name LIKE $3 || '%')",
+         WHERE service_id = ANY($1) \
+           AND (name LIKE $2 || '%' OR name LIKE $3 || '%' OR name LIKE $4 || '%')",
     )
     .bind(sweep)
     .bind(COMPILER_GRANT_PREFIX)
     .bind(COMPILER_RULE_PREFIX)
+    // SP4c Task 2: a clearance deny is reaped by this same sweep when its
+    // gate is removed — the prefix has to be here or a lifted clearance
+    // would be enforced forever (SP4a Task 7 fix round 1's Critical, one
+    // source over).
+    .bind(COMPILER_CLEARANCE_PREFIX)
     .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;
@@ -893,7 +929,7 @@ async fn apply_diff_in_tx(
 
     for ((service_id, name), dp) in desired {
         debug_assert!(
-            name.starts_with(COMPILER_GRANT_PREFIX) || name.starts_with(COMPILER_RULE_PREFIX),
+            egret_policy::is_compiler_owned_policy_name(&name),
             "compiled policy name {name:?} does not carry this compiler's own prefix — \
              the existing-state sweep above would never find it again"
         );
@@ -994,6 +1030,21 @@ async fn record_compiled(
     policy_id: i64,
     dp: &DesiredPolicy,
 ) -> Result<(), CompileError> {
+    // **A CLEARANCE records no provenance row, deliberately** (SP4c Task 2).
+    // `perm.compiled` is grant/rule-shaped in the schema itself — `source_kind`
+    // is `CHECK (source_kind IN ('grant','rule'))` and each of the two ids is
+    // CHECKed against it (`migrations/0154_perm_model.sql`) — and a clearance
+    // comes from `classification_policies`, so it has neither id to record.
+    // Widening that schema would buy nothing here: since Task 7's fix round 1
+    // the sweep's source of truth is `policy.authz_policies` scoped by this
+    // compiler's own name prefixes, never `perm.compiled`, and a clearance
+    // policy's NAME already carries the `tags.id` it came from
+    // (`COMPILER_CLEARANCE_PREFIX{tag_id}`), so the provenance question is
+    // answered by the row that decides reaping rather than by a second table
+    // that can cascade away beneath it.
+    if dp.source_kind == SourceKind::Clearance {
+        return Ok(());
+    }
     sqlx::query(
         "INSERT INTO perm.compiled (service_id, policy_id, source_kind, grant_id, rule_id) \
          VALUES ($1, $2, $3, $4, $5) \

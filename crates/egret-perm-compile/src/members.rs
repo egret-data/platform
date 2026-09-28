@@ -71,9 +71,114 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use uuid::Uuid;
 
-use egret_auth::users::ensure_username_via;
+use egret_auth::users::{ensure_username_via, usernames_via};
 use egret_core::UserId;
 use egret_perm::{CompileError, Grant, Principal, PrincipalKind, PrincipalSet, Rule};
+
+/// The usernames of the users currently holding each role NAME in `roles` —
+/// the expansion SP4c needs twice over (**SP4c Task 2 and Task 2b**).
+///
+/// **Why a role name has to be expanded at all.** D0
+/// (`docs/en/plans/2026-09-28-sp4c-d0-result.md`) measured on the Trino path
+/// egret provisions that a Ranger policy item naming a ROLE matches nobody: the
+/// plugin fetches roles from `/service/roles/download/<service>`, a separate
+/// document with its own version counter that egret's six `/service` GET routes
+/// do not include, so the poll 404s and `lastKnownRoleVersion` never leaves
+/// `-1`; Trino's built-in plugin also passes `userRoles` as a hardcoded `null`
+/// and defaults `disableRoleResolution` to `true`. A role name is therefore
+/// exactly as unresolvable as a group (D7), and the only enforceable form of
+/// "the holders of role X" is the member list enumerated at compile time.
+///
+/// **A role is scope-free here, deliberately.** `access_grants` scopes a role
+/// grant to the platform, a workspace or an object, but the thing being
+/// compiled is a COLUMN read, which carries no workspace context on any engine
+/// — and `egret_perm::eval::matches_principal` matches
+/// `PrincipalKind::Role` against a flat `Subject::roles` with no scope either.
+/// Reading any live `allow` grant of the role therefore keeps the compiler and
+/// the evaluator in agreement, which is the property SP4c Task 2b exists to
+/// restore. It is WIDER than Cedar's object-level check in one corner (Cedar
+/// loads the grants for the resource's OWN workspace, so a role held only in
+/// another workspace does not clear an object there); an engine read cannot
+/// tell those apart, and narrowing to platform scope would instead DENY people
+/// Cedar clears.
+///
+/// **`effect = 'allow'` only**, mirroring the Cedar PDP's own clearance read
+/// (`egret_auth::pdp`: a `deny`-effect grant strips access, so its role name
+/// must not count as holding the role) and `expand_workspace_members`'s
+/// membership predicate.
+///
+/// **The name emitted is the STORED `users.username`, read and never minted.**
+/// `usernames_via` is the read-only, never-minting half of the username API:
+/// `ensure_username` lowercases, slugifies and appends `-2`/`-3` on collision,
+/// so a re-derived slug names the WRONG person while compiling, deploying and
+/// reporting success. A holder with no username yet is absent from the map and
+/// is logged, not guessed — and absent is the right answer, not merely the safe
+/// one: the bare username is the only identity an engine ever sees for a
+/// person, so a user without one is not a principal on any engine, cannot
+/// appear in an `include` item either, and therefore cannot be granted the
+/// access an `exclude` would have subtracted.
+///
+/// Ordering is sorted + deduplicated because the compiled body is diffed
+/// byte-for-byte against what is stored (`apply_diff_in_tx`); an unstable
+/// principal order would rewrite every policy on every recompile.
+pub(crate) async fn role_usernames(
+    conn: &mut sqlx::PgConnection,
+    roles: &[String],
+) -> Result<BTreeMap<String, Vec<String>>, CompileError> {
+    // Every requested role appears in the map, even with no holders, so a
+    // caller can tell "expanded to nobody" from "never looked up".
+    let mut out: BTreeMap<String, Vec<String>> = roles
+        .iter()
+        .map(|r| (r.clone(), Vec::new()))
+        .collect::<BTreeMap<_, _>>();
+    if out.is_empty() {
+        return Ok(out);
+    }
+    let wanted: Vec<String> = out.keys().cloned().collect();
+
+    let holders: Vec<(String, Uuid)> = sqlx::query_as(
+        "SELECT r.name, ag.principal_id \
+           FROM access_grants ag \
+           JOIN roles r ON r.id = ag.role_id \
+          WHERE ag.principal_type = 'user' \
+            AND r.name = ANY($1) \
+            AND ag.effect = 'allow' \
+            AND (ag.expires_at IS NULL OR ag.expires_at > now())",
+    )
+    .bind(&wanted)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(e.to_string()))?;
+
+    let ids: Vec<Uuid> = {
+        let mut set: BTreeSet<Uuid> = BTreeSet::new();
+        for (_, id) in &holders {
+            set.insert(*id);
+        }
+        set.into_iter().collect()
+    };
+    let names = usernames_via(conn, &ids)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+
+    for (role, user_id) in &holders {
+        match names.get(user_id) {
+            Some(name) => out.entry(role.clone()).or_default().push(name.clone()),
+            None => tracing::warn!(
+                %user_id,
+                role = %role,
+                "a holder of this role has no `users.username` yet, so it is not named in the \
+                 compiled policy — that identity does not exist on any engine either (the bare \
+                 username is what an engine sees), and it is never guessed from the email"
+            ),
+        }
+    }
+    for names in out.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    Ok(out)
+}
 
 /// One workspace-membership row as read for expansion: who, and the username
 /// the engine will see (NULL until it is minted).

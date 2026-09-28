@@ -41,6 +41,10 @@
 //! why a `WorkspaceMembers`-only refusal is skipped rather than aborting the
 //! whole recompile.
 
+// SP4c Task 2: compiling a classification's clearance into a tag-service DENY
+// — the one place egret emits a tag ACCESS policy, which AMENDS SP4a's D2. The
+// argument is in that module's own doc comment, at the site.
+pub(crate) mod clearance;
 pub mod grants;
 pub(crate) mod members;
 pub mod routes;

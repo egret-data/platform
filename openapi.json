@@ -39019,7 +39019,7 @@
       },
       "SkipReport": {
         "type": "object",
-        "description": "A grant or rule a recompile could not express and left uncompiled. Surfaced\non the response rather than only in the logs: a create that succeeded but\ncompiled nothing for a service is a fact the author needs at authoring\ntime, not one a steward discovers from a query that returns no rows.",
+        "description": "A grant, a rule, or a tag's classification clearance that a recompile could\nnot express and left uncompiled. Surfaced\non the response rather than only in the logs: a create that succeeded but\ncompiled nothing for a service is a fact the author needs at authoring\ntime, not one a steward discovers from a query that returns no rows.",
         "required": [
           "source_kind",
           "id",
@@ -39028,11 +39028,12 @@
         "properties": {
           "source_kind": {
             "type": "string",
-            "description": "`grant` | `rule`."
+            "description": "`grant` | `rule` | `clearance`."
           },
           "id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "The `perm.grants`/`perm.rules` id — or, for `clearance`, the `tags.id`\nwhose classification gate could not be expressed (SP4c Task 2)."
           },
           "reason": {
             "type": "string"

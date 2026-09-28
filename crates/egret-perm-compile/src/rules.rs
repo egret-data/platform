@@ -575,7 +575,12 @@ fn invalid_custom_mask(rule_name: &str, expr: &str) -> CompileError {
 /// group would carry `MASK_NONE`/an empty filter for "everyone", exempting
 /// every principal from the rule — the one fail-open this exempt design
 /// otherwise avoids by refusing everything it cannot express correctly.
-const PUBLIC_GROUP: &str = "public";
+// `pub(crate)`: SP4c's clearance compiler (`crate::clearance`) puts this SAME
+// literal on the deny side of a tag policy to mean "everybody", which is the
+// half of Ranger's deny/deny-exception pair D0 measured IS expressible. Two
+// copies of this string would drift, and a drift makes a control that withholds
+// nothing.
+pub(crate) const PUBLIC_GROUP: &str = "public";
 
 /// Bucket a rule's exempt principals into (users, groups) for a
 /// masking/row-filter item. Those Ranger item shapes

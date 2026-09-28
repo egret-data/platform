@@ -7,14 +7,19 @@
  */
 
 /**
- * A grant or rule a recompile could not express and left uncompiled. Surfaced
+ * A grant, a rule, or a tag's classification clearance that a recompile could
+ * not express and left uncompiled. Surfaced
  * on the response rather than only in the logs: a create that succeeded but
  * compiled nothing for a service is a fact the author needs at authoring
  * time, not one a steward discovers from a query that returns no rows.
  */
 export interface SkipReport {
-  /** `grant` | `rule`. */
+  /** `grant` | `rule` | `clearance`. */
   source_kind: string;
+  /**
+     * The `perm.grants`/`perm.rules` id — or, for `clearance`, the `tags.id`
+     * whose classification gate could not be expressed (SP4c Task 2).
+     */
   id: string;
   reason: string;
 }
