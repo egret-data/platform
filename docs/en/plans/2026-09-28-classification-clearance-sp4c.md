@@ -62,6 +62,24 @@ This belongs here rather than in its own increment because SP4c is now exactly t
 - [ ] Tests: a role grant compiles to its members' usernames and not to a `roles` bucket; `explain` and the compiled policy **agree** about a role-granted subject. That agreement test is the one that would have caught this originally.
 - [ ] If anything here cannot be done without widening Task 2's scope, stop and report rather than half-doing it: a role grant that compiles to nothing is at least currently *consistent* with the empty Ranger bucket, whereas a half-migration could produce a policy naming some members and silently omitting others.
 
+### Task 2c: D0b — measure StarRocks, because D0 measured Trino only
+
+Tasks 2 and 2b enforce clearance on Trino. **StarRocks enforces none**, because it has no tag service, and D0's measurement was explicitly Trino-only. That leaves the spec failing its own acceptance criterion: D5 says a user without clearance cannot read the column **by any path**, and a StarRocks engine is a path. User decision (2026-09-28): measure StarRocks, then enforce it there too.
+
+**Files:** Create `docs/en/plans/2026-09-28-sp4c-d0b-starrocks-result.md`.
+
+- [ ] Use D0's method: upstream source first, a passive observation to corroborate, and **no conclusion drawn from a denied query alone** — a denial has many possible causes. StarRocks has its **own** Ranger plugin, not Trino's, so nothing measured in D0 carries over.
+- [ ] Answer three things. **Does a resource-level `deny` with `denyExceptions` actually work in the StarRocks plugin** — SP4a only ever compiled *masks* there, never a deny, so the deny shape is unproven on this engine. **Does the StarRocks plugin resolve a role name**, given it has native roles and may populate `userRoles` where Trino passes a hardcoded `null`. And **which way does an unresolvable principal fail** — deny nobody, or deny everybody, as D0 found for Trino.
+- [ ] Write the result into the spec beside D0, then **stop and report**. If a resource deny does not work on StarRocks, say so plainly: that is a complete answer and it changes Task 2d from "expand per column" to "there is no mechanism", which the user must then rule on.
+
+### Task 2d: Clearance on StarRocks, per column
+
+Written after the measurement, not before it. SP4a already expands a tag-selected **mask** into one resource policy per matched column on StarRocks, because that engine has no tag service — so the machinery exists and clearance reuses it rather than inventing a parallel path.
+
+- [ ] Expand a clearance into one deny per matched column, using the same expansion SP4a's tag masks use.
+- [ ] **The expansion ceilings apply and clearance now competes for the same budget.** SP4a refuses rather than truncates, with a per-rule cap and a profile-total cap that refuses only a change pushing a profile over. A clearance on a widely-applied tag can exhaust that budget, so say in the report what a clearance costs against both caps and confirm a refusal still names the profile and the running total.
+- [ ] Tests: a clearance on a tag covering N columns produces N denies and refuses past the ceiling rather than truncating; the exceptions carry the stored usernames, collision suffix included.
+
 ### Task 3: The triggers, because clearance has three inputs
 
 A compiled clearance depends on the tag's gate, on which columns carry the tag, and — on the enumerate branch — on who holds the clearing role.
