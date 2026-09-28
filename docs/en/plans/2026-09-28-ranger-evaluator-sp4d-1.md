@@ -51,7 +51,8 @@ the live gate.
   2.8.0 build additionally resolves `javax.servlet:javax.servlet-api:4.0.0`,
   which a cold `~/.m2` does not have — so a **first** 2.8.0 run needs network.
   Once warmed, `mvn -o test -Dranger.version=2.8.0` runs fully offline
-  (measured 2026-09-28: exit 0, `Tests run: 4, Failures: 0`).
+  (measured 2026-09-28: exit 0, `Tests run: 5, Failures: 0, Errors: 0,
+  Skipped: 1` — the four anchors plus the `Assume`d-out `EgretCaseRunner`).
 
 ---
 
@@ -92,9 +93,27 @@ affordable, record **NOT MEASURED** explicitly and say so in the result doc —
 do not guess from `allin1-ubuntu`.
 
 - [ ] **Step 3: Check for super-users.** Ranger short-circuits on
-`ranger.plugin.super.users` before any policy is consulted, and egret cannot see
-it. Read the provisioned engine's Ranger config (for Trino,
-`/etc/trino/ranger-trino-security.xml`) and record whether the key is set.
+`ranger.plugin.super.users` before any policy is consulted, with
+`policyPriority = Integer.MAX_VALUE`.
+
+  **CORRECTED 2026-09-29 — this step covers only half of it.** An earlier
+  version of this line said egret cannot see the key at all. A policy
+  download CAN carry it: `RangerPolicyEngineImpl.<init>` builds a
+  `RangerPolicyEngineImpl$ServiceConfig` from
+  `ServicePolicies.getServiceConfig()` (javap offsets 125-136, identical at
+  2.5.0 and 2.8.0), that class reads `ranger.plugin.super.users`,
+  `.super.groups` and `ranger.plugin.service.admins`, and
+  `isSuperUser(user, groups)` ORs it against `RangerPluginConfig` — either
+  side alone decides. What keeps the evaluator safe is that it refuses any
+  envelope with a non-empty `serviceConfig`
+  (`Unmodelled::ServiceConfig` → `UndecidableCause::EnvelopeConstruct`), NOT
+  the absence of the key. See the warning on `Unmodelled::ServiceConfig` in
+  `crates/egret-ranger-eval/src/model.rs` before narrowing envelope refusals
+  in SP4d-2.
+
+  This step still stands as written for the PLUGIN side: read the provisioned
+  engine's Ranger config (for Trino,
+  `/etc/trino/ranger-trino-security.xml`) and record whether the key is set.
 
 - [ ] **Step 4: Write the result doc.** Record each measurement with the exact
 command and its verbatim output, and label anything unmeasured as NOT MEASURED.
@@ -140,7 +159,12 @@ cd tests/ranger && mvn -q test
 cd tests/ranger && mvn -q test -Dranger.version=2.8.0
 ```
 
-Expected at **both** versions: `Tests run: 4, Failures: 0, Errors: 0`.
+Expected at **both** versions: `Tests run: 5, Failures: 0, Errors: 0,
+Skipped: 1` in the totals — the four anchors plus `EgretCaseRunner`, which
+`Assume`s itself out when no `-Degret.cases` is given. The line that proves
+the anchors ran is the per-class one:
+`Tests run: 4, Failures: 0, Errors: 0, Skipped: 0 ... in
+EgretRangerEnforcementTest`.
 
 If the two versions disagree on any of the four cases, that is a finding worth
 recording, not a test to loosen: it means Ranger's behaviour changed between

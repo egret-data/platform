@@ -811,10 +811,17 @@ fn a_higher_priority_mask_policy_wins() {
 /// That order's third key is `RangerOptimizedPolicyEvaluator.getEvalOrder()`
 /// — a resource-specificity score this crate does not reproduce. For access
 /// that was harmless (within one band the allow/deny OUTCOME is
-/// order-independent); for a mask it is NOT, because the two policies carry
-/// different mask types. There is no defensible answer to pick.
+/// order-independent); for a mask it is NOT, because a mask is data and the
+/// reported result names the policy that produced it. Here the two policies
+/// also carry different mask types, so not even the mask type survives the
+/// ambiguity.
+///
+/// The name says what varies in THIS case, not what triggers the refusal:
+/// the trigger is the TIE. `evaluate_sub` never compares the two yields, so
+/// [`a_same_priority_mask_tie_is_undecidable_when_the_masks_are_identical`]
+/// refuses on the same input shape with the masks made equal.
 #[test]
-fn two_same_priority_mask_policies_with_different_masks_are_undecidable() {
+fn a_same_priority_mask_tie_is_undecidable_when_the_masks_differ() {
     let set = policies(json!([
         mask_policy(
             1,
@@ -834,6 +841,47 @@ fn two_same_priority_mask_policies_with_different_masks_are_undecidable() {
             .any(|c| matches!(c, UndecidableCause::EvalOrderAmbiguous { .. })),
         "{:?}",
         mask_causes(&d)
+    );
+}
+
+/// The tie is refused whether or not the tied policies AGREE.
+///
+/// `evaluate_sub` never compares the two `SubResult`s: any band holding two
+/// deciding policies is `EvalOrderAmbiguous`. That is deliberate rather than
+/// an oversight — [`MaskResult`] carries a `policy_id` and a `policy_name`,
+/// and a tie this crate cannot order is a tie whose winner it cannot name,
+/// so there is no complete answer even when the mask type is not in doubt.
+///
+/// It also matters in practice: the one live StarRocks profile measured in
+/// `docs/en/plans/2026-09-28-sp4d-1-live-result.md` §8 hits exactly this
+/// shape — mask policies 8777 and 8801 BOTH carry `dataMaskType: "MASK"`
+/// with no `valueExpr`. An `explain` written against the narrower rule would
+/// tell an operator the two policies produce different masks. They do not.
+///
+/// Sibling of
+/// [`a_same_priority_mask_tie_is_undecidable_when_the_masks_differ`]: the
+/// two differ only in whether the tied masks are equal, and both refuse.
+#[test]
+fn a_same_priority_mask_tie_is_undecidable_when_the_masks_are_identical() {
+    let set = policies(json!([
+        mask_policy(
+            1,
+            "a",
+            json!([mask_item("alice", json!({"dataMaskType": "MASK"}))])
+        ),
+        mask_policy(
+            2,
+            "b",
+            json!([mask_item("alice", json!({"dataMaskType": "MASK"}))])
+        ),
+    ]));
+    let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
+    assert!(
+        mask_causes(&d)
+            .iter()
+            .any(|c| matches!(c, UndecidableCause::EvalOrderAmbiguous { .. })),
+        "an AGREEING tie must refuse too — the winner's policy id is still unknown: {:?}",
+        d
     );
 }
 

@@ -189,8 +189,7 @@ pub enum PluginVersion {
     Ranger2_8_0,
 }
 
-/// Plugin-side configuration the engine consults but a policy download does
-/// not carry.
+/// The PLUGIN-side half of the configuration the engine consults.
 ///
 /// Every field is an `Option`: `None` means "the caller did not measure
 /// this", which is not the same as "empty" and must not be treated as such.
@@ -199,6 +198,25 @@ pub enum PluginVersion {
 /// every decision unknowable. Both live Trino instances were measured to
 /// set neither (`docs/en/plans/2026-09-28-sp4d-plugin-version-result.md`) —
 /// that measurement is what [`EngineConfig::without_super_users`] records.
+///
+/// # This struct is only half of the super-user question
+///
+/// **A policy download CAN also carry super-users**, and an earlier version
+/// of this doc said it could not. `RangerPolicyEngineImpl.<init>` builds a
+/// `RangerPolicyEngineImpl$ServiceConfig` from
+/// `ServicePolicies.getServiceConfig()` (offsets 125-136, identical at 2.5.0
+/// and 2.8.0), that class reads `ranger.plugin.super.users`,
+/// `ranger.plugin.super.groups` and `ranger.plugin.service.admins`, and
+/// `isSuperUser(user, groups)` ORs it against `RangerPluginConfig`. Either
+/// side alone decides.
+///
+/// Filling this struct in therefore does NOT make a download's super-users
+/// known. What keeps the crate safe today is a refusal one layer up:
+/// [`crate::model::Unmodelled::ServiceConfig`] fires on any envelope with a
+/// non-empty `serviceConfig`, and [`UndecidableCause::EnvelopeConstruct`]
+/// turns it into `Undecidable` for every decision. That refusal, not this
+/// struct, is the safety property — see the warning on
+/// [`crate::model::Unmodelled::ServiceConfig`] before narrowing it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EngineConfig {
     /// `ranger.plugin.super.users`.
@@ -333,10 +351,21 @@ pub enum UndecidableCause {
         expr: String,
     },
     /// Two or more mask (or row-filter) policies tie at the same
-    /// `(policyPriority, hasDeny)` and produce DIFFERENT results, so which
-    /// one Ranger reports is decided by
+    /// `(policyPriority, hasDeny)` and each yield a result, so which one
+    /// Ranger reports is decided by
     /// `RangerOptimizedPolicyEvaluator.getEvalOrder()` — a
     /// resource-specificity score this crate does not reproduce.
+    ///
+    /// **The refusal fires on ANY such tie, not only on one where the tied
+    /// policies yield different masks.** [`MaskResult`] and
+    /// [`RowFilterResult`] both carry a `policy_id` and a `policy_name`, and
+    /// a tie the crate cannot order is a tie whose winner it cannot name —
+    /// so even when every tied policy yields the same mask there is no
+    /// complete answer to return. Measured at the recorded differential seed
+    /// (`tests/ranger/README.md`): 144 ties in 4000 cases, of which 111
+    /// yield different results and 33 agree on everything but the policy id.
+    /// Refusing the agreeing 33 costs 0.8% of the corpus and is the reason
+    /// this variant's payload is a LIST of ids rather than one id.
     ///
     /// For an ACCESS decision the same gap is harmless: within one band the
     /// allow/deny outcome does not depend on order (see the sort in
@@ -1345,8 +1374,9 @@ fn evaluate_sub(
     // Which evaluator is "first" is decided within a `(priority, hasDeny)`
     // band by `getEvalOrder()`, which this crate does not compute. So the
     // band decides, not the order inside it: if the band holds one yield
-    // the answer is that yield, and if it holds several DIFFERENT ones
-    // there is no answer to give.
+    // the answer is that yield, and if it holds SEVERAL — agreeing or not —
+    // there is no complete answer to give, because a result names the
+    // policy that produced it and this crate cannot say which that was.
     let mut deciding: Vec<(&PolicyView<'_>, SubResult)> = Vec::new();
     let mut band: Option<(i32, bool)> = None;
     for view in &candidates {

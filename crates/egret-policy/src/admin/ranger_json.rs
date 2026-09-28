@@ -204,6 +204,14 @@ pub fn masking_to_ranger_json(input: &MaskingPolicyInput) -> Value {
         "resources": resources_object(&input.resources),
         "dataMaskPolicyItems": input.items.iter().map(mask_item_obj).collect::<Vec<_>>(),
         "policyItems": [], "denyPolicyItems": [],
+        // SP4d-1 F2 (live-measured, see
+        // `docs/en/plans/2026-09-28-sp4d-1-live-result.md` §8): two rules that
+        // overlap on one resource compile into two policies at the SAME
+        // priority, and Ranger defines no order between them — for a mask or a
+        // row filter the FIRST evaluator in `getEvalOrder()` is final, so which
+        // one applies is not determined by anything this compiler writes down.
+        // `egret-ranger-eval` answers `EvalOrderAmbiguous` rather than
+        // guessing. Not fixed here; SP4d-2 and the perm compiler own it.
         "policyPriority": if input.is_override { 1 } else { 0 },
     })
 }
@@ -259,6 +267,14 @@ pub fn rowfilter_to_ranger_json(input: &RowFilterPolicyInput) -> Value {
         "resources": resources_object(&input.resources),
         "rowFilterPolicyItems": input.items.iter().map(rowfilter_item_obj).collect::<Vec<_>>(),
         "policyItems": [], "denyPolicyItems": [],
+        // SP4d-1 F2 (live-measured, see
+        // `docs/en/plans/2026-09-28-sp4d-1-live-result.md` §8): two rules that
+        // overlap on one resource compile into two policies at the SAME
+        // priority, and Ranger defines no order between them — for a mask or a
+        // row filter the FIRST evaluator in `getEvalOrder()` is final, so which
+        // one applies is not determined by anything this compiler writes down.
+        // `egret-ranger-eval` answers `EvalOrderAmbiguous` rather than
+        // guessing. Not fixed here; SP4d-2 and the perm compiler own it.
         "policyPriority": if input.is_override { 1 } else { 0 },
     })
 }

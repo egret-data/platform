@@ -15,6 +15,17 @@
 //! a warm `~/.m2`).
 use std::process::Command;
 
+/// Surefire's per-class summary for the anchors, which is what this gate
+/// asserts on. The TOTALS line cannot do the job: `mvn` exits 0 with zero
+/// anchors run (measured:
+/// `mvn -q test -Dtest=EgretCaseRunner -Dsurefire.failIfNoSpecifiedTests=false`
+/// exits 0 and prints nothing at all), so "four anchors passed" and "no anchor
+/// ran" are indistinguishable from the exit status. `tests/ranger/pom.xml`
+/// names surefire `<includes>` by FILENAME, so renaming the class empties the
+/// run silently too.
+const ANCHOR_CLASS: &str = "EgretRangerEnforcementTest";
+const ANCHORS_RAN: &str = "Tests run: 4, Failures: 0, Errors: 0, Skipped: 0";
+
 #[test]
 fn ranger_engine_enforces_egret_policies() {
     if std::env::var("EGRET_TEST_RANGER_E2E").ok().as_deref() != Some("1") {
@@ -26,14 +37,31 @@ fn ranger_engine_enforces_egret_policies() {
     // Trino 470 loads 2.5.0 and StarRocks fe-ubuntu:4.1 loads 2.8.0, measured
     // on the running pods (`docs/en/plans/2026-09-28-sp4d-plugin-version-result.md`).
     for version in ["2.5.0", "2.8.0"] {
-        let status = Command::new("mvn")
-            .args(["-q", "test", &format!("-Dranger.version={version}")])
+        // No `-q`: the per-class summary line this gate reads is logged at
+        // INFO, and `-q` suppresses it. That is the whole reason the flag is
+        // gone.
+        let out = Command::new("mvn")
+            .args(["test", &format!("-Dranger.version={version}")])
             .current_dir(&dir)
-            .status()
+            .output()
             .expect("run mvn");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
         assert!(
-            status.success(),
-            "Ranger enforcement test failed at ranger-plugins-common {version}"
+            out.status.success(),
+            "Ranger enforcement test failed at ranger-plugins-common {version}\n{text}"
+        );
+        // A green exit is not evidence the anchors ran. Require the line that
+        // names the class AND the count.
+        let ran = text
+            .lines()
+            .any(|l| l.contains(ANCHOR_CLASS) && l.contains(ANCHORS_RAN));
+        assert!(
+            ran,
+            "mvn exited 0 at ranger-plugins-common {version} but no line said \
+             `{ANCHORS_RAN} ... in {ANCHOR_CLASS}`. The four hand-written anchors \
+             did NOT run — check `tests/ranger/pom.xml`'s surefire <includes>, \
+             which names the class by filename.\n{text}"
         );
     }
 }

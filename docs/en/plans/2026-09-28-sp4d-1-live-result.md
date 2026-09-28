@@ -74,7 +74,9 @@ Three findings came out of the run that no case asked for:
   anything here. §6.
 - **F2 — egret's rule compiler emits pairs of same-priority mask / row-filter policies whose
   evaluation order Ranger does not define**, and the evaluator refuses them as
-  `EvalOrderAmbiguous` rather than guessing. §8.
+  `EvalOrderAmbiguous` rather than guessing. The two MASKS here AGREE (both
+  `dataMaskType: "MASK"`, no `valueExpr`); only the two ROW FILTERS carry different expressions
+  (`country = 'US'` vs `id > 2`). §8.
 - **F3 — "StarRocks has no tag policies" is true as egret deploys it, but the cause is egret's
   `starrocks` service-def carrying `contextEnrichers: []`**, not Ranger 2.8.0 and not
   StarRocks. §7.
@@ -646,14 +648,23 @@ user       : d3member
 ```
 
 **F2 — egret's rule compiler produces order-ambiguous policy pairs, and the evaluator refuses
-them.** Two distinct mask policies (`8777` and `8801`) select the same resource
-`sp4a10_wh.sp4a.report.item`, both `policyPriority 0`, both granting `select` to
-`groups: ["public"]`, both `dataMaskType: "MASK"`. Two row-filter policies (`8776`
-`country = 'US'` and `8806` `id > 2`) select the same table, likewise same priority — and these
-two carry **different** filter expressions, so which one wins is a visible difference in the rows
-a user sees. Ranger sorts evaluators with `EVAL_ORDER_COMPARATOR`, which for equal priority falls
-through to a tie-break the download does not determine; the evaluator reports
-`EvalOrderAmbiguous` rather than picking one.
+them.** The two halves are NOT the same, and the difference is worth stating plainly because
+short summaries of F2 have got it wrong:
+
+- **The two MASKS agree.** Policies `8777` and `8801` select the same resource
+  `sp4a10_wh.sp4a.report.item`, both `policyPriority 0`, both granting `select` to
+  `groups: ["public"]`, and **both carry `dataMaskType: "MASK"` with no `valueExpr`** — an
+  AGREEING tie. Whichever wins, the column is masked the same way. The evaluator still refuses,
+  because a `MaskResult` names the policy that produced it and it cannot say which that was; see
+  `mask_filter.rs::a_same_priority_mask_tie_is_undecidable_when_the_masks_are_identical`.
+- **The two ROW FILTERS differ.** Policies `8776` (`country = 'US'`) and `8806` (`id > 2`)
+  select the same table at the same priority and carry **different** filter expressions, so which
+  one wins is a visible difference in the rows a user sees. This is the half that costs
+  something.
+
+Ranger sorts evaluators with `EVAL_ORDER_COMPARATOR`, which for equal priority falls through to a
+tie-break the download does not determine; the evaluator reports `EvalOrderAmbiguous` rather than
+picking one, for both halves.
 
 This is a finding about **egret's compiler**, not about the evaluator: two rules that overlap on
 one resource compile into two same-priority policies with no defined precedence between them. It

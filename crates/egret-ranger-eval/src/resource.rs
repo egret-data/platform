@@ -765,10 +765,16 @@ fn check_index_of(
 /// Java tries `c1 == c2`, then `toUpperCase(c1) == toUpperCase(c2)`, then
 /// `toLowerCase(toUpperCase(c1)) == toLowerCase(toUpperCase(c2))` — all
 /// single-character mappings. This tries `a == b` and then one lowercase
-/// step, which is NOT the same, and the difference was measured rather than
-/// reasoned about: 1922 character pairs through the real
-/// `String.regionMatches(true, …)` on the harness classpath produce **22
-/// disagreements, and in every one Java is `true` while this is `false`**.
+/// step, which is NOT the same.
+///
+/// The difference was measured rather than reasoned about, and measured
+/// EXHAUSTIVELY the second time: over every BMP code point this JDK defines,
+/// by two independent instruments (Java's fold key
+/// `toLowerCase(toUpperCase(c))` grouped over all 62034 of them, and the real
+/// `String.regionMatches(true, …)` brute-forced over every ordered pair of
+/// the 2423 code points either language treats as cased). Both give
+/// **104 disagreeing ordered pairs in 21 classes, and in every one Java is
+/// `true` while this is `false`. There are none the other way.**
 ///
 /// **This is strictly NARROWER than Java, never wider** — an earlier version
 /// of this comment said the opposite, which mattered because the direction IS
@@ -776,22 +782,34 @@ fn check_index_of(
 /// finds one: fail-CLOSED for an allow rule, and fail-OPEN for a deny or an
 /// `isExcludes` rule, which is the direction that costs something.
 ///
-/// Two classes, both pinned in
-/// [`tests::case_folding_is_narrower_than_java_in_exactly_two_classes`]:
+/// A second earlier version said "exactly two classes … 22 disagreements".
+/// That was the honest answer to a 1922-pair hand-picked cross product: the
+/// claim was simply wider than the measurement behind it. The full set, its
+/// size and its direction are now pinned in
+/// [`tests::case_folding_is_narrower_than_java_on_104_ordered_pairs_in_21_classes`],
+/// which enumerates every class, so the README and the code cannot drift
+/// apart.
 ///
-/// 1. **Dotted and dotless I.** `İ` (U+0130) and `ı` (U+0131) against `i` /
-///    `I`. Java's second step maps `İ` to itself and its third maps it to a
-///    single `i`; Rust's `char::to_lowercase` yields TWO code points for
-///    `İ`, so no single-character comparison can reach Java's answer.
-/// 2. **Final sigma.** `ς` (U+03C2) against `σ` (U+03C3) and `Σ` (U+03A3).
-///    This one is not a length problem at all — it is the missing
-///    UPPERCASE step: `toUpperCase('ς') == toUpperCase('σ') == 'Σ'`, while
-///    lowercasing leaves `ς` and `σ` distinct. Adding a `to_uppercase` step
-///    would close this class and not the first; it is left alone here
-///    because this round corrects the claim rather than the semantics.
+/// The 21 classes, by mechanism:
 ///
-/// No catalog/schema/database/table/column identifier on either engine
-/// admits any of these code points.
+/// 1. **Dotted and dotless I** (U+0049 U+0069 U+0130 U+0131, 10 pairs).
+///    Java's third step maps `İ` to a single `i`; Rust's
+///    `char::to_lowercase` yields TWO code points for it, so no
+///    single-character comparison can reach Java's answer.
+/// 2. **The other twenty are one mechanism**: a missing UPPERCASE step.
+///    `toUpperCase('ς') == toUpperCase('σ') == 'Σ'`, while lowercasing
+///    leaves them distinct. That shape covers final sigma `ς`, the long s
+///    `ſ`, the micro sign `µ`, iota subscript U+0345 / U+1FBE, the Greek
+///    symbol variants `ϐ ϵ ϑ ϴ ϰ ϖ ϱ ϕ`, the nine Cyrillic historic shapes
+///    U+1C80-U+1C88, and `ẛ` (U+1E9B).
+///
+/// Adding a `to_uppercase` step would close **96 of the 104** — measured by
+/// making that change and re-running the test below, which then reports 8.
+/// The 8 survivors are the six pairs involving `İ` (whose Rust lowercase is
+/// TWO code points, so no single-character step reaches Java's answer) and
+/// `ϑ` vs `ϴ`. It is left alone here because these rounds correct the claim
+/// rather than the semantics — **no catalog/schema/database/table/column
+/// identifier on either engine admits any of these code points.**
 fn chars_equal(a: char, b: char, ignore_case: bool) -> bool {
     if a == b {
         return true;
@@ -1106,43 +1124,133 @@ mod tests {
         }
     }
 
-    /// The case-folding divergence, measured against the real
-    /// `String.regionMatches(true, …)` over a 1922-pair cross product of every
-    /// code point with an awkward case mapping. Two properties are pinned:
-    /// the exact membership of the divergent set, and — the load-bearing one
-    /// — its DIRECTION.
+    /// Every Java case-fold class this crate SPLITS, and how many ordered
+    /// pairs each splitting costs.
+    ///
+    /// Measured, not reasoned about, over **every BMP code point this JDK
+    /// defines** (62034 of them) rather than over a hand-picked cross
+    /// product — the earlier 1922-pair cross product is what let the declared
+    /// set stop at two classes when there are 21. Two instruments agreed
+    /// exactly:
+    ///
+    /// 1. Java's fold key `toLowerCase(toUpperCase(c))`, computed for every
+    ///    defined code point and grouped. Java's three-step rule reduces to
+    ///    that key.
+    /// 2. The real `String.regionMatches(true, …)`, brute-forced over every
+    ///    ordered pair of the 2423 code points either language treats as
+    ///    cased. A pair outside that set cannot disagree: both mappings are
+    ///    the identity there.
+    ///
+    /// Both give **104 ordered pairs, in 21 classes, and 0 the other way.**
+    ///
+    /// The brute force did surface 16 ordered pairs running the other way,
+    /// and every one involves a code point `Character.isDefined` says this
+    /// JDK does not know (U+A7CB, U+1C89, U+A7DC and their partners). That is
+    /// Unicode-table skew between JDK 21 and Rust std, not a folding
+    /// difference; it moves with the JVM, not with this crate.
+    const JAVA_FOLD_CLASSES_THIS_CRATE_SPLITS: &[&[char]] = &[
+        // 10 pairs — U+0049 U+0069 U+0130 U+0131
+        &['\u{0049}', '\u{0069}', '\u{0130}', '\u{0131}'],
+        // 4  pairs — U+0053 U+0073 U+017F
+        &['\u{0053}', '\u{0073}', '\u{017F}'],
+        // 4  pairs — U+0392 U+03B2 U+03D0
+        &['\u{0392}', '\u{03B2}', '\u{03D0}'],
+        // 4  pairs — U+0395 U+03B5 U+03F5
+        &['\u{0395}', '\u{03B5}', '\u{03F5}'],
+        // 6  pairs — U+0398 U+03B8 U+03D1 U+03F4
+        &['\u{0398}', '\u{03B8}', '\u{03D1}', '\u{03F4}'],
+        // 10 pairs — U+0345 U+0399 U+03B9 U+1FBE
+        &['\u{0345}', '\u{0399}', '\u{03B9}', '\u{1FBE}'],
+        // 4  pairs — U+039A U+03BA U+03F0
+        &['\u{039A}', '\u{03BA}', '\u{03F0}'],
+        // 4  pairs — U+00B5 U+039C U+03BC
+        &['\u{00B5}', '\u{039C}', '\u{03BC}'],
+        // 4  pairs — U+03A0 U+03C0 U+03D6
+        &['\u{03A0}', '\u{03C0}', '\u{03D6}'],
+        // 4  pairs — U+03A1 U+03C1 U+03F1
+        &['\u{03A1}', '\u{03C1}', '\u{03F1}'],
+        // 4  pairs — U+03A3 U+03C2 U+03C3
+        &['\u{03A3}', '\u{03C2}', '\u{03C3}'],
+        // 4  pairs — U+03A6 U+03C6 U+03D5
+        &['\u{03A6}', '\u{03C6}', '\u{03D5}'],
+        // 4  pairs — U+0412 U+0432 U+1C80
+        &['\u{0412}', '\u{0432}', '\u{1C80}'],
+        // 4  pairs — U+0414 U+0434 U+1C81
+        &['\u{0414}', '\u{0434}', '\u{1C81}'],
+        // 4  pairs — U+041E U+043E U+1C82
+        &['\u{041E}', '\u{043E}', '\u{1C82}'],
+        // 4  pairs — U+0421 U+0441 U+1C83
+        &['\u{0421}', '\u{0441}', '\u{1C83}'],
+        // 10 pairs — U+0422 U+0442 U+1C84 U+1C85
+        &['\u{0422}', '\u{0442}', '\u{1C84}', '\u{1C85}'],
+        // 4  pairs — U+042A U+044A U+1C86
+        &['\u{042A}', '\u{044A}', '\u{1C86}'],
+        // 4  pairs — U+0462 U+0463 U+1C87
+        &['\u{0462}', '\u{0463}', '\u{1C87}'],
+        // 4  pairs — U+1E60 U+1E61 U+1E9B
+        &['\u{1E60}', '\u{1E61}', '\u{1E9B}'],
+        // 4  pairs — U+1C88 U+A64A U+A64B
+        &['\u{1C88}', '\u{A64A}', '\u{A64B}'],
+    ];
+
+    /// The case-folding divergence: **strictly narrower than Java, 104
+    /// ordered pairs in 21 classes, none the other way.**
+    ///
+    /// Pins three things, so the README and the code cannot drift apart: the
+    /// exact membership of the divergent set, its SIZE, and — the
+    /// load-bearing one — its DIRECTION.
+    ///
+    /// Narrower means egret finds no match where Ranger finds one:
+    /// fail-CLOSED for an allow rule, fail-OPEN for a deny or an
+    /// `isExcludes` rule.
     #[test]
-    fn case_folding_is_narrower_than_java_in_exactly_two_classes() {
-        // Java says these are equal ignoring case; this crate says they are
-        // not. Measured, not predicted.
-        let java_yes_rust_no = [
-            ('i', '\u{0130}'),
-            ('i', '\u{0131}'),
-            ('I', '\u{0130}'),
-            ('I', '\u{0131}'),
-            ('\u{0130}', 'i'),
-            ('\u{0130}', 'I'),
-            ('\u{0130}', '\u{0131}'),
-            ('\u{0131}', 'i'),
-            ('\u{0131}', 'I'),
-            ('\u{0131}', '\u{0130}'),
-            ('\u{03C2}', '\u{03C3}'),
-            ('\u{03C2}', '\u{03A3}'),
-            ('\u{03C3}', '\u{03C2}'),
-            ('\u{03A3}', '\u{03C2}'),
-        ];
-        for (a, b) in java_yes_rust_no {
-            assert!(
-                !chars_equal(a, b, true),
-                "{a:?} vs {b:?}: this crate now agrees with Java here. If that is \
-                 deliberate, shrink the declared divergence in this test AND in \
-                 tests/ranger/README.md; the two must not drift apart."
-            );
+    fn case_folding_is_narrower_than_java_on_104_ordered_pairs_in_21_classes() {
+        // Java folds every member of a class together. Count the ordered
+        // pairs this crate does NOT.
+        let mut split = 0usize;
+        for class in JAVA_FOLD_CLASSES_THIS_CRATE_SPLITS {
+            for &a in *class {
+                for &b in *class {
+                    if a != b && !chars_equal(a, b, true) {
+                        split += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            split, 104,
+            "the declared case-folding divergence changed. Re-measure against the \
+             real String.regionMatches(true, …) and update BOTH this table and the \
+             bullet in tests/ranger/README.md; they must not drift apart."
+        );
+        assert_eq!(JAVA_FOLD_CLASSES_THIS_CRATE_SPLITS.len(), 21);
+
+        // DIRECTION, within the measured universe: this crate never folds
+        // together two characters Java keeps apart. Java's fold classes are
+        // disjoint, so every cross-class pair is a pair Java splits.
+        for (i, ci) in JAVA_FOLD_CLASSES_THIS_CRATE_SPLITS.iter().enumerate() {
+            for (j, cj) in JAVA_FOLD_CLASSES_THIS_CRATE_SPLITS.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                for &a in *ci {
+                    for &b in *cj {
+                        assert!(
+                            !chars_equal(a, b, true),
+                            "U+{:04X} and U+{:04X} are in different Java fold classes, so \
+                             folding them equal would be WIDER than Java — the fail-open \
+                             direction for a deny or isExcludes rule.",
+                            a as u32,
+                            b as u32
+                        );
+                    }
+                }
+            }
         }
 
-        // The direction is the claim that matters: NARROWER, never wider. The
-        // ordinary mappings all still work, so the divergence is confined to
-        // the set above rather than being a hole in case-insensitive matching.
+        // The ordinary mappings all still work, so the divergence is confined
+        // to the table above rather than being a hole in case-insensitive
+        // matching.
         for (a, b) in [
             ('a', 'A'),
             ('A', 'a'),

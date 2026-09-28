@@ -1976,6 +1976,12 @@ fn check_pinned_divergences(def_json: &Value, def: &ServiceDef, engine: &EngineC
 /// verdicts back. Each run also executes the four hand-written anchor tests,
 /// which is deliberate: they carry known-good expected values and are the only
 /// thing in this harness that does not merely assert agreement.
+///
+/// **That claim is now checked rather than asserted in prose.** `mvn` exits 0
+/// with zero anchors run (`tests/ranger/pom.xml` names surefire `<includes>`
+/// by FILENAME, so a rename empties the run silently), which makes "four
+/// anchors passed" and "no anchor ran" indistinguishable from the exit
+/// status. So this reads the per-class summary line and requires it.
 fn ask_ranger(cases: &[Case], service_type: &str, ranger_version: &str, tag: &str) -> Vec<Value> {
     let dir = ranger_dir();
     // The scratch path carries the pid: several agents share one temp
@@ -2004,9 +2010,10 @@ fn ask_ranger(cases: &[Case], service_type: &str, ranger_version: &str, tag: &st
         cases_path.display()
     );
 
+    // No `-q`: the per-class surefire summary this asserts on is logged at
+    // INFO, and `-q` suppresses it.
     let out = Command::new("mvn")
         .args([
-            "-q".to_string(),
             "test".to_string(),
             format!("-Dranger.version={ranger_version}"),
             format!("-Degret.cases={}", cases_path.display()),
@@ -2015,12 +2022,22 @@ fn ask_ranger(cases: &[Case], service_type: &str, ranger_version: &str, tag: &st
         .current_dir(&dir)
         .output()
         .expect("run mvn");
+    let log = String::from_utf8_lossy(&out.stdout).into_owned()
+        + "\n--- stderr ---\n"
+        + &String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
         "mvn failed at ranger {ranger_version} (this run also executes the four hand-written \
-         anchor tests, so a failure here may be one of those):\n--- stdout ---\n{}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+         anchor tests, so a failure here may be one of those):\n{log}"
+    );
+    // A green exit is not evidence the anchors ran; see this function's docs.
+    assert!(
+        log.lines().any(|l| l.contains("EgretRangerEnforcementTest")
+            && l.contains("Tests run: 4, Failures: 0, Errors: 0, Skipped: 0")),
+        "mvn exited 0 at ranger {ranger_version} but no line said `Tests run: 4, Failures: 0, \
+         Errors: 0, Skipped: 0 ... in EgretRangerEnforcementTest`. The four hand-written anchors \
+         did NOT run, so this harness is asserting agreement and nothing else — check \
+         `tests/ranger/pom.xml`'s surefire <includes>.\n{log}"
     );
 
     let verdicts: Vec<Value> =

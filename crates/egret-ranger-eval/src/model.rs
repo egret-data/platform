@@ -161,12 +161,21 @@ pub struct PolicyItem {
     /// **Always `Some` on a `dataMaskPolicyItems` entry**, and `None`
     /// everywhere else.
     ///
-    /// SP4d-1 Task 7, finding F2: Gson builds a `RangerDataMaskPolicyItem`
-    /// through its no-arg constructor, which delegates to the all-args one,
-    /// whose `setDataMaskInfo(null)` substitutes
-    /// `new RangerPolicyItemDataMaskInfo()`. Gson then overwrites only the
-    /// fields the JSON actually carries, so a missing or explicitly null
-    /// `dataMaskInfo` is a non-null empty object — never null. The `ifnull`
+    /// SP4d-1 Task 7, finding F2: Ranger deserialises the download with
+    /// **Jackson**, not Gson — `JsonUtils.getMapper()` is a
+    /// `com.fasterxml.jackson.databind.ObjectMapper` and neither
+    /// `ranger-plugins-common` jar carries a single Gson class. The library
+    /// is the mechanism, not a footnote: Jackson binds through the SETTER,
+    /// and `RangerDataMaskPolicyItem.setDataMaskInfo` substitutes
+    /// `new RangerPolicyItemDataMaskInfo()` for a null argument (`ifnonnull`
+    /// at offset 2, `new` at 5). The no-arg constructor routes through the
+    /// same setter via the all-args one, so BOTH paths — key absent, key
+    /// explicitly null — end at a non-null empty object, never null.
+    ///
+    /// Real Gson would predict the opposite: it assigns fields directly and
+    /// bypasses setters, which would leave `dataMaskInfo` null and make the
+    /// guard below FIRE. Naming the wrong library here would invert the
+    /// finding. The `ifnull`
     /// guard at the top of
     /// `RangerDefaultDataMaskPolicyItemEvaluator.updateAccessResult`
     /// therefore never fires, and such an item DETERMINES the result with a
@@ -272,6 +281,46 @@ pub enum Unmodelled {
     /// "no policy matched" — for anything the delta didn't happen to touch.
     PolicyDeltas,
     /// The envelope's `serviceConfig` is non-empty.
+    ///
+    /// # ⚠ DO NOT NARROW THIS REFUSAL WITHOUT READING THIS
+    ///
+    /// **A policy download CAN carry `ranger.plugin.super.users`, and this
+    /// refusal is the only thing standing between that fact and a confident
+    /// wrong allow.** It was documented for a long time that super-users are
+    /// plugin-side only; that was false.
+    ///
+    /// Measured with `javap -c` on both jars, identically at 2.5.0 and
+    /// 2.8.0:
+    ///
+    /// * `RangerPolicyEngineImpl.<init>` offsets 125-136 construct
+    ///   `RangerPolicyEngineImpl$ServiceConfig` from
+    ///   **`ServicePolicies.getServiceConfig()`** — i.e. from this very map,
+    ///   which arrives in the download.
+    /// * That inner class reads the keys `ranger.plugin.super.users`,
+    ///   `ranger.plugin.super.groups`, `ranger.plugin.service.admins` and
+    ///   `ranger.plugin.audit.exclude.{users,groups,roles}`.
+    /// * `RangerPolicyEngineImpl.isSuperUser(user, groups)` ORs
+    ///   `serviceConfig.isSuperUser(user)` with
+    ///   `pluginContext.getConfig().isSuperUser(user)` (and the same for
+    ///   groups via `hasSuperGroup`). Either side alone is enough.
+    /// * A super-user hit sets `isAllowed`, `isAccessDetermined`,
+    ///   `policyId = -1`, `policyPriority = Integer.MAX_VALUE` and
+    ///   `reason = "superuser"` BEFORE any policy is consulted.
+    ///
+    /// SP4d-1 Task 8's F1 is pressure to narrow envelope refusals so
+    /// `explain` can answer for the profiles egret actually provisions.
+    /// Narrowing `serviceConfig` while trusting
+    /// [`crate::eval::EngineConfig::without_super_users`] would fail
+    /// **OPEN**: that
+    /// constructor records a measurement of the PLUGIN side only
+    /// (`docs/en/plans/2026-09-28-sp4d-plugin-version-result.md`), and says
+    /// nothing about the download side.
+    ///
+    /// Whoever narrows this must either model the six keys above or keep
+    /// refusing any envelope whose `serviceConfig` carries them. Narrowing
+    /// it to "refuse only the keys we know about" is not safe on its own
+    /// either: `ranger.plugin.service.admins` also short-circuits, through
+    /// `isServiceAdmin`.
     ServiceConfig,
     /// A mask item's `dataMaskInfo.valueExpr` contains a Ranger runtime
     /// expression this reader cannot resolve (a `${{ ... }}` request-time
@@ -337,15 +386,19 @@ fn default_true() -> bool {
 
 /// Read a field that may be JSON `null`, as Ranger reads it.
 ///
-/// SP4d-1 Task 7, finding F3 — the sweep behind F2, widened. Gson assigns
-/// fields directly, so a key that is ABSENT keeps whatever the class's
-/// constructor left there, and `RangerPolicy`, `RangerPolicyItem`,
-/// `RangerPolicyResource` and `RangerPolicyItemAccess` all normalise in their
-/// constructors (`nullSafeList` for every list, `Boolean.FALSE` /
-/// `Boolean.TRUE` / `0` / `""` for the scalars). An EXPLICIT `null` reaches
-/// the same field as a null reference and is read back through the same
-/// getters, so Ranger treats "absent" and "null" identically — measured with
-/// `JsonUtils.jsonToObject` on both shapes.
+/// SP4d-1 Task 7, finding F3 — the sweep behind F2, widened. Ranger reads
+/// the download with Jackson (`JsonUtils.getMapper()` is a
+/// `com.fasterxml.jackson.databind.ObjectMapper`). A key that is ABSENT is
+/// never bound at all and keeps whatever the class's constructor left there,
+/// and `RangerPolicy`, `RangerPolicyItem`, `RangerPolicyResource` and
+/// `RangerPolicyItemAccess` all normalise in their constructors
+/// (`nullSafeList` for every list, `Boolean.FALSE` / `Boolean.TRUE` / `0` /
+/// `""` for the scalars). An EXPLICIT `null` is bound through the setter,
+/// which for most of these fields substitutes the same default the
+/// constructor did, and is read back through the same getter — so Ranger
+/// treats "absent" and "null" identically. Measured with
+/// `JsonUtils.jsonToObject` on both shapes rather than derived from the
+/// binding rules.
 ///
 /// Plain `#[serde(default)]` covers only the absent case: `null` makes serde
 /// fail with `invalid type: null`. A reader that REFUSES a document the live
@@ -857,8 +910,13 @@ fn build_policy_item(
 
     // Ranger's own null substitution, reproduced at the layer that reads the
     // document rather than at the layer that acts on it: a `RangerPolicy` is
-    // not the JSON, it is the JSON as Gson built it through these classes'
-    // constructors and setters, and those two readings differ. Applied per
+    // not the JSON, it is the JSON as JACKSON built it through these classes'
+    // constructors and SETTERS, and those two readings differ. The setter is
+    // the whole mechanism — `setDataMaskInfo(null)` substitutes an empty
+    // object, which is why the line below reads an absent or null
+    // `dataMaskInfo` as `MaskInfo::default()` rather than as `None`. Gson,
+    // which assigns fields directly, would leave it null; neither
+    // `ranger-plugins-common` jar contains Gson. Applied per
     // BUCKET because the substitution lives on the bucket's element class —
     // `RangerPolicyItem` (the four access buckets) declares neither field, so
     // a `dataMaskInfo` written into `policyItems` is dropped by Ranger and

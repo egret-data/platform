@@ -168,7 +168,7 @@ with a named cause, never a guess:
 
 | Input | Why egret cannot know it |
 |---|---|
-| `ranger.plugin.super.users` | plugin-side config, not in the download |
+| `ranger.plugin.super.users` | **corrected 2026-09-29:** the download CAN carry it. `RangerPolicyEngineImpl.<init>` builds its `ServiceConfig` from `ServicePolicies.getServiceConfig()` (javap offsets 125-136, identical at 2.5.0 and 2.8.0) and `isSuperUser` ORs that against the plugin config, so either side alone decides. Egret cannot know the PLUGIN side; it can read the download side but does not model it, and refuses any envelope carrying `serviceConfig` (`Unmodelled::ServiceConfig` → `EnvelopeConstruct`). That refusal, not the absence of the key, is the safety property |
 | `{OWNER}` | resource ownership is supplied per request by the engine |
 | user→group mapping | egret runs no usersync; measured empty on every provisioned engine |
 | roles | the plugin fetches `/service/roles/download/<service>`, a route egret does not serve |
@@ -293,6 +293,9 @@ objects, and surfaces all of it in the UI.
 - Which `ranger-plugins-common` does `starrocks/fe-ubuntu:4.1-latest` bundle?
 - Do provisioned engines set `ranger.plugin.super.users`? (Not set in
   `deploy/starrocks/ranger/ranger-starrocks-security.xml:28-34`; the k8s path
-  is unmeasured.)
+  is unmeasured.) Note this asks only about the PLUGIN side — the policy
+  download's `serviceConfig` can carry the same key, and the answer there is
+  "the evaluator refuses the whole envelope", not "the key cannot be there".
+  See the D2 row above.
 - Does 2.5.0 share 2.8.0's bucket ordering and priority asymmetry verbatim?
   The differential harness answers this rather than a source reading.

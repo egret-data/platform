@@ -70,9 +70,15 @@ but 2.5.0 stays the default because Trino is the primary/only engine this
 evaluator package targets per the SP4d-1 brief.
 
 Both versions were run clean (`mvn clean test`) against the unmodified
-harness and produced **`Tests run: 4, Failures: 0, Errors: 0`** with no
-assertion differences between them — Ranger's behaviour for these four cases
-(allow, deny, mask, row filter) has not changed between 2.5.0 and 2.8.0.
+harness and produced **`Tests run: 5, Failures: 0, Errors: 0, Skipped: 1`**
+with no assertion differences between them — Ranger's behaviour for these four
+cases (allow, deny, mask, row filter) has not changed between 2.5.0 and 2.8.0.
+The fifth is `EgretCaseRunner`, `Assume`d out when no `-Degret.cases` is
+given. The anchors themselves are the per-class line
+`Tests run: 4, Failures: 0, Errors: 0, Skipped: 0 ... in
+EgretRangerEnforcementTest`, which is what
+`crates/egret-policy/tests/ranger_engine_gate.rs` asserts on — the totals line
+alone cannot tell "four anchors passed" from "no anchor ran".
 
 ## The differential gate
 
@@ -82,7 +88,7 @@ writes it as `cases.json`, has `EgretCaseRunner` answer every case with a real
 `Decision` matches. Paths travel as `-Degret.cases` / `-Degret.verdicts`
 system properties, so nothing is bound to a working directory.
 
-Recorded run, 2026-09-28 (JDK 21 / Maven 3.9.11):
+Recorded run, re-recorded 2026-09-29 (JDK 21.0.11 / Maven 3.9.11):
 
 | | |
 |---|---|
@@ -95,9 +101,10 @@ Recorded run, 2026-09-28 (JDK 21 / Maven 3.9.11):
 | Deliberate eval-order duels | **489, all agreeing** |
 | Wall time | ~37s including three Maven runs |
 
-A wider sweep at 5000 per engine (10000 cases, ~64s) was also run green:
-**9595 compared and agreeing, 405 `EvalOrderAmbiguous` (4.0%), 1273 duels all
-agreeing.** The rate is stable across an order of magnitude of corpus size.
+A wider sweep at 5000 per engine (10000 cases, 64.6s) was also re-run green
+on the same day: **9595 compared and agreeing, 405 `EvalOrderAmbiguous`
+(4.0%), 1273 duels all agreeing.** The rate is stable across an order of
+magnitude of corpus size.
 
 These are the numbers AFTER the findings below were fixed and their
 exclusions removed. Whether the corpus still REACHES the shapes those fixes
@@ -105,14 +112,38 @@ were written for is not a matter of opinion here — see the coverage table
 below, which is printed on every run and fails it when an axis thins out.
 
 `EvalOrderAmbiguous` is Task 6's refusal to guess a mask (or row filter) when
-two policies tie inside one `(policyPriority, hasDeny)` band and would yield
-different results — the arbitration there is `>=`, not `>`, so the first
-evaluator in `getEvalOrder()` is final, and this crate does not reproduce
-`computeEvalOrder()`. **4.7% is the measured cost of that refusal.** Those
-cases are counted and excluded from the comparison, because this crate has no
-answer to compare; every other `Undecidable` fails the run, so the generator
-cannot drift into constructs the evaluator declines to answer while the gate
-reports green.
+two policies tie inside one `(policyPriority, hasDeny)` band — the arbitration
+there is `>=`, not `>`, so the first evaluator in `getEvalOrder()` is final,
+and this crate does not reproduce `computeEvalOrder()`. Those cases are
+counted and excluded from the comparison, because this crate has no answer to
+compare; every other `Undecidable` fails the run, so the generator cannot
+drift into constructs the evaluator declines to answer while the gate reports
+green.
+
+**The refusal fires on ANY tie, not only on one where the tied policies yield
+different masks** — `evaluate_sub` never compares the two `SubResult`s. That
+is deliberate: a `MaskResult` names the policy that produced it, and a tie
+this crate cannot order is a tie whose winner it cannot name. Both halves are
+pinned by
+`crates/egret-ranger-eval/tests/mask_filter.rs::a_same_priority_mask_tie_is_undecidable_when_the_masks_{differ,are_identical}`.
+
+**The cost splits in two, and only one half is unavoidable.** Measured by
+patching `evaluate_sub` to refuse only on DISAGREEMENT and re-running this
+gate at the recorded seed:
+
+| | Cases of 4000 | Rate |
+|---|---|---|
+| Ties (what is refused today) | **144** | **3.6%** |
+| …of which the tied policies yield DIFFERENT results | 111 | 2.8% |
+| …of which they agree on everything but the policy id | 33 | 0.8% |
+
+The 33 are not a hidden divergence: with the patch in place all 33 were
+compared against the real engine and **all 33 agreed**. So 0.8% of the corpus
+is a tie where this crate has a defensible answer and only the reported policy
+id is unknown — which is exactly the shape the one live StarRocks profile hits
+(`docs/en/plans/2026-09-28-sp4d-1-live-result.md` §8: mask policies 8777 and
+8801 BOTH `dataMaskType: "MASK"`, no `valueExpr`). The patch was a measurement
+only and was reverted; the evaluator refuses both halves.
 
 ### The gate has been observed failing
 
@@ -134,33 +165,64 @@ eye (`cp` is aliased to `cp -i` on this machine and silently refuses):
 Places where this crate is knowingly not byte-for-byte Ranger, with the reason
 each is acceptable. Anything not on this list and not `Undecidable` is a bug.
 
-- **Case folding is NARROWER than Java's, in exactly two classes.** Measured
-  over a 1922-pair character cross product through the real
-  `String.regionMatches(true, …)` on the harness classpath: **22
-  disagreements, and in every one Java says `true` while this crate says
-  `false`. There are none the other way.**
+- **Case folding is NARROWER than Java's: 104 ordered pairs, in 21
+  classes.** Measured over **every BMP code point this JDK defines**, by two
+  independent instruments that agree exactly:
+
+  1. Java's fold key `toLowerCase(toUpperCase(c))`, computed for all 62034
+     defined code points and grouped — Java's rule reduces to that key.
+  2. The real `String.regionMatches(true, …)`, brute-forced over every
+     ordered pair of the 2423 code points either language treats as cased (a
+     pair outside that set cannot disagree; both mappings are the identity).
+
+  **104 disagreements, and in every one Java says `true` while this crate
+  says `false`. There are none the other way.**
 
   The direction is the point, and an earlier version of this section had it
   backwards. Narrower means egret finds no match where Ranger finds one:
   **fail-CLOSED for an allow rule, fail-OPEN for a deny or an `isExcludes`
   rule.** Calling it "wider" implied it was uniformly safe. It is not.
 
-  The two classes:
+  An earlier version also said "exactly two classes … 22 disagreements".
+  That was the honest answer to a 1922-pair hand-picked cross product — the
+  claim was simply wider than the measurement behind it. The 21 classes:
 
-  1. **Dotted and dotless I** — `İ` (U+0130) and `ı` (U+0131) against `i` /
-     `I`. Java's chain maps `İ` to a single `i`; Rust's `char::to_lowercase`
-     yields TWO code points for it, so no single-character comparison reaches
-     Java's answer.
-  2. **Final sigma** — `ς` (U+03C2) against `σ` (U+03C3) and `Σ` (U+03A3).
-     This one is **not** a length problem: it is a missing UPPERCASE step.
-     `toUpperCase('ς') == toUpperCase('σ') == 'Σ'`, while lowercasing leaves
-     `ς` and `σ` distinct. Adding a `to_uppercase` step would close this class
-     and not the first.
+  | # | Class | Pairs | Mechanism |
+  |---|---|---|---|
+  | 1 | `I i İ ı` (U+0049 U+0069 U+0130 U+0131) | 10 | Java's third step maps `İ` to a single `i`; Rust's `char::to_lowercase` yields TWO code points for it, so no single-character comparison can reach Java's answer. |
+  | 2 | `S s ſ` (U+017F long s) | 4 | missing UPPERCASE step |
+  | 3 | `Σ ς σ` (final sigma) | 4 | missing UPPERCASE step |
+  | 4 | `Μ μ µ` (U+00B5 micro sign) | 4 | missing UPPERCASE step |
+  | 5 | `Ι ι ͅ ι` (U+0345 iota subscript, U+1FBE prosgegrammeni) | 10 | missing UPPERCASE step |
+  | 6-12 | the Greek symbol variants `ϐ ϵ ϑ/ϴ ϰ ϖ ϱ ϕ` | 4-6 each | missing UPPERCASE step |
+  | 13-20 | the Cyrillic historic shapes U+1C80-U+1C88 (`ᲀ ᲁ ᲂ ᲃ ᲄ ᲅ ᲆ ᲇ ᲈ`) | 4-10 each | missing UPPERCASE step |
+  | 21 | `Ṡ ṡ ẛ` (U+1E9B) | 4 | missing UPPERCASE step |
+
+  So class 1 is a length problem and the other twenty are all one mechanism:
+  `toUpperCase` collapses the variant onto the canonical letter, while
+  lowercasing leaves them distinct. Adding a `to_uppercase` step closes **96
+  of the 104** — measured by making that change and re-running the test, which
+  then reports 8 survivors: the six pairs involving `İ` (Rust lowercases it to
+  TWO code points, so no single-character step reaches Java's answer) and `ϑ`
+  vs `ϴ`.
 
   No catalog/schema/database/table/column identifier on either engine admits
-  any of these code points. The set and its direction are pinned in
-  `resource.rs::case_folding_is_narrower_than_java_in_exactly_two_classes`, so
-  the README and the code cannot drift apart.
+  any of these code points.
+
+  The full set, its size and its direction are pinned in
+  `resource.rs::case_folding_is_narrower_than_java_on_104_ordered_pairs_in_21_classes`,
+  which enumerates every class and asserts both that exactly 104 ordered
+  pairs split and that no CROSS-class pair folds equal. That second
+  assertion is the direction, and it is the one worth keeping: the claim and
+  the test now cover the same set, so they cannot drift apart.
+
+  One caveat the brute force turned up and this crate does not own: 16
+  ordered pairs run the OTHER way (Rust folds them, Java does not), and
+  every one involves a code point `Character.isDefined` says JDK 21 does not
+  know — U+A7CB, U+1C89, U+A7DC and their partners. That is Unicode-table
+  skew between the JVM's tables and Rust std's, not a folding difference; it
+  moves with the JVM. None of those code points is an identifier character
+  on either engine either.
 
   `Equals`, `StartsWith` and `EndsWith` fold the whole string; the wildcard
   path deliberately does **not**, and the asymmetry is worth knowing about.
@@ -203,8 +265,14 @@ each is acceptable. Anything not on this list and not `Undecidable` is a bug.
 - **`getEvalOrder()` is not reproduced.** Within one
   `(policyPriority, hasDeny)` band this crate cannot say which of two
   same-priority mask or row-filter policies Ranger reaches first, and refuses
-  with `EvalOrderAmbiguous` rather than guessing. Measured cost: 3.4-4.0% of
-  the corpus. For ACCESS the outcome does not depend on it — see the duels
+  with `EvalOrderAmbiguous` rather than guessing — on ANY tie, not only on
+  one where the tied policies would yield different results. Measured cost:
+  **3.6% of the corpus at the recorded seed (144 of 4000), of which 2.8% are
+  ties that actually disagree and 0.8% ties that agree on everything but the
+  policy id**; 4.0% over a 10000-case sweep, and 3.3-4.5% across four
+  unrelated seeds at 1000 cases each (per engine the extremes are 3.0% and
+  5.6%). See "The differential gate" above for the split and how it was
+  measured. For ACCESS the outcome does not depend on it — see the duels
   below.
 
 ## Coverage: what the corpus actually produced
@@ -230,19 +298,40 @@ the wrong counter — the same class of defect the table exists to catch.
 Floors are in cases per thousand, so they survive a change to
 `EGRET_DIFF_CASES`, and each is set near half of what the corpus measurably
 produces. A floor that flaps gets deleted by the next person, which is worse
-than no floor: across both engines at both corpus sizes, the tightest margin
-is 2.0x, re-checked after every change to the vocabularies (adding the
-backtracking texts diluted `request value *` and its floor was lowered to
-match, rather than left to flap).
+than no floor: over the 89 floored rows of the recorded run (45 axes × 2
+engines, less the one row that is `n/a` on StarRocks) the tightest margin is
+**1.968x**, on `policyType 0 (access)`. Three floors were LOWERED when the
+backtracking vocabulary diluted their axes — `wildcard: repeated ?` 60→50,
+`request value *` 70→50 and `request value empty` 70→55 — rather than left to
+flap; the table above shows the lowered values, because it is re-recorded from
+a run rather than patched by hand.
 
 Those floors were calibrated against the recorded seed, which on its own only
 shows they hold for the run that set them. Four unrelated seeds
-(`0xdead1`, `0xbeef2`, `0xc0ffee3`, `0x13579b`) were then run at 500 cases:
-all pass, and across 352 floored rows the tightest margin anywhere is **1.73x**
-(`ANCESTOR-shaped policy` and `policyType 2 (row filter)`). So the margin
-survives seed variation with room to spare, rather than being expected to.
+(`0xdead1`, `0xbeef2`, `0xc0ffee3`, `0x13579b`) were then re-run at 500 cases
+against the 45-axis table: all pass, and across **356** floored rows (4 seeds ×
+2 engines × 45 axes, less the 4 `n/a` rows) the tightest margin anywhere is
+**1.733x** (`ANCESTOR-shaped policy` at `0xc0ffee3`, `policyType 2 (row
+filter)` and `row-filter case at TABLE granularity` at `0xbeef2`). So the
+margin survives seed variation with room to spare, rather than being expected
+to.
 
-Measured at ranger 2.5.0 (Trino), 2000 cases, seed `0x54d000007`:
+**How this table was produced, so the next person regenerates it the same
+way.** It is the `coverage at ranger 2.5.0 (Trino)` block the gate prints,
+copied verbatim from one run of:
+
+```bash
+EGRET_TEST_RANGER_E2E=1 EGRET_DIFF_SEED=54d000007 EGRET_DIFF_CASES=2000 \
+  cargo test -p egret-ranger-eval --test differential -- --nocapture
+```
+
+Do not hand-patch individual rows: the axis LIST comes from `AXES` in
+`crates/egret-ranger-eval/tests/differential.rs`, so an added axis has to
+appear here as a new row, and a hand-edit is how this table came to be missing
+one. Re-record the whole block.
+
+Measured at ranger 2.5.0 (Trino), 2000 cases, seed `0x54d000007` — **45 axes,
+the same 45 the run prints**:
 
 | Axis | Cases | Rate | Floor |
 |---|---|---|---|
@@ -255,21 +344,22 @@ Measured at ranger 2.5.0 (Trino), 2000 cases, seed `0x54d000007`:
 | policy DEEPER than the request | 513 | 256‰ | 80‰ |
 | isExcludes | 814 | 407‰ | 100‰ |
 | multi-value level | 1140 | 570‰ | 100‰ |
-| level with no usable values | 441 | 220‰ | 40‰ |
+| level with no usable values | 436 | 218‰ | 40‰ |
 | additionalResources | 487 | 243‰ | 100‰ |
-| wildcard: leading * | 1258 | 629‰ | 200‰ |
-| wildcard: trailing * | 1266 | 633‰ | 200‰ |
-| wildcard: interior * | 1077 | 538‰ | 150‰ |
-| wildcard: repeated * | 1119 | 559‰ | 150‰ |
-| wildcard: leading ? | 709 | 354‰ | 100‰ |
-| wildcard: trailing ? | 791 | 395‰ | 100‰ |
-| wildcard: interior ? | 645 | 322‰ | 100‰ |
-| wildcard: repeated ? | 268 | 134‰ | 60‰ |
-| wildcard: `*` immediately before `?` (F1) | 497 | 248‰ | 100‰ |
-| policy value that is only `*` | 1339 | 669‰ | 200‰ |
-| policy value differing from the request only by case | 551 | 275‰ | 100‰ |
-| request value `*` | 310 | 155‰ | 70‰ |
-| request value empty | 319 | 159‰ | 70‰ |
+| wildcard: leading * | 1328 | 664‰ | 200‰ |
+| wildcard: trailing * | 1258 | 629‰ | 200‰ |
+| wildcard: interior * | 1167 | 583‰ | 150‰ |
+| wildcard: repeated * | 1205 | 602‰ | 150‰ |
+| wildcard: leading ? | 696 | 348‰ | 100‰ |
+| wildcard: trailing ? | 768 | 384‰ | 100‰ |
+| wildcard: interior ? | 672 | 336‰ | 100‰ |
+| wildcard: repeated ? | 219 | 109‰ | 50‰ |
+| wildcard: `*` immediately before `?` (F1) | 455 | 227‰ | 100‰ |
+| wildcard: literal AFTER a `*` (backtracking reachable) | 1418 | 709‰ | 100‰ |
+| policy value that is only `*` | 1253 | 626‰ | 200‰ |
+| policy value differing from the request only by case | 536 | 268‰ | 100‰ |
+| request value `*` | 211 | 105‰ | 50‰ |
+| request value empty | 264 | 132‰ | 55‰ |
 | request with a gap in the hierarchy | 1247 | 623‰ | 30‰ |
 | bucket policyItems | 1166 | 583‰ | 280‰ |
 | bucket denyPolicyItems | 860 | 430‰ | 150‰ |
@@ -297,9 +387,12 @@ this engine` there and is floored only for Trino.
 
 **Floors prove a shape is GENERATED, not that a rule is REACHED — and review
 found the difference the hard way.** Deleting the backtracking resume point in
-`wildcard_match` (`backtrack.push((wcs_idx, repeat))`) left all 131 unit tests
-green, the 53-row `FilenameUtils` oracle green, and the whole 4000-case gate
-green at the recorded seed with identical tallies. The corpus emitted plenty
+`wildcard_match` (`backtrack.push((wcs_idx, repeat))`) left every unit test
+green, the `FilenameUtils` oracle green **as it then stood, at 53 rows**, and
+the whole 4000-case gate green at the recorded seed with identical tallies.
+(That oracle is now 81 rows — see
+`resource.rs::wildcard_match_reproduces_filenameutils` — and the added rows
+are what kills the mutation.) The corpus emitted plenty
 of wildcards; almost none of them could reach that line, because a value
 ending in `*` jumps to the end of the text and never needs a resume point, and
 the corpus's literal runs never recurred in a request value. Both halves are
@@ -344,19 +437,37 @@ token walk instead of approximating them. Read from `javap -c` of
 **commons-io 2.16.1**, which the same command resolves for
 `ranger-plugins-common:2.8.0`. A 3348-pair cross product produced
 byte-identical output from the two jars, so the exact commons-io version
-changes no answer; the port agrees with all 3348, and the interesting 54 rows
-are a unit test that needs no JVM.
+changes no answer; the port agrees with all 3348, and the interesting rows are
+a unit test that needs no JVM — **81 of them** today, in
+`resource.rs::wildcard_match_reproduces_filenameutils`, grown from 54 when
+review showed the original table shared the corpus's blind spot.
 
-**F2 — a `dataMaskPolicyItems` entry with no `dataMaskInfo`.**
-`RangerPolicy$RangerDataMaskPolicyItem`'s no-arg constructor (the one Gson
-uses) delegates to the all-args one, and `setDataMaskInfo(null)` substitutes
-`new RangerPolicyItemDataMaskInfo()`. So `getDataMaskInfo()` is **never null**
-on a deserialised item, the `ifnull` guard at offset 8 of
-`RangerDefaultDataMaskPolicyItemEvaluator.updateAccessResult` never fires, and
-the item DETERMINES the result with a null mask type — stopping the search.
+**F2 — a `dataMaskPolicyItems` entry with no `dataMaskInfo`.** The
+deserialiser is **Jackson**, and which library it is IS the finding.
+`JsonUtils.getMapper()` returns a
+`com.fasterxml.jackson.databind.ObjectMapper` (`javap -c` of
+`org.apache.ranger.authorization.utils.JsonUtils`), and neither
+`ranger-plugins-common` jar contains a single Gson class — the only mention of
+Gson anywhere in the 2.5.0 jar is a line in `META-INF/DEPENDENCIES`.
+
+Jackson binds through the **setter**.
+`RangerPolicy$RangerDataMaskPolicyItem.setDataMaskInfo` substitutes
+`new RangerPolicyItemDataMaskInfo()` for a null argument (`ifnonnull` at
+offset 2), and the no-arg constructor reaches the same setter through the
+all-args one. So `getDataMaskInfo()` is **never null** on a deserialised item
+whether the key was absent or explicitly null, the `ifnull` guard at offset 8
+of `RangerDefaultDataMaskPolicyItemEvaluator.updateAccessResult` never fires,
+and the item DETERMINES the result with a null mask type — stopping the
+search.
+
+Had it been Gson, the prediction would be the OPPOSITE: Gson assigns fields
+directly and bypasses setters, so `dataMaskInfo` would stay null and the
+`ifnull` guard WOULD fire. An earlier version of this section named Gson, and
+that naming predicts the behaviour the gate measured as false.
+
 Fixed in the READER (`model.rs`), which is where the defect was: the reader
 was reading the wire format while Ranger reads the same bytes through classes
-that rewrite them.
+whose setters rewrite them.
 
 **The row-filter path makes the identical substitution and behaves the
 OPPOSITE way**, which is why the fix could not be uniform.
@@ -367,12 +478,13 @@ call with `if (result.getFilterExpr() != null)` (offsets 40-44) instead. A
 null `filterExpr` therefore determines nothing and the next policy IS reached.
 
 **F3 — the reader refused documents the live plugin enforces.** Chasing F2's
-class turned this up. Gson assigns fields directly, so an ABSENT key keeps
+class turned this up. An ABSENT key is never bound at all, so the field keeps
 whatever the constructor left, and `RangerPolicy`, `RangerPolicyItem`,
 `RangerPolicyResource` and `RangerPolicyItemAccess` all normalise in their
-constructors. An EXPLICIT `null` lands in the same field and reads back
-through the same getter, so Ranger cannot tell "absent" from "null" — measured
-on both shapes with `JsonUtils.jsonToObject`:
+constructors. An EXPLICIT `null` goes through Jackson's setter call, which for
+these classes substitutes the same default, and reads back through the same
+getter — so Ranger cannot tell "absent" from "null". Measured on both shapes
+with `JsonUtils.jsonToObject` rather than derived from the binding rules:
 
 | Class | Field | Ranger's value for absent AND null |
 |---|---|---|
