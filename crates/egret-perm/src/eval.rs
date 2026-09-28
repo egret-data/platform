@@ -33,6 +33,19 @@
 //!   its oracle, the compiler will agree — the oracle is blind to this whole
 //!   class of dead grant, and nothing downstream of `evaluate` alone can
 //!   catch it.
+//! - **`Role` principals were in that same bound, and are NOT any more (SP4c
+//!   Task 2b).** SP4c's D0 measured that a Ranger item naming a role matches
+//!   nobody either, for its own reason (the plugin downloads roles from a route
+//!   egret does not serve, and Trino's plugin passes `userRoles` as `null`) —
+//!   so `explain` was reporting an access the engine did not grant, exactly as
+//!   for a group. Unlike a group, a role's membership IS knowable from
+//!   `access_grants`, so the compiler now expands a `role` principal into its
+//!   holders' usernames (`egret_perm_compile::members`) instead of naming the
+//!   role. This function is unchanged — matching `Subject::roles` by name is
+//!   still the right oracle semantics — but the divergence it could not see is
+//!   closed on the compiler's side, and
+//!   `egret-perm-compile/tests/role_grants.rs` asserts the two now AGREE about
+//!   a role-granted subject.
 
 use uuid::Uuid;
 

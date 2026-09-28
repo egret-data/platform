@@ -66,7 +66,9 @@
 //! `workspace_members` (`egret_perm::assignment`). D7 measured that a Ranger
 //! GROUP item matches nobody on any engine egret provisions, so that principal
 //! compiles to **the member list enumerated at compile time**, as bare
-//! usernames — [`crate::members::expand_workspace_members`], run here on the
+//! usernames — [`crate::members::expand_enumerated_principals`], which since
+//! SP4c Task 2b expands a `role` principal the same way and for the same
+//! measured reason, run here on the
 //! caller's own connection before anything is compiled, so `compile_grant`
 //! and `compile_rule` stay free of I/O and keep refusing the unexpanded kind
 //! as a defence in depth.
@@ -426,10 +428,12 @@ async fn compile_desired(
 
     let mut all_grants = list_grants_via(conn).await.map_err(db_err)?;
     let mut all_rules = list_rules_via(conn).await.map_err(db_err)?;
-    // D3: turn every `workspace_members` principal into the members it stands
-    // for BEFORE anything is compiled, so the pure compilers below never see
-    // one. See `crate::members` for what a member is and what it costs.
-    crate::members::expand_workspace_members(conn, &mut all_grants, &mut all_rules).await?;
+    // D3: turn every `workspace_members` principal — and, since SP4c Task 2b,
+    // every `role` principal — into the people it stands for BEFORE anything is
+    // compiled, so the pure compilers below never see one. See `crate::members`
+    // for what a member is, what it costs, and why a role name cannot be left
+    // for Ranger to resolve.
+    crate::members::expand_enumerated_principals(conn, &mut all_grants, &mut all_rules).await?;
 
     let mut desired: BTreeMap<PolicyKey, DesiredPolicy> = BTreeMap::new();
     let mut skipped: Vec<SkippedItem> = Vec::new();
@@ -478,7 +482,7 @@ async fn compile_desired(
             Err(CompileError::UnexpandedPrincipalKind { kind }) => {
                 let reason = format!(
                     "principal kind {kind:?} reached the compiler unexpanded — a bug in \
-                     `crate::members::expand_workspace_members`, not in the grant"
+                     `crate::members::expand_enumerated_principals`, not in the grant"
                 );
                 tracing::warn!(
                     service_id,
@@ -665,7 +669,7 @@ async fn compile_one_rule(
         Err(CompileError::UnexpandedPrincipalKind { kind }) => {
             let reason = format!(
                 "principal kind {kind:?} reached the compiler unexpanded — a bug in \
-                 `crate::members::expand_workspace_members`, not in the rule"
+                 `crate::members::expand_enumerated_principals`, not in the rule"
             );
             tracing::warn!(
                 service_id,

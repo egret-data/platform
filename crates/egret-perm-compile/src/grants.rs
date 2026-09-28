@@ -41,6 +41,23 @@
 //! situation may change. No claim of enforcement is implied or tested here;
 //! see D7 §2-3 and `model::PrincipalKind`'s doc comment.
 //!
+//! **ROLES DO NOT, and that changed in SP4c Task 2b.** Round 1 bucketed a
+//! `PrincipalKind::Role` into Ranger's `roles` alongside groups, on the same
+//! "egret is not the only possible consumer" reasoning. D0
+//! (`docs/en/plans/2026-09-28-sp4c-d0-result.md`) measured that the bucket is
+//! never populated on the Trino path egret provisions — the roles document
+//! comes from a `/service/roles/download/<svc>` route egret does not serve, so
+//! `lastKnownRoleVersion` never leaves `-1`, and the plugin passes `userRoles`
+//! as a hardcoded `null` — while `egret_perm::eval::matches_principal` matches
+//! a role happily, so `explain` reported an access the engine did not grant.
+//! Unlike the group case that divergence is now fixable, because
+//! `access_grants` knows who holds a role: a `role` principal is expanded into
+//! its holders' usernames before this file ever sees it
+//! (`crate::members::expand_enumerated_principals`), and reaching
+//! `principal_item` with one unexpanded is refused exactly as
+//! `WorkspaceMembers` is — see [`Expansion`] for why the authoring boundary
+//! still accepts one.
+//!
 //! **`WorkspaceMembers` principals are refused, not dropped.** Round 1
 //! silently contributed nothing for a `WorkspaceMembers` principal, on the
 //! theory that Task 6 (which expands it into the member list enumerated at
@@ -83,18 +100,45 @@ pub(crate) fn validate_user_ref(r#ref: &str) -> Result<(), CompileError> {
     }
 }
 
+/// Whether `crate::members::expand_enumerated_principals` has already run over
+/// the principal set being bucketed. It decides ONE thing: what a `role`
+/// principal means here.
+///
+/// **SP4c Task 2b, and the distinction is load-bearing.** A `role` grant is a
+/// perfectly legal thing to author — SP4b's picker offers it — and it is
+/// expanded into its holders at compile time. So the authoring boundary
+/// ([`validate_grant_shape`], which runs before anything is stored and long
+/// before anything is expanded) must ACCEPT one, while `compile_grant` — which
+/// only ever runs after the expansion — must REFUSE one, because a `role` still
+/// present there is a bug in the expansion rather than an authoring mistake,
+/// and bucketing it into Ranger's `roles` would compile a grant that matches
+/// nobody (module doc comment).
+///
+/// `WorkspaceMembers` is refused in BOTH positions, unchanged: no authoring
+/// path may write one (they are produced only by `egret_perm::assignment`), so
+/// there is no legal author to accommodate.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Expansion {
+    /// `compile_grant`: the principal set has been expanded, so an enumerated
+    /// kind surviving here is an internal invariant violation.
+    Done,
+    /// `validate_grant_shape`: nothing has been expanded yet, so a `role` is
+    /// simply an unexpanded-but-valid author's choice.
+    NotYet,
+}
+
 /// Sort principals in `refs` into a Ranger item's `users`/`groups`/`roles`
-/// buckets and set `effect`/`accesses` on it. Any `WorkspaceMembers`
-/// principal refuses the whole compile rather than being silently dropped
-/// (module doc comment).
+/// buckets and set `effect`/`accesses` on it. A `WorkspaceMembers` principal —
+/// and, once `expansion` is [`Expansion::Done`], a `Role` — refuses the whole
+/// compile rather than being silently dropped (module doc comment).
 fn principal_item(
     refs: &[Principal],
     effect: Effect,
     accesses: &[String],
+    expansion: Expansion,
 ) -> Result<AccessItemInput, CompileError> {
     let mut users = Vec::new();
     let mut groups = Vec::new();
-    let mut roles = Vec::new();
     for p in refs {
         match p.kind {
             PrincipalKind::User => {
@@ -102,8 +146,9 @@ fn principal_item(
                 users.push(p.r#ref.clone());
             }
             PrincipalKind::Group => groups.push(p.r#ref.clone()),
-            PrincipalKind::Role => roles.push(p.r#ref.clone()),
-            PrincipalKind::WorkspaceMembers => {
+            // Legal to author, expanded before any compile sees it.
+            PrincipalKind::Role if expansion == Expansion::NotYet => {}
+            PrincipalKind::Role | PrincipalKind::WorkspaceMembers => {
                 return Err(CompileError::UnexpandedPrincipalKind { kind: p.kind });
             }
         }
@@ -111,7 +156,12 @@ fn principal_item(
     Ok(AccessItemInput {
         users,
         groups,
-        roles,
+        // **Always empty, deliberately** (SP4c Task 2b). Ranger's `roles`
+        // bucket is never populated on the Trino path egret provisions (D0), so
+        // a name written here matches nobody: in an item it grants nobody, and
+        // in an exception block it excepts nobody and the deny stands for
+        // everyone. Roles reach the engine as their expanded members instead.
+        roles: Vec::new(),
         accesses: accesses.to_vec(),
         effect: effect.as_str().to_string(),
     })
@@ -336,8 +386,9 @@ pub(crate) const ROW_FILTER_LEVELS: usize = 3;
 ///
 /// **What is in and what is out.** In: the checks that would fail against
 /// every service alike — a `User` ref that was never resolved to a bare
-/// `users.username` (`UnusableUserRef`), and a principal kind this compiler
-/// cannot expand (`UnexpandedPrincipalKind`). Out: everything that depends on
+/// `users.username` (`UnusableUserRef`), and a principal kind NO compile can
+/// ever expand (`UnexpandedPrincipalKind` for `WorkspaceMembers`; a `role` is
+/// expanded at compile time and so is accepted here — see [`Expansion`]). Out: everything that depends on
 /// which engine or profile is being compiled for (`UnsupportedMaskType` reads
 /// a service-def; `MissingTagService` reads a profile's config), because a
 /// grant can be perfectly valid for one profile and not another and only the
@@ -349,8 +400,8 @@ pub(crate) const ROW_FILTER_LEVELS: usize = 3;
 /// compiled" gets a drift between them, and the drift is a grant that passes
 /// the gate and fails the compile.
 pub fn validate_grant_shape(g: &Grant) -> Result<(), CompileError> {
-    principal_item(&g.principals.include, g.effect, &[])?;
-    principal_item(&g.principals.exclude, g.effect, &[])?;
+    principal_item(&g.principals.include, g.effect, &[], Expansion::NotYet)?;
+    principal_item(&g.principals.exclude, g.effect, &[], Expansion::NotYet)?;
     Ok(())
 }
 
@@ -383,12 +434,13 @@ pub fn compile_grant(
         }
     }
 
-    let item = principal_item(&g.principals.include, g.effect, &accesses)?;
+    let item = principal_item(&g.principals.include, g.effect, &accesses, Expansion::Done)?;
 
     let mut allow_exceptions = Vec::new();
     let mut deny_exceptions = Vec::new();
     if !g.principals.exclude.is_empty() {
-        let exception = principal_item(&g.principals.exclude, g.effect, &accesses)?;
+        let exception =
+            principal_item(&g.principals.exclude, g.effect, &accesses, Expansion::Done)?;
         match g.effect {
             Effect::Allow => allow_exceptions.push(exception),
             Effect::Deny => deny_exceptions.push(exception),
