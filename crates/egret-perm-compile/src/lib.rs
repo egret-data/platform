@@ -54,7 +54,8 @@ pub mod trigger;
 
 pub use grants::{compile_grant, validate_grant_shape};
 pub use role_membership::{
-    assign_platform_role_and_recompile, unassign_platform_role_and_recompile,
+    assign_platform_role_and_recompile, delete_platform_role_and_recompile,
+    unassign_platform_role_and_recompile,
 };
 pub use routes::{openapi, perm_router, PermHttpError, PermState};
 pub use rules::{compile_rule, validate_rule_shape, ResolvedNames, TaggedColumn};

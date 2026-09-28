@@ -99,6 +99,24 @@ async fn new_tag(db: &Db) -> (Uuid, String) {
     (id, name)
 }
 
+/// Bind an engine to `service_id`, which is what makes a profile
+/// COMPILER-TARGETED. `compiler_targeted_services_via` joins
+/// `engine_mgmt.engines` on `authz_service_id`, so a profile with no engine is
+/// reached by `recompile_service` called by name but by NO affected-service
+/// trigger — which is why `seed()` alone is not enough for a test that exercises
+/// a trigger rather than calling the recompile itself.
+async fn bind_engine(db: &Db, service_id: i64) {
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2)",
+    )
+    .bind(unique("clr-eng"))
+    .bind(service_id)
+    .execute(&db.pool)
+    .await
+    .expect("bind engine");
+}
+
 /// A platform role, returning its id.
 async fn new_role(db: &Db, name: &str) -> Uuid {
     sqlx::query_scalar("INSERT INTO roles (scope, name) VALUES ('platform', $1) RETURNING id")
@@ -630,4 +648,99 @@ async fn explain_and_the_compiled_policy_agree_about_a_blocked_subject() {
              ordinary policy) — got {other:?}"
         ),
     }
+}
+
+/// **SP4c review C1 — a Critical this branch introduced, in the fail-OPEN
+/// direction.** Deleting a clearing role is a role-MEMBERSHIP write wearing a
+/// different name: `access_grants.role_id` is `ON DELETE CASCADE` (migration
+/// `0068_access_grants.sql`), so one `DELETE FROM roles` revokes the clearance
+/// from every holder at once.
+///
+/// Before the fix, `RoleRepo::delete` ran that statement with no recompile. An
+/// admin deleting a clearing role to revoke a clearance therefore got: every
+/// `access_grants` row gone, Cedar closing control-plane object access — and the
+/// compiled `denyExceptions` still naming the ex-holders, who went on reading
+/// the classified column through SQL Lab and notebooks with nothing in the
+/// system converging it. That is the union-not-intersection defect SP4c exists
+/// to close, re-opened one write over. The enumeration that reviewed this path
+/// labelled it "fails closed": true of the eventual state, false of the
+/// unbounded interim, and no process was ever going to close the interim.
+///
+/// The assertion is on the ARTIFACT — the compiled `denyExceptions` in
+/// `policy.authz_policies`, the body a Ranger plugin downloads — not on
+/// `access_grants`, which was always written correctly and is exactly what made
+/// the defect invisible in egret's own UI.
+#[tokio::test]
+async fn deleting_a_clearing_role_reaps_the_ex_holders_from_deny_exceptions() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+    let (tag_id, _tag_name) = new_tag(&db).await;
+
+    let role_name = unique("clearance-deleted");
+    let role_id = new_role(&db, &role_name).await;
+    let holder = new_user(
+        &db,
+        &format!("{}@egret.local", unique("clr-exholder")),
+        Some("clr-exholder"),
+    )
+    .await;
+    grant_role(&db, holder, role_id).await;
+    gate(&db, tag_id, &[&role_name], &[]).await;
+    // The delete goes through a TRIGGER, not a recompile called by name, so the
+    // profile has to be reachable by `affected_services_for_role_membership` —
+    // which means an engine bound to it.
+    bind_engine(&db, f.profile_id).await;
+    recompile_service(&f.perm, &f.policy, f.profile_id)
+        .await
+        .expect("recompile");
+
+    // Ground truth FIRST: without this the test below passes against a
+    // clearance that never named the holder at all.
+    let before = clearance_policy(&db, f.tag_service_id, tag_id)
+        .await
+        .expect("a role-gated tag must compile to a clearance policy");
+    assert_eq!(
+        users_of(&before["denyExceptions"].as_array().expect("denyExceptions")[0]),
+        vec!["clr-exholder".to_string()],
+        "sanity: the compiled deny excepts the holder before the role is deleted"
+    );
+
+    // The write under test. Not `RoleRepo::delete` — that is the method with no
+    // recompile, kept for callers with no engine consequence.
+    egret_perm_compile::delete_platform_role_and_recompile(&db.pool, role_id)
+        .await
+        .expect("delete the clearing role");
+
+    // The cascade did what the migration says.
+    let grants_left: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM access_grants WHERE principal_id = $1")
+            .bind(holder)
+            .fetch_one(&db.pool)
+            .await
+            .expect("count grants");
+    assert_eq!(
+        grants_left, 0,
+        "sanity: deleting the role cascaded its grants away"
+    );
+
+    // And the ENGINE agrees, in the same transaction the delete committed in.
+    let after = clearance_policy(&db, f.tag_service_id, tag_id)
+        .await
+        .expect("the clearance policy must still exist — the TAG is still gated");
+    let excepted: Vec<String> = after["denyExceptions"]
+        .as_array()
+        .expect("denyExceptions")
+        .iter()
+        .flat_map(users_of)
+        .collect();
+    assert!(
+        !excepted.contains(&"clr-exholder".to_string()),
+        "the ex-holder is still excepted from the deny, so they can still read the classified \
+         column after their clearance was deleted: {after:#}"
+    );
+    assert!(
+        excepted.is_empty(),
+        "nobody holds the clearing role now, so the deny must except nobody — a deny standing \
+         for everyone is the correct compilation of 'nobody is cleared': {after:#}"
+    );
 }

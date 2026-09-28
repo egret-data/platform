@@ -87,6 +87,74 @@ pub async fn unassign_platform_role_and_recompile(
     with_recompile(pool, Op::Unassign, ptype, pid, role_id).await
 }
 
+/// Delete platform role `role_id` and recompile every service the deletion can
+/// reach, in ONE transaction.
+///
+/// **This is a role-membership write wearing a different name, and missing that
+/// re-opened the defect SP4c exists to close.** `access_grants.role_id` is
+/// `ON DELETE CASCADE` (`migrations/0068_access_grants.sql`), so deleting a
+/// role revokes it from every holder in one statement. An admin deleting a
+/// CLEARING role to revoke a clearance therefore got: every grant gone, Cedar
+/// closing object access — and the compiled `denyExceptions` still naming the
+/// ex-holders, who went on reading the classified column with nothing in the
+/// system converging it. The eventual state was fail-closed; the interim was
+/// unbounded, and "fails closed" is a claim about the interim or it is not
+/// worth making.
+///
+/// The deletion takes the SAME three calls as a grant or a revoke, in the same
+/// order and for the same reasons ([`with_recompile`]) — affected set, locks
+/// ascending, write, recompile — with one difference stated here rather than
+/// left to be rediscovered: the affected set is computed from the role's NAME
+/// **before** the row is gone. Both consumers key on the name
+/// (`perm.grant_principals`, `classification_policies.required_roles`) and
+/// neither has an FK to `roles`, so the name survives the delete in the model
+/// while the row does not — and after the recompile the clearance's exception
+/// list is empty, which compiles to a deny withholding the column from
+/// everybody. That is the correct reading of "nobody holds the clearing role".
+///
+/// A role id that does not exist is a no-op, exactly as [`with_recompile`]
+/// treats an unresolvable name: the DELETE matches nothing and a full compile
+/// for a role nothing references would change nothing.
+pub async fn delete_platform_role_and_recompile(
+    pool: &PgPool,
+    role_id: Uuid,
+) -> Result<(), CompileError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+
+    let name = RoleRepo::name_of_in_tx(&mut tx, role_id)
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+
+    if let Some(name) = name.as_deref() {
+        let services = affected_services_for_role_membership(&mut tx, name).await?;
+        lock_services_in_tx(&mut tx, &services).await?;
+        RoleRepo::delete_in_tx(&mut tx, role_id)
+            .await
+            .map_err(|e| CompileError::Db(e.to_string()))?;
+        for summary in recompile_services_in_tx(&mut tx, &services).await? {
+            if !summary.skipped.is_empty() {
+                tracing::warn!(
+                    role = %name,
+                    skipped_count = summary.skipped.len(),
+                    "a role deletion's recompile skipped some items"
+                );
+            }
+        }
+    } else {
+        RoleRepo::delete_in_tx(&mut tx, role_id)
+            .await
+            .map_err(|e| CompileError::Db(e.to_string()))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| CompileError::Db(e.to_string()))?;
+    Ok(())
+}
+
 /// The transaction shape both directions share, so the ORDER cannot drift
 /// between them.
 ///

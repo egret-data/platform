@@ -297,6 +297,20 @@ impl RoleRepo {
     }
 
     /// Delete a role (cascades to `role_permissions` and `access_grants`).
+    ///
+    /// **Not the path the control plane takes, and deliberately so.** Deleting a
+    /// role is a role-MEMBERSHIP write wearing a different name: migration
+    /// `0068_access_grants.sql` makes `access_grants.role_id` `ON DELETE
+    /// CASCADE`, so this one statement revokes the role from every holder at
+    /// once. If the role was clearing a classification, the compiled
+    /// `denyExceptions` goes on naming the ex-holders until something
+    /// recompiles, and they go on reading the classified column — the
+    /// union-not-intersection failure SP4c exists to close, re-opened by a
+    /// revocation that looked like a delete. Use
+    /// `egret_perm_compile::delete_platform_role_and_recompile`, which takes
+    /// this crate's [`Self::delete_in_tx`] inside the same transaction as the
+    /// recompile. This method remains for callers with no engine consequence
+    /// (tests, fixtures).
     pub async fn delete(&self, id: Uuid) -> Result<()> {
         sqlx::query("DELETE FROM roles WHERE id = $1")
             .bind(id)
@@ -305,6 +319,26 @@ impl RoleRepo {
             .map_err(db_err)?;
         self.bus.publish(RolesChanged);
         Ok(())
+    }
+
+    /// [`Self::delete`] on a caller-supplied connection — see
+    /// [`Self::assign_in_tx`] for why the recompile cannot live in this crate,
+    /// and [`Self::delete`] for why a delete needs one at all.
+    pub async fn delete_in_tx(conn: &mut sqlx::PgConnection, id: Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM roles WHERE id = $1")
+            .bind(id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Announce that the role graph changed, for a caller that owned the
+    /// transaction itself and so could not let a `RoleRepo` method publish.
+    /// Called AFTER the commit: the PDP invalidates its cache on this event, and
+    /// publishing before the commit would let it re-read the pre-commit state.
+    pub fn publish_roles_changed(&self) {
+        self.bus.publish(RolesChanged);
     }
 
     /// Replace a role's permission set with `perms`, in one transaction.

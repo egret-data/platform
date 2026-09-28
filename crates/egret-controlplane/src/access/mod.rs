@@ -1115,7 +1115,19 @@ async fn delete_role(
             "Seeded roles cannot be deleted".to_string(),
         ));
     }
-    st.roles.delete(id).await?;
+    // **A role delete IS a role-membership write.** `access_grants.role_id` is
+    // `ON DELETE CASCADE` (migration 0068), so this revokes the role from every
+    // holder at once — and if the role was clearing a classification, the
+    // compiled `denyExceptions` would go on naming the ex-holders until
+    // something recompiled, letting them read the classified column after the
+    // clearance was taken away. Same three calls as assign/unassign, in the same
+    // transaction; see `egret_perm_compile::role_membership`.
+    egret_perm_compile::delete_platform_role_and_recompile(st.roles.pool(), id)
+        .await
+        .map_err(CpError::from)?;
+    // The repo publishes this itself on the non-transactional path; here the
+    // transaction was owned above, so it is published after the commit.
+    st.roles.publish_roles_changed();
     Ok(StatusCode::NO_CONTENT)
 }
 
