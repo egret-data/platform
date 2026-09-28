@@ -11,6 +11,27 @@ back. Nothing here is inferred from a policy row.
 
 `demo-trino` was not used and not modified.
 
+## Verdict
+
+**Four PASS, one FAILED, one BLOCKED. The acceptance sentence holds for the query
+paths SP4c set out to close and does NOT hold through a view.**
+
+| # | case | verdict | the actual value observed |
+|---|---|---|---|
+| 1 | intersection property — uncleared read refused, SQL Lab **and** notebook, both engines | **PASS** | Trino `Access Denied: Cannot select from columns [id, secret] in table or view gate`; StarRocks `ERROR 5204 (42000): Access denied; you need (at least one of) the SELECT privilege(s) on COLUMN secret`. Same two denials from the notebook kernel. The untagged column `plain` still returns 3 rows. |
+| 2 | cleared user still reads — **first observation of `denyExceptions` on StarRocks** | **PASS** | `d3member` gets `[[1,'classified-one'],[2,'classified-two'],[3,'classified-three']]` on both engines, SQL Lab and notebook, while `analyst` is refused in the same minute. |
+| 3 | the clearance lifts and the policy is reaped | **PASS** | profile 51: 4 → 3 policies, profile 55: 35 → 34, `classification_policies` row gone; every read returns 4 rows again. |
+| 4 | the view bypass, on both engines | **FAILED (measured Critical)** | StarRocks: `SELECT id, secret FROM sp4cgate.gate_v` → all three classified values to `analyst`. Trino: same view read succeeds in full once the view's **owner** is cleared. Both MVs **BLOCKED** (see 4c). |
+| 5 | StarRocks withholds reads only | **PASS as stated — and Trino does too, which the UI denies** | `analyst` INSERTs row 91 on StarRocks (`finished`; `d3member` reads it back) and still cannot SELECT it. The same subject also INSERTed **and DELETEd** on Trino, whose deny carries `insert, delete`. |
+| 6 | a rename does not break it | **PASS** | `PATCH {"name":"sp4cgate2"}` → policy 8840 `resources.tag.values` = `["sp4cgate2"]`, tag download `tagVersion 10 / type sp4cgate2`; deny and exception both still bite. |
+
+Two defects were measured that the six cases did not ask for, and both are
+recorded in full below: **Trino's clearance withholds reads only** (its `insert` /
+`delete` accesses match nothing, because the tag sits on a *column* resource while
+the write checks present a *table* one), and **`explain` disagrees with the engine
+about a cleared user** because `ExplainSubject.roles` is caller-supplied and
+defaults to empty.
+
 ---
 
 ## 1. Instruments, and the ones rejected
