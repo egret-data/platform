@@ -205,3 +205,57 @@ rm -f trino/catalog/iceberg.properties   # host-specific; không bao giờ commi
 3. **Policy `id` trong download** — engine Ranger thật NPE khi `RangerPolicy.getId()==null`; download phải inject `id`/`version`/`isEnabled` từ DB.
 4. **`/service` ẩn danh** — plugin Ranger gốc xác thực ngoài-luồng; `ranger.auth_token` rỗng mở `/service` cho chúng. Đặt token để bắt buộc bearer.
 5. **Mạng** — một IP host chung giữ nhất quán kiểm SSRF của Egret, S3 endpoint của Trino, và URL đã ký.
+
+---
+
+## 7. Kiểm evaluator (SP4d-1) — DỰ ĐOÁN TRƯỚC, rồi mới chạy query
+
+Thêm 2026-09-28. Mục 1-6 chứng minh **policy của Egret tới được Trino thật và được cưỡng chế**.
+Mục này chứng minh chuyện khác: `egret-ranger-eval` — bộ đánh giá Rust trả lời "cái này có được
+phép không?" mà không cần engine — **đồng ý với chính plugin đang trả lời câu đó**. Gate vi phân
+(`crates/egret-ranger-eval/tests/differential.rs`) so crate với `RangerPolicyEngineImpl` Java
+thật, nhưng harness đó **tự dựng request**: nó không thấy Trino đặt tên tài nguyên thế nào, hỏi
+ở độ mịn nào, gửi access type nào. Mục này phủ đúng khoảng trống đó.
+
+Nội dung đầy đủ (manifest của coordinator riêng, 8 case, thứ tự ba bước, dọn dẹp) là **bản
+tiếng Anh chuẩn**:
+[`docs/en/testing/2026-06-18-trino-iceberg-ranger-manual-test.md`](../../en/testing/2026-06-18-trino-iceberg-ranger-manual-test.md) §7.
+Kết quả đã đo: [`docs/en/plans/2026-09-28-sp4d-1-live-result.md`](../../en/plans/2026-09-28-sp4d-1-live-result.md).
+
+Kiểm này gồm **mười case**: tám trên một Trino coordinator riêng, và hai trên một StarRocks
+FE + CN riêng (S1 hình dạng ANCESTOR `{catalog, database}` → BỊ TỪ CHỐI; S2 cùng thế nhưng có
+`column: ["*"]` → ĐƯỢC PHÉP). Phải đo StarRocks riêng: nó chạy plugin 2.8.0 trên một service-def
+khác, tầng giữa tên là `database` chứ không phải `schema`, nên KHÔNG được suy từ kết quả Trino.
+
+Bốn điều bắt buộc, tóm tắt:
+
+1. **Tính dự đoán TRƯỚC, ghi xuống, rồi mới chạy query.** Dự đoán viết sau khi thấy kết quả
+   không chứng minh gì. Và **bất đồng là một PHÁT HIỆN**, không phải test cần chỉnh: hoặc
+   evaluator sai, hoặc harness sai, hoặc cách repo này đọc Ranger sai — phải kết luận là cái nào.
+2. **Xác nhận plugin đang giữ đúng `policyVersion` mình vừa dự đoán từ đó**, bằng cách đọc
+   `/tmp/ranger/<service>/policycache/trino_<service>.json` ngay trong pod. Coordinator do egret
+   cấp phát poll mỗi **30 giây**; query trước khi poll về là đo trạng thái CŨ.
+3. **Case row-filter phải hỏi ở độ mịn BẢNG**, không kèm `column`. `rowFilterDef.resources` của
+   cả hai engine dừng ở `table`, nên request theo cột biến mọi policy row-filter thành khớp
+   ANCESTOR và trả `NoFilter` — đọc ra như "row filter không chạy". Task 6 mất sáu test vì điều
+   này.
+
+4. **Chủ thể trên StarRocks phải là user native, KHÔNG BAO GIỜ là `root`.** `root` đi vòng qua
+   kiểm tra trước khi Ranger được hỏi (`RangerAccessController.java:115-117`), nên kết quả đo
+   bằng `root` không chứng minh được gì về một deny. Dùng `root` chỉ để DDL và để làm control
+   xác nhận đường dữ liệu đọc được.
+
+### Ghi chú hợp đồng mục này thêm vào
+
+6. **Khớp ANCESTOR KHÔNG phải là cho phép.** Policy nêu ít tầng hơn request thì không cấp gì.
+   Evaluator và Trino thật đồng ý; defect T1 của SP4a chính là hình dạng này.
+7. **Có tag service thì evaluator im lặng.** `tagPolicies` khác null trong download là
+   `Undecidable { EnvelopeConstruct(TagPolicies) }`. Auto-bind của Trino tạo kèm một service
+   `<profile>_tag`, nên mọi profile nó tạo đều dính — nhưng CHỈ khi tag service đó còn **tồn
+   tại**: lookup trong `download.rs` là best-effort, nên profile có tag service đã bị xoá (trong
+   cụm này là `demo-trino`) không nhận khối `tagPolicies` và vẫn quyết bình thường. Hãy kiểm
+   DOWNLOAD, đừng kiểm `config_jsonb`. Dự đoán trên profile KHÔNG có tag service, hoặc chấp nhận
+   không có câu trả lời.
+8. **Đừng bao giờ cắt bớt input để lấy câu trả lời.** Evaluator nói `Undecidable` thì đó LÀ kết
+   quả. Sửa download đã bắt được cho tới khi nó quyết được cũng là lỗi y như sửa test cho tới
+   khi nó xanh.

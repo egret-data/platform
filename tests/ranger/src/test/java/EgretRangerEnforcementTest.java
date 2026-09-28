@@ -11,12 +11,14 @@ import static org.junit.Assert.*;
 
 public class EgretRangerEnforcementTest {
     private RangerPolicyEngineImpl engine() throws Exception {
-        // ranger-plugins-common 2.4.0 exposes JsonUtils.jsonToObject(String, Class)
-        // (the Reader overload only exists on newer Ranger trunk), so read to a String.
+        // Read to a String: jsonToObject(String, Class) exists at every version this
+        // harness runs (2.4.0 through 2.8.0). The Reader overload does NOT exist at
+        // 2.4.0, so the String form is the one that works across the whole range.
         String json = new String(Files.readAllBytes(Paths.get("fixtures/service-policies.json")));
         ServicePolicies sp = JsonUtils.jsonToObject(json, ServicePolicies.class);
-        // A null pluginContext makes PolicyEngine.<init> NPE in ranger 2.4.0, so build a
-        // minimal one. RangerPluginConfig lives in org.apache.ranger.authorization.hadoop.config.
+        // A null pluginContext still makes PolicyEngine.<init> NPE at 2.5.0 (reproduced
+        // 2026-09-28), so build a minimal one -- this is not a 2.4.0-only workaround.
+        // RangerPluginConfig lives in org.apache.ranger.authorization.hadoop.config.
         RangerPluginConfig cfg = new RangerPluginConfig(
                 "trino", "trino_prod", "egret", null, null, new RangerPolicyEngineOptions());
         RangerPluginContext ctx = new RangerPluginContext(cfg);
@@ -34,6 +36,11 @@ public class EgretRangerEnforcementTest {
         m.put("catalog","hive"); m.put("schema","default"); m.put("table","t");
         return request(user, access, m);
     }
+    // A FRESH request per evaluation, deliberately. `preProcess` early-returns
+    // on `ISREQUESTPREPROCESSED`; `setResource` clears that flag, `setUser`
+    // does not (javap -c, 2.5.0). Reusing one request and only changing the
+    // user would evaluate every case after the first against a stale
+    // `token:USER` — failing OPEN, and silently.
     private RangerAccessRequestImpl request(String user, String access, Map<String,Object> m) {
         RangerAccessRequestImpl r = new RangerAccessRequestImpl();
         r.setResource(new RangerAccessResourceImpl(m));

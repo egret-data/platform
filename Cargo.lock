@@ -3536,6 +3536,7 @@ dependencies = [
  "egret-events",
  "egret-metastore",
  "egret-policy-api",
+ "egret-ranger-eval",
  "egret-secrets",
  "egret-test-db",
  "http-body-util",
@@ -3629,6 +3630,14 @@ dependencies = [
  "serde_json",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "egret-ranger-eval"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

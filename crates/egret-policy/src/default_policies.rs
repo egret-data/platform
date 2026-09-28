@@ -15,38 +15,16 @@
 
 use crate::service_def::{starrocks_service_def, trino_service_def};
 use crate::{PolicyStore, PolicyStoreError};
+// The hierarchy walker lives in `egret-ranger-eval` (SP4d Task 4), which
+// needs the same walk to reproduce Ranger's resource matching. There is
+// exactly one: a second walker that disagreed with this seeder would hand
+// the evaluator a different hierarchy from the one the seeded policies were
+// built against, and the disagreement would only ever surface as a wrong
+// access decision. The dependency runs seeder -> evaluator, never back:
+// `egret-ranger-eval` is pure (no sqlx, no tokio, no network, no
+// filesystem) and knows nothing about this crate.
+use egret_ranger_eval::servicedef::{hierarchy_chain, is_hierarchy_leaf, parse_resources};
 use serde_json::{json, Map, Value};
-
-struct ResourceDef {
-    name: String,
-    parent: String,
-    is_valid_leaf: bool,
-    access_type_restrictions: Vec<String>,
-}
-
-fn parse_resources(def: &Value) -> Vec<ResourceDef> {
-    def["resources"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|r| {
-            let name = r["name"].as_str()?.to_string();
-            Some(ResourceDef {
-                name,
-                parent: r["parent"].as_str().unwrap_or("").to_string(),
-                is_valid_leaf: r["isValidLeaf"].as_bool().unwrap_or(false),
-                access_type_restrictions: r["accessTypeRestrictions"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            })
-        })
-        .collect()
-}
 
 /// Every top-level accessType name in the def, excluding the `all` alias
 /// (its `impliedGrants` already enumerate these individually — listing both
@@ -61,29 +39,6 @@ fn all_access_types(def: &Value) -> Vec<String> {
         .filter(|n| *n != "all")
         .map(str::to_string)
         .collect()
-}
-
-/// A resource is a hierarchy termination point if it's explicitly marked
-/// `isValidLeaf`, or if it's a true tree leaf (nothing declares it as parent).
-fn is_hierarchy_leaf(res: &ResourceDef, all: &[ResourceDef]) -> bool {
-    res.is_valid_leaf || !all.iter().any(|r| r.parent == res.name)
-}
-
-/// Root-to-leaf resource-name chain for one hierarchy termination point.
-fn hierarchy_chain<'a>(leaf: &'a ResourceDef, all: &'a [ResourceDef]) -> Vec<&'a ResourceDef> {
-    let mut chain = vec![leaf];
-    let mut cur = leaf;
-    while !cur.parent.is_empty() {
-        match all.iter().find(|r| r.name == cur.parent) {
-            Some(p) => {
-                chain.push(p);
-                cur = p;
-            }
-            None => break,
-        }
-    }
-    chain.reverse();
-    chain
 }
 
 /// Build one default all-access policy per resource hierarchy in `def`,
@@ -223,6 +178,7 @@ impl PolicyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egret_ranger_eval::servicedef::ResourceDef;
 
     #[test]
     fn computes_all_13_trino_hierarchies() {
