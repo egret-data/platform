@@ -47,7 +47,11 @@ the live gate.
   Trino 470 loads `ranger-plugins-common-2.5.0`, StarRocks fe-ubuntu 4.1 loads
   `2.8.0`. Plugin version is therefore an **input** to the evaluator alongside
   engine type, and any gate that certifies only one version certifies only one
-  engine. Both jars are already in `~/.m2`, so covering both needs no network.
+  engine. All four `ranger-plugins-common` jars are already in `~/.m2`, but the
+  2.8.0 build additionally resolves `javax.servlet:javax.servlet-api:4.0.0`,
+  which a cold `~/.m2` does not have — so a **first** 2.8.0 run needs network.
+  Once warmed, `mvn -o test -Dranger.version=2.8.0` runs fully offline
+  (measured 2026-09-28: exit 0, `Tests run: 4, Failures: 0`).
 
 ---
 
