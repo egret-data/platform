@@ -419,6 +419,61 @@ pub(crate) async fn workspaces_for_username(
     Ok(ids)
 }
 
+/// Every role NAME `username` currently holds through a live, direct
+/// (`principal_type = 'user'`), `allow`, unexpired `access_grants` row — the
+/// exact predicate [`role_usernames`] reads, in the OTHER direction (role ->
+/// holders there, holder -> roles here), off the SAME rows joined on the
+/// STORED `users.username`.
+///
+/// **SP4c Task 7, and it is SP4a Task 15's D3 defect 2 on the field next to
+/// the one that was fixed.** `/perm/explain` used to take its subject's roles
+/// from the REQUEST BODY (`ExplainSubject::roles`, caller-supplied,
+/// `#[serde(default)]` to `vec![]`), and the live gate
+/// (`docs/en/plans/2026-09-28-sp4c-live-result.md`) measured it wrong in both
+/// directions at once: asked the natural way, naming only a user, it reported
+/// `clearance_required` for the subject the engine had served the column to in
+/// the same minute; asked with `{"user":"analyst","roles":["sp4c_cleared"]}` it
+/// reported `allowed` for the subject the engine refuses, because a caller
+/// asserting a role it does not hold was simply believed. A diagnostic that can
+/// be told a lie repeats it. This function is `explain`'s read, called with
+/// `body.subject.user` in place of that list, so the evaluator matches a
+/// `role` principal against the same fact the clearance compiler expands.
+///
+/// **Scope-free, deliberately**, exactly as in [`role_usernames`]: a role grant
+/// can be scoped to the platform, a workspace or an object, but
+/// `egret_perm::eval::matches_principal` matches `PrincipalKind::Role` against
+/// a flat `Subject::roles` with no scope, and the compiled engine policy names
+/// the holders of the role with no scope either. Reading any live `allow` grant
+/// of the role is what keeps the three in agreement.
+///
+/// A username with no `users` row (never minted, or simply wrong) resolves to
+/// no roles, which is correct — that identity does not exist on any engine
+/// either, so no compiled `denyExceptions` entry can name it.
+pub(crate) async fn roles_for_username(
+    conn: &mut sqlx::PgConnection,
+    username: &str,
+) -> Result<Vec<String>, CompileError> {
+    let mut names: Vec<String> = sqlx::query_scalar(
+        "SELECT r.name FROM access_grants ag \
+           JOIN roles r ON r.id = ag.role_id \
+           JOIN users u ON u.id = ag.principal_id \
+          WHERE u.username = $1 \
+            AND ag.principal_type = 'user' \
+            AND ag.effect = 'allow' \
+            AND (ag.expires_at IS NULL OR ag.expires_at > now())",
+    )
+    .bind(username)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| CompileError::Db(e.to_string()))?;
+    // One person can hold the same role through more than one grant (platform
+    // and workspace, say); the evaluator asks only whether the name is in the
+    // list, so the duplicate would be noise in every `explain` response.
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 /// Rewrite one `PrincipalSet` in place: every `WorkspaceMembers` and every
 /// `Role` entry becomes the `User` entries it stands for, everything else is
 /// carried through untouched and in its original order. Duplicates are

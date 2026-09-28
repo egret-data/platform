@@ -2106,9 +2106,12 @@ async fn a_preview_of_nothing_or_of_an_unknown_id_is_refused() {
 // explain
 // ---------------------------------------------------------------------------
 
+/// The subject carries no `roles` — SP4c Task 7 removed the field from the
+/// wire, and `explain` resolves the subject's roles server-side. See
+/// `explain_ignores_a_caller_supplied_role_and_resolves_the_subjects_own`.
 fn explain_body(catalog_id: Uuid, user: &str) -> Value {
     json!({
-        "subject": { "user": user, "groups": [], "roles": [] },
+        "subject": { "user": user, "groups": [] },
         "action": "read",
         "target": { "catalog_id": catalog_id, "schema": "sales", "table": "orders", "column": null }
     })
@@ -2391,6 +2394,173 @@ async fn explain_agrees_with_the_compiled_policy_for_a_collision_suffixed_member
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body_a}");
     assert_eq!(body_a["allowed"], true, "body: {body_a}");
+}
+
+/// **SP4c Task 7.** `explain` must resolve the subject's ROLES itself, and a
+/// `roles` list in the request body must not be honoured.
+///
+/// The SP4c live gate (`docs/en/plans/2026-09-28-sp4c-live-result.md`)
+/// measured `ExplainSubject.roles` wrong in both directions at once, on the
+/// field next to the `workspaces` SP4a Task 15 removed for the same reason:
+///
+/// - `{"user":"analyst","roles":["sp4c_cleared"]}` answered `allowed` for the
+///   very user BOTH engines refuse — a caller asserting a role it does not
+///   hold was believed, so the diagnostic could be told a lie and repeated it.
+/// - `{"user":"d3member"}`, the natural call, answered `clearance_required`
+///   for the user the engine had served the classified column to in the same
+///   minute, because the field defaulted to empty.
+///
+/// Both halves are asserted here against ONE fixture, because a test that only
+/// checked the lie is also passed by an `explain` that ignores roles entirely
+/// and therefore refuses everybody — which is the second defect wearing the
+/// first one's fix.
+#[tokio::test]
+async fn explain_ignores_a_caller_supplied_role_and_resolves_the_subjects_own() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    let tag_id: Uuid = sqlx::query_scalar("SELECT id FROM tags WHERE key = $1")
+        .bind(&f.tag_key)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("the fixture's tag");
+
+    let role_name = unique("sp4c-clearing-role");
+    let role_id: Uuid =
+        sqlx::query_scalar("INSERT INTO roles (scope, name) VALUES ('platform', $1) RETURNING id")
+            .bind(&role_name)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("clearing role");
+
+    let cleared = f
+        .users
+        .insert_local(
+            &format!("{}@example.com", unique("cleared")),
+            "Cleared",
+            "x",
+        )
+        .await
+        .expect("insert cleared user")
+        .0;
+    let uncleared = f
+        .users
+        .insert_local(
+            &format!("{}@example.com", unique("uncleared")),
+            "Uncleared",
+            "x",
+        )
+        .await
+        .expect("insert uncleared user")
+        .0;
+    let mut conn = f.db.pool.acquire().await.expect("acquire conn");
+    let cleared_name =
+        egret_auth::users::ensure_username_via(&mut conn, egret_core::UserId(cleared))
+            .await
+            .expect("mint cleared username");
+    let uncleared_name =
+        egret_auth::users::ensure_username_via(&mut conn, egret_core::UserId(uncleared))
+            .await
+            .expect("mint uncleared username");
+    drop(conn);
+
+    // Only ONE of them actually holds the clearing role.
+    let res = sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL)",
+    )
+    .bind(cleared)
+    .bind(role_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("role grant");
+    assert_eq!(res.rows_affected(), 1, "the role grant row must exist");
+
+    // Gate the fixture's tag on that role, and give BOTH subjects a grant that
+    // would allow the read on its own — so a clearance denial is the only
+    // thing that can refuse either of them, and `allowed` is a real verdict
+    // rather than "no grant matched" wearing a different name.
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, '{}') \
+         ON CONFLICT (tag_id) DO UPDATE SET required_roles = EXCLUDED.required_roles",
+    )
+    .bind(tag_id)
+    .bind(vec![role_name.clone()])
+    .execute(&f.db.pool)
+    .await
+    .expect("gate the tag");
+    for name in [&cleared_name, &uncleared_name] {
+        let (status, body) = into_json(
+            f.app()
+                .oneshot(req(
+                    "POST",
+                    "/perm/grants",
+                    &token,
+                    Some(grant_body(f.catalog_id, name)),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    }
+
+    // 1. The lie. The uncleared subject asserts the clearing role it does not
+    //    hold; `explain` must answer for the subject the engine sees.
+    let mut lying = explain_body(f.catalog_id, &uncleared_name);
+    lying["target"]["column"] = json!("email");
+    lying["subject"]["roles"] = json!([role_name]);
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", &token, Some(lying)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["allowed"], false,
+        "a caller-supplied role must not clear a subject who does not hold it — this is the \
+         live gate's `{{\"user\":\"analyst\",\"roles\":[\"sp4c_cleared\"]}}` answering `allowed` \
+         for the user both engines refuse; body: {body}"
+    );
+    assert_eq!(
+        body["reasons"][0]["kind"], "clearance_required",
+        "and the reason must still be the clearance, not a grant miss; body: {body}"
+    );
+    assert_eq!(
+        body["reasons"][0]["tag"], f.tag_key,
+        "the reason must name the gating tag; body: {body}"
+    );
+    assert_eq!(
+        body["reasons"][0]["required_roles"],
+        json!([role_name]),
+        "body: {body}"
+    );
+
+    // 2. The other direction. The subject who DOES hold the role is cleared
+    //    without naming it, because the server read it from `access_grants`.
+    let mut truthful = explain_body(f.catalog_id, &cleared_name);
+    truthful["target"]["column"] = json!("email");
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req("POST", "/perm/explain", &token, Some(truthful)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(
+        body["allowed"], true,
+        "the subject holding the clearing role must be allowed WITHOUT naming it in the \
+         request — resolving roles server-side is what makes the natural call correct; \
+         body: {body}"
+    );
+    assert_ne!(
+        body["reasons"][0]["kind"], "clearance_required",
+        "body: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -274,13 +274,33 @@ pub struct RuleView {
 /// database already answers, and keeping the field would let a caller
 /// override that fact when what it should be describing is the caller's
 /// principal, not a value only egret can verify.
+///
+/// **And no `roles` field either (SP4c Task 7 — the same defect, on the field
+/// next to it, removed for the same reason).** The SP4c live gate
+/// (`docs/en/plans/2026-09-28-sp4c-live-result.md`) measured both directions
+/// of it: naming only a `user` returned `clearance_required` for the subject
+/// the engine had just served the classified column to, and
+/// `{"user":"analyst","roles":["sp4c_cleared"]}` returned `allowed` for the
+/// subject the engine refuses — a caller asserting a role it does not hold was
+/// believed, so the diagnostic could be told a lie and would repeat it.
+/// `explain` now reads the subject's roles from `access_grants`
+/// (`crate::members::roles_for_username`) through the same live/`allow`/
+/// unexpired predicate the clearance compiler's own expansion uses. **This is
+/// not a "what-if" endpoint**: D9 (SP4b) defines it as answering why a subject
+/// **is** allowed or refused, and a field that let a caller invent the
+/// subject's clearance would answer a different question while looking
+/// authoritative.
+///
+/// `groups` remains caller-supplied and is deliberately left so: egret runs no
+/// usersync and no group provider, so a group name reaches no engine at all
+/// (D7/D2) and the UI already says the field is matched here and nowhere else.
+/// Resolving it server-side would give the field an authority the data plane
+/// does not honour, which is the opposite of the fix above.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ExplainSubject {
     pub user: String,
     #[serde(default)]
     pub groups: Vec<String>,
-    #[serde(default)]
-    pub roles: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -1258,6 +1278,11 @@ async fn explain(
     // expansion reads, rather than trusting a caller-supplied list — see
     // `ExplainSubject`'s doc comment for what trusting one instead cost.
     let workspaces = crate::members::workspaces_for_username(&mut conn, &body.subject.user).await?;
+    // SP4c Task 7: the same, for the roles a clearance is checked against. A
+    // `roles` in the request body is now an unknown field and is ignored, not
+    // honoured — the live gate measured that honouring one answered `allowed`
+    // for the very user both engines refuse.
+    let roles = crate::members::roles_for_username(&mut conn, &body.subject.user).await?;
 
     // SP4c Task 4/D4: the clearance gates `evaluate` must agree with the
     // compiled engine about — only tags whose `required_roles` is non-empty,
@@ -1276,7 +1301,7 @@ async fn explain(
     let subject = Subject {
         user: body.subject.user,
         groups: body.subject.groups,
-        roles: body.subject.roles,
+        roles,
         workspaces,
     };
     let decision = evaluate(

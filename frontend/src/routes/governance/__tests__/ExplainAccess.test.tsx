@@ -202,17 +202,47 @@ describe("ExplainAccess — a group in the subject is a permissive-direction lie
     expect(screen.getByText(/can read Allowed while the engine refuses/)).toBeInTheDocument();
   });
 
-  /** Roles must NOT carry it: Ranger's access items do have a roles bucket, so
-   *  a role-matched answer is not subject to this blind spot, and a warning
-   *  shown for everything teaches an operator to ignore it. */
-  test("does not warn about Roles", async () => {
+  /**
+   * **SP4c Task 7.** There is no Roles field to warn about any more, and its
+   * absence is the control. The live gate measured `{user: "analyst", roles:
+   * ["sp4c_cleared"]}` answering `allowed` for the user both engines refuse —
+   * a caller asserting a role the subject does not hold was believed — so the
+   * field left the wire (`ExplainSubject.roles`) exactly as SP4b-1 removed
+   * `workspaces`, and `explain` resolves the subject's roles from
+   * `access_grants` itself. Asserted on BOTH halves: the input is gone, and
+   * the request body carries no `roles` key, because a page that kept sending
+   * one against a server that ignores it would look like it still worked.
+   */
+  test("offers no Roles field and sends no roles — explain resolves them server-side", async () => {
     const user = userEvent.setup();
     renderPage();
 
-    await user.type(screen.getByLabelText("Roles"), "analyst{Enter}");
+    expect(screen.queryByLabelText("Roles")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/add a role/i)).not.toBeInTheDocument();
 
-    expect(screen.getByText("analyst")).toBeInTheDocument();
-    expect(screen.queryByText(/no group provider or usersync/)).not.toBeInTheDocument();
+    await submit(user);
+
+    expect(mutateAsync).toHaveBeenCalledTimes(1);
+    const sent = mutateAsync.mock.calls[0][0].data.subject;
+    expect(sent).not.toHaveProperty("roles");
+    expect(sent.user).toBe("alice-doe");
+  });
+
+  /**
+   * And the page says so where the answer is read: this tool reports why a
+   * subject IS allowed or refused (D9), not what would happen if they held
+   * some other role. A "what-if" tool would be a different product.
+   */
+  test("states that the subject's roles are resolved, not asserted", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    expect(
+      await screen.findByText(
+        /the subject.s roles are resolved here, not asserted: this answers why a subject is allowed or refused as they are, not what would happen if they held some other role/i,
+      ),
+    ).toBeInTheDocument();
   });
 });
 

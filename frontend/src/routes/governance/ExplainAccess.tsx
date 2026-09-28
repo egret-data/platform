@@ -224,11 +224,18 @@ function SubjectUserField({
   );
 }
 
-/** Free-text chip list for `groups`/`roles` — unlike `user`, explain accepts any
- *  string a caller asserts the subject belongs to; there is no allocated ref to
+/** Free-text chip list for `groups` — unlike `user`, explain accepts any string
+ *  a caller asserts the subject belongs to; there is no allocated ref to
  *  resolve. `warning` is rendered once at least one value is present: a hazard
  *  belongs at the point of choice, which is how `PrincipalPicker` carries the
- *  same fact. */
+ *  same fact.
+ *
+ *  There is no ROLES chip list any more (SP4c Task 7). `ExplainSubject.roles`
+ *  left the wire because a caller asserting a role the subject does not hold
+ *  was believed: the live gate measured `{user: "analyst", roles:
+ *  ["sp4c_cleared"]}` answering `allowed` for the user both engines refuse.
+ *  `explain` reads the subject's roles from `access_grants` itself, exactly as
+ *  SP4b-1 made it read their workspaces. */
 function ChipListField({
   label,
   values,
@@ -306,7 +313,6 @@ function ChipListField({
 export default function ExplainAccess() {
   const [user, setUser] = useState("");
   const [groups, setGroups] = useState<string[]>([]);
-  const [roles, setRoles] = useState<string[]>([]);
   const [action, setAction] = useState<Action>("read");
   const [target, setTarget] = useState<Scope>(EMPTY_SCOPE);
 
@@ -341,7 +347,6 @@ export default function ExplainAccess() {
           subject: {
             user: user.trim(),
             groups: groups.length ? groups : undefined,
-            roles: roles.length ? roles : undefined,
           },
           action,
           target,
@@ -400,7 +405,6 @@ export default function ExplainAccess() {
               </Badge>
             }
           />
-          <ChipListField label="Roles" values={roles} onChange={setRoles} placeholder="Add a role…" />
 
           <div className="space-y-1.5">
             <Label htmlFor="explain-action">Action</Label>
@@ -504,6 +508,11 @@ export default function ExplainAccess() {
                 A group in the subject is matched here but not by the engine: there is no
                 group provider or usersync, so an answer that depends on a group can read
                 &quot;allowed&quot; for access the engine refuses.
+              </p>
+              <p>
+                The subject&apos;s roles are resolved here, not asserted: this answers why
+                a subject is allowed or refused as they are, not what would happen if they
+                held some other role.
               </p>
             </AlertDescription>
           </Alert>
