@@ -12,6 +12,7 @@
 //! `ServicePolicySet::all_unmodelled` (I3).
 
 use egret_ranger_eval::model::{ItemBucket, RangerPolicy, ServicePolicySet, Unmodelled};
+use serde_json::{json, Value};
 
 /// `tests/ranger/fixtures/service-policies.json` — a captured real Ranger
 /// download (`ServicePolicies` envelope) with 3 policies covering access,
@@ -93,7 +94,7 @@ fn parses_captured_service_policies_fixture() {
         .data_mask_info
         .as_ref()
         .expect("dataMaskInfo present");
-    assert_eq!(mask_info.mask_type, "MASK_HASH");
+    assert_eq!(mask_info.mask_type.as_deref(), Some("MASK_HASH"));
     assert!(mask.unmodelled.is_empty(), "{:?}", mask.unmodelled);
 
     let rowfilter = set
@@ -554,4 +555,137 @@ fn all_unmodelled_folds_envelope_and_policy_level_reports() {
                 .map(|p| p.unmodelled.len())
                 .sum::<usize>()
     );
+}
+
+// ── the absent/null sweep (SP4d-1 Task 7, finding F3) ────────────────────
+
+/// **Every expectation here is a MEASURED value**, read back from
+/// `JsonUtils.jsonToObject(json, <class>)` on the real
+/// `ranger-plugins-common` 2.5.0 classpath — not from the wire format, and
+/// not from the field declarations.
+///
+/// That distinction is the finding. `model.rs` was written by reading the
+/// JSON; Ranger reads the same bytes through Gson into classes whose no-arg
+/// constructors call setters that substitute non-null defaults. Gson assigns
+/// fields directly, so an ABSENT key keeps the constructor's value, and an
+/// EXPLICIT null lands in the field and is read back through the same
+/// getters — Ranger cannot tell the two apart. Measured, both shapes:
+///
+/// ```text
+/// RangerPolicy{}            policyPriority=0  isEnabled=true  isDenyAllElse=false
+///                           resources=Map(0)  policyItems=List(0) … validitySchedules=List(0)
+///                           policyType=NULL   additionalResources=NULL  conditions=NULL
+/// RangerPolicyResource{}    values=List(0)    isExcludes=false  isRecursive=false
+/// RangerPolicyItem{}        users/groups/roles/accesses/conditions=List(0)  delegateAdmin=false
+/// RangerPolicyItemAccess{}  type=""           isAllowed=true
+/// ```
+///
+/// Before this was measured, `serde` rejected every explicit null with
+/// `invalid type: null` — so this crate REFUSED documents the live plugin
+/// enforces. A reader that cannot read is not fail-safe; it simply has no
+/// answer where one is needed.
+#[test]
+fn absent_and_null_keys_take_rangers_own_defaults() {
+    let parse = |policy: Value| -> ServicePolicySet {
+        serde_json::from_value(json!({"serviceName": "trino", "policies": [policy]}))
+            .expect("Ranger accepts this shape, so this crate must too")
+    };
+
+    // Everything absent.
+    let p = parse(json!({"name": "p"}));
+    let p = &p.policies[0];
+    assert_eq!(
+        p.policy_type, 0,
+        "policyType null is Ranger's access bucket"
+    );
+    assert!(p.is_enabled, "isEnabled defaults TRUE, not false");
+    assert_eq!(p.policy_priority, 0);
+    assert!(!p.is_deny_all_else);
+    assert!(p.resources.is_empty());
+    assert!(p.policy_items.is_empty());
+
+    // Everything explicitly null. Ranger reads this identically.
+    let p = parse(json!({
+        "name": null, "service": null, "policyType": null, "isEnabled": null,
+        "policyPriority": null, "isDenyAllElse": null, "resources": null,
+        "additionalResources": null, "policyItems": null, "denyPolicyItems": null,
+        "allowExceptions": null, "denyExceptions": null, "dataMaskPolicyItems": null,
+        "rowFilterPolicyItems": null, "conditions": null, "validitySchedules": null,
+    }));
+    let p = &p.policies[0];
+    assert_eq!(p.name, "");
+    assert_eq!(p.policy_type, 0);
+    assert!(p.is_enabled);
+    assert_eq!(p.policy_priority, 0);
+    assert!(!p.is_deny_all_else);
+    assert!(p.resources.is_empty());
+    assert!(p.policy_items.is_empty());
+    assert!(
+        p.unmodelled.is_empty(),
+        "a null `conditions` is an EMPTY condition list, not a condition: {:?}",
+        p.unmodelled
+    );
+
+    // `RangerPolicyResource`: null lists and null booleans.
+    let p = parse(json!({
+        "name": "p",
+        "resources": {"catalog": {"values": null, "isExcludes": null, "isRecursive": null}},
+    }));
+    let level = &p.policies[0].resources["catalog"];
+    assert!(level.values.is_empty());
+    assert!(!level.is_excludes);
+    assert!(!level.is_recursive);
+
+    // `RangerPolicyItemAccess`: an absent or null `type` is `""`, and a null
+    // `isAllowed` is TRUE. `""` matches no concrete access type, so this is a
+    // decision rather than a refusal — and it must not be an `ExplicitDeny`
+    // either, since `isAllowed` came back true.
+    let p = parse(json!({
+        "name": "p",
+        "policyItems": [
+            {"users": ["a"], "accesses": [{"isAllowed": true}]},
+            {"users": ["a"], "accesses": [{"type": null, "isAllowed": null}]},
+        ],
+    }));
+    let items = &p.policies[0].policy_items;
+    assert_eq!(items[0].accesses[0].access_type, "");
+    assert!(items[0].accesses[0].is_allowed);
+    assert_eq!(items[1].accesses[0].access_type, "");
+    assert!(items[1].accesses[0].is_allowed);
+    assert!(p.policies[0].unmodelled.is_empty());
+
+    // `RangerDataMaskPolicyItem` / `RangerRowFilterPolicyItem`: the info
+    // object is substituted, so it is present even when the JSON says null.
+    // The BEHAVIOURS differ — see the mask_filter tests — but the READING
+    // does not.
+    let p = parse(json!({
+        "name": "p", "policyType": 1,
+        "dataMaskPolicyItems": [{"users": ["a"], "dataMaskInfo": null}],
+    }));
+    let info = p.policies[0].data_mask_policy_items[0]
+        .data_mask_info
+        .as_ref()
+        .expect("Ranger substitutes an empty RangerPolicyItemDataMaskInfo");
+    assert_eq!(
+        info.mask_type, None,
+        "…whose dataMaskType is NULL, not \"\""
+    );
+
+    let p = parse(json!({
+        "name": "p", "policyType": 2,
+        "rowFilterPolicyItems": [{"users": ["a"]}],
+    }));
+    let info = p.policies[0].row_filter_policy_items[0]
+        .row_filter_info
+        .as_ref()
+        .expect("Ranger substitutes an empty RangerPolicyItemRowFilterInfo");
+    assert_eq!(info.filter_expr, None);
+
+    // The four ACCESS buckets have no such field on `RangerPolicyItem`, so a
+    // `dataMaskInfo` written into `policyItems` is dropped by Ranger.
+    let p = parse(json!({
+        "name": "p",
+        "policyItems": [{"users": ["a"], "dataMaskInfo": {"dataMaskType": "MASK"}}],
+    }));
+    assert_eq!(p.policies[0].policy_items[0].data_mask_info, None);
 }

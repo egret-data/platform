@@ -384,8 +384,16 @@ pub enum UndecidableCause {
 pub struct MaskResult {
     pub policy_id: Option<i64>,
     pub policy_name: String,
-    /// `setMaskType(dataMaskInfo.getDataMaskType())`. Never resolved.
-    pub mask_type: String,
+    /// `setMaskType(dataMaskInfo.getDataMaskType())`, passed straight
+    /// through with no null check. Never resolved.
+    ///
+    /// `None` is Ranger reporting a null `maskType` — which a matched item
+    /// carrying no `dataMaskInfo` at all produces, since the model class
+    /// substitutes an empty one (finding F2). It is NOT the same as
+    /// [`MaskDecision::NoMask`]: the host applies no transform either way,
+    /// but this one DETERMINED the result, so no lower-priority policy is
+    /// ever consulted.
+    pub mask_type: Option<String>,
     /// `setMaskedValue(...)`: `dataMaskInfo.getValueExpr()` verbatim.
     /// `None` when the policy carries none — Ranger calls
     /// `setMaskedValue(null)`.
@@ -1062,11 +1070,25 @@ impl<'a> PolicyView<'a> {
     /// own `updateAccessResult`.
     ///
     /// `None` means the policy determines nothing, which is NOT the same as
-    /// "no item matched": a matched item whose `dataMaskInfo` is null
-    /// returns from `updateAccessResult` at its first `ifnull` without
-    /// touching the result, and `getMatchingPolicyItem` has already
-    /// committed to that item — later items in the same policy are never
-    /// tried. The engine loop then moves on to the next policy.
+    /// "no item matched": `getMatchingPolicyItem` has already committed to
+    /// the first matching item, so later items in the same policy are never
+    /// tried, and the engine loop moves on to the next policy.
+    ///
+    /// The two sub-kinds reach that state by DIFFERENT routes, and assuming
+    /// they were the same is finding F2 (SP4d-1 Task 7):
+    ///
+    /// * **Mask.** `RangerDefaultDataMaskPolicyItemEvaluator.updateAccessResult`
+    ///   opens with `if (getDataMaskInfo() == null) return;` — but
+    ///   [`crate::model::PolicyItem::data_mask_info`] is always `Some` on this
+    ///   bucket, because Ranger's model class cannot hold a null there. So
+    ///   the guard never fires, a matched mask item ALWAYS determines, and
+    ///   the `mask_type` it reports may itself be `None`.
+    /// * **Row filter.** `RangerDefaultRowFilterPolicyItemEvaluator.updateAccessResult`
+    ///   has no such guard at the top, but wraps its
+    ///   `policyEvaluator.updateAccessResult(...)` call in
+    ///   `if (result.getFilterExpr() != null)`. A null `filterExpr` therefore
+    ///   determines NOTHING and the search continues. An empty string is not
+    ///   null and does determine.
     fn decide_sub(
         &self,
         kind: DecisionKind,
@@ -1083,6 +1105,7 @@ impl<'a> PolicyView<'a> {
 
         match kind {
             DecisionKind::Access => None,
+            // Always `Some` for a matched mask item — see the doc above.
             DecisionKind::DataMask => item.data_mask_info.as_ref().map(|info| {
                 SubResult::Mask(MaskResult {
                     policy_id: self.policy.id,

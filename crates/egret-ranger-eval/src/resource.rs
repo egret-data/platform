@@ -635,13 +635,13 @@ impl ValueMatcher {
                     resource_value.ends_with(p)
                 }
             }
-            ValueMatcher::Wildcard(p) => {
-                if ignore_case {
-                    glob_match(&fold(p), &fold(resource_value))
-                } else {
-                    glob_match(p, resource_value)
-                }
-            }
+            // NOT folded before matching, unlike the three above:
+            // `wildcard_match` does index arithmetic against the text, and a
+            // whole-string `fold` can change its LENGTH (`İ` lowercases to two
+            // code points), which would shift every index away from the ones
+            // Java computes. It takes `ignore_case` and compares per position
+            // instead, which is also what `IOCase.checkRegionMatches` does.
+            ValueMatcher::Wildcard(p) => wildcard_match(p, resource_value, ignore_case),
         }
     }
 }
@@ -657,44 +657,254 @@ fn fold(s: &str) -> String {
     s.to_lowercase()
 }
 
-/// `FilenameUtils.wildcardMatch`: `*` matches any run of characters
-/// including none, `?` matches exactly one character, and the whole value
-/// must be consumed.
+/// One token of a wildcard pattern, as `FilenameUtils.splitOnTokens` produces
+/// them: the `String[]` it returns holds the one-character strings `"?"` and
+/// `"*"` plus maximal runs of everything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Token {
+    /// `"*"` — any run of characters, including none. Consecutive `*` in the
+    /// pattern collapse into ONE of these.
+    Any,
+    /// `"?"` — exactly one character. These do NOT collapse.
+    One,
+    Literal(Vec<char>),
+}
+
+/// `FilenameUtils.splitOnTokens`, read from `javap -c` of
+/// `commons-io-2.8.0.jar` and confirmed instruction-for-instruction identical
+/// in `commons-io-2.16.1.jar` (see [`wildcard_match`] for which jar each
+/// engine links).
 ///
-/// Adapted from `crates/egret-perm/src/eval.rs:355-395`, which was written
-/// precisely because a matcher that only special-cased the literal `"*"`
-/// gives wrong answers. Unchanged from that version in algorithm; case
-/// folding is applied by the caller rather than here, because whether to
-/// fold is the service-def's decision, not the glob's.
-fn glob_match(pattern: &str, value: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let v: Vec<char> = value.chars().collect();
-    // Classic greedy wildcard match with backtracking: `star` remembers the
-    // last `*` seen in the pattern and how far into `value` we'd consumed
-    // when we saw it, so a later mismatch can retry by having that `*`
-    // absorb one more character instead of failing outright.
-    let (mut pi, mut vi) = (0usize, 0usize);
-    let (mut star, mut star_vi) = (None::<usize>, 0usize);
-    while vi < v.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == v[vi]) {
-            pi += 1;
-            vi += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some(pi);
-            star_vi = vi;
-            pi += 1;
-        } else if let Some(s) = star {
-            pi = s + 1;
-            star_vi += 1;
-            vi = star_vi;
+/// ```java
+/// if (text.indexOf('?') == -1 && text.indexOf('*') == -1) return new String[]{text};
+/// char[] array = text.toCharArray();
+/// ArrayList<String> list = new ArrayList<>();
+/// StringBuilder buffer = new StringBuilder();
+/// char prevChar = 0;
+/// for (char ch : array) {
+///     if (ch == '?' || ch == '*') {
+///         if (buffer.length() != 0) { list.add(buffer.toString()); buffer.setLength(0); }
+///         if (ch == '?') { list.add("?"); }
+///         else if (prevChar != '*') { list.add("*"); }
+///     } else { buffer.append(ch); }
+///     prevChar = ch;
+/// }
+/// if (buffer.length() != 0) list.add(buffer.toString());
+/// ```
+///
+/// `prevChar` is the previous character of the PATTERN, not the previous
+/// token, so `**` collapses but `*?*` keeps both stars.
+fn split_on_tokens(pattern: &[char]) -> Vec<Token> {
+    if !pattern.contains(&'?') && !pattern.contains(&'*') {
+        return vec![Token::Literal(pattern.to_vec())];
+    }
+    let mut tokens = Vec::new();
+    let mut buffer: Vec<char> = Vec::new();
+    let mut prev_char = '\u{0}';
+    for &ch in pattern {
+        if ch == '?' || ch == '*' {
+            if !buffer.is_empty() {
+                tokens.push(Token::Literal(std::mem::take(&mut buffer)));
+            }
+            if ch == '?' {
+                tokens.push(Token::One);
+            } else if prev_char != '*' {
+                tokens.push(Token::Any);
+            }
         } else {
+            buffer.push(ch);
+        }
+        prev_char = ch;
+    }
+    if !buffer.is_empty() {
+        tokens.push(Token::Literal(buffer));
+    }
+    tokens
+}
+
+/// `IOCase.checkRegionMatches(str, strStartIndex, search)`, i.e.
+/// `str.regionMatches(ignoreCase, strStartIndex, search, 0, search.length())`.
+fn check_region_matches(text: &[char], start: usize, search: &[char], ignore_case: bool) -> bool {
+    if start > text.len() || text.len() - start < search.len() {
+        return false;
+    }
+    text[start..start + search.len()]
+        .iter()
+        .zip(search)
+        .all(|(a, b)| chars_equal(*a, *b, ignore_case))
+}
+
+/// `IOCase.checkIndexOf(str, strStartIndex, search)`:
+///
+/// ```java
+/// int endIndex = str.length() - search.length();
+/// if (endIndex >= strStartIndex) {
+///     for (int i = strStartIndex; i <= endIndex; i++) {
+///         if (checkRegionMatches(str, i, search)) return i;
+///     }
+/// }
+/// return -1;
+/// ```
+///
+/// `None` is Java's `-1`.
+fn check_index_of(
+    text: &[char],
+    start: usize,
+    search: &[char],
+    ignore_case: bool,
+) -> Option<usize> {
+    let end = text.len().checked_sub(search.len())?;
+    if end < start {
+        return None;
+    }
+    (start..=end).find(|&i| check_region_matches(text, i, search, ignore_case))
+}
+
+/// One character compared the way `String.regionMatches(true, …)` does.
+///
+/// Java tries `c1 == c2`, then `toUpperCase(c1) == toUpperCase(c2)`, then
+/// `toLowerCase(toUpperCase(c1)) == toLowerCase(toUpperCase(c2))` — all
+/// single-character mappings. Rust's `char::to_lowercase` can yield more than
+/// one character for a handful of code points (`İ`, `ẞ` in some directions),
+/// where this is wider than Java's; no catalog/schema/table/column identifier
+/// on either engine uses one, and the whole 3348-pair oracle in the tests
+/// below was measured against the real method.
+fn chars_equal(a: char, b: char, ignore_case: bool) -> bool {
+    if a == b {
+        return true;
+    }
+    if !ignore_case {
+        return false;
+    }
+    a.to_lowercase().eq(b.to_lowercase())
+}
+
+/// `FilenameUtils.wildcardMatch(filename, wildcardMatcher, caseSensitivity)`,
+/// ported token-for-token rather than approximated.
+///
+/// **This is NOT a classic greedy wildcard matcher**, and assuming it was is
+/// what the differential gate caught (SP4d-1 Task 7, finding F1, fail-open).
+/// A `*` token sets `anyChars` and otherwise advances nothing; the text index
+/// moves only when a LITERAL token is consumed (`checkIndexOf` skips ahead to
+/// the next occurrence) or when the `*` is the pattern's LAST token (it then
+/// jumps straight to the end). So a `*` followed by a `?` consumes **nothing**:
+///
+/// ```text
+/// wildcardMatch("HIVE", "?*?", INSENSITIVE) == false   (a greedy matcher: true)
+/// wildcardMatch("HIVE", "*?",  INSENSITIVE) == false   (a greedy matcher: true)
+/// wildcardMatch("ab",   "?*?", INSENSITIVE) == true
+/// ```
+///
+/// Backtracking exists but only for literal tokens: when a literal is found
+/// after a `*`, the NEXT occurrence of that same literal is pushed as a
+/// resume point. One resume point per literal occurrence, not a full search.
+///
+/// ```java
+/// String[] wcs = splitOnTokens(wildcardMatcher);
+/// boolean anyChars = false; int textIdx = 0, wcsIdx = 0;
+/// Deque<int[]> backtrack = new ArrayDeque<>(wcs.length);
+/// do {
+///     if (!backtrack.isEmpty()) { int[] a = backtrack.pop(); wcsIdx = a[0]; textIdx = a[1]; anyChars = true; }
+///     while (wcsIdx < wcs.length) {
+///         if (wcs[wcsIdx].equals("?")) {
+///             textIdx++;
+///             if (textIdx > filename.length()) break;
+///             anyChars = false;
+///         } else if (wcs[wcsIdx].equals("*")) {
+///             anyChars = true;
+///             if (wcsIdx == wcs.length - 1) textIdx = filename.length();
+///         } else {
+///             if (anyChars) {
+///                 textIdx = caseSensitivity.checkIndexOf(filename, textIdx, wcs[wcsIdx]);
+///                 if (textIdx == -1) break;
+///                 int repeat = caseSensitivity.checkIndexOf(filename, textIdx + 1, wcs[wcsIdx]);
+///                 if (repeat >= 0) backtrack.push(new int[]{wcsIdx, repeat});
+///             } else if (!caseSensitivity.checkRegionMatches(filename, textIdx, wcs[wcsIdx])) {
+///                 break;
+///             }
+///             textIdx += wcs[wcsIdx].length();
+///             anyChars = false;
+///         }
+///         wcsIdx++;
+///     }
+///     if (wcsIdx == wcs.length && textIdx == filename.length()) return true;
+/// } while (!backtrack.isEmpty());
+/// return false;
+/// ```
+///
+/// Read from `javap -c org.apache.commons.io.FilenameUtils` on
+/// **commons-io 2.8.0**, which `mvn dependency:build-classpath` resolves for
+/// `ranger-plugins-common:2.5.0` (Trino 470's version), and confirmed
+/// identical in **commons-io 2.16.1**, which the same command resolves for
+/// `ranger-plugins-common:2.8.0` (StarRocks 4.1's). `splitOnTokens` and
+/// `wildcardMatch` disassemble to the same instruction sequence in both, and
+/// a 3348-pair cross product produced byte-identical output from the two —
+/// so the exact commons-io version does not change any answer here.
+///
+/// Character indices stand in for Java's UTF-16 indices. They differ only for
+/// astral characters, which no engine's resource vocabulary admits.
+fn wildcard_match(pattern: &str, text: &str, ignore_case: bool) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let wcs = split_on_tokens(&pattern);
+
+    let mut any_chars = false;
+    let mut text_idx: usize = 0;
+    let mut wcs_idx: usize = 0;
+    let mut backtrack: Vec<(usize, usize)> = Vec::with_capacity(wcs.len());
+
+    loop {
+        if let Some((w, t)) = backtrack.pop() {
+            wcs_idx = w;
+            text_idx = t;
+            any_chars = true;
+        }
+
+        while wcs_idx < wcs.len() {
+            match &wcs[wcs_idx] {
+                Token::One => {
+                    text_idx += 1;
+                    if text_idx > text.len() {
+                        break;
+                    }
+                    any_chars = false;
+                }
+                Token::Any => {
+                    any_chars = true;
+                    if wcs_idx == wcs.len() - 1 {
+                        text_idx = text.len();
+                    }
+                }
+                Token::Literal(literal) => {
+                    if any_chars {
+                        match check_index_of(&text, text_idx, literal, ignore_case) {
+                            None => break,
+                            Some(found) => {
+                                text_idx = found;
+                                if let Some(repeat) =
+                                    check_index_of(&text, text_idx + 1, literal, ignore_case)
+                                {
+                                    backtrack.push((wcs_idx, repeat));
+                                }
+                            }
+                        }
+                    } else if !check_region_matches(&text, text_idx, literal, ignore_case) {
+                        break;
+                    }
+                    text_idx += literal.len();
+                    any_chars = false;
+                }
+            }
+            wcs_idx += 1;
+        }
+
+        if wcs_idx == wcs.len() && text_idx == text.len() {
+            return true;
+        }
+        if backtrack.is_empty() {
             return false;
         }
     }
-    while pi < p.len() && p[pi] == '*' {
-        pi += 1;
-    }
-    pi == p.len()
 }
 
 #[cfg(test)]
@@ -745,13 +955,102 @@ mod tests {
         );
     }
 
+    /// Every row here is a MEASURED value, not a belief: it was produced by
+    /// calling the real `FilenameUtils.wildcardMatch` on the harness
+    /// classpath (`tests/ranger`), over a 3348-pair cross product of which
+    /// this is the interesting slice. The full cross product produced
+    /// byte-identical output from commons-io 2.8.0 (what
+    /// `ranger-plugins-common:2.5.0` resolves) and 2.16.1 (what 2.8.0
+    /// resolves), and the port above agrees with all 3348.
+    ///
+    /// The point of keeping them here rather than only in the differential
+    /// gate: a regression is caught by `cargo test` alone, with no JVM, no
+    /// Maven and no `EGRET_TEST_RANGER_E2E`.
+    ///
+    /// The first block is finding F1 — a `*` immediately followed by a `?`
+    /// consumes NOTHING, which a greedy matcher gets wrong in the fail-open
+    /// direction.
     #[test]
-    fn glob_backtracks() {
-        assert!(glob_match("*", ""));
-        assert!(glob_match("or*e*", "orders"));
-        assert!(glob_match("o?ders", "orders"));
-        assert!(!glob_match("o?ders", "oders"));
-        assert!(!glob_match("or*z", "orders"));
+    fn wildcard_match_reproduces_filenameutils() {
+        let table: &[(&str, &str, bool, bool)] = &[
+            ("?*?", "HIVE", true, false),
+            ("?*?", "hive", true, false),
+            ("?*?", "ab", true, true),
+            ("?*?", "abc", true, false),
+            ("?*?", "a", true, false),
+            ("*?", "HIVE", true, false),
+            ("*?", "a", true, true),
+            ("*?", "ab", true, false),
+            ("*?", "", true, false),
+            ("?*", "HIVE", true, true),
+            ("?*", "a", true, true),
+            ("?*", "", true, false),
+            ("*?*", "HIVE", true, true),
+            ("*?*", "a", true, true),
+            ("**?", "abc", true, false),
+            ("?**", "abc", true, true),
+            ("a*?", "abc", true, false),
+            ("*a?", "abc", true, false),
+            ("?a*", "abc", true, false),
+            ("*?a", "abc", true, false),
+            ("h*e", "HIVE", true, true),
+            ("h*e", "hive", false, true),
+            ("h*e", "HIVE", false, false),
+            ("a*b", "ab", true, true),
+            ("a**b", "ab", true, true),
+            ("*a*b*", "sales", true, false),
+            ("*a*b*", "ababc", true, true),
+            ("a*b*", "abcd", true, true),
+            ("*a*a*", "aaa", true, true),
+            ("aa*aa", "aaaa", true, true),
+            ("*aa*", "aaa", true, true),
+            ("a*a*a", "aaa", true, true),
+            ("*ab*c*", "abcabc", true, true),
+            ("*abc*", "ababc", true, true),
+            ("*", "", true, true),
+            ("*", "HIVE", true, true),
+            ("**", "HIVE", true, true),
+            ("?", "", true, false),
+            ("?", "a", true, true),
+            ("??", "ab", true, true),
+            ("??", "abc", true, false),
+            ("???", "abc", true, true),
+            ("HIVE", "hive", true, true),
+            ("HIVE", "hive", false, false),
+            ("H*E", "hive", true, true),
+            ("H*E", "hive", false, false),
+            ("or?er", "orders", true, false),
+            ("or?ers", "orders", true, true),
+            ("s**s", "orders", true, false),
+            ("*s*", "orders", true, true),
+            ("x?z", "xyz", true, true),
+            ("x?z", "x_z", true, true),
+            ("*_tmp", "hive_tmp", true, true),
+            ("tmp_*", "tmp_1", true, true),
+        ];
+        for (pattern, text, ignore_case, expected) in table {
+            assert_eq!(
+                wildcard_match(pattern, text, *ignore_case),
+                *expected,
+                "wildcardMatch({text:?}, {pattern:?}, ignoreCase={ignore_case})"
+            );
+        }
+    }
+
+    #[test]
+    fn split_on_tokens_collapses_only_adjacent_stars() {
+        let split = |p: &str| split_on_tokens(&p.chars().collect::<Vec<_>>());
+        let lit = |s: &str| Token::Literal(s.chars().collect());
+        // No wildcard at all: one literal token holding the whole value.
+        assert_eq!(split("test"), vec![lit("test")]);
+        // Adjacent stars collapse...
+        assert_eq!(split("a**b"), vec![lit("a"), Token::Any, lit("b")]);
+        // ...but `?` between them keeps both, because `prevChar` is the
+        // previous CHARACTER, not the previous token.
+        assert_eq!(split("*?*"), vec![Token::Any, Token::One, Token::Any]);
+        assert_eq!(split("?*?"), vec![Token::One, Token::Any, Token::One]);
+        // `?` never collapses.
+        assert_eq!(split("??"), vec![Token::One, Token::One]);
     }
 
     #[test]

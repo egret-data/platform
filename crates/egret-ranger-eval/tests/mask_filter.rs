@@ -229,7 +229,7 @@ fn a_mask_policy_returns_the_mask_type_as_data() {
     )]));
     let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
     let m = masked(&d);
-    assert_eq!(m.mask_type, "MASK_HASH");
+    assert_eq!(m.mask_type.as_deref(), Some("MASK_HASH"));
     assert_eq!(m.policy_id, Some(1));
     assert_eq!(m.masked_value, None);
     assert_eq!(m.mask_condition, None);
@@ -247,7 +247,7 @@ fn mask_none_is_a_mask_result_not_an_absence() {
         json!([mask_item("alice", json!({"dataMaskType": "MASK_NONE"}))])
     )]));
     let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
-    assert_eq!(masked(&d).mask_type, "MASK_NONE");
+    assert_eq!(masked(&d).mask_type.as_deref(), Some("MASK_NONE"));
 }
 
 /// Nothing matched: `maskType` stays null and the host applies no mask.
@@ -262,21 +262,46 @@ fn no_matching_mask_policy_is_no_mask() {
     assert_eq!(d, MaskDecision::NoMask);
 }
 
-/// `updateAccessResult` returns immediately when `getDataMaskInfo()` is
-/// null (the `ifnull 101` at offset 8): no `maskType`, no `setIsAllowed`.
-/// The policy therefore determines NOTHING and the engine loop moves on to
-/// the next evaluator — it does not stop at the matched-but-empty item.
+/// **The `ifnull` guard at the top of `updateAccessResult` (offset 8) can
+/// never fire, so this is the opposite of what it looks like.**
+///
+/// SP4d-1 Task 7, finding F2. Reading the bytecode alone says a null
+/// `getDataMaskInfo()` returns immediately and the policy determines
+/// nothing. Reading the MODEL CLASS says `getDataMaskInfo()` is never null:
+/// Gson builds `RangerDataMaskPolicyItem` through its no-arg constructor,
+/// which delegates to the all-args one, whose `setDataMaskInfo(null)`
+/// substitutes `new RangerPolicyItemDataMaskInfo()`. Measured, not inferred:
+/// `JsonUtils.jsonToObject("{}", RangerDataMaskPolicyItem.class)` comes back
+/// with a non-null `dataMaskInfo` whose `dataMaskType` is null, and so does
+/// `{"dataMaskInfo": null}`.
+///
+/// So `updateAccessResult` runs its whole body: `setMaskType(null)` and then
+/// `policyEvaluator.updateAccessResult(result, matchType, true, …)`, which
+/// sets `policyId`, `policyPriority` and `isAllowed`. The item DETERMINES,
+/// with a null mask type, and policy 2 is never reached.
+///
+/// The differential gate found this; the previous version of this test
+/// asserted `policy_id == Some(2)` and passed, because the test and the code
+/// shared one misreading.
 #[test]
-fn a_mask_item_without_data_mask_info_determines_nothing() {
+fn a_mask_item_without_data_mask_info_still_determines() {
+    // The empty one is given the HIGHER priority, so which policy Ranger
+    // reaches first is decided by `policyPriority` and not by the
+    // `getEvalOrder()` this crate does not reproduce. Left at equal
+    // priorities the two now yield DIFFERENT results and the honest answer
+    // is `EvalOrderAmbiguous`, which would test the refusal rather than the
+    // finding.
+    let mut empty = mask_policy(
+        1,
+        "a empty",
+        json!([{
+            "users": ["alice"],
+            "accesses": [{"type": "select", "isAllowed": true}],
+        }]),
+    );
+    empty["policyPriority"] = json!(1);
     let set = policies(json!([
-        mask_policy(
-            1,
-            "a empty",
-            json!([{
-                "users": ["alice"],
-                "accesses": [{"type": "select", "isAllowed": true}],
-            }])
-        ),
+        empty,
         mask_policy(
             2,
             "b real",
@@ -284,7 +309,44 @@ fn a_mask_item_without_data_mask_info_determines_nothing() {
         ),
     ]));
     let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
-    assert_eq!(masked(&d).policy_id, Some(2));
+    let m = masked(&d);
+    assert_eq!(
+        m.policy_id,
+        Some(1),
+        "policy 1 determines; policy 2 is never reached"
+    );
+    assert_eq!(m.mask_type, None, "it determines with a NULL mask type");
+}
+
+/// The row-filter path makes the identical substitution and then behaves the
+/// OPPOSITE way, which is why the sweep behind F2 could not stop at one fix.
+///
+/// `RangerRowFilterPolicyItem.setRowFilterInfo(null)` also substitutes an
+/// empty object, so `getRowFilterInfo()` is never null either. But
+/// `RangerDefaultRowFilterPolicyItemEvaluator.updateAccessResult` has no
+/// guard at the top; it guards the `policyEvaluator.updateAccessResult(...)`
+/// call instead, with `if (result.getFilterExpr() != null)` (offsets 40-44).
+/// A null `filterExpr` never marks the result, so the item determines
+/// NOTHING and the next policy IS reached.
+#[test]
+fn a_null_row_filter_expression_lets_a_later_policy_decide() {
+    let set = policies(json!([
+        row_filter_policy(
+            1,
+            "a empty",
+            json!([{
+                "users": ["alice"],
+                "accesses": [{"type": "select", "isAllowed": true}],
+            }])
+        ),
+        row_filter_policy(
+            2,
+            "b real",
+            json!([filter_item("alice", json!("country = 'US'"))])
+        ),
+    ]));
+    let d = evaluate_row_filter(&set, &trino_table_request("alice"), &trino_def(), &engine());
+    assert_eq!(filtered(&d).policy_id, Some(2));
 }
 
 // ── 2. row filter returns the expression as data ─────────────────────────
@@ -311,6 +373,13 @@ fn a_row_filter_policy_returns_the_filter_expression_as_data() {
 /// nothing. An ABSENT `filterExpr` and an empty-string one are therefore
 /// different, which is why [`egret_ranger_eval::model::RowFilterInfo`]
 /// keeps it as an `Option`.
+///
+/// Note the `rowFilterInfo` object here is present but empty, and that an
+/// ABSENT `rowFilterInfo` behaves identically — `setRowFilterInfo(null)`
+/// substitutes an empty one, so the two shapes are indistinguishable to
+/// Ranger. What differs between the mask and row-filter paths is not the
+/// substitution but the guard; see
+/// `a_null_row_filter_expression_lets_a_later_policy_decide`.
 #[test]
 fn a_row_filter_item_without_a_filter_expression_determines_nothing() {
     let set = policies(json!([row_filter_policy(
@@ -368,7 +437,7 @@ fn a_deny_bucket_on_a_mask_policy_is_ignored() {
     }]);
     let set = policies(json!([policy]));
     let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
-    assert_eq!(masked(&d).mask_type, "MASK_HASH");
+    assert_eq!(masked(&d).mask_type.as_deref(), Some("MASK_HASH"));
 }
 
 /// The same for `allowExceptions` / `denyExceptions`: the single-list
@@ -392,7 +461,7 @@ fn exceptions_on_a_mask_policy_are_ignored() {
     }]);
     let set = policies(json!([policy]));
     let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
-    assert_eq!(masked(&d).mask_type, "MASK_HASH");
+    assert_eq!(masked(&d).mask_type.as_deref(), Some("MASK_HASH"));
 }
 
 /// The deny-all-else fallback in `evaluatePolicyItems` is guarded by
@@ -505,7 +574,7 @@ fn a_custom_mask_carrying_a_col_token_is_data_not_an_unknown() {
     )]));
     let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
     let m = masked(&d);
-    assert_eq!(m.mask_type, "CUSTOM");
+    assert_eq!(m.mask_type.as_deref(), Some("CUSTOM"));
     assert_eq!(m.masked_value.as_deref(), Some("cast({col} as varchar)"));
 }
 
@@ -655,7 +724,7 @@ fn conditions_on_an_access_bucket_of_a_mask_policy_do_not_decide_the_mask() {
     }]);
     let set = policies(json!([policy]));
     let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
-    assert_eq!(masked(&d).mask_type, "MASK_HASH");
+    assert_eq!(masked(&d).mask_type.as_deref(), Some("MASK_HASH"));
 }
 
 // ── 5. the two policy worlds do not see each other ───────────────────────
@@ -730,7 +799,7 @@ fn a_higher_priority_mask_policy_wins() {
     );
     let set = policies(json!([low, high]));
     let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
-    assert_eq!(masked(&d).mask_type, "MASK_NULL");
+    assert_eq!(masked(&d).mask_type.as_deref(), Some("MASK_NULL"));
 }
 
 /// `evaluatePoliciesForOneAccessTypeNoAudit` arbitrates with `>=` for
@@ -785,7 +854,7 @@ fn a_lower_priority_mask_policy_does_not_make_the_answer_ambiguous() {
     );
     let set = policies(json!([high, low]));
     let d = evaluate_data_mask(&set, &trino_request("alice"), &trino_def(), &engine());
-    assert_eq!(masked(&d).mask_type, "MASK_NULL");
+    assert_eq!(masked(&d).mask_type.as_deref(), Some("MASK_NULL"));
 }
 
 // ── 7. the superuser short-circuit ───────────────────────────────────────
@@ -884,8 +953,9 @@ fn the_same_mask_policy_differs_between_the_two_engines() {
             &starrocks_def(),
             &sr_engine
         ))
-        .mask_type,
-        "MASK_HASH"
+        .mask_type
+        .as_deref(),
+        Some("MASK_HASH")
     );
 
     // The same body read through Trino's def: `database` is not a Trino
@@ -1012,8 +1082,9 @@ fn a_matching_engine_declaration_changes_nothing() {
             &trino_def(),
             &engine
         ))
-        .mask_type,
-        "MASK_HASH"
+        .mask_type
+        .as_deref(),
+        Some("MASK_HASH")
     );
 }
 

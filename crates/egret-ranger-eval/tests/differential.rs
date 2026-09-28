@@ -844,7 +844,7 @@ fn rust_outcome(
                 mask_condition: None,
             },
             MaskDecision::Masked(m) => Outcome::Mask {
-                mask_type: Some(m.mask_type),
+                mask_type: m.mask_type,
                 masked_value: m.masked_value,
                 mask_condition: m.mask_condition,
             },

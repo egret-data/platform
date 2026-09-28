@@ -114,11 +114,11 @@ pub struct RangerPolicy {
 /// `additionalResources`) map — e.g. `"catalog": {"values": ["hive"], ...}`.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct ResourceLevel {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub values: Vec<String>,
-    #[serde(default, rename = "isExcludes")]
+    #[serde(default, deserialize_with = "null_as_default", rename = "isExcludes")]
     pub is_excludes: bool,
-    #[serde(default, rename = "isRecursive")]
+    #[serde(default, deserialize_with = "null_as_default", rename = "isRecursive")]
     pub is_recursive: bool,
 }
 
@@ -126,9 +126,19 @@ pub struct ResourceLevel {
 /// `{"type": "select", "isAllowed": true}`.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct AccessEntry {
-    #[serde(rename = "type")]
+    /// `RangerPolicyItemAccess.setType(null)` substitutes `""`, and an
+    /// ABSENT `type` leaves the constructor's own `""` — so neither is an
+    /// error to Ranger, and neither may be one here. An empty access type
+    /// matches no request (`equalsIgnoreCase` against a concrete type), which
+    /// is a decision, not a refusal.
+    #[serde(default, deserialize_with = "null_as_default", rename = "type")]
     pub access_type: String,
-    #[serde(default = "default_true", rename = "isAllowed")]
+    /// `setIsAllowed(null)` substitutes `Boolean.TRUE`, as does an absent key.
+    #[serde(
+        default = "default_true",
+        deserialize_with = "null_as_true",
+        rename = "isAllowed"
+    )]
     pub is_allowed: bool,
 }
 
@@ -148,15 +158,53 @@ pub struct PolicyItem {
     pub groups: Vec<String>,
     pub roles: Vec<String>,
     pub accesses: Vec<AccessEntry>,
+    /// **Always `Some` on a `dataMaskPolicyItems` entry**, and `None`
+    /// everywhere else.
+    ///
+    /// SP4d-1 Task 7, finding F2: Gson builds a `RangerDataMaskPolicyItem`
+    /// through its no-arg constructor, which delegates to the all-args one,
+    /// whose `setDataMaskInfo(null)` substitutes
+    /// `new RangerPolicyItemDataMaskInfo()`. Gson then overwrites only the
+    /// fields the JSON actually carries, so a missing or explicitly null
+    /// `dataMaskInfo` is a non-null empty object — never null. The `ifnull`
+    /// guard at the top of
+    /// `RangerDefaultDataMaskPolicyItemEvaluator.updateAccessResult`
+    /// therefore never fires, and such an item DETERMINES the result with a
+    /// null mask type instead of standing aside. Reading the wire format
+    /// literally said the opposite, and the differential gate caught it.
     pub data_mask_info: Option<MaskInfo>,
+    /// **Always `Some` on a `rowFilterPolicyItems` entry**, and `None`
+    /// everywhere else — `RangerRowFilterPolicyItem.setRowFilterInfo` makes
+    /// the identical substitution.
+    ///
+    /// The BEHAVIOUR does not follow the mask path, though, and assuming it
+    /// did would be the same mistake in the opposite direction:
+    /// `RangerDefaultRowFilterPolicyItemEvaluator.updateAccessResult` guards
+    /// its `policyEvaluator.updateAccessResult(...)` call with
+    /// `if (result.getFilterExpr() != null)` (offsets 40-44), which the mask
+    /// evaluator has no equivalent of. So a row-filter item whose
+    /// `filterExpr` is null determines NOTHING and the search continues —
+    /// see [`RowFilterInfo::filter_expr`].
     pub row_filter_info: Option<RowFilterInfo>,
 }
 
 /// A `dataMaskPolicyItems[].dataMaskInfo` object.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+///
+/// Note what [`PolicyItem::data_mask_info`] says: on a `dataMaskPolicyItems`
+/// entry this object is ALWAYS present, because Ranger's model class
+/// substitutes an empty one for a missing or null `dataMaskInfo`. An empty one
+/// is what this struct's [`Default`] is.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct MaskInfo {
-    #[serde(default, rename = "dataMaskType")]
-    pub mask_type: String,
+    /// `RangerPolicyItemDataMaskInfo.getDataMaskType()`, which
+    /// `updateAccessResult` passes STRAIGHT to
+    /// `RangerAccessResult.setMaskType` with no null check. `None` is
+    /// Ranger's null and is what the host reads as "no mask type"; `Some("")`
+    /// is an explicit empty string, which is NOT null and which the host
+    /// reads as a mask type of `""`. Folding the two onto `String` would lose
+    /// the difference, and `RangerAccessResult.getMaskType()` reports it.
+    #[serde(default, deserialize_with = "null_as_default", rename = "dataMaskType")]
+    pub mask_type: Option<String>,
     #[serde(default, rename = "valueExpr")]
     pub value_expr: Option<String>,
     /// Ranger's `RangerPolicyItemDataMaskInfo.conditionExpr` — a
@@ -176,7 +224,7 @@ pub struct MaskInfo {
 /// `setFilterExpr` and the guard `if (result.getFilterExpr() != null)`
 /// fails — the item determines nothing. An explicit empty string is NOT
 /// null and does mark the result. Folding both onto `""` would erase that.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct RowFilterInfo {
     #[serde(default, rename = "filterExpr")]
     pub filter_expr: Option<String>,
@@ -285,6 +333,41 @@ pub enum Unmodelled {
 
 fn default_true() -> bool {
     true
+}
+
+/// Read a field that may be JSON `null`, as Ranger reads it.
+///
+/// SP4d-1 Task 7, finding F3 — the sweep behind F2, widened. Gson assigns
+/// fields directly, so a key that is ABSENT keeps whatever the class's
+/// constructor left there, and `RangerPolicy`, `RangerPolicyItem`,
+/// `RangerPolicyResource` and `RangerPolicyItemAccess` all normalise in their
+/// constructors (`nullSafeList` for every list, `Boolean.FALSE` /
+/// `Boolean.TRUE` / `0` / `""` for the scalars). An EXPLICIT `null` reaches
+/// the same field as a null reference and is read back through the same
+/// getters, so Ranger treats "absent" and "null" identically — measured with
+/// `JsonUtils.jsonToObject` on both shapes.
+///
+/// Plain `#[serde(default)]` covers only the absent case: `null` makes serde
+/// fail with `invalid type: null`. A reader that REFUSES a document the live
+/// plugin enforces has no answer exactly where one is needed, so every field
+/// whose Ranger default is `Default::default()` goes through here.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// [`null_as_default`] for the two booleans whose Ranger default is TRUE:
+/// `RangerPolicy.setIsEnabled(null)` and
+/// `RangerPolicyItemAccess.setIsAllowed(null)` both substitute
+/// `Boolean.TRUE`.
+fn null_as_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(true))
 }
 
 /// True if `s` contains a Ranger runtime expression this reader cannot
@@ -429,20 +512,28 @@ struct RawServicePolicySet {
     service_id: Option<i64>,
     #[serde(default, rename = "policyVersion")]
     policy_version: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     policies: Vec<RangerPolicy>,
     #[serde(default, rename = "serviceDef")]
     service_def: serde_json::Value,
-    #[serde(default, rename = "securityZones")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        rename = "securityZones"
+    )]
     security_zones: serde_json::Map<String, serde_json::Value>,
     /// A whole second `TagPolicies`-shaped object when the service has tag
     /// policies. Not further typed here (see `Unmodelled::TagPolicies`);
     /// `Value::Null` means the key was absent, which is the common case.
     #[serde(default, rename = "tagPolicies")]
     tag_policies: serde_json::Value,
-    #[serde(default, rename = "policyDeltas")]
+    #[serde(default, deserialize_with = "null_as_default", rename = "policyDeltas")]
     policy_deltas: Vec<serde_json::Value>,
-    #[serde(default, rename = "serviceConfig")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        rename = "serviceConfig"
+    )]
     service_config: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -480,38 +571,78 @@ impl<'de> Deserialize<'de> for ServicePolicySet {
 struct RawRangerPolicy {
     #[serde(default)]
     id: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     service: String,
-    #[serde(default, rename = "policyType")]
+    #[serde(default, deserialize_with = "null_as_default", rename = "policyType")]
     policy_type: i32,
-    #[serde(default = "default_true", rename = "isEnabled")]
+    #[serde(
+        default = "default_true",
+        deserialize_with = "null_as_true",
+        rename = "isEnabled"
+    )]
     is_enabled: bool,
-    #[serde(default, rename = "policyPriority")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        rename = "policyPriority"
+    )]
     policy_priority: i32,
-    #[serde(default, rename = "isDenyAllElse")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        rename = "isDenyAllElse"
+    )]
     is_deny_all_else: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     resources: BTreeMap<String, ResourceLevel>,
-    #[serde(default, rename = "additionalResources")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        rename = "additionalResources"
+    )]
     additional_resources: Vec<BTreeMap<String, ResourceLevel>>,
-    #[serde(default, rename = "policyItems")]
+    #[serde(default, deserialize_with = "null_as_default", rename = "policyItems")]
     policy_items: Vec<RawPolicyItem>,
-    #[serde(default, rename = "denyPolicyItems")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        rename = "denyPolicyItems"
+    )]
     deny_policy_items: Vec<RawPolicyItem>,
-    #[serde(default, rename = "allowExceptions")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        rename = "allowExceptions"
+    )]
     allow_exceptions: Vec<RawPolicyItem>,
-    #[serde(default, rename = "denyExceptions")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        rename = "denyExceptions"
+    )]
     deny_exceptions: Vec<RawPolicyItem>,
-    #[serde(default, rename = "dataMaskPolicyItems")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        rename = "dataMaskPolicyItems"
+    )]
     data_mask_policy_items: Vec<RawPolicyItem>,
-    #[serde(default, rename = "rowFilterPolicyItems")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        rename = "rowFilterPolicyItems"
+    )]
     row_filter_policy_items: Vec<RawPolicyItem>,
     /// Top-level `conditions` — Ranger's policy-wide condition list.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     conditions: Vec<serde_json::Value>,
-    #[serde(default, rename = "validitySchedules")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        rename = "validitySchedules"
+    )]
     validity_schedules: Vec<serde_json::Value>,
     #[serde(default, rename = "zoneName")]
     zone_name: Option<String>,
@@ -519,19 +650,26 @@ struct RawRangerPolicy {
 
 #[derive(Deserialize)]
 struct RawPolicyItem {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     users: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     groups: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     roles: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     accesses: Vec<AccessEntry>,
     /// Item-level `conditions`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     conditions: Vec<serde_json::Value>,
-    #[serde(default, rename = "delegateAdmin")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        rename = "delegateAdmin"
+    )]
     delegate_admin: bool,
+    // Both are normalised per bucket in `convert_item`, which is where
+    // Ranger's own null substitution is reproduced. Read these raw fields as
+    // "what the JSON said", never as "what Ranger has".
     #[serde(default, rename = "dataMaskInfo")]
     data_mask_info: Option<MaskInfo>,
     #[serde(default, rename = "rowFilterInfo")]
@@ -717,13 +855,30 @@ fn build_policy_item(
         }
     }
 
+    // Ranger's own null substitution, reproduced at the layer that reads the
+    // document rather than at the layer that acts on it: a `RangerPolicy` is
+    // not the JSON, it is the JSON as Gson built it through these classes'
+    // constructors and setters, and those two readings differ. Applied per
+    // BUCKET because the substitution lives on the bucket's element class —
+    // `RangerPolicyItem` (the four access buckets) declares neither field, so
+    // a `dataMaskInfo` written into `policyItems` is dropped by Ranger and
+    // must be dropped here.
+    let (data_mask_info, row_filter_info) = match bucket {
+        ItemBucket::DataMaskPolicyItems => (Some(raw.data_mask_info.unwrap_or_default()), None),
+        ItemBucket::RowFilterPolicyItems => (None, Some(raw.row_filter_info.unwrap_or_default())),
+        ItemBucket::PolicyItems
+        | ItemBucket::DenyPolicyItems
+        | ItemBucket::AllowExceptions
+        | ItemBucket::DenyExceptions => (None, None),
+    };
+
     PolicyItem {
         users: raw.users,
         groups: raw.groups,
         roles: raw.roles,
         accesses: raw.accesses,
-        data_mask_info: raw.data_mask_info,
-        row_filter_info: raw.row_filter_info,
+        data_mask_info,
+        row_filter_info,
     }
 }
 
