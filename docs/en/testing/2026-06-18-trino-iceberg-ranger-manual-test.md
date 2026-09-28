@@ -396,8 +396,12 @@ gone, and they are what makes the check cheap to re-run.
    grants nothing. Both the evaluator and a real Trino agree, and SP4a's T1 defect was exactly
    this shape reaching production from the compiler.
 7. **A tag service makes the evaluator silent.** Any non-null `tagPolicies` in the download is
-   `Undecidable { EnvelopeConstruct(TagPolicies) }` — every Trino profile egret auto-binds carries
-   one. Predict on a profile without a tag service, or expect no answer.
+   `Undecidable { EnvelopeConstruct(TagPolicies) }`. Trino auto-bind creates a `<profile>_tag`
+   service alongside the profile, so every profile it creates is affected — but only while that
+   tag service still **exists**: `download.rs`'s lookup is best-effort, and a profile whose named
+   tag service has been deleted (in this cluster, `demo-trino`) gets no `tagPolicies` block and
+   decides normally. Check the download, not the `config_jsonb`. Predict on a profile without a
+   tag service, or expect no answer.
 8. **Never strip the input to get an answer.** If the evaluator says `Undecidable`, that is the
    result. Editing the captured download until it decides is the same error as editing a test
    until it passes.

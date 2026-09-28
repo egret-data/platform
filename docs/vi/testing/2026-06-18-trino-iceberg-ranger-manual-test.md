@@ -240,8 +240,12 @@ Ba điều bắt buộc, tóm tắt:
 6. **Khớp ANCESTOR KHÔNG phải là cho phép.** Policy nêu ít tầng hơn request thì không cấp gì.
    Evaluator và Trino thật đồng ý; defect T1 của SP4a chính là hình dạng này.
 7. **Có tag service thì evaluator im lặng.** `tagPolicies` khác null trong download là
-   `Undecidable { EnvelopeConstruct(TagPolicies) }` — mọi profile Trino egret tự bind đều có một
-   cái. Hãy dự đoán trên profile KHÔNG có tag service, hoặc chấp nhận không có câu trả lời.
+   `Undecidable { EnvelopeConstruct(TagPolicies) }`. Auto-bind của Trino tạo kèm một service
+   `<profile>_tag`, nên mọi profile nó tạo đều dính — nhưng CHỈ khi tag service đó còn **tồn
+   tại**: lookup trong `download.rs` là best-effort, nên profile có tag service đã bị xoá (trong
+   cụm này là `demo-trino`) không nhận khối `tagPolicies` và vẫn quyết bình thường. Hãy kiểm
+   DOWNLOAD, đừng kiểm `config_jsonb`. Dự đoán trên profile KHÔNG có tag service, hoặc chấp nhận
+   không có câu trả lời.
 8. **Đừng bao giờ cắt bớt input để lấy câu trả lời.** Evaluator nói `Undecidable` thì đó LÀ kết
    quả. Sửa download đã bắt được cho tới khi nó quyết được cũng là lỗi y như sửa test cho tới
    khi nó xanh.

@@ -138,9 +138,20 @@ fn main() {
     let path = args
         .next()
         .expect("usage: live_gate <download.json> <engine> <user> [catalog]");
+    // Unknown engine names PANIC rather than defaulting. A typo'd `starocks`
+    // would silently predict with Trino's service-def and Trino's middle
+    // resource level (`schema`, not `database`), i.e. confidently answer
+    // "nothing matched" about the wrong engine — which is the exact failure
+    // this tool exists to prevent. The printed header is a mitigation, not a
+    // guard: it is read after the run, if at all.
     let engine = match args.next().as_deref() {
+        Some("trino") => EngineType::Trino,
         Some("starrocks") => EngineType::StarRocks,
-        _ => EngineType::Trino,
+        other => panic!(
+            "engine must be `trino` or `starrocks`, got {other:?}; \
+             refusing to default, because predicting for the wrong engine \
+             uses the wrong service-def and the wrong resource hierarchy"
+        ),
     };
     let user = args.next().unwrap_or_else(|| "admin".to_string());
     let catalog = args.next().unwrap_or_else(|| "sp4a10_wh".to_string());

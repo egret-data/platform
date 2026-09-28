@@ -34,6 +34,13 @@ decision; the findings below are of a different kind.
 
 ## Verdict
 
+**Numbering, because it does not match the brief one-for-one.** The task brief's case list ends
+at seven, whose seventh is the fallback probe; here that probe is **case 8**, so that **case 7**
+can be the StarRocks tag-fetch question the package brief raised separately (§7). Nothing was
+dropped: brief 1-6 are cases 1-6 (with 5 split into 5a and 5b, because Ranger's bucket for
+cancelling a deny is `denyExceptions` and the brief's wording named the other one), brief 7 is
+case 8, and cases 7, S1 and S2 are the additions.
+
 | # | case | prediction (made first) | engine | agree? |
 |---|---|---|---|---|
 | 1 | `{catalog, schema}` policy vs a column-granular `SELECT` (the T1 shape) | `Denied { NoPolicyMatched }` | `Access Denied: Cannot select from columns [item, id] in table or view t1` | **YES** |
@@ -45,17 +52,26 @@ decision; the findings below are of a different kind.
 | 6 | grant to group `public`, requester in no groups | `Allowed { 8857 }` | 4 rows | **YES** |
 | 7 | does StarRocks' Ranger plugin fetch tags at all? | — (an observation, not a prediction) | **it does not, and the cause is egret's own service-def** | see §7 |
 | 8 | a Ranger-undetermined request — does Trino fall through? | `Denied { NoPolicyMatched }` | `Access Denied: Cannot select from columns [item, id] in table or view t7` | **YES** |
-| S1 | StarRocks, the ANCESTOR shape | `Denied` would be the claim | **NOT MEASURED** — see §9 | — |
-| S2 | StarRocks, `column: ["*"]` | — | **NOT MEASURED** — see §9 | — |
+| S1 | StarRocks, the ANCESTOR shape | **none — there is nothing to predict from** | **NOT MEASURED** — §9 | — |
+| S2 | StarRocks, `column: ["*"]` | **none — same reason** | **NOT MEASURED** — §9 | — |
 
-**Eight of eight Trino cases agree.** Two StarRocks cases could not be measured, for a reason
-recorded in full in §9; StarRocks predictions were still written down first (§8) so a later run
-can finish the measurement without re-deriving them.
+**Eight of eight Trino cases agree.** The two StarRocks cases were **not measured and not
+predicted**, and the second half of that is not an omission: a prediction is computed from a
+policy download, and neither shape could be got into one. §9 obstacle 1 is why no policy could be
+written to the profile the FE polls, and obstacle 2 is why the ANCESTOR shape is no longer
+producible through the permission model either — so there is no download in which S1 exists to be
+predicted from. A later run has to create the policy first; §9 says what that costs.
+
+What §8 *does* hold is a different thing, and it is not a substitute: predictions for six
+resources that already exist in the live StarRocks policy set. They were computed and written
+down before any StarRocks query was attempted, they are the reason F2 was found, and they are
+worth re-using — but none of them is the ANCESTOR or the column-wildcard shape.
 
 Three findings came out of the run that no case asked for:
 
-- **F1 — the evaluator answers `Undecidable` for every engine egret binds a tag service to.**
-  §6.
+- **F1 — the evaluator answers `Undecidable` for a profile whose bound tag service actually
+  exists** — today exactly one, and it is the only engine-facing Trino profile enforcing
+  anything here. §6.
 - **F2 — egret's rule compiler emits pairs of same-priority mask / row-filter policies whose
   evaluation order Ranger does not define**, and the evaluator refuses them as
   `EvalOrderAmbiguous` rather than guessing. §8.
@@ -86,14 +102,13 @@ are recorded because they shape the whole run:
 
 1. Its download carries a non-empty `tagPolicies` block (it has a bound tag service), which makes
    every evaluator answer `Undecidable` — see **F1**, §6.
-2. `POST /api/control-plane/policies` refuses to write to it. Verbatim:
-
-   ```json
-   {"error":"conflict: profile 54 is compiled by the SP4a permission model — edit its grants and
-   rules instead of writing a policy directly; the next recompile would silently overwrite this
-   change"}
-   ```
-   (that response is for the StarRocks profile, §9; the trino one refuses identically.)
+2. `POST /api/control-plane/policies` refuses to write to any `generated` profile, this one
+   included. The guard is `refuse_if_generated` (`crates/egret-policy/src/store.rs:178`), which
+   reads `policy.authz_services.origin` and returns `CompilerOwned`; it does not consult the
+   service type, so trino and starrocks profiles take the same path. **No write against profile
+   52 was attempted, so no 409 for 52 is quoted anywhere here.** The one verbatim refusal this
+   run produced was against profile **54** (`sp3c2-sr-live`) and is quoted, with its attribution
+   spelled out, in §9.
 
 So the Trino instrument is a **private, additive coordinator** created for this run, which
 modifies nothing shared: pod + ConfigMap `sp4d1-gate-trino` in `egret-engines`, image
@@ -147,9 +162,21 @@ coordinator that poll is every 30 s. Measuring before a poll lands records the p
 produces a false result. Two independent confirmations were taken, and the second is the one that
 counts:
 
-1. `GET /service/plugins/policies/download/sp4d1-gate`, issued from inside the pod, returned
-   `policyVersion 17` with 16 policies and **no `tagPolicies` key**. This is the byte-for-byte
-   input the prediction was computed from.
+1. `GET /service/plugins/policies/download/sp4d1-gate` returned `policyVersion 17` with 16
+   policies and **no `tagPolicies` key**. This is the byte-for-byte input the prediction was
+   computed from.
+
+   **The timeline, stated precisely, because the two clocks below do not line up on their own.**
+   This fetch was issued before the private coordinator existed — with `kubectl exec` into the
+   *live* `sp3c2-trino-live` coordinator, used as nothing but a pod that can reach the egret
+   service on the cluster network. Nothing of that pod's configuration was read for it or changed
+   by it. The pod that ran the queries was created afterwards, at **18:21:52Z** (its own
+   `Bootstrap` log line), which is why its cache file's mtime is **18:21:56Z** — the plugin's
+   *first* download at start-up, not a later refresh. A reader reconciling 18:14:17Z (prediction)
+   against 18:21:56Z (cache) would otherwise reasonably suspect the cache had moved underneath
+   the prediction. It had not: profile 56 has sat at `policyVersion 17` since the last policy was
+   written at ~18:13Z, no policy was written after the pod existed, and the two fetches returned
+   the same version and the same 16 policy ids.
 2. The plugin's **own on-disk cache**, read out of the running pod:
 
    ```text
@@ -427,7 +454,7 @@ limitation reached before any authorization check, so it discriminates nothing.
 
 ---
 
-## 6. F1 — the evaluator answers `Undecidable` for every engine egret binds a tag service to
+## 6. F1 — the evaluator answers `Undecidable` for a profile whose bound tag service exists
 
 This was not a case; it is what made the private coordinator necessary, and it is a live
 constraint on SP4d-2.
@@ -440,12 +467,42 @@ clearance access policy). `crates/egret-ranger-eval/src/model.rs` reports any no
 construct into `Undecidable { EnvelopeConstruct(TagPolicies) }` **before** any policy is
 considered. So on that service the evaluator answers nothing at all, for any request.
 
-That is the correct answer — a tag policy set is DENY-capable and can change any decision — but
-its blast radius is worth stating plainly: `download.rs` embeds `tagPolicies` whenever the
+That is the correct answer — a tag policy set is DENY-capable and can change any decision — and
+the code path that produces it is egret's own: `download.rs` embeds `tagPolicies` whenever the
 service's `config_jsonb` carries a `tagService`, and egret's Trino auto-bind always creates one
-(`<profile>_tag`). **Every Trino profile egret provisions is therefore undecidable to this
-crate today.** Of the seven profiles in the live store, two (`demo-trino`, `sp3c2-trino-live`)
-carry a `tagService`; the four StarRocks profiles and the manual `trino` one do not.
+(`<profile>_tag`).
+
+**The blast radius, scoped to what is measurable rather than to what the code path suggests.**
+An earlier draft of this section said "every Trino profile egret provisions is therefore
+undecidable to this crate today". That is **false**, and the store refutes it. Counted on
+2026-09-28, `policy.authz_services` holds **eight** profiles: four `trino` (`demo-trino` 2,
+`trino` 50, `sp3c2-trino-live` 52, `sp4d1-gate` 56), three `starrocks` (53, 54, 55), and one
+`tag` (`sp3c2-trino-live_tag` 51). Two of the four trino profiles carry a `tagService` in
+`config_jsonb` — and only **one** of those two is actually undecidable:
+
+| profile | `config_jsonb.tagService` | tag service row exists? | `tagPolicies` in its download | evaluator |
+|---|---|---|---|---|
+| `sp3c2-trino-live` (52, generated) | `sp3c2-trino-live_tag` | yes (id 51) | **present** | `Undecidable` |
+| `demo-trino` (2, generated) | `demo-trino_tag` | **no** | absent | decides normally |
+| `trino` (50, manual), `sp4d1-gate` (56, manual) | none | — | absent | decides normally |
+| the three starrocks profiles | none | — | absent | decides normally |
+
+`demo-trino` is the exception because its tag service was never created (or was deleted): `GET
+/service/plugins/policies/download/demo-trino_tag` returns **404**, `download.rs`'s lookup is
+best-effort (`if let Ok(tsvc) = s.store.get_service(&name)`) and omits the block, and the live
+`GET /service/plugins/policies/download/demo-trino` comes back with keys
+`[serviceName, serviceId, policyVersion, serviceDef, policies, auditMode]` and no `tagPolicies`.
+Read-only; `demo-trino` was not touched.
+
+So the accurate statement, and the one F1 should be read as making, is:
+
+> **Undecidable today: every profile whose named tag service actually exists — which is one
+> profile, `sp3c2-trino-live`, and it is the only engine-facing Trino profile enforcing anything
+> in this cluster. Undecidable from now on: every profile Trino auto-bind creates, because it
+> creates the tag service alongside.**
+
+The narrower claim is the stronger one. A reader who checks `demo-trino`, finds it decidable, and
+concludes the finding was overstated would discount an escalation that is real.
 
 Consequences, in order of who has to act:
 
@@ -453,8 +510,9 @@ Consequences, in order of who has to act:
   `sp4d1-gate` exists. Its download has no `tagPolicies` key at all and every prediction in §4 is
   decidable (`unmodelled : []`).
 - **SP4d-2 (`explain`).** An `explain` built on this crate will return "I cannot answer" for the
-  engines egret actually runs unless tag policies are modelled or the answer is qualified. That
-  is a product decision, not a bug, and it belongs to SP4d-2.
+  one engine-facing Trino profile enforcing today, and for every profile auto-bind creates from
+  here on, unless tag policies are modelled or the answer is qualified. That is a product
+  decision, not a bug, and it belongs to SP4d-2.
 - **What was *not* done.** The captured download was **not** edited to remove `tagPolicies` in
   order to obtain a decidable answer. Stripping an input until the evaluator answers is exactly
   the "tune it into agreement" move this gate forbids.
@@ -539,11 +597,18 @@ changes.
 
 ---
 
-## 8. StarRocks — the predictions, made first, and F2
+## 8. StarRocks — predictions for the policy set that exists, made first, and F2
 
-The StarRocks live queries could not be run (§9), but the predictions were still computed and
-are recorded here so that a later run measures against a written-down answer rather than
-producing one after the fact. Input: `GET /service/plugins/policies/download/sp4a-sr-crosscheck`,
+**These are not S1 and S2.** The brief's two StarRocks cases need policies that could not be
+created (§9), so no download contains them and nothing about them can be predicted. What follows
+is a prediction-first cross-check against the StarRocks policies that **already exist** — which
+still exercises the Gap-B surface that matters for StarRocks (the middle level is `database`, not
+`schema`; the plugin is 2.8.0 against a different service-def), just not the ANCESTOR shape. The
+live queries could not be run either (§9 obstacle 3), so these predictions stand unmeasured; they
+are recorded because they are what found F2, and because a later run should measure against them
+rather than produce fresh ones after the fact.
+
+Input: `GET /service/plugins/policies/download/sp4a-sr-crosscheck`,
 `policyVersion 54`, 34 policies, **no `tagPolicies` key**; confirmed against the FE's own cache,
 which reads `{"serviceName":"sp4a-sr-crosscheck","serviceId":55,"policyVersion":54,…}`.
 
@@ -616,13 +681,30 @@ Three obstacles, each recorded with what was tried:
    `sp4a-sr-crosscheck` (id 55) — read out of
    `/opt/starrocks/fe/conf/ranger-starrocks-security.xml` inside the FE, not assumed from the
    engine name, which is `sp3c2-sr-live`. That profile has `origin = 'generated'`, and
-   `POST /api/control-plane/policies` refuses:
+   `POST /api/control-plane/policies` refuses every write to a generated profile.
+
+   **The refusal quoted below is borrowed, and the borrowing matters.** The attempt that produced
+   it named the profile `sp3c2-sr-live` — the *engine*'s name — before the FE's own
+   `ranger-starrocks-security.xml` was read and showed it polls `sp4a-sr-crosscheck` instead. So
+   this is the verbatim 409 for **profile 54**, not 55:
 
    ```json
    {"error":"conflict: profile 54 is compiled by the SP4a permission model — edit its grants and
    rules instead of writing a policy directly; the next recompile would silently overwrite this
    change"}
    ```
+
+   `crates/egret-policy/src/store.rs:190` interpolates the **service id** into that message, so
+   `54` names `sp3c2-sr-live` and nothing else. No write against profile 55 was ever issued, so
+   no 409 for 55 is quoted anywhere in this document. What carries the conclusion is not the
+   quote but the guard: `refuse_if_generated` reads `policy.authz_services.origin` and returns
+   `CompilerOwned` for any `'generated'` profile, and profile 55 is `generated` — measured,
+   `select id, name, origin from policy.authz_services` →
+   `55|sp4a-sr-crosscheck|starrocks|generated`. Identical code path, same outcome; the message
+   would differ only in the number.
+
+   That this slip is the exact engine-named-vs-profile-id confusion the paragraph above it warns
+   against is worth leaving on the record rather than quietly fixing.
 
 2. **The shape cannot be produced through the permission model either.** Writing a `perm` grant
    is the sanctioned way onto a generated profile, but today's compiler always emits a full
@@ -654,8 +736,11 @@ re-registered and an authentication chain configured — the same four repairs S
 for two cases.
 
 **What StarRocks contributed anyway:** case 7 (§7), which needs no query and no authentication,
-and the written-down predictions in §8, one of which (F2) found a real compiler defect in the
-live policy store.
+and §8's predictions against the policy set that *does* exist — one of which (F2) found a real
+compiler defect in the live policy store. To be exact, because the distinction is the whole point
+of §9: §8 does **not** contain predictions for S1 or S2. Obstacles 1 and 2 above mean neither
+shape exists in any download, and a prediction is computed from a download. A later run must
+create the policy before it can predict anything, and only then measure.
 
 ---
 
