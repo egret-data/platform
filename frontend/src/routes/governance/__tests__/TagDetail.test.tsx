@@ -274,7 +274,15 @@ describe("TagDetail", () => {
       setMutate.mockImplementation(
         (
           _vars: unknown,
-          opts: { onSuccess: (r: { ok: boolean; skipped: { reason: string }[] }) => void },
+          opts: {
+            onSuccess: (r: {
+              ok: boolean;
+              // The whole SkipReport, not just `reason`: narrowing it here made
+              // `tsc` reject the literal below while vitest still passed, so the
+              // gate failed on a shape the runtime never minded.
+              skipped: { source_kind: string; id: string; reason: string }[];
+            }) => void;
+          },
         ) =>
           opts.onSuccess({
             ok: true,
