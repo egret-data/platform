@@ -69,18 +69,61 @@
 //! ([`crate::SkippedItem`]) and logged rather than being silent. SP4c Task 5
 //! says the same thing in the UI, where the clearance is set.
 //!
-//! # Trino only, because the tag service is
+//! # Two shapes, because the two engines resolve a tag differently
 //!
-//! A clearance is addressed to the profile's Ranger TAG service, which only a
-//! Trino profile has (`config_jsonb->>'tagService'`; StarRocks has no tag
-//! service — upstream `starrocks#67458`). A profile with no usable tag service
-//! records a skip, exactly as a tag-selected RULE already does
-//! (`CompileError::MissingTagService`'s handling in `crate::trigger`), and for
-//! the same reason: nothing filed there could be served to anyone. Expressing a
-//! StarRocks clearance would need the per-column expansion SP4a's rules use,
-//! **and D0's measurement explicitly does not cover StarRocks** (its own plugin
-//! has native roles and may populate `userRoles` where Trino passes `null`), so
-//! it is not attempted here on a premise nobody has measured.
+//! **Trino** has a Ranger TAG service, so a clearance is ONE tag policy
+//! addressed to it (`config_jsonb->>'tagService'`), covering however many
+//! columns currently carry the tag — O(1), installation-wide, and evaluated
+//! before every resource policy.
+//!
+//! **StarRocks has no tag service** (upstream `starrocks#67458`), so a
+//! clearance expands to **one ACCESS deny per tagged column**, reusing the very
+//! same `column_resources` expansion SP4a's tag MASKS already use on this
+//! engine ([`crate::rules::column_resources`]). D0b
+//! (`docs/en/plans/2026-09-28-sp4c-d0b-starrocks-result.md`) measured that this
+//! works, and three of its findings constrain the shape:
+//!
+//! - **`select` only, by user ruling (2026-09-28).** `checkColumnAction` has
+//!   exactly ONE caller and it passes `PrivilegeType.SELECT`
+//!   (`ColumnPrivilege.java:152`), and egret's own `starrocks.json` restricts
+//!   the `column` resource to `accessTypeRestrictions: ["select"]`. The
+//!   `insert`/`update`/`delete` this compiler withholds on Trino can therefore
+//!   NEVER match at column granularity here: emitting them would be decoration
+//!   that reads as protection. **So a user without clearance can still
+//!   OVERWRITE a column they cannot read** — a real asymmetry with Trino, not a
+//!   rounding error. Buying the write half needs a *table*-level deny, which
+//!   would block every untagged column of that table too; that is a user
+//!   ruling, not a compiler decision, and the ruling so far is "reads only".
+//! - **No dedup, so the count is exactly N.** A tag-selected ROW FILTER dedups
+//!   per table because `rowFilterDef` declares no column resource, so two
+//!   tagged columns of one table are the same filter. An access deny DOES carry
+//!   a column resource, so two tagged columns are two different denies and
+//!   collapsing them would un-deny one of the columns.
+//! - **Priority 0, `is_override: false`.** On Trino the tag-first
+//!   short-circuit is what makes a clearance beat a resource grant. There is no
+//!   such short-circuit here; deny-beats-allow comes instead from
+//!   `PolicyEvalOrderComparator.compareNormal` sorting a `hasDeny()` evaluator
+//!   first, and an allow becoming final only once `!evaluator.hasDeny()`
+//!   (`RangerPolicyEngineImpl.java:718-722`) — which holds **only at EQUAL
+//!   policy priority**, because priority dominates that comparator. An OVERRIDE
+//!   here would break the very ordering it looks like it strengthens.
+//!
+//! **The expansion ceilings apply, and a clearance now competes for the same
+//! budget as a mask.** `DEFAULT_EXPANSION_CEILING` bounds one clearance
+//! ([`CompileError::ClearanceExpansionCeiling`], named after the TAG because a
+//! clearance is not a `perm.rules` row), and `PROFILE_EXPANSION_CEILING` bounds
+//! the profile's running total — which a StarRocks clearance counts against and
+//! a Trino one does not, because the Trino body is filed under the TAG service
+//! and the total is scoped to the profile's own `service_id`. A tag that is both
+//! masked and gated therefore costs 2N against that total for N columns. Both
+//! ceilings **refuse rather than truncate**: a truncated clearance is a control
+//! that withholds some of the columns it claims to, which is the failure this
+//! programme keeps refusing to ship.
+//!
+//! A StarRocks clearance is **not** a view-proof control: `ColumnPrivilege`
+//! routes a `View` to `checkViewPrivilege` and a materialized view to
+//! `checkMaterializedViewAction`, neither of which descends to base-table
+//! columns (D0b, read in source and NOT yet measured live — Task 6 owns that).
 
 use std::collections::BTreeMap;
 
@@ -88,11 +131,15 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use egret_perm::{engine_accesses, Action, CompileError, EngineType};
-use egret_policy::admin::{tag_access_to_ranger_json, AccessItemInput, AccessPolicyInput};
-use egret_policy::COMPILER_CLEARANCE_PREFIX;
+use egret_policy::admin::{
+    access_to_ranger_json, tag_access_to_ranger_json, AccessItemInput, AccessPolicyInput,
+    ResourceLevel,
+};
+use egret_policy::{tagged_columns_for_service_via, COMPILER_CLEARANCE_PREFIX};
 
-use crate::rules::PUBLIC_GROUP;
-use crate::trigger::{SkippedItem, SourceKind};
+use crate::grants::PolicyTarget;
+use crate::rules::{column_resources, stamp_service_type, TaggedColumn, PUBLIC_GROUP};
+use crate::trigger::{SkippedItem, SourceKind, DEFAULT_EXPANSION_CEILING};
 
 /// One `classification_policies` row joined to the tag it gates. A row whose
 /// tag no longer exists is dropped by the join — there is no tag left to deny
@@ -105,34 +152,56 @@ struct GateRow {
     /// (`ServiceTags::from_assignments` carries `tag_name`), which is the same
     /// resolution `crate::rules` uses via `tag_name_for_key_via`.
     tag_name: String,
+    /// `tags.key` — the STABLE identifier, needed only on the StarRocks branch:
+    /// `tagged_columns_for_service_via` selects assignments by key, the same
+    /// lookup `crate::trigger` already does for a tag-selected rule. The Trino
+    /// branch never uses it (a tag POLICY matches on the name).
+    tag_key: String,
     required_roles: Vec<String>,
     required_groups: Vec<Uuid>,
 }
 
 /// What compiling this installation's clearances produced for ONE profile: the
-/// rendered tag-policy bodies (already addressed to the tag service by
-/// `tagify`, so `crate::trigger::target_service_id` routes them from the body's
-/// own `service` field) and the gated tags this profile could not express.
+/// rendered policy bodies keyed by the name they must exist under, and the
+/// gated tags this profile could not express.
+///
+/// On Trino each body is already addressed to the TAG service by `tagify`; on
+/// StarRocks each is addressed to the profile itself. Either way
+/// `crate::trigger::target_service_id` routes it from the body's own `service`
+/// field, so this struct does not need to say which.
 pub(crate) struct Clearances {
     pub(crate) policies: Vec<(String, Value)>,
     pub(crate) skipped: Vec<SkippedItem>,
 }
 
-/// Compile every gated tag into a clearance deny for the profile named
-/// `tag_service`.
+/// Compile every gated tag into a clearance deny for one profile.
 ///
-/// Clearances are **installation-wide**, exactly like a Trino tag-selected
-/// rule: the policy carries no catalog resource at all, and the tag plugin
-/// resolves the tag wherever it has been assigned. So every gated tag compiles
-/// into every Trino profile that has a tag service, and a clearance write
-/// recompiles every such profile (SP4c Task 3's affected set).
+/// On **Trino** a clearance is **installation-wide**, exactly like a
+/// tag-selected rule: the policy carries no catalog resource at all and the tag
+/// plugin resolves the tag wherever it has been assigned. So every gated tag
+/// compiles into every Trino profile that has a tag service.
+///
+/// On **StarRocks** it is service-scoped, because the expansion is: only the
+/// columns reachable from `service_id` (`tagged_columns_for_service_via`) can be
+/// addressed by a policy served to that profile's plugin. A gated tag with no
+/// reachable tagged column compiles to nothing there, and that is NOT a skip —
+/// there is no column to withhold, which is the same answer SP4a's tag masks
+/// give for the same input.
+///
+/// `service` is the profile's own Ranger service name (what a StarRocks body
+/// stamps on itself); `tag_service` is its TAG service name, `None` for
+/// StarRocks and for a Trino profile whose `tagService` is unconfigured or names
+/// a profile that does not exist.
 pub(crate) async fn compile_clearance(
     conn: &mut sqlx::PgConnection,
     engine: EngineType,
+    service_id: i64,
+    service: &str,
     tag_service: Option<&str>,
 ) -> Result<Clearances, CompileError> {
     let gates: Vec<GateRow> = sqlx::query_as(
-        "SELECT cp.tag_id, t.name AS tag_name, cp.required_roles, cp.required_groups \
+        "SELECT cp.tag_id, t.name AS tag_name, t.key AS tag_key, cp.required_roles, \
+                cp.required_groups \
            FROM classification_policies cp \
            JOIN tags t ON t.id = cp.tag_id \
           ORDER BY cp.tag_id",
@@ -180,18 +249,6 @@ pub(crate) async fn compile_clearance(
             ));
             continue;
         }
-        let Some(tag_service) = tag_service else {
-            out.skipped.push(skip(
-                g,
-                format!(
-                    "this {engine:?} profile has no usable `tagService`, and a clearance is a \
-                     TAG policy — nothing filed here could be served to any plugin. A StarRocks \
-                     clearance would need the per-column expansion its rules use, on a premise \
-                     D0 did not measure for StarRocks"
-                ),
-            ));
-            continue;
-        };
 
         // Cleared = holds AT LEAST ONE of the required roles
         // (`ClassificationPolicyRepo`'s semantics: `>= 1` role OR `>= 1`
@@ -222,52 +279,151 @@ pub(crate) async fn compile_clearance(
             );
         }
 
-        let name = format!("{COMPILER_CLEARANCE_PREFIX}{}", g.tag_id);
-        let input = AccessPolicyInput {
-            name: name.clone(),
-            // `tagify` overwrites this with `tag_service` regardless; passing
-            // it explicitly keeps the body from ever naming the profile.
-            service: tag_service.to_string(),
-            is_enabled: true,
-            // `tagify` replaces the resources map with the single `tag`
-            // resource, exactly as it does for a compiled tag mask.
-            resources: BTreeMap::new(),
-            items: vec![AccessItemInput {
-                users: Vec::new(),
-                // The ONE expressible half of the pair: `{public}` matches
-                // everybody even with no group provider (D0, measured).
-                groups: vec![PUBLIC_GROUP.to_string()],
-                // Deliberately empty. Naming the clearing role here — the
-                // obvious implementation — is what D0 measured matches nobody.
-                roles: Vec::new(),
-                accesses: accesses.clone(),
-                effect: "deny".to_string(),
-            }],
-            allow_exceptions: Vec::new(),
-            deny_exceptions: vec![AccessItemInput {
-                users: cleared,
-                groups: Vec::new(),
-                roles: Vec::new(),
-                accesses: accesses.clone(),
-                effect: "deny".to_string(),
-            }],
-            // MUST stay false: `access_to_ranger_json` blanks BOTH
-            // `denyPolicyItems` and `denyExceptions` when `isDenyAllElse` is
-            // set, which would turn this policy into a deny nobody can be
-            // excepted from.
-            is_deny_all_else: false,
-            description: String::new(),
-            labels: Vec::new(),
-            is_override: false,
-            additional: Vec::new(),
-        };
-        out.policies.push((
-            name,
-            tag_access_to_ranger_json(&input, &g.tag_name, tag_service),
-        ));
+        match engine {
+            EngineType::Trino => {
+                let Some(tag_service) = tag_service else {
+                    out.skipped.push(skip(
+                        g,
+                        "this Trino profile has no usable `tagService` (unconfigured, or naming a \
+                         profile that does not exist), and a Trino clearance is a TAG policy — \
+                         nothing filed here could be served to any plugin"
+                            .to_string(),
+                    ));
+                    continue;
+                };
+                let name = format!("{COMPILER_CLEARANCE_PREFIX}{}", g.tag_id);
+                let input = clearance_input(
+                    name.clone(),
+                    tag_service.to_string(),
+                    // `tagify` replaces the resources map with the single `tag`
+                    // resource, exactly as it does for a compiled tag mask.
+                    BTreeMap::new(),
+                    &accesses,
+                    cleared,
+                );
+                out.policies.push((
+                    name,
+                    tag_access_to_ranger_json(&input, &g.tag_name, tag_service),
+                ));
+            }
+            // **SP4c Task 2d — the per-column expansion, on the engine that has
+            // no tag service to do it for us.** The same `column_resources`
+            // SP4a's tag masks use, at `PolicyTarget::Access`: one policy per
+            // matched column and NO dedup, because an access deny DOES carry a
+            // column resource and collapsing two columns would un-deny one.
+            EngineType::StarRocks => {
+                let tagged: Vec<TaggedColumn> =
+                    tagged_columns_for_service_via(conn, service_id, &g.tag_key)
+                        .await
+                        .map_err(|e| CompileError::Db(e.to_string()))?
+                        .into_iter()
+                        .map(|row| TaggedColumn {
+                            catalog: row.catalog,
+                            schema: row.schema_name,
+                            table: row.table_name,
+                            column: row.column_name,
+                        })
+                        .collect();
+                // **Refuse, never truncate.** A truncated clearance withholds
+                // SOME of the columns it claims to, and the ones silently
+                // dropped are readable by exactly the people the classification
+                // exists to keep out. The refusal fails the write that caused it
+                // (`crate::trigger` propagates it, the caller's `?` rolls back)
+                // rather than committing a clearance the UI shows as active.
+                if tagged.len() > DEFAULT_EXPANSION_CEILING {
+                    return Err(CompileError::ClearanceExpansionCeiling {
+                        tag: g.tag_name.clone(),
+                        count: tagged.len(),
+                        ceiling: DEFAULT_EXPANSION_CEILING,
+                    });
+                }
+                for col in &tagged {
+                    let name = format!(
+                        "{COMPILER_CLEARANCE_PREFIX}{}-{}.{}.{}.{}",
+                        g.tag_id, col.catalog, col.schema, col.table, col.column
+                    );
+                    let input = clearance_input(
+                        name.clone(),
+                        service.to_string(),
+                        column_resources(engine, col, PolicyTarget::Access),
+                        &accesses,
+                        cleared.clone(),
+                    );
+                    // `access_to_ranger_json` hardcodes `serviceType: "trino"`;
+                    // a StarRocks-targeted body rendered without this stamp
+                    // deploys cleanly and enforces nothing
+                    // (`stamp_service_type`'s own reason for existing).
+                    out.policies.push((
+                        name,
+                        stamp_service_type(access_to_ranger_json(&input), engine),
+                    ));
+                }
+            }
+        }
     }
 
     Ok(out)
+}
+
+/// The one clearance policy shape, built once for both engines: deny `{public}`
+/// the withheld accesses on `resources`, except the enumerated cleared
+/// usernames.
+///
+/// Shared deliberately. The two branches differ ONLY in which resource they
+/// address and which service they are filed under; every other field is a
+/// property of what a clearance IS, and three of them are load-bearing in ways a
+/// second copy would be free to get wrong — see the inline notes.
+fn clearance_input(
+    name: String,
+    service: String,
+    resources: BTreeMap<String, ResourceLevel>,
+    accesses: &[String],
+    cleared: Vec<String>,
+) -> AccessPolicyInput {
+    AccessPolicyInput {
+        name,
+        service,
+        is_enabled: true,
+        resources,
+        items: vec![AccessItemInput {
+            users: Vec::new(),
+            // The ONE expressible half of the pair: `{public}` matches
+            // everybody even with no group provider (D0/D0b, measured — the
+            // group check needs only a non-null `userGroups`, and
+            // `setUserGroups` normalises `null` to an empty set).
+            groups: vec![PUBLIC_GROUP.to_string()],
+            // Deliberately empty. Naming the clearing role here — the obvious
+            // implementation — is what D0 measured matches nobody, and D0b
+            // re-derived the same answer for StarRocks: `setUserRoles` is never
+            // called anywhere in `fe/`.
+            roles: Vec::new(),
+            accesses: accesses.to_vec(),
+            effect: "deny".to_string(),
+        }],
+        allow_exceptions: Vec::new(),
+        deny_exceptions: vec![AccessItemInput {
+            users: cleared,
+            groups: Vec::new(),
+            roles: Vec::new(),
+            accesses: accesses.to_vec(),
+            effect: "deny".to_string(),
+        }],
+        // MUST stay false: `access_to_ranger_json` blanks BOTH
+        // `denyPolicyItems` and `denyExceptions` when `isDenyAllElse` is set,
+        // which would turn this policy into a deny nobody can be excepted from.
+        is_deny_all_else: false,
+        description: String::new(),
+        labels: Vec::new(),
+        // **MUST stay false on BOTH engines, for two DIFFERENT reasons.** On
+        // Trino an override is simply unnecessary — the tag-first short-circuit
+        // already wins. On StarRocks it would be actively HARMFUL: with no tag
+        // service, deny-beats-allow comes from Ranger sorting `hasDeny()`
+        // evaluators first, and priority DOMINATES that comparator
+        // (`PolicyEvalOrderComparator.compareNormal`) — so raising the priority
+        // breaks the very ordering it looks like it strengthens (D0b).
+        is_override: false,
+        additional: Vec::new(),
+    }
 }
 
 fn skip(g: &GateRow, reason: String) -> SkippedItem {
@@ -290,15 +446,34 @@ fn skip(g: &GateRow, reason: String) -> SkippedItem {
 /// plugin does not declare is silently ignored: the policy compiles, deploys,
 /// and withholds nothing — `egret_perm::actions`' own warning).
 ///
-/// **Both actions, not just `read`.** A classification withholds the DATA, not
-/// only the `SELECT`: an uncleared user who could still `INSERT` into a
-/// classified column would be writing into data they are not cleared to see,
-/// and under-denying here is the one failure direction that cannot be noticed
-/// from a read test. On Trino that is `select`/`insert`/`delete`.
+/// **Trino: both actions, not just `read`.** A classification withholds the
+/// DATA, not only the `SELECT`: an uncleared user who could still `INSERT` into
+/// a classified column would be writing into data they are not cleared to see,
+/// and under-denying is the one failure direction a read test cannot notice.
+/// That is `select`/`insert`/`delete`.
+///
+/// **StarRocks: `select` ALONE, by user ruling (2026-09-28) — and this is an
+/// asymmetry with Trino, not a simplification.** D0b measured that
+/// `checkColumnAction` has exactly ONE caller and it passes
+/// `PrivilegeType.SELECT` (`ColumnPrivilege.java:152`), and that egret's own
+/// `starrocks.json` restricts the `column` resource to
+/// `accessTypeRestrictions: ["select"]`. So the `insert`/`update`/`delete` this
+/// function yields for Trino can never MATCH at column granularity here.
+/// Emitting them anyway would be decoration that reads as protection — a policy
+/// listing four withheld accesses while withholding one — which is precisely the
+/// failure mode this programme keeps refusing to ship. **The consequence is
+/// real: a user without clearance can still overwrite a StarRocks column they
+/// cannot read.** Buying the write half needs a *table*-level deny, which would
+/// block every untagged column of that table too; that is a user ruling, and the
+/// ruling is reads-only. SP4c Task 5 says so in the UI.
 fn withheld_accesses(engine: EngineType) -> Result<Vec<String>, CompileError> {
+    let actions: &[Action] = match engine {
+        EngineType::Trino => &[Action::Read, Action::Write],
+        EngineType::StarRocks => &[Action::Read],
+    };
     let mut out: Vec<String> = Vec::new();
-    for action in [Action::Read, Action::Write] {
-        for acc in engine_accesses(action, engine)? {
+    for action in actions {
+        for acc in engine_accesses(*action, engine)? {
             if !out.iter().any(|a| a == acc) {
                 out.push((*acc).to_string());
             }

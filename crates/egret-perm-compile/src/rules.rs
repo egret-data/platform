@@ -355,7 +355,13 @@ pub fn compile_rule(
 /// it as live, and it filtered no rows at all. A mask keeps all four levels
 /// (`dataMaskDef` declares `column`); a row filter stops at `table`
 /// ([`ROW_FILTER_LEVELS`]).
-fn column_resources(
+///
+/// `pub(crate)`: SP4c Task 2d's per-column CLEARANCE expansion addresses
+/// exactly the same resource, at `PolicyTarget::Access`. Reusing this rather
+/// than building a second column-resource map is deliberate — the two would
+/// otherwise be free to disagree about a level name or a depth, and a clearance
+/// addressing a resource the mask does not is a deny that enforces nothing.
+pub(crate) fn column_resources(
     e: EngineType,
     col: &TaggedColumn,
     target: PolicyTarget,

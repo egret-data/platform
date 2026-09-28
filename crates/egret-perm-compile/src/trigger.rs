@@ -520,12 +520,23 @@ async fn compile_desired(
     // ("tags drive rules only, never access") — the argument is at the site,
     // in `crate::clearance`'s module doc, because a classification exists to
     // withhold data and a mask still answers the query. Clearances come from
-    // `classification_policies`, not from the `perm` model, and they are
-    // installation-wide for the same reason a Trino tag rule is: the body
-    // carries no catalog resource and the tag plugin resolves the tag wherever
-    // it is assigned.
-    let clearances =
-        crate::clearance::compile_clearance(conn, engine, tag_service.as_deref()).await?;
+    // `classification_policies`, not from the `perm` model.
+    //
+    // **Installation-wide on Trino, service-scoped on StarRocks** (SP4c Task
+    // 2d). A Trino clearance is one TAG policy carrying no catalog resource, so
+    // it compiles identically into every Trino profile with a tag service. A
+    // StarRocks clearance expands to one ACCESS deny per tagged column
+    // reachable from THIS service — the same `tagged_columns_for_service_via`
+    // expansion a tag-selected rule uses above — so `service_id` and the
+    // profile's own name both have to reach the compiler.
+    let clearances = crate::clearance::compile_clearance(
+        conn,
+        engine,
+        service_id,
+        &svc.name,
+        tag_service.as_deref(),
+    )
+    .await?;
     skipped.extend(clearances.skipped);
     for (name, body) in clearances.policies {
         let target = target_service_id(&body, &writable, &format!("clearance {name}"))?;
