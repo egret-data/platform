@@ -303,6 +303,21 @@ pub struct RunnerSpec {
     pub memory: Option<String>,
 }
 
+impl RunnerSpec {
+    /// What `taskRunner: {type: <kind>}` with no other property parses to:
+    /// `pullPolicy: IF_NOT_PRESENT`, `delete: true`, nothing else set.
+    pub fn defaults(kind: RunnerKind) -> Self {
+        RunnerSpec {
+            kind,
+            pull_policy: PullPolicy::default(),
+            delete: true,
+            resources: None,
+            cpu: None,
+            memory: None,
+        }
+    }
+}
+
 /// A parsed script task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptTask {
@@ -592,14 +607,7 @@ fn parse_runner(value: &Value, errs: &mut Vec<ScriptRefusal>) -> Option<RunnerSp
         }
     };
 
-    let mut spec = RunnerSpec {
-        kind,
-        pull_policy: PullPolicy::default(),
-        delete: true,
-        resources: None,
-        cpu: None,
-        memory: None,
-    };
+    let mut spec = RunnerSpec::defaults(kind);
     let before = errs.len();
     for (key, value) in map {
         let key = key.as_str();

@@ -81,6 +81,7 @@ mod cancel;
 mod claim;
 pub mod commands;
 pub mod handlers;
+pub mod k8s;
 mod reaper;
 mod registry;
 mod render;

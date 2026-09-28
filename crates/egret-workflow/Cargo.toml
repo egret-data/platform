@@ -220,6 +220,17 @@ tracing.workspace = true
 # egret-kernel both take it), so this is a direct edge and no new crate.
 tokio-util.workspace = true
 
+# W5a Task 4: `worker::k8s` is the Kubernetes task runner
+# (`io.kestra.plugin.ee.kubernetes.runner.Kubernetes`). Both crates are the
+# workspace's own entries, already linked into `egret-bin` by the notebook
+# kernel launcher (`kernel_launcher_k8s.rs`), so this adds edges and no new
+# crate; `ws` (in the workspace entry) is what `pods/exec` needs.
+# `futures-util` reads `pods/log`, which kube hands back as a
+# `futures::AsyncBufRead`; also already in the tree.
+kube.workspace = true
+k8s-openapi.workspace = true
+futures-util.workspace = true
+
 [dev-dependencies]
 # minijinja moved to [dependencies] in W2 Task 3 (`runners::env` builds the
 # real environment). `runners::rewrite`'s tests still reach it as
@@ -280,6 +291,13 @@ url.workspace = true
 # dependency, so no new crate.
 tracing-subscriber.workspace = true
 
+# `tests/k8s_runner_live.rs` ONLY: kube's TLS client needs a rustls crypto
+# provider, and this tree enables both ring and aws-lc-rs, so none is chosen
+# automatically (a runtime panic). `egret-bin` installs ring at startup with
+# this same pin (`crates/egret-bin/Cargo.toml`); the test's `main` does the
+# same. Already in the lock file, so no new crate.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
 # `tests/container_docker_live.rs` runs WITHOUT libtest, and that is fix round
 # 1's reviewer plan item 2 rather than a preference.
 #
@@ -295,4 +313,11 @@ tracing-subscriber.workspace = true
 # file's own doc for what it does and does not implement.
 [[test]]
 name = "container_docker_live"
+harness = false
+
+# W5a Task 4: the Kubernetes runner against a real cluster, gated on
+# `EGRET_TEST_KIND=1` and reported IGNORED (never passed) without it -- the
+# same hand-rolled main as `container_docker_live`, for the same reason.
+[[test]]
+name = "k8s_runner_live"
 harness = false

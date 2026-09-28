@@ -225,6 +225,34 @@ impl LogRepo {
         rows.iter().map(stored).collect()
     }
 
+    /// The `ts` of the newest stored line of one task-run attempt, `None` when
+    /// it has none.
+    ///
+    /// W5a Task 4: the Kubernetes runner's re-attach follows `main`'s log from
+    /// here (`sinceTime`), so a worker that takes over a live pod repeats few of
+    /// the lines its predecessor already stored (spec §5, *Re-attach*).
+    /// `attempt` is the STORED numbering, 0-based
+    /// ([`RunIdentity::stored_attempt`](super::RunIdentity::stored_attempt)).
+    /// `execution_id` is in the predicate so the `(execution_id, id)` index
+    /// narrows the scan; `task_run_id` has no index of its own.
+    pub async fn last_ts(
+        &self,
+        execution: Uuid,
+        task_run: Uuid,
+        attempt: i32,
+    ) -> Result<Option<DateTime<Utc>>> {
+        sqlx::query_scalar(
+            "SELECT max(ts) FROM workflow.task_logs \
+              WHERE execution_id = $1 AND task_run_id = $2 AND attempt = $3",
+        )
+        .bind(execution)
+        .bind(task_run)
+        .bind(attempt)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(db_err)
+    }
+
     /// Delete at most `batch` lines produced (`ts`) more than
     /// `older_than_days` days ago; returns how many went. The retention
     /// ticker calls this until it returns less than `batch`.

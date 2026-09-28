@@ -119,6 +119,7 @@ use tokio::process::Command;
 
 use super::TaskInput;
 use crate::logs::LogLevel;
+use crate::scripts::RunnerSpec;
 
 /// The directory a command runs in, inside the container.
 ///
@@ -297,10 +298,27 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
     /// Everything the author can act on (a bad image, a command that exited
     /// non-zero) is `Ok` and the handler decides what it means, exactly as
     /// [`Registry::run`](super::Registry) splits the two.
+    ///
+    /// `spec` is the task's parsed `taskRunner:` (`pullPolicy`, `delete`,
+    /// `resources`, …) — **where** the command runs, per task, which is why it
+    /// is an argument and not a field of the runner (W5a Task 4). A runner
+    /// reads the properties it implements; a handler with no `taskRunner:`
+    /// passes [`RunnerSpec::defaults`].
+    ///
+    /// # Re-attach (W5a spec §5)
+    ///
+    /// A runner that names its work deterministically per **(run, attempt)**
+    /// — [`KubernetesRunner`](super::k8s::KubernetesRunner) — first looks the
+    /// work up by that name and re-attaches to it if it exists, instead of
+    /// creating a second one. That is what makes a dropped `run` future (the
+    /// worker lost its lease, W5a Task 3) safe: dropping never deletes, and
+    /// the next holder of the lease finds the same pod. [`DockerRunner`]'s
+    /// name still carries the lease, so it cannot re-attach yet (Task 5).
     async fn run(
         &self,
         task: &TaskInput,
         commands: &TaskCommands,
+        spec: &RunnerSpec,
         observer: &dyn LineObserver,
     ) -> Result<CommandsResult>;
 
@@ -433,6 +451,10 @@ pub fn container_name(task: &TaskInput) -> String {
 /// container up by them — [`container_name`] is the address — and that is
 /// deliberate: a lookup by label would be a second way to name the same thing,
 /// able to disagree with the first.
+///
+/// *W5a Task 4:* the one reader is [`OrphanSweep`], which **lists** by
+/// [`TASKRUN_LABEL`] to find the run each container belongs to. It never
+/// addresses a single container's work by label; it removes by name.
 pub fn labels(task: &TaskInput) -> Vec<(String, String)> {
     vec![
         (
@@ -443,7 +465,7 @@ pub fn labels(task: &TaskInput) -> Vec<(String, String)> {
             "egret.io/execution-id".into(),
             task.execution_id.to_string(),
         ),
-        ("egret.io/taskrun-id".into(), task.run_id.to_string()),
+        (TASKRUN_LABEL.into(), task.run_id.to_string()),
         ("egret.io/task-id".into(), task.task_id.clone()),
         ("egret.io/taskrun-attempt".into(), task.attempt.to_string()),
         ("egret.io/lease".into(), task.claimed_at.to_rfc3339()),
@@ -1056,10 +1078,14 @@ impl DockerRunner {
 
 #[async_trait::async_trait]
 impl TaskRunner for DockerRunner {
+    /// `spec` is not read yet: `pullPolicy`, `delete`, `cpu` and `memory` on
+    /// the Docker runner are W5a Task 5's, which also wires this runner as
+    /// `taskRunner: io.kestra.plugin.scripts.runner.docker.Docker`.
     async fn run(
         &self,
         task: &TaskInput,
         commands: &TaskCommands,
+        _spec: &RunnerSpec,
         observer: &dyn LineObserver,
     ) -> Result<CommandsResult> {
         // `Docker.run`'s own first act, and its own message.
@@ -1414,6 +1440,154 @@ impl DockerRunner {
     }
 }
 
+/// The label every egret task container **and** task pod carries with its
+/// `task_runs.id` — what an orphan sweep reads to find the run a piece of
+/// work belongs to.
+pub const TASKRUN_LABEL: &str = "egret.io/taskrun-id";
+
+/// The prefix of every task container's and task pod's name.
+pub const RUN_NAME_PREFIX: &str = "egret-run-";
+
+/// **Clean up the work a runner left behind for runs that have ended** —
+/// one interface for both runners (W5a Task 4, carrying Task 3's finding).
+///
+/// Task 3 measured that a Docker container whose worker lost its lease keeps
+/// running, and until re-attach exists the new holder starts a second one; a
+/// pod is left behind the same way when egret dies between downloading a
+/// task's outputs and deleting its pod (spec §5, *Orphans*). Neither is
+/// anybody's to delete while its run is live, and both are garbage once the
+/// run is terminal. The reaper's tick calls this (Task 5 wires the call site).
+///
+/// Returns how many were removed. `Err` is the runner's backend being
+/// unreachable; one item that fails to delete is logged and not counted.
+#[async_trait::async_trait]
+pub trait OrphanSweep: Send + Sync {
+    async fn sweep_orphans(&self, pool: &sqlx::PgPool) -> Result<u64>;
+}
+
+/// Of `ids`, which `task_runs` rows are terminal, and which have no row at
+/// all — the one question both halves of [`OrphanSweep`] ask the database.
+///
+/// Terminal is [`RunState::is_terminal`](crate::executor::RunState::is_terminal),
+/// Kestra's `isTerminated()`, spelled here by the enum rather than a copied
+/// list so the two cannot drift.
+pub(crate) async fn run_liveness(pool: &sqlx::PgPool, ids: &[uuid::Uuid]) -> Result<RunLiveness> {
+    let terminal: Vec<&str> = crate::executor::RunState::ALL
+        .iter()
+        .filter(|s| s.is_terminal())
+        .map(|s| s.wire())
+        .collect();
+    let rows: Vec<(uuid::Uuid, bool)> =
+        sqlx::query_as("SELECT id, state = ANY($2) FROM workflow.task_runs WHERE id = ANY($1)")
+            .bind(ids)
+            .bind(&terminal)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| {
+                Error::Internal(anyhow::anyhow!(
+                    "reading run states for the orphan sweep: {e}"
+                ))
+            })?;
+    let mut out = RunLiveness::default();
+    let mut seen = std::collections::HashSet::new();
+    for (id, is_terminal) in rows {
+        seen.insert(id);
+        if is_terminal {
+            out.terminal.insert(id);
+        }
+    }
+    for id in ids {
+        if !seen.contains(id) {
+            out.missing.insert(*id);
+        }
+    }
+    Ok(out)
+}
+
+/// [`run_liveness`]'s answer.
+#[derive(Debug, Default)]
+pub(crate) struct RunLiveness {
+    /// A row exists and its state is terminal.
+    pub terminal: std::collections::HashSet<uuid::Uuid>,
+    /// No row at all (the execution was deleted, cascading its runs — or the
+    /// work belongs to ANOTHER egret sharing the backend).
+    pub missing: std::collections::HashSet<uuid::Uuid>,
+}
+
+/// **The Docker half of the sweep.**
+///
+/// Lists every container carrying [`TASKRUN_LABEL`] whose name starts with
+/// [`RUN_NAME_PREFIX`], and force-removes those whose run is **terminal**.
+///
+/// # A container whose run has NO row is left alone, unlike a pod
+///
+/// A Docker daemon is shared: a developer's machine runs the dev stack, the
+/// test suites and anything else against one daemon, each with its own
+/// database. A container whose run id is absent from *this* database is far
+/// more likely to be another egret's live work than an orphan of ours, so
+/// only a row this database can see as terminal authorises the removal. The
+/// pod sweep differs on purpose: the task namespace is egret's alone
+/// ([`k8s::sweep_orphans`](super::k8s::sweep_orphans)).
+#[async_trait::async_trait]
+impl OrphanSweep for DockerRunner {
+    async fn sweep_orphans(&self, pool: &sqlx::PgPool) -> Result<u64> {
+        let label_filter = format!("label={TASKRUN_LABEL}");
+        let format = format!("{{{{.Names}}}}\t{{{{.Label \"{TASKRUN_LABEL}\"}}}}");
+        let out = self
+            .cli(&[
+                "ps",
+                "--all",
+                "--filter",
+                &label_filter,
+                "--format",
+                &format,
+            ])
+            .await?;
+        if !out.status.success() {
+            return Err(self
+                .classify("ps", &String::from_utf8_lossy(&out.stderr))
+                .await);
+        }
+        let listed = parse_docker_ps(&String::from_utf8_lossy(&out.stdout));
+        if listed.is_empty() {
+            return Ok(0);
+        }
+        let ids: Vec<uuid::Uuid> = listed.iter().map(|(_, id)| *id).collect();
+        let live = run_liveness(pool, &ids).await?;
+        let mut removed = 0u64;
+        for (name, id) in &listed {
+            if !live.terminal.contains(id) {
+                continue;
+            }
+            match self.cli(&["rm", "--force", name]).await {
+                Ok(o) if o.status.success() => removed += 1,
+                Ok(o) => tracing::warn!(
+                    container = %name,
+                    "orphan sweep could not remove the container: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ),
+                Err(e) => tracing::warn!(container = %name, "orphan sweep: {e}"),
+            }
+        }
+        Ok(removed)
+    }
+}
+
+/// `docker ps --format '{{.Names}}\t{{.Label "egret.io/taskrun-id"}}'`, parsed:
+/// the egret task containers only (name prefix AND a label that is a UUID).
+fn parse_docker_ps(stdout: &str) -> Vec<(String, uuid::Uuid)> {
+    stdout
+        .lines()
+        .filter_map(|l| {
+            let (name, id) = l.split_once('\t')?;
+            if !name.starts_with(RUN_NAME_PREFIX) {
+                return None;
+            }
+            Some((name.to_string(), uuid::Uuid::parse_str(id.trim()).ok()?))
+        })
+        .collect()
+}
+
 /// Make the staging destination for **one** declared output name, under a root
 /// that is private to that name.
 ///
@@ -1589,7 +1763,7 @@ fn check_relative(rel: &str) -> Result<()> {
 
 /// The same rule as a **message or nothing**, so [`ingest_output_file`] can use
 /// it without an [`Error`] it would only have to unwrap again.
-fn relative_problem(rel: &str) -> Option<String> {
+pub(crate) fn relative_problem(rel: &str) -> Option<String> {
     if rel.is_empty() {
         return Some("a file name must not be empty".to_string());
     }
@@ -2337,6 +2511,7 @@ mod tests {
                     output_files: vec!["wanted.txt".into(), "nested/also.txt".into()],
                     ..TaskCommands::default()
                 },
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
                 &NoObserver,
             )
             .await
@@ -2488,6 +2663,7 @@ mod tests {
                     output_files: vec!["a".into(), "a/b.txt".into()],
                     ..TaskCommands::default()
                 },
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
                 &NoObserver,
             )
             .await
@@ -2566,7 +2742,12 @@ mod tests {
         };
         let sink = NoObserver;
         runner
-            .run(&leased(1_700_000_000), &cmds, &sink)
+            .run(
+                &leased(1_700_000_000),
+                &cmds,
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+                &sink,
+            )
             .await
             .expect("no worker failure");
 
@@ -2672,7 +2853,8 @@ mod tests {
             ..TaskCommands::default()
         };
         let sink = NoObserver;
-        let fut = runner.run(&task, &cmds, &sink);
+        let spec = RunnerSpec::defaults(crate::scripts::RunnerKind::Docker);
+        let fut = runner.run(&task, &cmds, &spec, &sink);
         // Exactly what `timeout::guard` does to a handler that outruns its
         // budget: drop the future.
         assert!(
@@ -2809,7 +2991,12 @@ mod tests {
         };
         let sink = NoObserver;
         let out = runner
-            .run(&leased(1_700_000_000), &cmds, &sink)
+            .run(
+                &leased(1_700_000_000),
+                &cmds,
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+                &sink,
+            )
             .await
             .expect(
                 "an author naming a file `docker.sock` must not be able to make egret \

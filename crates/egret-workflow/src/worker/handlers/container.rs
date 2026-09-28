@@ -381,7 +381,9 @@ impl TaskHandler for Container {
             output_files,
         };
 
-        match self.runner.run(task, &cmds, &NoObserver).await {
+        // W5a Task 5 replaces this with the task's own `taskRunner:`.
+        let spec = crate::scripts::RunnerSpec::defaults(crate::scripts::RunnerKind::Docker);
+        match self.runner.run(task, &cmds, &spec, &NoObserver).await {
             Ok(result) => Ok(outcome_for(TYPE_ID, &result)),
             Err(e) => mapped(TYPE_ID, e),
         }
@@ -457,6 +459,7 @@ pub(super) mod testing {
             &self,
             task: &TaskInput,
             commands: &TaskCommands,
+            _spec: &crate::scripts::RunnerSpec,
             observer: &dyn crate::worker::commands::LineObserver,
         ) -> Result<CommandsResult> {
             self.seen.lock().unwrap().push(commands.clone());

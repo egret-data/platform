@@ -71,6 +71,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use egret_workflow::logs::{LogLevel, LogLimits, LogLine, RunIdentity, RunLog};
+use egret_workflow::scripts::{RunnerKind, RunnerSpec};
 use egret_workflow::worker::commands::{
     container_name, DockerRunner, NoObserver, TaskCommands, TaskRunner,
 };
@@ -332,6 +333,11 @@ fn force_remove(name: &str) {
         .args(["rm", "--force", name])
         .stdin(std::process::Stdio::null())
         .output();
+}
+
+/// The `taskRunner:` a flow with none gets on this runner.
+fn docker_spec() -> RunnerSpec {
+    RunnerSpec::defaults(RunnerKind::Docker)
 }
 
 fn outputs(out: &Outcome) -> serde_json::Value {
@@ -711,6 +717,7 @@ async fn the_runner_refuses_an_empty_image_with_the_artifacts_own_message() {
                 commands: vec!["true".into()],
                 ..TaskCommands::default()
             },
+            &docker_spec(),
             &NoObserver,
         )
         .await
@@ -747,6 +754,7 @@ async fn a_path_that_escapes_the_working_directory_is_refused_by_the_runner() {
                 input_files: BTreeMap::from([("../escaped.txt".to_string(), "x".to_string())]),
                 ..TaskCommands::default()
             },
+            &docker_spec(),
             &NoObserver,
         )
         .await
@@ -765,6 +773,7 @@ async fn a_path_that_escapes_the_working_directory_is_refused_by_the_runner() {
                 output_files: vec!["/etc/passwd".to_string()],
                 ..TaskCommands::default()
             },
+            &docker_spec(),
             &NoObserver,
         )
         .await
@@ -966,7 +975,7 @@ async fn an_output_file_over_the_cap_fails_the_task_rather_than_being_truncated(
         ..TaskCommands::default()
     };
     let out = runner
-        .run(&t, &cmds, &NoObserver)
+        .run(&t, &cmds, &docker_spec(), &NoObserver)
         .await
         .expect("a file over the cap is the author's flow");
     let why = out.failure.clone().expect("the cap must fail the task");
@@ -982,7 +991,7 @@ async fn an_output_file_over_the_cap_fails_the_task_rather_than_being_truncated(
     let runner = DockerRunner::new().with_limits(1024, 1_048_576);
     let t = task(container::TYPE_ID, serde_json::json!({}));
     let out = runner
-        .run(&t, &cmds, &NoObserver)
+        .run(&t, &cmds, &docker_spec(), &NoObserver)
         .await
         .expect("100 bytes is under a 1024-byte cap");
     assert_eq!(out.failure, None, "{out:?}");
@@ -1005,6 +1014,7 @@ async fn a_flood_of_output_markers_is_refused_rather_than_stored() {
                 ],
                 ..TaskCommands::default()
             },
+            &docker_spec(),
             &NoObserver,
         )
         .await

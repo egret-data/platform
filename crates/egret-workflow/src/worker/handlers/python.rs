@@ -326,7 +326,8 @@ impl TaskHandler for Python {
         // authoring mistake Kestra hides is connected to its cause here — see
         // [`NameHintSink`] and review Minor 7.
         let watcher = NameHintSink::default();
-        match self.runner.run(task, &cmds, &watcher).await {
+        let spec = crate::scripts::RunnerSpec::defaults(crate::scripts::RunnerKind::Docker);
+        match self.runner.run(task, &cmds, &spec, &watcher).await {
             Ok(result) => {
                 let mut outcome = outcome_for(TYPE_ID, &result);
                 if let (Some(hint), Some(message)) = (watcher.hint(), outcome.message.as_mut()) {
