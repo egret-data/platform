@@ -2561,6 +2561,17 @@ async fn explain_ignores_a_caller_supplied_role_and_resolves_the_subjects_own() 
         body["reasons"][0]["kind"], "clearance_required",
         "body: {body}"
     );
+
+    // Lift the gate again. A clearance is installation-wide: left behind, this
+    // tag would be compiled into every Trino profile in the shared test
+    // database for the rest of the run, perturbing suites that have nothing to
+    // do with it. Nothing above depends on this running, so a failure that
+    // skips it costs correctness nowhere.
+    sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
+        .bind(tag_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("lift the gate");
 }
 
 // ---------------------------------------------------------------------------
