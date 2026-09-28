@@ -1411,7 +1411,10 @@ fn an_owner_item_reached_through_implied_grants_still_raises_the_cause() {
     assert!(
         causes(&d)
             .iter()
-            .any(|c| matches!(c, UndecidableCause::ResourceOwnerUnknown { .. })),
+            .any(|c| matches!(
+                c,
+                UndecidableCause::ResourceOwnerUnknown { policy_id, .. } if *policy_id == Some(1)
+            )),
         "row 3 control: {d:?}"
     );
 }
@@ -1440,7 +1443,10 @@ fn the_allow_side_of_the_owner_implied_grant_defect() {
     assert!(
         causes(&d)
             .iter()
-            .any(|c| matches!(c, UndecidableCause::ResourceOwnerUnknown { .. })),
+            .any(|c| matches!(
+                c,
+                UndecidableCause::ResourceOwnerUnknown { policy_id, .. } if *policy_id == Some(1)
+            )),
         "{d:?}"
     );
 
@@ -1474,7 +1480,8 @@ fn a_case_mismatch_reached_through_implied_grants_still_raises_the_cause() {
     assert!(
         causes(&d).iter().any(|c| matches!(
             c,
-            UndecidableCause::AccessTypeCaseMismatch { access_type, .. } if access_type == "select"
+            UndecidableCause::AccessTypeCaseMismatch { access_type, policy_id, .. }
+                if access_type == "select" && *policy_id == Some(1)
         )),
         "{d:?}"
     );
