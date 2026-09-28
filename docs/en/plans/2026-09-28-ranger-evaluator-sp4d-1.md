@@ -391,6 +391,19 @@ multi-value levels, `additionalResources`, priority/override, all four buckets
 with overlapping principals, `isDenyAllElse`, `impliedGrants`, `public`,
 `{USER}`, and all three policy types.
 
+**Wildcard matching must be a first-class axis of the corpus.** Task 4
+reimplemented `FilenameUtils.wildcardMatch` rather than binding to it, and said
+so: the algorithm agrees on standard `*`/`?` semantics but has never been
+differentially checked against the Java one. Generate values exercising `*` and
+`?` in leading, trailing, interior and repeated positions, empty segments,
+values that are only `*`, and case differences under `ignoreCase: true` — this
+gate is the only thing that will catch a divergence there.
+
+Also generate **request**-side `*` and empty values. Task 4 measured that
+`getMatchType` short-circuits before consulting policy values, so a request
+value of `*` matches only a match-any policy — a rule that is easy to get
+backwards and that no hand-written case currently covers.
+
 Generate only constructs the evaluator claims to model. A generated
 `Undecidable` proves nothing about agreement — count them and assert the count
 is zero for the generated corpus, so the generator cannot quietly drift into
