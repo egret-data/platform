@@ -39,6 +39,14 @@
 //!
 //! # This handler has NO default budget, and that is a hazard on the shipping tick
 //!
+//! **Superseded by W5a Task 3, kept for the diagnosis.** The worker now gives
+//! every script and container task with no `timeout:` a default budget
+//! (`WorkerTiming::container_default_timeout`, 1 h — `worker::timeout::defaulted`),
+//! and renews the lease of the run it is executing (`worker::claim::under_lease`),
+//! which is fix 2's "refresh each lease" option applied at the claim rather than
+//! in a handler. The batch's pre-invocation window is narrowed, not closed; see
+//! `worker::claim::tick`'s doc, cause 1.
+//!
 //! The whole-branch review's Important 2, verified rather than accepted.
 //! `handlers::sql` falls back to its own `DEFAULT_TIMEOUT` (300s) when the
 //! author writes no `timeout:`; this handler and [`super::python`] fall back to

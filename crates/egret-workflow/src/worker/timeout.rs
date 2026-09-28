@@ -229,7 +229,8 @@ pub fn exceeded(budget: Duration) -> String {
 pub(super) enum Budget {
     /// The task declares no `timeout:`. The handler runs unbounded — the
     /// artifact's `null` branch in `callWithTimeout`, which calls the
-    /// evaluation directly.
+    /// evaluation directly — **except a script or container task**, which
+    /// [`defaulted`] turns into [`Budget::Of`] the configured default (W5a).
     Absent,
     /// The author's budget, rendered and parsed.
     Of(Duration),
@@ -304,6 +305,22 @@ fn is_negative(source: &str) -> bool {
         unsigned.push(c);
     }
     parse_duration(&unsigned).is_some()
+}
+
+/// A script or container task with no `timeout:` runs under
+/// `script_default` (W5a spec §6); every other budget, and every other type,
+/// is returned unchanged.
+///
+/// **egret's divergence, not the artifact's**: Kestra runs a script task with
+/// no `timeout:` unbounded. See
+/// [`DEFAULT_CONTAINER_TIMEOUT`](super::DEFAULT_CONTAINER_TIMEOUT) for why.
+/// "Script or container" is [`crate::scripts::kind_of`]: the four script
+/// FQCNs and the aliases `egret.container` and `egret.script.python`.
+pub(super) fn defaulted(budget: Budget, type_id: &str, script_default: Duration) -> Budget {
+    match budget {
+        Budget::Absent if crate::scripts::kind_of(type_id).is_some() => Budget::Of(script_default),
+        other => other,
+    }
 }
 
 /// Resolve one task's `timeout:` against the context its handler will render

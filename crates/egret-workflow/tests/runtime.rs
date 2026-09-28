@@ -181,6 +181,7 @@ fn fast(tick_ms: u64, batch: usize) -> RuntimeConfig {
         batch,
         reaper_interval: Duration::from_secs(3600),
         working_timeout: Duration::from_secs(3600),
+        container_default_timeout: Duration::from_secs(3600),
         scheduler_enabled: false,
         trigger_interval: Duration::from_millis(tick_ms),
         log_limits: egret_workflow::logs::LogLimits::default(),
@@ -329,6 +330,7 @@ async fn a_cancelled_token_stops_both_tickers(pool: sqlx::PgPool) {
         batch: 4,
         reaper_interval: Duration::from_millis(10),
         working_timeout: Duration::from_secs(1),
+        container_default_timeout: Duration::from_secs(3600),
         scheduler_enabled: false,
         trigger_interval: Duration::from_secs(3600),
         log_limits: egret_workflow::logs::LogLimits::default(),
@@ -899,6 +901,7 @@ async fn two_tickers_reclaim_an_expired_lease_once_and_leave_a_live_one(pool: sq
         batch: 4,
         reaper_interval: Duration::from_millis(10),
         working_timeout: Duration::from_secs(3600),
+        container_default_timeout: Duration::from_secs(3600),
         scheduler_enabled: false,
         trigger_interval: Duration::from_secs(3600),
         log_limits: egret_workflow::logs::LogLimits::default(),
@@ -1999,4 +2002,102 @@ async fn the_scheduler_ticker_sweeps_expired_windows(pool: sqlx::PgPool) {
     )
     .await;
     cancel.cancel();
+}
+
+// ── W5a Task 3: the lease is renewed while a handler runs ───────────────────
+
+/// **A run longer than `working_timeout` is not reaped while its worker
+/// lives.**
+///
+/// The real runtime, reaper ticking every 100 ms against a 2 s
+/// `working_timeout`, and a handler that takes 5 s. Before W5a the reaper
+/// cleared the lease at 2 s, the handler's result then hit the fence
+/// (`LeaseLost`), and the next tick ran the handler a second time — so the
+/// instrument is the handler's call count, which is the only place a second
+/// run is visible (the attempt count does not move on a reclaim; see
+/// `worker::claim::tick`'s doc, cause 3). Asserted beside it: one outcome, one
+/// attempt, and the lease observed to move forward mid-handler.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_longer_than_working_timeout_is_not_reaped_while_its_worker_lives(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let ws = seed(&pool).await;
+    let ex = start_execution(&pool, ws, None, &one_task("long"), serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    let reg = Arc::new(Recorder::new().delaying_the_first_call_by(Duration::from_secs(5)));
+    let cancel = CancellationToken::new();
+    let cfg = RuntimeConfig {
+        reaper_interval: Duration::from_millis(100),
+        working_timeout: Duration::from_secs(2),
+        ..fast(50, 1)
+    };
+    spawn(pool.clone(), reg.clone(), cfg, cancel.clone());
+
+    wait_until("the handler started", Duration::from_secs(5), || async {
+        if reg.count() >= 1 {
+            Ok(())
+        } else {
+            Err("no call yet".into())
+        }
+    })
+    .await;
+    let first = lease_of(&pool, ex).await.expect("leased");
+    tokio::time::sleep(Duration::from_millis(3_000)).await;
+    let later = lease_of(&pool, ex).await;
+    assert!(
+        matches!(later, Some(t) if t > first),
+        "past one working_timeout the lease is still held and has moved \
+         forward: claimed {first}, now {later:?}"
+    );
+
+    wait_until(
+        "the execution terminal",
+        Duration::from_secs(15),
+        || async {
+            if is_terminal(&pool, ex).await {
+                Ok(())
+            } else {
+                Err(format!("calls {}", reg.count()))
+            }
+        },
+    )
+    .await;
+    cancel.cancel();
+
+    assert_eq!(
+        reg.seen_for(ex),
+        vec![("a".to_string(), 1)],
+        "exactly one handler call: the reaper never handed the run to a second"
+    );
+    assert_eq!(run_state(&pool, ex, "a").await.as_deref(), Some("SUCCESS"));
+    assert_eq!(attempts_of(&pool, ex, "a").await, 1);
+    assert_eq!(execution_state(&pool, ex).await, "SUCCESS");
+}
+
+/// `WorkflowConfig::container_default_timeout_s`'s 3600 is a second copy of
+/// [`DEFAULT_CONTAINER_TIMEOUT`](egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT)
+/// in a crate that cannot name it; this is the comparison, for
+/// [`the_config_default_working_timeout_equals_the_workers_own`]'s reason.
+#[test]
+fn the_config_default_container_timeout_equals_the_workers_own() {
+    let cfg = egret_config::Config::default().workflow;
+    assert_eq!(
+        Duration::from_secs(cfg.container_default_timeout_s),
+        egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT
+    );
+    assert_eq!(
+        egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT,
+        Duration::from_secs(3600),
+        "W5a spec §6: one hour"
+    );
+    assert_eq!(
+        egret_workflow::worker::WorkerTiming::default(),
+        egret_workflow::worker::WorkerTiming {
+            working_timeout: egret_workflow::worker::DEFAULT_WORKING_TIMEOUT,
+            container_default_timeout: egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT,
+        }
+    );
 }

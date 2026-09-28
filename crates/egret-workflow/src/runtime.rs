@@ -268,7 +268,13 @@ pub struct RuntimeConfig {
     /// Between reaper passes.
     pub reaper_interval: Duration,
     /// How long a lease may go unreleased before a reaper pass takes it back.
+    /// The claim loop renews the lease of the run it is executing every third
+    /// of this (W5a), so only a lease whose worker stopped renewing expires.
     pub working_timeout: Duration,
+    /// W5a: the budget of a script or container task that declares no
+    /// `timeout:`. `egret_config::WorkflowConfig::container_default_timeout_s`;
+    /// see [`DEFAULT_CONTAINER_TIMEOUT`](crate::worker::DEFAULT_CONTAINER_TIMEOUT).
+    pub container_default_timeout: Duration,
     /// **The scheduler's own gate (W12), independent of [`enabled`](Self::enabled).**
     ///
     /// When true, [`spawn`] starts a third ticker that calls
@@ -558,6 +564,10 @@ fn spawn_worker(
     );
 
     // ── Ticker 1: the claim loop ────────────────────────────────────────────
+    let timing = crate::worker::WorkerTiming {
+        working_timeout: cfg.working_timeout,
+        container_default_timeout: cfg.container_default_timeout,
+    };
     let claim_loop = {
         let pool = pool.clone();
         let cancel = cancel.clone();
@@ -580,7 +590,7 @@ fn spawn_worker(
                         // NOT `while n > 0`. See this module's doc: `tick`
                         // returns results COMMITTED, and a tick that only woke
                         // something returns 0 while having changed the database.
-                        match crate::worker::tick(&pool, cfg.batch, &*reg).await {
+                        match crate::worker::tick_with(&pool, cfg.batch, &*reg, timing).await {
                             Ok(0) => {}
                             Ok(n) => tracing::debug!(committed = n, "workflow tick"),
                             // A failing tick must not end the loop. The next one

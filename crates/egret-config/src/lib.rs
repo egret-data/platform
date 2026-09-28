@@ -542,6 +542,22 @@ pub struct WorkflowConfig {
     #[serde(default = "default_working_timeout_s")]
     pub working_timeout_s: u64,
 
+    /// **Seconds a script or container task may run when its author wrote no
+    /// `timeout:` (W5a spec §6).**
+    ///
+    /// Applies to the four script task types
+    /// (`io.kestra.plugin.scripts.{shell,python}.{Commands,Script}`) and their
+    /// aliases `egret.container` and `egret.script.python`; every other task
+    /// with no `timeout:` runs unbounded, as in Kestra. A run that outlives it
+    /// is FAILED with `Timeout after HH:mm:ss.SSS`, the same as an explicit
+    /// `timeout:`. **A deliberate divergence from Kestra**, which runs a
+    /// script task with no `timeout:` unbounded: an unbounded container is one
+    /// nobody reclaims. The default is
+    /// `egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT` (3600s).
+    /// `EGRET_WORKFLOW__CONTAINER_DEFAULT_TIMEOUT_S=3600`.
+    #[serde(default = "default_container_default_timeout_s")]
+    pub container_default_timeout_s: u64,
+
     /// **The switch that makes `cron:` schedule triggers fire (W12), and it
     /// defaults to `false` for [`WorkflowConfig::worker_enabled`]'s argument.**
     ///
@@ -699,6 +715,14 @@ fn default_working_timeout_s() -> u64 {
     3600
 }
 
+/// `3600` -- see [`WorkflowConfig::container_default_timeout_s`]. Equal to
+/// `egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT`, which this crate cannot
+/// name; `egret-workflow`'s `tests/runtime.rs`,
+/// `the_config_default_container_timeout_equals_the_workers_own`, pins the two.
+fn default_container_default_timeout_s() -> u64 {
+    3600
+}
+
 /// `false` -- see [`WorkflowConfig::scheduler_enabled`].
 fn default_scheduler_enabled() -> bool {
     false
@@ -745,6 +769,7 @@ fn default_workflow() -> WorkflowConfig {
         batch: default_batch(),
         reaper_interval_secs: default_reaper_interval_secs(),
         working_timeout_s: default_working_timeout_s(),
+        container_default_timeout_s: default_container_default_timeout_s(),
         scheduler_enabled: default_scheduler_enabled(),
         trigger_interval_secs: default_trigger_interval_secs(),
         log_retention_days: default_log_retention_days(),

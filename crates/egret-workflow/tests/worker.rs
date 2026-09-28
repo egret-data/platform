@@ -8304,3 +8304,377 @@ async fn an_unconditional_fail_logs_one_line_and_a_conditional_fail_two(pool: sq
     }
     assert_eq!(sink.of(ok), vec![(LogLevel::Info, "hi".to_string())]);
 }
+
+// ===========================================================================
+// W5a Task 3: the worker renews its lease while a handler runs
+// ===========================================================================
+
+use egret_workflow::worker::{tick_with, WorkerTiming};
+
+/// A [`WorkerTiming`] with a short lease and the product's script default.
+fn lease_of_ms(working_timeout_ms: u64) -> WorkerTiming {
+    WorkerTiming {
+        working_timeout: std::time::Duration::from_millis(working_timeout_ms),
+        ..WorkerTiming::default()
+    }
+}
+
+/// A [`Registry`] whose handler signals that it has started and then sleeps
+/// for `sleep`; `completed` counts the handlers that were allowed to finish.
+struct Sleeper {
+    sleep: std::time::Duration,
+    started: std::sync::Arc<tokio::sync::Notify>,
+    calls: std::sync::atomic::AtomicUsize,
+    completed: std::sync::atomic::AtomicUsize,
+}
+
+impl Sleeper {
+    fn new(sleep: std::time::Duration) -> Self {
+        Self {
+            sleep,
+            started: std::sync::Arc::new(tokio::sync::Notify::new()),
+            calls: Default::default(),
+            completed: Default::default(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Registry for Sleeper {
+    async fn run(&self, _task: &TaskInput) -> egret_core::Result<Outcome> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.started.notify_one();
+        tokio::time::sleep(self.sleep).await;
+        self.completed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Outcome::success())
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        panic!("nothing here declares a `timeout:`: {}", task.task_id);
+    }
+}
+
+/// **A run whose worker stopped renewing is reaped — and not before.**
+///
+/// The worker dies mid-handler: its tick future is aborted, which is what a
+/// killed process looks like to the database (nothing more is written). Two
+/// reaper passes bracket the death, and they must DISAGREE: while the worker
+/// lived its lease was younger than `working_timeout` however long the handler
+/// had run (zero reclaimed, after more than one `working_timeout` of
+/// handler), and one `working_timeout` after it died the same pass reclaims
+/// it (one). A reaper that reclaimed nothing ever, and a worker that never
+/// renewed, are each caught by one of the two numbers.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_whose_worker_stopped_renewing_is_reaped(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(&pool, ws, None, &one_task("dies"), serde_json::json!({}))
+        .await
+        .expect("start execution");
+    let timeout = std::time::Duration::from_millis(900);
+    let reg = std::sync::Arc::new(Sleeper::new(std::time::Duration::from_secs(60)));
+
+    let worker = {
+        let (pool, reg) = (pool.clone(), reg.clone());
+        tokio::spawn(async move { tick_with(&pool, 1, &*reg, lease_of_ms(900)).await })
+    };
+    reg.started.notified().await;
+    let claimed_at = lease_of(&pool, ex, "a").await.expect("leased");
+
+    // Longer than one working_timeout inside the handler.
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    let renewed = lease_of(&pool, ex, "a").await.expect("still leased");
+    assert!(
+        renewed > claimed_at,
+        "the live worker renewed its lease: claimed {claimed_at}, now {renewed}"
+    );
+    assert_eq!(
+        reap(&pool, timeout).await.expect("reap"),
+        0,
+        "a run whose worker is alive is never reclaimed, however long its handler"
+    );
+
+    // The worker dies.
+    worker.abort();
+    assert!(worker.await.unwrap_err().is_cancelled());
+    let last = lease_of(&pool, ex, "a").await.expect("still leased");
+
+    tokio::time::sleep(timeout + std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        lease_of(&pool, ex, "a").await,
+        Some(last),
+        "a dead worker renews nothing"
+    );
+    assert_eq!(
+        reap(&pool, timeout).await.expect("reap"),
+        1,
+        "one working_timeout after its worker died, the run is reclaimed"
+    );
+    assert_eq!(lease_of(&pool, ex, "a").await, None);
+    assert_eq!(run_state(&pool, ex, "a").await.as_deref(), Some("RUNNING"));
+    assert_eq!(reg.completed.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // And the reclaimed run is claimable and finishes once, under a new worker.
+    let next = Sleeper::new(std::time::Duration::ZERO);
+    assert_eq!(
+        tick_with(&pool, 1, &next, lease_of_ms(900))
+            .await
+            .expect("tick"),
+        1
+    );
+    assert_eq!(run_state(&pool, ex, "a").await.as_deref(), Some("SUCCESS"));
+    assert_eq!(attempts_of(&pool, ex, "a").await, 1);
+}
+
+/// A [`Registry`] whose handler writes three lines, then lets a rival take its
+/// run exactly as production would (the reaper clears the lease, another
+/// worker claims it), then sleeps `sleep` and answers FAILED with a message.
+struct FenceMover {
+    pool: sqlx::PgPool,
+    sink: std::sync::Arc<Lines>,
+    sleep: std::time::Duration,
+    rival: Mutex<Option<egret_workflow::worker::Claimed>>,
+    completed: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl Registry for FenceMover {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        for i in 1..=3 {
+            task.log.info(&format!("line {i}")).await;
+        }
+        assert_eq!(
+            reap(&self.pool, std::time::Duration::ZERO)
+                .await
+                .expect("reap"),
+            1
+        );
+        let rival = claim(&self.pool, 1).await.expect("rival claim");
+        assert_eq!(rival.len(), 1, "the reaped run is claimable again");
+        *self.rival.lock().unwrap() = rival.into_iter().next();
+        tokio::time::sleep(self.sleep).await;
+        self.completed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(Outcome::failed_with("the stale worker's outcome"))
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        panic!("nothing here declares a `timeout:`: {}", task.task_id);
+    }
+    fn log_sink(&self) -> (std::sync::Arc<dyn LogSink>, egret_workflow::logs::LogLimits) {
+        (
+            self.sink.clone(),
+            LogLimits {
+                run_max_lines: 1,
+                ..LogLimits::default()
+            },
+        )
+    }
+}
+
+/// **A worker that finds its fence moved records no outcome, and stops.**
+///
+/// The rival holds the run now. The stale worker's renewal finds
+/// `claimed_at` moved, drops its handler (which never finishes), writes no
+/// failed-attempt line and applies no outcome — the tick returns `Ok(0)`,
+/// not the `LeaseLost` error a worker that ran its handler to the end and
+/// then hit `apply_outcome`'s fence returns. Its already-written lines stay,
+/// and `finish()` still runs: the cap is one line, so the cap summary (WARN,
+/// two withheld) is the evidence that the lost path finished the log.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_worker_that_loses_its_fence_records_no_outcome(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(&pool, ws, None, &one_task("fence"), serde_json::json!({}))
+        .await
+        .expect("start execution");
+    let reg = FenceMover {
+        pool: pool.clone(),
+        sink: std::sync::Arc::new(Lines::default()),
+        sleep: std::time::Duration::from_secs(3),
+        rival: Mutex::new(None),
+        completed: std::sync::atomic::AtomicBool::new(false),
+    };
+
+    let started = std::time::Instant::now();
+    let committed = tick_with(&pool, 1, &reg, lease_of_ms(300))
+        .await
+        .expect("a lost fence is not an error: the new holder owns the run");
+    assert_eq!(committed, 0, "no result committed");
+    assert!(
+        !reg.completed.load(std::sync::atomic::Ordering::SeqCst),
+        "the handler was dropped, not run to the end"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "the worker stopped following the task at its next renewal: {:?}",
+        started.elapsed()
+    );
+
+    let rival = reg
+        .rival
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the rival claimed");
+    assert_eq!(
+        lease_of(&pool, ex, "a").await,
+        Some(rival.claimed_at),
+        "the rival's lease is untouched"
+    );
+    assert_eq!(run_state(&pool, ex, "a").await.as_deref(), Some("RUNNING"));
+    assert_eq!(run_message(&pool, ex, "a").await, None);
+    assert_eq!(run_outputs(&pool, ex, "a").await, None);
+    assert_eq!(attempts_of(&pool, ex, "a").await, 1);
+    assert_eq!(
+        reg.sink.of(ex),
+        vec![
+            (LogLevel::Info, "line 1".to_string()),
+            (
+                LogLevel::Warn,
+                "2 lines (12 bytes) of this attempt were not stored: over the per-run log \
+                 cap (1 lines / 10485760 bytes)."
+                    .to_string()
+            ),
+        ],
+        "the written line stays, finish() ran, and no failed-attempt line"
+    );
+
+    // The rival, holding the live lease, can still commit.
+    let mut tx = pool.begin().await.unwrap();
+    apply_outcome(&mut tx, &rival, &Outcome::success())
+        .await
+        .expect("the rival commits");
+    tx.commit().await.unwrap();
+    assert_eq!(run_state(&pool, ex, "a").await.as_deref(), Some("SUCCESS"));
+}
+
+/// A [`Registry`] that records each run's `(task_id, timeout)` and sleeps
+/// `slow` for the task named `slow`.
+#[derive(Default)]
+struct Budgets {
+    seen: Mutex<Vec<(String, Option<std::time::Duration>)>>,
+    killed: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl Registry for Budgets {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((task.task_id.clone(), task.timeout));
+        if task.task_id == "slow" {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+        Ok(Outcome::success())
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        self.killed.lock().unwrap().push(task.task_id.clone());
+        Ok(())
+    }
+}
+
+fn one_typed_task(id: &str, task: &str, type_id: &str, extra: &str) -> String {
+    let body = if type_id.starts_with("io.kestra.plugin.core") {
+        "    message: hi\n".to_string()
+    } else {
+        "    commands: [echo hi]\n".to_string()
+    };
+    format!("id: {id}\nnamespace: t\ntasks:\n  - id: {task}\n    type: {type_id}\n{body}{extra}")
+}
+
+/// **A script or container task with no `timeout:` runs under the configured
+/// default; an explicit `timeout:` wins; every other type stays unbounded.**
+///
+/// The default is set to 777 s, a value no other code path produces, so the
+/// handler seeing it is the configured value arriving and not a constant. The
+/// control rows are a `core.log.Log` with no `timeout:` (unbounded, as in
+/// Kestra) and a script task with `timeout: PT5S` (the author's). The last
+/// part enforces it: with a 1 s default, a script task whose handler takes 3 s
+/// is FAILED with the artifact's own timeout message.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_script_task_without_timeout_gets_the_default(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let default = std::time::Duration::from_secs(777);
+    let cases = [
+        (
+            "shell",
+            "io.kestra.plugin.scripts.shell.Commands",
+            "",
+            Some(default),
+        ),
+        (
+            "python",
+            "io.kestra.plugin.scripts.python.Commands",
+            "",
+            Some(default),
+        ),
+        ("alias", "egret.container", "", Some(default)),
+        (
+            "explicit",
+            "io.kestra.plugin.scripts.shell.Commands",
+            "    timeout: PT5S\n",
+            Some(std::time::Duration::from_secs(5)),
+        ),
+        ("log", "io.kestra.plugin.core.log.Log", "", None),
+    ];
+    for (task, type_id, extra, _) in &cases {
+        start_execution(
+            &pool,
+            ws,
+            None,
+            &one_typed_task(task, task, type_id, extra),
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("start {task}: {e}"));
+    }
+    let reg = Budgets::default();
+    let timing = WorkerTiming {
+        container_default_timeout: default,
+        ..WorkerTiming::default()
+    };
+    assert_eq!(
+        tick_with(&pool, 8, &reg, timing).await.expect("tick"),
+        cases.len()
+    );
+    let mut seen = reg.seen.lock().unwrap().clone();
+    seen.sort();
+    let mut want: Vec<_> = cases
+        .iter()
+        .map(|(task, _, _, budget)| (task.to_string(), *budget))
+        .collect();
+    want.sort();
+    assert_eq!(seen, want);
+
+    // Enforced, not only handed over.
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_typed_task(
+            "slow",
+            "slow",
+            "io.kestra.plugin.scripts.shell.Commands",
+            "",
+        ),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start slow");
+    let timing = WorkerTiming {
+        container_default_timeout: std::time::Duration::from_secs(1),
+        ..WorkerTiming::default()
+    };
+    tick_with(&pool, 1, &reg, timing).await.expect("tick");
+    assert_eq!(
+        run_state(&pool, ex, "slow").await.as_deref(),
+        Some("FAILED")
+    );
+    assert_eq!(
+        run_message(&pool, ex, "slow").await.as_deref(),
+        Some("Timeout after 00:00:01.000")
+    );
+    assert_eq!(reg.killed.lock().unwrap().clone(), vec!["slow".to_string()]);
+}

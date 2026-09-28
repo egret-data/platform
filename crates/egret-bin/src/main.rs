@@ -1887,6 +1887,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             batch: config.workflow.batch,
             reaper_interval: std::time::Duration::from_secs(config.workflow.reaper_interval_secs),
             working_timeout: std::time::Duration::from_secs(config.workflow.working_timeout_s),
+            container_default_timeout: std::time::Duration::from_secs(
+                config.workflow.container_default_timeout_s,
+            ),
             scheduler_enabled: config.workflow.scheduler_enabled,
             trigger_interval: std::time::Duration::from_secs(config.workflow.trigger_interval_secs),
             log_limits: egret_workflow::logs::LogLimits {

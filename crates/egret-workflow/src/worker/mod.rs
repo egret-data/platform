@@ -92,7 +92,7 @@ mod timeout;
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
 pub use claim::{
     apply_outcome, claim, due_retries, resume, start_execution, start_execution_in,
-    start_execution_with_trigger, tick, wake, Claimed, NewExecution,
+    start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution, WorkerTiming,
 };
 pub use reaper::reap;
 pub use registry::Handlers;
@@ -116,6 +116,19 @@ use crate::runners::RenderContext;
 /// drive it, exactly as the plan's interface says, and a caller that wants the
 /// product default passes this.
 pub const DEFAULT_WORKING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// **The budget a script or container task runs under when its author wrote no
+/// `timeout:`** (W5a spec §6): one hour.
+///
+/// **A deliberate divergence from Kestra**, whose `callWithTimeout` runs a task
+/// with a `null` timeout unbounded. egret bounds the four script types and
+/// their two aliases (`scripts::kind_of`) because an unbounded container is a
+/// pod or container nobody ever reclaims; every other handler keeps the
+/// artifact's answer. A run that outlives it is FAILED with
+/// `Timeout after 01:00:00.000`, exactly as an explicit `timeout: PT1H` would
+/// be. `egret_config::WorkflowConfig::container_default_timeout_s` carries the
+/// configured value; `tests/runtime.rs` pins the two defaults together.
+pub const DEFAULT_CONTAINER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// What a handler is handed.
 ///
