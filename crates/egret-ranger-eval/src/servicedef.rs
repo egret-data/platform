@@ -18,7 +18,7 @@
 //! crate and calls these. A second walker that disagreed with the seeder
 //! would be a defect in waiting, so there is exactly one.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -156,6 +156,20 @@ fn boolean_option(options: &Value, name: &str, default: bool) -> bool {
     }
 }
 
+/// One `accessTypes[]` (or `markerAccessTypes[]`) entry of a service-def.
+///
+/// `impliedGrants` is what makes a single granted access type stand for
+/// several: Ranger's `RangerServiceDefHelper.Delegate.computeImpliedGrants`
+/// folds `accessTypes[]` and `markerAccessTypes[]` into one
+/// `Map<String, Collection<String>>`, which
+/// `RangerAbstractPolicyItemEvaluator.computeWithImpliedGrants` then applies
+/// to a policy item's `accesses`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessTypeDef {
+    pub name: String,
+    pub implied_grants: Vec<String>,
+}
+
 /// A construct in a service-def that this crate detected but does not
 /// reproduce. Reported, never silently ignored: a silently dropped
 /// construct produces a confident wrong decision downstream.
@@ -169,6 +183,16 @@ pub enum ServiceDefIssue {
     /// depend on the request value's leading character. Matching falls back
     /// to plain `ignoreCase` behaviour for this resource.
     QuotedCaseSensitive { resource: String },
+    /// Two `impliedGrants` entries form a **chain**: an access type implied
+    /// by one access type is itself an implying access type.
+    /// `computeWithImpliedGrants` iterates a `HashMap` while mutating the
+    /// item it is expanding, so whether the second level is reached depends
+    /// on that map's unspecified iteration order — Ranger's own comment says
+    /// "Only one round of 'expansion' is done", but the code can do two when
+    /// the order happens to favour it. Neither egret service-def has a chain
+    /// (`trino.json` declares only a flat `all => [...]`; `starrocks.json`
+    /// declares none), so this is reported rather than guessed at.
+    ChainedImpliedGrants { implying: String, implied: String },
     /// `RangerServiceDefHelper.isValid` would reject this policy type's
     /// resource graph, which makes Ranger produce **no** hierarchies for it
     /// — so every policy of that type matches nothing.
@@ -196,6 +220,7 @@ pub enum GraphProblem {
 pub struct ServiceDef {
     name: String,
     per_type: BTreeMap<PolicyType, TypeDefs>,
+    access_types: Vec<AccessTypeDef>,
     issues: Vec<ServiceDefIssue>,
 }
 
@@ -286,11 +311,42 @@ impl ServiceDef {
             );
         }
 
+        let access_types = parse_access_types(def);
+        for chained in chained_implied_grants(&access_types) {
+            if !issues.contains(&chained) {
+                issues.push(chained);
+            }
+        }
+
         ServiceDef {
             name: def["name"].as_str().unwrap_or_default().to_string(),
             per_type,
+            access_types,
             issues,
         }
+    }
+
+    /// Every `accessTypes[]` entry, followed by every `markerAccessTypes[]`
+    /// entry — the two lists `computeImpliedGrants` reads, in that order.
+    pub fn access_types(&self) -> &[AccessTypeDef] {
+        &self.access_types
+    }
+
+    /// `RangerServiceDefHelper.getImpliedAccessGrants()`: implying access
+    /// type -> the access types it implies, folded over `accessTypes[]` and
+    /// `markerAccessTypes[]`. Entries with no `impliedGrants` are absent,
+    /// exactly as `computeImpliedGrants` builds the map.
+    pub fn implied_access_grants(&self) -> BTreeMap<&str, BTreeSet<&str>> {
+        let mut ret: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for at in &self.access_types {
+            if at.implied_grants.is_empty() {
+                continue;
+            }
+            ret.entry(at.name.as_str())
+                .or_default()
+                .extend(at.implied_grants.iter().map(String::as_str));
+        }
+        ret
     }
 
     /// The def's `name` (`"trino"`, `"starrocks"`, `"tag"`, …).
@@ -559,6 +615,57 @@ fn checked_chain(leaf: &ResourceDef, all: &[ResourceDef]) -> Result<Vec<String>,
     }
     chain.reverse();
     Ok(chain)
+}
+
+/// `accessTypes[]` then `markerAccessTypes[]`, in the order
+/// `RangerServiceDefHelper.Delegate.computeImpliedGrants` reads them.
+pub fn parse_access_types(def: &Value) -> Vec<AccessTypeDef> {
+    let mut ret = Vec::new();
+    for key in ["accessTypes", "markerAccessTypes"] {
+        let Some(list) = def[key].as_array() else {
+            continue;
+        };
+        for entry in list {
+            let Some(name) = entry["name"].as_str() else {
+                continue;
+            };
+            ret.push(AccessTypeDef {
+                name: name.to_string(),
+                implied_grants: entry["impliedGrants"]
+                    .as_array()
+                    .map(|g| {
+                        g.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            });
+        }
+    }
+    ret
+}
+
+/// Every pair `(implying, implied)` where `implied` is itself an implying
+/// access type — see [`ServiceDefIssue::ChainedImpliedGrants`].
+fn chained_implied_grants(access_types: &[AccessTypeDef]) -> Vec<ServiceDefIssue> {
+    let implying: BTreeMap<&str, &AccessTypeDef> = access_types
+        .iter()
+        .filter(|a| !a.implied_grants.is_empty())
+        .map(|a| (a.name.as_str(), a))
+        .collect();
+    let mut ret = Vec::new();
+    for (name, def) in &implying {
+        for grant in &def.implied_grants {
+            if grant.as_str() != *name && implying.contains_key(grant.as_str()) {
+                ret.push(ServiceDefIssue::ChainedImpliedGrants {
+                    implying: (*name).to_string(),
+                    implied: grant.clone(),
+                });
+            }
+        }
+    }
+    ret
 }
 
 #[cfg(test)]

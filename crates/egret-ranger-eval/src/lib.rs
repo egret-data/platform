@@ -29,9 +29,18 @@
 //! policy naming fewer hierarchy levels than the request — is NOT an allow:
 //! Ranger refuses to record one for an ancestor match on a resource
 //! request, and a live Trino measurement confirmed it (see the
-//! [`resource`] module doc). Precedence and the final decision are a later
-//! task's; mask and row-filter evaluation a later one still.
+//! [`resource`] module doc).
+//!
+//! [`eval`] is the third layer and the one that answers: policy-item
+//! evaluation, precedence and the final three-valued
+//! [`eval::Decision`]. Mask and row-filter evaluation are a later task's.
+//! `Allowed | Denied | Undecidable { why }` is the whole point of the
+//! crate: anything it cannot model names itself as an
+//! [`eval::UndecidableCause`] instead of being guessed at, and a policy
+//! carrying an [`model::Unmodelled`] construct makes the decision
+//! undecidable even when another policy would have allowed.
 
+pub mod eval;
 pub mod model;
 pub mod resource;
 pub mod servicedef;
