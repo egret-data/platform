@@ -220,3 +220,115 @@ admin   / StarRocks  SELECT id, item FROM sp4a10_wh.sp4a.srcases ORDER BY id
                      → [[3,'xxxx'], [4,'xxxx']]             (mask + `id > 2` filter, biting even for admin,
                                                              because a mask is not an access check)
 ```
+
+---
+
+## 3. What the clearance compiled to
+
+`PUT /api/control-plane/tags/3954a1a4-…/access-policy
+{"required_roles":["sp4c_cleared"],"required_groups":[]}` → `200 {"ok":true}`.
+The write's own recompile ran in the same transaction; nothing was forced.
+
+| profile | policies before | policies after |
+|---|---|---|
+| 51 `sp3c2-trino-live_tag` (the Trino TAG service) | 2 | **4** |
+| 52 `sp3c2-trino-live` | 31 | 31 |
+| 55 `sp4a-sr-crosscheck` (StarRocks) | 34 | **35** |
+
+Trino's clearance is one tag policy filed on the tag service (the second new row
+on 51 belongs to a pre-existing gated tag, `tag`, which has no assignments);
+StarRocks' is exactly **N = 1**, one per tagged column:
+
+```text
+8840 | 51 | perm-clearance-3954a1a4-386d-40fb-bdc8-e2b4f657f4fd
+8841 | 55 | perm-clearance-3954a1a4-386d-40fb-bdc8-e2b4f657f4fd-sp4a10_wh.sp4a.gate.secret
+```
+
+The bodies, abbreviated to the parts D0/D0b made load-bearing — **the exception
+names the member, never the role**:
+
+```json
+// 8840 (Trino, tag service)                    // 8841 (StarRocks, per column)
+"resources": {"tag": {"values": ["sp4cgate"]}}  "resources": {"catalog":["sp4a10_wh"],"database":["sp4a"],
+"serviceType": "tag"                                          "table":["gate"],"column":["secret"]}
+"denyPolicyItems": [{"groups": ["public"],      "serviceType": "starrocks"
+  "accesses": [select, insert, delete]}]        "denyPolicyItems": [{"groups": ["public"],
+"denyExceptions":  [{"users": ["d3member"],       "accesses": [select]}]
+  "accesses": [select, insert, delete]}]        "denyExceptions":  [{"users": ["d3member"],
+"policyPriority": 0                               "accesses": [select]}]
+```
+
+`roles: []` in every item, on both engines — the Ranger roles bucket is unused,
+exactly as D0 and D0b required. `select` alone on StarRocks, `select, insert,
+delete` on Trino.
+
+---
+
+## Case 1 — the intersection property. **PASS**
+
+A user without the clearing role cannot read the classified column, through SQL
+Lab **or** through a notebook, on **either** engine. Verbatim:
+
+**SQL Lab, `analyst` (no `sp4c_cleared`):**
+
+```text
+Trino      SELECT id, secret FROM sp4a10_wh.sp4a.gate ORDER BY id
+           → failed: engine: Access Denied: Cannot select from columns [id, secret] in table or view gate
+
+StarRocks  SELECT id, secret FROM sp4a10_wh.sp4a.gate ORDER BY id
+           → failed: engine: Server error: `ERROR 5204 (42000): Access denied; you need (at least one of)
+             the SELECT privilege(s) on COLUMN secret for this operation.'
+```
+
+**Notebook, `analyst`** — a real per-user kernel pod, `execute_request` over the
+Jupyter channels WebSocket, the kernel's own helpers minting their own engine JWT:
+
+```text
+me = analyst
+TRINO ERROR: RuntimeError Failed to execute sql: SELECT * FROM (SELECT id, secret FROM sp4a10_wh.sp4a.gate
+  ORDER BY id) AS subquery LIMIT 10, error: (trino.exceptions.TrinoUserError) TrinoUserError(type=USER_ERROR,
+  name=PERMISSION_DENIED, message="Access Denied: Cannot select from columns [id, secret] in table or view gate",
+  query_id=20260928_070624_00030_nc3ii)
+STARROCKS ERROR: RuntimeError Failed to execute sql: SELECT * FROM (SELECT id, secret FROM sp4a10_wh.sp4a.gate
+  ORDER BY id) AS subquery LIMIT 10, error: (pymysql.err.OperationalError) (5204, 'Access denied; you need
+  (at least one of) the SELECT privilege(s) on COLUMN secret for this operation.')
+```
+
+**The deny is scoped to the classified column, not the table** — the same subject,
+the same table, the untagged column, in the same session:
+
+```text
+analyst / Trino      SELECT id, plain FROM sp4a10_wh.sp4a.gate ORDER BY id
+                     → finished, [[1,'open-one'],[2,'open-two'],[3,'open-three']]
+analyst / StarRocks  SELECT id, plain FROM sp4a10_wh.sp4a.gate ORDER BY id
+                     → finished, [[1,'open-one'],[2,'open-two'],[3,'open-three']]
+```
+
+Before the clearance existed, both of these subjects read `secret` on both engines
+through both paths (§1). So the refusal is the clearance and not an outage, a
+missing grant, or a broken engine.
+
+---
+
+## Case 2 — the cleared user still reads it. **PASS**, and on StarRocks this is the first observation anywhere of `denyExceptions` working
+
+D0b §5 was explicit: `denyExceptions` had **never been served to StarRocks**, none
+of the 32 policies then cached carried one, and half of D0b's answer for that
+engine rested on a source read of the shared Ranger evaluator rather than on any
+query. Policy **8841** is the first `denyExceptions` that engine has ever held,
+and this is the first time it has been observed deciding anything:
+
+```text
+d3member / Trino      SQL Lab   SELECT id, secret FROM sp4a10_wh.sp4a.gate ORDER BY id
+                                → finished, [[1,'classified-one'],[2,'classified-two'],[3,'classified-three']]
+d3member / StarRocks  SQL Lab   same query
+                                → finished, [[1,'classified-one'],[2,'classified-two'],[3,'classified-three']]
+d3member / notebook             me = d3member
+                                TRINO ROWS:     {'id': [1,2,3], 'secret': ['classified-one','classified-two','classified-three']}
+                                STARROCKS ROWS: {'id': [1,2,3], 'secret': ['classified-one','classified-two','classified-three']}
+```
+
+Same query, same engines, same minute, same deny policy — one subject refused and
+the other served, the only difference being one `access_grants` row. That is what
+makes case 1 a **clearance** and not an outage, and it is the observation D0b said
+the gate owed.
