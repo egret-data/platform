@@ -89,14 +89,21 @@ Recorded run, 2026-09-28 (JDK 21 / Maven 3.9.11):
 | Seed | `0x54d000007` (`EGRET_DIFF_SEED`, hex) |
 | Cases | **2000 per engine — 4000 total** (`EGRET_DIFF_CASES`) |
 | Versions | **2.5.0** against the Trino service-def, **2.8.0** against the StarRocks one |
-| Compared and agreeing | 3812 |
+| Compared and agreeing | **3836** |
 | `Undecidable` other than `EvalOrderAmbiguous` | **0** (asserted) |
-| `EvalOrderAmbiguous` | 188 of 4000 — **4.7%** |
+| `EvalOrderAmbiguous` | 164 of 4000 — **4.1%** |
+| Deliberate eval-order duels | **501, all agreeing** |
 | Wall time | ~37s including three Maven runs |
 
-A wider sweep at 5000 per engine (10000 cases, ~63s) was also run green and
-found nothing the 4000-case corpus had not; the `EvalOrderAmbiguous` rate held
-at 4.6%, so the figure is stable across an order of magnitude of corpus size.
+A wider sweep at 5000 per engine (10000 cases, ~64s) was also run green:
+**9616 compared and agreeing, 384 `EvalOrderAmbiguous` (3.8%), 1281 duels all
+agreeing.** The rate is stable across an order of magnitude of corpus size.
+
+These are the numbers AFTER the two findings below were fixed and their
+exclusions removed. The corpus now genuinely exercises both shapes rather
+than avoiding them: the 5000-case Trino corpus contains **1789 policy values
+in which a `*` is immediately followed by a `?`**, spread over 1339 cases, and
+**609 `dataMaskPolicyItems` entries with no `dataMaskInfo`**.
 
 `EvalOrderAmbiguous` is Task 6's refusal to guess a mask (or row filter) when
 two policies tie inside one `(policyPriority, hasDeny)` band and would yield
@@ -110,40 +117,50 @@ reports green.
 
 ### The gate has been observed failing
 
-A gate never seen failing is not known to be a gate. With
-`MatchType::Ancestor` added to the "matched" test in
-`crates/egret-ranger-eval/src/eval.rs` — i.e. making an ANCESTOR match an
-allow, the fail-open direction — the differential caught it at only 300 cases
-per engine: **7 of 284 compared cases disagreed** at ranger 2.5.0. The file was
-then restored from a backup and verified byte-identical by `shasum`, not by
-eye (`cp` is aliased to `cp -i` on this machine and silently refuses).
+A gate never seen failing is not known to be a gate. Two breaks, both
+restored from a backup and verified byte-identical by `shasum` rather than by
+eye (`cp` is aliased to `cp -i` on this machine and silently refuses):
 
-### Two divergences the gate FOUND, and what the corpus therefore excludes
+- `MatchType::Ancestor` added to the "matched" test in
+  `crates/egret-ranger-eval/src/eval.rs` — making an ANCESTOR match an allow,
+  the fail-open direction. Caught at only 300 cases per engine: **6 of 290
+  compared cases disagreed** at ranger 2.5.0.
+- `Token::Any` in `resource.rs` made to advance the text index
+  unconditionally, i.e. back towards a greedy matcher. Caught by the
+  JVM-free unit table alone, on `wildcardMatch("ab", "?*?")` — no Maven, no
+  `EGRET_TEST_RANGER_E2E`.
 
-The first run of the corpus disagreed with the real engine on 3 of 1200 cases.
-Both mechanisms were read out of the 2.5.0 bytecode. Neither is fixed here —
-this task builds the gate, and adjusting an evaluator to make its own gate pass
-is how a misreading survives — so both constructs are excluded from the
-generated corpus and kept under test as minimal reproducers
-(`pinned_divergences`) that assert the **disagreement**. The day either defect
-is fixed, the pin fails and says to widen the corpus again.
+### Three divergences the gate FOUND, since fixed
 
-**F1 — `*` immediately followed by `?` (fail-open).** Task 4 reimplemented
+The first run of the corpus disagreed with the real engine on 3 of 1200
+cases. Both mechanisms were read out of the 2.5.0 bytecode, and chasing the
+second one turned up a third. All three are fixed; the minimal reproducers
+for the first two are kept as pins (`pinned_divergences`) that now assert
+AGREEMENT on the exact inputs that caught them.
+
+**F1 — `*` immediately followed by `?`. Was FAIL-OPEN.** Task 4 reimplemented
 `FilenameUtils.wildcardMatch` rather than binding to it, and said the two had
-never been compared. They disagree. `splitOnTokens` turns `?*?` into
-`["?", "*", "?"]`, and a `*` token advances the text index only when it is the
-LAST token (`textIdx = filename.length()`) or when the next token is a literal
-(via `checkIndexOf`). A `*` followed by `?` therefore consumes nothing:
+never been compared. They disagreed. `wildcardMatch` is not a greedy matcher
+with backtracking: `splitOnTokens` turns `?*?` into `["?", "*", "?"]`, and a
+`*` token advances the text index only when it is the LAST token
+(`textIdx = filename.length()`) or when the next token is a literal (via
+`checkIndexOf`). A `*` followed by `?` consumes nothing:
 
 ```text
-FilenameUtils.wildcardMatch("HIVE", "?*?", INSENSITIVE) == false   (egret: true)
-FilenameUtils.wildcardMatch("HIVE", "*?",  INSENSITIVE) == false   (egret: true)
+FilenameUtils.wildcardMatch("HIVE", "?*?", INSENSITIVE) == false
+FilenameUtils.wildcardMatch("HIVE", "*?",  INSENSITIVE) == false
 FilenameUtils.wildcardMatch("ab",   "?*?", INSENSITIVE) == true
 ```
 
-egret's matcher is a classic greedy matcher with backtracking and says true for
-all three. Reproducer `pin-f1-wildcard`: a policy allowing `catalog=?*?` grants
-a `HIVE` request that the live plugin refuses.
+`crates/egret-ranger-eval/src/resource.rs` now ports `splitOnTokens` and the
+token walk instead of approximating them. Read from `javap -c` of
+**commons-io 2.8.0** — what `mvn dependency:build-classpath` resolves for
+`ranger-plugins-common:2.5.0` — and confirmed instruction-identical in
+**commons-io 2.16.1**, which the same command resolves for
+`ranger-plugins-common:2.8.0`. A 3348-pair cross product produced
+byte-identical output from the two jars, so the exact commons-io version
+changes no answer; the port agrees with all 3348, and the interesting 54 rows
+are a unit test that needs no JVM.
 
 **F2 — a `dataMaskPolicyItems` entry with no `dataMaskInfo`.**
 `RangerPolicy$RangerDataMaskPolicyItem`'s no-arg constructor (the one Gson
@@ -151,13 +168,84 @@ uses) delegates to the all-args one, and `setDataMaskInfo(null)` substitutes
 `new RangerPolicyItemDataMaskInfo()`. So `getDataMaskInfo()` is **never null**
 on a deserialised item, the `ifnull` guard at offset 8 of
 `RangerDefaultDataMaskPolicyItemEvaluator.updateAccessResult` never fires, and
-the item runs the whole body — `setMaskType(null)` and then
-`policyEvaluator.updateAccessResult(result, matchType, true, …)`, which sets
-`policyId`, `policyPriority` and `isAllowed`. The item DETERMINES the result
-with a null mask type and the search stops. `egret-ranger-eval` reads the
-absent key as `MaskInfo: None` and models it as "reports nothing, keep
-looking", so it goes on to a lower-priority policy and reports a mask Ranger
-never reaches. Reproducer `pin-f2-missing-datamaskinfo`.
+the item DETERMINES the result with a null mask type — stopping the search.
+Fixed in the READER (`model.rs`), which is where the defect was: the reader
+was reading the wire format while Ranger reads the same bytes through classes
+that rewrite them.
+
+**The row-filter path makes the identical substitution and behaves the
+OPPOSITE way**, which is why the fix could not be uniform.
+`RangerRowFilterPolicyItem.setRowFilterInfo(null)` substitutes an empty object
+too, but `RangerDefaultRowFilterPolicyItemEvaluator.updateAccessResult` has no
+guard at the top — it guards its `policyEvaluator.updateAccessResult(...)`
+call with `if (result.getFilterExpr() != null)` (offsets 40-44) instead. A
+null `filterExpr` therefore determines nothing and the next policy IS reached.
+
+**F3 — the reader refused documents the live plugin enforces.** Chasing F2's
+class turned this up. Gson assigns fields directly, so an ABSENT key keeps
+whatever the constructor left, and `RangerPolicy`, `RangerPolicyItem`,
+`RangerPolicyResource` and `RangerPolicyItemAccess` all normalise in their
+constructors. An EXPLICIT `null` lands in the same field and reads back
+through the same getter, so Ranger cannot tell "absent" from "null" — measured
+on both shapes with `JsonUtils.jsonToObject`:
+
+| Class | Field | Ranger's value for absent AND null |
+|---|---|---|
+| `RangerPolicy` | `policyPriority` | `0` |
+| | `isEnabled` | `true` |
+| | `isAuditEnabled` | `true` (not modelled here) |
+| | `isDenyAllElse` | `false` |
+| | `resources` | empty map |
+| | `policyItems`, `denyPolicyItems`, `allowExceptions`, `denyExceptions`, `dataMaskPolicyItems`, `rowFilterPolicyItems`, `validitySchedules` | empty list |
+| | `policyType`, `additionalResources`, `conditions`, `zoneName`, `id`, `name`, `service` | **null** — no substitution |
+| `RangerPolicyResource` | `values` | empty list |
+| | `isExcludes`, `isRecursive` | `false` |
+| `RangerPolicyItem` | `users`, `groups`, `roles`, `accesses`, `conditions` | empty list |
+| | `delegateAdmin` | `false` |
+| `RangerPolicyItemAccess` | `type` | `""` |
+| | `isAllowed` | `true` |
+| `RangerDataMaskPolicyItem` | `dataMaskInfo` | empty object (F2) |
+| `RangerRowFilterPolicyItem` | `rowFilterInfo` | empty object |
+| `RangerPolicyItemDataMaskInfo` | `dataMaskType`, `valueExpr`, `conditionExpr` | **null** |
+| `RangerPolicyItemRowFilterInfo` | `filterExpr` | **null** |
+| `ServicePolicies` | every field | **null** |
+
+Before this, `serde` rejected every explicit null with `invalid type: null`,
+and an absent `accesses[].type` with `missing field`. A reader that cannot
+read is not fail-safe — it simply has no answer where one is needed. The whole
+table is now a test,
+`crates/egret-ranger-eval/tests/model.rs::absent_and_null_keys_take_rangers_own_defaults`.
+
+Three of those rows are `null` rather than a substituted default, and they are
+the reason the sweep could not be applied mechanically:
+`additionalResources` and `conditions` come back null where the rest come back
+empty, and `RangerPolicy.policyType` comes back null where
+`RangerPolicyItemAccess.type` comes back `""`. Reading them as "empty" is
+correct here only because an empty additional-resource list and an absent one
+produce the same decision, and because `RangerPolicyRepository.init` files a
+null `policyType` into the access bucket — i.e. `0`.
+
+### The eval-order claim, now actually tested
+
+Task 5 did not reproduce `getEvalOrder()` and argued that within one
+`(policyPriority, hasDeny)` band the allow/deny OUTCOME cannot depend on
+order. Ten thousand generated cases produced no counterexample — but the
+generator could not produce the shape a counterexample needs, so that was not
+evidence.
+
+`access_order_duel` now builds it deliberately: one case in four of the ACCESS
+corpus is two policies at the SAME priority, both certainly matching, one
+reaching an allow and the other a deny, with ids AND names swapped half the
+time so a name-then-id tie-break cannot be right by luck. All three `hasDeny`
+combinations are generated, because `PolicyEvalOrderComparator.compareNormal`
+(disassembled from the 2.5.0 jar) sorts `hasDeny` FIRST and only then by
+`getEvalOrder()`, which makes them different questions.
+
+**1281 duels across the 10000-case sweep, all agreeing.** Task 5's claim
+survives a test that could have killed it, and the `hasDeny` key in the
+comparator is why: it puts the denying policy first, so the engine loop's
+`if (ret.getIsAllowed()) { if (!evaluator.hasDeny()) break; }` cannot break
+past a same-priority deny.
 
 ### What the corpus covers
 
