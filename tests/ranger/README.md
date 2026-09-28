@@ -89,21 +89,20 @@ Recorded run, 2026-09-28 (JDK 21 / Maven 3.9.11):
 | Seed | `0x54d000007` (`EGRET_DIFF_SEED`, hex) |
 | Cases | **2000 per engine — 4000 total** (`EGRET_DIFF_CASES`) |
 | Versions | **2.5.0** against the Trino service-def, **2.8.0** against the StarRocks one |
-| Compared and agreeing | **3836** |
+| Compared and agreeing | **3866** |
 | `Undecidable` other than `EvalOrderAmbiguous` | **0** (asserted) |
-| `EvalOrderAmbiguous` | 164 of 4000 — **4.1%** |
-| Deliberate eval-order duels | **501, all agreeing** |
+| `EvalOrderAmbiguous` | 134 of 4000 — **3.4%** |
+| Deliberate eval-order duels | **489, all agreeing** |
 | Wall time | ~37s including three Maven runs |
 
 A wider sweep at 5000 per engine (10000 cases, ~64s) was also run green:
-**9616 compared and agreeing, 384 `EvalOrderAmbiguous` (3.8%), 1281 duels all
+**9596 compared and agreeing, 404 `EvalOrderAmbiguous` (4.0%), 1273 duels all
 agreeing.** The rate is stable across an order of magnitude of corpus size.
 
-These are the numbers AFTER the two findings below were fixed and their
-exclusions removed. The corpus now genuinely exercises both shapes rather
-than avoiding them: the 5000-case Trino corpus contains **1789 policy values
-in which a `*` is immediately followed by a `?`**, spread over 1339 cases, and
-**609 `dataMaskPolicyItems` entries with no `dataMaskInfo`**.
+These are the numbers AFTER the findings below were fixed and their
+exclusions removed. Whether the corpus still REACHES the shapes those fixes
+were written for is not a matter of opinion here — see the coverage table
+below, which is printed on every run and fails it when an axis thins out.
 
 `EvalOrderAmbiguous` is Task 6's refusal to guess a mask (or row filter) when
 two policies tie inside one `(policyPriority, hasDeny)` band and would yield
@@ -129,6 +128,126 @@ eye (`cp` is aliased to `cp -i` on this machine and silently refuses):
   unconditionally, i.e. back towards a greedy matcher. Caught by the
   JVM-free unit table alone, on `wildcardMatch("ab", "?*?")` — no Maven, no
   `EGRET_TEST_RANGER_E2E`.
+
+## Declared divergences from the real engine
+
+Places where this crate is knowingly not byte-for-byte Ranger, with the reason
+each is acceptable. Anything not on this list and not `Undecidable` is a bug.
+
+- **Case folding of `İ` and friends.** `Equals`, `StartsWith` and `EndsWith`
+  fold the whole string with Rust's `to_lowercase` before comparing, while
+  Java compares per UTF-16 unit via `toUpperCase`/`toLowerCase`. The two
+  differ only for characters whose lowercase form is longer than one code
+  point (`İ` lowercases to two), which no catalog/schema/database/table/column
+  identifier on either engine admits.
+
+  The wildcard path deliberately does **not** do this, and the asymmetry is
+  worth knowing about: `wildcard_match` walks token by token doing index
+  arithmetic against the text, and a whole-string fold that changes the
+  string's LENGTH would shift every index away from the ones Java computes.
+  So it takes `ignore_case` and compares per position instead, which is what
+  `IOCase.checkRegionMatches` does. Its residual is narrower: a single
+  character whose Rust and Java case mappings disagree, rather than a length
+  change.
+
+- **Character indices stand in for Java's UTF-16 indices** throughout the
+  matcher. They differ only for astral characters, which no engine's resource
+  vocabulary admits.
+
+- **`_any` against an ANCESTOR-matching `isDenyAllElse` policy** denies on
+  2.5.0 and does not on 2.8.0 — see below. `_any` is
+  `UndecidableCause::PseudoAccessType`, so this crate refuses rather than
+  picking a version.
+
+- **`getEvalOrder()` is not reproduced.** Within one
+  `(policyPriority, hasDeny)` band this crate cannot say which of two
+  same-priority mask or row-filter policies Ranger reaches first, and refuses
+  with `EvalOrderAmbiguous` rather than guessing. Measured cost: 3.4-4.0% of
+  the corpus. For ACCESS the outcome does not depend on it — see the duels
+  below.
+
+## Coverage: what the corpus actually produced
+
+Once the gate is green, "green" and "still testing the shape" become
+indistinguishable. A generator edit that quietly stops emitting `isExcludes`
+costs nothing visible — the corpus stays green, because agreement on cases
+that never exercise a rule is agreement about nothing. That is a **silent,
+green failure**, which is the failure mode this whole package exists to
+eliminate elsewhere.
+
+So every axis has a structural counter and a floor that FAILS the run, and the
+table prints on **every** run rather than only on failure: a number nobody
+sees is a number nobody checks, and the point is to notice an axis thinning
+out long before it reaches zero.
+
+The predicates read the generated JSON and the request, never the outcome, so
+a counter cannot be satisfied by a decision that happened to come out a
+certain way. `axis_hits` and `AXES` are checked against each other BY NAME at
+runtime, because a silent misalignment would attach every floor below it to
+the wrong counter — the same class of defect the table exists to catch.
+
+Floors are in cases per thousand, so they survive a change to
+`EGRET_DIFF_CASES`, and each is set near half of what the corpus measurably
+produces. A floor that flaps gets deleted by the next person, which is worse
+than no floor: the tightest margin in the table below is 1.98x.
+
+Measured at ranger 2.5.0 (Trino), 2000 cases, seed `0x54d000007`:
+
+| Axis | Cases | Rate | Floor |
+|---|---|---|---|
+| policyType 0 (access) | 988 | 494‰ | 250‰ |
+| policyType 1 (data mask) | 515 | 257‰ | 120‰ |
+| policyType 2 (row filter) | 497 | 248‰ | 120‰ |
+| row-filter case at TABLE granularity | 497 | 248‰ | 120‰ |
+| policy of a DIFFERENT type in the set | 395 | 197‰ | 80‰ |
+| ANCESTOR-shaped policy (fewer levels than request) | 248 | 124‰ | 60‰ |
+| policy DEEPER than the request | 513 | 256‰ | 80‰ |
+| isExcludes | 814 | 407‰ | 100‰ |
+| multi-value level | 1140 | 570‰ | 100‰ |
+| level with no usable values | 441 | 220‰ | 40‰ |
+| additionalResources | 487 | 243‰ | 100‰ |
+| wildcard: leading * | 1258 | 629‰ | 200‰ |
+| wildcard: trailing * | 1266 | 633‰ | 200‰ |
+| wildcard: interior * | 1077 | 538‰ | 150‰ |
+| wildcard: repeated * | 1119 | 559‰ | 150‰ |
+| wildcard: leading ? | 709 | 354‰ | 100‰ |
+| wildcard: trailing ? | 791 | 395‰ | 100‰ |
+| wildcard: interior ? | 645 | 322‰ | 100‰ |
+| wildcard: repeated ? | 268 | 134‰ | 60‰ |
+| wildcard: `*` immediately before `?` (F1) | 497 | 248‰ | 100‰ |
+| policy value that is only `*` | 1339 | 669‰ | 200‰ |
+| policy value differing from the request only by case | 551 | 275‰ | 100‰ |
+| request value `*` | 310 | 155‰ | 70‰ |
+| request value empty | 319 | 159‰ | 70‰ |
+| request with a gap in the hierarchy | 1247 | 623‰ | 30‰ |
+| bucket policyItems | 1166 | 583‰ | 280‰ |
+| bucket denyPolicyItems | 860 | 430‰ | 150‰ |
+| bucket allowExceptions | 321 | 160‰ | 60‰ |
+| bucket denyExceptions | 319 | 159‰ | 60‰ |
+| group `public` | 732 | 366‰ | 80‰ |
+| user `{USER}` | 913 | 456‰ | 80‰ |
+| policy item naming a role | 1135 | 567‰ | 60‰ |
+| policyPriority override | 601 | 300‰ | 140‰ |
+| isDenyAllElse | 171 | 85‰ | 40‰ |
+| disabled policy | 330 | 165‰ | 70‰ |
+| impliedGrants via trino `all` | 1123 | 561‰ | 60‰ |
+| access entry with isAllowed:false | 816 | 408‰ | 150‰ |
+| access entry whose type reads as `""` (F3) | 697 | 348‰ | 40‰ |
+| dataMask item with NO dataMaskInfo (F2) | 165 | 82‰ | 40‰ |
+| rowFilter item with NO rowFilterInfo | 120 | 60‰ | 20‰ |
+| CUSTOM mask carrying a valueExpr | 231 | 115‰ | 40‰ |
+| mask conditionExpr | 136 | 68‰ | 20‰ |
+| filterExpr explicitly empty or null | 365 | 182‰ | 40‰ |
+| eval-order duel | 266 | 133‰ | 55‰ |
+
+`impliedGrants via trino \`all\`` is the one engine-specific row: StarRocks's
+service-def declares no `impliedGrants` at all, so the axis prints `n/a for
+this engine` there and is floored only for Trino.
+
+**The floors have been observed failing.** With `isExcludes` generation
+disabled the run stops with `isExcludes - 0 cases (0per-mille), floor
+100per-mille` and names the axis; the file was restored and verified
+byte-identical by `shasum`.
 
 ### Three divergences the gate FOUND, since fixed
 
