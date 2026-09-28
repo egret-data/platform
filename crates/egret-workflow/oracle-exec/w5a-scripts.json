@@ -76,8 +76,38 @@
   },
   {
    "id": "before_commands",
-   "finding": "beforeCommands [echo before-1, false] + commands [echo main] ran as `/bin/sh -c echo '##kestra:log:debug##'\\nset -e\\necho before-1\\nfalse\\necho '##kestra:log:info##'\\necho main`: one script, `set -e` once before the beforeCommands, and beforeCommands' output logged at DEBUG (`DEBUG before-1`) through Kestra's `##kestra:log:<level>##` markers. `false` in beforeCommands failed the task (exitCode 1) before `main`.",
+   "finding": "(failFast default = true) beforeCommands [echo before-1, false] + commands [echo main] ran as `/bin/sh -c echo '##kestra:log:debug##'\\nset -e\\necho before-1\\nfalse\\necho '##kestra:log:info##'\\necho main`: one script, `set -e` once before the beforeCommands, and beforeCommands' output logged at DEBUG (`DEBUG before-1`) through Kestra's `##kestra:log:<level>##` markers. `false` in beforeCommands failed the task (exitCode 1) before `main`.",
    "basis": "measured"
+  },
+  {
+   "id": "before_commands_fail_fast_false",
+   "finding": "Fix round 1: the same beforeCommands with failFast: false ran as `/bin/sh -c echo '##kestra:log:debug##'\\necho before-1\\nfalse\\necho '##kestra:log:info##'\\necho main` (no `set -e`), printed `main` and ended SUCCESS, exitCode 0. With failFast: true (explicit) it is FAILED, exitCode 1, no `main`. So `set -e` before beforeCommands is conditional on failFast, as AbstractExecScript.java:179-181 says.",
+   "basis": "measured"
+  },
+  {
+   "id": "failed_run_vars",
+   "finding": "Fix round 1: commands [echo '::{\"outputs\":{\"early\":1}}::', exit 4] -> FAILED with outputs `{\"vars\": {\"early\": 1}, \"exitCode\": 4, \"outputFiles\": {}}`: a failed run keeps the vars emitted before the failure.",
+   "basis": "measured"
+  },
+  {
+   "id": "digest_ref",
+   "finding": "Fix round 1: containerImage `python@sha256:7c61056e…` (the local python:3.13-slim) -> the container was created with the image exactly as written, no pull event, `Python 3.13.15`, SUCCESS. A registry with a port was not measured (no registry): Docker.java:988-990 treats a colon before the first `/` as the registry port, and :1025 defaults a missing tag to `latest`.",
+   "basis": "measured (digest); code (port)"
+  },
+  {
+   "id": "required_at_save",
+   "finding": "Fix round 1: a missing `commands` / `script` is refused at save (`tasks[t].commands: must not be null`, `tasks[t].script: must not be null`) on all four types. No `taskRunner`, and `taskRunner: null`, validate clean on shell.Commands and python.Script; every default-runner run in this file has none. The schema's `$required: true` on taskRunner is the @NotNull on a field that has a code default.",
+   "basis": "measured"
+  },
+  {
+   "id": "core_task_properties",
+   "finding": "Of the 15 base-Task properties every script type accepts (besides `timeout`, which W5a implements), egret's Task deserializer (crates/egret-workflow/src/models/task.rs:663-679) reads id, type, description, retry, disabled, runIf, allowFailure, allowWarning; the other seven -- assets, logLevel, logToFile, policyRefs, taskCache, version, workerSelector -- stay in the leaf spec map and nothing reads them. W5a therefore REFUSES those seven on script types (`refused_in_w5a`), and `version` is refused on the Docker runner too. Kestra accepted `version: '1.9.8'` on a task at save (measured).",
+   "basis": "code (egret) + measured (Kestra accepts)"
+  },
+  {
+   "id": "docker_resource_sub_properties",
+   "finding": "Fix round 1: Docker `cpu` is a closed object (`one known property: \"cpus\"`), `memory` too (`6 known properties: \"memory\", \"memorySwap\", \"memoryReservation\", \"oomKillDisable\", \"kernelMemory\", \"memorySwappiness\"`). W5a implements `cpu.cpus` and `memory.memory` and refuses the other five memory sub-properties.",
+   "basis": "measured (accepted); egret-chosen (split)"
   },
   {
    "id": "script_composition",
@@ -111,7 +141,7 @@
   },
   {
    "id": "accepted_properties",
-   "finding": "Each type accepts exactly its flow-schema properties (the 30 in Jackson's error for shell.Commands equal the schema's list). Python types add dependencies, dependencyCacheEnabled, packageManager (UV|PIP, default UV), pythonVersion, uvAutoInstallEnabled, uvInstallerSha256, uvInstallerVersion. Per-type lists and the implemented/refused split are in egret_expected.task_types.",
+   "finding": "Each type accepts exactly its flow-schema properties (the 30 in Jackson's error for shell.Commands equal the schema's list). Python types add dependencies, dependencyCacheEnabled, packageManager (UV|PIP, default UV), pythonVersion, uvAutoInstallEnabled, uvInstallerSha256, uvInstallerVersion. Per-type lists and the implemented/handled/refused split are in egret_expected.task_types. Fix round 1 cross-checked all four types against Jackson's lists (30, 30, 37, 37 known properties), equal to the schema.",
    "basis": "measured"
   }
  ],
@@ -126,10 +156,15 @@
      "-c"
     ],
     "default_fail_fast": true,
-    "required": [
+    "required_at_save": [
+     "commands"
+    ],
+    "schema_required": [
      "commands",
      "taskRunner"
     ],
+    "task_runner_absent": "default_runner",
+    "task_runner_null_accepted_at_save": true,
     "accepted_properties": [
      "allowFailure",
      "allowWarning",
@@ -176,25 +211,34 @@
      "warningOnStdErr"
     ],
     "refused_in_w5a": [
+     "assets",
+     "logLevel",
+     "logToFile",
      "namespaceFiles",
      "outputDirectory",
+     "policyRefs",
      "runner",
-     "targetOS"
+     "targetOS",
+     "taskCache",
+     "version",
+     "workerSelector"
     ],
-    "core_task_properties_not_w5a": [
+    "handled_by_egret_task_model": [
      "allowFailure",
      "allowWarning",
-     "assets",
      "description",
      "disabled",
      "id",
+     "retry",
+     "runIf",
+     "type"
+    ],
+    "refused_core_task_properties": [
+     "assets",
      "logLevel",
      "logToFile",
      "policyRefs",
-     "retry",
-     "runIf",
      "taskCache",
-     "type",
      "version",
      "workerSelector"
     ],
@@ -212,10 +256,15 @@
      "-c"
     ],
     "default_fail_fast": true,
-    "required": [
+    "required_at_save": [
+     "script"
+    ],
+    "schema_required": [
      "script",
      "taskRunner"
     ],
+    "task_runner_absent": "default_runner",
+    "task_runner_null_accepted_at_save": true,
     "accepted_properties": [
      "allowFailure",
      "allowWarning",
@@ -262,25 +311,34 @@
      "warningOnStdErr"
     ],
     "refused_in_w5a": [
+     "assets",
+     "logLevel",
+     "logToFile",
      "namespaceFiles",
      "outputDirectory",
+     "policyRefs",
      "runner",
-     "targetOS"
+     "targetOS",
+     "taskCache",
+     "version",
+     "workerSelector"
     ],
-    "core_task_properties_not_w5a": [
+    "handled_by_egret_task_model": [
      "allowFailure",
      "allowWarning",
-     "assets",
      "description",
      "disabled",
      "id",
+     "retry",
+     "runIf",
+     "type"
+    ],
+    "refused_core_task_properties": [
+     "assets",
      "logLevel",
      "logToFile",
      "policyRefs",
-     "retry",
-     "runIf",
      "taskCache",
-     "type",
      "version",
      "workerSelector"
     ],
@@ -298,10 +356,15 @@
      "-c"
     ],
     "default_fail_fast": true,
-    "required": [
+    "required_at_save": [
+     "commands"
+    ],
+    "schema_required": [
      "commands",
      "taskRunner"
     ],
+    "task_runner_absent": "default_runner",
+    "task_runner_null_accepted_at_save": true,
     "accepted_properties": [
      "allowFailure",
      "allowWarning",
@@ -355,32 +418,41 @@
      "warningOnStdErr"
     ],
     "refused_in_w5a": [
+     "assets",
      "dependencies",
      "dependencyCacheEnabled",
+     "logLevel",
+     "logToFile",
      "namespaceFiles",
      "outputDirectory",
      "packageManager",
+     "policyRefs",
      "pythonVersion",
      "runner",
      "targetOS",
+     "taskCache",
      "uvAutoInstallEnabled",
      "uvInstallerSha256",
-     "uvInstallerVersion"
+     "uvInstallerVersion",
+     "version",
+     "workerSelector"
     ],
-    "core_task_properties_not_w5a": [
+    "handled_by_egret_task_model": [
      "allowFailure",
      "allowWarning",
-     "assets",
      "description",
      "disabled",
      "id",
+     "retry",
+     "runIf",
+     "type"
+    ],
+    "refused_core_task_properties": [
+     "assets",
      "logLevel",
      "logToFile",
      "policyRefs",
-     "retry",
-     "runIf",
      "taskCache",
-     "type",
      "version",
      "workerSelector"
     ],
@@ -398,10 +470,15 @@
      "-c"
     ],
     "default_fail_fast": true,
-    "required": [
+    "required_at_save": [
+     "script"
+    ],
+    "schema_required": [
      "script",
      "taskRunner"
     ],
+    "task_runner_absent": "default_runner",
+    "task_runner_null_accepted_at_save": true,
     "accepted_properties": [
      "allowFailure",
      "allowWarning",
@@ -455,32 +532,41 @@
      "warningOnStdErr"
     ],
     "refused_in_w5a": [
+     "assets",
      "dependencies",
      "dependencyCacheEnabled",
+     "logLevel",
+     "logToFile",
      "namespaceFiles",
      "outputDirectory",
      "packageManager",
+     "policyRefs",
      "pythonVersion",
      "runner",
      "targetOS",
+     "taskCache",
      "uvAutoInstallEnabled",
      "uvInstallerSha256",
-     "uvInstallerVersion"
+     "uvInstallerVersion",
+     "version",
+     "workerSelector"
     ],
-    "core_task_properties_not_w5a": [
+    "handled_by_egret_task_model": [
      "allowFailure",
      "allowWarning",
-     "assets",
      "description",
      "disabled",
      "id",
+     "retry",
+     "runIf",
+     "type"
+    ],
+    "refused_core_task_properties": [
+     "assets",
      "logLevel",
      "logToFile",
      "policyRefs",
-     "retry",
-     "runIf",
      "taskCache",
-     "type",
      "version",
      "workerSelector"
     ],
@@ -557,17 +643,36 @@
      "IF_NOT_PRESENT",
      "NEVER"
     ],
-    "cpu_properties": [
-     "cpus"
-    ],
-    "memory_properties": [
-     "kernelMemory",
-     "memory",
-     "memoryReservation",
-     "memorySwap",
-     "memorySwappiness",
-     "oomKillDisable"
-    ],
+    "cpu_properties": {
+     "accepted": [
+      "cpus"
+     ],
+     "implemented_in_w5a": [
+      "cpus"
+     ],
+     "refused_in_w5a": []
+    },
+    "memory_properties": {
+     "accepted": [
+      "kernelMemory",
+      "memory",
+      "memoryReservation",
+      "memorySwap",
+      "memorySwappiness",
+      "oomKillDisable"
+     ],
+     "implemented_in_w5a": [
+      "memory"
+     ],
+     "refused_in_w5a": [
+      "kernelMemory",
+      "memoryReservation",
+      "memorySwap",
+      "memorySwappiness",
+      "oomKillDisable"
+     ]
+    },
+    "sub_properties_basis": "measured (accepted: Jackson `one known property: \"cpus\"` / `6 known properties`); egret-chosen split: only the two that map to a Kubernetes limit are implemented",
     "basis": "measured (accepted list, defaults); spec §3 (implemented split)"
    },
    "io.kestra.plugin.core.runner.Process": {
@@ -583,7 +688,24 @@
     "artifact_accepts": false,
     "artifact_error": "Invalid type: io.kestra.plugin.ee.kubernetes.runner.Kubernetes",
     "egret": "implemented",
-    "basis": "spec §2 (egret-chosen): EE FQCN, absent from OSS"
+    "implemented_in_w5a": [
+     "delete",
+     "pullPolicy",
+     "resources",
+     "type"
+    ],
+    "resources_implemented_paths": [
+     "limit.cpu",
+     "limit.memory",
+     "request.cpu",
+     "request.memory"
+    ],
+    "anything_else": "refused",
+    "defaults": {
+     "pullPolicy": "IF_NOT_PRESENT",
+     "delete": true
+    },
+    "basis": "spec §2/§3 (egret-chosen): EE FQCN, absent from OSS so nothing is measurable; a closed set, every other property or resources path is refused at save"
    },
    "absent": {
     "kestra_default": "io.kestra.plugin.scripts.runner.docker.Docker",
@@ -667,6 +789,19 @@
    "output_files_template_renders_to": "{{ workingDir }}/<name>",
    "basis": "measured (keys, glob, missing); spec §2 (egret-chosen: inline contents)"
   },
+  "failed_run_keeps_vars_emitted_before_failure": true,
+  "failed_run_vars_case": {
+   "commands": [
+    "echo \"::{\\\"outputs\\\":{\\\"early\\\":1}}::\"",
+    "exit 4"
+   ],
+   "state": "FAILED",
+   "exitCode": 4,
+   "vars": {
+    "early": 1
+   },
+   "basis": "measured"
+  },
   "outputs_keys": {
    "success_docker": [
     "exitCode",
@@ -706,8 +841,16 @@
      "stderr_lines": 1,
      "exit_code": 0,
      "state": "SUCCESS"
+    },
+    {
+     "type": "io.kestra.plugin.scripts.python.Script",
+     "warningOnStdErr": true,
+     "stderr_lines": 1,
+     "exit_code": 0,
+     "state": "SUCCESS"
     }
    ],
+   "cases_type_default": "io.kestra.plugin.scripts.shell.Commands",
    "stderr_log_level": "ERROR",
    "basis": "measured; amends spec §3"
   },
@@ -777,15 +920,87 @@
   },
   "before_commands": {
    "same_script_as_commands": true,
-   "set_e_before_before_commands": true,
-   "failure_stops_commands": true,
+   "set_e_before_before_commands": "iff_fail_fast",
    "kestra_log_level_of_before_commands_output": "DEBUG",
-   "basis": "measured"
+   "cases": [
+    {
+     "failFast": true,
+     "beforeCommands": [
+      "echo before-1",
+      "false"
+     ],
+     "commands": [
+      "echo main"
+     ],
+     "set_e_prepended": true,
+     "main_ran": false,
+     "state": "FAILED",
+     "exitCode": 1
+    },
+    {
+     "failFast": false,
+     "beforeCommands": [
+      "echo before-1",
+      "false"
+     ],
+     "commands": [
+      "echo main"
+     ],
+     "set_e_prepended": false,
+     "main_ran": true,
+     "state": "SUCCESS",
+     "exitCode": 0
+    }
+   ],
+   "basis": "measured (both failFast values); agrees with AbstractExecScript.java:179-181 mayAddExitOnErrorCommands"
   },
   "script_task": {
    "shell_script": "inlined_after_prefix",
    "python_script": "written_to_working_dir_py_file_and_run_with_python",
    "basis": "measured"
+  },
+  "image_reference_normalisation": {
+   "prefix_added_or_stripped": false,
+   "digest_ref": "as_written",
+   "tag_is_after_last_slash": true,
+   "missing_tag_becomes": "latest",
+   "cases": [
+    {
+     "written": "python",
+     "matched_as": "python:latest",
+     "basis": "measured (pull python:latest)"
+    },
+    {
+     "written": "ubuntu",
+     "matched_as": "ubuntu:latest",
+     "basis": "measured (default image; pull ubuntu:latest)"
+    },
+    {
+     "written": "python:3.13-slim",
+     "matched_as": "python:3.13-slim",
+     "basis": "measured (default image; create event)"
+    },
+    {
+     "written": "python@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b",
+     "matched_as": "python@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b",
+     "basis": "measured (create event image as written, ran Python 3.13.15, no pull)"
+    },
+    {
+     "written": "registry.local:5000/team/img",
+     "matched_as": "registry.local:5000/team/img:latest",
+     "basis": "code (Docker.java:988-990 a colon before the first slash is the registry port; :1025 tag defaults to latest); not measured, no registry"
+    },
+    {
+     "written": "registry.local:5000/team/img:1.2",
+     "matched_as": "registry.local:5000/team/img:1.2",
+     "basis": "code (as above)"
+    },
+    {
+     "written": "docker.io/library/python:3.13-slim",
+     "matched_as": "docker.io/library/python:3.13-slim",
+     "basis": "egret-chosen: no Docker Hub normalisation in either direction, so `python:*` does not match it"
+    }
+   ]
   },
   "tagless_image": {
    "written": "python",
@@ -1498,6 +1713,116 @@
     "warningOnStdErr",
     "workerSelector"
    ],
+   "io.kestra.plugin.scripts.shell.Script": [
+    "allowFailure",
+    "allowWarning",
+    "assets",
+    "beforeCommands",
+    "containerImage",
+    "description",
+    "disabled",
+    "env",
+    "failFast",
+    "id",
+    "inputFiles",
+    "interpreter",
+    "logLevel",
+    "logToFile",
+    "namespaceFiles",
+    "outputDirectory",
+    "outputFiles",
+    "policyRefs",
+    "retry",
+    "runIf",
+    "runner",
+    "script",
+    "targetOS",
+    "taskCache",
+    "taskRunner",
+    "timeout",
+    "type",
+    "version",
+    "warningOnStdErr",
+    "workerSelector"
+   ],
+   "io.kestra.plugin.scripts.python.Commands": [
+    "allowFailure",
+    "allowWarning",
+    "assets",
+    "beforeCommands",
+    "commands",
+    "containerImage",
+    "dependencies",
+    "dependencyCacheEnabled",
+    "description",
+    "disabled",
+    "env",
+    "failFast",
+    "id",
+    "inputFiles",
+    "interpreter",
+    "logLevel",
+    "logToFile",
+    "namespaceFiles",
+    "outputDirectory",
+    "outputFiles",
+    "packageManager",
+    "policyRefs",
+    "pythonVersion",
+    "retry",
+    "runIf",
+    "runner",
+    "targetOS",
+    "taskCache",
+    "taskRunner",
+    "timeout",
+    "type",
+    "uvAutoInstallEnabled",
+    "uvInstallerSha256",
+    "uvInstallerVersion",
+    "version",
+    "warningOnStdErr",
+    "workerSelector"
+   ],
+   "io.kestra.plugin.scripts.python.Script": [
+    "allowFailure",
+    "allowWarning",
+    "assets",
+    "beforeCommands",
+    "containerImage",
+    "dependencies",
+    "dependencyCacheEnabled",
+    "description",
+    "disabled",
+    "env",
+    "failFast",
+    "id",
+    "inputFiles",
+    "interpreter",
+    "logLevel",
+    "logToFile",
+    "namespaceFiles",
+    "outputDirectory",
+    "outputFiles",
+    "packageManager",
+    "policyRefs",
+    "pythonVersion",
+    "retry",
+    "runIf",
+    "runner",
+    "script",
+    "targetOS",
+    "taskCache",
+    "taskRunner",
+    "timeout",
+    "type",
+    "uvAutoInstallEnabled",
+    "uvInstallerSha256",
+    "uvInstallerVersion",
+    "version",
+    "warningOnStdErr",
+    "workerSelector"
+   ],
    "io.kestra.plugin.scripts.runner.docker.Docker": [
     "config",
     "cpu",
@@ -1522,6 +1847,17 @@
     "version",
     "volumes",
     "wait"
+   ],
+   "io.kestra.plugin.scripts.runner.docker.Cpu": [
+    "cpus"
+   ],
+   "io.kestra.plugin.scripts.runner.docker.Memory": [
+    "kernelMemory",
+    "memory",
+    "memoryReservation",
+    "memorySwap",
+    "memorySwappiness",
+    "oomKillDisable"
    ]
   },
   "first_pass": {
@@ -3847,6 +4183,739 @@
     ],
     "at": "2026-09-28T02:36:38.827804+00:00"
    }
+  },
+  "fix_round_1": {
+   "captured_at": "2026-09-28T02:47:39Z..02:48:33Z (artifact up again, same digest; down -v at 02:48:33Z)",
+   "runs": {
+    "r2_before_commands_fail_fast_true": {
+     "scenario": "r2_before_commands_fail_fast_true",
+     "flow_yaml": "id: r2_before_commands_fail_fast_true\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.shell.Commands\n    failFast: true\n    beforeCommands:\n      - 'echo before-1'\n      - 'false'\n    commands:\n      - 'echo main'\n",
+     "deploy_status": 200,
+     "host_utc_before": "2026-09-28T02:47:49.601825+00:00",
+     "host_utc_after": "2026-09-28T02:47:54.976743+00:00",
+     "execution_id": "2d6ZGGn1gfk5YEnuBtvgkU",
+     "execution_state": "FAILED",
+     "taskrun_state": "FAILED",
+     "taskrun_attempt_states": [
+      "FAILED"
+     ],
+     "outputs_via_eval": {
+      "vars": {},
+      "exitCode": 1,
+      "outputFiles": {}
+     },
+     "logs": [
+      {
+       "timestamp": "2026-09-28T02:47:50.935971Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Container created: 92487b660a7ee262fafac0dafb6dea619b37026f1f9f443bfed737d6431cd491"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:50.966852Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Volume created: 69b482eafb275114a940f082739ee6d839b1dd7f6e8b30ba009dcf12be379bbf"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:51.693130Z",
+       "taskId": "t",
+       "level": "DEBUG",
+       "message": "Starting command with container id 92487b660a7ee262fafac0dafb6dea619b37026f1f9f443bfed737d6431cd491 [/bin/sh -c echo '##kestra:log:debug##'\nset -e\necho before-1\nfalse\necho '##kestra:log:info##'\necho main]"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:51.833028Z",
+       "taskId": "t",
+       "level": "DEBUG",
+       "message": "before-1"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:52.335762Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Container deleted: 92487b660a7ee262fafac0dafb6dea619b37026f1f9f443bfed737d6431cd491"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:52.471455Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Volume deleted: 69b482eafb275114a940f082739ee6d839b1dd7f6e8b30ba009dcf12be379bbf"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:52.477943Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Captured 0 output file(s)."
+      },
+      {
+       "timestamp": "2026-09-28T02:47:52.487300Z",
+       "taskId": "t",
+       "level": "ERROR",
+       "message": "io.kestra.core.models.tasks.runners.TaskException: Command failed with exit code 1"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:52.487300Z",
+       "taskId": "t",
+       "level": "ERROR",
+       "message": "Command failed with exit code 1"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:52.487300Z",
+       "taskId": "t",
+       "level": "DEBUG",
+       "message": "io.kestra.core.models.tasks.RunnableTaskException: io.kestra.core.models.tasks.runners.TaskException: Command failed with exit code 1\n\tat io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper.run(CommandsWrapper.java:259)\n\tat io.kestra.plugin.scripts.shell.Commands.run(Commands.java:333)\n\tat io.kestra.plugin.scripts.shell.Commands.run(Commands.java:22)\n\tat io.kestra.worker.processors.internals.WorkerTaskCallable.lambda$doCall$0(WorkerTaskCallable.java:63)\n\tat io.kestra.worker.processors.internals.AbstractWorkerCallable.callWithTimeout(AbstractWorkerCallable.java:161)\n\tat io.kestra.worker.processors.internals.WorkerTaskCallable.doCall(WorkerTaskCallable.java:61)\n\tat io.kestra.worker.processors.internals.AbstractWorkerCallable.call(AbstractWorkerCallable.java:77)\n\tat io.kestra.worker.WorkerSecurityService.callInSecurityContext(WorkerSecurityService.java:12)\n\tat io.kestra.worker.processors.AbstractWorkerJobProcessor.lambda$callJob$0(AbstractWorkerJobProcessor.java:91)\n\tat io.kestra.core.trace.NoopTracer.inCurrentContext(NoopTracer.java:16)\n\tat io.kestra.worker.processors.AbstractWorkerJobProcessor.callJob(AbstractWorkerJobProcessor.java:85)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.runAttempt(WorkerTaskProcessor.java:442)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.runTask(WorkerTaskProcessor.java:260)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.runTask(WorkerTaskProcessor.java:181)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.doProcess(WorkerTaskProcessor.java:103)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.doProcess(WorkerTaskProcessor.java:57)\n\tat io.kestra.worker.processors.AbstractWorkerJobProcessor.process(AbstractWorkerJobProcessor.java:63)\n\tat io.kestra.worker.WorkerJobExecutor$WorkerJobConsumer.lambda$doOnLoop$0(WorkerJobExecutor.java:316)\n\tat io.micrometer.core.instrument.internal.TimedRunnable.run(TimedRunnable.java:49)\n\tat java.base/java.util.concurrent.Executors$RunnableAdapter.call(Unknown Source)\n\tat java.base/java.util.concurrent.FutureTask.run(Unknown Source)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(Unknown Source)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(Unknown Source)\n\tat java.base/java.lang.Thread.run(Unknown Source)\nCaused by: io.kestra.core.models.tasks.runners.TaskException: Command failed with exit code 1\n\tat io.kestra.plugin.scripts.runner.docker.Docker.run(Docker.java:629)\n\tat io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper.run(CommandsWrapper.java:238)\n\t... 23 more\n"
+      }
+     ],
+     "docker_ps_a_kestra_labelled_after": []
+    },
+    "r2_before_commands_fail_fast_false": {
+     "scenario": "r2_before_commands_fail_fast_false",
+     "flow_yaml": "id: r2_before_commands_fail_fast_false\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.shell.Commands\n    failFast: false\n    beforeCommands:\n      - 'echo before-1'\n      - 'false'\n    commands:\n      - 'echo main'\n",
+     "deploy_status": 200,
+     "host_utc_before": "2026-09-28T02:47:55.028812+00:00",
+     "host_utc_after": "2026-09-28T02:47:58.851721+00:00",
+     "execution_id": "3iJRnUN1KbT5vIhBWRafBO",
+     "execution_state": "SUCCESS",
+     "taskrun_state": "SUCCESS",
+     "taskrun_attempt_states": [
+      "SUCCESS"
+     ],
+     "outputs_via_eval": {
+      "vars": {},
+      "exitCode": 0,
+      "taskRunner": {
+       "containerId": "9beb6954c4fd479edb82c187b91b573f1d1fde20180b3cd7c444481f497884b0"
+      },
+      "outputFiles": {}
+     },
+     "logs": [
+      {
+       "timestamp": "2026-09-28T02:47:55.446183Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Container created: 9beb6954c4fd479edb82c187b91b573f1d1fde20180b3cd7c444481f497884b0"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:55.459536Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Volume created: ec561a8aa7a29e62fbe438d158df4926b60994cc1a23805999bb2388b31fd7a3"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:55.967531Z",
+       "taskId": "t",
+       "level": "DEBUG",
+       "message": "Starting command with container id 9beb6954c4fd479edb82c187b91b573f1d1fde20180b3cd7c444481f497884b0 [/bin/sh -c echo '##kestra:log:debug##'\necho before-1\nfalse\necho '##kestra:log:info##'\necho main]"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:55.981534Z",
+       "taskId": "t",
+       "level": "DEBUG",
+       "message": "before-1"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:55.982507Z",
+       "taskId": "t",
+       "level": "INFO",
+       "message": "main"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:56.088578Z",
+       "taskId": "t",
+       "level": "DEBUG",
+       "message": "Command succeed with exit code 0"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:56.214879Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Container deleted: 9beb6954c4fd479edb82c187b91b573f1d1fde20180b3cd7c444481f497884b0"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:56.227306Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Volume deleted: ec561a8aa7a29e62fbe438d158df4926b60994cc1a23805999bb2388b31fd7a3"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:56.227894Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Captured 0 output file(s)."
+      }
+     ],
+     "docker_ps_a_kestra_labelled_after": []
+    },
+    "r2_vars_before_failure": {
+     "scenario": "r2_vars_before_failure",
+     "flow_yaml": "id: r2_vars_before_failure\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.shell.Commands\n    commands:\n      - 'echo \"::{\\\"outputs\\\":{\\\"early\\\":1}}::\"'\n      - 'exit 4'\n",
+     "deploy_status": 200,
+     "host_utc_before": "2026-09-28T02:47:58.905619+00:00",
+     "host_utc_after": "2026-09-28T02:48:02.665250+00:00",
+     "execution_id": "nEyWbOaOtIvP2hpGWFT3b",
+     "execution_state": "FAILED",
+     "taskrun_state": "FAILED",
+     "taskrun_attempt_states": [
+      "FAILED"
+     ],
+     "outputs_via_eval": {
+      "vars": {
+       "early": 1
+      },
+      "exitCode": 4,
+      "outputFiles": {}
+     },
+     "logs": [
+      {
+       "timestamp": "2026-09-28T02:47:59.374040Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Container created: 9ff65760a893d514c597c35189a920c44e74425259a7b4c505d7976f73946cd2"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:59.396760Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Volume created: 917f6b4ae42a41ccf493f046a9368d3b1af551f5d12f7ad9287072d94af27b05"
+      },
+      {
+       "timestamp": "2026-09-28T02:47:59.874544Z",
+       "taskId": "t",
+       "level": "DEBUG",
+       "message": "Starting command with container id 9ff65760a893d514c597c35189a920c44e74425259a7b4c505d7976f73946cd2 [/bin/sh -c set -e\necho \"::{\\\"outputs\\\":{\\\"early\\\":1}}::\"\nexit 4]"
+      },
+      {
+       "timestamp": "2026-09-28T02:48:00.199042Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Container deleted: 9ff65760a893d514c597c35189a920c44e74425259a7b4c505d7976f73946cd2"
+      },
+      {
+       "timestamp": "2026-09-28T02:48:00.212993Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Volume deleted: 917f6b4ae42a41ccf493f046a9368d3b1af551f5d12f7ad9287072d94af27b05"
+      },
+      {
+       "timestamp": "2026-09-28T02:48:00.213735Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Captured 0 output file(s)."
+      },
+      {
+       "timestamp": "2026-09-28T02:48:00.216618Z",
+       "taskId": "t",
+       "level": "ERROR",
+       "message": "io.kestra.core.models.tasks.runners.TaskException: Command failed with exit code 4"
+      },
+      {
+       "timestamp": "2026-09-28T02:48:00.216618Z",
+       "taskId": "t",
+       "level": "ERROR",
+       "message": "Command failed with exit code 4"
+      },
+      {
+       "timestamp": "2026-09-28T02:48:00.216618Z",
+       "taskId": "t",
+       "level": "DEBUG",
+       "message": "io.kestra.core.models.tasks.RunnableTaskException: io.kestra.core.models.tasks.runners.TaskException: Command failed with exit code 4\n\tat io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper.run(CommandsWrapper.java:259)\n\tat io.kestra.plugin.scripts.shell.Commands.run(Commands.java:333)\n\tat io.kestra.plugin.scripts.shell.Commands.run(Commands.java:22)\n\tat io.kestra.worker.processors.internals.WorkerTaskCallable.lambda$doCall$0(WorkerTaskCallable.java:63)\n\tat io.kestra.worker.processors.internals.AbstractWorkerCallable.callWithTimeout(AbstractWorkerCallable.java:161)\n\tat io.kestra.worker.processors.internals.WorkerTaskCallable.doCall(WorkerTaskCallable.java:61)\n\tat io.kestra.worker.processors.internals.AbstractWorkerCallable.call(AbstractWorkerCallable.java:77)\n\tat io.kestra.worker.WorkerSecurityService.callInSecurityContext(WorkerSecurityService.java:12)\n\tat io.kestra.worker.processors.AbstractWorkerJobProcessor.lambda$callJob$0(AbstractWorkerJobProcessor.java:91)\n\tat io.kestra.core.trace.NoopTracer.inCurrentContext(NoopTracer.java:16)\n\tat io.kestra.worker.processors.AbstractWorkerJobProcessor.callJob(AbstractWorkerJobProcessor.java:85)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.runAttempt(WorkerTaskProcessor.java:442)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.runTask(WorkerTaskProcessor.java:260)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.runTask(WorkerTaskProcessor.java:181)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.doProcess(WorkerTaskProcessor.java:103)\n\tat io.kestra.worker.processors.WorkerTaskProcessor.doProcess(WorkerTaskProcessor.java:57)\n\tat io.kestra.worker.processors.AbstractWorkerJobProcessor.process(AbstractWorkerJobProcessor.java:63)\n\tat io.kestra.worker.WorkerJobExecutor$WorkerJobConsumer.lambda$doOnLoop$0(WorkerJobExecutor.java:316)\n\tat io.micrometer.core.instrument.internal.TimedRunnable.run(TimedRunnable.java:49)\n\tat java.base/java.util.concurrent.Executors$RunnableAdapter.call(Unknown Source)\n\tat java.base/java.util.concurrent.FutureTask.run(Unknown Source)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(Unknown Source)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(Unknown Source)\n\tat java.base/java.lang.Thread.run(Unknown Source)\nCaused by: io.kestra.core.models.tasks.runners.TaskException: Command failed with exit code 4\n\tat io.kestra.plugin.scripts.runner.docker.Docker.run(Docker.java:629)\n\tat io.kestra.plugin.scripts.exec.scripts.runners.CommandsWrapper.run(CommandsWrapper.java:238)\n\t... 23 more\n"
+      }
+     ],
+     "docker_ps_a_kestra_labelled_after": []
+    },
+    "r2_digest_ref": {
+     "scenario": "r2_digest_ref",
+     "flow_yaml": "id: r2_digest_ref\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.shell.Commands\n    containerImage: python@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b\n    commands:\n      - 'python --version'\n",
+     "deploy_status": 200,
+     "host_utc_before": "2026-09-28T02:48:02.726158+00:00",
+     "host_utc_after": "2026-09-28T02:48:06.513220+00:00",
+     "execution_id": "1t8CbYJxOabXC0hwYKTgB3",
+     "execution_state": "SUCCESS",
+     "taskrun_state": "SUCCESS",
+     "taskrun_attempt_states": [
+      "SUCCESS"
+     ],
+     "outputs_via_eval": {
+      "vars": {},
+      "exitCode": 0,
+      "taskRunner": {
+       "containerId": "3ddd21bbcf0e2ca2c0d5e3c84c309a8c4eb25723a7885b5ea247e11097446bd8"
+      },
+      "outputFiles": {}
+     },
+     "logs": [
+      {
+       "timestamp": "2026-09-28T02:48:03.247378Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Container created: 3ddd21bbcf0e2ca2c0d5e3c84c309a8c4eb25723a7885b5ea247e11097446bd8"
+      },
+      {
+       "timestamp": "2026-09-28T02:48:03.272740Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Volume created: 61f6f890d942a34c65cb1dfb4616d2420f828b82f5f0049bd5257a954bbbb7dc"
+      },
+      {
+       "timestamp": "2026-09-28T02:48:03.742697Z",
+       "taskId": "t",
+       "level": "DEBUG",
+       "message": "Starting command with container id 3ddd21bbcf0e2ca2c0d5e3c84c309a8c4eb25723a7885b5ea247e11097446bd8 [/bin/sh -c set -e\npython --version]"
+      },
+      {
+       "timestamp": "2026-09-28T02:48:03.763246Z",
+       "taskId": "t",
+       "level": "INFO",
+       "message": "Python 3.13.15"
+      },
+      {
+       "timestamp": "2026-09-28T02:48:03.933837Z",
+       "taskId": "t",
+       "level": "DEBUG",
+       "message": "Command succeed with exit code 0"
+      },
+      {
+       "timestamp": "2026-09-28T02:48:04.069699Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Container deleted: 3ddd21bbcf0e2ca2c0d5e3c84c309a8c4eb25723a7885b5ea247e11097446bd8"
+      },
+      {
+       "timestamp": "2026-09-28T02:48:04.083404Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Volume deleted: 61f6f890d942a34c65cb1dfb4616d2420f828b82f5f0049bd5257a954bbbb7dc"
+      },
+      {
+       "timestamp": "2026-09-28T02:48:04.084088Z",
+       "taskId": "t",
+       "level": "TRACE",
+       "message": "Captured 0 output file(s)."
+      }
+     ],
+     "docker_ps_a_kestra_labelled_after": []
+    }
+   },
+   "validate": {
+    "unknown_prop_shell_script": {
+     "flow_yaml": "id: r2v_0\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.shell.Script\n    script: echo hi\n    notAProperty: 1\n",
+     "validate_status": 200,
+     "validate_body": [
+      {
+       "index": 0,
+       "constraints": "Validation error: Unrecognized field \"notAProperty\" (class io.kestra.plugin.scripts.shell.Script), not marked as ignorable (30 known properties: \"allowFailure\", \"assets\", \"runIf\", \"script\", \"inputFiles\", \"policyRefs\", \"allowWarning\", \"taskRunner\", \"version\", \"failFast\", \"id\", \"namespaceFiles\", \"logLevel\", \"timeout\", \"beforeCommands\", \"retry\", \"outputDirectory\", \"env\", \"runner\", \"targetOS\", \"outputFiles\", \"type\", \"logToFile\", \"description\", \"workerSelector\", \"containerImage\", \"interpreter\", \"disabled\", \"taskCache\", \"warningOnStdErr\")",
+       "outdated": false
+      }
+     ],
+     "at": "2026-09-28T02:48:26.365814+00:00"
+    },
+    "unknown_prop_python_commands": {
+     "flow_yaml": "id: r2v_1\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.python.Commands\n    commands: ['python -V']\n    notAProperty: 1\n",
+     "validate_status": 200,
+     "validate_body": [
+      {
+       "index": 0,
+       "constraints": "Validation error: Unrecognized field \"notAProperty\" (class io.kestra.plugin.scripts.python.Commands), not marked as ignorable (37 known properties: \"allowFailure\", \"assets\", \"packageManager\", \"runIf\", \"dependencyCacheEnabled\", \"inputFiles\", \"policyRefs\", \"allowWarning\", \"taskRunner\", \"version\", \"failFast\", \"id\", \"namespaceFiles\", \"logLevel\", \"timeout\", \"beforeCommands\", \"retry\", \"dependencies\", \"outputDirectory\", \"env\", \"uvInstallerSha256\", \"runner\", \"uvInstallerVersion\", \"targetOS\", \"outputFiles\", \"type\", \"logToFile\", \"description\", \"workerSelector\", \"commands\", \"containerImage\", \"pythonVersion\", \"uvAutoInstallEnabled\", \"interpreter\", \"disabled\", \"taskCache\", \"warningOnStdErr\")",
+       "outdated": false
+      }
+     ],
+     "at": "2026-09-28T02:48:26.378478+00:00"
+    },
+    "unknown_prop_python_script": {
+     "flow_yaml": "id: r2v_2\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.python.Script\n    script: print(1)\n    notAProperty: 1\n",
+     "validate_status": 200,
+     "validate_body": [
+      {
+       "index": 0,
+       "constraints": "Validation error: Unrecognized field \"notAProperty\" (class io.kestra.plugin.scripts.python.Script), not marked as ignorable (37 known properties: \"allowFailure\", \"assets\", \"packageManager\", \"runIf\", \"dependencyCacheEnabled\", \"script\", \"inputFiles\", \"policyRefs\", \"allowWarning\", \"taskRunner\", \"version\", \"failFast\", \"id\", \"namespaceFiles\", \"logLevel\", \"timeout\", \"beforeCommands\", \"retry\", \"dependencies\", \"outputDirectory\", \"env\", \"uvInstallerSha256\", \"runner\", \"uvInstallerVersion\", \"targetOS\", \"outputFiles\", \"type\", \"logToFile\", \"description\", \"workerSelector\", \"containerImage\", \"pythonVersion\", \"uvAutoInstallEnabled\", \"interpreter\", \"disabled\", \"taskCache\", \"warningOnStdErr\")",
+       "outdated": false
+      }
+     ],
+     "at": "2026-09-28T02:48:26.389491+00:00"
+    },
+    "shell_commands_missing_commands": {
+     "flow_yaml": "id: r2v_3\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.shell.Commands\n",
+     "validate_status": 200,
+     "validate_body": [
+      {
+       "index": 0,
+       "namespace": "w5a",
+       "flow": "r2v_3",
+       "constraints": "Validation error: tasks[t].commands: must not be null\n",
+       "outdated": false,
+       "deprecationPaths": [],
+       "warnings": [],
+       "infos": []
+      }
+     ],
+     "at": "2026-09-28T02:48:26.417135+00:00"
+    },
+    "shell_script_missing_script": {
+     "flow_yaml": "id: r2v_4\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.shell.Script\n",
+     "validate_status": 200,
+     "validate_body": [
+      {
+       "index": 0,
+       "namespace": "w5a",
+       "flow": "r2v_4",
+       "constraints": "Validation error: tasks[t].script: must not be null\n",
+       "outdated": false,
+       "deprecationPaths": [],
+       "warnings": [],
+       "infos": []
+      }
+     ],
+     "at": "2026-09-28T02:48:26.439696+00:00"
+    },
+    "python_commands_missing_commands": {
+     "flow_yaml": "id: r2v_5\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.python.Commands\n",
+     "validate_status": 200,
+     "validate_body": [
+      {
+       "index": 0,
+       "namespace": "w5a",
+       "flow": "r2v_5",
+       "constraints": "Validation error: tasks[t].commands: must not be null\n",
+       "outdated": false,
+       "deprecationPaths": [],
+       "warnings": [],
+       "infos": []
+      }
+     ],
+     "at": "2026-09-28T02:48:26.460391+00:00"
+    },
+    "python_script_missing_script": {
+     "flow_yaml": "id: r2v_6\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.python.Script\n",
+     "validate_status": 200,
+     "validate_body": [
+      {
+       "index": 0,
+       "namespace": "w5a",
+       "flow": "r2v_6",
+       "constraints": "Validation error: tasks[t].script: must not be null\n",
+       "outdated": false,
+       "deprecationPaths": [],
+       "warnings": [],
+       "infos": []
+      }
+     ],
+     "at": "2026-09-28T02:48:26.472343+00:00"
+    },
+    "no_task_runner_shell_commands": {
+     "flow_yaml": "id: r2v_7\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.shell.Commands\n    commands: ['echo hi']\n",
+     "validate_status": 200,
+     "validate_body": [
+      {
+       "index": 0,
+       "namespace": "w5a",
+       "flow": "r2v_7",
+       "outdated": false,
+       "deprecationPaths": [],
+       "warnings": [],
+       "infos": []
+      }
+     ],
+     "at": "2026-09-28T02:48:26.483626+00:00"
+    },
+    "no_task_runner_python_script": {
+     "flow_yaml": "id: r2v_8\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.python.Script\n    script: print(1)\n",
+     "validate_status": 200,
+     "validate_body": [
+      {
+       "index": 0,
+       "namespace": "w5a",
+       "flow": "r2v_8",
+       "outdated": false,
+       "deprecationPaths": [],
+       "warnings": [],
+       "infos": []
+      }
+     ],
+     "at": "2026-09-28T02:48:26.495341+00:00"
+    },
+    "task_runner_null": {
+     "flow_yaml": "id: r2v_9\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.shell.Commands\n    commands: ['echo hi']\n    taskRunner: null\n",
+     "validate_status": 200,
+     "validate_body": [
+      {
+       "index": 0,
+       "namespace": "w5a",
+       "flow": "r2v_9",
+       "outdated": false,
+       "deprecationPaths": [],
+       "warnings": [],
+       "infos": []
+      }
+     ],
+     "at": "2026-09-28T02:48:26.508397+00:00"
+    },
+    "docker_cpu_unknown_sub": {
+     "flow_yaml": "id: r2v_10\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.shell.Commands\n    commands: ['echo hi']\n    taskRunner:\n      type: io.kestra.plugin.scripts.runner.docker.Docker\n      cpu:\n        notASub: 1\n",
+     "validate_status": 200,
+     "validate_body": [
+      {
+       "index": 0,
+       "constraints": "Validation error: Unrecognized field \"notASub\" (class io.kestra.plugin.scripts.runner.docker.Cpu), not marked as ignorable (one known property: \"cpus\")",
+       "outdated": false
+      }
+     ],
+     "at": "2026-09-28T02:48:26.520881+00:00"
+    },
+    "docker_memory_unknown_sub": {
+     "flow_yaml": "id: r2v_11\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.shell.Commands\n    commands: ['echo hi']\n    taskRunner:\n      type: io.kestra.plugin.scripts.runner.docker.Docker\n      memory:\n        notASub: 1\n",
+     "validate_status": 200,
+     "validate_body": [
+      {
+       "index": 0,
+       "constraints": "Validation error: Unrecognized field \"notASub\" (class io.kestra.plugin.scripts.runner.docker.Memory), not marked as ignorable (6 known properties: \"memory\", \"memorySwap\", \"memoryReservation\", \"oomKillDisable\", \"kernelMemory\", \"memorySwappiness\")",
+       "outdated": false
+      }
+     ],
+     "at": "2026-09-28T02:48:26.531705+00:00"
+    },
+    "task_version_property": {
+     "flow_yaml": "id: r2v_12\nnamespace: w5a\ntasks:\n  - id: t\n    type: io.kestra.plugin.scripts.shell.Commands\n    version: '1.9.8'\n    commands: ['echo hi']\n",
+     "validate_status": 200,
+     "validate_body": [
+      {
+       "index": 0,
+       "namespace": "w5a",
+       "flow": "r2v_12",
+       "outdated": false,
+       "deprecationPaths": [],
+       "warnings": [],
+       "infos": []
+      }
+     ],
+     "at": "2026-09-28T02:48:26.544135+00:00"
+    }
+   },
+   "docker_events": [
+    {
+     "time": 1790563670,
+     "type": "container",
+     "action": "create",
+     "image": "ubuntu",
+     "labels": {
+      "kestra.io/execution-id": "2d6ZGGn1gfk5YEnuBtvgkU",
+      "kestra.io/flow-id": "r2_before_commands_fail_fast_true",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "75umLhDAh85sTiR6Emvysl"
+     }
+    },
+    {
+     "time": 1790563671,
+     "type": "container",
+     "action": "start",
+     "image": "ubuntu",
+     "labels": {
+      "kestra.io/execution-id": "2d6ZGGn1gfk5YEnuBtvgkU",
+      "kestra.io/flow-id": "r2_before_commands_fail_fast_true",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "75umLhDAh85sTiR6Emvysl"
+     }
+    },
+    {
+     "time": 1790563671,
+     "type": "container",
+     "action": "die",
+     "image": "ubuntu",
+     "labels": {
+      "kestra.io/execution-id": "2d6ZGGn1gfk5YEnuBtvgkU",
+      "kestra.io/flow-id": "r2_before_commands_fail_fast_true",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "75umLhDAh85sTiR6Emvysl"
+     }
+    },
+    {
+     "time": 1790563672,
+     "type": "container",
+     "action": "destroy",
+     "image": "ubuntu",
+     "labels": {
+      "kestra.io/execution-id": "2d6ZGGn1gfk5YEnuBtvgkU",
+      "kestra.io/flow-id": "r2_before_commands_fail_fast_true",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "75umLhDAh85sTiR6Emvysl"
+     }
+    },
+    {
+     "time": 1790563675,
+     "type": "container",
+     "action": "create",
+     "image": "ubuntu",
+     "labels": {
+      "kestra.io/execution-id": "3iJRnUN1KbT5vIhBWRafBO",
+      "kestra.io/flow-id": "r2_before_commands_fail_fast_false",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "4nNSoBCF16cc1FIwGfZVj4"
+     }
+    },
+    {
+     "time": 1790563675,
+     "type": "container",
+     "action": "start",
+     "image": "ubuntu",
+     "labels": {
+      "kestra.io/execution-id": "3iJRnUN1KbT5vIhBWRafBO",
+      "kestra.io/flow-id": "r2_before_commands_fail_fast_false",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "4nNSoBCF16cc1FIwGfZVj4"
+     }
+    },
+    {
+     "time": 1790563675,
+     "type": "container",
+     "action": "die",
+     "image": "ubuntu",
+     "labels": {
+      "kestra.io/execution-id": "3iJRnUN1KbT5vIhBWRafBO",
+      "kestra.io/flow-id": "r2_before_commands_fail_fast_false",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "4nNSoBCF16cc1FIwGfZVj4"
+     }
+    },
+    {
+     "time": 1790563676,
+     "type": "container",
+     "action": "destroy",
+     "image": "ubuntu",
+     "labels": {
+      "kestra.io/execution-id": "3iJRnUN1KbT5vIhBWRafBO",
+      "kestra.io/flow-id": "r2_before_commands_fail_fast_false",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "4nNSoBCF16cc1FIwGfZVj4"
+     }
+    },
+    {
+     "time": 1790563679,
+     "type": "container",
+     "action": "create",
+     "image": "ubuntu",
+     "labels": {
+      "kestra.io/execution-id": "nEyWbOaOtIvP2hpGWFT3b",
+      "kestra.io/flow-id": "r2_vars_before_failure",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "1gD2iU0rv8VVUcxgJMdZX1"
+     }
+    },
+    {
+     "time": 1790563679,
+     "type": "container",
+     "action": "start",
+     "image": "ubuntu",
+     "labels": {
+      "kestra.io/execution-id": "nEyWbOaOtIvP2hpGWFT3b",
+      "kestra.io/flow-id": "r2_vars_before_failure",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "1gD2iU0rv8VVUcxgJMdZX1"
+     }
+    },
+    {
+     "time": 1790563679,
+     "type": "container",
+     "action": "die",
+     "image": "ubuntu",
+     "labels": {
+      "kestra.io/execution-id": "nEyWbOaOtIvP2hpGWFT3b",
+      "kestra.io/flow-id": "r2_vars_before_failure",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "1gD2iU0rv8VVUcxgJMdZX1"
+     }
+    },
+    {
+     "time": 1790563680,
+     "type": "container",
+     "action": "destroy",
+     "image": "ubuntu",
+     "labels": {
+      "kestra.io/execution-id": "nEyWbOaOtIvP2hpGWFT3b",
+      "kestra.io/flow-id": "r2_vars_before_failure",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "1gD2iU0rv8VVUcxgJMdZX1"
+     }
+    },
+    {
+     "time": 1790563683,
+     "type": "container",
+     "action": "create",
+     "image": "python@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b",
+     "labels": {
+      "kestra.io/execution-id": "1t8CbYJxOabXC0hwYKTgB3",
+      "kestra.io/flow-id": "r2_digest_ref",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "3LmgKABTRR5iZI1SlBykLE"
+     }
+    },
+    {
+     "time": 1790563683,
+     "type": "container",
+     "action": "start",
+     "image": "python@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b",
+     "labels": {
+      "kestra.io/execution-id": "1t8CbYJxOabXC0hwYKTgB3",
+      "kestra.io/flow-id": "r2_digest_ref",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "3LmgKABTRR5iZI1SlBykLE"
+     }
+    },
+    {
+     "time": 1790563683,
+     "type": "container",
+     "action": "die",
+     "image": "python@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b",
+     "labels": {
+      "kestra.io/execution-id": "1t8CbYJxOabXC0hwYKTgB3",
+      "kestra.io/flow-id": "r2_digest_ref",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "3LmgKABTRR5iZI1SlBykLE"
+     }
+    },
+    {
+     "time": 1790563684,
+     "type": "container",
+     "action": "destroy",
+     "image": "python@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b",
+     "labels": {
+      "kestra.io/execution-id": "1t8CbYJxOabXC0hwYKTgB3",
+      "kestra.io/flow-id": "r2_digest_ref",
+      "kestra.io/namespace": "w5a",
+      "kestra.io/task-id": "t",
+      "kestra.io/taskrun-attempt": "0",
+      "kestra.io/taskrun-id": "3LmgKABTRR5iZI1SlBykLE"
+     }
+    }
+   ]
   },
   "docker_events": [
    {
