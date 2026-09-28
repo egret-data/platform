@@ -128,3 +128,14 @@ before any case could mean anything.
    read-modify-write round trip through the two silently drops every policy item
    (`policyItems: []`, i.e. the policy stops granting anything) and still answers
    `200`. Repaired by re-authoring all five in the editor shape.
+
+Two more baselines, both needed so a later result cannot be read as an engine
+limitation:
+
+```text
+d3member / notebook   TRINO ROWS:     {'id': [1,2,3], 'secret': ['classified-one','classified-two','classified-three']}
+                      STARROCKS ROWS: {'id': [1,2,3], 'secret': ['classified-one','classified-two','classified-three']}
+
+analyst / StarRocks   INSERT INTO sp4a10_wh.sp4a.gate VALUES (90,'write-before-clearance','plain90')
+                      → finished     (so StarRocks CAN write this Iceberg table; row 90 was then deleted through Trino)
+```
