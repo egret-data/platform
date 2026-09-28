@@ -12,7 +12,7 @@
 //! | egret | Kestra | what it is |
 //! |---|---|---|
 //! | [`TaskHandler`](super::TaskHandler) | `RunnableTask` | one task **type** — `egret.container`, `egret.script.python` |
-//! | [`TaskRunner`] | `io.kestra.core.models.tasks.runners.TaskRunner` | **where** a command runs — a container today, a pod later |
+//! | [`TaskRunner`] | `io.kestra.core.models.tasks.runners.TaskRunner` | **where** a command runs — a Docker container ([`DockerRunner`]) or a Kubernetes pod ([`KubernetesRunner`](super::k8s::KubernetesRunner)) |
 //! | [`TaskCommands`] | `io.kestra.core.models.tasks.runners.TaskCommands` | **what** to run, as data |
 //!
 //! A handler builds a [`TaskCommands`] and hands it to a [`TaskRunner`]; it
@@ -318,9 +318,11 @@ pub struct CommandsResult {
 
 /// **Where** a command runs.
 ///
-/// One implementation today ([`DockerRunner`]); the trait exists because
-/// Kestra's does and for the same reason — a Kubernetes runner is a second
-/// implementation of this and not a second `egret.script.python`.
+/// Two implementations: [`DockerRunner`] (local development and tests) and,
+/// since W5a Task 4, [`KubernetesRunner`](super::k8s::KubernetesRunner) (a pod
+/// per task-run attempt, production). The trait exists because Kestra's does
+/// and for the same reason: the Kubernetes runner is a second implementation
+/// of this, not a second copy of every script handler.
 ///
 /// # `cancel` has no default body, for [`TaskHandler::cancel`]'s reason
 ///

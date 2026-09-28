@@ -7955,7 +7955,8 @@ and the attempt stays open, and `claim`'s own predicate
 `state = 'RUNNING' AND claimed_at IS NULL` is what re-selects the row. Nothing
 counts the cycles — `attempts.push` is in one file and neither site is on this
 path — so one `warn` per cycle is the entire signal, and **9 of 13 publishable
-types** are in this condition on the shipped registry.
+types** are in this condition on the shipped registry. *(W5a Task 6,
+2026-09-28: **7 of 15** now; see item 19 (a).)*
 
 **The second cause was not recorded anywhere in this statement**: a handler that
 **outruns** `working_timeout`. `Sleep::new()` is uncapped and is one of the four
@@ -8701,6 +8702,15 @@ killed by a named assertion and recorded in that task's report. None survived.
    lines come from `Log`, `Fail` and the handlers' own failure and timeout
    messages. Wiring container, python and sql into production is its own
    package, because how the server may run containers is a security decision.
+   *(W5a Task 6, 2026-09-28: that package is W5a, and for containers this
+   item is the record of the gap, not the present. With
+   `workflow.container_runner` set to `docker` or `kubernetes`, production
+   registers Kestra's four script types and the two aliases, and their
+   stdout and stderr are stored line by line at INFO and ERROR -- on
+   Kubernetes too, where stderr is carried through a file because
+   `pods/log` merges the streams; measured live, see the W5a section. The
+   default is still `none`, which leaves the registry exactly as described
+   above, and `egret.sql` and `egret.python` are still not in production.)*
 2. **There is no SSE and no `follow`.** A client polls the cursor. That was
    decided with the user (D1); egret has no SSE endpoint anywhere.
 3. **A line becomes readable about 2 s after it is written.** A page stops
@@ -8825,6 +8835,241 @@ not match):
 ```text
 stderr[^.;|]{0,30}\bWARN\b|stdout INFO, stderr WARN
 ```
+
+### W5a — script tasks run in production now, and the oracle cannot see a single container
+
+**109 before W5a and 109 at its tip.** The tip figure is the
+`executor_matches_golden` line printed with `--nocapture` in Task 6's gate:
+**294 golden entries, 109 mismatching, 109 baselined, 0 broken** on
+`4b09eefa` (the branch rebased onto `ce21e167`) plus this task's
+comment and documentation edits. The base figure is derived from a pass rather than printed: the
+test was `ok` at the package base `742a2d7a` (`baseline-gate.txt`, W5a's
+Task 1 gate), and it fails on any stale or banked entry, so `ok` means the
+mismatching set equals `baseline.txt`'s **109** entries; `baseline.txt`,
+`golden.json` and `corpus/` are byte-identical between the base and the tip
+(`git diff --quiet 8f35f85a HEAD -- …` exits 0). The branch was rebased
+from `8f35f85a` onto `ce21e167` (#603, SP4c) in Task 6, which touches no
+workflow crate; the branch's own diff is identical before and after, modulo
+hunk offsets.
+
+The ratchet cannot move for W5a, structurally:
+
+- **The corpus declares no script task.** Of **71** distinct `type:` values
+  in `oracle-exec/corpus/`, the pattern
+  `script|container|shell|command|docker|python|runner` matches **6**, and
+  all six are Kestra's own test tasks under `io.kestra.core.runners.*`
+  (`TaskThatFail`, `WorkerTaskResultTooLarge`, ...), not script tasks. So the
+  count that could disagree is 6, and the count of script tasks is **0**.
+- **The driver names none of W5a's code.** `scripts::`, `gate::`, `k8s::`,
+  `KubernetesRunner`, `DockerRunner`, `renew_lease`, `handlers_for` and
+  `script::` each occur **0** times in `oracle-exec/driver.rs` and in
+  `tests/executor.rs`, against `worker::` at **26** and **38** (the positive
+  control W11 and W13b used).
+- **The golden holds nothing W5a writes.** Its 13 keys (`attempts`,
+  `execution`, `id`, `order`, `parent`, `parent_run`, `rejected_class`,
+  `runs`, `spawned`, `state`, `task`, `value`, `verdict`) include no lease,
+  no pod and no log line. Lease renewal is on the driver's path
+  (`worker::tick` → the claim loop) and changes only `claimed_at`, which no
+  trace carries.
+
+| | ratchet | what the task shipped |
+|---|---|---|
+| package base `8f35f85a` (+ spec `3ea4b84d`, plan `742a2d7a`) | 109 (derived from the pass, above) | -- |
+| Task 1 | 109 | Kestra's script tasks measured on the pinned artifact (`oracle-exec/w5a-scripts.json`): default images `ubuntu` / `python:3.13-slim`, accepted and refused properties per type, `outputFiles` shape, inline `inputFiles`, `warningOnStdErr` (**no effect**: stderr is ERROR and the task SUCCESS, contradicting the spec's first draft), `failFast`, a tagless image pulling `:latest` |
+| Task 2 | 109 | the four types and two aliases, `taskRunner:` (Docker, Kubernetes; `Process` refused), save-time refusals by name, `default_enabled` in the feature catalog and `workflow_containers` (off by default), `plugin_configurations`, the one gate at publish |
+| Task 3 | 109 | lease renewal every `working_timeout / 3` under a fence; `container_default_timeout_s` (3600) |
+| Task 4 | 109 | `KubernetesRunner`: pure pod-spec builder, exec+tar files in and out, stderr through a file, log following, re-attach by (run, attempt), delete, the orphan sweep; the helper image |
+| Task 5 | 109 | config, `runtime::handlers_for`, the Docker runner as `taskRunner` Docker with re-attach, the run-time gate, self-fence, the Helm chart (task namespace, Role, RoleBinding, NetworkPolicy); fix rounds: Kestra `outputFiles` semantics, bounded listings and globs, 169.254.169.254 denied |
+| Task 6 | **109** (measured, above) | the end-to-end on a Calico kind cluster, this section, the sweep below, the full local gate |
+
+#### What is covered live, what by unit test, and what is not measured
+
+**Live on a real cluster, through egret's API** (Task 6, a temporary kind
+cluster `egret-w5a` with kindnet disabled and **Calico v3.28.2** enforcing
+NetworkPolicy; the chart installed with `workflow.containerRunner=kubernetes`;
+the commands and their outputs are kept in the package's working notes,
+and every figure below is copied from them):
+
+1. **A `shell.Commands` flow publishes and runs in a pod.** Two runs of one
+   flow (`ubuntu:latest`, `taskRunner` Kubernetes): SUCCESS; the logs route
+   returns `hello-stdout` at **INFO** and `hello-stderr` at **ERROR**,
+   `complete: true`; the execution carries `outputFiles` `{"out.txt":
+   "payload-from-pod\n"}` and `vars` `{"answer": 42}`; the pod watch shows
+   each run's pod `ADDED` and `DELETED` (the clean run: created 11:59:14,
+   deleted 11:59:17), and `egret-tasks` holds **0** pods afterwards.
+2. **Killing egret mid-run re-attaches.** A 120 s flow was started, its pod
+   running, and the egret pod force-deleted (`--grace-period=0 --force`) at
+   second 19. The replacement pod's reaper reclaimed the lease
+   (`working_timeout_s` set to 30 for the test), the next claim logged
+   `re-attaching to the task's existing pod`, and the run ended SUCCESS with
+   **one attempt**. The pod watch holds **one UID** for that pod name, one
+   `ADDED` and one `DELETED`; its `done.txt` names that pod; the logs hold
+   all **40** tick lines, **one** of them twice (`tick 5`, the repeat spec
+   §11 allows) and **none** missing.
+3. **NetworkPolicy, measured on Calico with a control.** From a task pod
+   (`alpine:3.20`, busybox `nc -w 4`, exit 0 = connected): with the chart's
+   policy, egret's Postgres (Service IP and pod IP) and the Kubernetes API
+   server (the `kubernetes` Service and its endpoint `172.23.0.3:6443`) are
+   **BLOCKED**, while egret's own API (same namespace, the positive control
+   for "in-cluster is not simply dead") and `1.1.1.1:443` are **REACHABLE**.
+   With the policy deleted and the same flow re-run, all four blocked
+   targets turn **REACHABLE**, so the blocks are the policy's.
+   **`169.254.169.254` is UNMEASURED**: it answered BLOCKED with the policy
+   and without it, because nothing listens there on kind; the rule is present
+   in the rendered policy (`except: 169.254.169.254/32`) and that is all this
+   run shows.
+4. **A disabled workspace creates nothing.** In a workspace with
+   `workflow_containers` off (the catalog default, visible on a fresh
+   workspace), publish answered **400** `the 'workflow_containers' feature is
+   disabled for this workspace; ...`. Starting the unpublished draft anyway
+   (the W13b path) ran the run-time gate: the task run FAILED with the same
+   reason as its one log line, and `egret-tasks` held **0** pods and **0**
+   events, against **5** `Scheduled` pods and 40 events after the other runs
+   (the control for that zero).
+5. **Found live, not by any test: the chart's RBAC cannot exec.** Every
+   `files-out` exec (stderr sentinel, output download) failed with
+   `403 Forbidden`; the API server's reason was *"cannot **get** resource
+   `pods/exec`"*. kube-rs opens exec as a WebSocket, which is an HTTP GET,
+   and on Kubernetes **v1.33.1** that is authorised as verb `get`; the Role
+   grants `pods/exec` **`create`** only, exactly as the spec says. The runner
+   kept the pod and re-attached every `working_timeout` without ever
+   finishing; adding `get` to the Role **in the temporary cluster only**
+   made the stuck run finish on its next claim, and every result above was
+   measured with that patch. The chart in this branch is **unchanged**:
+   the spec's "RBAC exactly" is a user constraint, and the fix is theirs to
+   take. Tasks 4 and 5's live tests ran with an administrator's kubeconfig,
+   so RBAC was never exercised by them.
+6. **A re-attached run under-counts its lines.** After a re-attach,
+   `stdErrLineCount`/`stdOutLineCount` count only lines the last holder read
+   (the first hello run: 0 stderr / 1 stdout against 1 / 2 on its clean
+   re-run; the killed run: 35 stdout lines counted of the 40 it printed): the lines already stored are dropped as replayed and
+   not counted. The stored log lines are complete; the counts are not.
+
+**Live against a real daemon or cluster, driven by tests** (gated by env var,
+as `container_docker_live` is gated on Docker): `tests/k8s_runner_live.rs`
+(`EGRET_TEST_KIND=1`) -- a command runs in a pod and the pod is deleted;
+input and output files round-trip; a non-zero exit fails and keeps outputs;
+cancel deletes the pod; a second `run` for the same attempt re-attaches rather
+than re-creating; a line written just before the reclaim is not lost; the
+orphan sweep deletes pods of terminal runs only (and the Docker sweep,
+containers). `tests/container_docker_live.rs` covers the Docker runner,
+re-attach included. These ran on the shared `egret` kind cluster (kindnet),
+in their own namespace.
+
+**Against a real Postgres, no cluster:** `tests/scripts_gate.rs` (the
+refusals by name at publish, the gate at run with no runner call on refusal,
+a disabled feature and a rendered image outside the allowlist each FAILED
+with nothing created); `tests/runtime.rs` and `tests/worker.rs` (a run longer
+than `working_timeout` is not reaped while its worker lives; reaped after it
+stops renewing; a lost fence records no outcome; a script task without
+`timeout:` gets the default). **Pure unit tests:** the pod spec (every
+`restricted` field, no service-account token, resources capped by
+`max_resources` and an absent limit set to the max), image normalisation and
+glob semantics against the fixture, the output-file budgets.
+
+**Mutations:** every task's report records its mutants with the killing
+assertion (Task 2 5/5, Task 3 4/4, Task 4 9/9 plus its fix rounds, Task 5
+6/6 plus its fix rounds). None survived. One was **not run** and is
+therefore unproved: Task 5 fix round 2's quadratic-parse mutant (restoring
+the O(n²) `docker diff` parse), skipped because at 200,000 paths it runs for
+minutes; its timing test is the instrument, unmutated.
+
+**Not covered, or not true, and stated so nobody infers it:**
+
+1. **The default is still `none`.** A deployment that sets nothing has
+   exactly W11's registry; no script task runs, and publish refuses every
+   script task.
+2. **Seven of fifteen publishable types still hang** (item 19 (a)):
+   `egret.sql`, `egret.python`, `egret.dataapi.call`,
+   `egret.dataset.refresh`, `egret.report.send`, `core.http`, `core.slack`.
+   A script task reached without publish (a draft run) under `none` hangs the
+   same way.
+3. **Spec §11's limits hold as written:** a pod that outlives egret entirely
+   (egret uninstalled) is not cleaned up by egret; re-attach may repeat a few
+   log lines around the reclaim instant (the dedupe is by exact
+   `(timestamp, line)` and text); `pods/exec` in the task namespace lets
+   egret exec into task pods, and the namespace holds nothing else.
+4. **NetworkPolicy is IPv4 only.** On a dual-stack cluster IPv6 egress is
+   denied, not open (fail-closed). The in-cluster Postgres rule is by pod
+   selector (`app: postgres` in the release namespace); a metadata Postgres
+   elsewhere must be named in `deniedNamespaces` or `deniedCidrs`, and the
+   pod and service CIDRs must be right: wrong ones silently reopen Postgres
+   on a CNI that matches `ipBlock` against pod IPs. The e2e measured the
+   chart's defaults on one CNI (Calico); Cilium and cloud CNIs are unmeasured.
+5. **stderr is ERROR only for a shell interpreter on Kubernetes.** A
+   non-shell `interpreter` keeps `pods/log`'s merged stream (stderr at INFO)
+   and writes one WARN saying so.
+6. **Deferred minors** carried in the tasks' reviews: the helper image is
+   pinned by tag, not digest; a symlinked parent directory in `outputFiles`
+   is followed inside `files-out`; an unschedulable pod gives no reason; a
+   re-attached run whose feature was turned off is FAILED while its
+   container keeps running; the self-fence tests use real 60/200 ms timers.
+7. **The ratchet cannot judge any of this in either direction**, for the
+   three reasons above.
+8. **The chart's Role, as shipped, cannot run a task on Kubernetes v1.33.**
+   It grants `pods/exec` `create` only (spec §5, "RBAC exactly"); kube-rs's
+   WebSocket exec is authorised as `get` there, so every exec is `403` and a
+   run re-attaches for ever without finishing (live item 5 above). Open for
+   a decision at the time of writing; no test in this crate exercises RBAC,
+   because the live tests use an administrator's kubeconfig.
+
+**Decisions the user made (2026-09-28)**, recorded here because the tests
+enforce them and a reader could mistake them for accidents: W5 split into
+W5a (containers) and W5b (plugin host); follow Kestra's shape (script tasks,
+`taskRunner:`, FQCNs, Kubernetes under the EE FQCN); `workflow_containers`
+off by default plus one global image allowlist in `plugin_configurations`,
+where no entry allows no image; a Kubernetes pod per task in production,
+Docker for development; lease renewal and a 1 h default timeout; standard
+pod hardening, egress open except egret's Postgres and the Kubernetes API;
+in Task 5's review: `outputFiles` follow Kestra (a missing file is ignored,
+non-recursive globs) with the 1 MiB caps kept, `169.254.169.254/32` denied by
+default, and the task namespace may not be the release namespace.
+
+#### The sweep: "no Kubernetes runner" and "nine of thirteen hang" are retired where they described W5a's absence
+
+Denominators over the tree at **`a30f3683`** (Task 5's tip, before this
+task edited anything; `git archive a30f3683`, **3950** files), counted with
+`/usr/bin/grep` with file arguments.
+
+| # | population | examined | corrected |
+|---|---|---:|---:|
+| 1 | the programme spec EN: lines matching `W5\b\|kestra-plugin-host\|kestra\.<FQCN>\|egret\.container` | **9 lines**, 12 occurrences | **4** lines, plus one new dated correction under §9's table |
+| 2 | its VI twin, same pattern | **9 lines**, 12 occurrences | **4** lines, plus the VI correction |
+| 3 | "nine of thirteen hang", EN and VI, whole tree: `nine of (the )?thirteen\|9 of 13\|thirteen publishable\|chín trên (mười ba\|13)\|9 trên 13` (`-i`) | **8 files, 10 occurrences** | **5**, plus **1** restored in `egret-bin` |
+| 4 | "no Kubernetes runner exists": `pod later\|one implementation today\|no kubernetes runner\|kubernetes runner is a second\|only implementation` (`-i`), whole tree | **8 occurrences** in 5 files | **3** |
+
+**Population 1's four**: §6.4's `egret.container` row (dated: an alias of
+`shell.Commands` now, run by `taskRunner:`/`container_runner`, not the
+kernel launcher) and `kestra.<FQCN>` row (*W5b; not built*); §9's W5 row
+(split into W5a and W5b, user decision); §11 question 3 (answered for
+containers, still open for plugin jars). The new correction under the table
+retires the W11 correction's *"production's registry has no container or
+python handler"* for containers. **Left (5)**: §3's spike heading and its
+`W5 host` sentence (the spike's record, and true of W5b's host), §3.1's two
+lines saying the plugin host is driven through the `egret.container`
+contract (still W5b's plan), and W4's row (a record). Population 2: the
+same four and five, line for line.
+
+**Population 3**: corrected `worker/claim.rs`'s doc (*"13 rows ... 9 of
+13"* → 15 rows, **7 of 15**, with the seven named and the old figure
+quoted), this README's item 19 (a) and the W10 fix-round note above it (dated
+parentheses), and the W11 design spec's §11 limit, EN and VI (dated). The
+`egret-bin` comment the brief names had **0** hits at `a30f3683`: Task 5
+had already rewritten it and dropped the count; this task restores a
+count, correctly, because the hang it describes is still true for seven
+types. **Left (5)**: `oracle/README.md` and this README's *"Nine of the
+thirteen are ..."* (other subjects: threads and pointers); the W5a plan
+quoting the brief; the W5a design spec's §1 table, EN and VI, headed as the
+state on `8f35f85a`.
+
+**Population 4**: `worker/commands.rs`'s module table (*"a container today,
+a pod later"*) and `TaskRunner`'s doc (*"One implementation today"*, and the
+second *"Kubernetes runner is a second"* with it) name both runners now.
+**Left (5)**: the module doc's *"a Kubernetes runner is a second
+implementation rather than a second copy of every handler"* (a design
+statement, true), three unrelated *"only implementation"* in
+`egret-perm-compile` and the SP4b plan, and the W5a plan quoting the brief.
+`handlers/container.rs` had **0** hits: Task 5 had rewritten it.
 
 ### What this ratchet does **not** prove
 
@@ -9864,7 +10109,13 @@ item necessary rather than what makes it unnecessary.** Four things a green
   ten-thousandth cycle as on the first. **One `warn` per cycle is the entire
   signal.** Guarding it symmetrically at publish is not available — that would
   refuse to start every deployment declining to wire `egret.sql`, `core.http` or
-  the container tasks, i.e. every deployment.
+  the container tasks, i.e. every deployment. *(W5a Task 6, 2026-09-28:
+  `TASK_TYPES` has **15** rows now, and **7 of 15** publishable types hang
+  whatever `workflow.container_runner` is -- `egret.sql`, `egret.python`,
+  `egret.dataapi.call`, `egret.dataset.refresh`, `egret.report.send`,
+  `core.http`, `core.slack`. The four script rows are served when a runner is
+  configured and refused at publish when it is not; a draft run of one under
+  `none` still reaches this loop. See the W5a section.)*
 
   **(b) A handler that OUTRUNS `working_timeout`** — and this is a *slow*
   handler, not a *missing* one. `DEFAULT_WORKING_TIMEOUT` is 3600 s;
@@ -9873,7 +10124,18 @@ item necessary rather than what makes it unnecessary.** Four things a green
   may publish. `duration: PT2H`: claimed, sleeping, reaped at 1 h, **re-claimed**,
   starts a *fresh* two-hour sleep; when the first handler returns it hits the
   fence with `LeaseLost`. The second is reaped at its own hour, and so on — the
-  run never completes and **each cycle costs a new handler**.
+  run never completes and **each cycle costs a new handler**. *(W5a Task 6,
+  2026-09-28: **closed for a live worker** by W5a Task 3's lease renewal. While
+  any handler runs, the worker renews `claimed_at` every
+  `working_timeout / 3` under a fence (`claimed_at = $held`), so `reap` never
+  reclaims a live worker's run and a `PT2H` sleep completes once
+  (`a_run_longer_than_working_timeout_is_not_reaped_while_its_worker_lives`).
+  What remains is by design: a worker that stops renewing -- dead, or cut off
+  from Postgres, in which case it abandons the handler after
+  `working_timeout` without a renewal -- has its run reclaimed
+  (`a_run_whose_worker_stopped_renewing_is_reaped`), and a worker whose fence
+  moved records no outcome (`a_worker_that_loses_its_fence_records_no_outcome`).
+  The ratchet reads 109 through all of it; see the W5a section.)*
 
   **The two need different fixes, and that is why they are listed apart**: a
   give-up-after-N rule closes (a) and quietly converts (b) into a **wrongly

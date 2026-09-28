@@ -1870,7 +1870,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // does not fail the run: it propagates out of `run_one`, the run keeps its
     // lease, `reap` clears only `claimed_at` a `working_timeout` later, `claim`
     // re-selects it, and the cycle repeats for ever with one `warn` per cycle.
-    // `oracle-exec/README.md` item 19 carries this. Publish
+    // `oracle-exec/README.md` item 19 carries this. **Seven of fifteen
+    // publishable types hang in production, whatever the runner** (`egret.sql`,
+    // `egret.python`, `egret.dataapi.call`, `egret.dataset.refresh`,
+    // `egret.report.send`, `core.http`, `core.slack`); this comment said "nine
+    // of thirteen" before W5a folded `egret.container`/`egret.script.python`
+    // into aliases of four script types that a runner now serves. Publish
     // (`publish::check_script_tasks`) refuses EVERY script task when no
     // runner is configured -- with or without a `taskRunner:` -- and one whose
     // `taskRunner:` names a runner other than the configured one. So with
