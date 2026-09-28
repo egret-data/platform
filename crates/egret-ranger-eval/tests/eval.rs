@@ -24,7 +24,7 @@ use std::collections::BTreeSet;
 use egret_ranger_eval::eval::{
     evaluate, AccessRequest, Decision, DenyReason, EngineConfig, UndecidableCause,
 };
-use egret_ranger_eval::model::ServicePolicySet;
+use egret_ranger_eval::model::{ServicePolicySet, Unmodelled};
 use egret_ranger_eval::resource::RequestResource;
 use egret_ranger_eval::servicedef::{ServiceDef, ServiceDefIssue};
 use serde_json::{json, Value};
@@ -717,9 +717,13 @@ fn the_owner_macro_needs_an_owner_and_says_so_when_it_has_none() {
     assert!(unknown_owner.owner.is_none());
     let d = evaluate(&set, &unknown_owner, &trino_def(), &no_superusers());
     assert!(
-        causes(&d)
-            .iter()
-            .any(|c| matches!(c, UndecidableCause::ResourceOwnerUnknown { .. })),
+        causes(&d).iter().any(|c| matches!(
+            c,
+            UndecidableCause::ResourceOwnerUnknown {
+                policy_id: Some(1),
+                ..
+            }
+        )),
         "{d:?}"
     );
 
@@ -914,7 +918,21 @@ fn a_validity_schedule_forces_undecidable() {
         &trino_def(),
         &no_superusers(),
     );
-    assert!(!causes(&d).is_empty(), "{d:?}");
+    // Named exactly. Review round 1, M4: this asserted only
+    // `!causes(&d).is_empty()`, which any cause at all would have
+    // satisfied — the same looseness `8d0649c3` went back to fix in the
+    // chained-grant test, missed in this member of the same population.
+    assert!(
+        causes(&d).iter().any(|c| matches!(
+            c,
+            UndecidableCause::PolicyConstruct {
+                construct: Unmodelled::ValiditySchedules,
+                policy_id: Some(1),
+                ..
+            }
+        )),
+        "{d:?}"
+    );
 }
 
 /// An envelope-level construct — here `tagPolicies`, a whole second,
@@ -940,9 +958,10 @@ fn an_envelope_construct_forces_undecidable() {
         &no_superusers(),
     );
     assert!(
-        causes(&d)
-            .iter()
-            .any(|c| matches!(c, UndecidableCause::EnvelopeConstruct(_))),
+        causes(&d).iter().any(|c| matches!(
+            c,
+            UndecidableCause::EnvelopeConstruct(Unmodelled::TagPolicies)
+        )),
         "{d:?}"
     );
 }
@@ -1004,9 +1023,13 @@ fn a_resource_expression_forces_undecidable_even_when_it_seems_not_to_match() {
         &no_superusers(),
     );
     assert!(
-        causes(&d)
-            .iter()
-            .any(|c| matches!(c, UndecidableCause::PolicyConstruct { .. })),
+        causes(&d).iter().any(|c| matches!(
+            c,
+            UndecidableCause::PolicyConstruct {
+                construct: Unmodelled::ResourceValueExpressionMarker { resource_type, value, .. },
+                ..
+            } if resource_type == "schema" && value == "${{USER}}"
+        )),
         "{d:?}"
     );
 }
@@ -1116,7 +1139,7 @@ fn the_two_plugin_versions_disagree_about_access_type_any() {
     assert!(
         causes(&d)
             .iter()
-            .any(|c| matches!(c, UndecidableCause::PseudoAccessType(_))),
+            .any(|c| matches!(c, UndecidableCause::PseudoAccessType(a) if a == "_any")),
         "{d:?}"
     );
 }
@@ -1142,7 +1165,7 @@ fn the_other_pseudo_access_types_are_undecidable_too() {
         assert!(
             causes(&d)
                 .iter()
-                .any(|c| matches!(c, UndecidableCause::PseudoAccessType(_))),
+                .any(|c| matches!(c, UndecidableCause::PseudoAccessType(a) if a == access_type)),
             "{access_type}: {d:?}"
         );
     }
@@ -1175,9 +1198,11 @@ fn an_access_type_matching_only_case_insensitively_is_undecidable() {
         &no_superusers(),
     );
     assert!(
-        causes(&d)
-            .iter()
-            .any(|c| matches!(c, UndecidableCause::AccessTypeCaseMismatch { .. })),
+        causes(&d).iter().any(|c| matches!(
+            c,
+            UndecidableCause::AccessTypeCaseMismatch { access_type, policy_id: Some(1), .. }
+                if access_type == "SELECT"
+        )),
         "{d:?}"
     );
 }
@@ -1308,6 +1333,202 @@ fn a_non_matching_policy_contributes_nothing() {
     assert_allowed(&evaluate(
         &set,
         &full_request("alice", "select"),
+        &trino_def(),
+        &no_superusers(),
+    ));
+}
+
+// ── review round 1: a guard that matched differently from the thing it
+//    guarded ───────────────────────────────────────────────────────────────
+
+/// **CRITICAL 1, fail-open.** The `{OWNER}` cause detector compared an
+/// item's LITERAL `accesses[].type` against the request's access type, but
+/// the thing it guards — [`item_is_match`] — matches through
+/// `computeWithImpliedGrants`. `trino.json` declares
+/// `all => [select, insert, …]`, so a deny item granting `all` to `{OWNER}`
+/// DECIDES a `select` request while being invisible to the detector: egret
+/// answered `Allowed` where Ranger, given the owner, denies.
+///
+/// The three rows are the reviewer's probe table. Row 3 is the control that
+/// isolates the cause: naming the access type literally always raised it.
+#[test]
+fn an_owner_item_reached_through_implied_grants_still_raises_the_cause() {
+    let via_implied = policies(json!([{
+        "id": 1, "name": "p", "service": "trino", "policyType": 0,
+        "resources": full_resources(),
+        "policyItems": [item(&["alice"], &["select"])],
+        "denyPolicyItems": [item(&["{OWNER}"], &["all"])],
+    }]));
+
+    // Row 1: owner unknown. `all` implies `select`, so the deny item can
+    // decide — the answer is not knowable.
+    let d = evaluate(
+        &via_implied,
+        &full_request("alice", "select"),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        causes(&d).iter().any(|c| matches!(
+            c,
+            UndecidableCause::ResourceOwnerUnknown {
+                policy_id: Some(1),
+                ..
+            }
+        )),
+        "row 1: {d:?}"
+    );
+
+    // Row 2: the ground truth the missing cause was hiding. With the owner
+    // supplied, the very same policy denies.
+    let mut owned = full_request("alice", "select");
+    owned.owner = Some("alice".to_string());
+    assert!(
+        matches!(
+            evaluate(&via_implied, &owned, &trino_def(), &no_superusers()),
+            Decision::Denied {
+                reason: DenyReason::DenyPolicyItem,
+                ..
+            }
+        ),
+        "row 2"
+    );
+
+    // Row 3, the control: the same shape with the access type named
+    // literally always raised the cause, even before the fix.
+    let literal = policies(json!([{
+        "id": 1, "name": "p", "service": "trino", "policyType": 0,
+        "resources": full_resources(),
+        "policyItems": [item(&["alice"], &["select"])],
+        "denyPolicyItems": [item(&["{OWNER}"], &["select"])],
+    }]));
+    let d = evaluate(
+        &literal,
+        &full_request("alice", "select"),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        causes(&d)
+            .iter()
+            .any(|c| matches!(c, UndecidableCause::ResourceOwnerUnknown { .. })),
+        "row 3 control: {d:?}"
+    );
+}
+
+/// The allow-side half of the same defect — fail-CLOSED, but wrong in the
+/// same way: with the owner unknown the answer was a confident
+/// `Denied { NoPolicyMatched }`, while supplying the owner on identical
+/// input allows.
+#[test]
+fn the_allow_side_of_the_owner_implied_grant_defect() {
+    let set = policies(json!([{
+        "id": 1, "name": "p", "service": "trino", "policyType": 0,
+        "resources": full_resources(),
+        "policyItems": [{
+            "users": ["{OWNER}"],
+            "accesses": [{"type": "all", "isAllowed": true}],
+        }],
+    }]));
+
+    let d = evaluate(
+        &set,
+        &full_request("alice", "select"),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        causes(&d)
+            .iter()
+            .any(|c| matches!(c, UndecidableCause::ResourceOwnerUnknown { .. })),
+        "{d:?}"
+    );
+
+    let mut owned = full_request("alice", "select");
+    owned.owner = Some("alice".to_string());
+    assert_allowed(&evaluate(&set, &owned, &trino_def(), &no_superusers()));
+}
+
+/// **M1**, the second instance of the same shape, found by the reviewer.
+/// `AccessTypeCaseMismatch` also built its sets from literal accesses.
+/// `RangerOptimizedPolicyEvaluator` warms `accessPerms` from
+/// `evaluator.getWithImpliedGrants().getAccesses()`
+/// (`checkIfWithImpliedGrantsInitialized`), so for a policy granting `all`
+/// the warm set is `{all, select, insert, …}` and its case-SENSITIVE
+/// `contains("SELECT")` misses — a warm plugin skips the policy and denies,
+/// a cold one matches and allows. egret answered `Allowed` with no cause.
+#[test]
+fn a_case_mismatch_reached_through_implied_grants_still_raises_the_cause() {
+    let set = policies(json!([{
+        "id": 1, "name": "p", "service": "trino", "policyType": 0,
+        "resources": full_resources(),
+        "policyItems": [item(&["alice"], &["all"])],
+    }]));
+
+    let d = evaluate(
+        &set,
+        &full_request("alice", "SELECT"),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        causes(&d).iter().any(|c| matches!(
+            c,
+            UndecidableCause::AccessTypeCaseMismatch { access_type, .. } if access_type == "select"
+        )),
+        "{d:?}"
+    );
+
+    // (The literal-access half of the same divergence is
+    // `an_access_type_matching_only_case_insensitively_is_undecidable`.)
+    // The control: spelled as the def spells it, the warm and cold
+    // pre-filters agree and the implied grant is decidable.
+    assert_allowed(&evaluate(
+        &set,
+        &full_request("alice", "select"),
+        &trino_def(),
+        &no_superusers(),
+    ));
+}
+
+/// `hasAllPerms` must keep reading the LITERAL access set.
+/// `checkIfHasAllPerms()` runs inside `RangerOptimizedPolicyEvaluator.init`,
+/// immediately after `preprocessPolicyItems` and before any item evaluator
+/// has computed its implied grants — so a policy granting only `all` does
+/// NOT have all perms as far as that check is concerned, and the pre-filter
+/// stays armed. Computing it from the expanded set instead would suppress
+/// the cause above and fail OPEN, which is exactly what
+/// `a_case_mismatch_reached_through_implied_grants_still_raises_the_cause`
+/// would then stop catching.
+#[test]
+fn has_all_perms_is_computed_from_literal_accesses_not_expanded_ones() {
+    // Granting every access type the def declares DOES trip hasAllPerms,
+    // so no cause — the pre-filter never engages for such a policy.
+    let every: Vec<&str> = vec![
+        "select",
+        "insert",
+        "create",
+        "drop",
+        "delete",
+        "use",
+        "alter",
+        "grant",
+        "revoke",
+        "show",
+        "impersonate",
+        "execute",
+        "read_sysinfo",
+        "write_sysinfo",
+        "all",
+    ];
+    let set = policies(json!([{
+        "id": 1, "name": "p", "service": "trino", "policyType": 0,
+        "resources": full_resources(),
+        "policyItems": [item(&["alice"], &every)],
+    }]));
+    assert_allowed(&evaluate(
+        &set,
+        &full_request("alice", "SELECT"),
         &trino_def(),
         &no_superusers(),
     ));

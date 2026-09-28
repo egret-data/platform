@@ -79,7 +79,7 @@ use crate::model::{
     AccessEntry, ItemBucket, PolicyItem, RangerPolicy, ServicePolicySet, Unmodelled,
 };
 use crate::resource::{match_policy_resources, MatchType, RequestResource};
-use crate::servicedef::{PolicyType, ServiceDef, ServiceDefIssue};
+use crate::servicedef::{ServiceDef, ServiceDefIssue};
 
 /// `RangerPolicyEngine.GROUP_PUBLIC`. Verified with
 /// `javap -constants org.apache.ranger.plugin.policyengine.RangerPolicyEngine`
@@ -335,13 +335,20 @@ pub fn evaluate(
     let mut candidates: Vec<PolicyView<'_>> = policies
         .policies
         .iter()
-        .filter(|p| p.is_enabled && PolicyType::from_code(p.policy_type) == PolicyType::Access)
+        .filter(|p| p.is_enabled)
+        // `policy_type == 0` is the load-bearing test: `init` files a
+        // policy by its RAW code, and anything that is not null/0/1/2 is
+        // dropped with a warning rather than folded onto access. The
+        // `PolicyType::from_code` call alongside it would fold code 3
+        // (audit) and every unknown code ONTO access, which is right for
+        // picking a resource hierarchy and wrong here — so it is the
+        // raw-code test that decides, and the typed one is not consulted.
         .filter(|p| p.policy_type == 0)
         .map(|policy| PolicyView::build(policy, request, service_def))
         .collect();
 
     for view in &candidates {
-        view.collect_causes(request, &all_access_types, &mut why);
+        view.collect_causes(request, &implied, &all_access_types, &mut why);
     }
 
     if !why.is_empty() {
@@ -528,6 +535,7 @@ impl<'a> PolicyView<'a> {
     fn collect_causes(
         &self,
         request: &AccessRequest,
+        implied: &BTreeMap<&str, BTreeSet<&str>>,
         all_access_types: &BTreeSet<&str>,
         why: &mut Vec<UndecidableCause>,
     ) {
@@ -556,18 +564,26 @@ impl<'a> PolicyView<'a> {
             return;
         }
 
-        // `{OWNER}` with no owner supplied. Only worth reporting for an
-        // item that could otherwise have decided this access type — an
-        // item granting something else is silent either way.
-        let owner_unknown = request.owner.is_none()
-            && access_buckets(self.policy).any(|items| {
-                items.iter().any(|item| {
-                    item.users.iter().any(|u| u == RESOURCE_OWNER)
-                        && item.accesses.iter().any(|a| {
-                            a.is_allowed && a.access_type.eq_ignore_ascii_case(&request.access_type)
-                        })
-                })
-            });
+        // `{OWNER}` with no owner supplied.
+        //
+        // REVIEW ROUND 1, CRITICAL 1 (fail-open): this used to re-implement
+        // the test rather than run it — it compared the item's LITERAL
+        // `accesses[].type` against the request's access type while the
+        // thing it guards, [`item_is_match`], matches through
+        // `computeWithImpliedGrants`. A deny item granting `all` to
+        // `{OWNER}` therefore DECIDED a `select` request on `trino.json`
+        // while being invisible here, and egret answered `Allowed` where
+        // Ranger, given the owner, denies.
+        //
+        // The fix is structural, not a patched predicate: [`item_is_match`]
+        // is now three-valued and IS the detector, so there is exactly one
+        // place an item's access list is tested and the guard cannot drift
+        // from the guarded again.
+        let owner_unknown = access_buckets(self.policy).any(|items| {
+            items
+                .iter()
+                .any(|item| item_is_match(item, request, implied) == ItemMatch::NeedsOwner)
+        });
         if owner_unknown {
             why.push(UndecidableCause::ResourceOwnerUnknown {
                 policy_id: self.policy.id,
@@ -579,36 +595,57 @@ impl<'a> PolicyView<'a> {
         // over ALL SIX buckets, and `checkIfHasAllPerms` short-circuits the
         // whole test when the policy grants every access type the def
         // declares (or sets `isDenyAllElse`).
+        //
+        // REVIEW ROUND 1, M1 — the same blind spot as CRITICAL 1. The two
+        // sets below are DIFFERENT on purpose, and each is pinned to the
+        // moment of Ranger's own that it models:
+        //
+        // * `literal_granted` is `accessPerms` as `preprocessPolicyItems`
+        //   leaves it at `init` time: the raw `policyItemAccess.getType()`
+        //   of every allowed access. `checkIfHasAllPerms()` is called from
+        //   `init` immediately after, BEFORE any item evaluator has
+        //   computed its implied grants, so `hasAllPerms` is a fact about
+        //   the literal set. Computing it from the expanded set would make
+        //   it true more often, suppress this cause, and fail OPEN.
+        // * `expanded_granted` is `accessPerms` once WARM:
+        //   `checkIfWithImpliedGrantsInitialized` folds
+        //   `evaluator.getWithImpliedGrants().getAccesses()` in as each
+        //   evaluator initialises. That is the set the pre-filter's
+        //   case-SENSITIVE `contains(request.getAccessType())` actually
+        //   tests, so it is the one the exact/case-insensitive comparison
+        //   has to use.
         if !self.policy.is_deny_all_else {
-            let mut exact = false;
-            let mut case_insensitive: Option<&str> = None;
-            let mut granted: BTreeSet<&str> = BTreeSet::new();
+            let mut literal_granted: BTreeSet<&str> = BTreeSet::new();
+            let mut expanded_granted: BTreeSet<String> = BTreeSet::new();
             for items in all_buckets(self.policy) {
                 for item in items {
                     for access in &item.accesses {
-                        if !access.is_allowed {
-                            continue;
+                        if access.is_allowed {
+                            literal_granted.insert(access.access_type.as_str());
                         }
-                        granted.insert(access.access_type.as_str());
-                        if access.access_type == request.access_type {
-                            exact = true;
-                        } else if access
-                            .access_type
-                            .eq_ignore_ascii_case(&request.access_type)
-                        {
-                            case_insensitive = Some(access.access_type.as_str());
+                    }
+                    for access in with_implied_grants(item, implied) {
+                        if access.is_allowed {
+                            expanded_granted.insert(access.access_type);
                         }
                     }
                 }
             }
             let has_all_perms = !all_access_types.is_empty()
-                && all_access_types.iter().all(|a| granted.contains(a));
+                && all_access_types.iter().all(|a| literal_granted.contains(a));
+            let exact = expanded_granted.contains(&request.access_type);
+            let case_insensitive = expanded_granted
+                .iter()
+                .find(|a| {
+                    a.eq_ignore_ascii_case(&request.access_type) && **a != request.access_type
+                })
+                .cloned();
             if let Some(access_type) = case_insensitive {
                 if !exact && !has_all_perms {
                     why.push(UndecidableCause::AccessTypeCaseMismatch {
                         policy_id: self.policy.id,
                         policy_name: self.policy.name.clone(),
-                        access_type: access_type.to_string(),
+                        access_type,
                     });
                 }
             }
@@ -694,12 +731,15 @@ fn matching_item(
     request: &AccessRequest,
     implied: &BTreeMap<&str, BTreeSet<&str>>,
 ) -> bool {
-    if !items.iter().any(|i| item_is_match(i, request, implied)) {
+    if !items
+        .iter()
+        .any(|i| item_is_match(i, request, implied) == ItemMatch::Yes)
+    {
         return false;
     }
     !exceptions
         .iter()
-        .any(|e| item_is_match(e, request, implied))
+        .any(|e| item_is_match(e, request, implied) == ItemMatch::Yes)
 }
 
 /// `RangerDefaultPolicyItemEvaluator.isMatch`, for a request naming a
@@ -723,13 +763,50 @@ fn item_is_match(
     item: &PolicyItem,
     request: &AccessRequest,
     implied: &BTreeMap<&str, BTreeSet<&str>>,
-) -> bool {
-    if !match_user_group_and_owner(item, request) {
-        return false;
+) -> ItemMatch {
+    let principal = match_user_group_and_owner(item, request);
+    if principal == PrincipalMatch::No {
+        return ItemMatch::No;
     }
-    with_implied_grants(item, implied)
+    // THE one place an item's access list is tested, and it always goes
+    // through `computeWithImpliedGrants`. Review round 1 found two callers
+    // that had re-implemented this comparison against the LITERAL
+    // `accesses[]` instead; both now call this function rather than
+    // repeating it.
+    let access_matched = with_implied_grants(item, implied)
         .iter()
-        .any(|a| a.is_allowed && a.access_type.eq_ignore_ascii_case(&request.access_type))
+        .any(|a| a.is_allowed && a.access_type.eq_ignore_ascii_case(&request.access_type));
+    if !access_matched {
+        return ItemMatch::No;
+    }
+    match principal {
+        PrincipalMatch::Yes => ItemMatch::Yes,
+        PrincipalMatch::OwnerUnknown => ItemMatch::NeedsOwner,
+        PrincipalMatch::No => unreachable!("returned above"),
+    }
+}
+
+/// Whether one policy item matches a request — three-valued, because
+/// "does not match" and "cannot be told apart from matching without a
+/// resource owner the caller did not supply" are different answers and only
+/// the first may be acted on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemMatch {
+    No,
+    Yes,
+    /// The item names `{OWNER}`, nothing earlier in
+    /// [`match_user_group_and_owner`]'s order matched, the access type DOES
+    /// match, and [`AccessRequest::owner`] is `None`.
+    NeedsOwner,
+}
+
+/// The principal half of [`item_is_match`], three-valued for the same
+/// reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrincipalMatch {
+    No,
+    Yes,
+    OwnerUnknown,
 }
 
 /// `RangerDefaultPolicyItemEvaluator.matchUserGroupAndOwner`, verbatim
@@ -753,30 +830,39 @@ fn item_is_match(
 /// `List.contains`, so both macros are matched EXACTLY, not
 /// case-insensitively. Every other comparison here is exact too; only the
 /// access type is `equalsIgnoreCase`.
-fn match_user_group_and_owner(item: &PolicyItem, request: &AccessRequest) -> bool {
+fn match_user_group_and_owner(item: &PolicyItem, request: &AccessRequest) -> PrincipalMatch {
     let has_current_user = item.users.iter().any(|u| u == USER_CURRENT);
     if has_current_user || item.users.contains(&request.user) {
-        return true;
+        return PrincipalMatch::Yes;
     }
     if item.groups.iter().any(|g| g == GROUP_PUBLIC)
         || item.groups.iter().any(|g| request.groups.contains(g))
     {
-        return true;
+        return PrincipalMatch::Yes;
     }
     if !request.roles.is_empty()
         && !item.roles.is_empty()
         && item.roles.iter().any(|r| request.roles.contains(r))
     {
-        return true;
+        return PrincipalMatch::Yes;
     }
     let has_resource_owner = item.users.iter().any(|u| u == RESOURCE_OWNER);
     if has_resource_owner {
-        // An unknown owner cannot match. The decision has already been
-        // forced Undecidable by `collect_causes`, so this never decides
-        // anything on its own.
-        return request.owner.as_deref() == Some(request.user.as_str());
+        return match request.owner.as_deref() {
+            Some(owner) => {
+                if owner == request.user {
+                    PrincipalMatch::Yes
+                } else {
+                    PrincipalMatch::No
+                }
+            }
+            // Reached only when every earlier clause missed, which is
+            // exactly when the owner decides — so this is the one state the
+            // caller must not resolve by guessing.
+            None => PrincipalMatch::OwnerUnknown,
+        };
     }
-    false
+    PrincipalMatch::No
 }
 
 /// `RangerAbstractPolicyItemEvaluator.computeWithImpliedGrants`, one round.
