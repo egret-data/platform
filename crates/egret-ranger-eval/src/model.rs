@@ -1,30 +1,45 @@
 //! A typed reader for Ranger policy bodies.
 //!
-//! Field names below were verified against two sources, not transcribed
-//! from any summary: `crates/egret-policy/src/admin/ranger_json.rs` (the
-//! writer, for the shapes egret itself produces) and Apache Ranger's own
-//! `RangerPolicy` model
-//! (`agents-common/.../plugin/model/RangerPolicy.java`, fetched from
-//! `apache/ranger@master`), plus the captured download at
-//! `tests/ranger/fixtures/service-policies.json`.
+//! Field names were verified against three sources, not transcribed from
+//! any summary: `crates/egret-policy/src/admin/ranger_json.rs` (the
+//! writer, for the shapes egret itself produces), Apache Ranger's own
+//! `RangerPolicy`/`ServicePolicies` models
+//! (`agents-common/.../plugin/model/RangerPolicy.java` and
+//! `.../plugin/util/ServicePolicies.java`, fetched from `apache/ranger@master`),
+//! and the captured download at `tests/ranger/fixtures/service-policies.json`.
+//! Fix round 1 (review of the initial version) additionally verified the
+//! request-time expression syntax and default values directly against
+//! `javap` disassembly of `ranger-plugins-common` 2.5.0 and 2.8.0 — see
+//! `contains_expression_marker`'s doc comment and the `defaults_match_ranger_*`
+//! test for what was checked and how.
 //!
-//! Two kinds of field live here:
+//! Three kinds of field live here:
 //!
 //! - **Round-tripped** fields decide the outcome once Tasks 4-6 evaluate
 //!   this shape: `policyType`, `isEnabled`, `policyPriority`,
 //!   `isDenyAllElse`, `resources`/`additionalResources` (with `values`,
 //!   `isExcludes`, `isRecursive`), the six item buckets, and per item
 //!   `users`/`groups`/`roles`/`accesses[].type`/`accesses[].isAllowed`.
+//! - **Retained but not yet typed**: the envelope's `serviceDef`. It is
+//!   where Ranger's matching semantics actually live (`accessTypes` with
+//!   `impliedGrants`, `resources[].matcherOptions`, `dataMaskDef`,
+//!   `rowFilterDef`) and Task 4 needs it to lift the hierarchy walker out
+//!   of `crates/egret-policy/src/default_policies.rs:20-90` — dropping it
+//!   would be exactly the silent-drop defect this crate exists to prevent,
+//!   so it round-trips as a raw `serde_json::Value` here; Task 4 gives it a
+//!   real type.
 //! - **Reported, not evaluated** constructs change the decision in ways
 //!   this reader does not implement: a policy-wide validity window, a
 //!   policy- or item-level condition, security-zone scoping, an explicit
-//!   per-access deny sitting inside an "allow" bucket, `delegateAdmin`,
-//!   and a mask/row-filter expression containing a Ranger runtime macro
-//!   (`{USER}`, a CUSTOM mask's `{col}`, …). Each is a variant of
-//!   [`Unmodelled`], collected on the policy (or, for `securityZones`, the
-//!   envelope) that carried it. Parsing still succeeds — the alternative,
-//!   dropping the field silently, is the exact defect this crate exists to
-//!   prevent.
+//!   per-access deny sitting inside an "allow" bucket, `delegateAdmin`, a
+//!   non-empty `tagPolicies` (a whole second, DENY-capable policy set),
+//!   `policyDeltas` (an incremental update, meaning `policies` is partial),
+//!   a non-empty `serviceConfig`, and a resource value / mask-or-row-filter
+//!   expression / item principal containing a Ranger runtime expression.
+//!   Each is a variant of [`Unmodelled`], collected on the policy (or, for
+//!   the envelope-level constructs, the [`ServicePolicySet`]) that carried
+//!   it. Parsing still succeeds — the alternative, dropping the field
+//!   silently, is the exact defect this crate exists to prevent.
 
 use std::collections::BTreeMap;
 
@@ -42,10 +57,30 @@ pub struct ServicePolicySet {
     pub service_id: Option<i64>,
     pub policy_version: Option<i64>,
     pub policies: Vec<RangerPolicy>,
-    /// Envelope-level constructs this reader does not model (currently:
-    /// only a non-empty `securityZones`). Per-policy constructs live on
-    /// each [`RangerPolicy::unmodelled`] instead.
+    /// The service's `serviceDef` object, round-tripped verbatim (not
+    /// dropped, not yet typed — see the module doc). `Value::Null` when
+    /// the envelope omitted it.
+    pub service_def: serde_json::Value,
+    /// Envelope-level constructs this reader does not model: a non-empty
+    /// `securityZones`, `tagPolicies`, `policyDeltas`, or `serviceConfig`.
+    /// Per-policy constructs live on each [`RangerPolicy::unmodelled`]
+    /// instead — use [`ServicePolicySet::all_unmodelled`] to see both.
     pub unmodelled: Vec<Unmodelled>,
+}
+
+impl ServicePolicySet {
+    /// Every [`Unmodelled`] construct anywhere in this envelope: its own
+    /// envelope-level reports, folded together with every policy's
+    /// per-policy reports. A caller asking "did anything in this download
+    /// go unmodelled?" should call this rather than checking
+    /// `self.unmodelled` alone, which only sees envelope-level constructs
+    /// and misses every policy-level one.
+    pub fn all_unmodelled(&self) -> Vec<&Unmodelled> {
+        self.unmodelled
+            .iter()
+            .chain(self.policies.iter().flat_map(|p| p.unmodelled.iter()))
+            .collect()
+    }
 }
 
 /// One Ranger policy body (`policy.authz_policies.policy_jsonb`), typed for
@@ -151,11 +186,11 @@ pub enum ItemBucket {
     RowFilterPolicyItems,
 }
 
-/// A construct this reader detected in a policy body but does not model.
-/// Each variant names the field, and (where applicable) exactly where it
-/// was found, so a caller — today, a human; a later task, the evaluator —
-/// can decide to force an `Undecidable` outcome rather than proceed on an
-/// incomplete picture of what the policy actually says.
+/// A construct this reader detected in a policy or envelope body but does
+/// not model. Each variant names the field, and (where applicable) exactly
+/// where it was found, so a caller — today, a human; a later task, the
+/// evaluator — can decide to force an `Undecidable` outcome rather than
+/// proceed on an incomplete picture of what the policy actually says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unmodelled {
     /// Top-level `validitySchedules`: the policy is only in effect during a
@@ -170,15 +205,63 @@ pub enum Unmodelled {
     ZoneName(String),
     /// The envelope's `securityZones` map is non-empty.
     SecurityZones,
-    /// A mask item's `dataMaskInfo.valueExpr` contains a `{TOKEN}` runtime
-    /// macro/placeholder (e.g. a CUSTOM mask's `{col}`) this reader cannot
-    /// substitute.
-    MaskExpressionMarker { item_index: usize, expr: String },
+    /// The envelope's `tagPolicies` is present: a whole second policy set,
+    /// bound to the service's tag service, that CAN deny independently of
+    /// every policy in `policies`. Dropping it would produce a confident
+    /// allow that a live tag policy actually denies.
+    TagPolicies,
+    /// The envelope's `policyDeltas` is non-empty: this download is an
+    /// INCREMENTAL update, so `policies` alone is partial (or absent).
+    /// Evaluating `policies` as if it were the full set would fail open —
+    /// "no policy matched" — for anything the delta didn't happen to touch.
+    PolicyDeltas,
+    /// The envelope's `serviceConfig` is non-empty.
+    ServiceConfig,
+    /// A mask item's `dataMaskInfo.valueExpr` contains a Ranger runtime
+    /// expression this reader cannot resolve (a `${{ ... }}` request-time
+    /// expression, or a bare `{TOKEN}` placeholder such as a CUSTOM mask's
+    /// `{col}`) — see [`contains_expression_marker`].
+    MaskExpressionMarker {
+        bucket: ItemBucket,
+        item_index: usize,
+        expr: String,
+    },
     /// A mask item's `dataMaskInfo.conditionExpr` is set.
-    MaskConditionExpr { item_index: usize },
-    /// A row-filter item's `rowFilterInfo.filterExpr` contains a `{TOKEN}`
-    /// runtime macro (e.g. `{USER}`) this reader cannot substitute.
-    RowFilterExpressionMarker { item_index: usize, expr: String },
+    MaskConditionExpr {
+        bucket: ItemBucket,
+        item_index: usize,
+    },
+    /// A row-filter item's `rowFilterInfo.filterExpr` contains a Ranger
+    /// runtime expression this reader cannot resolve — see
+    /// [`contains_expression_marker`].
+    RowFilterExpressionMarker {
+        bucket: ItemBucket,
+        item_index: usize,
+        expr: String,
+    },
+    /// A `resources` (or `additionalResources[N]`) value contains a Ranger
+    /// runtime expression. `ResourceMatcher` resolves these via its own
+    /// `exprResolver` and `StringTokenReplacer`
+    /// (`RangerAbstractResourceMatcher.OPTION_REPLACE_TOKENS`, default
+    /// delimiters `{`/`}`) — this reader treats `values` as literal
+    /// strings, so a marked value is not a literal this reader can match.
+    /// `additional_index` is `None` for the primary `resources` map, or
+    /// `Some(i)` for `additionalResources[i]`.
+    ResourceValueExpressionMarker {
+        additional_index: Option<usize>,
+        resource_type: String,
+        value: String,
+    },
+    /// A policy item's `users` list contains a Ranger runtime expression —
+    /// most commonly one of Ranger's own current-request macros
+    /// (`RangerPolicyEngine.USER_CURRENT = "{USER}"`,
+    /// `RESOURCE_OWNER = "{OWNER}"`), which name the requesting user or the
+    /// resource's owner rather than a literal username.
+    UserExpressionMarker {
+        bucket: ItemBucket,
+        index: usize,
+        user: String,
+    },
     /// An access entry has `isAllowed: false` — meaningful only inside an
     /// "allow" bucket (`policyItems`/`allowExceptions`/
     /// `dataMaskPolicyItems`/`rowFilterPolicyItems`), where list membership
@@ -196,29 +279,76 @@ fn default_true() -> bool {
     true
 }
 
-/// True if `s` contains a Ranger runtime macro/placeholder of the form
-/// `{TOKEN}` — a bare run of alphanumerics/underscore between braces, e.g.
-/// `{USER}`, `{USER_IP}`, or a CUSTOM mask's `{col}`. Ranger substitutes
-/// these at evaluation time using request context (the current user, the
-/// column being read) this reader does not have, so any such marker
-/// changes the decision in a way this reader cannot resolve on its own.
+/// True if `s` contains a Ranger runtime expression this reader cannot
+/// resolve. Two distinct syntaxes, both checked:
+///
+/// 1. **Ranger's own request-time expression**, `${{ ... }}` (non-greedy
+///    inner match) — exactly `RangerRequestExprResolver.PATTERN`
+///    (`\$\{\{(?<expr>.*?)\}\}`), verified identical in `ranger-plugins-common`
+///    2.5.0 and 2.8.0 bytecode (fix round 1). Its holders are
+///    `RangerDefaultDataMaskPolicyItemEvaluator`,
+///    `RangerDefaultRowFilterPolicyItemEvaluator`, and `ResourceMatcher` —
+///    exactly the three surfaces this function is applied to
+///    (`dataMaskInfo.valueExpr`, `rowFilterInfo.filterExpr`, and a
+///    resource/`additionalResources` `values` entry). Examples:
+///    `${{USER}}`, `${{USER.dept}}`, `${{IS_IN_GROUP('finance')}}`.
+/// 2. **A bare `{TOKEN}` placeholder** — a run of ASCII alphanumerics/`_`
+///    between literal braces not already matched by rule 1 — covering a
+///    CUSTOM mask's `{col}` and Ranger's current-request macros `{USER}` /
+///    `{OWNER}` when not wrapped in the `${{ }}` form.
+///
+/// Checked in that order because `${{` starts with the same `{` byte a
+/// naive `{TOKEN}` scan would otherwise try to treat as its own opener.
 fn contains_expression_marker(s: &str) -> bool {
+    contains_ranger_request_expr(s) || contains_braced_token(s)
+}
+
+/// Rule 1 of [`contains_expression_marker`]: `${{ ... }}`. Byte comparisons
+/// only (never a `&str` slice boundary risk on the scanning index itself);
+/// the one slice taken, `s[i + 3..]`, starts immediately after the ASCII
+/// `{` at `i + 2`, which is always a valid `char` boundary.
+fn contains_ranger_request_expr(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let n = bytes.len();
     let mut i = 0;
-    while i < s.len() {
-        if s.as_bytes()[i] == b'{' {
-            match s[i + 1..].find('}') {
-                Some(rel) => {
-                    let token = &s[i + 1..i + 1 + rel];
-                    if !token.is_empty()
-                        && token
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                    {
-                        return true;
-                    }
-                    i += 1 + rel;
+    while i + 3 <= n {
+        if bytes[i] == b'$'
+            && bytes[i + 1] == b'{'
+            && bytes[i + 2] == b'{'
+            && s[i + 3..].contains("}}")
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Rule 2 of [`contains_expression_marker`]: a bare `{TOKEN}`. Fix round 1:
+/// the scan now advances by exactly one byte per iteration regardless of
+/// whether a candidate `{...}` span was accepted or rejected — the
+/// original version jumped past a rejected span's closing `}`, so a `{`
+/// nested inside a rejected span (e.g. the inner `{USER}` in
+/// `"{a-b{USER}}"`, or in `"concat('x{',{USER})"`) was never examined and
+/// the marker was missed.
+fn contains_braced_token(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if let Some(rel) = s[i + 1..].find('}') {
+                let token = &s[i + 1..i + 1 + rel];
+                if !token.is_empty()
+                    && token
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                {
+                    return true;
                 }
-                None => break,
+            } else {
+                // No '}' anywhere in the remainder of the string, so no
+                // '{' from here on can ever close — safe to stop entirely.
+                break;
             }
         }
         i += 1;
@@ -245,8 +375,19 @@ struct RawServicePolicySet {
     policy_version: Option<i64>,
     #[serde(default)]
     policies: Vec<RangerPolicy>,
+    #[serde(default, rename = "serviceDef")]
+    service_def: serde_json::Value,
     #[serde(default, rename = "securityZones")]
     security_zones: serde_json::Map<String, serde_json::Value>,
+    /// A whole second `TagPolicies`-shaped object when the service has tag
+    /// policies. Not further typed here (see `Unmodelled::TagPolicies`);
+    /// `Value::Null` means the key was absent, which is the common case.
+    #[serde(default, rename = "tagPolicies")]
+    tag_policies: serde_json::Value,
+    #[serde(default, rename = "policyDeltas")]
+    policy_deltas: Vec<serde_json::Value>,
+    #[serde(default, rename = "serviceConfig")]
+    service_config: serde_json::Map<String, serde_json::Value>,
 }
 
 impl<'de> Deserialize<'de> for ServicePolicySet {
@@ -259,11 +400,21 @@ impl<'de> Deserialize<'de> for ServicePolicySet {
         if !raw.security_zones.is_empty() {
             unmodelled.push(Unmodelled::SecurityZones);
         }
+        if !raw.tag_policies.is_null() {
+            unmodelled.push(Unmodelled::TagPolicies);
+        }
+        if !raw.policy_deltas.is_empty() {
+            unmodelled.push(Unmodelled::PolicyDeltas);
+        }
+        if !raw.service_config.is_empty() {
+            unmodelled.push(Unmodelled::ServiceConfig);
+        }
         Ok(ServicePolicySet {
             service_name: raw.service_name,
             service_id: raw.service_id,
             policy_version: raw.policy_version,
             policies: raw.policies,
+            service_def: raw.service_def,
             unmodelled,
         })
     }
@@ -351,8 +502,17 @@ impl RangerPolicy {
         if !raw.validity_schedules.is_empty() {
             unmodelled.push(Unmodelled::ValiditySchedules);
         }
-        if let Some(zone) = raw.zone_name.filter(|z| !z.is_empty()) {
+        if let Some(zone) = raw
+            .zone_name
+            .map(|z| z.trim().to_string())
+            .filter(|z| !z.is_empty())
+        {
             unmodelled.push(Unmodelled::ZoneName(zone));
+        }
+
+        scan_resources_for_markers(&raw.resources, None, &mut unmodelled);
+        for (i, additional) in raw.additional_resources.iter().enumerate() {
+            scan_resources_for_markers(additional, Some(i), &mut unmodelled);
         }
 
         let policy_items =
@@ -404,6 +564,24 @@ impl RangerPolicy {
     }
 }
 
+fn scan_resources_for_markers(
+    resources: &BTreeMap<String, ResourceLevel>,
+    additional_index: Option<usize>,
+    unmodelled: &mut Vec<Unmodelled>,
+) {
+    for (resource_type, level) in resources {
+        for value in &level.values {
+            if contains_expression_marker(value) {
+                unmodelled.push(Unmodelled::ResourceValueExpressionMarker {
+                    additional_index,
+                    resource_type: resource_type.clone(),
+                    value: value.clone(),
+                });
+            }
+        }
+    }
+}
+
 fn convert_bucket(
     items: Vec<RawPolicyItem>,
     bucket: ItemBucket,
@@ -437,6 +615,15 @@ fn build_policy_item(
             });
         }
     }
+    for user in &raw.users {
+        if contains_expression_marker(user) {
+            unmodelled.push(Unmodelled::UserExpressionMarker {
+                bucket,
+                index,
+                user: user.clone(),
+            });
+        }
+    }
     if let Some(mask_info) = &raw.data_mask_info {
         if mask_info
             .value_expr
@@ -444,6 +631,7 @@ fn build_policy_item(
             .is_some_and(contains_expression_marker)
         {
             unmodelled.push(Unmodelled::MaskExpressionMarker {
+                bucket,
                 item_index: index,
                 expr: mask_info.value_expr.clone().unwrap_or_default(),
             });
@@ -453,12 +641,16 @@ fn build_policy_item(
             .as_deref()
             .is_some_and(|s| !s.is_empty())
         {
-            unmodelled.push(Unmodelled::MaskConditionExpr { item_index: index });
+            unmodelled.push(Unmodelled::MaskConditionExpr {
+                bucket,
+                item_index: index,
+            });
         }
     }
     if let Some(row_filter_info) = &raw.row_filter_info {
         if contains_expression_marker(&row_filter_info.filter_expr) {
             unmodelled.push(Unmodelled::RowFilterExpressionMarker {
+                bucket,
                 item_index: index,
                 expr: row_filter_info.filter_expr.clone(),
             });
@@ -489,5 +681,28 @@ mod tests {
         // An empty or unterminated brace pair is not a token.
         assert!(!contains_expression_marker("{}"));
         assert!(!contains_expression_marker("unterminated {col"));
+    }
+
+    /// Fix round 1 (review): `RangerRequestExprResolver.PATTERN`, verified
+    /// identical in 2.5.0 and 2.8.0 bytecode via `javap`, is
+    /// `\$\{\{(?<expr>.*?)\}\}` — not `{TOKEN}`. Every one of these was
+    /// measured to return `false` (missed) before the fix.
+    #[test]
+    fn expression_marker_detects_dollar_brace_brace_family() {
+        assert!(contains_expression_marker("${{USER}}"));
+        assert!(contains_expression_marker("${{USER.dept}}"));
+        assert!(contains_expression_marker("dept = '${{USER.dept}}'"));
+        assert!(contains_expression_marker("${{IS_IN_GROUP('finance')}}"));
+        assert!(contains_expression_marker("${{ USER_ATTRIBUTES }}"));
+    }
+
+    /// Fix round 1 (review): the pre-fix `{TOKEN}` scan jumped past a
+    /// rejected span's closing `}`, so a `{` nested inside a rejected span
+    /// was never examined. Both were measured to return `false` (missed)
+    /// before the fix.
+    #[test]
+    fn expression_marker_detects_nested_braces_after_a_rejected_span() {
+        assert!(contains_expression_marker("{a-b{USER}}"));
+        assert!(contains_expression_marker("concat('x{',{USER})"));
     }
 }
