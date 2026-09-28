@@ -465,6 +465,13 @@ directly and bypasses setters, so `dataMaskInfo` would stay null and the
 `ifnull` guard WOULD fire. An earlier version of this section named Gson, and
 that naming predicts the behaviour the gate measured as false.
 
+Where the confusion came from is worth writing down, because it is a trap
+anyone re-reading this harness can fall into: **`EgretCaseRunner` itself uses
+Gson** — for its own `cases.json` / `verdicts.json`, which are the harness's
+files and nothing to do with Ranger. The `ServicePolicies` under test goes
+through `JsonUtils.jsonToObject` (line 112), i.e. Jackson, so the differential
+gate does exercise Ranger's real binding.
+
 Fixed in the READER (`model.rs`), which is where the defect was: the reader
 was reading the wire format while Ranger reads the same bytes through classes
 whose setters rewrite them.

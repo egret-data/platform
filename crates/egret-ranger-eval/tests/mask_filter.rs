@@ -268,9 +268,12 @@ fn no_matching_mask_policy_is_no_mask() {
 /// SP4d-1 Task 7, finding F2. Reading the bytecode alone says a null
 /// `getDataMaskInfo()` returns immediately and the policy determines
 /// nothing. Reading the MODEL CLASS says `getDataMaskInfo()` is never null:
-/// Gson builds `RangerDataMaskPolicyItem` through its no-arg constructor,
-/// which delegates to the all-args one, whose `setDataMaskInfo(null)`
-/// substitutes `new RangerPolicyItemDataMaskInfo()`. Measured, not inferred:
+/// Ranger deserialises with JACKSON (`JsonUtils.getMapper()` is a
+/// `com.fasterxml.jackson.databind.ObjectMapper`; neither jar carries a Gson
+/// class), which binds through the SETTER —
+/// `RangerDataMaskPolicyItem.setDataMaskInfo(null)` substitutes
+/// `new RangerPolicyItemDataMaskInfo()`, and the no-arg constructor reaches
+/// the same setter through the all-args one. Measured, not inferred:
 /// `JsonUtils.jsonToObject("{}", RangerDataMaskPolicyItem.class)` comes back
 /// with a non-null `dataMaskInfo` whose `dataMaskType` is null, and so does
 /// `{"dataMaskInfo": null}`.
@@ -288,9 +291,9 @@ fn a_mask_item_without_data_mask_info_still_determines() {
     // The empty one is given the HIGHER priority, so which policy Ranger
     // reaches first is decided by `policyPriority` and not by the
     // `getEvalOrder()` this crate does not reproduce. Left at equal
-    // priorities the two now yield DIFFERENT results and the honest answer
-    // is `EvalOrderAmbiguous`, which would test the refusal rather than the
-    // finding.
+    // priorities the answer would be `EvalOrderAmbiguous` — the refusal
+    // fires on any tie inside one band, whatever the tied policies yield —
+    // which would test the refusal rather than the finding.
     let mut empty = mask_policy(
         1,
         "a empty",

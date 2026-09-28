@@ -1857,9 +1857,13 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
         },
         // ── F2 ────────────────────────────────────────────────────────────
         //
-        // `RangerPolicy$RangerDataMaskPolicyItem`'s no-arg constructor (the
-        // one Gson uses) delegates to the all-args constructor with nulls, and
-        // `setDataMaskInfo(null)` substitutes `new RangerPolicyItemDataMaskInfo()`.
+        // Ranger deserialises with Jackson, which binds through the SETTER:
+        // `RangerPolicy$RangerDataMaskPolicyItem.setDataMaskInfo(null)`
+        // substitutes `new RangerPolicyItemDataMaskInfo()`, and the no-arg
+        // constructor reaches the same setter through the all-args one.
+        // (Gson, which this HARNESS uses for its own cases/verdicts files,
+        // assigns fields directly and would leave it null — hence the
+        // confusion this comment used to carry.)
         // So `getDataMaskInfo()` is NEVER null on a deserialised item, the
         // `ifnull` guard at offset 8 of
         // `RangerDefaultDataMaskPolicyItemEvaluator.updateAccessResult` never

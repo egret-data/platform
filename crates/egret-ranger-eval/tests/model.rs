@@ -565,11 +565,14 @@ fn all_unmodelled_folds_envelope_and_policy_level_reports() {
 /// not from the field declarations.
 ///
 /// That distinction is the finding. `model.rs` was written by reading the
-/// JSON; Ranger reads the same bytes through Gson into classes whose no-arg
-/// constructors call setters that substitute non-null defaults. Gson assigns
-/// fields directly, so an ABSENT key keeps the constructor's value, and an
-/// EXPLICIT null lands in the field and is read back through the same
-/// getters — Ranger cannot tell the two apart. Measured, both shapes:
+/// JSON; Ranger reads the same bytes with JACKSON
+/// (`JsonUtils.getMapper()` is a `com.fasterxml.jackson.databind.ObjectMapper`
+/// — neither `ranger-plugins-common` jar carries a Gson class) into classes
+/// whose no-arg constructors call setters that substitute non-null defaults.
+/// An ABSENT key is never bound and keeps the constructor's value; an
+/// EXPLICIT null is bound through the setter, which substitutes the same
+/// default, and is read back through the same getter — so Ranger cannot tell
+/// the two apart. Measured, both shapes:
 ///
 /// ```text
 /// RangerPolicy{}            policyPriority=0  isEnabled=true  isDenyAllElse=false
