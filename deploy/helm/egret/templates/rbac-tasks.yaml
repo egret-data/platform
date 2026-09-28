@@ -6,8 +6,14 @@ task namespace only (W5a spec §5, RBAC):
                                               create, list for the orphan
                                               sweep, delete on finish/cancel
   pods/log   get                           -- follow main's and files-out's log
-  pods/exec  create                        -- move input/output files by
-                                              exec + tar, and the markers
+  pods/exec  get/create                    -- move input/output files by
+                                              exec + tar, and the markers.
+                                              `get` because kube-rs execs over
+                                              a WebSocket, an HTTP GET, which
+                                              Kubernetes >= 1.30 authorises as
+                                              `get` (measured on kind 1.33 in
+                                              W5a Task 6's e2e: `create` alone
+                                              is a 403 on every exec)
 
 `pods/exec` lets egret exec into task pods; the namespace holds nothing else
 (spec §11). Bound to egret's own ServiceAccount.
@@ -25,7 +31,7 @@ rules:
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods/exec"]
-    verbs: ["create"]
+    verbs: ["get","create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

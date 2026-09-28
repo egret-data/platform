@@ -36,7 +36,7 @@
 - **Pod hardening:**
   - `automountServiceAccountToken: false`, `runAsNonRoot: true`, `runAsUser` from config, all capabilities dropped, `seccompProfile: RuntimeDefault`;
   - resources capped by `max_resources`.
-- **RBAC (exactly):** `pods` get/list/watch/create/delete; `pods/log` get; `pods/exec` create. Only in the task namespace.
+- **RBAC (exactly):** `pods` get/list/watch/create/delete; `pods/log` get; `pods/exec` get, create. Only in the task namespace. (`get` added 2026-09-28 by user decision: WebSocket exec on Kubernetes >= 1.30 is authorised as `get` (measured on kind 1.33 in W5a Task 6's e2e).)
 - **NetworkPolicy:** task pods cannot reach egret's metadata Postgres or the Kubernetes API server. All other egress is open.
 - **Logs:** every stdout/stderr line goes through W11's `ingest_line` → `RunLog`, unchanged.
 - **The ratchet cannot judge this package.** Expected **109 → 109**, measured.

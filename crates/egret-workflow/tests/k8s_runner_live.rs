@@ -26,6 +26,20 @@
 //! suite makes is in [`NS`], which it creates with Pod Security `restricted`
 //! **enforced** — so the admission controller itself judges the pod's
 //! hardening on every case — and deletes at the end, whatever happened.
+//!
+//! # The runner runs as the chart's Role, not as the admin
+//!
+//! Every [`KubernetesRunner`] and [`sweep_orphans`] call here goes through
+//! [`runner_client`], which **impersonates** the ServiceAccount [`RUNNER_SA`]
+//! in [`NS`]. That account is bound to a Role whose rules are **parsed from
+//! the chart's `templates/rbac-tasks.yaml`** ([`chart_role_rules`]), so the
+//! suite runs the runner with exactly the permissions a deployment grants.
+//! Until W5a Task 6 fix round 1 the runner used the admin kubeconfig, and the
+//! chart's `pods/exec` `create`-only Role — a 403 on every exec on
+//! Kubernetes 1.33, where kube-rs's WebSocket exec is authorised as `get` —
+//! passed this suite and failed only on a real install. The admin client
+//! ([`client`]) is kept for what the test itself does: create the namespace
+//! and the RBAC, and observe or plant pods.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -41,7 +55,8 @@ use egret_workflow::worker::commands::{
 use egret_workflow::worker::handlers::LogSink;
 use egret_workflow::worker::k8s::{pod_spec, sweep_orphans, KubernetesRunner, PodConfig};
 use egret_workflow::worker::TaskInput;
-use k8s_openapi::api::core::v1::{Namespace, Pod};
+use k8s_openapi::api::core::v1::{Namespace, Pod, ServiceAccount};
+use k8s_openapi::api::rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, DeleteParams, ListParams, PostParams};
 use uuid::Uuid;
@@ -56,6 +71,8 @@ const CONTEXT: &str = "kind-egret";
 const HELPER_IMAGE: &str = "egret-task-helper:dev";
 /// `alpine:3.20`, retagged so `kind load` has a single-platform image.
 const SHELL_IMAGE: &str = "egret-w5a-test-shell:dev";
+/// The ServiceAccount the runner impersonates, bound to the chart's Role.
+const RUNNER_SA: &str = "egret-task-runner-test";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -70,6 +87,48 @@ async fn client() -> kube::Client {
         .await
         .unwrap_or_else(|e| panic!("no kubeconfig context {CONTEXT}: {e}"));
     kube::Client::try_from(cfg).expect("a kube client")
+}
+
+/// The admin client with `Impersonate-User` set to [`RUNNER_SA`]: every
+/// request is authorised as that account, so as the chart's Role.
+async fn runner_client() -> kube::Client {
+    let opts = kube::config::KubeConfigOptions {
+        context: Some(CONTEXT.to_string()),
+        ..Default::default()
+    };
+    let mut cfg = kube::Config::from_kubeconfig(&opts)
+        .await
+        .unwrap_or_else(|e| panic!("no kubeconfig context {CONTEXT}: {e}"));
+    cfg.auth_info.impersonate = Some(format!("system:serviceaccount:{NS}:{RUNNER_SA}"));
+    kube::Client::try_from(cfg).expect("an impersonating kube client")
+}
+
+/// The task Role's rules, read from the chart itself: the lines from
+/// `rules:` to the document's end in `templates/rbac-tasks.yaml` (they hold
+/// no template expression), parsed as Kubernetes `PolicyRule`s.
+fn chart_role_rules() -> Vec<PolicyRule> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/helm/egret/templates/rbac-tasks.yaml"
+    );
+    let text = std::fs::read_to_string(path).expect("read the chart's rbac-tasks.yaml");
+    let start = text.find("\nrules:\n").expect("the Role has `rules:`") + 1;
+    let end = start + text[start..].find("\n---").expect("the Role ends at `---`");
+    #[derive(serde::Deserialize)]
+    struct Rules {
+        rules: Vec<PolicyRule>,
+    }
+    let rules: Rules = serde_norway::from_str(&text[start..end]).expect("the rules parse");
+    assert!(
+        rules.rules.iter().any(|r| r
+            .resources
+            .as_deref()
+            .unwrap_or_default()
+            .contains(&"pods/exec".to_string())),
+        "the chart's Role must be what was read: {:?}",
+        rules.rules
+    );
+    rules.rules
 }
 
 fn pod_config() -> PodConfig {
@@ -106,7 +165,11 @@ async fn pool() -> sqlx::PgPool {
 }
 
 async fn runner() -> KubernetesRunner {
-    KubernetesRunner::new(client().await, pod_config(), LogRepo::new(pool().await))
+    KubernetesRunner::new(
+        runner_client().await,
+        pod_config(),
+        LogRepo::new(pool().await),
+    )
 }
 
 fn pods(c: &kube::Client) -> Api<Pod> {
@@ -765,7 +828,9 @@ async fn the_orphan_sweep_deletes_pods_of_terminal_runs_only() {
         .count();
     assert_eq!(standing, 4, "the namespace holds only this case's pods");
 
-    let n = sweep_orphans(&c, &cfg, &pool).await.expect("sweep");
+    let n = sweep_orphans(&runner_client().await, &cfg, &pool)
+        .await
+        .expect("sweep");
     assert_eq!(n, 1, "only the terminal run's pod");
     assert!(wait_gone(&c, &names[&done], Duration::from_secs(20)).await);
     for run in [live, kept, rowless] {
@@ -895,13 +960,93 @@ async fn create_namespace() {
         .expect("create namespace");
     // The default ServiceAccount is created asynchronously; a pod needs it.
     let sa: Api<k8s_openapi::api::core::v1::ServiceAccount> = Api::namespaced(client().await, NS);
+    let mut ready = false;
     for _ in 0..120 {
         if sa.get_opt("default").await.ok().flatten().is_some() {
-            return;
+            ready = true;
+            break;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    panic!("the default service account never appeared in {NS}");
+    assert!(ready, "the default service account never appeared in {NS}");
+    create_runner_identity().await;
+}
+
+/// [`RUNNER_SA`], the chart's Role ([`chart_role_rules`]) and the binding,
+/// in [`NS`] -- then proof that [`runner_client`] really is that account:
+/// it may list pods in [`NS`] and may NOT list them in `default` (the admin
+/// can do both, so a client that ignored the impersonation passes neither
+/// half of this check).
+async fn create_runner_identity() {
+    let c = client().await;
+    let pp = PostParams::default();
+    let meta = |name: &str| ObjectMeta {
+        name: Some(name.to_string()),
+        namespace: Some(NS.to_string()),
+        ..Default::default()
+    };
+    Api::<ServiceAccount>::namespaced(c.clone(), NS)
+        .create(
+            &pp,
+            &ServiceAccount {
+                metadata: meta(RUNNER_SA),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create the runner's service account");
+    Api::<Role>::namespaced(c.clone(), NS)
+        .create(
+            &pp,
+            &Role {
+                metadata: meta(RUNNER_SA),
+                rules: Some(chart_role_rules()),
+            },
+        )
+        .await
+        .expect("create the chart's Role");
+    Api::<RoleBinding>::namespaced(c.clone(), NS)
+        .create(
+            &pp,
+            &RoleBinding {
+                metadata: meta(RUNNER_SA),
+                role_ref: RoleRef {
+                    api_group: "rbac.authorization.k8s.io".into(),
+                    kind: "Role".into(),
+                    name: RUNNER_SA.into(),
+                },
+                subjects: Some(vec![Subject {
+                    kind: "ServiceAccount".into(),
+                    name: RUNNER_SA.into(),
+                    namespace: Some(NS.into()),
+                    ..Default::default()
+                }]),
+            },
+        )
+        .await
+        .expect("bind the Role");
+    let rc = runner_client().await;
+    let mut allowed = false;
+    for _ in 0..40 {
+        if Api::<Pod>::namespaced(rc.clone(), NS)
+            .list(&ListParams::default())
+            .await
+            .is_ok()
+        {
+            allowed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(allowed, "the runner's identity cannot list pods in {NS}");
+    let elsewhere = Api::<Pod>::namespaced(rc, "default")
+        .list(&ListParams::default())
+        .await;
+    assert!(
+        matches!(&elsewhere, Err(kube::Error::Api(e)) if e.code == 403),
+        "the runner's client must be the Role's account, not the admin: \
+         listing pods in `default` gave {elsewhere:?}"
+    );
 }
 
 async fn delete_namespace() -> bool {

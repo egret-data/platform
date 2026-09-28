@@ -101,7 +101,7 @@ workflow:
   # registers no script handler: the worker is exactly what it was before W5a.
   # "kubernetes" runs one pod per task-run attempt in `tasks.namespace` and
   # renders that namespace (Pod Security restricted), a Role with exactly
-  # pods get/list/watch/create/delete, pods/log get and pods/exec create, its
+  # pods get/list/watch/create/delete, pods/log get and pods/exec get/create, its
   # RoleBinding to egret's ServiceAccount, and the NetworkPolicy below.
   # ("docker" is for local development only and is refused by this chart: a
   # Docker socket in the server is root on the node.)

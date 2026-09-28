@@ -683,7 +683,7 @@ pub enum ContainerRunner {
 pub struct WorkflowKubernetesConfig {
     /// The namespace task pods are created in. It must exist, enforce Pod
     /// Security `restricted`, and grant egret's ServiceAccount exactly `pods`
-    /// get/list/watch/create/delete, `pods/log` get and `pods/exec` create --
+    /// get/list/watch/create/delete, `pods/log` get and `pods/exec` get/create --
     /// which is what the chart's `workflow.containerRunner: kubernetes`
     /// renders. Default `egret-tasks`.
     #[serde(default = "default_task_namespace")]
@@ -1361,7 +1361,9 @@ values = { allowed-images = [] }
     /// W5a Task 5: the chart carries the lever with `none` as its default, and
     /// the task namespace's Role is exactly the RBAC the spec allows --
     /// `pods` get/list/watch/create/delete, `pods/log` get, `pods/exec`
-    /// create -- nothing more. (`helm template` is the full check; this pins
+    /// get/create -- nothing more. (`get` on `pods/exec` because WebSocket
+    /// exec on Kubernetes >= 1.30 is authorised as `get`; measured on kind
+    /// 1.33 in W5a Task 6's e2e.) (`helm template` is the full check; this pins
     /// the text so an added verb or resource fails a unit test.)
     #[test]
     fn the_chart_carries_the_container_runner_and_the_exact_task_rbac() {
@@ -1387,7 +1389,7 @@ values = { allowed-images = [] }
                 r#"resources: ["pods/log"]"#,
                 r#"verbs: ["get"]"#,
                 r#"resources: ["pods/exec"]"#,
-                r#"verbs: ["create"]"#,
+                r#"verbs: ["get","create"]"#,
             ]
         );
         assert_eq!(rbac.matches("apiGroups:").count(), 3);

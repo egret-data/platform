@@ -99,7 +99,7 @@ Properties implemented: `containerImage`, `commands` (Commands) / `script` (Scri
 
 **Orphans:** the reaper, on its existing tick, deletes pods carrying egret's labels whose run is terminal (egret died between downloading outputs and deleting).
 
-**RBAC:** a Role in the task namespace: `pods` get/list/watch/create/delete, `pods/log` get, `pods/exec` create; bound to egret's ServiceAccount.
+**RBAC:** a Role in the task namespace: `pods` get/list/watch/create/delete, `pods/log` get, `pods/exec` get and create; bound to egret's ServiceAccount. *(`get` on `pods/exec` added by user decision, 2026-09-28: WebSocket exec on Kubernetes >= 1.30 is authorised as `get` (measured on kind 1.33 in W5a Task 6's e2e); with `create` alone every exec is a 403.)*
 
 **NetworkPolicy:** task pods may not reach egret's metadata Postgres or the Kubernetes API server; all other egress is open.
 
@@ -156,3 +156,4 @@ W5b (plugin host image, shim, `kestra.<FQCN>`, jar allowlist); internal storage,
 - A pod that outlives egret entirely (egret uninstalled) is not cleaned up by egret.
 - Re-attach may repeat a few log lines around the reclaim instant.
 - `pods/exec` in the task namespace lets egret exec into task pods; the namespace holds nothing else.
+- After a re-attach, `stdOutLineCount` and `stdErrLineCount` count only the lines the last holder read: the lines an earlier holder stored are dropped as replayed and not counted. The stored log lines themselves are complete; only the counts are short (measured in W5a Task 6's e2e: the killed run counted 35 of its 40 stdout lines).

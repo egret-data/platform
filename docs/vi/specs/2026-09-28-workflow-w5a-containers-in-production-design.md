@@ -101,7 +101,7 @@ Các thuộc tính được cài đặt: `containerImage`, `commands` (Commands)
 
 **Pod mồ côi:** reaper, trên tick sẵn có của nó, xoá các pod mang label của egret mà run của chúng đã ở trạng thái kết thúc (egret chết giữa lúc download output và lúc xoá).
 
-**RBAC:** một Role trong namespace của task: `pods` get/list/watch/create/delete, `pods/log` get, `pods/exec` create; gắn (bound) vào ServiceAccount của egret.
+**RBAC:** một Role trong namespace của task: `pods` get/list/watch/create/delete, `pods/log` get, `pods/exec` get và create; gắn (bound) vào ServiceAccount của egret. *(`get` trên `pods/exec` được thêm theo quyết định của người dùng, 2026-09-28: exec qua WebSocket trên Kubernetes >= 1.30 được phân quyền như `get` (đo trên kind 1.33 trong e2e của W5a Task 6); chỉ có `create` thì mọi exec đều bị 403.)*
 
 **NetworkPolicy:** pod của task không được tới Postgres metadata của egret hay Kubernetes API server; mọi egress khác đều mở.
 
@@ -158,3 +158,4 @@ W5b (image plugin host, shim, `kestra.<FQCN>`, allowlist jar); internal storage,
 - Một pod sống lâu hơn egret hoàn toàn (egret bị gỡ cài đặt) không được egret dọn dẹp.
 - Gắn lại có thể lặp lại vài dòng log quanh thời điểm thu hồi.
 - `pods/exec` trong namespace của task cho phép egret exec vào pod của task; namespace đó không chứa gì khác.
+- Sau khi gắn lại, `stdOutLineCount` và `stdErrLineCount` chỉ đếm các dòng mà holder cuối cùng đọc được: các dòng holder trước đã lưu bị bỏ qua như dòng phát lại và không được đếm. Bản thân các dòng log đã lưu vẫn đầy đủ; chỉ con số là thiếu (đo trong e2e của W5a Task 6: run bị kill đếm 35 trên 40 dòng stdout).

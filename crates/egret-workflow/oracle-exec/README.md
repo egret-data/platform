@@ -8935,10 +8935,13 @@ and every figure below is copied from them):
    kept the pod and re-attached every `working_timeout` without ever
    finishing; adding `get` to the Role **in the temporary cluster only**
    made the stuck run finish on its next claim, and every result above was
-   measured with that patch. The chart in this branch is **unchanged**:
-   the spec's "RBAC exactly" is a user constraint, and the fix is theirs to
-   take. Tasks 4 and 5's live tests ran with an administrator's kubeconfig,
-   so RBAC was never exercised by them.
+   measured with that patch. *(Fix round 1, user decision 2026-09-28: the
+   chart's Role grants `pods/exec` `get` and `create`, and spec §5 says so.
+   Tasks 4 and 5's live tests ran the runner with an administrator's
+   kubeconfig, so RBAC was never exercised by them; `k8s_runner_live` now
+   runs every runner and sweep call as a ServiceAccount bound to a Role
+   parsed from the chart's `rbac-tasks.yaml`, and dropping `get` from the
+   chart fails it with the same 403.)*
 6. **A re-attached run under-counts its lines.** After a re-attach,
    `stdErrLineCount`/`stdOutLineCount` count only lines the last holder read
    (the first hello run: 0 stderr / 1 stdout against 1 / 2 on its clean
@@ -9006,12 +9009,13 @@ minutes; its timing test is the instrument, unmutated.
    container keeps running; the self-fence tests use real 60/200 ms timers.
 7. **The ratchet cannot judge any of this in either direction**, for the
    three reasons above.
-8. **The chart's Role, as shipped, cannot run a task on Kubernetes v1.33.**
-   It grants `pods/exec` `create` only (spec §5, "RBAC exactly"); kube-rs's
-   WebSocket exec is authorised as `get` there, so every exec is `403` and a
-   run re-attaches for ever without finishing (live item 5 above). Open for
-   a decision at the time of writing; no test in this crate exercises RBAC,
-   because the live tests use an administrator's kubeconfig.
+8. **Line counts after a re-attach are short** (spec §11, added in fix
+   round 1): `stdOutLineCount`/`stdErrLineCount` count only what the last
+   holder read (live item 6 above). The stored lines are complete.
+9. *(Retired by fix round 1, kept as the record:)* the chart's Role granted
+   `pods/exec` `create` only, and every exec was a 403 on Kubernetes 1.33
+   (live item 5). It grants `get` too now, and `k8s_runner_live` runs as
+   that Role, so the class is covered by a test rather than by this line.
 
 **Decisions the user made (2026-09-28)**, recorded here because the tests
 enforce them and a reader could mistake them for accidents: W5 split into
