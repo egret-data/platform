@@ -33,12 +33,28 @@
 //!
 //! [`eval`] is the third layer and the one that answers: policy-item
 //! evaluation, precedence and the final three-valued
-//! [`eval::Decision`]. Mask and row-filter evaluation are a later task's.
+//! [`eval::Decision`].
 //! `Allowed | Denied | Undecidable { why }` is the whole point of the
 //! crate: anything it cannot model names itself as an
 //! [`eval::UndecidableCause`] instead of being guessed at, and a policy
 //! carrying an [`model::Unmodelled`] construct makes the decision
 //! undecidable even when another policy would have allowed.
+//!
+//! [`eval`] answers Ranger's other two questions too —
+//! [`eval::evaluate_data_mask`] and [`eval::evaluate_row_filter`] — on the
+//! same contract but with a different shape of answer, because a mask is
+//! DATA (`maskType` / `maskedValue` / `maskCondition`) and not a verdict:
+//! `RangerDefaultDataMaskPolicyItemEvaluator.updateAccessResult` reports
+//! allow unconditionally, so the allow half carries no information.
+//! Ranger keeps the three worlds in three disjoint evaluator lists and
+//! neither can see the others.
+//!
+//! The engine is an explicit input ([`eval::EngineType`],
+//! [`eval::PluginVersion`]), not a constant: Trino and StarRocks name their
+//! middle resource level differently (`schema` vs `database`), their
+//! access-type vocabularies are partly disjoint, and they load different
+//! `ranger-plugins-common` versions (2.5.0 and 2.8.0, both measured on the
+//! running pods).
 
 pub mod eval;
 pub mod model;
