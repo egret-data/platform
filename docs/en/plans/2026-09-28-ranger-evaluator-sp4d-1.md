@@ -404,6 +404,19 @@ Also generate **request**-side `*` and empty values. Task 4 measured that
 value of `*` matches only a match-any policy — a rule that is easy to get
 backwards and that no hand-written case currently covers.
 
+**Several same-priority policies over one resource must be a first-class axis.**
+Task 5 did not reproduce Ranger's `getEvalOrder()` (it stands in a name-then-id
+tie-break) and said plainly that its argument for why order cannot change
+allow/deny is reasoning from the loop, not a measurement. It named this its
+weakest link. Nothing but a corpus with competing same-priority policies can
+falsify it.
+
+**Record, do not test, the one measured version divergence.** Task 5 measured
+that an `_any` request against an ANCESTOR-matching `isDenyAllElse` policy
+denies on Ranger 2.5.0 (Trino 470) and does not on 2.8.0 (StarRocks 4.1). The
+evaluator refuses `_any` as `Undecidable`, so such cases are out of the corpus
+by construction — note the divergence in the README rather than generating it.
+
 Generate only constructs the evaluator claims to model. A generated
 `Undecidable` proves nothing about agreement — count them and assert the count
 is zero for the generated corpus, so the generator cannot quietly drift into
@@ -463,6 +476,12 @@ exercises request construction rather than policy logic:
 4. A row filter, checked by row count.
 5. A deny that an allow-exception cancels.
 6. A `public` grant against a user with no groups.
+7. **Whether a Ranger-undetermined request falls through to Trino's own
+   authorizer.** Task 5 kept `Denied { NoPolicyMatched }` as a distinct reason
+   because `getIsFallbackSupported()` gates only `isAccessDetermined`, but it did
+   NOT verify how the Trino plugin consumes that flag. If a fallback fires,
+   "denied" is the wrong label for that branch and the evaluator is wrong in the
+   fail-closed direction. Measure it; do not reason about it.
 
 Then **two StarRocks cases** on the live FE (`sp3c2-sr-live-fe-0` was running
 2026-09-28): the ANCESTOR case (1) and the column-wildcard case (2). StarRocks
