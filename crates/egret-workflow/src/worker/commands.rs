@@ -12,7 +12,7 @@
 //! | egret | Kestra | what it is |
 //! |---|---|---|
 //! | [`TaskHandler`](super::TaskHandler) | `RunnableTask` | one task **type** — `egret.container`, `egret.script.python` |
-//! | [`TaskRunner`] | `io.kestra.core.models.tasks.runners.TaskRunner` | **where** a command runs — a container today, a pod later |
+//! | [`TaskRunner`] | `io.kestra.core.models.tasks.runners.TaskRunner` | **where** a command runs — a Docker container ([`DockerRunner`]) or a Kubernetes pod ([`KubernetesRunner`](super::k8s::KubernetesRunner)) |
 //! | [`TaskCommands`] | `io.kestra.core.models.tasks.runners.TaskCommands` | **what** to run, as data |
 //!
 //! A handler builds a [`TaskCommands`] and hands it to a [`TaskRunner`]; it
@@ -104,11 +104,10 @@
 //!   namespace files, Windows workers). [`TaskCommands::input_files`] carries
 //!   the one case a handler here actually needs — a script written by the
 //!   handler itself.
-//! * **No image pulling policy, no registry credentials, no resource limits.**
-//!   `Docker` has `pullPolicy`, `credentials`, `cpu`, `memory`, `shmSize`,
-//!   `deviceRequests`, `privileged`, `networkMode`. Adding any of them is a
-//!   property with a caller; none has one yet, and this package's standing rule
-//!   is that a field with no reader does not ship.
+//! * **No registry credentials, no `shmSize`, `deviceRequests`, `privileged`,
+//!   `networkMode`, volumes.** W5a Task 5 implements `pullPolicy`, `cpu.cpus`,
+//!   `memory.memory` and `delete` (see [`create_args`]); every other Kestra
+//!   `Docker` property is refused at save by `scripts::parse`, never ignored.
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
@@ -119,6 +118,7 @@ use tokio::process::Command;
 
 use super::TaskInput;
 use crate::logs::LogLevel;
+use crate::scripts::RunnerSpec;
 
 /// The directory a command runs in, inside the container.
 ///
@@ -156,6 +156,48 @@ pub const DEFAULT_INTERPRETER: [&str; 2] = ["/bin/sh", "-c"];
 /// a gigabyte, and this doc used to claim it was *the* bound.
 /// [`ingest_output_file`] carries a running total and refuses on either.
 pub const MAX_OUTPUT_FILE_BYTES: usize = 1_048_576;
+
+/// The most bytes a directory LISTING for `outputFiles` globs may be -- the
+/// output of `docker diff` (Docker) or `ls -A1p` (Kubernetes). Past it the
+/// task fails by name; nothing is parsed (W5a Task 5 fix round 2: an author
+/// who creates 300 000 files must not be able to make the worker read, hold
+/// or scan an unbounded listing inside its handler, where the lease renewal,
+/// the budget and the self-fence cannot run).
+pub const MAX_LISTING_BYTES: usize = 1_048_576;
+
+/// A pure DoS guard on `docker diff` (W5a Task 5 fix round 3): the most
+/// bytes read of the WHOLE container's diff, most of which is outside the
+/// working directory (`pip install`, `apt-get`) and is skipped, not counted
+/// toward [`MAX_LISTING_BYTES`]. Past it, or past [`DIFF_TIMEOUT`], the task
+/// fails saying the container changed too much to list.
+pub const MAX_DIFF_BYTES: usize = 64 * 1_048_576;
+
+/// How long reading `docker diff` may take (the same DoS guard).
+pub const DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The most names `outputFiles` may resolve to -- literal names and glob
+/// matches together -- before the task fails by name. Each one is a copy or
+/// an exec, and a key in the outputs map.
+pub const MAX_OUTPUT_NAMES: usize = 1_000;
+
+/// The most distinct glob PATTERNS one task's `outputFiles` may declare
+/// (W5a Task 5 fix round 3): refused at save, and again at run for a draft.
+pub const MAX_OUTPUT_PATTERNS: usize = 64;
+
+/// The longest a pattern's FILE NAME may be, in bytes -- `NAME_MAX`: a longer
+/// pattern with one literal character could match no file. Refused at save
+/// and at run.
+pub const MAX_PATTERN_BYTES: usize = 255;
+
+/// The most matcher steps resolving one task's `outputFiles` globs may take
+/// (`scripts::gate::glob_match_within`). With the caps above the worst case
+/// is `MAX_OUTPUT_PATTERNS` x the listing (at most [`MAX_LISTING_BYTES`] of
+/// names) x `MAX_PATTERN_BYTES` -- about 1.7e10 steps, too many to run inside
+/// a handler -- so the work is ALSO bounded by this budget, independent of
+/// the input: past it the task fails by name. 200 M steps leaves room for
+/// every realistic case (64 simple patterns x ~47k names x ~20 steps is
+/// ~60 M) and is measured in `the_glob_worst_case_is_bounded_by_the_step_budget`.
+pub const GLOB_STEP_BUDGET: u64 = 200_000_000;
 
 /// The most bytes the `::{…}::` markers may contribute in total.
 ///
@@ -198,11 +240,15 @@ pub struct TaskCommands {
     /// `AbstractExecScript.outputFiles` — names relative to [`WORKING_DIR`],
     /// read back after the command exits.
     ///
-    /// **Literal names only, no globs.** Kestra's `CommandsWrapper` treats
-    /// `*`, `?` and `[` as a glob; egret refuses them, because a glob that
-    /// matched nothing would produce an output map missing a key the author
-    /// declared, and that absence is invisible until a later `{{ … }}` fails
-    /// somewhere else.
+    /// **As Kestra (W5a Task 5 fix round 1, the user's decision):** a literal
+    /// name, or a non-recursive glob -- `*` and `?` in the file name, matched
+    /// within one directory (`*.csv`, `sub/*.csv`) -- keying every FILE it
+    /// matches; and a declared file the command did not write is IGNORED (no
+    /// key, no failure). Measured: `w5a-scripts.json`
+    /// `egret_expected.output_files`. `**`, `[...]` and a wildcard directory
+    /// are refused by name ([`output_problem`]). W4 took literal names only
+    /// and failed a missing one. The 1 MiB per-file and total caps stay: the
+    /// value is the contents, not a storage URI (W9).
     pub output_files: Vec<String>,
 }
 
@@ -272,9 +318,11 @@ pub struct CommandsResult {
 
 /// **Where** a command runs.
 ///
-/// One implementation today ([`DockerRunner`]); the trait exists because
-/// Kestra's does and for the same reason — a Kubernetes runner is a second
-/// implementation of this and not a second `egret.script.python`.
+/// Two implementations: [`DockerRunner`] (local development and tests) and,
+/// since W5a Task 4, [`KubernetesRunner`](super::k8s::KubernetesRunner) (a pod
+/// per task-run attempt, production). The trait exists because Kestra's does
+/// and for the same reason: the Kubernetes runner is a second implementation
+/// of this, not a second copy of every script handler.
 ///
 /// # `cancel` has no default body, for [`TaskHandler::cancel`]'s reason
 ///
@@ -297,18 +345,71 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
     /// Everything the author can act on (a bad image, a command that exited
     /// non-zero) is `Ok` and the handler decides what it means, exactly as
     /// [`Registry::run`](super::Registry) splits the two.
+    ///
+    /// `spec` is the task's parsed `taskRunner:` (`pullPolicy`, `delete`,
+    /// `resources`, …) — **where** the command runs, per task, which is why it
+    /// is an argument and not a field of the runner (W5a Task 4). A runner
+    /// reads the properties it implements; a handler with no `taskRunner:`
+    /// passes [`RunnerSpec::defaults`].
+    ///
+    /// # Re-attach (W5a spec §5)
+    ///
+    /// A runner that names its work deterministically per **(run, attempt)**
+    /// — [`KubernetesRunner`](super::k8s::KubernetesRunner) — first looks the
+    /// work up by that name and re-attaches to it if it exists, instead of
+    /// creating a second one. That is what makes a dropped `run` future (the
+    /// worker lost its lease, W5a Task 3) safe: dropping never deletes, and
+    /// the next holder of the lease finds the same pod. [`DockerRunner`] does
+    /// the same with its container since W5a Task 5.
+    ///
+    /// # `run` never deletes what it ran (W5a final review I3)
+    ///
+    /// Whatever `run` returns, the container or pod is left in place:
+    /// [`release`](Self::release) deletes it, and `claim::run_one` calls that
+    /// (through the handler) only **after the outcome committed**. A runner
+    /// that deleted here would turn a failed commit into a second execution.
     async fn run(
         &self,
         task: &TaskInput,
         commands: &TaskCommands,
+        spec: &RunnerSpec,
         observer: &dyn LineObserver,
     ) -> Result<CommandsResult>;
+
+    /// [`run`](Self::run), **but only if the work for `task`'s (run, attempt)
+    /// already exists and was started** -- a re-attach, never a create.
+    /// `Ok(None)` when there is nothing to adopt; nothing is created then.
+    ///
+    /// This is how the script handler keeps W5a spec §4's promise that "runs
+    /// already in a pod finish" when the gate would now refuse the task (the
+    /// workspace turned `workflow_containers` off, or the allowlist changed,
+    /// after the pod was created): the pod passed the gate when it was
+    /// created, and a re-claim adopts it rather than failing the run and
+    /// leaving the pod for the sweep. Because this cannot create, the gate is
+    /// never bypassed for new work.
+    async fn adopt(
+        &self,
+        task: &TaskInput,
+        commands: &TaskCommands,
+        spec: &RunnerSpec,
+        observer: &dyn LineObserver,
+    ) -> Result<Option<CommandsResult>>;
 
     /// Stop whatever `task` is running, addressed by **identity**.
     ///
     /// The caller is [`cancel::guarded`](super::TaskHandler::cancel) by way of
     /// a handler, and it has no handle to pass: see [`container_name`].
     async fn cancel(&self, task: &TaskInput) -> Result<()>;
+
+    /// Free `task`'s container or pod once its outcome has **committed**
+    /// (`TaskHandler::release`): delete it when `spec.delete` (the default),
+    /// otherwise leave it, as the author asked -- the Kubernetes runner lets
+    /// its `files-out` sidecar exit so the kept pod completes. A container or
+    /// pod that is not there is `Ok(())`.
+    ///
+    /// No default body, for `cancel`'s reason: every runner says what freeing
+    /// means to it.
+    async fn release(&self, task: &TaskInput, spec: &RunnerSpec) -> Result<()>;
 }
 
 /// Something that sees each line a runner writes, before it goes to
@@ -365,88 +466,87 @@ pub(crate) async fn stream_line(
     }
 }
 
-/// The container this run owns, named from its **lease**.
+/// The container this run attempt owns: `egret-run-<run id, hyphenless>-<attempt>`
+/// -- the Kubernetes runner's [`pod_name`](super::k8s::pod_name), exactly.
 ///
-/// # This is the answer to `TaskHandler::cancel`'s hazard note
+/// # W5a Task 5 moved the key from the LEASE to the ATTEMPT, and why that is
+/// # now safe
 ///
-/// That method's doc carries a section headed *READ THIS BEFORE IMPLEMENTING A
-/// HANDLER THAT HOLDS AN EXTERNAL RESOURCE*, written by W4 Task 3 for this
-/// task. Restated: [`cancel`](TaskRunner::cancel) is addressed by **run id**,
-/// not by a handle to the work, whereas Kestra's `TaskRunner.kill()` runs a
-/// `Runnable` captured over *this instance's* container id (fact 2). So a
-/// worker A whose lease [`reap`](super::reap) cleared — leaving
-/// `state = 'RUNNING'`, which is claimable — can still be inside its handler
-/// when worker B claims the same `run_id`, and A's own budget then expires and
-/// calls `cancel`. **If the container were named `egret-run-<run_id>`, A would
-/// kill B's container.** `attempt` does not disambiguate: the reaper leaves the
-/// attempt open, so A and B share it.
+/// W4 named the container after `(run_id, claimed_at)` so that a worker A,
+/// reaped while still inside its handler, could not kill the container of the
+/// worker B that claimed the same run: A's own budget would expire and call
+/// `cancel` with a name that no longer existed. Two things changed in W5a:
 ///
-/// The disambiguator is the lease token, [`TaskInput::claimed_at`] — the value
-/// the claim's own `UPDATE … SET claimed_at = now()` wrote and the value every
-/// [`apply_outcome`](super::apply_outcome) write is fenced on. A name built
-/// from `(run_id, claimed_at)` makes A's kill address a container that does not
-/// exist, which `docker rm --force` reports by exiting **0** (measured), so
-/// [`DockerRunner::cancel`] treats it as nothing to do — the artifact's own
-/// answer (fact 9: `NotFoundException` is caught and silently ignored).
+/// 1. **A worker renews its lease while its handler runs, under a fence, and
+///    drops the handler's future when the fence moves** (Task 3,
+///    `worker::claim::under_lease`) -- **or when no renewal has succeeded for
+///    `working_timeout`, the reaper's own threshold** (Task 5 fix round 1).
+///    That second half is what makes this key safe, and the first version of
+///    this doc claimed it without it: a renewal that ERRORS used to be retried
+///    for ever, so a worker cut off from Postgres but not from Docker or the
+///    API server stayed inside its handler after being reaped, and could
+///    kill (its own budget's `cancel`) the container the new holder had
+///    re-attached to. Now the worker gives the run up no later than the
+///    reaper could take it, with its future -- budget and all -- dropped, so
+///    no `cancel` is issued. (Removing the container on finish, the other
+///    half of that fear, is gone too: `release` runs only after a COMMITTED
+///    outcome, which a worker that lost the run cannot make -- final review
+///    I3.)
+///    *Residual, stated:* a worker whose process is frozen (not merely cut
+///    off) past the deadline resumes inside a poll of the handler before the
+///    fence is re-checked; the window is one poll.
+/// 2. **The new holder must FIND the old holder's container** to re-attach to
+///    it (spec §5), which a lease-keyed name makes impossible: every claim
+///    would create a second container while the first kept running (Task 3's
+///    measured orphan). The attempt is the re-attach key because `reap`
+///    leaves the attempt open, so A and B compute the same name -- which is
+///    now the point.
 ///
-/// # Why not a handle registry inside the runner
-///
-/// Because a registry keyed by `run_id` has the identical bug — B overwrites
-/// A's entry in the same process — and a registry keyed by
-/// `(run_id, claimed_at)` is this function with more moving parts. More
-/// decisively, in production A and B are **different processes**: a registry
-/// cannot see across them, and the daemon can, because it is shared. The name
-/// is the only disambiguator that works in the case the hazard is actually
-/// about.
-///
-/// # The format
-///
-/// `egret-run-<run id, hyphenless>-<lease, microseconds since the epoch>`.
-/// Microseconds because that is Postgres `timestamptz`'s own resolution, so the
-/// token is carried without loss; a coarser unit would let two claims of one
-/// run collide, which is the whole failure this exists to prevent. Every
-/// character is in Docker's `[a-zA-Z0-9][a-zA-Z0-9_.-]*`.
-///
-/// `-` for a negative instant is in that set too, and a pre-epoch lease is
-/// unreachable in practice — `claimed_at` is `now()`. It is spelled `_` anyway
-/// rather than relying on that, because a name that fails to parse would make
-/// the failure a daemon error at run time rather than at review time.
+/// A `cancel` for the run (a kill, a budget that expired in the live holder)
+/// reaches the container whoever started it, which is what a kill means.
 pub fn container_name(task: &TaskInput) -> String {
-    let micros = task.claimed_at.timestamp_micros();
-    let lease = if micros < 0 {
-        format!("_{}", micros.unsigned_abs())
-    } else {
-        micros.to_string()
-    };
-    format!("egret-run-{}-{}", task.run_id.simple(), lease)
+    super::k8s::pod_name(task.run_id, super::k8s::pod_spec::attempt_of(task))
 }
+
+/// The label that marks a container the author asked to keep
+/// (`taskRunner.delete: false`); the orphan sweep leaves it alone, as the pod
+/// sweep leaves a pod with the same annotation.
+pub const DELETE_LABEL: &str = super::k8s::pod_spec::DELETE_ANNOTATION;
 
 /// The labels a container carries, so an operator can find one this worker
 /// left behind.
 ///
 /// `ScriptService.labels` writes `kestra.io/{namespace,flow-id,task-id,
 /// execution-id,taskrun-id,taskrun-attempt}` (fact 5). egret writes its own
-/// namespace and the same identifiers, plus the one Kestra has no equivalent
-/// of and this module depends on: the lease.
+/// namespace and the same identifiers -- the pod's four
+/// (`egret.io/{workspace-id,execution-id,taskrun-id,attempt}`, W5a spec §5)
+/// plus the task id. W4's `egret.io/lease` label is gone with the lease-keyed
+/// name ([`container_name`]): after a re-attach it would name the wrong holder.
 ///
 /// **The labels are diagnostics, not identity.** Nothing in this module looks a
 /// container up by them — [`container_name`] is the address — and that is
 /// deliberate: a lookup by label would be a second way to name the same thing,
 /// able to disagree with the first.
+///
+/// *W5a Task 4:* the one reader is [`OrphanSweep`], which **lists** by
+/// [`TASKRUN_LABEL`] to find the run each container belongs to. It never
+/// addresses a single container's work by label; it removes by name.
 pub fn labels(task: &TaskInput) -> Vec<(String, String)> {
     vec![
         (
-            "egret.io/workspace-id".into(),
+            super::k8s::pod_spec::WORKSPACE_LABEL.into(),
             task.workspace_id.to_string(),
         ),
         (
-            "egret.io/execution-id".into(),
+            super::k8s::pod_spec::EXECUTION_LABEL.into(),
             task.execution_id.to_string(),
         ),
-        ("egret.io/taskrun-id".into(), task.run_id.to_string()),
+        (TASKRUN_LABEL.into(), task.run_id.to_string()),
         ("egret.io/task-id".into(), task.task_id.clone()),
-        ("egret.io/taskrun-attempt".into(), task.attempt.to_string()),
-        ("egret.io/lease".into(), task.claimed_at.to_rfc3339()),
+        (
+            super::k8s::pod_spec::ATTEMPT_LABEL.into(),
+            super::k8s::pod_spec::attempt_of(task).to_string(),
+        ),
     ]
 }
 
@@ -611,6 +711,7 @@ pub(crate) fn classify_marker(line: &str) -> Marker {
 /// `Err` is the message the **task** fails with — never a worker failure. The
 /// caller puts it in [`CommandsResult::failure`], so the exit code and the vars
 /// the command printed survive it.
+#[cfg(test)]
 pub(crate) fn ingest_output_file(
     result: &mut CommandsResult,
     staged_root: &std::path::Path,
@@ -619,7 +720,31 @@ pub(crate) fn ingest_output_file(
     max_total_bytes: usize,
     total: &mut usize,
 ) -> std::result::Result<(), String> {
-    if let Some(problem) = relative_problem(rel) {
+    ingest_output(
+        result,
+        staged_root,
+        rel,
+        max_file_bytes,
+        max_total_bytes,
+        total,
+        false,
+    )
+}
+
+/// [`ingest_output_file`], for a name that is either declared literally
+/// (`from_glob = false`) or one a declared glob matched (`true`). A glob that
+/// matched a DIRECTORY skips it -- Kestra's glob visits files only -- where a
+/// directory declared by name is refused.
+pub(crate) fn ingest_output(
+    result: &mut CommandsResult,
+    staged_root: &std::path::Path,
+    rel: &str,
+    max_file_bytes: usize,
+    max_total_bytes: usize,
+    total: &mut usize,
+    from_glob: bool,
+) -> std::result::Result<(), String> {
+    if let Some(problem) = output_problem(rel) {
         return Err(problem);
     }
 
@@ -644,14 +769,13 @@ pub(crate) fn ingest_output_file(
         let m = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // **A declared output that is not there fails the task.** The
-                // alternative is a key missing from `outputs`, which nothing
-                // notices until a later `{{ outputs.x.f }}` fails somewhere
-                // else with a message about the wrong task.
-                return Err(format!(
-                    "`outputFiles` declares {rel:?}, which the command did not leave in \
-                     {WORKING_DIR}"
-                ));
+                // **A declared output that is not there is IGNORED** -- no key,
+                // no failure -- the artifact's measured behaviour
+                // (`w5a-scripts.json` `egret_expected.output_files`:
+                // `missing_declared_file: "ignored"`, state SUCCESS). W4 failed
+                // the task here; W5a Task 5 fix round 1 follows Kestra, by the
+                // user's decision.
+                return Ok(());
             }
             Err(e) => {
                 return Err(format!(
@@ -673,6 +797,9 @@ pub(crate) fn ingest_output_file(
     }
     let meta = meta.expect("`relative_problem` refuses an empty name, so there is a segment");
 
+    if meta.is_dir() && from_glob {
+        return Ok(());
+    }
     if meta.is_dir() {
         return Err(format!(
             "`outputFiles` declares {rel:?}, which is a DIRECTORY. An output is JSON \
@@ -690,12 +817,14 @@ pub(crate) fn ingest_output_file(
              answer"
         ));
     }
-    *total += len;
+    // The KEY counts too (fix round 2): many empty files matched by a glob
+    // would otherwise grow the outputs map with no bound.
+    *total += len + rel.len();
     if *total > max_total_bytes {
         return Err(format!(
-            "the output files declared by this task come to {total} bytes, over the \
-             {max_total_bytes} one task may carry. `outputFiles:` is an unbounded \
-             list, so a per-file cap alone bounds nothing"
+            "the output files declared by this task come to {total} bytes (names and \
+             contents), over the {max_total_bytes} one task may carry. `outputFiles:` is \
+             an unbounded list, so a per-file cap alone bounds nothing"
         ));
     }
     let bytes = std::fs::read(&path).map_err(|e| {
@@ -943,6 +1072,14 @@ pub struct DockerRunner {
     max_output_bytes: usize,
     /// [`MAX_VARS_BYTES`], as a field.
     max_vars_bytes: usize,
+    /// [`MAX_LISTING_BYTES`], as a field (a test drives the cap).
+    max_listing_bytes: usize,
+    /// [`MAX_DIFF_BYTES`], as a field (a test drives the cap).
+    max_diff_bytes: usize,
+    /// Where a re-attach reads the attempt's newest stored line from, so it
+    /// follows the container's log from there rather than from its start
+    /// (W5a Task 5). `None`: a re-attach replays the whole log.
+    logs: Option<crate::logs::LogRepo>,
 }
 
 impl Default for DockerRunner {
@@ -959,7 +1096,17 @@ impl DockerRunner {
             binary: "docker".to_string(),
             max_output_bytes: MAX_OUTPUT_FILE_BYTES,
             max_vars_bytes: MAX_VARS_BYTES,
+            max_listing_bytes: MAX_LISTING_BYTES,
+            max_diff_bytes: MAX_DIFF_BYTES,
+            logs: None,
         }
+    }
+
+    /// The same runner, reading the re-attach window from `logs` -- what
+    /// production builds (`runtime::handlers_for`). See [`DockerRunner::run`].
+    pub fn with_logs(mut self, logs: crate::logs::LogRepo) -> Self {
+        self.logs = Some(logs);
+        self
     }
 
     /// The same runner over another binary. For a test, and for an operator
@@ -982,6 +1129,100 @@ impl DockerRunner {
         self.max_output_bytes = max_output_bytes;
         self.max_vars_bytes = max_vars_bytes;
         self
+    }
+
+    /// The same runner with a smaller [`MAX_LISTING_BYTES`], for a test.
+    pub fn with_listing_cap(mut self, max_listing_bytes: usize) -> Self {
+        self.max_listing_bytes = max_listing_bytes;
+        self
+    }
+
+    /// The same runner with a smaller [`MAX_DIFF_BYTES`], for a test.
+    pub fn with_diff_cap(mut self, max_diff_bytes: usize) -> Self {
+        self.max_diff_bytes = max_diff_bytes;
+        self
+    }
+
+    /// The entries of each directory in `dirs`, from `docker diff`, **streamed**
+    /// (W5a Task 5 fix round 3): only lines under the working directory are
+    /// kept, and only they count toward the listing cap -- so a container that
+    /// installed a package tree outside it is not "too many files". The whole
+    /// diff is still bounded, by [`MAX_DIFF_BYTES`] and [`DIFF_TIMEOUT`], as a
+    /// DoS guard with its own message. The process is killed at either cap.
+    ///
+    /// `Ok(Err)` is the task's failure; `Err` is egret's (the daemon).
+    async fn diff_listing(
+        &self,
+        name: &str,
+        dirs: &std::collections::BTreeSet<String>,
+    ) -> Result<std::result::Result<std::collections::BTreeMap<String, Vec<String>>, String>> {
+        use tokio::io::AsyncReadExt;
+        let mut child = Command::new(&self.binary)
+            .args(["diff", name])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                Error::Internal(anyhow::anyhow!("could not run `{} diff`: {e}", self.binary))
+            })?;
+        let stdout = child.stdout.take().expect("stdout piped");
+        let limit = u64::try_from(self.max_diff_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let mut reader = BufReader::new(stdout.take(limit));
+        let prefix = format!("A {WORKING_DIR}/");
+        let prefix_c = format!("C {WORKING_DIR}/");
+        let deadline = tokio::time::Instant::now() + DIFF_TIMEOUT;
+        let (mut total, mut in_wd) = (0usize, 0usize);
+        let mut kept = String::new();
+        let mut line = Vec::new();
+        let too_changed = |what: String| {
+            format!(
+                "the container changed {what} of its filesystem, so egret cannot list its \
+                 outputs to resolve the `outputFiles` glob; name the output files instead"
+            )
+        };
+        let failure = loop {
+            line.clear();
+            let n = match tokio::time::timeout_at(deadline, reader.read_until(b'\n', &mut line))
+                .await
+            {
+                Err(_) => break Some(too_changed(format!("too much to read in {DIFF_TIMEOUT:?}"))),
+                Ok(r) => r.map_err(io_err)?,
+            };
+            if n == 0 {
+                break None;
+            }
+            total += n;
+            if total > self.max_diff_bytes {
+                break Some(too_changed(format!(
+                    "more than {} bytes",
+                    self.max_diff_bytes
+                )));
+            }
+            if line.starts_with(prefix.as_bytes()) || line.starts_with(prefix_c.as_bytes()) {
+                in_wd += n;
+                if in_wd > self.max_listing_bytes {
+                    break Some(listing_too_big(self.max_listing_bytes));
+                }
+                kept.push_str(&String::from_utf8_lossy(&line));
+            }
+        };
+        if let Some(why) = failure {
+            let _ = child.kill().await;
+            return Ok(Err(why));
+        }
+        let mut err = Vec::new();
+        if let Some(stderr) = child.stderr.take() {
+            let _ = stderr.take(64 * 1024).read_to_end(&mut err).await;
+        }
+        let status = child.wait().await.map_err(io_err)?;
+        if !status.success() {
+            return Err(self.classify("diff", &String::from_utf8_lossy(&err)).await);
+        }
+        Ok(Ok(parse_docker_diff(&kept, dirs)))
     }
 
     /// Run one `docker` subcommand to completion, capturing both streams.
@@ -1054,12 +1295,54 @@ impl DockerRunner {
     }
 }
 
+/// What `docker inspect --format {{.State.Status}}` says about a task's
+/// container, as far as [`DockerRunner::run`] cares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Found {
+    /// No container by that name.
+    Absent,
+    /// Created and never started: nothing of the author's has run in it.
+    Created,
+    /// Being removed, or dead: a `cancel` got there first.
+    Going,
+    /// Running, paused, restarting or exited: its work happened, or is
+    /// happening, and a new holder re-attaches to it.
+    Started,
+}
+
 #[async_trait::async_trait]
 impl TaskRunner for DockerRunner {
+    /// Reads `spec.pull_policy` (`docker create --pull`), `spec.cpu`
+    /// (`--cpus`), `spec.memory` (`--memory`) and `spec.delete` (W5a Task 5);
+    /// `resources` is the Kubernetes runner's.
+    ///
+    /// # Re-attach, and what ends a container (W5a spec §5, as the pod)
+    ///
+    /// The container is looked up by [`container_name`] -- **(run, attempt)**
+    /// -- before anything is created:
+    ///
+    /// * **absent**: create it, copy the input files in, `start --attach`;
+    /// * **created, never started** (a holder died between `create` and
+    ///   `start`): nothing of the author's ran, so it is removed and created
+    ///   afresh -- the input copy may have been cut short;
+    /// * **running or exited**: this call adopts it, follows `docker logs
+    ///   --follow` from the attempt's newest stored line minus the margin
+    ///   ([`with_logs`](DockerRunner::with_logs); without it, from the start,
+    ///   and lines repeat), waits for the exit code and collects the outputs;
+    /// * **being removed**: a cancel won; the task fails saying so.
+    ///
+    /// Then, exactly as the Kubernetes runner: **`run` removes nothing**.
+    /// [`release`](TaskRunner::release) removes the container (`delete`,
+    /// default `true`) once the outcome has committed (final review I3); a
+    /// worker failure (`Error::Internal`, the daemon went away) leaves it for
+    /// the next claim to re-attach to; and **dropping this future removes
+    /// nothing** -- there is no `Drop` on this path, so a worker whose lease was
+    /// taken (W5a Task 3) leaves the container running for the new holder.
     async fn run(
         &self,
         task: &TaskInput,
         commands: &TaskCommands,
+        spec: &RunnerSpec,
         observer: &dyn LineObserver,
     ) -> Result<CommandsResult> {
         // `Docker.run`'s own first act, and its own message.
@@ -1068,78 +1351,91 @@ impl TaskRunner for DockerRunner {
                 "This task runner needs the `containerImage` property to be set".to_string(),
             ));
         }
+        // An input name is the author's: refused before a container exists.
+        for rel in commands.input_files.keys() {
+            check_relative(rel)?;
+        }
 
         let name = container_name(task);
-        let argv = commands.argv();
+        let result = match self.find(&name).await? {
+            Found::Absent => {
+                self.create_and_run(task, commands, spec, observer, &name)
+                    .await
+            }
+            Found::Created => {
+                let out = self.cli(&["rm", "--force", &name]).await?;
+                if !out.status.success() {
+                    return Err(self
+                        .classify("rm", &String::from_utf8_lossy(&out.stderr))
+                        .await);
+                }
+                self.create_and_run(task, commands, spec, observer, &name)
+                    .await
+            }
+            Found::Going => Err(Error::InvalidInput(format!(
+                "the task's container {name} is being removed (the run was cancelled)"
+            ))),
+            Found::Started => {
+                tracing::info!(run = %task.run_id, container = %name, "re-attaching to the task's existing container");
+                self.reattach(task, commands, observer, &name).await
+            }
+        };
 
-        // ---- create ----------------------------------------------------
-        let mut create: Vec<String> = vec![
-            "create".into(),
-            "--name".into(),
-            name.clone(),
-            "--workdir".into(),
-            WORKING_DIR.into(),
-        ];
-        for (k, v) in labels(task) {
-            create.push("--label".into());
-            create.push(format!("{k}={v}"));
-        }
-        create.push("--env".into());
-        create.push(format!("{ENV_WORKING_DIR}={WORKING_DIR}"));
-        for (k, v) in &commands.env {
-            create.push("--env".into());
-            create.push(format!("{k}={v}"));
-        }
-        // `withEntrypoint(interpreter)` + `withCmd(joined)`. The CLI takes one
-        // string for `--entrypoint`, so the interpreter's head is the
-        // entrypoint and its tail leads the CMD — which produces the identical
-        // argv, because the daemon concatenates the two.
-        create.push("--entrypoint".into());
-        create.push(argv[0].clone());
-        create.push(commands.container_image.clone());
-        create.extend(argv[1..].iter().cloned());
-
-        let borrowed: Vec<&str> = create.iter().map(String::as_str).collect();
-        let created = self.cli(&borrowed).await?;
-        if !created.status.success() {
-            return Err(self
-                .classify("create", &String::from_utf8_lossy(&created.stderr))
-                .await);
-        }
-
-        // Everything from here on owns a container, so every exit runs through
-        // `remove`. `?` would leak one.
-        let result = self.run_created(task, commands, observer, &name).await;
-        let removed = self.cli(&["rm", "--force", &name]).await;
-        match removed {
-            Ok(out) if !out.status.success() => tracing::warn!(
+        if let Err(Error::Internal(e)) = &result {
+            tracing::warn!(
                 run = %task.run_id,
                 container = %name,
-                "could not remove the container after the run: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-            Err(e) => tracing::warn!(run = %task.run_id, container = %name, "{e}"),
-            Ok(_) => {}
+                "the task container is kept for a later claim to re-attach to: {e}"
+            );
         }
+        // Nothing is removed here, whatever the result: `release`, after the
+        // outcome commits (final review I3).
         result
     }
 
-    /// [`container_name`]'s whole argument, applied: this addresses the
-    /// container by the name that carries **this worker's lease**, so a worker
-    /// whose lease was reaped names a container that no longer exists.
+    /// The container, only if one was **started** for this (run, attempt):
+    /// followed to its end exactly as [`run`](TaskRunner::run)'s re-attach.
+    /// A container that was created and never started ran nothing of the
+    /// author's, so there is nothing to finish: `None`, and `release` removes
+    /// it once the refusal commits.
+    async fn adopt(
+        &self,
+        task: &TaskInput,
+        commands: &TaskCommands,
+        _spec: &RunnerSpec,
+        observer: &dyn LineObserver,
+    ) -> Result<Option<CommandsResult>> {
+        let name = container_name(task);
+        match self.find(&name).await? {
+            Found::Started => {
+                tracing::info!(
+                    run = %task.run_id,
+                    container = %name,
+                    "re-attaching to the task's existing container, which passed the gate \
+                     when it was created"
+                );
+                let result = self.reattach(task, commands, observer, &name).await;
+                if let Err(Error::Internal(e)) = &result {
+                    tracing::warn!(run = %task.run_id, container = %name, "the task container is kept for a later claim to re-attach to: {e}");
+                }
+                result.map(Some)
+            }
+            Found::Absent | Found::Created | Found::Going => Ok(None),
+        }
+    }
+
+    /// Remove the attempt's container: `docker rm --force`, which is
+    /// `killContainerCmd` + delete, Kestra's two shipped defaults
+    /// (`$default$killGracePeriod` = `Duration.ZERO`, `$default$delete` =
+    /// `true`) in one call. A grace period is deliberately not offered.
     ///
-    /// `docker rm --force` is `killContainerCmd` + delete, which are Kestra's
-    /// two shipped defaults (`$default$killGracePeriod` = `Duration.ZERO`,
-    /// `$default$delete` = `true`) in one call. A grace period is deliberately
-    /// not offered: it is a property with no reader, and the artifact's default
-    /// is not to have one.
+    /// **Addressed by (run, attempt), as the Kubernetes runner's pod** -- see
+    /// [`container_name`] for why that no longer lets a reaped worker kill its
+    /// replacement's work.
     ///
     /// **A container that is not there is `Ok(())`**, which is the artifact's
-    /// answer too — `Docker.kill`'s exception table catches
-    /// `NotFoundException` and returns without logging. It is also the only
-    /// answer that is true of the two ways it happens: the run already
-    /// finished, or this worker's lease is stale and the container belongs to
-    /// nobody by this name.
+    /// answer too -- `Docker.kill`'s exception table catches
+    /// `NotFoundException` and returns without logging.
     async fn cancel(&self, task: &TaskInput) -> Result<()> {
         let name = container_name(task);
         let out = self.cli(&["rm", "--force", &name]).await?;
@@ -1149,96 +1445,147 @@ impl TaskRunner for DockerRunner {
         // **There is deliberately no "No such container" branch**, and the
         // whole-branch review's Minor 2 is why: `docker rm --force` on a name
         // that does not exist exits **0** (measured, daemon 28.4.0), so that
-        // branch was unreachable — a guard nobody could see fire, which is the
-        // shape this package has refused throughout. The absent container is
-        // therefore handled by the success arm above, which is also the
-        // artifact's answer (`Docker.kill` catches `NotFoundException` and
-        // returns without logging).
+        // branch was unreachable. The absent container is handled by the
+        // success arm above.
         Err(self
             .classify("rm", &String::from_utf8_lossy(&out.stderr))
             .await)
     }
+
+    /// `docker rm --force` when `spec.delete` (the default); with
+    /// `delete: false` the container is kept, exited -- measured on the
+    /// artifact -- and the orphan sweep leaves it too (its label).
+    async fn release(&self, task: &TaskInput, spec: &RunnerSpec) -> Result<()> {
+        if !spec.delete {
+            return Ok(());
+        }
+        self.cancel(task).await
+    }
 }
 
 impl DockerRunner {
-    /// The half of [`TaskRunner::run`] that runs with a container in
-    /// existence.
+    /// The state of the container called `name`, per [`Found`].
     ///
-    /// Split out so the caller can remove the container on **every** path
-    /// without a `Drop` guard that would have to block on an async call.
-    async fn run_created(
+    /// A failed `inspect` is **absent** when the daemon answers the probe and
+    /// egret's outage when it does not -- the probe, not the stderr, decides
+    /// ([`_CLASSIFICATION_IS_A_PROBE_NOT_A_SUBSTRING_TEST`]).
+    async fn find(&self, name: &str) -> Result<Found> {
+        let out = self
+            .cli(&[
+                "inspect",
+                "--type",
+                "container",
+                "--format",
+                "{{.State.Status}}",
+                name,
+            ])
+            .await?;
+        if !out.status.success() {
+            if self.daemon_answers().await {
+                return Ok(Found::Absent);
+            }
+            return Err(Error::Internal(anyhow::anyhow!(
+                "the Docker daemon could not be reached, so the task's container could not be \
+                 looked up: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(match String::from_utf8_lossy(&out.stdout).trim() {
+            "created" => Found::Created,
+            "removing" | "dead" => Found::Going,
+            _ => Found::Started,
+        })
+    }
+
+    /// `docker create` with the task's name, labels, env, runner properties
+    /// and argv, then [`run_created`](Self::run_created).
+    async fn create_and_run(
+        &self,
+        task: &TaskInput,
+        commands: &TaskCommands,
+        spec: &RunnerSpec,
+        observer: &dyn LineObserver,
+        name: &str,
+    ) -> Result<CommandsResult> {
+        let borrowed_args = create_args(task, commands, spec, name);
+        let borrowed: Vec<&str> = borrowed_args.iter().map(String::as_str).collect();
+        let created = self.cli(&borrowed).await?;
+        if !created.status.success() {
+            return Err(self
+                .classify("create", &String::from_utf8_lossy(&created.stderr))
+                .await);
+        }
+        self.run_created(task, commands, observer, name).await
+    }
+
+    /// Adopt a container a previous holder started: follow its log from the
+    /// re-attach window, wait for its exit code, collect its outputs.
+    async fn reattach(
         &self,
         task: &TaskInput,
         commands: &TaskCommands,
         observer: &dyn LineObserver,
         name: &str,
     ) -> Result<CommandsResult> {
-        // ---- input files ------------------------------------------------
-        //
-        // `docker cp` into a container that has never started, which is
-        // Kestra's `copyArchiveToContainer` and the reason the working
-        // directory does not have to exist first: measured on this machine's
-        // daemon (28.4.0), a copy into `/egret/working-dir` creates it.
-        if !commands.input_files.is_empty() {
-            // **[`StagingDir`] removes itself however this scope ends** —
-            // including when `timeout::guard` drops the whole future mid-copy,
-            // which is the path an explicit cleanup could never cover (review
-            // Minor 3). Review Minor 2's `?`-before-cleanup leak is closed by
-            // the same thing, so the closure that used to force a single exit
-            // is gone with it.
-            // # `input_files` KEYS ARE NOT AUTHOR-SUPPLIED TODAY, AND THE NEXT
-            // # HANDLER AUTHOR MUST KEEP IT THAT WAY
-            //
-            // The `create_dir_all(...).map_err(io_err)?` below is the **closed
-            // Critical's exact shape**: an author-derived path handed to the
-            // filesystem, with an `io::Error` becoming `Error::Internal` and
-            // therefore a worker failure. It is unreachable only because **no
-            // handler lets an author name a key**: `handlers::python` writes the
-            // single constant `SCRIPT_FILE` and `handlers::container` passes an
-            // empty map. Nothing in the type system says so — `TaskCommands` is
-            // `pub` and its `input_files` is a plain `BTreeMap`.
-            //
-            // A handler that ever maps an author's value into a key here
-            // reintroduces the Critical in its original form. It should route
-            // through [`stage_destination`], whose `String` error cannot express
-            // a worker failure, exactly as the output path does.
-            let staging = tempdir(task)?;
-            for (rel, contents) in &commands.input_files {
-                check_relative(rel)?;
-                let path = staging.path().join(rel);
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(io_err)?;
-                }
-                std::fs::write(&path, contents).map_err(io_err)?;
-            }
-            let src = format!("{}/.", staging.path().display());
-            let dst = format!("{name}:{WORKING_DIR}");
-            let out = self.cli(&["cp", &src, &dst]).await?;
-            if !out.status.success() {
-                return Err(self
-                    .classify("cp", &String::from_utf8_lossy(&out.stderr))
-                    .await);
-            }
+        let (since, mut replayed) = match &self.logs {
+            Some(logs) => crate::worker::k8s::runner::reattach_window(logs, task).await?,
+            None => (None, crate::worker::k8s::runner::Replayed::default()),
+        };
+        let mut args: Vec<String> = vec!["logs".into(), "--follow".into()];
+        if let Some(since) = since {
+            args.push("--since".into());
+            args.push(since.timestamp().to_string());
         }
-
-        // ---- start, and stream --------------------------------------------
+        args.push(name.to_string());
         let mut child = Command::new(&self.binary)
-            .args(["start", "--attach", name])
+            .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // The attach is the long one, so it is the one most likely to be
-            // dropped mid-flight. `kill_on_drop` reaps the CLI; the container
-            // itself is the daemon's and is stopped by `cancel`.
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
-                Error::Internal(anyhow::anyhow!(
-                    "could not run `{} start`: {e}",
-                    self.binary
-                ))
+                Error::Internal(anyhow::anyhow!("could not run `{} logs`: {e}", self.binary))
             })?;
+        let mut result = self
+            .pump(task, observer, &mut child, Some(&mut replayed))
+            .await?;
+        child.wait().await.map_err(io_err)?;
 
+        // `docker wait` rather than `inspect`: the log stream can close a
+        // moment before the daemon records the exit, and `wait` returns the
+        // code once it has (immediately, for a container already exited).
+        let waited = self.cli(&["wait", name]).await?;
+        if !waited.status.success() {
+            return Err(self
+                .classify("wait", &String::from_utf8_lossy(&waited.stderr))
+                .await);
+        }
+        let raw = String::from_utf8_lossy(&waited.stdout).trim().to_string();
+        result.exit_code = raw.parse::<i32>().map_err(|_| {
+            Error::Internal(anyhow::anyhow!(
+                "docker wait returned {raw:?} for the exit code of {name}"
+            ))
+        })?;
+
+        if !commands.output_files.is_empty() && result.failure.is_none() {
+            let staging = tempdir(task)?;
+            self.collect_output_files(name, commands, staging.path(), &mut result)
+                .await?;
+        }
+        Ok(result)
+    }
+
+    /// Read both of `child`'s pipes to their end, every line through
+    /// [`stream_line`]; a line the previous holder already stored
+    /// (`replayed`) is dropped once.
+    async fn pump(
+        &self,
+        task: &TaskInput,
+        observer: &dyn LineObserver,
+        child: &mut tokio::process::Child,
+        mut replayed: Option<&mut crate::worker::k8s::runner::Replayed>,
+    ) -> Result<CommandsResult> {
         let mut out_lines = BufReader::new(child.stdout.take().expect("stdout piped")).lines();
         let mut err_lines = BufReader::new(child.stderr.take().expect("stderr piped")).lines();
 
@@ -1260,7 +1607,11 @@ impl DockerRunner {
                     None => { err_open = false; continue }
                 },
             };
-
+            if let Some(r) = replayed.as_deref_mut() {
+                if r.already_stored(&line) {
+                    continue;
+                }
+            }
             // **Every decision about this line is [`ingest_line`]'s**, and
             // this loop keeps only the pipes. See that function for why the
             // split is a merge condition and not a tidy-up.
@@ -1275,7 +1626,72 @@ impl DockerRunner {
             )
             .await;
         }
+        Ok(result)
+    }
 
+    /// The half of a fresh run that runs with a container in existence:
+    /// input files in, `start --attach`, exit code, output files out.
+    async fn run_created(
+        &self,
+        task: &TaskInput,
+        commands: &TaskCommands,
+        observer: &dyn LineObserver,
+        name: &str,
+    ) -> Result<CommandsResult> {
+        // ---- input files ------------------------------------------------
+        //
+        // `docker cp` into a container that has never started, which is
+        // Kestra's `copyArchiveToContainer` and the reason the working
+        // directory does not have to exist first: measured on this machine's
+        // daemon (28.4.0), a copy into `/egret/working-dir` creates it.
+        if !commands.input_files.is_empty() {
+            // **[`StagingDir`] removes itself however this scope ends** --
+            // including when `timeout::guard` drops the whole future mid-copy.
+            //
+            // # `input_files` KEYS ARE AUTHOR-SUPPLIED SINCE W5a
+            //
+            // `inputFiles:` is a script task property, so a key is the
+            // author's path. Everything decided about it must be a TASK
+            // failure, never a worker failure: [`check_relative`] (in `run`)
+            // refuses `..`, absolute paths, `.` and globs, and the staging
+            // writes below go through [`stage_input`], whose error type is
+            // `String` and becomes `InvalidInput` -- so `{"a": .., "a/b": ..}`
+            // (a file where a directory must go) fails the task instead of
+            // wedging the run as the closed Critical's shape did.
+            let staging = tempdir(task)?;
+            for (rel, contents) in &commands.input_files {
+                stage_input(staging.path(), rel, contents).map_err(Error::InvalidInput)?;
+            }
+            let src = format!("{}/.", staging.path().display());
+            let dst = format!("{name}:{WORKING_DIR}");
+            let out = self.cli(&["cp", &src, &dst]).await?;
+            if !out.status.success() {
+                return Err(self
+                    .classify("cp", &String::from_utf8_lossy(&out.stderr))
+                    .await);
+            }
+        }
+
+        // ---- start, and stream --------------------------------------------
+        let mut child = Command::new(&self.binary)
+            .args(["start", "--attach", name])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // The attach is the long one, so it is the one most likely to be
+            // dropped mid-flight. `kill_on_drop` reaps the CLI; the container
+            // itself is the daemon's and keeps running -- the next holder
+            // re-attaches to it, and `cancel` is what stops it.
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                Error::Internal(anyhow::anyhow!(
+                    "could not run `{} start`: {e}",
+                    self.binary
+                ))
+            })?;
+
+        let mut result = self.pump(task, observer, &mut child, None).await?;
         let status = child.wait().await.map_err(io_err)?;
 
         // ---- the exit code, read from the container and not from the CLI ---
@@ -1361,14 +1777,39 @@ impl DockerRunner {
         result: &mut CommandsResult,
     ) -> Result<()> {
         let mut total = 0usize;
-        for (i, rel) in commands.output_files.iter().enumerate() {
-            // The name is vetted BEFORE it is interpolated into a `docker cp`
-            // argument, so `..` never reaches the daemon and the staged path
-            // cannot land outside `staging`.
-            if let Some(problem) = relative_problem(rel) {
+        // Every declared name is vetted BEFORE anything is interpolated into
+        // a `docker` argument, so `..` never reaches the daemon and a staged
+        // path cannot land outside `staging`.
+        for rel in &commands.output_files {
+            if let Some(problem) = output_problem(rel) {
                 result.failure = Some(problem);
                 return Ok(());
             }
+        }
+        // Patterns are resolved against `docker diff` -- the paths the
+        // container added, which works on a stopped container and moves no
+        // file contents -- then read back one file at a time like a literal.
+        let dirs = pattern_dirs(&commands.output_files);
+        let listed = if dirs.is_empty() {
+            std::collections::BTreeMap::new()
+        } else {
+            match self.diff_listing(name, &dirs).await? {
+                Ok(listed) => listed,
+                Err(problem) => {
+                    result.failure = Some(problem);
+                    return Ok(());
+                }
+            }
+        };
+        let names = match expand_outputs(&commands.output_files, &listed, MAX_OUTPUT_NAMES) {
+            Ok(n) => n,
+            Err(problem) => {
+                result.failure = Some(problem);
+                return Ok(());
+            }
+        };
+        for (i, (rel, from_glob)) in names.iter().enumerate() {
+            let (rel, from_glob) = (rel.as_str(), *from_glob);
             // **One private root per declared name** — see
             // [`stage_destination`] for the whole argument. Nothing an author
             // declares can reach another declared name's staging tree.
@@ -1398,13 +1839,14 @@ impl DockerRunner {
             // A copy that failed while the daemon is up is left to the
             // filesystem: the file is simply not staged, and
             // `ingest_output_file` produces the author-facing message.
-            if let Err(problem) = ingest_output_file(
+            if let Err(problem) = ingest_output(
                 result,
                 &root,
                 rel,
                 self.max_output_bytes,
                 self.max_output_bytes,
                 &mut total,
+                from_glob,
             ) {
                 result.failure = Some(problem);
                 break;
@@ -1412,6 +1854,262 @@ impl DockerRunner {
         }
         Ok(())
     }
+}
+
+/// The label every egret task container **and** task pod carries with its
+/// `task_runs.id` — what an orphan sweep reads to find the run a piece of
+/// work belongs to.
+pub const TASKRUN_LABEL: &str = "egret.io/taskrun-id";
+
+/// The prefix of every task container's and task pod's name.
+pub const RUN_NAME_PREFIX: &str = "egret-run-";
+
+/// **Clean up the work a runner left behind for runs that have ended** —
+/// one interface for both runners (W5a Task 4, carrying Task 3's finding).
+///
+/// Task 3 measured that a Docker container whose worker lost its lease keeps
+/// running, and until re-attach exists the new holder starts a second one; a
+/// pod is left behind the same way when egret dies between downloading a
+/// task's outputs and deleting its pod (spec §5, *Orphans*). Neither is
+/// anybody's to delete while its run is live, and both are garbage once the
+/// run is terminal. The reaper's tick calls this (Task 5 wires the call site).
+///
+/// Returns how many were removed. `Err` is the runner's backend being
+/// unreachable; one item that fails to delete is logged and not counted.
+#[async_trait::async_trait]
+pub trait OrphanSweep: Send + Sync {
+    async fn sweep_orphans(&self, pool: &sqlx::PgPool) -> Result<u64>;
+}
+
+/// Of `ids`, which `task_runs` rows are terminal, and which have no row at
+/// all — the one question both halves of [`OrphanSweep`] ask the database.
+///
+/// Terminal is [`RunState::is_terminal`](crate::executor::RunState::is_terminal),
+/// Kestra's `isTerminated()`, spelled here by the enum rather than a copied
+/// list so the two cannot drift.
+pub(crate) async fn run_liveness(pool: &sqlx::PgPool, ids: &[uuid::Uuid]) -> Result<RunLiveness> {
+    let terminal: Vec<&str> = crate::executor::RunState::ALL
+        .iter()
+        .filter(|s| s.is_terminal())
+        .map(|s| s.wire())
+        .collect();
+    let rows: Vec<(uuid::Uuid, bool)> =
+        sqlx::query_as("SELECT id, state = ANY($2) FROM workflow.task_runs WHERE id = ANY($1)")
+            .bind(ids)
+            .bind(&terminal)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| {
+                Error::Internal(anyhow::anyhow!(
+                    "reading run states for the orphan sweep: {e}"
+                ))
+            })?;
+    let mut out = RunLiveness::default();
+    let mut seen = std::collections::HashSet::new();
+    for (id, is_terminal) in rows {
+        seen.insert(id);
+        if is_terminal {
+            out.terminal.insert(id);
+        }
+    }
+    for id in ids {
+        if !seen.contains(id) {
+            out.missing.insert(*id);
+        }
+    }
+    Ok(out)
+}
+
+/// [`run_liveness`]'s answer.
+#[derive(Debug, Default)]
+pub(crate) struct RunLiveness {
+    /// A row exists and its state is terminal.
+    pub terminal: std::collections::HashSet<uuid::Uuid>,
+    /// No row at all (the execution was deleted, cascading its runs — or the
+    /// work belongs to ANOTHER egret sharing the backend).
+    pub missing: std::collections::HashSet<uuid::Uuid>,
+}
+
+/// **The Docker half of the sweep.**
+///
+/// Lists every container carrying [`TASKRUN_LABEL`] whose name starts with
+/// [`RUN_NAME_PREFIX`], and force-removes those whose run is **terminal**.
+///
+/// # A container whose run has NO row is left alone, unlike a pod
+///
+/// A Docker daemon is shared: a developer's machine runs the dev stack, the
+/// test suites and anything else against one daemon, each with its own
+/// database. A container whose run id is absent from *this* database is far
+/// more likely to be another egret's live work than an orphan of ours, so
+/// only a row this database can see as terminal authorises the removal. The
+/// pod sweep differs on purpose: the task namespace is egret's alone
+/// ([`k8s::sweep_orphans`](super::k8s::sweep_orphans)).
+#[async_trait::async_trait]
+impl OrphanSweep for DockerRunner {
+    async fn sweep_orphans(&self, pool: &sqlx::PgPool) -> Result<u64> {
+        let label_filter = format!("label={TASKRUN_LABEL}");
+        let format = format!(
+            "{{{{.Names}}}}\t{{{{.Label \"{TASKRUN_LABEL}\"}}}}\t{{{{.Label \"{DELETE_LABEL}\"}}}}"
+        );
+        let out = self
+            .cli(&[
+                "ps",
+                "--all",
+                "--filter",
+                &label_filter,
+                "--format",
+                &format,
+            ])
+            .await?;
+        if !out.status.success() {
+            return Err(self
+                .classify("ps", &String::from_utf8_lossy(&out.stderr))
+                .await);
+        }
+        let listed = parse_docker_ps(&String::from_utf8_lossy(&out.stdout));
+        if listed.is_empty() {
+            return Ok(0);
+        }
+        let ids: Vec<uuid::Uuid> = listed.iter().map(|(_, id)| *id).collect();
+        let live = run_liveness(pool, &ids).await?;
+        let mut removed = 0u64;
+        for (name, id) in &listed {
+            if !live.terminal.contains(id) {
+                continue;
+            }
+            match self.cli(&["rm", "--force", name]).await {
+                Ok(o) if o.status.success() => removed += 1,
+                Ok(o) => tracing::warn!(
+                    container = %name,
+                    "orphan sweep could not remove the container: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ),
+                Err(e) => tracing::warn!(container = %name, "orphan sweep: {e}"),
+            }
+        }
+        Ok(removed)
+    }
+}
+
+/// `docker ps --format '{{.Names}}\t{{.Label "egret.io/taskrun-id"}}\t{{.Label "egret.io/delete"}}'`,
+/// parsed: the egret task containers only (name prefix AND a label that is a
+/// UUID), **minus those the author asked to keep** (`delete: false`, the
+/// [`DELETE_LABEL`] -- the pod sweep's rule, W5a Task 5).
+fn parse_docker_ps(stdout: &str) -> Vec<(String, uuid::Uuid)> {
+    stdout
+        .lines()
+        .filter_map(|l| {
+            let mut cols = l.split('\t');
+            let name = cols.next()?;
+            let id = cols.next()?;
+            let keep = cols.next().is_some_and(|d| d.trim() == "false");
+            if !name.starts_with(RUN_NAME_PREFIX) || keep {
+                return None;
+            }
+            Some((name.to_string(), uuid::Uuid::parse_str(id.trim()).ok()?))
+        })
+        .collect()
+}
+
+/// `docker create`'s argv for one task: name, working directory, labels, env,
+/// the `taskRunner:` properties the Docker runner implements, entrypoint,
+/// image and CMD. Pure, so the mapping is asserted without a daemon.
+///
+/// * `pullPolicy` → `--pull`: `IF_NOT_PRESENT` is `missing` (the CLI's own
+///   default, written out), `ALWAYS` is `always`, `NEVER` is `never`.
+/// * `cpu.cpus` → `--cpus`, `memory.memory` → `--memory`, as written; a value
+///   the daemon cannot parse fails `create`, i.e. the task, with its words.
+/// * `delete: false` → the [`DELETE_LABEL`] label, which the orphan sweep reads.
+///
+/// **No disk bound** (final review I5, a known limit): Docker has no portable
+/// per-container disk limit -- `--storage-opt size=` works only on overlay2
+/// over xfs with `pquota` -- so a task on this runner can fill the daemon's
+/// disk. The Kubernetes runner bounds it (`ephemeral-storage` and
+/// `emptyDir.sizeLimit`); this runner is for local development and tests.
+pub(crate) fn create_args(
+    task: &TaskInput,
+    commands: &TaskCommands,
+    spec: &RunnerSpec,
+    name: &str,
+) -> Vec<String> {
+    let argv = commands.argv();
+    let mut create: Vec<String> = vec![
+        "create".into(),
+        "--name".into(),
+        name.to_string(),
+        "--workdir".into(),
+        WORKING_DIR.into(),
+        "--pull".into(),
+        match spec.pull_policy {
+            crate::scripts::PullPolicy::Always => "always",
+            crate::scripts::PullPolicy::IfNotPresent => "missing",
+            crate::scripts::PullPolicy::Never => "never",
+        }
+        .into(),
+    ];
+    if let Some(cpus) = &spec.cpu {
+        create.push("--cpus".into());
+        create.push(cpus.clone());
+    }
+    if let Some(memory) = &spec.memory {
+        create.push("--memory".into());
+        create.push(memory.clone());
+    }
+    for (k, v) in labels(task) {
+        create.push("--label".into());
+        create.push(format!("{k}={v}"));
+    }
+    if !spec.delete {
+        create.push("--label".into());
+        create.push(format!("{DELETE_LABEL}=false"));
+    }
+    create.push("--env".into());
+    create.push(format!("{ENV_WORKING_DIR}={WORKING_DIR}"));
+    for (k, v) in &commands.env {
+        create.push("--env".into());
+        create.push(format!("{k}={v}"));
+    }
+    // `withEntrypoint(interpreter)` + `withCmd(joined)`. The CLI takes one
+    // string for `--entrypoint`, so the interpreter's head is the entrypoint
+    // and its tail leads the CMD — which produces the identical argv, because
+    // the daemon concatenates the two.
+    create.push("--entrypoint".into());
+    create.push(argv[0].clone());
+    // `--` ends `docker create`'s flags, so the image can only ever be the
+    // IMAGE positional. Without it an image spelled like a flag
+    // (`--privileged`) WAS a flag, and the author's interpreter tail then
+    // supplied the rest (`-v /:/host alpine …`) -- final review I1. The gate
+    // refuses such an image first (`gate::image_ref_problem`); this is the
+    // second line, and it holds on its own.
+    create.push("--".into());
+    create.push(commands.container_image.clone());
+    create.extend(argv[1..].iter().cloned());
+    create
+}
+
+/// Write one author-named input file under the staging `root`.
+///
+/// `String` errors, as [`stage_destination`]: an author's `inputFiles` key
+/// must never be able to produce a worker failure. Parents are created by
+/// egret; a name whose parent is already a FILE (`{"a": …, "a/b": …}`) or
+/// that is itself a directory another name needs is refused with a message.
+pub(crate) fn stage_input(
+    root: &std::path::Path,
+    rel: &str,
+    contents: &str,
+) -> std::result::Result<(), String> {
+    if let Some(problem) = relative_problem(rel) {
+        return Err(problem);
+    }
+    let path = root.join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!("the input file {rel:?} cannot be placed: a parent of it is also declared as a file ({e})")
+        })?;
+    }
+    std::fs::write(&path, contents).map_err(|e| {
+        format!("the input file {rel:?} cannot be written: another input file needs it to be a directory ({e})")
+    })
 }
 
 /// Make the staging destination for **one** declared output name, under a root
@@ -1589,7 +2287,7 @@ fn check_relative(rel: &str) -> Result<()> {
 
 /// The same rule as a **message or nothing**, so [`ingest_output_file`] can use
 /// it without an [`Error`] it would only have to unwrap again.
-fn relative_problem(rel: &str) -> Option<String> {
+pub(crate) fn relative_problem(rel: &str) -> Option<String> {
     if rel.is_empty() {
         return Some("a file name must not be empty".to_string());
     }
@@ -1623,6 +2321,216 @@ fn relative_problem(rel: &str) -> Option<String> {
     None
 }
 
+/// Is a declared output a pattern (`*` or `?` in its file name) rather than a
+/// literal name.
+pub(crate) fn is_pattern(rel: &str) -> bool {
+    rel.contains(['*', '?'])
+}
+
+/// [`relative_problem`] for a DECLARED output, which may be a non-recursive
+/// glob (W5a Task 5 fix round 1, following `w5a-scripts.json`
+/// `egret_expected.output_files`: `*.csv` keys `a.csv`, `b.csv` and not
+/// `sub/c.csv`).
+///
+/// `*` (any run of characters) and `?` (one character) are accepted in the
+/// FILE NAME -- the last segment -- and match within the one directory the
+/// rest of the name gives (`sub/*.csv`). Refused by name, never ignored: a
+/// wildcard in a directory segment, `**`, and `[...]` classes (not
+/// implemented; `scripts::parse` refuses a literal one at save).
+pub(crate) fn output_problem(rel: &str) -> Option<String> {
+    if rel.contains('[') || rel.contains("**") {
+        return Some(format!(
+            "{rel:?}: `**` and `[...]` in `outputFiles` are not implemented by egret \
+             (W5a); `*` and `?` in the file name are"
+        ));
+    }
+    let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
+    if is_pattern(file) && file.len() > MAX_PATTERN_BYTES {
+        return Some(format!(
+            "an `outputFiles` pattern's file name is {} bytes, over the {MAX_PATTERN_BYTES} \
+             a file name can have",
+            file.len()
+        ));
+    }
+    if is_pattern(dir) {
+        return Some(format!(
+            "{rel:?}: a wildcard in a directory of `outputFiles` is not implemented by \
+             egret (W5a); only the file name may be a pattern"
+        ));
+    }
+    let literal = file.replace(['*', '?'], "x");
+    let probe = if dir.is_empty() {
+        literal
+    } else {
+        format!("{dir}/{literal}")
+    };
+    relative_problem(&probe).map(|p| p.replace(&format!("{probe:?}"), &format!("{rel:?}")))
+}
+
+/// The limits on the declared LIST (W5a Task 5 fix round 3), judged at save
+/// by `scripts::parse` and again at run: at most [`MAX_OUTPUT_NAMES`]
+/// entries, and at most [`MAX_OUTPUT_PATTERNS`] distinct patterns.
+pub(crate) fn output_list_problem<'a>(
+    declared: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    let mut entries = 0usize;
+    let mut patterns = std::collections::HashSet::new();
+    for rel in declared {
+        entries += 1;
+        if is_pattern(rel) {
+            patterns.insert(rel);
+        }
+    }
+    if entries > MAX_OUTPUT_NAMES {
+        return Some(format!(
+            "`outputFiles` declares {entries} entries, over the {MAX_OUTPUT_NAMES} one task \
+             may read back"
+        ));
+    }
+    if patterns.len() > MAX_OUTPUT_PATTERNS {
+        return Some(format!(
+            "`outputFiles` declares {} distinct patterns, over the {MAX_OUTPUT_PATTERNS} one \
+             task may; match fewer, wider patterns",
+            patterns.len()
+        ));
+    }
+    None
+}
+
+/// Resolve the declared outputs to the names to read back, given the entries
+/// directly inside each directory a pattern names (`listed[dir]`, `""` for
+/// the working directory). Literal names are kept, in declared order,
+/// whether or not they exist (a missing one is ignored when read); each
+/// pattern contributes its matches, sorted. A name is returned once. The
+/// `bool` is "from a glob". Pure: both runners list, then call this.
+///
+/// `Err` (the task's message) when the names exceed `max_names` -- per
+/// pattern or in total ([`MAX_OUTPUT_NAMES`]).
+pub(crate) fn expand_outputs(
+    declared: &[String],
+    listed: &std::collections::BTreeMap<String, Vec<String>>,
+    max_names: usize,
+) -> std::result::Result<Vec<(String, bool)>, String> {
+    let too_many = |what: &str| {
+        format!(
+            "`outputFiles` {what} more than {max_names} names; egret reads back at most \
+             {max_names} output files per task (each is a copy and an output key, stored on \
+             the task run: W9 owns storage)"
+        )
+    };
+    if let Some(problem) = output_list_problem(declared.iter().map(String::as_str)) {
+        return Err(problem);
+    }
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut seen_patterns = std::collections::HashSet::new();
+    let mut budget = GLOB_STEP_BUDGET;
+    for rel in declared {
+        if !is_pattern(rel) {
+            if seen.insert(rel.clone()) {
+                out.push((rel.clone(), false));
+            }
+            continue;
+        }
+        // A pattern declared twice is matched once.
+        if !seen_patterns.insert(rel.as_str()) {
+            continue;
+        }
+        let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
+        let mut matched: Vec<String> = Vec::new();
+        for name in listed.get(dir).into_iter().flatten() {
+            match crate::scripts::gate::glob_match_within(file, name, &mut budget) {
+                None => {
+                    return Err(format!(
+                        "matching the `outputFiles` patterns against the working directory \
+                         took more than {GLOB_STEP_BUDGET} steps; declare fewer or simpler \
+                         patterns, or fewer files"
+                    ))
+                }
+                Some(false) => {}
+                Some(true) => {
+                    if matched.len() == max_names {
+                        return Err(too_many(&format!("pattern {rel:?} matches")));
+                    }
+                    matched.push(if dir.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{dir}/{name}")
+                    });
+                }
+            }
+        }
+        matched.sort();
+        for m in matched {
+            if seen.insert(m.clone()) {
+                out.push((m, true));
+            }
+        }
+    }
+    if out.len() > max_names {
+        return Err(too_many("resolves to"));
+    }
+    Ok(out)
+}
+
+/// The task's message when a glob's directory listing is over
+/// [`MAX_LISTING_BYTES`].
+pub(crate) fn listing_too_big(cap: usize) -> String {
+    format!(
+        "the working directory's listing, needed to resolve the `outputFiles` glob, is \
+         over {cap} bytes (too many files); name the output files, or write fewer files"
+    )
+}
+
+/// The directories whose entries [`expand_outputs`] needs listed.
+pub(crate) fn pattern_dirs(declared: &[String]) -> std::collections::BTreeSet<String> {
+    declared
+        .iter()
+        .filter(|rel| is_pattern(rel))
+        .map(|rel| rel.rsplit_once('/').map_or("", |(d, _)| d).to_string())
+        .collect()
+}
+
+/// `docker diff` lines (`A /egret/working-dir/sub/c.csv`), as the entries of
+/// each directory in `dirs` that are not a parent of another entry -- i.e.
+/// its files (and empty directories, which [`ingest_output`] skips for a
+/// glob).
+fn parse_docker_diff(
+    stdout: &str,
+    dirs: &std::collections::BTreeSet<String>,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let prefix = format!("{WORKING_DIR}/");
+    let paths: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| l.get(2..))
+        .filter_map(|p| p.strip_prefix(prefix.as_str()))
+        .filter(|p| !p.is_empty())
+        .collect();
+    let mut out: std::collections::BTreeMap<String, Vec<String>> =
+        dirs.iter().map(|d| (d.clone(), Vec::new())).collect();
+    // Every proper ancestor of every path, once: linear in the listing's
+    // length (fix round 2 -- the first version compared every path with
+    // every other, quadratic in a listing the author controls).
+    let mut parents: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for p in &paths {
+        for (i, b) in p.bytes().enumerate() {
+            if b == b'/' {
+                parents.insert(&p[..i]);
+            }
+        }
+    }
+    for p in &paths {
+        if parents.contains(p) {
+            continue;
+        }
+        let (dir, name) = p.rsplit_once('/').unwrap_or(("", p));
+        if let Some(v) = out.get_mut(dir) {
+            v.push(name.to_string());
+        }
+    }
+    out
+}
+
 fn io_err(e: std::io::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))
 }
@@ -1633,41 +2541,50 @@ mod tests {
     use crate::logs::fixture;
     use crate::worker::handlers::testing::input;
 
-    fn leased(secs: i64) -> TaskInput {
+    /// A task input for run 7; `task` is the task id, so two inputs can
+    /// differ in everything but the run and the attempt.
+    fn leased(task: i64) -> TaskInput {
         TaskInput {
             run_id: uuid::Uuid::from_u128(7),
-            claimed_at: chrono::DateTime::from_timestamp(secs, 0).expect("a valid instant"),
+            task_id: format!("t{task}"),
             ..input("egret.container", serde_json::json!({}))
         }
     }
 
-    /// **The lease is in the name, and this is the assertion that would fail if
-    /// it were not.**
+    /// **The name is the (run, attempt) re-attach key, and nothing else**
+    /// (W5a Task 5; see [`container_name`] for the argument). `TaskInput`
+    /// carries no lease since the final review (I2), so a lease-keyed name is
+    /// not even expressible.
     ///
-    /// Two inputs that agree on everything the old `TaskInput` carried —
-    /// `run_id`, `execution_id`, `task_id`, `attempt` — and differ only in the
-    /// lease. If [`container_name`] dropped `claimed_at`, these two would be
-    /// equal, and a reaped worker's `cancel` would address its replacement's
-    /// container. The unit test says the names differ; the live suite's
-    /// `a_reaped_workers_cancel_cannot_reach_its_replacements_container` says
-    /// the daemon agrees.
+    /// Two holders of one attempt compute the same name, which is what lets
+    /// the second find the first's container; a retry (the next attempt) gets
+    /// a different one; and the name is the pod name, so the two runners
+    /// address their work identically.
     #[test]
-    fn the_container_name_carries_the_lease_and_not_only_the_run() {
+    fn the_container_name_is_the_attempt_and_not_the_lease() {
         let a = leased(1_700_000_000);
         let b = leased(1_700_000_001);
-        assert_eq!(a.run_id, b.run_id, "the two differ ONLY in the lease");
-        assert_eq!(a.attempt, b.attempt);
-        assert_ne!(
+        assert_eq!(a.run_id, b.run_id, "one run, one attempt, two holders");
+        assert_eq!(
             container_name(&a),
             container_name(&b),
-            "a name that ignores `claimed_at` lets a reaped worker kill its \
-             replacement's container -- see `TaskHandler::cancel`'s hazard note"
+            "a new holder of the same attempt must find the old holder's container"
         );
         assert_eq!(
             container_name(&a),
-            "egret-run-00000000000000000000000000000007-1700000000000000",
-            "the format is pinned: a change to it is a change to what `cancel` \
-             addresses, and every running container's name at once"
+            "egret-run-00000000000000000000000000000007-1",
+            "the format is pinned: a change to it is a change to what `cancel` and \
+             re-attach address, and every running container's name at once"
+        );
+        let retry = TaskInput {
+            attempt: 2,
+            ..a.clone()
+        };
+        assert_ne!(container_name(&a), container_name(&retry));
+        assert_eq!(
+            container_name(&a),
+            crate::worker::k8s::pod_name(a.run_id, 1),
+            "the Docker and Kubernetes runners name an attempt's work the same way"
         );
     }
 
@@ -1675,8 +2592,11 @@ mod tests {
     /// `[a-zA-Z0-9][a-zA-Z0-9_.-]*`.
     #[test]
     fn every_name_this_produces_is_a_legal_container_name() {
-        for secs in [0_i64, 1, 1_700_000_000, -1, -1_700_000_000] {
-            let name = container_name(&leased(secs));
+        for attempt in [0_usize, 1, 7, usize::MAX] {
+            let name = container_name(&TaskInput {
+                attempt,
+                ..leased(1_700_000_000)
+            });
             let mut chars = name.chars();
             let first = chars.next().expect("non-empty");
             assert!(
@@ -1688,6 +2608,142 @@ mod tests {
                 "{name} holds a character docker will refuse"
             );
         }
+    }
+
+    /// **`docker create` carries the `taskRunner:` properties the Docker runner
+    /// implements** -- `pullPolicy`, `cpu.cpus`, `memory.memory`, `delete` --
+    /// and a default spec carries only `--pull missing`.
+    #[test]
+    fn create_args_carry_the_docker_runner_properties() {
+        let task = leased(1_700_000_000);
+        let cmds = TaskCommands {
+            container_image: "alpine:3.20".into(),
+            commands: vec!["echo hi".into()],
+            ..TaskCommands::default()
+        };
+        let pair = |args: &[String], flag: &str| -> Option<String> {
+            args.iter()
+                .position(|a| a == flag)
+                .map(|i| args[i + 1].clone())
+        };
+
+        let d = create_args(
+            &task,
+            &cmds,
+            &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+            "n",
+        );
+        assert_eq!(pair(&d, "--pull").as_deref(), Some("missing"));
+        assert_eq!(pair(&d, "--cpus"), None);
+        assert_eq!(pair(&d, "--memory"), None);
+        assert!(!d.iter().any(|a| a.starts_with(DELETE_LABEL)), "{d:?}");
+        // The image is followed by the CMD tail, and nothing after it is a flag.
+        let at = d
+            .iter()
+            .position(|a| a == "alpine:3.20")
+            .expect("the image");
+        assert_eq!(&d[at + 1..], ["-c".to_string(), "echo hi".to_string()]);
+        assert_eq!(d[at - 1], "--", "flags end before the image: {d:?}");
+
+        for (policy, want) in [
+            (crate::scripts::PullPolicy::Always, "always"),
+            (crate::scripts::PullPolicy::IfNotPresent, "missing"),
+            (crate::scripts::PullPolicy::Never, "never"),
+        ] {
+            let spec = RunnerSpec {
+                pull_policy: policy,
+                cpu: Some("1.5".into()),
+                memory: Some("256m".into()),
+                delete: false,
+                ..RunnerSpec::defaults(crate::scripts::RunnerKind::Docker)
+            };
+            let a = create_args(&task, &cmds, &spec, "n");
+            assert_eq!(pair(&a, "--pull").as_deref(), Some(want));
+            assert_eq!(pair(&a, "--cpus").as_deref(), Some("1.5"));
+            assert_eq!(pair(&a, "--memory").as_deref(), Some("256m"));
+            assert!(
+                a.contains(&format!("{DELETE_LABEL}=false")),
+                "`delete: false` must be visible to the orphan sweep: {a:?}"
+            );
+        }
+    }
+
+    /// **An image spelled like a flag stays the IMAGE** (final review I1): the
+    /// only `--` in the argv ends the flags immediately before it, so
+    /// `--privileged` and the author's interpreter tail (`-v /:/host …`) are
+    /// the positional image and CMD, never `docker create` options. The gate
+    /// refuses such an image first; this pins the runner's own defence.
+    #[test]
+    fn a_flag_shaped_image_is_never_a_docker_create_flag() {
+        let task = leased(1_700_000_000);
+        let cmds = TaskCommands {
+            container_image: "--privileged".into(),
+            interpreter: vec![
+                "/bin/sh".into(),
+                "-v".into(),
+                "/:/host".into(),
+                "alpine:3.20".into(),
+                "sh".into(),
+                "-c".into(),
+            ],
+            commands: vec!["id".into()],
+            ..TaskCommands::default()
+        };
+        let a = create_args(
+            &task,
+            &cmds,
+            &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+            "n",
+        );
+        let ends: Vec<usize> = a
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x.as_str() == "--")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(ends.len(), 1, "exactly one end-of-flags marker: {a:?}");
+        let end = ends[0];
+        assert_eq!(
+            a[end + 1],
+            "--privileged",
+            "the image is the first positional"
+        );
+        assert!(
+            !a[..end].iter().any(|x| x == "--privileged" || x == "-v"),
+            "nothing the author wrote is before `--`: {a:?}"
+        );
+    }
+
+    /// The sweep's parser keeps only egret task containers and drops the ones
+    /// the author asked to keep.
+    #[test]
+    fn the_docker_sweep_parses_names_and_leaves_delete_false_alone() {
+        let a = uuid::Uuid::from_u128(1);
+        let b = uuid::Uuid::from_u128(2);
+        let out = format!(
+            "egret-run-x-1\t{a}\t\negret-run-y-1\t{b}\tfalse\nsomething-else\t{a}\t\negret-run-z-1\tnot-a-uuid\t\n"
+        );
+        assert_eq!(
+            parse_docker_ps(&out),
+            vec![("egret-run-x-1".to_string(), a)]
+        );
+    }
+
+    /// An author's `inputFiles` keys cannot produce a worker failure: a file
+    /// where a directory must go is a `String` error, i.e. a task failure.
+    #[test]
+    fn an_input_file_where_a_directory_must_go_is_the_authors_error() {
+        let root = staging("input-collision");
+        stage_input(&root, "a", "x").expect("a plain file stages");
+        let err = stage_input(&root, "a/b", "y").expect_err("`a` is a file");
+        assert!(err.contains("\"a/b\""), "{err}");
+        stage_input(&root, "sub/nested.txt", "n").expect("parents are created");
+        assert_eq!(
+            std::fs::read_to_string(root.join("sub/nested.txt")).unwrap(),
+            "n"
+        );
+        assert!(stage_input(&root, "../x", "y").is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// `ScriptService.scriptCommands`: the interpreter, then **one** element.
@@ -2020,20 +3076,335 @@ mod tests {
         );
     }
 
-    /// **A declared output that is not in the copied working directory fails
-    /// the task, naming it** — and it is a `std::fs` answer now, not a guess at
-    /// a daemon's wording (fix round 1's Important 5).
+    /// **`outputFiles` follows the artifact, case for case** (W5a Task 5 fix
+    /// round 1, the user's decision): every `egret_expected.output_files` case
+    /// of `w5a-scripts.json` -- a literal file, a non-recursive `*.csv` that
+    /// keys `a.csv` and `b.csv` but not `sub/c.csv` or `x.txt`, and a declared
+    /// file the command never wrote, which is IGNORED (no key, no failure).
+    /// Driven through the two pure seams both runners use: `expand_outputs`
+    /// over the working directory's listing, then `ingest_output` per name.
     #[test]
-    fn a_declared_output_that_is_absent_fails_the_task_and_names_itself() {
-        let dir = staging("absent");
+    fn output_files_follow_the_fixtures_cases() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/oracle-exec/w5a-scripts.json");
+        let fx: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let spec = &fx["egret_expected"]["output_files"];
+        assert_eq!(spec["missing_declared_file"], "ignored");
+        assert_eq!(spec["glob_descends_into_subdirectories"], false);
+        let strings = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect()
+        };
+        let cases = spec["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 3);
+        for case in cases {
+            let declared = strings(&case["declared"]);
+            let written = strings(&case["written"]);
+            let dir = staging("fixture-outputs");
+            for w in &written {
+                let p = dir.join(w);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(&p, format!("contents of {w}")).unwrap();
+            }
+            // What a listing of each pattern's directory returns: its direct
+            // entries (a subdirectory included, which a glob then skips).
+            let mut listed = std::collections::BTreeMap::new();
+            for d in pattern_dirs(&declared) {
+                let mut names: Vec<String> = std::fs::read_dir(dir.join(&d))
+                    .map(|rd| {
+                        rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                names.sort();
+                listed.insert(d, names);
+            }
+            let mut r = CommandsResult::default();
+            let mut total = 0usize;
+            for (rel, from_glob) in expand_outputs(&declared, &listed, MAX_OUTPUT_NAMES).unwrap() {
+                ingest_output(&mut r, &dir, &rel, 1024, 4096, &mut total, from_glob)
+                    .unwrap_or_else(|e| panic!("{case}: {rel}: {e}"));
+            }
+            let keys: Vec<String> = r.output_files.keys().cloned().collect();
+            assert_eq!(keys, strings(&case["keys"]), "{case}");
+            assert_eq!(case["state"], "SUCCESS");
+            for k in &keys {
+                assert_eq!(r.output_files[k], format!("contents of {k}"));
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// **Fix round 2: an author-sized listing cannot wedge the worker.** An
+    /// 8 MB `docker diff` (a shim; 8 MB rather than endless so the unmutated
+    /// control's memory stays bounded) is cut at a 64 KiB listing cap and the task FAILS by name, promptly -- rather than the
+    /// handler reading, holding and scanning it while its lease renewal,
+    /// budget and self-fence cannot run.
+    #[tokio::test]
+    async fn a_listing_over_the_cap_fails_the_task_in_bounded_time() {
+        let dir = staging("endless-diff");
+        let shim = dir.join("docker-shim.sh");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             \x20 create) echo id ;;\n\
+             \x20 version) exit 0 ;;\n\
+             \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
+             \x20 diff) yes 'A /egret/working-dir/f.x' | head -c 8000000 ;;\n\
+             esac\nexit 0\n",
+        )
+        .expect("write shim");
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o700);
+        }
+        std::fs::set_permissions(&shim, perms).expect("chmod");
+
+        let runner =
+            DockerRunner::with_binary(shim.display().to_string()).with_listing_cap(64 * 1024);
+        let cmds = TaskCommands {
+            container_image: "alpine:3.20".into(),
+            commands: vec!["true".into()],
+            output_files: vec!["*.x".into()],
+            ..TaskCommands::default()
+        };
+        let started = std::time::Instant::now();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            runner.run(
+                &leased(1_700_000_000),
+                &cmds,
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+                &NoObserver,
+            ),
+        )
+        .await
+        .expect("an endless listing must be cut at the cap, not read to its end")
+        .expect("an author's listing is never a worker failure");
+        let why = out.failure.expect("over the cap fails the task");
+        assert!(why.contains("listing") && why.contains("65536"), "{why}");
+        assert!(out.output_files.is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The listing is parsed in LINEAR time: 200 000 paths well inside a
+    /// second-scale bound (the first version was quadratic).
+    #[test]
+    fn a_large_listing_parses_in_linear_time() {
+        let mut diff = String::from("A /egret/working-dir\nA /egret/working-dir/sub\n");
+        for i in 0..200_000 {
+            diff.push_str(&format!("A /egret/working-dir/sub/f{i}.x\n"));
+        }
+        let dirs = std::collections::BTreeSet::from(["sub".to_string()]);
+        let started = std::time::Instant::now();
+        let listed = parse_docker_diff(&diff, &dirs);
+        assert_eq!(listed["sub"].len(), 200_000);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Too many names -- one pattern's matches, or all names together -- fail
+    /// the task by name.
+    #[test]
+    fn too_many_output_names_fail_by_name() {
+        let listed = std::collections::BTreeMap::from([(
+            String::new(),
+            (0..11).map(|i| format!("f{i}.x")).collect::<Vec<_>>(),
+        )]);
+        let err = expand_outputs(&["*.x".to_string()], &listed, 10).unwrap_err();
+        assert!(err.contains("\"*.x\" matches more than 10"), "{err}");
+        let ok = expand_outputs(&["*.x".to_string()], &listed, 11).expect("at the cap");
+        assert_eq!(ok.len(), 11);
+        let declared: Vec<String> = (0..6).map(|i| format!("lit{i}")).collect();
+        let small = std::collections::BTreeMap::from([(
+            String::new(),
+            (0..6).map(|i| format!("g{i}.x")).collect::<Vec<_>>(),
+        )]);
+        let mut all = declared.clone();
+        all.push("*.x".into());
+        let err = expand_outputs(&all, &small, 10).unwrap_err();
+        assert!(err.contains("resolves to more than 10"), "{err}");
+    }
+
+    /// The output KEYS count toward the total: empty files cost their names.
+    #[test]
+    fn output_keys_count_toward_the_total() {
+        let dir = staging("keys");
+        for n in ["aaaa", "bbbb", "cccc"] {
+            std::fs::write(dir.join(n), "").unwrap();
+        }
         let mut r = CommandsResult::default();
         let mut total = 0usize;
-        let err = ingest_output_file(&mut r, &dir, "gone.txt", 1024, 4096, &mut total)
-            .expect_err("an absent output must not be skipped");
-        assert!(err.contains("gone.txt"), "{err}");
-        assert!(err.contains("did not leave"), "{err}");
-        assert!(r.output_files.is_empty());
+        ingest_output(&mut r, &dir, "aaaa", 100, 10, &mut total, true).expect("4 bytes");
+        ingest_output(&mut r, &dir, "bbbb", 100, 10, &mut total, true).expect("8 bytes");
+        let err = ingest_output(&mut r, &dir, "cccc", 100, 10, &mut total, true)
+            .expect_err("12 bytes of names is over 10");
+        assert!(err.contains("names and contents"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `docker` shim whose `diff` prints `diff_script`'s output and whose
+    /// `cp` stages the word `staged`.
+    fn diff_shim(tag: &str, diff_script: &str) -> (std::path::PathBuf, String) {
+        let dir = staging(tag);
+        let shim = dir.join("docker-shim.sh");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 \x20 create) echo id ;;\n\
+                 \x20 version) exit 0 ;;\n\
+                 \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
+                 \x20 diff) {diff_script} ;;\n\
+                 \x20 cp) printf 'staged' > \"$3\" ;;\n\
+                 esac\nexit 0\n"
+            ),
+        )
+        .expect("write shim");
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o700);
+        }
+        std::fs::set_permissions(&shim, perms).expect("chmod");
+        (dir, shim.display().to_string())
+    }
+
+    async fn run_glob(runner: &DockerRunner) -> CommandsResult {
+        let cmds = TaskCommands {
+            container_image: "alpine:3.20".into(),
+            commands: vec!["true".into()],
+            output_files: vec!["*.csv".into()],
+            ..TaskCommands::default()
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            runner.run(
+                &leased(1_700_000_000),
+                &cmds,
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+                &NoObserver,
+            ),
+        )
+        .await
+        .expect("bounded")
+        .expect("never a worker failure")
+    }
+
+    /// **Fix round 3: only the working directory counts toward the listing
+    /// cap.** A container that changed ~400 KB of paths OUTSIDE it (a package
+    /// install) under a 64 KiB listing cap still lists its one output.
+    #[tokio::test]
+    async fn a_diff_mostly_outside_the_working_dir_still_lists_the_outputs() {
+        let (dir, shim) = diff_shim(
+            "outside-diff",
+            "yes 'A /usr/lib/python3/site-packages/torch/x.py' | head -n 10000; \
+             echo 'A /egret/working-dir'; echo 'A /egret/working-dir/a.csv'",
+        );
+        let runner = DockerRunner::with_binary(shim).with_listing_cap(64 * 1024);
+        let out = run_glob(&runner).await;
+        assert_eq!(out.failure, None, "{out:?}");
+        assert_eq!(
+            out.output_files,
+            BTreeMap::from([("a.csv".to_string(), "staged".to_string())])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whole diff still has a hard DoS cap, with its own honest message.
+    #[tokio::test]
+    async fn a_diff_over_the_hard_cap_fails_saying_the_container_changed_too_much() {
+        let (dir, shim) = diff_shim(
+            "huge-diff",
+            "yes 'A /usr/lib/python3/site-packages/torch/x.py' | head -n 10000",
+        );
+        let runner = DockerRunner::with_binary(shim).with_diff_cap(100_000);
+        let out = run_glob(&runner).await;
+        let why = out.failure.expect("over the hard cap fails the task");
+        assert!(
+            why.contains("the container changed more than 100000 bytes"),
+            "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The glob worst case at the caps is bounded by the step budget.**
+    /// 64 adversarial 255-byte patterns (`*aaa…ab`, the backtracking worst
+    /// case) against a full 1 MiB-class listing of `aaa…a` names: the budget
+    /// is spent and the task fails by name, in bounded time, rather than the
+    /// ~1e10 steps the caps alone allow. The control -- 64 ordinary patterns
+    /// against the same listing -- resolves within the budget.
+    #[test]
+    fn the_glob_worst_case_is_bounded_by_the_step_budget() {
+        let names: Vec<String> = (0..47_000)
+            .map(|i| format!("{}{i}", "a".repeat(15)))
+            .collect();
+        let listed = BTreeMap::from([(String::new(), names)]);
+        let adversarial: Vec<String> = (0..MAX_OUTPUT_PATTERNS)
+            .map(|i| format!("*{}{i}b", "a".repeat(MAX_PATTERN_BYTES - 4)))
+            .collect();
+        let started = std::time::Instant::now();
+        let err = expand_outputs(&adversarial, &listed, MAX_OUTPUT_NAMES).unwrap_err();
+        let spent = started.elapsed();
+        assert!(err.contains("steps"), "{err}");
+        assert!(spent < std::time::Duration::from_secs(30), "{spent:?}");
+        eprintln!("glob worst case (budget spent): {spent:?}");
+
+        let ordinary: Vec<String> = (0..MAX_OUTPUT_PATTERNS)
+            .map(|i| format!("*.csv{i}"))
+            .collect();
+        let started = std::time::Instant::now();
+        let ok = expand_outputs(&ordinary, &listed, MAX_OUTPUT_NAMES).expect("within budget");
+        assert!(ok.is_empty());
+        eprintln!("64 ordinary patterns x 47k names: {:?}", started.elapsed());
+    }
+
+    /// More than [`MAX_OUTPUT_PATTERNS`] distinct patterns is refused;
+    /// duplicates count once.
+    #[test]
+    fn the_pattern_count_is_capped_and_duplicates_count_once() {
+        let listed = BTreeMap::new();
+        let many: Vec<String> = (0..=MAX_OUTPUT_PATTERNS)
+            .map(|i| format!("*.{i}"))
+            .collect();
+        let err = expand_outputs(&many, &listed, MAX_OUTPUT_NAMES).unwrap_err();
+        assert!(err.contains("distinct patterns"), "{err}");
+        let dupes: Vec<String> = (0..500).map(|_| "*.csv".to_string()).collect();
+        expand_outputs(&dupes, &listed, MAX_OUTPUT_NAMES).expect("one distinct pattern");
+        assert!(output_problem(&format!("*{}", "a".repeat(MAX_PATTERN_BYTES))).is_some());
+        assert!(output_problem(&format!("*{}", "a".repeat(MAX_PATTERN_BYTES - 1))).is_none());
+    }
+
+    /// The pattern rules: `*`/`?` in the file name only; `**`, `[...]` and a
+    /// wildcard directory are refused by name; the literal rules still hold.
+    #[test]
+    fn an_output_pattern_is_a_file_name_glob_and_nothing_wider() {
+        assert_eq!(output_problem("*.csv"), None);
+        assert_eq!(output_problem("sub/data-?.csv"), None);
+        assert_eq!(output_problem("out.txt"), None);
+        for bad in ["**/x", "a/**", "[ab].csv", "*/x.csv", "../*.csv", "/tmp/*"] {
+            assert!(output_problem(bad).is_some(), "{bad} must be refused");
+        }
+        // An input name is still literal.
+        assert!(relative_problem("*.csv").is_some());
+        // `docker diff` parsing: files of the named directories only, no
+        // parent directories.
+        let diff = "C /egret\nA /egret/working-dir\nA /egret/working-dir/a.csv\n\
+                    A /egret/working-dir/sub\nA /egret/working-dir/sub/c.csv\nA /tmp/x\n";
+        let dirs = std::collections::BTreeSet::from(["".to_string(), "sub".to_string()]);
+        let listed = parse_docker_diff(diff, &dirs);
+        assert_eq!(listed[""], vec!["a.csv".to_string()]);
+        assert_eq!(listed["sub"], vec!["c.csv".to_string()]);
     }
 
     /// **A directory named as an output file fails the TASK, not the worker.**
@@ -2093,7 +3464,8 @@ mod tests {
         ingest_output_file(&mut r, &dir, "b", 150, 250, &mut total).expect("b fits");
         let err = ingest_output_file(&mut r, &dir, "c", 150, 250, &mut total)
             .expect_err("three 100-byte files are over a 250-byte total");
-        assert!(err.contains("300 bytes"), "the TOTAL must be named: {err}");
+        // 3 x (100 bytes + a 1-byte name) since fix round 2 counts the key.
+        assert!(err.contains("303 bytes"), "the TOTAL must be named: {err}");
         assert!(err.contains("unbounded list"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2273,7 +3645,9 @@ mod tests {
         for (bad, needle) in [
             ("../secret", "climbs out"),
             ("/etc/passwd", "absolute path"),
-            ("*.csv", "glob"),
+            ("**/x.csv", "not implemented"),
+            ("[ab].csv", "not implemented"),
+            ("*/x.csv", "not implemented"),
             ("", "must not be empty"),
         ] {
             let err = ingest_output_file(&mut r, &dir, bad, 1024, 4096, &mut total)
@@ -2301,7 +3675,8 @@ mod tests {
         let log = dir.join("argv.log");
         let shim = dir.join("docker-shim.sh");
         // A `docker` that records what it was asked and fakes just enough:
-        // `create` prints an id, `start` prints nothing, `inspect` prints 0,
+        // `create` prints an id, `start` prints nothing, `inspect` prints 0
+        // (and finds no container by name, so the run creates one),
         // and `cp` materialises a file at the destination so the pure seam has
         // something to ingest.
         std::fs::write(
@@ -2311,7 +3686,7 @@ mod tests {
                  echo \"$@\" >> {log}\n\
                  case \"$1\" in\n\
                  \x20 create) echo fake-container-id ;;\n\
-                 \x20 inspect) echo 0 ;;\n\
+                 \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
                  \x20 cp) case \"$3\" in *?) printf 'staged' > \"$3\" ;; esac ;;\n\
                  esac\n\
                  exit 0\n",
@@ -2337,6 +3712,7 @@ mod tests {
                     output_files: vec!["wanted.txt".into(), "nested/also.txt".into()],
                     ..TaskCommands::default()
                 },
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
                 &NoObserver,
             )
             .await
@@ -2460,7 +3836,7 @@ mod tests {
                  echo \"$@\" >> {log}\n\
                  case \"$1\" in\n\
                  \x20 create) echo fake-container-id ;;\n\
-                 \x20 inspect) echo 0 ;;\n\
+                 \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
                  \x20 cp) case \"$2\" in\n\
                  \x20        *a/b.txt) echo 'Error response from daemon: not a directory' >&2; exit 1 ;;\n\
                  \x20        *) printf 'regular-file' > \"$3\" ;;\n\
@@ -2488,6 +3864,7 @@ mod tests {
                     output_files: vec!["a".into(), "a/b.txt".into()],
                     ..TaskCommands::default()
                 },
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
                 &NoObserver,
             )
             .await
@@ -2497,24 +3874,17 @@ mod tests {
                  leased for an hour, then repeats for ever",
             );
 
-        let why = out
-            .failure
-            .clone()
-            .expect("the child cannot be produced, so the task fails");
-        assert!(
-            why.contains("a/b.txt"),
-            "the failure must name the child, not egret's plumbing: {why}"
-        );
-        assert!(
-            !why.contains("File exists") && !why.contains("os error 17"),
-            "and it must not be a staging-collision message -- each declared name \
-             gets its own root precisely so they cannot collide: {why}"
-        );
+        // The child cannot exist (its parent is a file), so it is a declared
+        // file the command did not leave: IGNORED since W5a Task 5 fix round 1
+        // (Kestra's `missing_declared_file`) -- and never a staging
+        // collision, because each declared name gets its own root.
+        assert_eq!(out.failure, None, "{out:?}");
         assert_eq!(
             out.output_files.get("a").map(String::as_str),
             Some("regular-file"),
-            "the parent still came back; only the child failed"
+            "the parent came back"
         );
+        assert!(!out.output_files.contains_key("a/b.txt"), "{out:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2543,7 +3913,7 @@ mod tests {
                  case \"$1\" in\n\
                  \x20 create) echo id ;;\n\
                  \x20 version) exit 0 ;;\n\
-                 \x20 inspect) echo 0 ;;\n\
+                 \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
                  \x20 cp) echo \"$3\" >> {log}; printf x > \"$3\" ;;\n\
                  esac\nexit 0\n",
                 log = log.display()
@@ -2566,7 +3936,12 @@ mod tests {
         };
         let sink = NoObserver;
         runner
-            .run(&leased(1_700_000_000), &cmds, &sink)
+            .run(
+                &leased(1_700_000_000),
+                &cmds,
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+                &sink,
+            )
             .await
             .expect("no worker failure");
 
@@ -2646,7 +4021,7 @@ mod tests {
                  case \"$1\" in\n\
                  \x20 create) echo id ;;\n\
                  \x20 cp) echo \"$2\" >> {log}; exec sleep 300 ;;\n\
-                 \x20 inspect) echo 0 ;;\n\
+                 \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
                  esac\n\
                  exit 0\n",
                 log = log.display()
@@ -2672,7 +4047,8 @@ mod tests {
             ..TaskCommands::default()
         };
         let sink = NoObserver;
-        let fut = runner.run(&task, &cmds, &sink);
+        let spec = RunnerSpec::defaults(crate::scripts::RunnerKind::Docker);
+        let fut = runner.run(&task, &cmds, &spec, &sink);
         // Exactly what `timeout::guard` does to a handler that outruns its
         // budget: drop the future.
         assert!(
@@ -2776,9 +4152,9 @@ mod tests {
     }
 
     /// **The same property end to end**: a declared `outputFiles` naming a
-    /// marker is a task failure, not a worker one.
+    /// marker is the author's (missing) file, never a worker failure.
     #[tokio::test]
-    async fn an_output_file_named_like_a_daemon_marker_fails_the_task() {
+    async fn an_output_file_named_like_a_daemon_marker_is_the_authors_missing_file() {
         let dir = staging("marker-output");
         let shim = dir.join("docker-shim.sh");
         std::fs::write(
@@ -2787,7 +4163,7 @@ mod tests {
              case \"$1\" in\n\
              \x20 create) echo id ;;\n\
              \x20 version) exit 0 ;;\n\
-             \x20 inspect) echo 0 ;;\n\
+             \x20 inspect) case \"$*\" in *State.Status*) exit 1 ;; esac; echo 0 ;;\n\
              \x20 cp) echo \"Error response from daemon: Could not find the file \
              /egret/working-dir/docker.sock in container c\" >&2; exit 1 ;;\n\
              esac\nexit 0\n",
@@ -2809,18 +4185,23 @@ mod tests {
         };
         let sink = NoObserver;
         let out = runner
-            .run(&leased(1_700_000_000), &cmds, &sink)
+            .run(
+                &leased(1_700_000_000),
+                &cmds,
+                &RunnerSpec::defaults(crate::scripts::RunnerKind::Docker),
+                &sink,
+            )
             .await
             .expect(
                 "an author naming a file `docker.sock` must not be able to make egret \
                  report its own daemon as unreachable",
             );
-        let why = out.failure.clone().expect("the file is not there");
-        assert!(why.contains("docker.sock"), "{why}");
-        assert!(
-            why.contains("did not leave"),
-            "and it is the ordinary missing-output message: {why}"
-        );
+        // A file the daemon could not copy while it answers is simply not
+        // there -- the ordinary missing output, IGNORED since W5a Task 5 fix
+        // round 1 (Kestra's `missing_declared_file`), and still no worker
+        // failure.
+        assert_eq!(out.failure, None, "{out:?}");
+        assert!(out.output_files.is_empty(), "{out:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

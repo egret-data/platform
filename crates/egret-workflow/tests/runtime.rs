@@ -181,6 +181,7 @@ fn fast(tick_ms: u64, batch: usize) -> RuntimeConfig {
         batch,
         reaper_interval: Duration::from_secs(3600),
         working_timeout: Duration::from_secs(3600),
+        container_default_timeout: Duration::from_secs(3600),
         scheduler_enabled: false,
         trigger_interval: Duration::from_millis(tick_ms),
         log_limits: egret_workflow::logs::LogLimits::default(),
@@ -329,6 +330,7 @@ async fn a_cancelled_token_stops_both_tickers(pool: sqlx::PgPool) {
         batch: 4,
         reaper_interval: Duration::from_millis(10),
         working_timeout: Duration::from_secs(1),
+        container_default_timeout: Duration::from_secs(3600),
         scheduler_enabled: false,
         trigger_interval: Duration::from_secs(3600),
         log_limits: egret_workflow::logs::LogLimits::default(),
@@ -899,6 +901,7 @@ async fn two_tickers_reclaim_an_expired_lease_once_and_leave_a_live_one(pool: sq
         batch: 4,
         reaper_interval: Duration::from_millis(10),
         working_timeout: Duration::from_secs(3600),
+        container_default_timeout: Duration::from_secs(3600),
         scheduler_enabled: false,
         trigger_interval: Duration::from_secs(3600),
         log_limits: egret_workflow::logs::LogLimits::default(),
@@ -1999,4 +2002,248 @@ async fn the_scheduler_ticker_sweeps_expired_windows(pool: sqlx::PgPool) {
     )
     .await;
     cancel.cancel();
+}
+
+// ── W5a Task 3: the lease is renewed while a handler runs ───────────────────
+
+/// **A run longer than `working_timeout` is not reaped while its worker
+/// lives.**
+///
+/// The real runtime, reaper ticking every 100 ms against a 2 s
+/// `working_timeout`, and a handler that takes 5 s. Before W5a the reaper
+/// cleared the lease at 2 s, the handler's result then hit the fence
+/// (`LeaseLost`), and the next tick ran the handler a second time — so the
+/// instrument is the handler's call count, which is the only place a second
+/// run is visible (the attempt count does not move on a reclaim; see
+/// `worker::claim::tick`'s doc, cause 3). Asserted beside it: one outcome, one
+/// attempt, and the lease observed to move forward mid-handler.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_run_longer_than_working_timeout_is_not_reaped_while_its_worker_lives(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let ws = seed(&pool).await;
+    let ex = start_execution(&pool, ws, None, &one_task("long"), serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    let reg = Arc::new(Recorder::new().delaying_the_first_call_by(Duration::from_secs(5)));
+    let cancel = CancellationToken::new();
+    let cfg = RuntimeConfig {
+        reaper_interval: Duration::from_millis(100),
+        working_timeout: Duration::from_secs(2),
+        ..fast(50, 1)
+    };
+    spawn(pool.clone(), reg.clone(), cfg, cancel.clone());
+
+    wait_until("the handler started", Duration::from_secs(5), || async {
+        if reg.count() >= 1 {
+            Ok(())
+        } else {
+            Err("no call yet".into())
+        }
+    })
+    .await;
+    let first = lease_of(&pool, ex).await.expect("leased");
+    tokio::time::sleep(Duration::from_millis(3_000)).await;
+    let later = lease_of(&pool, ex).await;
+    assert!(
+        matches!(later, Some(t) if t > first),
+        "past one working_timeout the lease is still held and has moved \
+         forward: claimed {first}, now {later:?}"
+    );
+
+    wait_until(
+        "the execution terminal",
+        Duration::from_secs(15),
+        || async {
+            if is_terminal(&pool, ex).await {
+                Ok(())
+            } else {
+                Err(format!("calls {}", reg.count()))
+            }
+        },
+    )
+    .await;
+    cancel.cancel();
+
+    assert_eq!(
+        reg.seen_for(ex),
+        vec![("a".to_string(), 1)],
+        "exactly one handler call: the reaper never handed the run to a second"
+    );
+    assert_eq!(run_state(&pool, ex, "a").await.as_deref(), Some("SUCCESS"));
+    assert_eq!(attempts_of(&pool, ex, "a").await, 1);
+    assert_eq!(execution_state(&pool, ex).await, "SUCCESS");
+}
+
+/// `WorkflowConfig::container_default_timeout_s`'s 3600 is a second copy of
+/// [`DEFAULT_CONTAINER_TIMEOUT`](egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT)
+/// in a crate that cannot name it; this is the comparison, for
+/// [`the_config_default_working_timeout_equals_the_workers_own`]'s reason.
+#[test]
+fn the_config_default_container_timeout_equals_the_workers_own() {
+    let cfg = egret_config::Config::default().workflow;
+    assert_eq!(
+        Duration::from_secs(cfg.container_default_timeout_s),
+        egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT
+    );
+    assert_eq!(
+        egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT,
+        Duration::from_secs(3600),
+        "W5a spec §6: one hour"
+    );
+    assert_eq!(
+        egret_workflow::worker::WorkerTiming::default(),
+        egret_workflow::worker::WorkerTiming {
+            working_timeout: egret_workflow::worker::DEFAULT_WORKING_TIMEOUT,
+            container_default_timeout: egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT,
+        }
+    );
+}
+
+// ── W5a Task 5: the deployment's registry, and the orphan sweep's call site ──
+
+/// A pool that is never connected: `handlers_for` stores it for the run-time
+/// feature read and the re-attach window, and none of these tests runs a task.
+fn unconnected_pool() -> sqlx::PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+        .expect("a lazy pool parses")
+}
+
+/// **With `container_runner = none` (the default) the production registry is
+/// byte-for-byte what it was before W5a** -- `Handlers::with_core_tasks()`,
+/// no orphan sweep, no default runner for publish -- and with `docker` it is
+/// that plus exactly the four script types and their two aliases.
+#[tokio::test]
+async fn with_container_runner_none_the_registry_is_unchanged() {
+    use egret_workflow::scripts::RunnerKind;
+    use egret_workflow::worker::Handlers;
+
+    let mut cfg = egret_config::Config::default().workflow;
+    assert_eq!(
+        cfg.container_runner,
+        egret_config::ContainerRunner::None,
+        "`none` is the shipping default"
+    );
+    let (reg, default_runner) = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool())
+        .await
+        .expect("`none` needs nothing");
+    assert_eq!(reg.type_ids(), Handlers::with_core_tasks().type_ids());
+    assert_eq!(default_runner, None, "publish has no runner to default to");
+    assert!(reg.orphan_sweep().is_none(), "nothing to sweep");
+
+    // The control: the same call with a runner configured DOES register --
+    // so the equality above is not a function that never registers anything.
+    cfg.container_runner = egret_config::ContainerRunner::Docker;
+    let (reg, default_runner) = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool())
+        .await
+        .expect("the Docker runner is built without a daemon");
+    let core = Handlers::with_core_tasks().type_ids().len();
+    let added: Vec<&str> = reg
+        .type_ids()
+        .into_iter()
+        .filter(|id| Handlers::with_core_tasks().get(id).is_none())
+        .collect();
+    assert_eq!(
+        added,
+        vec![
+            "egret.container",
+            "egret.script.python",
+            "io.kestra.plugin.scripts.python.Commands",
+            "io.kestra.plugin.scripts.python.Script",
+            "io.kestra.plugin.scripts.shell.Commands",
+            "io.kestra.plugin.scripts.shell.Script",
+        ]
+    );
+    assert_eq!(reg.type_ids().len(), core + 6);
+    assert_eq!(default_runner, Some(RunnerKind::Docker));
+    assert!(
+        reg.orphan_sweep().is_some(),
+        "the runner is the reaper's sweep"
+    );
+}
+
+/// A Kubernetes configuration egret refuses stops the deployment at start,
+/// naming the setting -- before any cluster client is built.
+#[tokio::test]
+async fn a_refused_kubernetes_configuration_stops_the_process_at_start() {
+    let mut cfg = egret_config::Config::default().workflow;
+    cfg.container_runner = egret_config::ContainerRunner::Kubernetes;
+    cfg.kubernetes.run_as_user = 0;
+    let err = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool())
+        .await
+        .expect_err("runAsNonRoot pods cannot run as uid 0");
+    assert!(err.to_string().contains("run_as_user"), "{err}");
+}
+
+/// `workflow.kubernetes.*` reaches the runner's `PodConfig` field for field.
+#[test]
+fn the_kubernetes_config_becomes_the_pod_config() {
+    let mut k = egret_config::WorkflowKubernetesConfig {
+        namespace: "tasks-x".into(),
+        image_pull_secrets: vec!["regcred".into()],
+        ..Default::default()
+    };
+    k.max_resources.request.cpu = Some("3".into());
+    let pod = egret_workflow::runtime::pod_config(&k);
+    assert_eq!(pod.namespace, "tasks-x");
+    assert_eq!(pod.run_as_user, 1000);
+    assert_eq!(pod.helper_image, "egret-task-helper:dev");
+    assert_eq!(pod.image_pull_secrets, vec!["regcred".to_string()]);
+    assert_eq!(pod.default_resources.request.cpu.as_deref(), Some("100m"));
+    assert_eq!(pod.default_resources.limit.memory.as_deref(), Some("512Mi"));
+    assert_eq!(pod.max_resources.request.cpu.as_deref(), Some("3"));
+    assert_eq!(pod.max_resources.limit.memory.as_deref(), Some("2Gi"));
+}
+
+/// An [`OrphanSweep`](egret_workflow::worker::commands::OrphanSweep) that
+/// counts its calls.
+#[derive(Debug, Default)]
+struct CountingSweep {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl egret_workflow::worker::commands::OrphanSweep for CountingSweep {
+    async fn sweep_orphans(&self, _pool: &sqlx::PgPool) -> egret_core::Result<u64> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(0)
+    }
+}
+
+/// **The reaper's tick calls the registry's orphan sweep** (W5a spec §5,
+/// *Orphans*; the call site Task 4 left to Task 5) -- through the real
+/// `spawn`, so the wiring is what is judged. The claim loop is parked; only
+/// the reaper ticks.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_reaper_tick_sweeps_the_configured_runners_orphans(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let sweep = Arc::new(CountingSweep::default());
+    let reg = egret_workflow::worker::Handlers::with_core_tasks().with_orphan_sweep(sweep.clone());
+    let cancel = CancellationToken::new();
+    let cfg = RuntimeConfig {
+        tick_interval: Duration::from_secs(3600),
+        reaper_interval: Duration::from_millis(50),
+        ..fast(3_600_000, 1)
+    };
+    let handle = spawn(pool.clone(), Arc::new(reg), cfg, cancel.clone());
+    wait_until(
+        "three sweeps on the reaper's tick",
+        Duration::from_secs(10),
+        || {
+            let n = sweep.calls.load(Ordering::SeqCst);
+            async move {
+                if n >= 3 {
+                    Ok(())
+                } else {
+                    Err(format!("{n} sweeps"))
+                }
+            }
+        },
+    )
+    .await;
+    cancel.cancel();
+    handle.join().await;
 }

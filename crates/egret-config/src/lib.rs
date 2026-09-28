@@ -542,6 +542,22 @@ pub struct WorkflowConfig {
     #[serde(default = "default_working_timeout_s")]
     pub working_timeout_s: u64,
 
+    /// **Seconds a script or container task may run when its author wrote no
+    /// `timeout:` (W5a spec §6).**
+    ///
+    /// Applies to the four script task types
+    /// (`io.kestra.plugin.scripts.{shell,python}.{Commands,Script}`) and their
+    /// aliases `egret.container` and `egret.script.python`; every other task
+    /// with no `timeout:` runs unbounded, as in Kestra. A run that outlives it
+    /// is FAILED with `Timeout after HH:mm:ss.SSS`, the same as an explicit
+    /// `timeout:`. **A deliberate divergence from Kestra**, which runs a
+    /// script task with no `timeout:` unbounded: an unbounded container is one
+    /// nobody reclaims. The default is
+    /// `egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT` (3600s).
+    /// `EGRET_WORKFLOW__CONTAINER_DEFAULT_TIMEOUT_S=3600`.
+    #[serde(default = "default_container_default_timeout_s")]
+    pub container_default_timeout_s: u64,
+
     /// **The switch that makes `cron:` schedule triggers fire (W12), and it
     /// defaults to `false` for [`WorkflowConfig::worker_enabled`]'s argument.**
     ///
@@ -594,6 +610,250 @@ pub struct WorkflowConfig {
     /// `EGRET_WORKFLOW__LOG_RUN_MAX_BYTES=10485760` (10 MiB).
     #[serde(default = "default_log_run_max_bytes")]
     pub log_run_max_bytes: u64,
+
+    /// **Per-plugin-type settings, in Kestra's `kestra.plugins.configurations`
+    /// shape (W5a spec §4): a list of `{type, values}`.**
+    ///
+    /// W5a reads exactly one value from it, `values.allowed-images`, keyed by
+    /// the task-runner FQCN (`io.kestra.plugin.scripts.runner.docker.Docker`,
+    /// `io.kestra.plugin.ee.kubernetes.runner.Kubernetes`): the glob patterns
+    /// a script task's image must match before egret runs it.
+    ///
+    /// **The default is the empty list, and it allows no image at all.** No
+    /// entry for a runner, or an entry with an empty `allowed-images`, refuses
+    /// every image on that runner (`egret_workflow::scripts::gate`). This is
+    /// stricter than Kestra OSS, which has no allowlist, and it is deliberate
+    /// (the user's decision of 2026-09-28).
+    ///
+    /// `EGRET_WORKFLOW__PLUGIN_CONFIGURATIONS='[{type="io.kestra.plugin.scripts.runner.docker.Docker",values={allowed-images=["python:*"]}}]'`,
+    /// or a `[[workflow.plugin_configurations]]` table in `egret.toml`.
+    #[serde(default)]
+    pub plugin_configurations: PluginConfigurations,
+
+    /// **Where script tasks run (W5a spec §7), and it defaults to `none`.**
+    ///
+    /// `none`: the worker registers no script task handler, so its registry is
+    /// exactly what it was before W5a (`core.log.Log`, `core.debug.Return`,
+    /// `core.execution.Fail`, `core.flow.Sleep`), and publish refuses a script
+    /// task with no `taskRunner:` because nothing would run it. `docker`: the
+    /// local Docker daemon, through the `docker` CLI -- for development and
+    /// tests, never for production (a Docker socket in the server is root on
+    /// the node). `kubernetes`: one pod per task-run attempt in
+    /// [`WorkflowKubernetesConfig::namespace`], the production runner.
+    ///
+    /// Either runner registers the four script task types
+    /// (`io.kestra.plugin.scripts.{shell,python}.{Commands,Script}`) and the
+    /// two aliases `egret.container` and `egret.script.python`, and becomes the
+    /// runner of a script task with no `taskRunner:`. The runner is built once,
+    /// at start. A task naming the OTHER runner in its `taskRunner:` fails at
+    /// run with a message saying which runner this deployment has.
+    ///
+    /// `none` is the safe default for the same reason `worker_enabled` is
+    /// `false`: a deployment that says nothing keeps behaving exactly as it
+    /// did, and an operator who wants containers says so once, deliberately --
+    /// and still has to switch on the workspace feature `workflow_containers`
+    /// and allow images in [`WorkflowConfig::plugin_configurations`].
+    /// `EGRET_WORKFLOW__CONTAINER_RUNNER=kubernetes`.
+    #[serde(default)]
+    pub container_runner: ContainerRunner,
+
+    /// `[workflow.kubernetes]` -- the task pods' namespace and bounds, read
+    /// only when [`WorkflowConfig::container_runner`] is `kubernetes`. None of
+    /// it is author-settable. `EGRET_WORKFLOW__KUBERNETES__NAMESPACE=egret-tasks`.
+    #[serde(default)]
+    pub kubernetes: WorkflowKubernetesConfig,
+}
+
+/// [`WorkflowConfig::container_runner`].
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ContainerRunner {
+    /// No script task handler is registered.
+    #[default]
+    None,
+    /// The local Docker daemon (development and tests).
+    Docker,
+    /// One pod per task-run attempt (production).
+    Kubernetes,
+}
+
+/// `[workflow.kubernetes]`: egret's side of every task pod (W5a spec §5).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowKubernetesConfig {
+    /// The namespace task pods are created in. It must exist, enforce Pod
+    /// Security `restricted`, and grant egret's ServiceAccount exactly `pods`
+    /// get/list/watch/create/delete, `pods/log` get and `pods/exec` get/create --
+    /// which is what the chart's `workflow.containerRunner: kubernetes`
+    /// renders. Default `egret-tasks`.
+    #[serde(default = "default_task_namespace")]
+    pub namespace: String,
+    /// Requests and limits a task gets where its `taskRunner.resources` says
+    /// nothing. Default: request `100m`/`128Mi`/ephemeral-storage `256Mi`,
+    /// limit `1`/`512Mi`/ephemeral-storage `10Gi`.
+    #[serde(default = "default_task_resources")]
+    pub default_resources: TaskResources,
+    /// The most a task may ask for; an author's request or limit above it is
+    /// capped to it, and an unset side here means no cap on that side.
+    /// Default: limit `2`/`2Gi`/ephemeral-storage `10Gi`, no request cap. A
+    /// limit left unset everywhere becomes this cap, so with the defaults no
+    /// task pod is ever without an ephemeral-storage limit.
+    #[serde(default = "default_task_max_resources")]
+    pub max_resources: TaskResources,
+    /// Names of existing `kubernetes.io/dockerconfigjson` Secrets in the task
+    /// namespace, attached to every task pod. Default none.
+    /// `EGRET_WORKFLOW__KUBERNETES__IMAGE_PULL_SECRETS='["regcred"]'`.
+    #[serde(default)]
+    pub image_pull_secrets: Vec<String>,
+    /// The uid every container of a task pod runs as. Must be positive: task
+    /// pods run with `runAsNonRoot`, and egret refuses to create a pod with
+    /// `0` rather than let the kubelet blame the author. Default `1000`.
+    #[serde(default = "default_task_run_as_user")]
+    pub run_as_user: i64,
+    /// egret's helper image (`deploy/docker/task-helper.Dockerfile`), which
+    /// moves input and output files in and out of a task pod. Default
+    /// `egret-task-helper:dev`.
+    #[serde(default = "default_task_helper_image")]
+    pub helper_image: String,
+}
+
+impl Default for WorkflowKubernetesConfig {
+    fn default() -> Self {
+        Self {
+            namespace: default_task_namespace(),
+            default_resources: default_task_resources(),
+            max_resources: default_task_max_resources(),
+            image_pull_secrets: Vec::new(),
+            run_as_user: default_task_run_as_user(),
+            helper_image: default_task_helper_image(),
+        }
+    }
+}
+
+/// Kubernetes requests and limits, as quantities written the Kubernetes way
+/// (`500m`, `1`, `256Mi`). `None` leaves that side unset.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskResources {
+    #[serde(default)]
+    pub request: TaskResourceAmounts,
+    #[serde(default)]
+    pub limit: TaskResourceAmounts,
+}
+
+/// One side of [`TaskResources`].
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskResourceAmounts {
+    #[serde(default)]
+    pub cpu: Option<String>,
+    #[serde(default)]
+    pub memory: Option<String>,
+    /// Kubernetes `ephemeral-storage`: the node disk a task pod may use --
+    /// its working directory, its stderr file and `main`'s own writable layer
+    /// and logs. A task has no say in it (Kestra's `resources` has no such
+    /// key). The limit is also the working directory's and the stderr
+    /// volume's `emptyDir.sizeLimit`, so a task that writes past it is evicted
+    /// by the kubelet and FAILED with the kubelet's reason, instead of filling
+    /// the node until `DiskPressure` evicts its neighbours. Spelled
+    /// `ephemeral_storage` in TOML and env
+    /// (`EGRET_WORKFLOW__KUBERNETES__MAX_RESOURCES__LIMIT__EPHEMERAL_STORAGE`),
+    /// like every other key here.
+    #[serde(default)]
+    pub ephemeral_storage: Option<String>,
+}
+
+/// `egret-tasks` -- see [`WorkflowKubernetesConfig::namespace`].
+fn default_task_namespace() -> String {
+    "egret-tasks".to_string()
+}
+
+/// See [`WorkflowKubernetesConfig::default_resources`].
+fn default_task_resources() -> TaskResources {
+    TaskResources {
+        request: TaskResourceAmounts {
+            cpu: Some("100m".to_string()),
+            memory: Some("128Mi".to_string()),
+            ephemeral_storage: Some("256Mi".to_string()),
+        },
+        limit: TaskResourceAmounts {
+            cpu: Some("1".to_string()),
+            memory: Some("512Mi".to_string()),
+            ephemeral_storage: Some("10Gi".to_string()),
+        },
+    }
+}
+
+/// See [`WorkflowKubernetesConfig::max_resources`].
+fn default_task_max_resources() -> TaskResources {
+    TaskResources {
+        request: TaskResourceAmounts::default(),
+        limit: TaskResourceAmounts {
+            cpu: Some("2".to_string()),
+            memory: Some("2Gi".to_string()),
+            ephemeral_storage: Some("10Gi".to_string()),
+        },
+    }
+}
+
+/// `1000` -- see [`WorkflowKubernetesConfig::run_as_user`].
+fn default_task_run_as_user() -> i64 {
+    1000
+}
+
+/// `egret-task-helper:dev` -- see [`WorkflowKubernetesConfig::helper_image`].
+fn default_task_helper_image() -> String {
+    "egret-task-helper:dev".to_string()
+}
+
+/// Kestra's `kestra.plugins.configurations`: one `{type, values}` per plugin
+/// type. See [`WorkflowConfig::plugin_configurations`].
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct PluginConfigurations(pub Vec<PluginConfiguration>);
+
+impl PluginConfigurations {
+    /// The `allowed-images` of the entry for `plugin_type`, or `None` when no
+    /// entry names that type. When several entries name the same type, their
+    /// lists are concatenated (Kestra merges configurations for one type the
+    /// same way: every matching entry contributes).
+    pub fn allowed_images(&self, plugin_type: &str) -> Option<Vec<&str>> {
+        let mut found = false;
+        let mut out = Vec::new();
+        for entry in self.0.iter().filter(|e| e.r#type == plugin_type) {
+            found = true;
+            out.extend(entry.values.allowed_images.iter().map(String::as_str));
+        }
+        found.then_some(out)
+    }
+}
+
+/// One entry of [`PluginConfigurations`].
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginConfiguration {
+    /// The plugin FQCN the values apply to.
+    pub r#type: String,
+    #[serde(default)]
+    pub values: PluginConfigurationValues,
+}
+
+/// The `values` of a [`PluginConfiguration`].
+///
+/// `deny_unknown_fields`: Kestra's `values` is an open map, but egret reads one
+/// key from it, and a value egret would silently ignore (Kestra's Docker
+/// `volume-enabled`, say) is refused at boot with its name rather than accepted
+/// and not acted on.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginConfigurationValues {
+    /// Glob patterns (`*` any run of characters except `/`, `?` one character
+    /// other than `/`; no `**`, so a pattern cannot reach another registry
+    /// host -- see `egret_workflow::scripts::gate::glob_match`) matched
+    /// against a script task's image reference. See W5a spec §4 for the
+    /// normalisation applied to the reference before matching.
+    #[serde(default, rename = "allowed-images")]
+    pub allowed_images: Vec<String>,
 }
 
 /// `false` — see [`WorkflowConfig::worker_enabled`]. A named function rather
@@ -627,6 +887,14 @@ fn default_reaper_interval_secs() -> u64 {
 /// shared constant -- without that assertion this `3600` would be a second copy
 /// of a constant no compiler compares to the first.
 fn default_working_timeout_s() -> u64 {
+    3600
+}
+
+/// `3600` -- see [`WorkflowConfig::container_default_timeout_s`]. Equal to
+/// `egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT`, which this crate cannot
+/// name; `egret-workflow`'s `tests/runtime.rs`,
+/// `the_config_default_container_timeout_equals_the_workers_own`, pins the two.
+fn default_container_default_timeout_s() -> u64 {
     3600
 }
 
@@ -676,11 +944,15 @@ fn default_workflow() -> WorkflowConfig {
         batch: default_batch(),
         reaper_interval_secs: default_reaper_interval_secs(),
         working_timeout_s: default_working_timeout_s(),
+        container_default_timeout_s: default_container_default_timeout_s(),
         scheduler_enabled: default_scheduler_enabled(),
         trigger_interval_secs: default_trigger_interval_secs(),
         log_retention_days: default_log_retention_days(),
         log_run_max_lines: default_log_run_max_lines(),
         log_run_max_bytes: default_log_run_max_bytes(),
+        plugin_configurations: PluginConfigurations::default(),
+        container_runner: ContainerRunner::None,
+        kubernetes: WorkflowKubernetesConfig::default(),
     }
 }
 
@@ -966,6 +1238,228 @@ impl Config {
 #[allow(clippy::result_large_err)]
 mod tests {
     use super::*;
+
+    /// W5a: no plugin configuration by default -- which allows no image.
+    #[test]
+    fn plugin_configurations_default_to_none() {
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.workflow.plugin_configurations,
+                PluginConfigurations::default()
+            );
+            assert_eq!(
+                cfg.workflow
+                    .plugin_configurations
+                    .allowed_images("io.kestra.plugin.scripts.runner.docker.Docker"),
+                None
+            );
+            Ok(())
+        });
+    }
+
+    /// W5a: the allowlist is reachable from the environment and from the file,
+    /// in Kestra's `{type, values}` shape with the `allowed-images` key.
+    #[test]
+    fn plugin_configurations_are_settable_from_env_and_file() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env(
+                "EGRET_WORKFLOW__PLUGIN_CONFIGURATIONS",
+                r#"[{type="io.kestra.plugin.scripts.runner.docker.Docker",values={allowed-images=["python:*","ubuntu:latest"]}}]"#,
+            );
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.workflow
+                    .plugin_configurations
+                    .allowed_images("io.kestra.plugin.scripts.runner.docker.Docker"),
+                Some(vec!["python:*", "ubuntu:latest"])
+            );
+            assert_eq!(
+                cfg.workflow
+                    .plugin_configurations
+                    .allowed_images("io.kestra.plugin.ee.kubernetes.runner.Kubernetes"),
+                None
+            );
+            Ok(())
+        });
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "egret.toml",
+                r#"
+[[workflow.plugin_configurations]]
+type = "io.kestra.plugin.ee.kubernetes.runner.Kubernetes"
+values = { allowed-images = [] }
+"#,
+            )?;
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.workflow
+                    .plugin_configurations
+                    .allowed_images("io.kestra.plugin.ee.kubernetes.runner.Kubernetes"),
+                Some(vec![])
+            );
+            Ok(())
+        });
+    }
+
+    /// W5a Task 5: `container_runner` is `none` unless a deployment says
+    /// otherwise, and `[workflow.kubernetes]` has the documented defaults.
+    #[test]
+    fn container_runner_defaults_to_none_and_kubernetes_to_its_documented_values() {
+        figment::Jail::expect_with(|_jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.workflow.container_runner, ContainerRunner::None);
+            let k = &cfg.workflow.kubernetes;
+            assert_eq!(k.namespace, "egret-tasks");
+            assert_eq!(k.run_as_user, 1000);
+            assert_eq!(k.helper_image, "egret-task-helper:dev");
+            assert!(k.image_pull_secrets.is_empty());
+            assert_eq!(k.default_resources.request.cpu.as_deref(), Some("100m"));
+            assert_eq!(k.default_resources.limit.memory.as_deref(), Some("512Mi"));
+            assert_eq!(k.max_resources.limit.cpu.as_deref(), Some("2"));
+            assert_eq!(k.max_resources.request, TaskResourceAmounts::default());
+            // Final review I5: the node's disk is bounded by default.
+            assert_eq!(
+                k.default_resources.limit.ephemeral_storage.as_deref(),
+                Some("10Gi")
+            );
+            assert_eq!(
+                k.default_resources.request.ephemeral_storage.as_deref(),
+                Some("256Mi")
+            );
+            assert_eq!(
+                k.max_resources.limit.ephemeral_storage.as_deref(),
+                Some("10Gi")
+            );
+            // The serde fallback for a `[workflow]` section that predates the
+            // keys agrees with the defaults layer.
+            assert_eq!(default_workflow().container_runner, ContainerRunner::None);
+            assert_eq!(
+                default_workflow().kubernetes,
+                WorkflowKubernetesConfig::default()
+            );
+            Ok(())
+        });
+    }
+
+    /// W5a Task 5: every `container_runner` spelling and every
+    /// `[workflow.kubernetes]` key is reachable from the environment.
+    #[test]
+    fn container_runner_and_kubernetes_are_settable_from_env() {
+        for (raw, want) in [
+            ("none", ContainerRunner::None),
+            ("docker", ContainerRunner::Docker),
+            ("kubernetes", ContainerRunner::Kubernetes),
+        ] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("EGRET_WORKFLOW__CONTAINER_RUNNER", raw);
+                let cfg: Config = Config::figment().extract()?;
+                assert_eq!(cfg.workflow.container_runner, want, "{raw}");
+                Ok(())
+            });
+        }
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_WORKFLOW__KUBERNETES__NAMESPACE", "tasks-x");
+            jail.set_env("EGRET_WORKFLOW__KUBERNETES__RUN_AS_USER", "4242");
+            jail.set_env(
+                "EGRET_WORKFLOW__KUBERNETES__HELPER_IMAGE",
+                "reg.io/helper:1",
+            );
+            jail.set_env(
+                "EGRET_WORKFLOW__KUBERNETES__IMAGE_PULL_SECRETS",
+                r#"["regcred"]"#,
+            );
+            jail.set_env(
+                "EGRET_WORKFLOW__KUBERNETES__MAX_RESOURCES__LIMIT__MEMORY",
+                "1Gi",
+            );
+            jail.set_env(
+                "EGRET_WORKFLOW__KUBERNETES__DEFAULT_RESOURCES__REQUEST__CPU",
+                "250m",
+            );
+            jail.set_env(
+                "EGRET_WORKFLOW__KUBERNETES__MAX_RESOURCES__LIMIT__EPHEMERAL_STORAGE",
+                "4Gi",
+            );
+            let cfg: Config = Config::figment().extract()?;
+            let k = &cfg.workflow.kubernetes;
+            assert_eq!(k.namespace, "tasks-x");
+            assert_eq!(k.run_as_user, 4242);
+            assert_eq!(k.helper_image, "reg.io/helper:1");
+            assert_eq!(k.image_pull_secrets, vec!["regcred".to_string()]);
+            assert_eq!(k.max_resources.limit.memory.as_deref(), Some("1Gi"));
+            assert_eq!(k.default_resources.request.cpu.as_deref(), Some("250m"));
+            assert_eq!(
+                k.max_resources.limit.ephemeral_storage.as_deref(),
+                Some("4Gi")
+            );
+            Ok(())
+        });
+    }
+
+    /// W5a Task 5: the chart carries the lever with `none` as its default, and
+    /// the task namespace's Role is exactly the RBAC the spec allows --
+    /// `pods` get/list/watch/create/delete, `pods/log` get, `pods/exec`
+    /// get/create -- nothing more. (`get` on `pods/exec` because WebSocket
+    /// exec on Kubernetes >= 1.30 is authorised as `get`; measured on kind
+    /// 1.33 in W5a Task 6's e2e.) (`helm template` is the full check; this pins
+    /// the text so an added verb or resource fails a unit test.)
+    #[test]
+    fn the_chart_carries_the_container_runner_and_the_exact_task_rbac() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/helm/egret");
+        let read = |p: &str| {
+            std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("cannot read {p}: {e}"))
+        };
+        assert!(read("templates/configmap-env.yaml").contains(
+            r#"EGRET_WORKFLOW__CONTAINER_RUNNER: "{{ .Values.workflow.containerRunner }}""#
+        ));
+        assert!(read("values.yaml").contains("  containerRunner: none\n"));
+        let rbac = read("templates/rbac-tasks.yaml");
+        let rules: Vec<&str> = rbac
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("resources:") || l.starts_with("verbs:"))
+            .collect();
+        assert_eq!(
+            rules,
+            vec![
+                r#"resources: ["pods"]"#,
+                r#"verbs: ["get","list","watch","create","delete"]"#,
+                r#"resources: ["pods/log"]"#,
+                r#"verbs: ["get"]"#,
+                r#"resources: ["pods/exec"]"#,
+                r#"verbs: ["get","create"]"#,
+            ]
+        );
+        assert_eq!(rbac.matches("apiGroups:").count(), 3);
+        assert!(!rbac.contains("ClusterRole"), "only in the task namespace");
+    }
+
+    /// An unknown runner is refused at boot, by name, not read as `none`.
+    #[test]
+    fn an_unknown_container_runner_is_refused() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_WORKFLOW__CONTAINER_RUNNER", "process");
+            let err = Config::figment().extract::<Config>().unwrap_err();
+            assert!(err.to_string().contains("process"), "{err}");
+            Ok(())
+        });
+    }
+
+    /// A value egret does not read is refused at boot, by name, rather than
+    /// accepted and ignored.
+    #[test]
+    fn an_unknown_plugin_configuration_value_is_refused() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env(
+                "EGRET_WORKFLOW__PLUGIN_CONFIGURATIONS",
+                r#"[{type="io.kestra.plugin.scripts.runner.docker.Docker",values={volume-enabled=true}}]"#,
+            );
+            let err = Config::figment().extract::<Config>().unwrap_err();
+            assert!(err.to_string().contains("volume-enabled"), "{err}");
+            Ok(())
+        });
+    }
 
     #[test]
     fn defaults_load_without_any_env() {

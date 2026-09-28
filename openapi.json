@@ -28671,7 +28671,7 @@
             }
           },
           "400": {
-            "description": "The draft does not parse or validate, or a task names an unknown type",
+            "description": "The draft does not parse or validate, a task names an unknown type, or a script task is refused by the container gate (workflow_containers off, no or empty allowed-images for its runner, image not allowed)",
             "content": {
               "application/json": {
                 "schema": {

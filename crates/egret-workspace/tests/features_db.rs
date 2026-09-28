@@ -39,6 +39,18 @@ async fn seed_ws(db: &Db, repo: &WorkspaceRepo) -> WorkspaceId {
         .id
 }
 
+/// The keys a fresh workspace (no rows at all) has OFF: exactly those whose
+/// `default_enabled` is false -- `workflow_containers` since W5a.
+fn off_by_default() -> std::collections::HashSet<String> {
+    egret_workspace::features::FEATURES
+        .iter()
+        .filter(|f| !f.default_enabled)
+        .map(|f| f.key.to_string())
+        .collect()
+}
+
+/// An absent row means the key's `default_enabled`: every key that existed
+/// before W5a stays ON, and `workflow_containers` is OFF.
 #[tokio::test]
 async fn absent_row_means_enabled() {
     let Some(db) = connect().await else { return };
@@ -47,7 +59,50 @@ async fn absent_row_means_enabled() {
 
     let disabled = repo.disabled_features(ws).await.unwrap();
 
-    assert!(disabled.is_empty(), "a fresh workspace disables nothing");
+    assert_eq!(
+        disabled,
+        ["workflow_containers".to_string()].into_iter().collect(),
+        "a fresh workspace disables only the feature that is off by default"
+    );
+    for key in egret_workspace::features::FEATURE_KEYS {
+        if *key != "workflow_containers" {
+            assert!(!disabled.contains(*key), "{key} must stay on with no row");
+        }
+    }
+
+    // The batched read answers the same, including for a workspace that has
+    // no row at all (it is not simply missing from the map).
+    let batched = repo.disabled_features_for(&[ws.0]).await.unwrap();
+    assert_eq!(batched.get(&ws.0), Some(&disabled));
+}
+
+/// W5a: the off-by-default key is turned ON by an explicit `true` row, and the
+/// dependency on `workflows` is enforced on the resulting state.
+#[tokio::test]
+async fn workflow_containers_is_turned_on_by_an_explicit_row() {
+    let Some(db) = connect().await else { return };
+    let repo = WorkspaceRepo::new(db.clone());
+    let ws = seed_ws(&db, &repo).await;
+
+    repo.set_features(ws, &[("workflow_containers".into(), true)], None)
+        .await
+        .unwrap();
+    assert!(repo.disabled_features(ws).await.unwrap().is_empty());
+    assert!(repo
+        .disabled_features_for(&[ws.0])
+        .await
+        .unwrap()
+        .get(&ws.0)
+        .is_some_and(|d| d.is_empty()));
+
+    let err = repo
+        .set_features(ws, &[("workflows".into(), false)], None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, egret_core::Error::InvalidInput(ref m) if m.contains("workflow_containers requires workflows")),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
@@ -82,7 +137,7 @@ async fn re_enabling_clears_the_disabled_set() {
         .await
         .unwrap();
 
-    assert!(repo.disabled_features(ws).await.unwrap().is_empty());
+    assert_eq!(repo.disabled_features(ws).await.unwrap(), off_by_default());
 }
 
 #[tokio::test]
@@ -116,8 +171,9 @@ async fn set_features_is_atomic_on_a_bad_key() {
         )
         .await;
 
-    assert!(
-        repo.disabled_features(ws).await.unwrap().is_empty(),
+    assert_eq!(
+        repo.disabled_features(ws).await.unwrap(),
+        off_by_default(),
         "a rejected batch must write nothing"
     );
 }

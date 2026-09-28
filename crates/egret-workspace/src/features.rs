@@ -2,9 +2,20 @@
 //! request-path matcher that says which module a request belongs to, and the
 //! `WorkspaceRepo` queries that read and write the on/off rows.
 //!
-//! An **absent row means enabled**. Only explicit `enabled = false` rows turn a
-//! module off, so a fresh install and every pre-existing workspace behave
-//! exactly as they did before this feature existed.
+//! An **absent row means the feature's [`Feature::default_enabled`]**. For
+//! every key but one that is `true`: only an explicit `enabled = false` row
+//! turns such a module off, so a fresh install and every pre-existing
+//! workspace behave exactly as they did before this feature existed.
+//!
+//! **`workflow_containers` (W5a) is the first key that is OFF by default**:
+//! with no row it is disabled, and only an explicit `enabled = true` row turns
+//! it on. Every place that turns rows into an on/off answer reads
+//! `default_enabled` -- [`WorkspaceRepo::disabled_features`] and
+//! [`WorkspaceRepo::disabled_features_for`] (which every route, the
+//! `WsContext` gate and the kernel callbacks go through), the `/me/workspaces`
+//! DTO in `routes.rs`, and the scheduler's SQL predicate in `egret-workflow`
+//! (`scheduler::start::flow_is_on!`), which binds [`default_enabled`] for
+//! the key it reads.
 //!
 //! # What this catalog does NOT cover
 //!
@@ -26,8 +37,8 @@
 //!
 //! - the workflow scheduler (`egret_workflow::scheduler::fire_due`), whose claim
 //!   skips every `Schedule` trigger in a workspace with `workflows` OFF, reading
-//!   `workspace_features` with this module's rule (only `enabled = false` is
-//!   off) in SQL. A skipped trigger is frozen, not consumed, so turning the
+//!   `workspace_features` with this module's rule (a row is what it says; no
+//!   row is the key's `default_enabled`, bound into the SQL) in SQL. A skipped trigger is frozen, not consumed, so turning the
 //!   module back on recovers the missed ticks (W12 final review I3).
 
 use std::collections::HashSet;
@@ -46,11 +57,48 @@ pub const FEATURE_KEYS: &[&str] = &[
     "alerts",
     "data_api",
     "workflows",
+    "workflow_containers",
 ];
 
 /// True if `key` names a module in the catalog.
 pub fn is_known(key: &str) -> bool {
     FEATURES.iter().any(|f| f.key == key)
+}
+
+/// What an ABSENT `workspace_features` row means for `key`:
+/// [`Feature::default_enabled`], or `None` for a key the catalog does not
+/// hold.
+pub fn default_enabled(key: &str) -> Option<bool> {
+    FEATURES
+        .iter()
+        .find(|f| f.key == key)
+        .map(|f| f.default_enabled)
+}
+
+/// The effective disabled set, from a workspace's stored `(feature, enabled)`
+/// rows: a catalog key with a row is what the row says, a catalog key with no
+/// row is its [`Feature::default_enabled`], and a row naming a key the catalog
+/// no longer holds counts only when it says `false` (the rule every stored
+/// row followed before `default_enabled` existed).
+///
+/// The one function that decides what an absent row means; both repository
+/// reads below go through it.
+pub fn effective_disabled(rows: impl IntoIterator<Item = (String, bool)>) -> HashSet<String> {
+    let mut stored: std::collections::HashMap<String, bool> = rows.into_iter().collect();
+    let mut out = HashSet::new();
+    for f in FEATURES {
+        let enabled = stored.remove(f.key).unwrap_or(f.default_enabled);
+        if !enabled {
+            out.insert(f.key.to_string());
+        }
+    }
+    out.extend(
+        stored
+            .into_iter()
+            .filter(|(_, enabled)| !enabled)
+            .map(|(k, _)| k),
+    );
+    out
 }
 
 /// Cross-module dependencies: `(dependent, requires, message)`. `dependent`
@@ -64,11 +112,20 @@ pub fn is_known(key: &str) -> bool {
 ///
 /// Expressed as data so a future second dependency is a one-line addition to
 /// this list, not new control flow in `violates_dependencies`.
-const DEPENDENCIES: &[(&str, &str, &str)] = &[(
-    "dashboards",
-    "charts",
-    "dashboards requires charts to be enabled",
-)];
+const DEPENDENCIES: &[(&str, &str, &str)] = &[
+    (
+        "dashboards",
+        "charts",
+        "dashboards requires charts to be enabled",
+    ),
+    // W5a: containers are a kind of workflow task; with `workflows` off
+    // nothing could author or run one.
+    (
+        "workflow_containers",
+        "workflows",
+        "workflow_containers requires workflows to be enabled",
+    ),
+];
 
 /// The message for the first violated dependency in `disabled` — the set of
 /// feature keys that would be OFF in the resulting state — or `None` if none
@@ -113,6 +170,11 @@ pub struct Feature {
     pub label: &'static str,
     pub description: &'static str,
     pub rules: &'static [GateRule],
+    /// What a workspace with **no** `workspace_features` row for this key
+    /// gets. `true` for every key that existed before W5a, so their
+    /// behaviour did not move; `false` for `workflow_containers`, the first
+    /// feature that is off until a platform admin turns it on.
+    pub default_enabled: bool,
 }
 
 const fn prefix(path: &'static str) -> GateRule {
@@ -138,24 +200,28 @@ pub const FEATURES: &[Feature] = &[
                 methods: Some(&["POST"]),
             },
         ],
+        default_enabled: true,
     },
     Feature {
         key: "datasets",
         label: "Datasets",
         description: "Model physical tables and SQL into reusable datasets with metrics.",
         rules: &[prefix("datasets")],
+        default_enabled: true,
     },
     Feature {
         key: "charts",
         label: "Charts",
         description: "Build and view charts on top of datasets.",
         rules: &[prefix("charts")],
+        default_enabled: true,
     },
     Feature {
         key: "dashboards",
         label: "Dashboards",
         description: "Arrange charts into dashboards with filters and tabs.",
         rules: &[prefix("dashboards")],
+        default_enabled: true,
     },
     Feature {
         key: "notebooks",
@@ -167,6 +233,7 @@ pub const FEATURES: &[Feature] = &[
             prefix("notebook-runtime"),
             prefix("notebook-settings"),
         ],
+        default_enabled: true,
     },
     Feature {
         key: "alerts",
@@ -176,6 +243,7 @@ pub const FEATURES: &[Feature] = &[
         // before the routes existed, because an unmatched prefix rule is inert
         // while a route that lands before its rule fails OPEN.
         rules: &[prefix("alerts")],
+        default_enabled: true,
     },
     Feature {
         key: "data_api",
@@ -194,6 +262,7 @@ pub const FEATURES: &[Feature] = &[
         // credentials being minted here; stopping traffic is `state='disabled'`
         // on the endpoint (spec §5.3).
         rules: &[prefix("data-api")],
+        default_enabled: true,
     },
     Feature {
         key: "workflows",
@@ -240,6 +309,20 @@ pub const FEATURES: &[Feature] = &[
         // stopping webhook traffic is `state = 'disabled'` on the flow, which
         // `webhook_routes` answers with a 409.
         rules: &[prefix("workflows")],
+        default_enabled: true,
+    },
+    Feature {
+        key: "workflow_containers",
+        label: "Workflow containers",
+        description: "Run workflow script tasks (shell and Python) in container images from the platform allowlist.",
+        // No route rules: this key gates EXECUTION, not a URL prefix. A script
+        // task (`io.kestra.plugin.scripts.*` and its two `egret.*` aliases) is
+        // refused at publish and at run by `egret_workflow::scripts::gate`
+        // while it is off; the workflow routes themselves stay `workflows`'.
+        rules: &[],
+        // W5a, the user's decision of 2026-09-28: the first feature that is
+        // OFF until a platform admin turns it on for a workspace.
+        default_enabled: false,
     },
 ];
 
@@ -359,18 +442,21 @@ fn gated_feature_in(features: &[Feature], suffix: &str, method: &str) -> Option<
 }
 
 impl WorkspaceRepo {
-    /// The module keys explicitly turned OFF for `ws`. Everything not in the
-    /// returned set is on.
+    /// The module keys OFF for `ws`. Everything not in the returned set is on.
+    ///
+    /// The EFFECTIVE set: every stored row, read through
+    /// [`effective_disabled`], so a key with no row is its
+    /// [`Feature::default_enabled`] (`workflow_containers` is in this set for
+    /// a workspace that never turned it on).
     pub async fn disabled_features(&self, ws: WorkspaceId) -> Result<HashSet<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT feature FROM workspace_features \
-             WHERE workspace_id = $1 AND enabled = false",
+        let rows: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT feature, enabled FROM workspace_features WHERE workspace_id = $1",
         )
         .bind(ws.0)
         .fetch_all(&self.db.pool)
         .await
         .map_err(db_err)?;
-        Ok(rows.into_iter().map(|(f,)| f).collect())
+        Ok(effective_disabled(rows))
     }
 
     /// Disabled feature keys for several workspaces at once, keyed by workspace
@@ -380,21 +466,27 @@ impl WorkspaceRepo {
         &self,
         ws_ids: &[uuid::Uuid],
     ) -> Result<std::collections::HashMap<uuid::Uuid, HashSet<String>>> {
-        let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
-            "SELECT workspace_id, feature FROM workspace_features \
-             WHERE enabled = false AND workspace_id = ANY($1)",
+        let rows: Vec<(uuid::Uuid, String, bool)> = sqlx::query_as(
+            "SELECT workspace_id, feature, enabled FROM workspace_features \
+             WHERE workspace_id = ANY($1)",
         )
         .bind(ws_ids)
         .fetch_all(&self.db.pool)
         .await
         .map_err(db_err)?;
 
-        let mut out: std::collections::HashMap<uuid::Uuid, HashSet<String>> =
-            std::collections::HashMap::new();
-        for (ws, feature) in rows {
-            out.entry(ws).or_default().insert(feature);
+        // Every requested id gets an entry -- a workspace with no rows at all
+        // still has its default-off keys disabled, and a caller must not have
+        // to decide what a missing entry means.
+        let mut by_ws: std::collections::HashMap<uuid::Uuid, Vec<(String, bool)>> =
+            ws_ids.iter().map(|id| (*id, Vec::new())).collect();
+        for (ws, feature, enabled) in rows {
+            by_ws.entry(ws).or_default().push((feature, enabled));
         }
-        Ok(out)
+        Ok(by_ws
+            .into_iter()
+            .map(|(ws, rows)| (ws, effective_disabled(rows)))
+            .collect())
     }
 
     /// Upsert `updates` for `ws` in one transaction. Rejects unknown keys, and
@@ -570,9 +662,15 @@ mod tests {
 
     #[test]
     fn workflows_is_catalogued_and_gates_its_own_prefix() {
-        // The key exists and is ordered last, after data_api (W0; the nav group
-        // itself lands in W7).
-        assert_eq!(FEATURE_KEYS.last(), Some(&"workflows"));
+        // The key exists and is ordered right after data_api (W0; the nav group
+        // itself lands in W7). It was last until W5a put `workflow_containers`
+        // after it.
+        let at = FEATURE_KEYS.iter().position(|k| *k == "workflows");
+        assert_eq!(
+            at.map(|i| FEATURE_KEYS[i - 1]),
+            Some("data_api"),
+            "{FEATURE_KEYS:?}"
+        );
         assert!(is_known("workflows"));
 
         // And the gate actually claims the prefix. Asserting only the key would
@@ -584,6 +682,64 @@ mod tests {
             .expect("workflows in FEATURES");
         assert_eq!(f.rules.len(), 1);
         assert_eq!(f.rules[0].path, "workflows");
+    }
+
+    /// W5a: `workflow_containers` is catalogued, OFF by default, gates no
+    /// URL (it gates execution), and requires `workflows`. Every other key
+    /// keeps `default_enabled: true`, so nothing that existed before moved.
+    #[test]
+    fn workflow_containers_is_the_one_feature_off_by_default() {
+        assert!(is_known("workflow_containers"));
+        assert_eq!(FEATURE_KEYS.last(), Some(&"workflow_containers"));
+        assert_eq!(default_enabled("workflow_containers"), Some(false));
+        let off_by_default: Vec<&str> = FEATURES
+            .iter()
+            .filter(|f| !f.default_enabled)
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(off_by_default, vec!["workflow_containers"]);
+        let f = FEATURES
+            .iter()
+            .find(|f| f.key == "workflow_containers")
+            .unwrap();
+        assert!(f.rules.is_empty(), "it gates execution, not a URL prefix");
+        assert_eq!(default_enabled("teleporter"), None);
+
+        let disabled =
+            |keys: &[&str]| -> HashSet<String> { keys.iter().map(|k| k.to_string()).collect() };
+        assert_eq!(
+            violates_dependencies(&disabled(&["workflows"])),
+            Some("workflow_containers requires workflows to be enabled")
+        );
+        assert_eq!(
+            violates_dependencies(&disabled(&["workflows", "workflow_containers"])),
+            None
+        );
+    }
+
+    /// The rule for an absent row, on the pure half: no rows at all disables
+    /// exactly the keys whose `default_enabled` is false; a row overrides the
+    /// default either way; a row for a key the catalog no longer holds keeps
+    /// the old rule (only `false` counts).
+    #[test]
+    fn effective_disabled_reads_default_enabled_for_an_absent_row() {
+        let none: Vec<(String, bool)> = Vec::new();
+        assert_eq!(
+            effective_disabled(none),
+            ["workflow_containers".to_string()].into_iter().collect()
+        );
+        let rows = vec![
+            ("workflow_containers".to_string(), true),
+            ("charts".to_string(), false),
+            ("retired_key".to_string(), false),
+            ("other_retired".to_string(), true),
+        ];
+        assert_eq!(
+            effective_disabled(rows),
+            ["charts".to_string(), "retired_key".to_string()]
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]
@@ -641,12 +797,14 @@ mod tests {
                 label: "Broad",
                 description: "",
                 rules: &[prefix("a")],
+                default_enabled: true,
             },
             Feature {
                 key: "narrow",
                 label: "Narrow",
                 description: "",
                 rules: &[prefix("a/b")],
+                default_enabled: true,
             },
         ];
         assert_eq!(

@@ -65,6 +65,10 @@ pub mod runtime;
 /// `update`, `soft_delete` -- `set_live` is exempt) and later W12 tasks drive
 /// it from integration tests.
 pub mod scheduler;
+/// W5a: Kestra's script tasks (`io.kestra.plugin.scripts.{shell,python}.*`)
+/// and their `taskRunner:` -- the model, the save-time refusals, and the ONE
+/// governance gate (`scripts::gate::check`) publish and the handler call.
+pub mod scripts;
 /// W8 Task 6: `sla:` — `EXECUTION_ASSERTION` evaluated, `MAX_DURATION` refused
 /// by name with the measurement. `pub` so `tests/executor.rs` (an integration
 /// test) can drive the predicate, the same reason `executor` and `worker` are.
@@ -85,7 +89,7 @@ pub mod webhook_routes;
 // integration test and sees only the public API.
 pub mod worker;
 
-pub use publish::publish;
+pub use publish::{publish, publish_gated, ScriptGate};
 pub use refs::WorkflowRefs;
 pub use repo::{
     CreateFlowInput, ExecutionDetail, ExecutionFilter, ExecutionLogStatus, ExecutionPage,

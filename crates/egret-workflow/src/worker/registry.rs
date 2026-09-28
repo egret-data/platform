@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::commands::OrphanSweep;
 use super::handlers::{LogSink, TracingSink};
 use super::{handlers, Outcome, Registry, TaskHandler, TaskInput, WorkerError};
 use crate::logs::LogLimits;
@@ -65,6 +66,9 @@ pub struct Handlers {
     /// Where each attempt's [`RunLog`](crate::logs::RunLog) writes, and its
     /// cap. `None` is `tracing` under the default limits.
     log: Option<(Arc<dyn LogSink>, LogLimits)>,
+    /// What the reaper's tick sweeps for work left behind by ended runs
+    /// (W5a): the configured container runner, or nothing.
+    sweep: Option<Arc<dyn OrphanSweep>>,
 }
 
 impl std::fmt::Debug for Handlers {
@@ -135,6 +139,14 @@ impl Handlers {
         self
     }
 
+    /// The same registry, with the reaper's tick sweeping `sweep`'s orphans
+    /// (`OrphanSweep`, W5a Task 4) -- set by `runtime::handlers_for` when a
+    /// container runner is configured.
+    pub fn with_orphan_sweep(mut self, sweep: Arc<dyn OrphanSweep>) -> Self {
+        self.sweep = Some(sweep);
+        self
+    }
+
     /// The sink and limits [`Registry::log_sink`] answers with.
     pub fn log_sink(&self) -> (Arc<dyn LogSink>, LogLimits) {
         match &self.log {
@@ -144,7 +156,9 @@ impl Handlers {
     }
 
     /// Register `handler` under its own [`TaskHandler::type_id`] **and under
-    /// every alias `spec::registry::TASK_TYPES` accepts for it** — the one
+    /// every spelling `spec::registry::TASK_TYPES` accepts for its row** (the
+    /// canonical one and every alias; the row is found by `type_id`, which may
+    /// itself be an alias) — the one
     /// call that keeps publish's vocabulary and the worker's from drifting.
     ///
     /// # Panics
@@ -174,6 +188,14 @@ impl Handlers {
         for alias in row.aliases {
             self.register(*alias, handler.clone());
         }
+        // W5a: the row's CANONICAL spelling too. Until W5a every handler's
+        // `type_id()` was its row's canonical spelling, so `add` below covered
+        // it; W4's `egret.container`/`egret.script.python` handlers now name
+        // an ALIAS (their rows became `io.kestra.plugin.scripts.*`), and
+        // without this line publish would accept the FQCN and this registry
+        // would not serve it -- the NoHandler loop `spec::registry`'s doc
+        // describes.
+        self.register(row.r#type, handler.clone());
         self.add(handler)
     }
 
@@ -231,8 +253,18 @@ impl Registry for Handlers {
             ))),
         }
     }
+    /// The same lookup; a type with no handler has nothing to free.
+    async fn release(&self, task: &TaskInput) -> Result<()> {
+        match self.get(&task.type_id) {
+            Some(h) => h.release(task).await,
+            None => Ok(()),
+        }
+    }
     fn log_sink(&self) -> (Arc<dyn LogSink>, LogLimits) {
         Handlers::log_sink(self)
+    }
+    fn orphan_sweep(&self) -> Option<Arc<dyn OrphanSweep>> {
+        self.sweep.clone()
     }
 }
 
@@ -310,6 +342,36 @@ mod tests {
             // `Log` has no output at all; `Return`'s `{"value": …}` is how a
             // wrong handler would show itself.
             assert_eq!(out.outputs, None, "{spelling} reached the wrong handler");
+        }
+    }
+
+    /// W5a: a handler whose `type_id()` is an ALIAS (`egret.container`, W4's
+    /// spelling, now an alias of `io.kestra.plugin.scripts.shell.Commands`)
+    /// still passes `add_publishable`'s guard, and is registered under every
+    /// spelling publish accepts for its row -- the canonical FQCN included.
+    #[test]
+    fn an_alias_typed_handler_is_served_under_every_spelling_of_its_row() {
+        struct AliasTyped;
+        #[async_trait::async_trait]
+        impl TaskHandler for AliasTyped {
+            fn type_id(&self) -> &'static str {
+                "egret.container"
+            }
+            async fn run(&self, _: &TaskInput) -> Result<Outcome> {
+                Ok(Outcome::success())
+            }
+            async fn cancel(&self, _: &TaskInput) -> Result<()> {
+                Ok(())
+            }
+        }
+        let mut reg = Handlers::default();
+        reg.add_publishable(Arc::new(AliasTyped));
+        assert_eq!(
+            reg.type_ids(),
+            vec!["egret.container", "io.kestra.plugin.scripts.shell.Commands"]
+        );
+        for id in reg.type_ids() {
+            assert!(crate::spec::registry::known_type(id).is_some(), "{id}");
         }
     }
 

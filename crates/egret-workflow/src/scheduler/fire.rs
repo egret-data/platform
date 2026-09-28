@@ -17,7 +17,7 @@ use crate::worker::{start_execution_in, NewExecution};
 
 // The off switches' SQL, the feature key and the start classification are
 // shared with the Flow-trigger processor (W13a Task 4); see `start.rs`.
-use super::start::{classify, flow_is_on, Started, WORKFLOWS_FEATURE};
+use super::start::{classify, flow_is_on, workflows_feature_default, Started, WORKFLOWS_FEATURE};
 
 fn db_err(e: sqlx::Error) -> Error {
     Error::Internal(anyhow::anyhow!("{e}"))
@@ -99,7 +99,7 @@ pub async fn fire_due(pool: &PgPool) -> Result<PassReport> {
               WHERE t.next_evaluation_date <= now() \
                 AND NOT t.disabled \
                 AND",
-            flow_is_on!("$3"),
+            flow_is_on!("$3", "$4"),
             "AND (t.flow_id, t.trigger_id) NOT IN \
                     (SELECT * FROM unnest($1::uuid[], $2::text[])) \
               ORDER BY t.next_evaluation_date \
@@ -109,6 +109,7 @@ pub async fn fire_due(pool: &PgPool) -> Result<PassReport> {
         .bind(&seen_flows)
         .bind(&seen_ids)
         .bind(WORKFLOWS_FEATURE)
+        .bind(workflows_feature_default())
         .fetch_optional(&mut *tx)
         .await
         .map_err(db_err)?;

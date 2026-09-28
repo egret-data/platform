@@ -71,12 +71,46 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use egret_workflow::logs::{LogLevel, LogLimits, LogLine, RunIdentity, RunLog};
+use egret_workflow::scripts::{RunnerKind, RunnerSpec};
 use egret_workflow::worker::commands::{
     container_name, DockerRunner, NoObserver, TaskCommands, TaskRunner,
 };
+use egret_workflow::worker::handlers::script::{FixedFeatureState, Script, ScriptRuntime};
 use egret_workflow::worker::handlers::{container, python, LogSink};
 use egret_workflow::worker::{Outcome, TaskHandler, TaskInput};
 use uuid::Uuid;
+
+/// The one script handler (W5a Task 5) for `type_id`, over a real
+/// [`DockerRunner`], with the gate open: the feature on and every image
+/// allowed. The gate itself is judged in `tests/scripts_gate.rs`; this file
+/// judges the daemon.
+fn handler(type_id: &str) -> Script {
+    use egret_config::{PluginConfiguration, PluginConfigurationValues, PluginConfigurations};
+    Script::new(
+        egret_workflow::scripts::kind_of(type_id).expect("a script type"),
+        Arc::new(ScriptRuntime {
+            runner_kind: RunnerKind::Docker,
+            runner: Arc::new(DockerRunner::new()),
+            plugin_configurations: PluginConfigurations(vec![PluginConfiguration {
+                r#type: RunnerKind::Docker.fqcn().to_string(),
+                values: PluginConfigurationValues {
+                    allowed_images: vec!["*".into(), "*/*".into(), "*/*/*".into()],
+                },
+            }]),
+            features: Arc::new(FixedFeatureState(true)),
+        }),
+    )
+}
+
+/// `egret.container`, W4's spelling, now an alias of `shell.Commands`.
+fn shell() -> Script {
+    handler(container::TYPE_ID)
+}
+
+/// `egret.script.python`, now an alias of `python.Script`.
+fn py() -> Script {
+    handler(python::TYPE_ID)
+}
 
 /// The image the container tests run in. Small, has `/bin/sh`, and is not
 /// Python — so an `egret.script.python` assertion cannot pass by accident here.
@@ -288,11 +322,38 @@ fn recorded(type_id: &str, spec: serde_json::Value) -> (TaskInput, Arc<Recorder>
     (t, rec)
 }
 
-/// A [`TaskInput`] with a **fresh** run id and a lease of `now`, so two tests
-/// can never address the same container.
+/// This process's workspace id, on every task it runs: the label the suite's
+/// cleanup removes by. Since final review I3 a handler's `run` leaves its
+/// container for the post-commit `release`, which a test calling `run`
+/// directly does not reach.
+fn suite_workspace() -> Uuid {
+    static WS: std::sync::OnceLock<Uuid> = std::sync::OnceLock::new();
+    *WS.get_or_init(Uuid::new_v4)
+}
+
+/// Remove every container this process created (its workspace label), and
+/// nothing else on the daemon.
+fn remove_this_suites_containers() {
+    let out = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "-aq",
+            "--filter",
+            &format!("label=egret.io/workspace-id={}", suite_workspace()),
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("docker ps");
+    for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+        force_remove(id);
+    }
+}
+
+/// A [`TaskInput`] with a **fresh** run id, so two tests can never address
+/// the same container.
 fn task(type_id: &str, spec: serde_json::Value) -> TaskInput {
     TaskInput {
-        workspace_id: Uuid::new_v4(),
+        workspace_id: suite_workspace(),
         execution_id: Uuid::new_v4(),
         run_id: Uuid::new_v4(),
         task_id: "t".to_string(),
@@ -303,7 +364,6 @@ fn task(type_id: &str, spec: serde_json::Value) -> TaskInput {
         render: egret_workflow::runners::RenderContext::new(),
         timeout: None,
         principal: None,
-        claimed_at: chrono::Utc::now(),
         log: RunLog::discard(),
     }
 }
@@ -327,11 +387,46 @@ fn container_running(name: &str) -> bool {
     out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
 }
 
+fn container_id(name: &str) -> String {
+    let out = std::process::Command::new("docker")
+        .args(["inspect", "--format", "{{.Id}}", name])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("docker inspect");
+    assert!(out.status.success(), "{name} must exist");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Every container, running or not, labelled with `run`'s task-run id.
+fn containers_of(run: Uuid) -> Vec<String> {
+    let out = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "--all",
+            "--filter",
+            &format!("label=egret.io/taskrun-id={run}"),
+            "--format",
+            "{{.Names}}",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("docker ps");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 fn force_remove(name: &str) {
     let _ = std::process::Command::new("docker")
         .args(["rm", "--force", name])
         .stdin(std::process::Stdio::null())
         .output();
+}
+
+/// The `taskRunner:` a flow with none gets on this runner.
+fn docker_spec() -> RunnerSpec {
+    RunnerSpec::defaults(RunnerKind::Docker)
 }
 
 fn outputs(out: &Outcome) -> serde_json::Value {
@@ -360,7 +455,7 @@ fn failed(out: &Outcome) -> String {
 /// daemon can say is that a **process** ran and that its two pipes were both
 /// read.
 async fn a_container_runs_and_both_of_its_streams_reach_the_sink() {
-    let h = container::Container::new();
+    let h = shell();
     let (t, rec) = recorded(
         container::TYPE_ID,
         serde_json::json!({
@@ -395,16 +490,23 @@ async fn a_container_runs_and_both_of_its_streams_reach_the_sink() {
         Some(LogLevel::Error),
         "and the stream it came from must survive the trip: stderr is ERROR (W11 Task 1)"
     );
+    // Final review I3: `run` removes nothing; the worker's post-commit
+    // `release` does, and only then.
+    assert!(
+        container_exists(&container_name(&t)),
+        "the container outlives `run`, so a failed commit can re-attach to it"
+    );
+    h.release(&t).await.expect("released");
     assert!(
         !container_exists(&container_name(&t)),
-        "a finished run removes its container -- `$default$delete` is true"
+        "release removes the container -- `$default$delete` is true"
     );
 }
 
 /// **The `::{…}::` marker becomes task outputs**, and an ordinary line does
 /// not.
 async fn an_output_marker_printed_by_the_container_becomes_task_outputs() {
-    let h = container::Container::new();
+    let h = shell();
     let t = task(
         container::TYPE_ID,
         serde_json::json!({
@@ -426,15 +528,12 @@ async fn an_output_marker_printed_by_the_container_becomes_task_outputs() {
     );
 }
 
-/// **An output file comes back with its contents, and a declared file the
-/// command did not produce fails the task WITHOUT losing what it did
-/// produce.**
-///
-/// The second half is fix round 1's Important 1 seen end to end: the exit code
-/// and the marker vars survive the failure, because
-/// `RunnableTaskException(e, ScriptOutput)` is an exception carrying an Output.
-async fn an_output_file_comes_back_and_a_missing_one_fails_without_losing_the_rest() {
-    let h = container::Container::new();
+/// **An output file comes back with its contents; a declared file the command
+/// did not produce is IGNORED; a non-recursive glob keys what it matches** --
+/// Kestra's `outputFiles`, case for case (`w5a-scripts.json`
+/// `egret_expected.output_files`, W5a Task 5 fix round 1, the user's decision).
+async fn output_files_follow_kestra_literal_missing_and_glob() {
+    let h = shell();
     let t = task(
         container::TYPE_ID,
         serde_json::json!({
@@ -460,34 +559,36 @@ async fn an_output_file_comes_back_and_a_missing_one_fails_without_losing_the_re
     );
     assert_eq!(files["sub/inner.txt"], serde_json::json!("deep\n"));
 
+    // The fixture's glob case: `*.csv` over a.csv, b.csv, sub/c.csv, x.txt
+    // keys a.csv and b.csv; plus its missing case, ignored.
     let t = task(
         container::TYPE_ID,
         serde_json::json!({
             "image": SHELL_IMAGE,
-            "commands": ["echo '::{\"outputs\":{\"printed\":1}}::'"],
-            "outputFiles": ["never-written.txt"],
+            "commands": [
+                "echo a > a.csv", "echo b > b.csv", "echo x > x.txt",
+                "mkdir -p sub dir.csv && echo c > sub/c.csv",
+                "echo '::{\"outputs\":{\"printed\":1}}::'",
+            ],
+            "outputFiles": ["*.csv", "never.txt"],
         }),
     );
     let out = h
         .run(&t)
         .await
-        .expect("a missing output file is the author's flow, never a worker failure");
-    let msg = failed(&out);
-    assert!(
-        msg.contains("never-written.txt"),
-        "a declared output that is absent must fail the task NAMING it: {msg}"
+        .expect("a missing output is never a worker failure");
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "a declared file the command did not write is ignored: {out:?}"
     );
     let o = outputs(&out);
     assert_eq!(
-        o["exitCode"],
-        serde_json::json!(0),
-        "the exit code survives the output-file failure"
+        o["outputFiles"],
+        serde_json::json!({"a.csv": "a\n", "b.csv": "b\n"}),
+        "non-recursive, files only"
     );
-    assert_eq!(
-        o["vars"],
-        serde_json::json!({"printed": 1}),
-        "and so do the vars the command printed before it"
-    );
+    assert_eq!(o["vars"], serde_json::json!({"printed": 1}));
 }
 
 /// **A DIRECTORY named as an output file fails the task, not the worker.**
@@ -498,7 +599,7 @@ async fn an_output_file_comes_back_and_a_missing_one_fails_without_losing_the_re
 /// it was claimed, for ever, blaming egret. `expect` on the `Result` is the
 /// assertion: an `Err` here IS the bug.
 async fn a_directory_named_as_an_output_file_does_not_wedge_the_worker() {
-    let h = container::Container::new();
+    let h = shell();
     let t = task(
         container::TYPE_ID,
         serde_json::json!({
@@ -526,13 +627,13 @@ async fn a_non_zero_exit_fails_the_task_and_set_e_stops_at_the_first_failure() {
             "commands": ["echo before", "exit 7", "echo after"],
         }),
     );
-    let out = container::Container::new()
+    let out = shell()
         .run(&t)
         .await
         .expect("a command that failed is the author's flow");
     assert_eq!(
         failed(&out),
-        "egret.container: the command exited with code 7"
+        "egret.container: Command failed with exit code 7"
     );
     assert_eq!(outputs(&out)["exitCode"], serde_json::json!(7));
     let texts = rec.texts();
@@ -541,13 +642,14 @@ async fn a_non_zero_exit_fails_the_task_and_set_e_stops_at_the_first_failure() {
         !texts.contains(&"after".to_string()),
         "`set -e` ends the script at the first failing line: {texts:?}"
     );
+    shell().release(&t).await.expect("released");
     assert!(!container_exists(&container_name(&t)));
 }
 
 /// **`egret.script.python` runs the author's program in the artifact's own
 /// default image**, streams it, and its outputs are computed by CPython.
 async fn python_runs_the_authors_script_and_its_numbers_come_from_cpython() {
-    let h = python::Python::new();
+    let h = py();
     let (t, rec) = recorded(
         python::TYPE_ID,
         serde_json::json!({
@@ -582,13 +684,12 @@ async fn python_runs_the_authors_script_and_its_numbers_come_from_cpython() {
 
 /// **A dropped future does NOT stop a container, and `cancel` is what does.**
 ///
-/// This is the property the whole of `TaskInput::claimed_at` exists for, and it
-/// is the one no unit test can see: `worker::timeout::guard` enforces a
-/// task-level `timeout:` by **dropping the future**, which is all a `Sleep`
-/// needs and all `egret.sql` gets. A container outlives that drop, because the
-/// daemon is holding it and not this process.
+/// The one property no unit test can see: a future dropped -- by a lost fence
+/// (W5a Task 3) or anything else -- leaves the container to the daemon, which
+/// is what lets the next holder re-attach to it; `cancel` (a kill, or the live
+/// holder's own expired budget, through `cancel::guarded`) is what stops it.
 async fn a_dropped_future_leaves_the_container_running_and_cancel_is_what_stops_it() {
-    let h = container::Container::new();
+    let h = shell();
     let t = task(
         container::TYPE_ID,
         serde_json::json!({"image": SHELL_IMAGE, "commands": ["sleep 120"]}),
@@ -618,64 +719,100 @@ async fn a_dropped_future_leaves_the_container_running_and_cancel_is_what_stops_
         .expect("a container that is not there is nothing to stop, not a refusal");
 }
 
-/// **A reaped worker's `cancel` cannot reach its replacement's container.**
+/// **A new holder of the attempt RE-ATTACHES to the old holder's container
+/// instead of starting a second one** (W5a Task 5, spec §5), and the old
+/// holder's dropped future removed nothing.
 ///
-/// `TaskHandler::cancel`'s hazard note, driven against the daemon. Worker B
-/// holds the run under lease `t2`; worker A — reaped, still inside its handler,
-/// about to have its own budget expire — calls `cancel` with the same `run_id`
-/// and its **stale** lease `t1`. `attempt` is identical, because `reap` leaves
-/// the attempt open.
+/// Worker A's handler future is dropped mid-run -- what a lost fence does
+/// (W5a Task 3) -- so the container keeps running. Worker B holds the same
+/// attempt under a NEW lease and runs the same task: it must find A's
+/// container by name, follow its log to the end and report the outcome A's
+/// container produced. `delete: false` keeps the container afterwards so the
+/// daemon can be asked how many there ever were: one, with A's id.
 ///
-/// Two mutations discriminate here and they are different ones: dropping the
-/// lease from the name is caught by the vacuity guard below, and addressing the
-/// container by its `run_id` **label** — the design this one was chosen over —
-/// is caught by the final assertion and by nothing else in the workspace.
-async fn a_reaped_workers_cancel_cannot_reach_its_replacements_container() {
-    let h = container::Container::new();
+/// Before W5a the name carried the lease, so B created a second container
+/// while A's ran on (Task 3's measured orphan); that mutant fails the id
+/// assertion here.
+async fn a_new_holder_re_attaches_to_the_attempts_container_instead_of_starting_another() {
+    let h = shell();
+    let spec = serde_json::json!({
+        "image": SHELL_IMAGE,
+        "commands": [
+            "echo first",
+            "sleep 4",
+            "echo second",
+            "echo \"::{\\\"outputs\\\":{\\\"n\\\":$((6*7))}}::\"",
+        ],
+        "taskRunner": {
+            "type": egret_workflow::scripts::DOCKER_RUNNER,
+            "delete": false,
+        },
+    });
+    let a = task(container::TYPE_ID, spec);
+    let name = container_name(&a);
 
-    let run_id = Uuid::new_v4();
-    let spec = serde_json::json!({"image": SHELL_IMAGE, "commands": ["sleep 120"]});
-
-    let stale = TaskInput {
-        run_id,
-        claimed_at: chrono::Utc::now() - chrono::Duration::seconds(30),
-        ..task(container::TYPE_ID, spec.clone())
-    };
-    let live = TaskInput {
-        claimed_at: chrono::Utc::now(),
-        ..stale.clone()
-    };
-    assert_eq!(stale.run_id, live.run_id);
-    assert_eq!(stale.attempt, live.attempt);
-    assert_ne!(
-        container_name(&stale),
-        container_name(&live),
-        "if these are equal the rest of this test is vacuous"
-    );
-
-    let running = tokio::time::timeout(std::time::Duration::from_millis(2500), h.run(&live)).await;
-    assert!(running.is_err(), "B must still be inside its handler");
-    let b_name = container_name(&live);
-    assert!(container_running(&b_name), "B's container must be up");
-
-    h.cancel(&stale)
-        .await
-        .expect("a stale worker's kill finds nothing, which is not a refusal");
-
+    let dropped = tokio::time::timeout(std::time::Duration::from_millis(2000), h.run(&a)).await;
     assert!(
-        container_running(&b_name),
-        "a reaped worker's cancel reached its REPLACEMENT's container. The lease \
-         token is what stops that (see `TaskInput::claimed_at`), and a cancel that \
-         found the container by its `run_id` LABEL instead would fail exactly here"
+        dropped.is_err(),
+        "A must still have been inside its handler"
     );
+    assert!(
+        container_running(&name),
+        "dropping A's future must not remove the container: the new holder re-attaches to it"
+    );
+    let a_id = container_id(&name);
 
-    force_remove(&b_name);
+    let (b, rec) = {
+        let (t, rec) = recorded(container::TYPE_ID, serde_json::json!({}));
+        (
+            TaskInput {
+                spec: a.spec.clone(),
+                log: t.log,
+                ..a.clone()
+            },
+            rec,
+        )
+    };
+    // B is a different holder (its own log), and `TaskInput` carries no
+    // lease at all: the name can only be the (run, attempt) re-attach key.
+    assert_eq!(a.attempt, b.attempt, "of the same attempt");
+
+    let out = h
+        .run(&b)
+        .await
+        .expect("re-attaching is not a worker failure");
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "{out:?}"
+    );
+    assert_eq!(
+        outputs(&out)["vars"],
+        serde_json::json!({"n": 42}),
+        "B reports what A's container computed"
+    );
+    assert!(
+        rec.texts().contains(&"second".to_string()),
+        "B follows the container's log to its end: {:?}",
+        rec.texts()
+    );
+    assert_eq!(
+        containers_of(b.run_id),
+        vec![name.clone()],
+        "one container for the attempt, ever"
+    );
+    assert_eq!(container_id(&name), a_id, "and it is A's, not a new one");
+    assert!(
+        !container_running(&name),
+        "`delete: false` keeps the container, exited -- the artifact's measured behaviour"
+    );
+    force_remove(&name);
 }
 
 /// **An image that does not exist fails the task, and does not abort the
 /// tick.**
 async fn an_image_that_does_not_exist_fails_the_task_rather_than_the_worker() {
-    let h = container::Container::new();
+    let h = shell();
     let t = task(
         container::TYPE_ID,
         serde_json::json!({
@@ -711,6 +848,7 @@ async fn the_runner_refuses_an_empty_image_with_the_artifacts_own_message() {
                 commands: vec!["true".into()],
                 ..TaskCommands::default()
             },
+            &docker_spec(),
             &NoObserver,
         )
         .await
@@ -729,14 +867,11 @@ async fn the_runner_refuses_an_empty_image_with_the_artifacts_own_message() {
 async fn a_path_that_escapes_the_working_directory_is_refused_by_the_runner() {
     let runner = DockerRunner::new();
 
-    // **After `docker create`, not before it** — review Minor 1, which said
-    // this exact sentence was false when it was a test heading, and which I
-    // then reproduced verbatim as this comment. `check_relative` for
-    // `input_files` runs inside `run_created`, i.e. once the container exists;
-    // the refusal is an `Err` because nothing has RUN yet and there is no exit
-    // code or var to preserve, which is a different fact from when it happens.
-    // The container is removed on the way out, which the assertion at the end
-    // of this test is what checks.
+    // **Before `docker create`** since W5a Task 5: `inputFiles` keys are the
+    // author's now, so `check_relative` runs at the top of `run`, before a
+    // container exists. The refusal is an `Err` because nothing has RUN yet
+    // and there is no exit code or var to preserve. The assertion at the end
+    // of this test checks nothing was left behind.
     let t = task(container::TYPE_ID, serde_json::json!({}));
     let err = runner
         .run(
@@ -747,6 +882,7 @@ async fn a_path_that_escapes_the_working_directory_is_refused_by_the_runner() {
                 input_files: BTreeMap::from([("../escaped.txt".to_string(), "x".to_string())]),
                 ..TaskCommands::default()
             },
+            &docker_spec(),
             &NoObserver,
         )
         .await
@@ -765,6 +901,7 @@ async fn a_path_that_escapes_the_working_directory_is_refused_by_the_runner() {
                 output_files: vec!["/etc/passwd".to_string()],
                 ..TaskCommands::default()
             },
+            &docker_spec(),
             &NoObserver,
         )
         .await
@@ -779,12 +916,19 @@ async fn a_path_that_escapes_the_working_directory_is_refused_by_the_runner() {
     );
     assert_eq!(out.exit_code, 0, "the exit code survives the refusal");
 
-    for t in [&t, &t2] {
-        assert!(
-            !container_exists(&container_name(t)),
-            "a refused run removes whatever it created"
-        );
-    }
+    // The input refusal came before `docker create`: nothing exists.
+    assert!(
+        !container_exists(&container_name(&t)),
+        "a run refused before `create` leaves nothing"
+    );
+    // The output refusal came after the command ran: the container stays for
+    // the post-commit `release` (final review I3), which removes it.
+    assert!(container_exists(&container_name(&t2)));
+    runner.release(&t2, &docker_spec()).await.expect("release");
+    assert!(
+        !container_exists(&container_name(&t2)),
+        "release removes what the refused run created"
+    );
 }
 
 /// **A symlinked output file cannot read the worker host's files.**
@@ -818,7 +962,7 @@ async fn a_path_that_escapes_the_working_directory_is_refused_by_the_runner() {
 /// matches declared names with `Files.walkFileTree`, so an unmatched name
 /// yields nothing). Both are inside the sandbox; neither is the host.
 async fn a_symlinked_output_file_cannot_read_the_worker_hosts_files() {
-    let h = container::Container::new();
+    let h = shell();
 
     // Whatever the worker host's own passwd file says, no task output may
     // contain it. Read here so the control is the real file and not a guess
@@ -914,7 +1058,7 @@ async fn a_symlinked_output_file_cannot_read_the_worker_hosts_files() {
 /// the_worker` because it is the same class — an author's `outputFiles` must
 /// never become an engine failure.
 async fn a_parent_and_a_child_declared_together_never_wedges_the_run() {
-    let h = container::Container::new();
+    let h = shell();
     let t = task(
         container::TYPE_ID,
         serde_json::json!({
@@ -928,28 +1072,21 @@ async fn a_parent_and_a_child_declared_together_never_wedges_the_run() {
          failure applies no outcome, so it stays RUNNING and leased for an hour",
     );
 
-    let msg = failed(&out);
-    assert!(
-        msg.contains("a/b.txt"),
-        "the failure must name the child the container could not produce: {msg}"
+    // The child cannot exist (its parent is a file), so it is a declared file
+    // the command did not leave: IGNORED since W5a Task 5 fix round 1
+    // (Kestra's `missing_declared_file`), and never egret's staging collision.
+    assert_eq!(
+        out.state,
+        egret_workflow::executor::RunState::Success,
+        "{out:?}"
     );
-    assert!(
-        !msg.contains("File exists") && !msg.contains("os error 17"),
-        "and it must not be egret's staging collision -- each declared name gets \
-         its own root precisely so they cannot collide: {msg}"
-    );
-
     let o = outputs(&out);
     assert_eq!(
-        o["outputFiles"]["a"],
-        serde_json::json!("regular-file\n"),
-        "the parent still came back; only the child failed: {o}"
+        o["outputFiles"],
+        serde_json::json!({"a": "regular-file\n"}),
+        "the parent came back; the impossible child is simply absent: {o}"
     );
-    assert_eq!(
-        o["vars"],
-        serde_json::json!({"ran": 1}),
-        "and the run's own outputs survive the failure: {o}"
-    );
+    assert_eq!(o["vars"], serde_json::json!({"ran": 1}), "{o}");
 }
 
 /// **An output file over the cap fails the task rather than being truncated**,
@@ -966,7 +1103,7 @@ async fn an_output_file_over_the_cap_fails_the_task_rather_than_being_truncated(
         ..TaskCommands::default()
     };
     let out = runner
-        .run(&t, &cmds, &NoObserver)
+        .run(&t, &cmds, &docker_spec(), &NoObserver)
         .await
         .expect("a file over the cap is the author's flow");
     let why = out.failure.clone().expect("the cap must fail the task");
@@ -982,7 +1119,7 @@ async fn an_output_file_over_the_cap_fails_the_task_rather_than_being_truncated(
     let runner = DockerRunner::new().with_limits(1024, 1_048_576);
     let t = task(container::TYPE_ID, serde_json::json!({}));
     let out = runner
-        .run(&t, &cmds, &NoObserver)
+        .run(&t, &cmds, &docker_spec(), &NoObserver)
         .await
         .expect("100 bytes is under a 1024-byte cap");
     assert_eq!(out.failure, None, "{out:?}");
@@ -1005,6 +1142,7 @@ async fn a_flood_of_output_markers_is_refused_rather_than_stored() {
                 ],
                 ..TaskCommands::default()
             },
+            &docker_spec(),
             &NoObserver,
         )
         .await
@@ -1041,10 +1179,10 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(a_non_zero_exit_fails_the_task_and_set_e_stops_at_the_first_failure),
         case!(a_parent_and_a_child_declared_together_never_wedges_the_run),
         case!(a_path_that_escapes_the_working_directory_is_refused_by_the_runner),
-        case!(a_reaped_workers_cancel_cannot_reach_its_replacements_container),
+        case!(a_new_holder_re_attaches_to_the_attempts_container_instead_of_starting_another),
         case!(a_symlinked_output_file_cannot_read_the_worker_hosts_files),
         case!(an_image_that_does_not_exist_fails_the_task_rather_than_the_worker),
-        case!(an_output_file_comes_back_and_a_missing_one_fails_without_losing_the_rest),
+        case!(output_files_follow_kestra_literal_missing_and_glob),
         case!(an_output_file_over_the_cap_fails_the_task_rather_than_being_truncated),
         case!(an_output_marker_printed_by_the_container_becomes_task_outputs),
         case!(python_runs_the_authors_script_and_its_numbers_come_from_cpython),
@@ -1132,6 +1270,7 @@ fn main() {
                     }
                 }
             }
+            remove_this_suites_containers();
         }
     }
 

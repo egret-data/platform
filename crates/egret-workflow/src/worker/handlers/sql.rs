@@ -640,7 +640,6 @@ mod tests {
             // all, so the lease token has no reader here. A fixed instant
             // rather than a clock reading, for `handlers::testing::input`'s
             // reason.
-            claimed_at: chrono::DateTime::UNIX_EPOCH,
             log: crate::logs::RunLog::discard(),
         }
     }

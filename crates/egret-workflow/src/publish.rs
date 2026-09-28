@@ -9,6 +9,10 @@
 //! 3. `validate(&flow)` -- any **error** is `InvalidInput`; warnings are
 //!    carried into the snapshot but never block publish (a flow declaring
 //!    `concurrency` must still publish -- it is simply not enforced yet);
+//!    3b. (W5a) every script task passes the ONE governance gate,
+//!    `scripts::gate::check` -- the workspace's `workflow_containers`
+//!    feature, the runner's `allowed-images` -- or publish is `InvalidInput`
+//!    naming the refusal. See [`ScriptGate`] and [`check_script_tasks`];
 //! 4. walk every task; `registry::known_type(&task.r#type)` -- `None` is
 //!    `InvalidInput`, naming the type, so a typo like `egret.sqll` fails to
 //!    publish instead of resolving vacuously and failing only at run time,
@@ -74,7 +78,9 @@ use uuid::Uuid;
 
 use crate::models::{Flow, Task, TaskKind, Trigger, TriggerKind};
 use crate::repo::{FlowRepo, FlowVersionRow};
+use crate::scripts::{self, RunnerKind};
 use crate::spec::{parse, registry, validate};
+use egret_config::PluginConfigurations;
 use egret_workflow_api::{RefKind, WorkflowRefPort};
 
 /// The single, shared answer to "this reference does not resolve in the
@@ -89,9 +95,123 @@ fn ref_not_found() -> Error {
     Error::NotFound("referenced object".into())
 }
 
+/// What publish's script-task gate (step 3b) decides with: the caller's
+/// workspace's `workflow_containers` state and the platform's
+/// `plugin_configurations`, plus the runner a script task with no
+/// `taskRunner:` runs on.
+#[derive(Debug, Clone, Copy)]
+pub struct ScriptGate<'a> {
+    /// `workflow_containers` is ON for the workspace being published into.
+    pub feature_enabled: bool,
+    pub plugin_configurations: &'a PluginConfigurations,
+    /// The configured default runner (W5a spec §2: "absent: the configured
+    /// `container_runner`"). `None` when none is configured, in which case a
+    /// script task with no `taskRunner:` is refused -- nothing would run it.
+    pub default_runner: Option<RunnerKind>,
+}
+
+static NO_PLUGIN_CONFIGURATIONS: PluginConfigurations = PluginConfigurations(Vec::new());
+
+impl ScriptGate<'static> {
+    /// Fail-closed: the feature off, no allowlist, no default runner -- every
+    /// script task is refused. What [`publish`] (the no-gate entry point)
+    /// uses, so a caller that never heard of W5a cannot publish a container.
+    pub fn closed() -> Self {
+        ScriptGate {
+            feature_enabled: false,
+            plugin_configurations: &NO_PLUGIN_CONFIGURATIONS,
+            default_runner: None,
+        }
+    }
+}
+
+/// Step 3b: every script task in `flow` through the ONE gate,
+/// `scripts::gate::check` -- or, for an image written as a `{{ }}`
+/// expression, `gate::check_unrendered` (the same rules minus the image
+/// match, which runs after rendering, W5a Task 5). The first refusal is
+/// `InvalidInput`, naming the task and the reason.
+///
+/// Runs after `validate`, so every script task here already parses; a parse
+/// error is still answered (not unwrapped) in case a caller skipped step 3.
+pub fn check_script_tasks(flow: &Flow, gate: &ScriptGate<'_>) -> Result<()> {
+    for (_path, task, _kind, spec) in scripts::script_tasks(flow) {
+        let parsed = scripts::parse(&task.r#type, spec).map_err(|refusals| {
+            Error::InvalidInput(
+                refusals
+                    .iter()
+                    .map(|r| format!("task '{}': {}", task.id, r.message))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })?;
+        let refuse = |why: scripts::gate::GateRefusal| {
+            Error::InvalidInput(format!("task '{}': {why}", task.id))
+        };
+        // The feature first, so a workspace with it off is told that --
+        // whatever else about the task would also be refused.
+        if !gate.feature_enabled {
+            return Err(refuse(scripts::gate::GateRefusal::FeatureDisabled));
+        }
+        let runner = match (&parsed.task_runner, gate.default_runner) {
+            (Some(r), _) => r.kind,
+            (None, Some(default)) => default,
+            (None, None) => {
+                return Err(Error::InvalidInput(format!(
+                    "task '{}': no 'taskRunner' and no default container runner is \
+                     configured, so nothing would run it",
+                    task.id
+                )))
+            }
+        };
+        let image = parsed.image();
+        let verdict = if scripts::gate::is_unrendered(image) {
+            scripts::gate::check_unrendered(
+                gate.feature_enabled,
+                runner,
+                gate.plugin_configurations,
+            )
+        } else {
+            scripts::gate::check(&scripts::gate::GateInput {
+                feature_enabled: gate.feature_enabled,
+                image,
+                runner,
+                plugin_configurations: gate.plugin_configurations,
+            })
+        };
+        verdict.map_err(refuse)?;
+        // An explicit `taskRunner` must be the runner this deployment HAS
+        // (W5a Task 5 fix round 1). Without this a flow naming the other
+        // runner published and failed every run -- and with
+        // `container_runner = none` it published a task nothing is
+        // registered for, which `WorkerError::NoHandler` re-claims for ever.
+        match gate.default_runner {
+            None => {
+                return Err(Error::InvalidInput(format!(
+                    "task '{}': no container runner is configured on this egret \
+                     (workflow.container_runner is none), so nothing would run it",
+                    task.id
+                )))
+            }
+            Some(configured) if configured != runner => {
+                return Err(Error::InvalidInput(format!(
+                    "task '{}': {}",
+                    task.id,
+                    scripts::runner_unavailable(runner, configured)
+                )))
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
 /// Publish `flow`'s current draft: parse, validate, resolve every reference,
 /// freeze a new immutable version, and mark it live. See the module doc for
 /// the ordered steps and where each refusal happens.
+///
+/// Script tasks are gated with [`ScriptGate::closed`], i.e. refused: this
+/// entry point knows neither the workspace's `workflow_containers` state nor
+/// the platform allowlist. The route calls [`publish_gated`].
 pub async fn publish(
     repo: &FlowRepo,
     refs: &dyn WorkflowRefPort,
@@ -99,6 +219,19 @@ pub async fn publish(
     by: UserId,
     flow: Uuid,
     note: &str,
+) -> Result<FlowVersionRow> {
+    publish_gated(repo, refs, ws, by, flow, note, &ScriptGate::closed()).await
+}
+
+/// [`publish`], with the script-task gate's inputs (step 3b).
+pub async fn publish_gated(
+    repo: &FlowRepo,
+    refs: &dyn WorkflowRefPort,
+    ws: Uuid,
+    by: UserId,
+    flow: Uuid,
+    note: &str,
+    gate: &ScriptGate<'_>,
 ) -> Result<FlowVersionRow> {
     // Step 1: `FlowRepo::get` is scoped by `ws` -- a missing OR foreign flow
     // both answer `NotFound` already, the module doc's module-level
@@ -125,6 +258,9 @@ pub async fn publish(
             .join("; ");
         return Err(Error::InvalidInput(msg));
     }
+
+    // Step 3b (W5a).
+    check_script_tasks(&parsed, gate)?;
 
     // Steps 4-6: walk every task in all four root lists (mirrors
     // `spec::validate`'s own walk over `tasks`/`errors`/`finally`/

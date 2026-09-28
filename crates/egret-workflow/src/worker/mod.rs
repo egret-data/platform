@@ -81,6 +81,7 @@ mod cancel;
 mod claim;
 pub mod commands;
 pub mod handlers;
+pub mod k8s;
 mod reaper;
 mod registry;
 mod render;
@@ -92,7 +93,7 @@ mod timeout;
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
 pub use claim::{
     apply_outcome, claim, due_retries, resume, start_execution, start_execution_in,
-    start_execution_with_trigger, tick, wake, Claimed, NewExecution,
+    start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution, WorkerTiming,
 };
 pub use reaper::reap;
 pub use registry::Handlers;
@@ -116,6 +117,19 @@ use crate::runners::RenderContext;
 /// drive it, exactly as the plan's interface says, and a caller that wants the
 /// product default passes this.
 pub const DEFAULT_WORKING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// **The budget a script or container task runs under when its author wrote no
+/// `timeout:`** (W5a spec §6): one hour.
+///
+/// **A deliberate divergence from Kestra**, whose `callWithTimeout` runs a task
+/// with a `null` timeout unbounded. egret bounds the four script types and
+/// their two aliases (`scripts::kind_of`) because an unbounded container is a
+/// pod or container nobody ever reclaims; every other handler keeps the
+/// artifact's answer. A run that outlives it is FAILED with
+/// `Timeout after 01:00:00.000`, exactly as an explicit `timeout: PT1H` would
+/// be. `egret_config::WorkflowConfig::container_default_timeout_s` carries the
+/// configured value; `tests/runtime.rs` pins the two defaults together.
+pub const DEFAULT_CONTAINER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// What a handler is handed.
 ///
@@ -221,40 +235,6 @@ pub struct TaskInput {
     /// scheduled run acts as, so it is left to own that column rather than
     /// guessed at here.
     pub principal: Option<egret_core::UserId>,
-    /// **The lease token this run is being executed under** —
-    /// `task_runs.claimed_at`, the instant the claim's own `UPDATE` wrote.
-    ///
-    /// # Why it is here, and why it was NOT here before W4 Task 5
-    ///
-    /// [`TaskHandler::cancel`]'s *READ THIS BEFORE IMPLEMENTING A HANDLER THAT
-    /// HOLDS AN EXTERNAL RESOURCE* section is this field's specification. W4
-    /// Task 3 wrote it and deliberately left the field off: *"the value that
-    /// does disambiguate is the lease token, `task_runs.claimed_at`, which
-    /// `Claimed` carries and which is deliberately not on `TaskInput` today,
-    /// because no handler uses it and a field with no reader is the shape this
-    /// package has refused ten times. Whoever adds a resource-holding handler
-    /// must add it … in the same change."*
-    ///
-    /// [`handlers::container`] and [`handlers::python`] are that handler and
-    /// this is that change. They name a Docker container after
-    /// `(run_id, claimed_at)` — [`commands::container_name`] — precisely so
-    /// that a stale worker A, reaped and still inside its handler, computes a
-    /// name that **no longer exists** and therefore cannot kill the container
-    /// belonging to worker B, which claimed the same `run_id` under a new
-    /// lease. `attempt` does not disambiguate ([`reap`] leaves it open) and
-    /// `run_id` alone is exactly the hazard.
-    ///
-    /// **A per-run handle registry inside the handler is NOT an alternative if
-    /// it is keyed by `run_id`.** Worker B claiming in the same process would
-    /// overwrite A's entry and A's cancel would reach B's container by another
-    /// route; and where A and B are separate processes — the production case —
-    /// a registry cannot see across them at all, while the name can, because
-    /// the daemon is shared. The disambiguator is load-bearing either way,
-    /// which is Task 3's point restated.
-    ///
-    /// A handler that holds nothing must ignore this field, and the four core
-    /// handlers do.
-    pub claimed_at: chrono::DateTime<chrono::Utc>,
     /// **This attempt's log** (W11): every line a handler or its runner
     /// writes goes through it with `task.log.line(level, msg).await`.
     ///
@@ -411,52 +391,78 @@ pub trait TaskHandler: Send + Sync {
     /// that type. The artifact's is not: `WorkerTaskCallable` holds *the task
     /// instance that is running*, and
     /// `io.kestra.plugin.jdbc.AbstractJdbcQuery.kill()` reaches
-    /// `this.runningStatement`, a field on that instance. Per-instance
-    /// addressing cannot name the wrong resource; per-identity addressing can.
+    /// `this.runningStatement`, a field on that instance. So an external
+    /// resource must be NAMED from the input, and the name decides what a
+    /// stale worker can reach.
     ///
-    /// The four core handlers are safe from this because they hold nothing.
-    /// **A pod-backed handler (W4 Task 5, `egret.container`) is not**, and the
-    /// hazard is concrete: [`reap`] clears a lease and leaves `state =
-    /// 'RUNNING'`, so worker B can claim a run while worker A is still inside
-    /// its handler, and A's own budget then expires and calls this method. A
-    /// handler that named its pod `egret-run-<run_id>` would have A delete
-    /// **B's** pod. `attempt` does not disambiguate either — the reaper leaves
-    /// the attempt open, so A and B share it.
+    /// **The name is `(run_id, attempt)`, deliberately, and the lease is not
+    /// in it** (W5a; [`commands::container_name`] and
+    /// [`k8s::pod_name`](k8s::pod_name) — `egret-run-<run>-<attempt>`). That is
+    /// the re-attach key: [`reap`] clears a lease and leaves the attempt open,
+    /// so the next holder of the run computes the SAME name and adopts the
+    /// container or pod already running the task instead of starting a second
+    /// one (W5a spec §5). W4 keyed the name on the lease (`claimed_at`)
+    /// instead, and W5a Task 3 measured what that cost: every re-claim
+    /// created a second container while the first ran on. `TaskInput`
+    /// therefore carries no lease at all — a name cannot depend on it.
     ///
-    /// **The value that does disambiguate is the lease token,
-    /// `task_runs.claimed_at`, and it IS on [`TaskInput`] now** — see
-    /// [`TaskInput::claimed_at`]. W4 Task 5 added it, because
-    /// [`handlers::container`] and [`handlers::python`] are the
-    /// resource-holding handlers this section was written for: they name a
-    /// container `egret-run-<run_id>-<lease µs>`
-    /// ([`commands::container_name`]), so a reaped worker A computes a name
-    /// that no longer exists and cannot reach worker B's container.
+    /// **The hazard, as it stands now:** worker A, reaped while still inside
+    /// its handler, shares the name with worker B, which re-claimed the run.
+    /// If A kept running it could delete (its budget's `cancel`, or a
+    /// post-commit [`release`](Self::release)) or kill the work B has
+    /// re-attached to. **What closes it is not the name but the lease:**
     ///
-    /// **This paragraph used to say the field was "deliberately not on
-    /// `TaskInput` today", and the whole-branch review is right that satisfying
-    /// the instruction falsified the instruction.** It is corrected rather than
-    /// deleted, because the hazard it describes is still exactly right and the
-    /// next resource-holding handler still has to obey it — what changed is
-    /// that the disambiguator is now supplied rather than owed.
+    /// 1. while a handler runs, `claim::under_lease` renews the lease every
+    ///    `working_timeout / 3` under a fence, and **drops the handler's
+    ///    future** — budget, `cancel`, everything — the moment a renewal finds
+    ///    the fence moved;
+    /// 2. and it **self-fences**: once no renewal has succeeded for
+    ///    `working_timeout` (the reaper's own threshold, clocked from before
+    ///    the claim statement was sent), it drops the future too, so a worker
+    ///    cut off from Postgres gives the run up no later than the reaper can
+    ///    hand it to B;
+    /// 3. [`release`](Self::release) runs only after A's outcome COMMITTED,
+    ///    under `apply_outcome`'s `claimed_at` fence, so a worker that lost the
+    ///    run never reaches it.
     ///
-    /// **The per-run handle registry this used to offer as an alternative is
-    /// NOT one**, and both [`TaskInput::claimed_at`] and
-    /// [`commands::container_name`] carry the argument: keyed by `run_id` it has
-    /// the identical bug (B overwrites A's entry in the same process), keyed by
-    /// `(run_id, claimed_at)` it is the name with more moving parts, and in the
-    /// case the hazard is actually about — A and B in **different processes** —
-    /// a registry cannot see across them while the daemon can.
+    /// *Residual, stated:* a process frozen (not merely cut off) past the
+    /// deadline resumes inside one poll of the handler before the fence is
+    /// re-checked.
     ///
-    /// `worker::cancel`'s module doc records why the kill path cannot simply be
-    /// suppressed for a lost lease instead: the worker never learns the lease is
-    /// gone until its write is refused, which is after the kill.
+    /// **So a new resource-holding handler must:** name its resource by
+    /// `(run_id, attempt)` so a new holder can find it; never delete it on
+    /// `Drop` (a dropped future is a lost lease, and B needs the resource);
+    /// run under `under_lease` like every handler (it does, through
+    /// `claim::run_one`); and delete on success only in
+    /// [`release`](Self::release), after the commit. A per-run handle registry
+    /// is NOT an alternative: in the production case A and B are different
+    /// processes, and only the shared name (the daemon's, the API server's)
+    /// is visible to both.
     ///
-    /// [`handlers::container`]: handlers::container
-    /// [`handlers::python`]: handlers::python
     /// [`commands::container_name`]: commands::container_name
-    ///
     /// [`reap`]: reap
     async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()>;
+
+    /// Free what the run held, **after its outcome committed** (W5a final
+    /// review I3).
+    ///
+    /// `claim::run_one` calls this only once `apply_outcome`'s transaction has
+    /// committed. A handler whose work outlives `run` — the script handler's
+    /// container or pod, which `run` leaves in place — deletes it here and
+    /// not inside `run`, because deleting first turned a failed commit into a
+    /// second execution: the outcome was lost, the lease expired, and the next
+    /// claim found nothing to re-attach to and ran the task again. In this
+    /// order a failed commit leaves the finished pod for the next claim to
+    /// re-attach to (it collects the same outcome, it does not re-run), and a
+    /// crash between the commit and this call leaves a pod of a terminal run,
+    /// which the orphan sweep deletes.
+    ///
+    /// A default `Ok(())`, unlike [`cancel`](Self::cancel), because the answer
+    /// is right for every handler whose work ends when `run` returns — all of
+    /// them but the script handler. `Err` is logged; the outcome stands.
+    async fn release(&self, _task: &TaskInput) -> egret_core::Result<()> {
+        Ok(())
+    }
 }
 
 /// Type-id → handler dispatch.
@@ -487,6 +493,15 @@ pub trait Registry: Send + Sync {
     /// keeps the terminal its budget gave it. See [`cancel`].
     async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()>;
 
+    /// [`TaskHandler::release`] for the handler [`Registry::run`] would pick:
+    /// free what a run held, called by `claim::run_one` **only after the
+    /// run's outcome committed**. A default `Ok(())`: a registry whose
+    /// handlers hold nothing past `run` has nothing to free, and a test
+    /// registry is one. [`Handlers`] dispatches.
+    async fn release(&self, _task: &TaskInput) -> egret_core::Result<()> {
+        Ok(())
+    }
+
     /// The sink and limits `claim::run_one` builds each attempt's
     /// [`RunLog`](crate::logs::RunLog) from.
     ///
@@ -504,6 +519,14 @@ pub trait Registry: Send + Sync {
             std::sync::Arc::new(handlers::TracingSink),
             crate::logs::LogLimits::default(),
         )
+    }
+
+    /// What the reaper's tick should sweep for containers or pods of runs that
+    /// have ended (W5a spec §5, *Orphans*). A default of `None` is safe: a
+    /// registry with no container runner has nothing to leave behind.
+    /// [`Handlers`] answers with what [`Handlers::with_orphan_sweep`] was given.
+    fn orphan_sweep(&self) -> Option<std::sync::Arc<dyn commands::OrphanSweep>> {
+        None
     }
 }
 

@@ -125,6 +125,10 @@ pub struct WorkflowState {
     /// The append-only audit trail — the same sink every other management
     /// seam writes mutations to.
     pub audit: egret_audit::AuditSink,
+    /// W5a: the platform half of the script-task gate publish runs
+    /// (`workflow.plugin_configurations`, the default runner). The workspace
+    /// half, `workflow_containers`, is read from `workspaces` per publish.
+    pub scripts: crate::scripts::ScriptSettings,
 }
 
 impl FromRef<WorkflowState> for SessionService {
@@ -680,7 +684,7 @@ async fn validate_flow(
     request_body = PublishFlowRequest,
     responses(
         (status = 200, description = "A new immutable version was frozen and is now live", body = FlowVersionDto),
-        (status = 400, description = "The draft does not parse or validate, or a task names an unknown type", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The draft does not parse or validate, a task names an unknown type, or a script task is refused by the container gate (workflow_containers off, no or empty allowed-images for its runner, image not allowed)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such flow in this workspace, or a task references an object that does not exist or belongs to another workspace", body = egret_core::http::ErrorBody),
@@ -695,13 +699,26 @@ async fn publish_flow(
 ) -> EgretResult<Json<FlowVersionDto>> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     let note = body.map(|Json(b)| b.note).unwrap_or_default();
-    let version = crate::publish::publish(
+    // W5a: the workspace half of the script-task gate. `disabled_features` is
+    // the effective set, so an absent `workflow_containers` row reads as OFF
+    // (its `default_enabled`), exactly as the `WsContext` gate would read it.
+    let feature_enabled = !st
+        .workspaces
+        .disabled_features(ctx.workspace_id)
+        .await?
+        .contains(crate::scripts::FEATURE_KEY);
+    let version = crate::publish::publish_gated(
         &st.repo,
         &*st.refs,
         ctx.workspace_id.0,
         ctx.principal.user_id,
         id,
         &note,
+        &crate::publish::ScriptGate {
+            feature_enabled,
+            plugin_configurations: &st.scripts.plugin_configurations,
+            default_runner: st.scripts.default_runner,
+        },
     )
     .await?;
     st.audit.emit(egret_audit::mutation_for(

@@ -354,6 +354,8 @@ pub fn validate(flow: &Flow) -> ValidationReport {
         }
     }
 
+    validate_script_tasks(flow, &mut report);
+
     validate_inputs(&flow.inputs, &mut report);
 
     for trigger in &flow.triggers {
@@ -365,6 +367,33 @@ pub fn validate(flow: &Flow) -> ValidationReport {
     emit_not_yet_enforced(&features, &mut report);
 
     report
+}
+
+/// W5a: every script task (`crate::scripts`) is parsed, and each property,
+/// runner or value W5a does not implement is an ERROR naming it -- never
+/// ignored (W5a spec §3). Walks `children()` AND `error_children()` through
+/// `scripts::script_tasks`, unlike `walk_task`, so a script task inside a
+/// flowable's `errors:` is refused too.
+///
+/// The governance gate (feature, allowlist) is NOT here: it needs the
+/// workspace and the platform configuration, which this pure function does
+/// not have. `publish::publish_gated` runs it after this.
+fn validate_script_tasks(flow: &Flow, report: &mut ValidationReport) {
+    for (path, task, _kind, spec) in crate::scripts::script_tasks(flow) {
+        if let Err(refusals) = crate::scripts::parse(&task.r#type, spec) {
+            for r in refusals {
+                report.errors.push(Finding {
+                    code: r.code,
+                    message: format!("task '{}': {}", task.id, r.message),
+                    path: if r.path.is_empty() {
+                        path.clone()
+                    } else {
+                        format!("{path}.{}", r.path)
+                    },
+                });
+            }
+        }
+    }
 }
 
 /// `namespace` against Kestra's own pattern (`AbstractFlow.java`):

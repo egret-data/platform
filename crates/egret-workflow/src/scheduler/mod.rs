@@ -31,7 +31,8 @@
 //! The `WHERE` also carries every off switch that is not in the YAML --
 //! `deleted_at`, `state`, the workspace's `workflows` feature (a `NOT
 //! EXISTS` over `workspace_features`, the rows the route gate reads; final
-//! review I3), and the workspace's own `status` (an `EXISTS` over
+//! review I3 -- since W5a a `COALESCE` of the row's `enabled` with the
+//! catalog's `default_enabled`, the same answer for this key), and the workspace's own `status` (an `EXISTS` over
 //! `workspaces` requiring `status = 'active'`, the same column and value
 //! `WsContext` and the webhook route already refuse a non-active workspace
 //! on; the user's decision of 2026-09-25) -- so an off trigger is never

@@ -80,6 +80,33 @@ data:
   # that an older flow's Flow trigger would hear are not recorded until the
   # scheduler first starts (and reconciles) or that flow is saved again.
   EGRET_WORKFLOW__SCHEDULER_ENABLED: "{{ .Values.workflow.schedulerEnabled }}"
+  # W5a — WHERE SCRIPT TASKS RUN. "none" by default: no script handler is
+  # registered and the worker is exactly what it was before W5a. "kubernetes"
+  # runs one pod per task-run attempt in the task namespace this chart renders
+  # (namespace-tasks.yaml, rbac-tasks.yaml, networkpolicy-tasks.yaml). A run
+  # still needs the workspace feature `workflow_containers` (off by default)
+  # and an image allowed by EGRET_WORKFLOW__PLUGIN_CONFIGURATIONS.
+  {{- if eq .Values.workflow.containerRunner "docker" }}
+  {{- fail "workflow.containerRunner=docker is for local development only: the chart's backend has no Docker daemon, and a Docker socket in the server is root on the node. Use kubernetes." }}
+  {{- end }}
+  EGRET_WORKFLOW__CONTAINER_RUNNER: "{{ .Values.workflow.containerRunner }}"
+  {{- with .Values.workflow.pluginConfigurations }}
+  EGRET_WORKFLOW__PLUGIN_CONFIGURATIONS: {{ . | quote }}
+  {{- end }}
+  {{- if eq .Values.workflow.containerRunner "kubernetes" }}
+  {{- $t := .Values.workflow.tasks }}
+  EGRET_WORKFLOW__KUBERNETES__NAMESPACE: "{{ $t.namespace }}"
+  EGRET_WORKFLOW__KUBERNETES__HELPER_IMAGE: "{{ $t.helperImage }}"
+  EGRET_WORKFLOW__KUBERNETES__RUN_AS_USER: "{{ $t.runAsUser }}"
+  EGRET_WORKFLOW__KUBERNETES__IMAGE_PULL_SECRETS: {{ $t.imagePullSecrets | toJson | quote }}
+  {{- range $key, $res := dict "DEFAULT_RESOURCES" $t.defaultResources "MAX_RESOURCES" $t.maxResources }}
+  {{- range $side, $amounts := $res }}
+  {{- range $what, $v := $amounts }}
+  EGRET_WORKFLOW__KUBERNETES__{{ $key }}__{{ upper $side }}__{{ upper $what }}: {{ $v | quote }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
   EGRET_RANGER__AUTH_TOKEN: ""
   EGRET_ADMIN_EMAIL: "{{ .Values.admin.email }}"
   # Package 4 — HOW MANY OF ME THERE ARE. A pod cannot discover this: the count

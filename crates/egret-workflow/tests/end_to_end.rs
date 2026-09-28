@@ -167,6 +167,7 @@ fn cfg(enabled: bool) -> RuntimeConfig {
         batch: 8,
         reaper_interval: Duration::from_secs(3600),
         working_timeout: Duration::from_secs(3600),
+        container_default_timeout: egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT,
         scheduler_enabled: false,
         trigger_interval: Duration::from_secs(3600),
         log_limits: egret_workflow::logs::LogLimits::default(),

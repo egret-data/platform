@@ -196,7 +196,19 @@ async fn list_returns_every_feature_enabled_by_default() {
     // assertion is "the route lists every module", which a hard-coded number
     // turns into "…and someone remembered to bump it" every time one is added.
     assert_eq!(arr.len(), egret_workspace::features::FEATURE_KEYS.len());
-    assert!(arr.iter().all(|f| f["enabled"] == true));
+    // Every key is on by default EXCEPT the ones whose `default_enabled` is
+    // false (`workflow_containers`, W5a) -- read from the catalog, not listed.
+    for item in arr {
+        let key = item["key"].as_str().unwrap();
+        assert_eq!(
+            item["enabled"],
+            egret_workspace::features::default_enabled(key).unwrap(),
+            "{key}"
+        );
+    }
+    assert!(arr
+        .iter()
+        .any(|f| f["key"] == "workflow_containers" && f["enabled"] == false));
     assert!(arr
         .iter()
         .all(|f| f["label"].is_string() && f["description"].is_string()));
@@ -253,11 +265,9 @@ async fn put_rejects_an_unknown_key_and_writes_nothing() {
                 .await,
         )
         .await;
-    assert!(json
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|x| x["enabled"] == true));
+    // Every key at its catalog default (W5a: `workflow_containers` is off).
+    assert!(json.as_array().unwrap().iter().all(|x| x["enabled"]
+        == egret_workspace::features::default_enabled(x["key"].as_str().unwrap()).unwrap()));
 }
 
 /// `PUT` is a merge, not a full replacement, despite the verb: a body naming
@@ -373,11 +383,9 @@ async fn put_rejects_dashboards_on_with_charts_off_and_writes_nothing() {
         .await;
     // Both are enabled by default, and default is untouched by the rejected
     // write.
-    assert!(json
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|x| x["enabled"] == true));
+    // Every key at its catalog default (W5a: `workflow_containers` is off).
+    assert!(json.as_array().unwrap().iter().all(|x| x["enabled"]
+        == egret_workspace::features::default_enabled(x["key"].as_str().unwrap()).unwrap()));
 }
 
 /// The merge trap: `dashboards` is currently ON (the default). A `PUT` naming
@@ -557,6 +565,9 @@ async fn my_workspaces_reports_enabled_features() {
         .collect();
     assert!(features.contains(&"charts"));
     assert!(!features.contains(&"notebooks"));
+    // W5a: the off-by-default key is absent from a workspace with no row.
+    assert!(!features.contains(&"workflow_containers"), "{features:?}");
+    assert!(features.contains(&"workflows"), "{features:?}");
 }
 
 /// Two workspaces with different disabled sets: `/me/workspaces` must report

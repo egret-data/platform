@@ -184,6 +184,7 @@ impl Claimed {
             std::sync::Arc<dyn super::handlers::LogSink>,
             crate::logs::LogLimits,
         ),
+        script_default: std::time::Duration,
     ) -> Result<(TaskInput, Budget)> {
         let flow = crate::spec::parse(&self.source)
             .map_err(|e| worker_err(WorkerError::Unplannable(self.execution_id, e.message)))?;
@@ -193,7 +194,11 @@ impl Claimed {
                 self.task_id.clone(),
             ))
         })?;
-        let budget = timeout::resolve(leaf.timeout, &render);
+        let budget = timeout::defaulted(
+            timeout::resolve(leaf.timeout, &render),
+            &self.type_id,
+            script_default,
+        );
         Ok((
             TaskInput {
                 workspace_id: self.workspace_id,
@@ -207,11 +212,6 @@ impl Claimed {
                 render,
                 timeout: budget.duration(),
                 principal: self.principal_id.map(egret_core::UserId),
-                // **The lease token, handed to the handler.** See
-                // `TaskInput::claimed_at`: a handler that holds an external
-                // resource names it after this and not after `run_id` alone,
-                // so a reaped worker cannot reach its replacement's resource.
-                claimed_at: self.claimed_at,
                 log: crate::logs::RunLog::new(
                     crate::logs::RunIdentity {
                         workspace_id: self.workspace_id,
@@ -769,6 +769,13 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// run at a time; refresh each lease immediately before its handler; or measure
 /// the reaper's timeout per run. See W4 Task 5's report and cost 2 above.
 ///
+/// **W5a Task 3 narrows this and does not close it.** [`under_lease`] renews
+/// each run's lease *before* its handler is polled, so a run reaped while it
+/// waited is found lost and **not run** — no second handler beside the worker
+/// that reclaimed it. What is still true: the waiting run's lease is not
+/// renewed while earlier members of the batch run, so it can still be reaped
+/// and handed to another worker in that window.
+///
 /// **2. Pick `n` deliberately.** `n = 1` makes the property above unreachable
 /// and is what `oracle-exec/driver.rs` uses.
 ///
@@ -785,9 +792,17 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 ///
 /// **3. A publishable type with no handler is claimed and never completed.**
 /// `Handlers::with_core_tasks` registers **4** handlers (`log`, `ret`, `fail`,
-/// `sleep`); `spec::registry::TASK_TYPES` holds **13** rows, every one of which
-/// `publish` accepts. So **9 of 13 publishable types** produce a run that
-/// `claim` leases, finds no handler for, and leaves `RUNNING`. [`reap`] then
+/// `sleep`); `spec::registry::TASK_TYPES` holds **15** rows. With
+/// `workflow.container_runner` set, `runtime::handlers_for` adds the **4**
+/// script rows (W5a); with `none` it does not, and `publish` refuses those four
+/// instead. Either way **7 of 15 publishable types** (`egret.sql`,
+/// `egret.python`, `egret.dataapi.call`, `egret.dataset.refresh`,
+/// `egret.report.send`, `core.http`, `core.slack`) produce a run that
+/// `claim` leases, finds no handler for, and leaves `RUNNING` -- as does a
+/// script task reached without publish (a draft run) under `none`. *(This
+/// read "13 rows ... 9 of 13" until W5a Task 6: W5a folded
+/// `egret.container`/`egret.script.python` into aliases and added the four
+/// script FQCNs.)* [`reap`] then
 /// clears `claimed_at` and **nothing else** — its statement is
 /// `SET claimed_at = NULL, updated_at = now()`, so the state stays `RUNNING` and
 /// the attempt stays open — and `claim`'s own predicate is
@@ -810,6 +825,14 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// the first handler finally returns it hits the fence with `LeaseLost`. The
 /// second is reaped at its own 1 h mark, and so on. The run never completes and
 /// each cycle costs a fresh handler.
+///
+/// **W5a Task 3 closed cause 4.** The worker renews its lease every
+/// `working_timeout / 3` while the handler runs ([`under_lease`]), so a live
+/// handler's lease never ages past the reaper's threshold; only a worker that
+/// stopped renewing (died) has its run reclaimed.
+/// `tests/runtime.rs::a_run_longer_than_working_timeout_is_not_reaped_while_its_worker_lives`
+/// and `tests/worker.rs::a_run_whose_worker_stopped_renewing_is_reaped` pin
+/// the two directions. Cause 3 is untouched.
 ///
 /// The distinction matters for whoever fixes it: cause 3 is a **missing**
 /// handler and cause 4 is a **slow** one, so a "give up after N tries" rule
@@ -948,7 +971,10 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 ///    member of a batch can then be **reaped before its handler is invoked**
 ///    and run twice. Nothing bounds this today; see
 ///    [`handlers::container`](super::handlers::container)'s module doc for the
-///    proposal and why it was not taken in a bookkeeping round.
+///    proposal and why it was not taken in a bookkeeping round. *(W5a Task 3:
+///    script and container tasks with no `timeout:` now run under
+///    `container_default_timeout`, and the running run's lease is renewed;
+///    the pre-invocation window of cause 1 above remains.)*
 /// 3. **It is the coupling this doc's own *One run's failure does not strand
 ///    the rest of the batch* already refused once** — this time inside the
 ///    transaction, where an early return cannot be softened into "carry on".
@@ -1017,6 +1043,55 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// run it reopened is claimed by this same call, so the count moves on the
 /// tick that runs it.
 pub async fn tick(pool: &PgPool, n: usize, reg: &dyn Registry) -> Result<usize> {
+    tick_with(pool, n, reg, WorkerTiming::default()).await
+}
+
+/// The two durations a tick needs and a bare `tick(pool, n, reg)` cannot
+/// carry: how long a lease lives, and the budget of a script task with no
+/// `timeout:`.
+///
+/// A struct rather than two more positional `Duration`s on [`tick_with`],
+/// because two adjacent `Duration` parameters are the pair a caller swaps
+/// without the compiler noticing. [`Default`] is the product default
+/// ([`DEFAULT_WORKING_TIMEOUT`](super::DEFAULT_WORKING_TIMEOUT),
+/// [`DEFAULT_CONTAINER_TIMEOUT`](super::DEFAULT_CONTAINER_TIMEOUT)), which is
+/// what [`tick`] uses; the runtime passes `RuntimeConfig`'s values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkerTiming {
+    /// The reaper's `working_timeout`: a lease older than this is reclaimed.
+    /// The worker renews its lease every third of it while a handler runs.
+    pub working_timeout: std::time::Duration,
+    /// The budget a script or container task gets when it declares no
+    /// `timeout:`. See [`DEFAULT_CONTAINER_TIMEOUT`](super::DEFAULT_CONTAINER_TIMEOUT).
+    pub container_default_timeout: std::time::Duration,
+}
+
+impl WorkerTiming {
+    /// Every third of `working_timeout` (W5a spec §6), so two renewals can be
+    /// lost before the reaper takes the run. Floored at 1 ms because
+    /// `tokio::time::interval` panics on zero.
+    pub fn renew_every(&self) -> std::time::Duration {
+        (self.working_timeout / 3).max(std::time::Duration::from_millis(1))
+    }
+}
+
+impl Default for WorkerTiming {
+    fn default() -> Self {
+        Self {
+            working_timeout: super::DEFAULT_WORKING_TIMEOUT,
+            container_default_timeout: super::DEFAULT_CONTAINER_TIMEOUT,
+        }
+    }
+}
+
+/// [`tick`] under an explicit [`WorkerTiming`] — what the runtime calls, with
+/// its configured `working_timeout` and `container_default_timeout`.
+pub async fn tick_with(
+    pool: &PgPool,
+    n: usize,
+    reg: &dyn Registry,
+    timing: WorkerTiming,
+) -> Result<usize> {
     let mut first_err: Option<Error> = None;
     // Ahead of the claim, and its failure does not stop the claim: an
     // execution that cannot settle must not keep this worker from running the
@@ -1024,11 +1099,17 @@ pub async fn tick(pool: &PgPool, n: usize, reg: &dyn Registry) -> Result<usize> 
     if let Err(e) = wake(pool, n as i64).await {
         first_err = Some(e);
     }
+    // Read BEFORE the claim statement is sent, so the self-fence's clock
+    // (`under_lease`) can only start earlier than the `claimed_at` it wrote.
+    let leased_at = tokio::time::Instant::now();
     let claimed = claim(pool, n as i64).await?;
     let mut done = 0usize;
     for c in &claimed {
-        match run_one(pool, c, reg).await {
-            Ok(()) => done += 1,
+        match run_one(pool, c, reg, timing, leased_at).await {
+            Ok(Committed::Yes) => done += 1,
+            // The fence moved: the run is another worker's and this one
+            // committed nothing, so it is not counted.
+            Ok(Committed::LeaseLost) => {}
             Err(e) => {
                 if first_err.is_none() {
                     first_err = Some(e);
@@ -1078,15 +1159,85 @@ pub async fn tick(pool: &PgPool, n: usize, reg: &dyn Registry) -> Result<usize> 
 ///
 /// Both come after the handler's own lines and before `pool.begin()`, so no
 /// log write happens inside the transaction.
-async fn run_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<()> {
-    let (input, budget) = input_for(pool, c, reg).await?;
-    let outcome = match budget {
-        Budget::Refused(message) => Ok(Outcome::failed_with(message)),
-        // `cancel::guarded` rather than `timeout::guard` directly: the budget's
-        // expiry is the artifact's only `kill(null)` site, so the kill path
-        // hangs off it. A refusal there does not reach this expression — it is
-        // logged and the budget's outcome stands. See `super::cancel`.
-        other => cancel::guarded(reg, &input, other.duration()).await,
+///
+/// **The fence-lost path (W5a) runs `finish()` and NOT the failed-attempt
+/// line.** A worker whose renewal finds the fence moved records no outcome,
+/// and a failed-attempt line is the log's half of an outcome; writing one
+/// would put `FAILED`'s message beside a run another worker may yet finish.
+///
+/// # The lease is renewed while the handler runs (W5a)
+///
+/// See [`under_lease`]: every `working_timeout / 3`, fenced, starting before
+/// the handler is polled. The outcome is then fenced on the **latest**
+/// renewed lease, which is why a renewed copy of `c` reaches
+/// [`apply_outcome`] rather than `c` itself. The handler never sees the lease:
+/// what it holds is named by `(run, attempt)` (see [`TaskHandler::cancel`]'s
+/// *READ THIS* section), which a renewal does not change.
+///
+/// # What the run held is released AFTER the commit (W5a final review I3)
+///
+/// [`Registry::release`] is called only once the outcome's transaction has
+/// committed — never on a lost lease, never on a handler `Err`, never on a
+/// failed commit. A script task's pod or container is deleted there, not in
+/// the handler, so:
+///
+/// * **the commit failed** (Postgres blip, failover): the run stays RUNNING,
+///   its lease expires, and the next claim **re-attaches** to the finished
+///   pod and collects the same outcome — the task is not run a second time;
+/// * **egret died between the commit and the release**: the run is terminal
+///   and its pod is deleted by the orphan sweep on the reaper's tick.
+///
+/// A release that fails is logged; the committed outcome stands.
+///
+/// [`TaskHandler::cancel`]: super::TaskHandler::cancel
+async fn run_one(
+    pool: &PgPool,
+    c: &Claimed,
+    reg: &dyn Registry,
+    timing: WorkerTiming,
+    leased_at: tokio::time::Instant,
+) -> Result<Committed> {
+    let (input, budget) = input_for(pool, c, reg, timing.container_default_timeout).await?;
+    let handler = async {
+        match budget {
+            Budget::Refused(message) => Ok(Outcome::failed_with(message)),
+            // `cancel::guarded` rather than `timeout::guard` directly: the
+            // budget's expiry is the artifact's only `kill(null)` site, so the
+            // kill path hangs off it. A refusal there does not reach this
+            // expression — it is logged and the budget's outcome stands. See
+            // `super::cancel`.
+            other => cancel::guarded(reg, &input, other.duration()).await,
+        }
+    };
+    let (outcome, held) = match under_lease(
+        pool,
+        c,
+        timing.renew_every(),
+        timing.working_timeout,
+        leased_at,
+        handler,
+    )
+    .await
+    {
+        Leased::Kept { out, held } => (out, held),
+        // **The fence moved: another worker holds this run now, and this one
+        // records NOTHING** — no outcome, and no failed-attempt line, because
+        // there is no failure to report: the task was not finished by anyone
+        // yet. Lines the handler already wrote stay (they were true when
+        // written), and `finish()` still runs so a withheld-lines summary is
+        // not lost. The handler future was dropped inside `under_lease`.
+        Leased::Lost => {
+            tracing::warn!(
+                execution = %c.execution_id,
+                run = %c.id,
+                task_id = %c.task_id,
+                "this worker no longer holds the run (the fence moved, or no renewal \
+                 succeeded for working_timeout); it stopped following the task and \
+                 records no outcome"
+            );
+            input.log.finish().await;
+            return Ok(Committed::LeaseLost);
+        }
     };
     if let Ok(Outcome {
         state: RunState::Failed,
@@ -1098,10 +1249,217 @@ async fn run_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<()> {
     }
     input.log.finish().await;
     let outcome = outcome?;
+    // **The fence is the LATEST renewed lease, not the claim's.** Every
+    // renewal moved `claimed_at`, so the claim's own value would match no row
+    // and a live worker's outcome would be refused as `LeaseLost`.
+    let renewed = Claimed {
+        claimed_at: held,
+        ..c.clone()
+    };
     let mut tx = pool.begin().await.map_err(db_err)?;
-    apply_outcome(&mut tx, c, &outcome).await?;
+    apply_outcome(&mut tx, &renewed, &outcome).await?;
     tx.commit().await.map_err(db_err)?;
-    Ok(())
+    // Only now: see "released AFTER the commit" above.
+    if let Err(e) = reg.release(&input).await {
+        tracing::warn!(
+            execution = %c.execution_id,
+            run = %c.id,
+            task_id = %c.task_id,
+            "the run's outcome is committed, but what it held could not be released \
+             (the orphan sweep will remove it): {e}"
+        );
+    }
+    Ok(Committed::Yes)
+}
+
+/// What [`run_one`] did with a run that did not error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Committed {
+    /// Its result committed.
+    Yes,
+    /// A renewal found the fence moved; nothing was recorded.
+    LeaseLost,
+}
+
+/// What [`under_lease`] ended with.
+enum Leased<T> {
+    /// The work finished while this worker still held the lease; `held` is
+    /// the lease's latest value, the one [`apply_outcome`] must fence on.
+    Kept { out: T, held: DateTime<Utc> },
+    /// A renewal found the fence moved. The work was dropped unfinished.
+    Lost,
+}
+
+/// Run `work` while renewing `c`'s lease every `every` — **Kestra's worker
+/// heartbeat, on egret's claim model** (W5a spec §6).
+///
+/// Kestra resubmits a task only once its worker's heartbeat is confirmed dead
+/// (`kestra.server.liveness`). egret has no worker registry; the lease IS the
+/// heartbeat: [`super::reap`] reclaims a lease older than `working_timeout`,
+/// so renewing it every third of that keeps a live worker's run from ever
+/// being reclaimed, however long its handler — and a dead worker stops
+/// renewing, so its run is reclaimed within `working_timeout`. This applies
+/// to **every** handler, not only containers: an hour-long `egret.sql` is
+/// covered by the same loop.
+///
+/// # The first renewal happens before the handler is polled
+///
+/// `interval`'s first tick is immediate and the `select!` is `biased` towards
+/// it. So a run whose lease was reaped while it waited behind earlier members
+/// of its batch (`tick` claims `n` at one instant and runs them in sequence)
+/// is found lost **before its handler starts**, rather than run a second
+/// time beside the worker that reclaimed it.
+///
+/// # Renewal is never cut off mid-statement
+///
+/// The renewal is awaited inside the `select!` arm's body, so the work
+/// future is not polled while one is in flight, and when the work finishes no
+/// renewal is outstanding. A renewal run as a concurrently-dropped future
+/// could commit on the server after its future was dropped, leaving
+/// `claimed_at` at a value this worker never saw and its own outcome refused.
+///
+/// # A renewal that ERRORS is retried -- until the worker SELF-FENCES
+///
+/// One failed renewal is logged and the next tick tries again. But a worker
+/// cut off from Postgres cannot tell whether the reaper has already taken its
+/// run, and -- since W5a names a container or pod by (run, attempt) so that the
+/// next holder re-attaches to it -- a worker still inside its handler could
+/// then KILL that work when its own budget expires, under the new holder (W5a
+/// Task 5 fix round 1, review Important 4; the delete on finish it also
+/// feared now happens only after a COMMITTED outcome, which a worker that
+/// lost the run cannot make -- final review I3). So **once no renewal has succeeded for `fence_after`
+/// (`working_timeout`, the reaper's own threshold), the worker gives the run
+/// up exactly as on a moved fence**: the handler future is dropped (no
+/// outcome, no delete, no cancel), and [`Leased::Lost`] is returned. Kestra's
+/// worker does the same when its heartbeat fails.
+///
+/// The clock starts when the claim was TAKEN (`leased_at`, read before the
+/// claim statement was sent), and each success restarts it from before its
+/// renewal was sent -- both earlier than the `claimed_at` the database wrote,
+/// so the local deadline always falls at or before the instant the reaper
+/// could see the lease as expired. A renewal is awaited (the handler is not
+/// polled meanwhile) for up to the later of the deadline and one interval: a
+/// renewal that SUCCEEDS is proof the run is still this worker's, however
+/// late; anything else once the deadline has passed gives the run up. A
+/// renewal cut off by that limit that later commits server-side wrote a lease
+/// this worker has already abandoned.
+///
+/// # What dropping `work` does, per handler
+///
+/// The four core handlers hold nothing. `egret.sql`'s query keeps running on
+/// its engine (a dropped future tells a MySQL-protocol engine nothing).
+/// `DockerRunner` (`egret.container`, `egret.script.python`) kills its
+/// `docker start --attach` CLI (`kill_on_drop`), which does **not** stop the
+/// container, and its `rm --force` never runs: the container is left for the
+/// new holder, which is what spec §6 asks (W5a Task 4/5 re-attach to it).
+/// [`super::TaskHandler::cancel`] is deliberately **not** called: the run is
+/// someone else's now.
+async fn under_lease<T>(
+    pool: &PgPool,
+    c: &Claimed,
+    every: std::time::Duration,
+    fence_after: std::time::Duration,
+    leased_at: tokio::time::Instant,
+    work: impl std::future::Future<Output = T>,
+) -> Leased<T> {
+    under_lease_with(
+        |held| renew_lease(pool, c.id, held),
+        c.id,
+        c.claimed_at,
+        every,
+        fence_after,
+        leased_at,
+        work,
+    )
+    .await
+}
+
+/// [`under_lease`] over any renewal, so a test can make renewals fail.
+async fn under_lease_with<T, R, F>(
+    mut renew: R,
+    run: Uuid,
+    claimed_at: DateTime<Utc>,
+    every: std::time::Duration,
+    fence_after: std::time::Duration,
+    leased_at: tokio::time::Instant,
+    work: impl std::future::Future<Output = T>,
+) -> Leased<T>
+where
+    R: FnMut(DateTime<Utc>) -> F,
+    F: std::future::Future<Output = Result<Option<DateTime<Utc>>>>,
+{
+    let mut held = claimed_at;
+    let mut last_ok = leased_at;
+    let mut work = std::pin::pin!(work);
+    let mut renew_tick = tokio::time::interval(every);
+    renew_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let self_fence = |why: &str| {
+        tracing::warn!(
+            run = %run,
+            "{why}: no lease renewal succeeded for {fence_after:?}, so this worker gives the \
+             run up (self-fence) and stops following it"
+        );
+        Leased::Lost
+    };
+    loop {
+        // Wait for the next renewal, the deadline, or the work. The renewal
+        // is preferred: a renewal that SUCCEEDS is proof the run is still this
+        // worker's, whatever the local clock says (a run that waited behind
+        // its batch past the deadline keeps it if nobody reaped it). Reaching
+        // the deadline also tries one renewal first, for the same reason. The
+        // work future is not polled while a renewal is in flight, so waiting
+        // for an answer past the deadline is safe; it is the WORK that must
+        // not run on past the deadline unproven.
+        tokio::select! {
+            biased;
+            _ = renew_tick.tick() => {}
+            _ = tokio::time::sleep_until(last_ok + fence_after) => {}
+            out = &mut work => return Leased::Kept { out, held },
+        }
+        let sent = tokio::time::Instant::now();
+        let limit = std::cmp::max(last_ok + fence_after, sent + every);
+        match tokio::time::timeout_at(limit, renew(held)).await {
+            Ok(Ok(Some(renewed))) => {
+                held = renewed;
+                last_ok = sent;
+            }
+            Ok(Ok(None)) => return Leased::Lost,
+            Ok(Err(e)) => tracing::warn!(
+                run = %run,
+                error = %e,
+                "could not renew the lease; retrying at the next renewal"
+            ),
+            Err(_) => tracing::warn!(run = %run, "a lease renewal went unanswered"),
+        }
+        if tokio::time::Instant::now() >= last_ok + fence_after {
+            return self_fence("the last renewal did not succeed");
+        }
+    }
+}
+
+/// Move `run`'s lease to `now()`, **if this worker still holds it** — the
+/// fence is `claimed_at = held`. `Some(new lease)` on success; `None` when the
+/// fence moved (reaped, or reaped and re-claimed), which means the run is no
+/// longer this worker's.
+///
+/// `RETURNING` the written value rather than reading `now()` separately, for
+/// [`Claimed::claimed_at`]'s reason: the token must be exactly what the row
+/// holds.
+async fn renew_lease(
+    pool: &PgPool,
+    run: Uuid,
+    held: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>> {
+    sqlx::query_scalar(
+        "UPDATE workflow.task_runs SET claimed_at = now() \
+          WHERE id = $1 AND claimed_at = $2 \
+          RETURNING claimed_at",
+    )
+    .bind(run)
+    .bind(held)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)
 }
 
 /// What one claimed run's handler is handed, render context included.
@@ -1114,7 +1472,12 @@ async fn run_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<()> {
 /// IT; a sibling of the same execution may finish while the handler runs, and
 /// what that costs is that a handler's `outputs` are a snapshot rather than a
 /// live view. Kestra's worker renders from a snapshot for the same reason.
-async fn input_for(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<(TaskInput, Budget)> {
+async fn input_for(
+    pool: &PgPool,
+    c: &Claimed,
+    reg: &dyn Registry,
+    script_default: std::time::Duration,
+) -> Result<(TaskInput, Budget)> {
     let mut conn = pool.acquire().await.map_err(db_err)?;
     let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No, Stack::Fresh).await?;
     let surface = Surface::load(&mut conn, &ctx).await?;
@@ -1127,6 +1490,7 @@ async fn input_for(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<(Ta
     c.input(
         surface.context(&ctx.plan, &state, Some(run)),
         reg.log_sink(),
+        script_default,
     )
 }
 
@@ -2616,5 +2980,154 @@ mod tests {
             after,
             "a child of a parent with no CREATED child is not the decision point"
         );
+    }
+
+    // ---- the self-fence (W5a Task 5 fix round 1) ------------------------------
+
+    /// Work that never finishes on its own and records whether it was dropped.
+    struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    const EVERY: std::time::Duration = std::time::Duration::from_millis(60);
+    const FENCE: std::time::Duration = std::time::Duration::from_millis(200);
+
+    fn now_utc() -> DateTime<Utc> {
+        Utc::now()
+    }
+
+    /// **A worker cut off from Postgres gives the run up once no renewal has
+    /// succeeded for `working_timeout`** -- exactly as on a moved fence: the
+    /// handler future is DROPPED (so the budget's `cancel`, inside it, never
+    /// runs) and `Lost` is returned.
+    /// Every renewal here errors, as against an unreachable database.
+    #[tokio::test]
+    async fn a_worker_whose_renewals_keep_failing_self_fences_and_drops_the_handler() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let guard = Dropped(dropped.clone());
+        let work = async move {
+            let _g = guard;
+            std::future::pending::<()>().await
+        };
+        let n = calls.clone();
+        let started = tokio::time::Instant::now();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            under_lease_with(
+                move |_held| {
+                    n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { Err(Error::Internal(anyhow::anyhow!("database unreachable"))) }
+                },
+                Uuid::nil(),
+                now_utc(),
+                EVERY,
+                FENCE,
+                started,
+                work,
+            ),
+        )
+        .await
+        .expect("a worker that cannot renew must NOT keep following the task for ever");
+        assert!(matches!(out, Leased::Lost));
+        assert!(
+            started.elapsed() >= FENCE,
+            "not before the deadline: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the handler was dropped"
+        );
+        assert!(
+            calls.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "it did retry first"
+        );
+    }
+
+    /// A renewal that never ANSWERS (a partition that hangs the connection)
+    /// self-fences too; the work is not polled on past the deadline.
+    #[tokio::test]
+    async fn a_renewal_that_never_answers_self_fences() {
+        let started = tokio::time::Instant::now();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            under_lease_with(
+                |_held| std::future::pending::<Result<Option<DateTime<Utc>>>>(),
+                Uuid::nil(),
+                now_utc(),
+                EVERY,
+                FENCE,
+                started,
+                std::future::pending::<()>(),
+            ),
+        )
+        .await
+        .expect("a hung renewal must not hold the worker in the handler for ever");
+        assert!(matches!(out, Leased::Lost));
+    }
+
+    /// **The controls.** Renewals that succeed keep a handler running well
+    /// past `working_timeout`; errors that recover before the deadline do not
+    /// fence; and a successful renewal keeps a run whose deadline had already
+    /// passed at entry (it waited behind its batch) -- success is proof.
+    #[tokio::test]
+    async fn succeeding_renewals_keep_the_run_past_the_deadline() {
+        let ok = |_held: DateTime<Utc>| async { Ok(Some(Utc::now())) };
+        let out = under_lease_with(
+            ok,
+            Uuid::nil(),
+            now_utc(),
+            EVERY,
+            FENCE,
+            tokio::time::Instant::now(),
+            async {
+                tokio::time::sleep(FENCE * 3).await;
+                7
+            },
+        )
+        .await;
+        assert!(matches!(out, Leased::Kept { out: 7, .. }));
+
+        let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let m = n.clone();
+        let flaky = move |_held: DateTime<Utc>| {
+            let i = m.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if i % 2 == 1 {
+                    Err(Error::Internal(anyhow::anyhow!("blip")))
+                } else {
+                    Ok(Some(Utc::now()))
+                }
+            }
+        };
+        let out = under_lease_with(
+            flaky,
+            Uuid::nil(),
+            now_utc(),
+            EVERY,
+            FENCE,
+            tokio::time::Instant::now(),
+            async {
+                tokio::time::sleep(FENCE * 3).await;
+                8
+            },
+        )
+        .await;
+        assert!(
+            matches!(out, Leased::Kept { out: 8, .. }),
+            "one error in two is not a fence"
+        );
+
+        let late = tokio::time::Instant::now() - FENCE * 2;
+        let out = under_lease_with(ok, Uuid::nil(), now_utc(), EVERY, FENCE, late, async {
+            tokio::time::sleep(EVERY).await;
+            9
+        })
+        .await;
+        assert!(matches!(out, Leased::Kept { out: 9, .. }));
     }
 }

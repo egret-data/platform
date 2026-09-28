@@ -70,6 +70,12 @@ anyhow.workspace = true
 # depending on the workflow engine.
 egret-workflow-api.workspace = true
 
+# W5a Task 2: `scripts::gate` reads `egret_config::PluginConfigurations` (the
+# `allowed-images` allowlist). `egret-config` sits below this crate and depends
+# on nothing of it, so the edge creates no cycle; it was already a
+# dev-dependency (see below), and this makes it a normal one.
+egret-config.workspace = true
+
 # Task 7 (routes): the HTTP surface. `axum`/`utoipa` for the router and its
 # OpenAPI doc; `egret-workspace` for `WsContext` (the extractor that resolves
 # `{workspace}`, membership, and the feature-entitlement gate); `egret-auth`
@@ -214,6 +220,17 @@ tracing.workspace = true
 # egret-kernel both take it), so this is a direct edge and no new crate.
 tokio-util.workspace = true
 
+# W5a Task 4: `worker::k8s` is the Kubernetes task runner
+# (`io.kestra.plugin.ee.kubernetes.runner.Kubernetes`). Both crates are the
+# workspace's own entries, already linked into `egret-bin` by the notebook
+# kernel launcher (`kernel_launcher_k8s.rs`), so this adds edges and no new
+# crate; `ws` (in the workspace entry) is what `pods/exec` needs.
+# `futures-util` reads `pods/log`, which kube hands back as a
+# `futures::AsyncBufRead`; also already in the tree.
+kube.workspace = true
+k8s-openapi.workspace = true
+futures-util.workspace = true
+
 [dev-dependencies]
 # minijinja moved to [dependencies] in W2 Task 3 (`runners::env` builds the
 # real environment). `runners::rewrite`'s tests still reach it as
@@ -264,7 +281,8 @@ url.workspace = true
 # first. A dev-only edge does not link into the library, cannot be reached from
 # `src/`, and creates no cycle (`egret-config` does not depend on this crate) --
 # the same argument this file already makes for `egret-query`.
-egret-config.workspace = true
+# (W5a Task 2 made it a normal dependency above; the dev-only edge this
+# paragraph argued for is now subsumed by it.)
 
 # W13a Task 4, `tests/flow_trigger_fire.rs` ONLY: the processor gives up on an
 # event after five attempts and says which listeners at `warn`, and that log
@@ -272,6 +290,13 @@ egret-config.workspace = true
 # `egret-dataapi`'s `tests/serving_auth.rs` does. Already a workspace
 # dependency, so no new crate.
 tracing-subscriber.workspace = true
+
+# `tests/k8s_runner_live.rs` ONLY: kube's TLS client needs a rustls crypto
+# provider, and this tree enables both ring and aws-lc-rs, so none is chosen
+# automatically (a runtime panic). `egret-bin` installs ring at startup with
+# this same pin (`crates/egret-bin/Cargo.toml`); the test's `main` does the
+# same. Already in the lock file, so no new crate.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 # `tests/container_docker_live.rs` runs WITHOUT libtest, and that is fix round
 # 1's reviewer plan item 2 rather than a preference.
@@ -288,4 +313,11 @@ tracing-subscriber.workspace = true
 # file's own doc for what it does and does not implement.
 [[test]]
 name = "container_docker_live"
+harness = false
+
+# W5a Task 4: the Kubernetes runner against a real cluster, gated on
+# `EGRET_TEST_KIND=1` and reported IGNORED (never passed) without it -- the
+# same hand-rolled main as `container_docker_live`, for the same reason.
+[[test]]
+name = "k8s_runner_live"
 harness = false
