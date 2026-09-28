@@ -51,6 +51,17 @@ Written for both branches of Task 1, because the plan must not assume its own me
 - [ ] A tag gated **only** by `required_groups` compiles to **nothing**, and the skip is reported rather than silent — D7 measured that a group matches nobody, so emitting the deny would produce a control that withholds nothing.
 - [ ] Tests, value-level not shape-level: the deny's resource names the tag; the exceptions name the cleared principals (and for the enumerate branch, a **collision-suffixed** username correctly — a user whose username equals their email slug passes whether the fix exists or not); a groups-only tag produces no policy and one reported skip.
 
+### Task 2b: A `role` grant reaches the engine too, or stops claiming to
+
+**Found by D0, in code already merged.** `crates/egret-perm-compile/src/grants.rs:105` compiles `PrincipalKind::Role` straight into the Ranger `roles` bucket, which D0 measured is never populated — so **a role grant matches nobody in the engine**, while `crates/egret-perm/src/eval.rs:160` matches it happily and `explain` therefore reports access the engine does not grant. It is the same divergence D7 found for groups, on a path D7 did not look at, and SP4b's picker offers `role` as an ordinary choice with no warning.
+
+This belongs here rather than in its own increment because SP4c is now exactly the question of which principals reach the engine, and the remedy is the machinery Task 2 builds.
+
+- [ ] Compile a `role` grant to the role's **members, enumerated at compile time**, reusing Task 2's expansion — reading the **stored** `users.username`, never a re-derivation.
+- [ ] Reuse Task 3's membership trigger so a role grant does not go stale either. If that means the trigger must cover two consumers, say so in the report rather than duplicating it.
+- [ ] Tests: a role grant compiles to its members' usernames and not to a `roles` bucket; `explain` and the compiled policy **agree** about a role-granted subject. That agreement test is the one that would have caught this originally.
+- [ ] If anything here cannot be done without widening Task 2's scope, stop and report rather than half-doing it: a role grant that compiles to nothing is at least currently *consistent* with the empty Ranger bucket, whereas a half-migration could produce a policy naming some members and silently omitting others.
+
 ### Task 3: The triggers, because clearance has three inputs
 
 A compiled clearance depends on the tag's gate, on which columns carry the tag, and — on the enumerate branch — on who holds the clearing role.
