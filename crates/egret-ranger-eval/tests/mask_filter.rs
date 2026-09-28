@@ -326,6 +326,29 @@ fn a_row_filter_item_without_a_filter_expression_determines_nothing() {
     assert_eq!(d, RowFilterDecision::NoFilter);
 }
 
+/// The other half of the same distinction, and the reason `filter_expr` is
+/// an `Option` at all. Ranger's guard is `if (result.getFilterExpr() != null)`
+/// — not `isNotEmpty` — so an EXPLICIT empty string is not the same as an
+/// absent one: it marks the result and the item determines something.
+/// Without this, the test above passes equally well against a `String` that
+/// folds null onto empty, and the distinction is only pinned in the
+/// direction that does not need it.
+#[test]
+fn an_explicitly_empty_filter_expression_still_marks_the_result() {
+    let set = policies(json!([row_filter_policy(
+        7,
+        "explicitly empty",
+        json!([filter_item("alice", json!(""))])
+    )]));
+    let d = evaluate_row_filter(&set, &trino_table_request("alice"), &trino_def(), &engine());
+    let f = filtered(&d);
+    assert_eq!(
+        f.filter_expr, "",
+        "an explicit empty filterExpr marks: {d:?}"
+    );
+    assert_eq!(f.policy_id, Some(7));
+}
+
 // ── 3. no deny bucket, no exceptions ─────────────────────────────────────
 
 /// `getMatchingPolicyItem(request, result)` is a `tableswitch` on the raw
@@ -558,9 +581,10 @@ fn a_row_filter_with_double_brackets_is_undecidable() {
     );
 }
 
-/// `hasDoubleBrackets` needs BOTH `[[` and `]]`; one alone is a literal.
+/// `hasDoubleBrackets` needs BOTH `[[` and `]]`: together they force a
+/// refusal, one alone is a literal. Both halves are asserted below.
 #[test]
-fn a_row_filter_with_only_one_double_bracket_is_data() {
+fn double_brackets_refuse_together_and_are_data_apart() {
     let set = policies(json!([row_filter_policy(
         7,
         "arrays",

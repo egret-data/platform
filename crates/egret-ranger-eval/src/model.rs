@@ -311,10 +311,16 @@ fn contains_expression_marker(s: &str) -> bool {
     contains_ranger_request_expr(s) || contains_braced_token(s)
 }
 
-/// `RangerRequestExprResolver.hasExpressions(String)` — **exactly**, and
-/// nothing more: `PATTERN.matcher(s).find()` with
-/// `PATTERN = \$\{\{(?<expr>.*?)\}\}`, read from the `static {}` block of
-/// both the 2.5.0 and the 2.8.0 jar.
+/// `RangerRequestExprResolver.hasExpressions(String)`:
+/// `PATTERN.matcher(s).find()` with `PATTERN = \$\{\{(?<expr>.*?)\}\}`,
+/// read from the `static {}` block of both the 2.5.0 and the 2.8.0 jar.
+///
+/// One known widening, in the SAFE direction: Java compiles that pattern
+/// without `DOTALL`, so its `.` cannot cross a newline, while this scan
+/// only looks for a later `}}` anywhere in the rest of the string. So
+/// `"${{\nfoo}}"` is an expression here and a literal to Ranger. The match
+/// set here strictly CONTAINS Java's, which can only produce a spurious
+/// `Undecidable` — never a confident wrong mask.
 ///
 /// This is the ONE predicate that decides whether Ranger resolves a mask
 /// value, a mask condition or a row-filter expression at request time:
