@@ -371,9 +371,12 @@ pub enum ExplainOutcome {
     /// At least one policy profile serves the target's catalog; `profiles`
     /// carries one block per profile.
     PerProfile,
-    /// No engine bound to a policy profile attaches this catalog
-    /// (`services_for_catalog_via` is empty, or every profile it names is one
-    /// this compiler does not target). Nothing is enforcing.
+    /// Nothing is enforcing. Reached when `services_for_catalog_via` names no
+    /// profile at all, when every profile it names is one this compiler does
+    /// not target (a tag service, say), or when no profile it names has the
+    /// catalog in its own `catalogs_for_service_via` map — the last is the
+    /// inverse of the first query over the same attachments, so in practice it
+    /// only differs under a concurrent detach.
     NoProfileServesTheCatalog,
 }
 
