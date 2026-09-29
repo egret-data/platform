@@ -544,7 +544,7 @@ async fn explain_and_the_compiled_policy_agree_about_a_blocked_subject() {
     // The same clearance gate, resolved the way `explain`'s route resolves
     // it — through the store function, not re-derived from `gate()`'s inputs.
     let mut conn = db.pool.acquire().await.expect("conn");
-    let gates = clearance_gates_for_tags_via(&mut conn, &[key.clone()])
+    let gates = clearance_gates_for_tags_via(&mut conn, std::slice::from_ref(&key))
         .await
         .expect("clearance gates");
     assert_eq!(gates.len(), 1, "one gated tag: {gates:?}");

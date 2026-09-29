@@ -1086,7 +1086,7 @@ pub async fn recompile_service_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<CompileSummary, CompileError> {
-    let Some(compiled) = compile_desired(&mut **tx, service_id).await? else {
+    let Some(compiled) = compile_desired(tx, service_id).await? else {
         return Ok(CompileSummary::default());
     };
     apply_diff_in_tx(
@@ -1483,7 +1483,7 @@ pub async fn lock_services_in_tx(
     // the same pair ascending: the exact opposed order two transactions
     // deadlock on. Locking the expanded, sorted set here keeps every path's
     // acquisition order ascending over the same universe.
-    let expanded = services_and_tag_services_via(&mut **tx, service_ids)
+    let expanded = services_and_tag_services_via(tx, service_ids)
         .await
         .map_err(db_err)?;
     // One statement per id rather than `WHERE id = ANY(...) ORDER BY id FOR

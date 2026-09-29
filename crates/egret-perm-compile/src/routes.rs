@@ -609,7 +609,7 @@ async fn write_grant(
     // catalog is gone and the profiles it reached are unrecoverable.
     let (old_services, origin) = match id {
         Some(id) => {
-            let Some(old) = get_grant_via(&mut **tx, id).await? else {
+            let Some(old) = get_grant_via(tx, id).await? else {
                 return Err(PermHttpError::NotFound);
             };
             // A `workspace_assignment` grant is the assignment path's row (D3):
@@ -624,10 +624,7 @@ async fn write_grant(
                         .into(),
                 ));
             }
-            (
-                affected_services_for_grant(&mut **tx, &old).await?,
-                old.origin,
-            )
+            (affected_services_for_grant(tx, &old).await?, old.origin)
         }
         // The database mints the id on a create; `GrantOrigin::Explicit` is the
         // only origin this surface may write — see `NewGrant`'s doc comment.
@@ -652,7 +649,7 @@ async fn write_grant(
     // the defect SP4a closed at create.
     validate_grant_shape(&g)?;
 
-    let new_services = affected_services_for_grant(&mut **tx, &g).await?;
+    let new_services = affected_services_for_grant(tx, &g).await?;
     let services = merge_service_ids(&old_services, &new_services);
 
     // The affected set is derived from the grant's own catalog, so it can be
@@ -706,10 +703,10 @@ async fn ensure_grant_still_covered(
     id: Uuid,
     locked: &[i64],
 ) -> Result<(), PermHttpError> {
-    let Some(current) = get_grant_via(&mut **tx, id).await? else {
+    let Some(current) = get_grant_via(tx, id).await? else {
         return Err(PermHttpError::NotFound);
     };
-    let now = affected_services_for_grant(&mut **tx, &current).await?;
+    let now = affected_services_for_grant(tx, &current).await?;
     if let Some(escaped) = now.iter().find(|s| locked.binary_search(s).is_err()) {
         return Err(PermHttpError::Conflict(format!(
             "this grant changed while the request was waiting: it now affects policy \
@@ -726,10 +723,10 @@ async fn ensure_rule_still_covered(
     id: Uuid,
     locked: &[i64],
 ) -> Result<(), PermHttpError> {
-    let Some(current) = get_rule_via(&mut **tx, id).await? else {
+    let Some(current) = get_rule_via(tx, id).await? else {
         return Err(PermHttpError::NotFound);
     };
-    let now = affected_services_for_rule(&mut **tx, &current).await?;
+    let now = affected_services_for_rule(tx, &current).await?;
     if let Some(escaped) = now.iter().find(|s| locked.binary_search(s).is_err()) {
         return Err(PermHttpError::Conflict(format!(
             "this rule changed while the request was waiting: it now affects policy \
@@ -762,10 +759,10 @@ async fn write_rule(
 
     let old_services = match id {
         Some(id) => {
-            let Some(old) = get_rule_via(&mut **tx, id).await? else {
+            let Some(old) = get_rule_via(tx, id).await? else {
                 return Err(PermHttpError::NotFound);
             };
-            affected_services_for_rule(&mut **tx, &old).await?
+            affected_services_for_rule(tx, &old).await?
         }
         None => Vec::new(),
     };
@@ -780,7 +777,7 @@ async fn write_rule(
     // Same reason as the grant path: an empty affected set validates nothing.
     validate_rule_shape(&r)?;
 
-    let new_services = affected_services_for_rule(&mut **tx, &r).await?;
+    let new_services = affected_services_for_rule(tx, &r).await?;
     let services = merge_service_ids(&old_services, &new_services);
 
     lock_services_in_tx(tx, &services).await?;
