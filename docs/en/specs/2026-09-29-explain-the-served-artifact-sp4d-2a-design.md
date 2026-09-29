@@ -125,10 +125,20 @@ engine sees. A policy that grants through a role or a group matches nobody
 there, and reporting otherwise would answer a question the operator did not ask.
 
 This also keeps SP4c's rule — a caller may not assert a role the subject does
-not hold — by the strongest available means: no role is sent at all. The
-`groups` request field stays on the wire for compatibility but is not forwarded
-to the evaluator; the page states plainly that a role- or group-granted policy
-matches nobody on these engines, and why.
+not hold — by the strongest available means: no role is sent at all.
+
+**Amended during implementation:** this section first said the `groups` request
+field would stay on the wire for compatibility while being ignored. It is
+removed instead. A field whose value cannot change any answer is a lie told by
+the schema, and that is the same reasoning that already removed `workspaces`
+(SP4a) and `roles` (SP4c) — keeping `groups` would have been inconsistent with
+both. Runtime compatibility is unaffected: the request type does not
+`deny_unknown_fields`, so an older client still sending `groups` is accepted and
+the key ignored. What changes is the declared contract, and the frontend, which
+is rewritten in this same package.
+
+The page states plainly that a role- or group-granted policy matches nobody on
+these engines, and why.
 
 ### D3 — narrow the `tagPolicies` refusal to tier (c), and name the cause there
 
