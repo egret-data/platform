@@ -3,8 +3,12 @@
 //!
 //! Pure (no DB) — the evaluator is a function of its arguments only.
 
+// SP4d-2a Task 5: `evaluate` is no longer re-exported at the crate root — it
+// is an ORACLE now, not what `/perm/explain` answers with, so reaching it
+// takes naming the module on purpose. See `egret_perm`'s own lib.rs note.
+use egret_perm::eval::evaluate;
 use egret_perm::{
-    evaluate, Action, ClearanceGate, Effect, Grant, GrantOrigin, Principal, PrincipalKind,
+    Action, ClearanceGate, Effect, Grant, GrantOrigin, Principal, PrincipalKind,
     PrincipalSet, Reason, Rule, RuleKind, Scope, Selector, Subject,
 };
 use uuid::Uuid;

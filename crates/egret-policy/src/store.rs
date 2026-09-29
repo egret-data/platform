@@ -803,6 +803,37 @@ pub async fn tag_keys_for_resource_via(
     .await?)
 }
 
+/// `tags.key` for each of `tag_ids`, as `(id, key)` pairs — the reverse of the
+/// lookup every other reader here needs.
+///
+/// **SP4d-2a Task 5.** A compiled clearance policy's NAME carries the
+/// `tags.id` it was minted from (`perm-clearance-{tag_id}[-{locator}]`), and
+/// `egret_perm_compile::attribute_policy_name` hands that bare uuid back
+/// without touching the database. `explain` has to turn it into something a
+/// steward recognises, and into the `required_roles` the gate declares — which
+/// [`clearance_gates_for_tags_via`] answers by KEY, not by id. So this is the
+/// one hop between them.
+///
+/// It returns `tags.key`, not `tags.name`: `key` is the stable identifier the
+/// rest of this module's tag surface is addressed by
+/// ([`tag_keys_for_resource_via`], [`clearance_gates_for_tags_via`]), and the
+/// two columns are different values — `tag_name_for_key_via` exists precisely
+/// because the display name has to be looked up separately.
+pub async fn tag_keys_by_ids_via(
+    conn: &mut sqlx::PgConnection,
+    tag_ids: &[uuid::Uuid],
+) -> Result<Vec<(uuid::Uuid, String)>, PolicyStoreError> {
+    if tag_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(
+        sqlx::query_as::<_, (uuid::Uuid, String)>(r#"SELECT id, key FROM tags WHERE id = ANY($1)"#)
+            .bind(tag_ids)
+            .fetch_all(&mut *conn)
+            .await?,
+    )
+}
+
 /// The clearance gate for each of `tag_keys` that `egret_perm::evaluate` can
 /// actually agree with the compiled engine about (SP4c Task 4/D4): one
 /// `(tag key, required_roles)` pair per gated tag whose `required_roles` is

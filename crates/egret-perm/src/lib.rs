@@ -24,7 +24,23 @@ pub mod store;
 pub use actions::{engine_accesses, CompileError, EngineType};
 pub use assignment::{sync_assignment_grants, sync_assignment_grants_in_tx};
 pub use error::PermError;
-pub use eval::{evaluate, ClearanceGate, Decision, Reason, Subject, PUBLIC_GROUP};
+// **`evaluate` is deliberately NOT re-exported here (SP4d-2a Task 5).** It was
+// the function `/perm/explain` answered with, and `explain` now evaluates the
+// compiled artifact each engine downloads (`egret-ranger-eval`) instead — two
+// implementations of one question had already been measured disagreeing in
+// production. `eval::evaluate` survives as an ORACLE: tests still compare the
+// model's own answer against the artifact's
+// (`egret-perm-compile/tests/routes.rs`'s
+// `the_artifact_answer_and_the_model_oracle_agree_on_the_happy_path`), and
+// `crates/egret-perm/tests/eval.rs` still pins its semantics. Dropping it from
+// the root re-export is what stops a new production caller reaching for it by
+// reflex; `egret_perm::eval::evaluate` remains the path for a test that wants
+// the oracle on purpose.
+//
+// `PUBLIC_GROUP` stays exported: it is genuine COMPILER code
+// (`egret_perm_compile::clearance` emits it as the one principal a Ranger deny
+// can name that matches everybody), not part of the retired evaluator.
+pub use eval::{ClearanceGate, Decision, Reason, Subject, PUBLIC_GROUP};
 pub use model::{
     Action, Effect, Grant, GrantOrigin, Principal, PrincipalKind, PrincipalSet, Rule, RuleKind,
     Scope, Selector,

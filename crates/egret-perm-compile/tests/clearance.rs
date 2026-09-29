@@ -26,8 +26,9 @@
 //! `tags.id` this test itself created, never to a count of everything.
 
 use egret_metastore::Db;
+use egret_perm::eval::evaluate;
 use egret_perm::{
-    evaluate, Action, ClearanceGate, Effect, Grant, GrantOrigin, PermStore, Principal,
+    Action, ClearanceGate, Effect, Grant, GrantOrigin, PermStore, Principal,
     PrincipalKind, PrincipalSet, Reason, Scope, Subject as EvalSubject,
 };
 use egret_perm_compile::{recompile_service, SourceKind};
@@ -486,23 +487,30 @@ async fn lifting_a_clearance_reaps_the_deny() {
     );
 }
 
-/// **SP4c Task 4/D4.** `explain` must give a subject blocked by clearance its
-/// own reason, and that reason must AGREE with the policy actually compiled —
-/// not merely say something plausible. This test ties both to the SAME
-/// artifact: it reads the real `denyExceptions` usernames off the compiled
-/// policy (exactly as the first test in this file does) and then calls
-/// `egret_perm::evaluate` — the function `explain` answers with — for the
-/// cleared username and the uncleared one, checking the decision matches which
-/// side of that list each username is actually on.
+/// **SP4c Task 4/D4.** egret's own ORACLE must give a subject blocked by
+/// clearance its own reason, and that reason must AGREE with the policy
+/// actually compiled — not merely say something plausible. This test ties both
+/// to the SAME artifact: it reads the real `denyExceptions` usernames off the
+/// compiled policy (exactly as the first test in this file does) and then calls
+/// `egret_perm::eval::evaluate` for the cleared username and the uncleared one,
+/// checking the decision matches which side of that list each username is
+/// actually on.
 ///
 /// The grant used here would ALLOW the read on its own (D1: a clearance must
-/// win over any resource grant, not merely apply where none exists), so a
+/// win over any resource grant, not merely apply where none exists), so an
 /// `evaluate` that forgot to check clearance first would report
-/// `AllowedByGrant` for the uncleared subject — which is exactly the bug this
-/// task closes (`explain` used to answer `no_grant_matched`, the ALSO wrong
-/// answer, since a grant existed and the deny was the correct reason).
+/// `AllowedByGrant` for the uncleared subject.
+///
+/// **Renamed in SP4d-2a Task 5 (was
+/// `explain_and_the_compiled_policy_agree_about_a_blocked_subject`).**
+/// `/perm/explain` no longer answers with `evaluate`; it evaluates the compiled
+/// artifact the engine downloads, and on StarRocks a clearance is a per-column
+/// resource DENY in that artifact. So this test is now about the oracle and the
+/// compiler agreeing, which is still worth pinning — the endpoint's own
+/// clearance assertion moved to
+/// `routes.rs::explain_reports_a_clearance_deny_from_the_compiled_artifact`.
 #[tokio::test]
-async fn explain_and_the_compiled_policy_agree_about_a_blocked_subject() {
+async fn the_oracle_and_the_compiled_policy_agree_about_a_blocked_subject() {
     let Some(db) = test_db().await else { return };
     let f = seed(&db).await;
     let (tag_id, _tag_name) = new_tag(&db).await;

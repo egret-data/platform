@@ -18,7 +18,8 @@
 //! how many there are.
 
 use egret_metastore::Db;
-use egret_perm::{evaluate, Action, Decision, PermStore, Reason, Scope, Subject as EvalSubject};
+use egret_perm::eval::evaluate;
+use egret_perm::{Action, Decision, PermStore, Reason, Scope, Subject as EvalSubject};
 use egret_perm_compile::{
     affected_services_for_workspace_members, recompile_service, recompile_services_in_tx,
 };
@@ -431,13 +432,23 @@ async fn adding_and_removing_a_member_recompiles_the_affected_profile() {
     );
 }
 
-/// Requirement 3: egret's own oracle (`evaluate`, what `explain` answers with)
-/// and the compiled policy must say the SAME thing about the implicit grant.
-/// The evaluator matches `workspace_members` through `Subject::workspaces`;
-/// the compiler matches it by naming usernames. Both are checked here against
-/// one model, for a member and for a non-member.
+/// Requirement 3: egret's own ORACLE (`egret_perm::eval::evaluate`) and the
+/// compiled policy must say the SAME thing about the implicit grant. The
+/// oracle matches `workspace_members` through `Subject::workspaces`; the
+/// compiler matches it by naming usernames. Both are checked here against one
+/// model, for a member and for a non-member.
+///
+/// **Renamed in SP4d-2a Task 5 (was
+/// `explain_and_the_compiled_policy_agree_for_the_implicit_grant`).**
+/// `/perm/explain` no longer answers with `evaluate` at all — it evaluates the
+/// compiled artifact each engine downloads — so the old name described a
+/// relationship that no longer exists. What is asserted here has not changed
+/// and still matters: the model and the compiled policy must not part company
+/// about the one grant SP4a creates automatically. The endpoint side of the
+/// same alarm is
+/// `routes.rs::the_artifact_answer_and_the_model_oracle_agree_on_the_happy_path`.
 #[tokio::test]
-async fn explain_and_the_compiled_policy_agree_for_the_implicit_grant() {
+async fn the_oracle_and_the_compiled_policy_agree_for_the_implicit_grant() {
     let Some(db) = test_db().await else { return };
     let f = seed(&db).await;
 

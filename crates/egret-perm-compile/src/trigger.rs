@@ -339,7 +339,11 @@ fn db_err<E: std::fmt::Display>(e: E) -> CompileError {
 /// means "nothing here for this compiler," not "something is broken" —
 /// treating it as a hard error would fail an entire tag write's recompile
 /// pass over a service this compiler was never asked to produce policies for.
-fn engine_type_for(service_type: &str) -> Option<EngineType> {
+// `pub(crate)`: SP4d-2a Task 5's `explain` asks the same question of a
+// `policy.authz_services` row — which engine's plugin, if any, downloads this
+// profile — and a second copy of the match would be free to disagree with the
+// compiler about which profiles are in scope at all.
+pub(crate) fn engine_type_for(service_type: &str) -> Option<EngineType> {
     match service_type {
         "trino" => Some(EngineType::Trino),
         "starrocks" => Some(EngineType::StarRocks),

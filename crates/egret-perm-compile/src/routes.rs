@@ -42,6 +42,7 @@
 //! family rather than adding a key: SP4c may fold the hand-written policy
 //! editor away entirely, and a key added now would have to be retired twice.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use axum::extract::{FromRef, Path, State};
@@ -54,21 +55,29 @@ use egret_auth::principal::Auth;
 use egret_auth::session::SessionService;
 use egret_core::http::ErrorBody;
 use egret_perm::{
-    create_grant_in_tx, create_rule_in_tx, delete_grant_in_tx, delete_rule_in_tx, evaluate,
+    create_grant_in_tx, create_rule_in_tx, delete_grant_in_tx, delete_rule_in_tx, engine_accesses,
     get_grant_via, get_rule_via, list_grants_via, list_rules_via, update_grant_in_tx,
-    update_rule_in_tx, Action, ClearanceGate, Decision, Effect, Grant, GrantOrigin, PermStore,
-    PrincipalKind, PrincipalSet, Reason, Rule, RuleKind, Scope, Selector, Subject,
+    update_rule_in_tx, Action, Effect, EngineType, Grant, GrantOrigin, PermStore, PrincipalKind,
+    PrincipalSet, Rule, RuleKind, Scope, Selector,
 };
 use egret_policy::{
-    catalog_names_for_ids_via, clearance_gates_for_tags_via, tag_keys_for_resource_via,
-    tag_names_for_keys_via, PolicyStore,
+    catalog_names_for_ids_via, catalogs_for_service_via, clearance_gates_for_tags_via,
+    get_service_by_id_via, services_for_catalog_via, tag_keys_by_ids_via,
+    tag_keys_for_resource_via, tag_names_for_keys_via, PolicyStore, ServiceRow,
 };
+use egret_policy_api::ServicePolicies;
+use egret_ranger_eval::eval::{AccessRequest, Decision, EngineConfig};
+use egret_ranger_eval::model::ServicePolicySet;
+use egret_ranger_eval::resource::RequestResource;
+use egret_ranger_eval::servicedef::ServiceDef;
 use sqlx::{Postgres, Transaction};
 
-use crate::grants::validate_grant_shape;
+use crate::attribution::{attribute_policy_name, PolicyAttribution};
+use crate::explain_wire::{WireDecision, WireEngineType};
+use crate::grants::{resource_level_names, validate_grant_shape};
 use crate::rules::validate_rule_shape;
 use crate::trigger::{
-    affected_services_for_grant, affected_services_for_rule, lock_services_in_tx,
+    affected_services_for_grant, affected_services_for_rule, engine_type_for, lock_services_in_tx,
     merge_service_ids, recompile_service, recompile_services_in_tx, CompileSummary, SkippedItem,
     SourceKind,
 };
@@ -146,7 +155,33 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         ExplainRequest,
         ExplainSubject,
         ExplainResponse,
-        ExplainReason,
+        ExplainOutcome,
+        ExplainProfile,
+        ExplainAccess,
+        ExplainAttribution,
+        // SP4d-2a Task 5: the Task 4 wire mirrors `ExplainResponse` can
+        // actually carry, registered here (the route crate owns the document)
+        // rather than in `explain_wire` itself. Every one of these is reachable
+        // from `WireDecision`, which is why they are listed: `WireDecision`'s
+        // `Undecidable` arm carries `WireUndecidableCause`, which carries
+        // `WireUnmodelled`/`WireServiceDefIssue`, which carry the four leaf
+        // enums. The mask and row-filter mirrors in that module
+        // (`WireMaskDecision`, `WireRowFilterDecision`, and their results) are
+        // deliberately NOT registered: no response shape carries one yet, and a
+        // registered-but-unreachable schema is a contract claim nothing
+        // honours. Register them in the same breath as the field that returns
+        // one.
+        crate::explain_wire::WireDecision,
+        crate::explain_wire::WireDenyReason,
+        crate::explain_wire::WireUndecidableCause,
+        crate::explain_wire::WireUnmodelled,
+        crate::explain_wire::WireItemBucket,
+        crate::explain_wire::WireTagPolicyBlock,
+        crate::explain_wire::WireServiceDefIssue,
+        crate::explain_wire::WirePolicyType,
+        crate::explain_wire::WireGraphProblem,
+        crate::explain_wire::WireEngineType,
+        crate::explain_wire::WirePluginVersion,
         CompileResponse,
         CreatedResponse,
         SkipReport,
@@ -292,16 +327,26 @@ pub struct RuleView {
 /// subject's clearance would answer a different question while looking
 /// authoritative.
 ///
-/// `groups` remains caller-supplied and is deliberately left so: egret runs no
-/// usersync and no group provider, so a group name reaches no engine at all
-/// (D7/D2) and the UI already says the field is matched here and nowhere else.
-/// Resolving it server-side would give the field an authority the data plane
-/// does not honour, which is the opposite of the fix above.
+/// **And no `groups` field either, as of SP4d-2a Task 5 — the third field
+/// removed from this struct for the third version of one reason.** Until this
+/// task `groups` was caller-supplied and matched by the model evaluator, on
+/// the argument that the UI said so. `explain` now answers with the artifact
+/// the engine downloads, and `roles` and `groups` reach that evaluator EMPTY:
+/// egret serves no `/service/roles/download` and runs no usersync, so a Ranger
+/// policy item naming a role or a group matches nobody on any engine egret
+/// provisions (D0/D7), and Ranger's `public` — the one group name that DOES
+/// match everybody — matches whatever the request carries. A field whose value
+/// can change no answer is a field that lies about what the endpoint does, so
+/// it is gone rather than ignored, exactly as `workspaces` and `roles` were.
+///
+/// Sending no roles at all is also the strongest available form of SP4c's rule
+/// that a caller may not assert a role the subject does not hold: there is no
+/// role to assert. A request that still carries `groups` is accepted and the
+/// key ignored (nothing here sets `deny_unknown_fields`), so an older client
+/// keeps working while answering the same question everyone else gets.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ExplainSubject {
     pub user: String,
-    #[serde(default)]
-    pub groups: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -311,116 +356,130 @@ pub struct ExplainRequest {
     pub target: Scope,
 }
 
-/// One reason, with its CLASS on the wire.
+/// Which of `explain`'s two shapes a response carries.
 ///
-/// The class is the deliverable. Ranger's own Access audit shows `-` for the
-/// most common denial — nothing matched — so a response that carried only
-/// `allowed: false` would reproduce exactly the blindness `explain` exists to
-/// remove. `no_grant_matched` and `explicit_deny` are different facts about
-/// the model and stay different here: a subject a grant's `exclude` subtracted
-/// matched no grant at all, which is not the same as being denied by one.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct ExplainReason {
-    /// `allowed_by_grant` | `allowed_by_group_only` | `explicit_deny` |
-    /// `no_grant_matched` | `masked_by_rule` | `filtered_by_rule` |
-    /// `clearance_required`.
-    ///
-    /// `allowed_by_group_only` is an allow the DATA PLANE will refuse: the
-    /// grant matched only through a `group` principal, and no engine egret
-    /// provisions can see a group (D7). It is its own string because a caller
-    /// parsing `kind` never sees the prose the page shows beside it.
-    pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub grant_id: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rule_id: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mask_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter_expr: Option<String>,
-    /// `clearance_required` only: the gating tag's key.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tag: Option<String>,
-    /// `clearance_required` only: the role(s) that would clear it — holding
-    /// any ONE is enough (`egret_perm_compile::clearance`'s "OR across
-    /// roles" semantics).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub required_roles: Option<Vec<String>>,
+/// **"No engine serves this catalog" is not a refusal.** Collapsing it into a
+/// `Denied` would tell a steward the model is withholding an access when in
+/// fact no plugin is ever consulted about the resource — nothing is enforcing,
+/// which is a different fact. `profiles` is empty for exactly this outcome,
+/// and this discriminator exists so a client never has to infer a
+/// security-relevant fact from the absence of data (an empty list also reads
+/// as "we did not look").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExplainOutcome {
+    /// At least one policy profile serves the target's catalog; `profiles`
+    /// carries one block per profile.
+    PerProfile,
+    /// No engine bound to a policy profile attaches this catalog
+    /// (`services_for_catalog_via` is empty, or every profile it names is one
+    /// this compiler does not target). Nothing is enforcing.
+    NoProfileServesTheCatalog,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+/// The `perm` model object the DECIDING policy's Ranger NAME maps back to —
+/// [`crate::attribute_policy_name`], resolved per decision.
+///
+/// **`None` on the owning [`ExplainAccess`] is a real answer, not a gap.**
+/// Four live categories of policy have no model object at all — the
+/// `egret-admin`/`all` hierarchies auto-bind seeds onto every generated
+/// profile, `egret-engine-mgmt`'s delegator plumbing, operator-written raw
+/// JSON, and Ranger's own `superuser` short-circuit — and every one of them
+/// can decide a real request. They are reported by their Ranger name and id on
+/// the decision itself and never dropped: dropping what egret's compiler does
+/// not own is exactly the blindness this endpoint was rerouted to remove.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExplainAttribution {
+    /// `perm-grant-{uuid}`.
+    Grant { grant_id: Uuid },
+    /// `perm-rule-{uuid}`, or `perm-rule-{uuid}-{locator}` for StarRocks'
+    /// per-column expansion, where ONE `perm.rules` row becomes N policies and
+    /// the locator is the only thing that says which expansion decided.
+    Rule {
+        rule_id: Uuid,
+        locator: Option<String>,
+    },
+    /// `perm-clearance-{tag_id}[-{locator}]`. A clearance has no Ranger
+    /// analogue on the wire, so `tag` and `required_roles` are reconstructed
+    /// here from the `tags` row the name points at (`tags.key`, not
+    /// `tags.name`) and from `classification_policies`. `tag` is `None` when
+    /// the tag row is gone — a compiled clearance can outlive its gate until
+    /// the next recompile, and inventing a name for it would be worse than
+    /// saying none is known. `required_roles` is empty for the same reason,
+    /// and also for a gate that declares only `required_groups` (which
+    /// compiles to no engine deny at all — D2/D7).
+    Clearance {
+        tag_id: Uuid,
+        tag: Option<String>,
+        required_roles: Vec<String>,
+        locator: Option<String>,
+    },
+}
+
+/// One Ranger ACCESS TYPE's verdict inside one profile.
+///
+/// **A `write` explain is several of these, and they are never collapsed.**
+/// Ranger has no `write`: `AccessRequest.access_type` is one string, and
+/// `egret_perm::engine_accesses` maps `write` to `insert,delete` on Trino and
+/// `insert,update,delete` on StarRocks. An operator who can insert but not
+/// delete has to be able to see that, which one merged verdict cannot say.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainAccess {
+    /// The Ranger access type evaluated, verbatim — `select`, `insert`,
+    /// `update`, `delete`.
+    pub access_type: String,
+    /// What `egret-ranger-eval` answered for the artifact this profile serves.
+    /// Three-valued on purpose: `Undecidable` names what stands between the
+    /// evaluator and a defensible answer rather than guessing in either
+    /// direction.
+    pub decision: WireDecision,
+    /// The deciding policy's `perm` model object, or `None` — see
+    /// [`ExplainAttribution`]. Always `None` for `Undecidable`, which has no
+    /// single deciding policy.
+    pub attribution: Option<ExplainAttribution>,
+}
+
+/// One policy profile's answer: the artifact ITS plugin downloads, evaluated
+/// for its own engine.
+///
+/// Per profile rather than once overall because a single answer cannot be
+/// right for two: the same `perm` grant compiles into two different policy
+/// sets, the two engines do not share the resource-level vocabulary the
+/// request is built from (`schema` vs `database`), and their access-type
+/// vocabularies are only partly the same.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ExplainProfile {
+    /// `policy.authz_services.id`.
+    pub service_id: i64,
+    /// `policy.authz_services.name` — the name the plugin polls
+    /// `/service/plugins/policies/download/{service}` with.
+    pub service_name: String,
+    pub engine: WireEngineType,
+    pub accesses: Vec<ExplainAccess>,
+}
+
+/// What `explain` answers with: one verdict block per profile serving the
+/// target's catalog, over the SERVED ARTIFACT.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct ExplainResponse {
-    pub allowed: bool,
-    pub reasons: Vec<ExplainReason>,
-    /// The tag keys egret resolved as present on `target` — the input the
-    /// rule selectors were matched against. Returned so a steward can see
-    /// WHY a mask did or did not apply, rather than having to guess whether
-    /// the tag resolution or the rule was at fault.
+    pub outcome: ExplainOutcome,
+    /// Empty exactly when `outcome` is `no_profile_serves_the_catalog`.
+    pub profiles: Vec<ExplainProfile>,
+    /// The tag keys **egret** resolved as attached to `target`, for the
+    /// steward's information only.
+    ///
+    /// **This is no longer an input to anything, and it is not a complete tag
+    /// set.** It used to be what the retired model evaluator matched rule
+    /// selectors against. Today the engine's own tags come from
+    /// `RangerTagEnricher`, which walks the resource hierarchy and emits
+    /// ANCESTOR tags, while `tag_keys_for_resource_via` matches
+    /// schema/table/column by exact equality with no roll-up. So this field
+    /// answers "what has egret got recorded on exactly this resource" — useful
+    /// when asking why a mask did or did not apply — and deliberately does NOT
+    /// reach `AccessRequest::resolved_tags`, whose narrowing would be unsound
+    /// given a set narrower than the enricher's. See the handler.
     pub tags: Vec<String>,
-}
-
-impl From<&Reason> for ExplainReason {
-    fn from(r: &Reason) -> Self {
-        let mut out = ExplainReason {
-            kind: String::new(),
-            grant_id: None,
-            rule_id: None,
-            mask_type: None,
-            filter_expr: None,
-            tag: None,
-            required_roles: None,
-        };
-        match r {
-            Reason::AllowedByGrant { grant_id } => {
-                out.kind = "allowed_by_grant".into();
-                out.grant_id = Some(*grant_id);
-            }
-            // SP4c review: the model allows it and no engine will, so it does
-            // not get to wear `allowed_by_grant`'s wire string — a caller
-            // parsing `kind` never sees the page's prose warning.
-            Reason::AllowedByGroupOnly { grant_id } => {
-                out.kind = "allowed_by_group_only".into();
-                out.grant_id = Some(*grant_id);
-            }
-            Reason::ExplicitDeny { grant_id } => {
-                out.kind = "explicit_deny".into();
-                out.grant_id = Some(*grant_id);
-            }
-            Reason::NoGrantMatched => out.kind = "no_grant_matched".into(),
-            Reason::MaskedByRule { rule_id, mask_type } => {
-                out.kind = "masked_by_rule".into();
-                out.rule_id = Some(*rule_id);
-                out.mask_type = Some(mask_type.clone());
-            }
-            Reason::FilteredByRule {
-                rule_id,
-                filter_expr,
-            } => {
-                out.kind = "filtered_by_rule".into();
-                out.rule_id = Some(*rule_id);
-                out.filter_expr = Some(filter_expr.clone());
-            }
-            Reason::ClearanceRequired {
-                tag,
-                required_roles,
-            } => {
-                out.kind = "clearance_required".into();
-                out.tag = Some(tag.clone());
-                out.required_roles = Some(required_roles.clone());
-            }
-        }
-        out
-    }
-}
-
-impl From<Decision> for ExplainResponse {
-    fn from(d: Decision) -> Self {
-        ExplainResponse {
-            allowed: d.allowed,
-            reasons: d.reasons.iter().map(ExplainReason::from).collect(),
-            tags: Vec::new(),
-        }
-    }
 }
 
 /// What `preview` is asked to try — SP4b D2.
@@ -1252,13 +1311,46 @@ async fn preview(
 /// scope — a body, not a query string. **It is nonetheless read-only**: it
 /// opens no transaction and issues no write. It gates on `policy:read`, not
 /// `policy:update`, precisely so the method does not decide the permission.
+///
+/// # What this answers with, and why it changed (SP4d-2a)
+///
+/// Until SP4d-2a this handler evaluated egret's OWN permission model
+/// (`egret_perm::eval::evaluate`) and never read `policy.authz_policies` at
+/// all. The engine evaluates the compiled artifact it downloads from egret.
+/// Those were two implementations of one question, and they had already been
+/// measured disagreeing in production — a predecessor package caught `explain`
+/// reporting a decision the engine did not make. So there is now ONE answer
+/// and it is the engine's: the disagreement class disappears instead of
+/// becoming visible.
+///
+/// It also removes a real blindness. Auto-bind seeds thirteen `egret-admin`
+/// hierarchies granting `*` on everything onto every generated profile
+/// (`egret_policy::default_policies`), and the model-only evaluator could not
+/// see one of them: an operator asking "why can this person read that?" got
+/// `no_grant_matched` while the engine allowed.
+///
+/// Four properties of the implementation below are load-bearing:
+///
+/// 1. **The artifact is assembled by [`artifact_for`], which mirrors
+///    `download_policies` field for field and loads each profile's policy set
+///    through `enabled_policies_for_service` — the same assembler the download
+///    route uses, not `list_policies`.** "What explain evaluated" and "what the
+///    engine received" must not be able to drift.
+/// 2. **`roles` and `groups` are empty** — see [`ExplainSubject`].
+/// 3. **`resolved_tags` is `None`, deliberately.** See the block at the call
+///    site: egret cannot establish the antecedent the narrowing needs, so a
+///    profile whose `tagPolicies` block could decide comes back `Undecidable`
+///    naming that block, rather than answering confidently from a tag set
+///    narrower than `RangerTagEnricher`'s.
+/// 4. **A `write` explain is several evaluations**, one per Ranger access type
+///    the action maps to on that engine, reported separately.
 #[utoipa::path(
     post,
     path = "/api/control-plane/perm/explain",
     tag = "perm",
     request_body = ExplainRequest,
     responses(
-        (status = 200, description = "The decision and the reasons behind it", body = ExplainResponse),
+        (status = 200, description = "One verdict per profile over the artifact each engine downloads", body = ExplainResponse),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1272,14 +1364,11 @@ async fn explain(
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
 
-    let grants = list_grants_via(&mut conn).await?;
-    let rules = list_rules_via(&mut conn).await?;
-
-    // `egret_perm::evaluate` does no I/O — resolving WHICH tags are on the
-    // target is the caller's job by construction (see `eval::selector_hits`),
-    // and here the caller is egret. Tags attach to tables and columns only,
-    // keyed `(warehouse_id, schema, table, column)` with `column = ''` meaning
-    // the table itself, so a target that names no table can carry none.
+    // Reported for the steward, and NOT passed to the evaluator — see
+    // `ExplainResponse::tags` and the `resolved_tags` block below. Tags attach
+    // to tables and columns only, keyed `(warehouse_id, schema, table, column)`
+    // with `column = ''` meaning the table itself, so a target that names no
+    // table can carry none.
     let tags = match (&body.target.schema, &body.target.table) {
         (Some(schema), Some(table)) => {
             tag_keys_for_resource_via(
@@ -1294,49 +1383,273 @@ async fn explain(
         _ => Vec::new(),
     };
 
-    // SP4a Task 15 (D3 defect 2): resolve the subject's CURRENT workspace
-    // memberships from the same table the compiler's own `workspace_members`
-    // expansion reads, rather than trusting a caller-supplied list — see
-    // `ExplainSubject`'s doc comment for what trusting one instead cost.
-    let workspaces = crate::members::workspaces_for_username(&mut conn, &body.subject.user).await?;
-    // SP4c Task 7: the same, for the roles a clearance is checked against. A
-    // `roles` in the request body is now an unknown field and is ignored, not
-    // honoured — the live gate measured that honouring one answered `allowed`
-    // for the very user both engines refuse.
-    let roles = crate::members::roles_for_username(&mut conn, &body.subject.user).await?;
+    let mut profiles: Vec<ExplainProfile> = Vec::new();
+    for service_id in services_for_catalog_via(&mut conn, body.target.catalog_id).await? {
+        let svc = get_service_by_id_via(&mut conn, service_id).await?;
+        // A profile this compiler does not target (a tag service, anything
+        // else) has no engine whose plugin downloads it as a RESOURCE policy
+        // set, so there is no per-engine answer to give for it. Same
+        // classification the compiler itself uses, so the two cannot disagree
+        // about which profiles are in scope.
+        let Some(engine) = engine_type_for(&svc.r#type) else {
+            continue;
+        };
+        // The compiler's own reachability test: a catalog absent from this map
+        // is out of scope for this profile, and a request naming it would be
+        // built from a catalog name this profile's policies never mention.
+        let Some(catalog_name) = catalogs_for_service_via(&mut conn, service_id)
+            .await?
+            .into_iter()
+            .find(|c| c.id == body.target.catalog_id)
+            .map(|c| c.name)
+        else {
+            continue;
+        };
 
-    // SP4c Task 4/D4: the clearance gates `evaluate` must agree with the
-    // compiled engine about — only tags whose `required_roles` is non-empty,
-    // since a `required_groups`-only gate compiles to no engine deny at all
-    // (D2/D7) and reporting a denial for one here would disagree with the
-    // engine in the direction opposite the bug this task fixes.
-    let clearances: Vec<ClearanceGate> = clearance_gates_for_tags_via(&mut conn, &tags)
-        .await?
-        .into_iter()
-        .map(|(tag, required_roles)| ClearanceGate {
-            tag,
-            required_roles,
-        })
-        .collect();
+        let artifact = artifact_for(&st.policy, &svc).await?;
+        // `ServiceDef::parse` of the envelope's OWN `serviceDef`, not of a def
+        // looked up separately: the plugin evaluates against the def it was
+        // handed, and the tag block's def (which the tag-policy tier check also
+        // consults) travels inside the same envelope.
+        let service_def = ServiceDef::parse(&artifact.service_def);
+        let resource = request_resource(engine, &catalog_name, &body.target);
+        // `EngineConfig::without_super_users()` records a MEASUREMENT: neither
+        // live Trino sets `ranger.plugin.super.users` or `.super.groups`
+        // (`docs/en/plans/2026-09-28-sp4d-plugin-version-result.md`), and an
+        // unknown super-user list would make every decision unknowable. The one
+        // field added on top is `engine`, which arms the def cross-check:
+        // Trino's middle resource level is `schema` and StarRocks' is
+        // `database`, so pairing the wrong def with an engine answers "nothing
+        // matched" with full confidence, and declaring the engine turns that
+        // silent wrong answer into `UndecidableCause::EngineMismatch`.
+        // `plugin_version` stays `None` — `EngineType::plugin_version` is
+        // already the measured value, so declaring it would only cross-check it
+        // against itself.
+        let config = EngineConfig {
+            engine: Some(ranger_engine(engine)),
+            ..EngineConfig::without_super_users()
+        };
 
-    let subject = Subject {
-        user: body.subject.user,
-        groups: body.subject.groups,
-        roles,
-        workspaces,
+        let mut accesses = Vec::new();
+        for access_type in engine_accesses(body.action, engine)? {
+            let request = AccessRequest {
+                user: body.subject.user.clone(),
+                // **Both empty, and that is the answer, not a shortcut.** See
+                // `ExplainSubject`: no engine egret provisions can match a
+                // Ranger `roles` or `groups` entry, so sending either would
+                // report an access no engine grants.
+                groups: BTreeSet::new(),
+                roles: BTreeSet::new(),
+                access_type: access_type.to_string(),
+                resource: resource.clone(),
+                // egret does not track a table's Ranger `{OWNER}`. `None` makes
+                // a decision that depends on one `Undecidable` rather than a
+                // guess in either direction.
+                owner: None,
+                // ⚠ **`None`, and it must stay `None` until egret's tag
+                // resolution is hierarchy-complete.** `Some(empty)` is a
+                // licence for `egret-ranger-eval` to skip its `tagPolicies`
+                // refusal, and that licence is sound only if the caller's tag
+                // resolution is at least as broad as
+                // `RangerTagEnricher`'s. egret's is not:
+                // `tag_keys_for_resource_via` matches schema/table/column by
+                // exact equality with no hierarchy roll-up, while the enricher
+                // walks the hierarchy and emits ancestor tags Ranger ADMITS for
+                // a tag request. So egret can report "no tags" for a column the
+                // engine is masking through a TABLE-level attachment. Every
+                // live tag assignment today is column-level, which is exactly
+                // how passing `tags` here would ship green and fail open. The
+                // cost of refusing is bounded and visible: a profile whose tag
+                // block carries a policy comes back `Undecidable` with the
+                // block and its policy COUNT named
+                // (`tests/routes.rs::a_tag_policy_block_that_could_decide_makes_the_profile_undecidable`
+                // pins it), which a steward can act on. Passing the existing
+                // resolution's result as if it were complete is the one thing
+                // that is not an option.
+                resolved_tags: None,
+            };
+            let decision =
+                egret_ranger_eval::eval::evaluate(&artifact, &request, &service_def, &config);
+            let attribution = attribution_for(&mut conn, &decision).await?;
+            accesses.push(ExplainAccess {
+                access_type: access_type.to_string(),
+                decision: WireDecision::from(&decision),
+                attribution,
+            });
+        }
+
+        profiles.push(ExplainProfile {
+            service_id,
+            service_name: svc.name,
+            engine: WireEngineType::from(ranger_engine(engine)),
+            accesses,
+        });
+    }
+
+    let outcome = if profiles.is_empty() {
+        ExplainOutcome::NoProfileServesTheCatalog
+    } else {
+        ExplainOutcome::PerProfile
     };
-    let decision = evaluate(
-        &subject,
-        body.action,
-        &body.target,
-        &grants,
-        &rules,
-        &tags,
-        &clearances,
+    Ok(Json(ExplainResponse {
+        outcome,
+        profiles,
+        tags,
+    }))
+}
+
+/// `egret_perm::EngineType` → the evaluator's own. Two enums for one fact
+/// because `egret-ranger-eval` is a pure crate that depends on neither
+/// `egret-perm` nor `egret-policy`; this is the single crossing.
+fn ranger_engine(engine: EngineType) -> egret_ranger_eval::eval::EngineType {
+    match engine {
+        EngineType::Trino => egret_ranger_eval::eval::EngineType::Trino,
+        EngineType::StarRocks => egret_ranger_eval::eval::EngineType::StarRocks,
+    }
+}
+
+/// The resource ONE access request names, in the levels the target engine's
+/// service-def declares (`resource_level_names` — Trino's middle level is
+/// `schema`, StarRocks' is `database`).
+///
+/// **A level the target does not name is ABSENT, not `*`.** That is what an
+/// engine's own request looks like: the plugin names exactly the levels the
+/// query touched. It is also not the same thing as the compiler's `*`, which
+/// is a POLICY value meaning "every child at this level" — a policy naming
+/// `catalog/*/*/*` against a request naming only `catalog` is Ranger's
+/// `SELF_AND_ALL_DESCENDANTS`, which matches; a request padded with `*` up to
+/// the leaf would be asking about a different resource.
+fn request_resource(engine: EngineType, catalog_name: &str, target: &Scope) -> RequestResource {
+    let names = resource_level_names(engine);
+    let mut resource = RequestResource::new();
+    resource.insert(names[0], catalog_name);
+    for (name, value) in [
+        (names[1], target.schema.as_deref()),
+        (names[2], target.table.as_deref()),
+        (names[3], target.column.as_deref()),
+    ] {
+        match value {
+            Some(v) => resource.insert(name, v),
+            // A gap below a named level cannot happen — `validate_grant_shape`
+            // and the picker both forbid `{schema: None, table: Some(_)}` — but
+            // stopping at the first absent level is the shape an engine request
+            // has either way.
+            None => break,
+        }
+    }
+    resource
+}
+
+/// Assemble the policy download `svc`'s plugin would receive, and read it back
+/// through `egret-ranger-eval`'s own reader.
+///
+/// **This mirrors `egret_policy::ranger::api::download::download_policies`
+/// deliberately and completely**, `tagPolicies` block included, and builds it
+/// with the same `ServicePolicies` type that handler serialises rather than a
+/// second hand-written copy of the envelope shape. The point of routing
+/// `explain` through the evaluator is that what it evaluated and what the
+/// engine received cannot differ; a private envelope builder here would be a
+/// second thing to keep in step, and the day they diverged `explain` would
+/// answer confidently about a download nobody serves. In particular the
+/// policies come from `enabled_policies_for_service` (which injects the
+/// DB-assigned `id`/`version`/`isEnabled` the plugin needs and drops disabled
+/// rows), NOT from `list_policies`.
+///
+/// The one thing it does not reproduce is the `lastKnownVersion` 304
+/// short-circuit, which is a caching protocol and carries no policy content.
+async fn artifact_for(
+    policy: &PolicyStore,
+    svc: &ServiceRow,
+) -> Result<ServicePolicySet, PermHttpError> {
+    let def = policy.get_service_def(&svc.r#type).await?.def_jsonb;
+    let policies = policy.enabled_policies_for_service(svc.id).await?;
+    let tag_service = svc
+        .config_jsonb
+        .get("tagService")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let mut envelope = ServicePolicies::new(
+        svc.name.clone(),
+        svc.id,
+        svc.policy_version,
+        def,
+        policies,
+        None,
     );
-    let mut out = ExplainResponse::from(decision);
-    out.tags = tags;
-    Ok(Json(out))
+    // Best-effort exactly as the download route is: a `tagService` naming
+    // nothing just omits the block, because that is what the plugin would
+    // receive.
+    if let Some(name) = tag_service {
+        if let Ok(tsvc) = policy.get_service(&name).await {
+            let tdef = policy.get_service_def(&tsvc.r#type).await?.def_jsonb;
+            let tpolicies = policy.enabled_policies_for_service(tsvc.id).await?;
+            envelope.tag_policies = Some(Box::new(ServicePolicies::new(
+                tsvc.name,
+                tsvc.id,
+                tsvc.policy_version,
+                tdef,
+                tpolicies,
+                None,
+            )));
+        }
+    }
+    // Through JSON on purpose: the plugin reads JSON, and
+    // `ServicePolicySet`'s `Deserialize` is where every `Unmodelled` construct
+    // in the download is detected. Going round the serialiser would skip the
+    // detection pass that makes the refusals possible.
+    let wire = serde_json::to_value(&envelope).map_err(PermHttpError::db)?;
+    serde_json::from_value::<ServicePolicySet>(wire).map_err(PermHttpError::db)
+}
+
+/// Map the DECIDING policy's Ranger name back to its `perm` model object, if
+/// it has one.
+///
+/// `Undecidable` has no single deciding policy, so it attributes to nothing —
+/// the causes in `why` name the policies they are about themselves. And a
+/// policy egret's compiler does not own attributes to nothing either, which is
+/// a real answer: see [`ExplainAttribution`].
+async fn attribution_for(
+    conn: &mut sqlx::PgConnection,
+    decision: &Decision,
+) -> Result<Option<ExplainAttribution>, PermHttpError> {
+    let name = match decision {
+        Decision::Allowed { policy_name, .. } | Decision::Denied { policy_name, .. } => policy_name,
+        Decision::Undecidable { .. } => return Ok(None),
+    };
+    Ok(match attribute_policy_name(name) {
+        None => None,
+        Some(PolicyAttribution::Grant(grant_id)) => Some(ExplainAttribution::Grant { grant_id }),
+        Some(PolicyAttribution::Rule { id, locator }) => Some(ExplainAttribution::Rule {
+            rule_id: id,
+            locator,
+        }),
+        // A clearance names a `tags.id` and nothing else. `tag` and
+        // `required_roles` are the two facts a steward needs and neither is on
+        // the wire the engine sees, so both are reconstructed here — `tags.key`
+        // (not `tags.name`), and the gate's roles keyed by that same key.
+        Some(PolicyAttribution::Clearance { tag_id, locator }) => {
+            let tag = tag_keys_by_ids_via(conn, &[tag_id])
+                .await?
+                .into_iter()
+                .find(|(id, _)| *id == tag_id)
+                .map(|(_, key)| key);
+            let required_roles = match &tag {
+                Some(key) => clearance_gates_for_tags_via(conn, std::slice::from_ref(key))
+                    .await?
+                    .into_iter()
+                    .find(|(gated, _)| gated == key)
+                    .map(|(_, roles)| roles)
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            Some(ExplainAttribution::Clearance {
+                tag_id,
+                tag,
+                required_roles,
+                locator,
+            })
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------

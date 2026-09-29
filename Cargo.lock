@@ -3510,6 +3510,7 @@ dependencies = [
  "egret-metastore",
  "egret-perm",
  "egret-policy",
+ "egret-policy-api",
  "egret-ranger-eval",
  "egret-secrets",
  "egret-test-db",
