@@ -355,6 +355,7 @@ pub fn validate(flow: &Flow) -> ValidationReport {
     }
 
     validate_script_tasks(flow, &mut report);
+    validate_plugin_tasks(flow, &mut report);
 
     validate_inputs(&flow.inputs, &mut report);
 
@@ -392,6 +393,55 @@ fn validate_script_tasks(flow: &Flow, report: &mut ValidationReport) {
                     },
                 });
             }
+        }
+    }
+}
+
+/// W5b: every Kestra plugin task (`crate::plugins`, `type: kestra.<FQCN>`)
+/// is parsed against the embedded catalog, and each refusal is an ERROR
+/// naming it (spec §4). A bare catalog FQCN is an error carrying the prefixed
+/// spelling. Both walk `children()` AND `error_children()`
+/// (`plugins::plugin_tasks`), unlike `walk_task`, so a plugin task inside a
+/// flowable's `errors:` is refused too -- which is also why the bare-FQCN
+/// error is raised here rather than in `walk_task`'s `Leaf` arm.
+///
+/// And, on **every** flow, a top-level `pluginDefaults:` (spec §4.1),
+/// whatever its value: Kestra 2.0 removed it and refuses the key at save.
+///
+/// The governance gate (features, `allowed-types`, a runner) is NOT here;
+/// `publish::check_plugin_tasks` runs it after this.
+fn validate_plugin_tasks(flow: &Flow, report: &mut ValidationReport) {
+    use crate::plugins;
+    if flow.plugin_defaults.is_some() {
+        report.errors.push(Finding {
+            code: plugins::CODE_REMOVED_PLUGIN_DEFAULTS,
+            message: plugins::REMOVED_PLUGIN_DEFAULTS_MESSAGE.to_string(),
+            path: "pluginDefaults".to_string(),
+        });
+    }
+    let refused = plugins::plugin_tasks(flow)
+        .into_iter()
+        .filter_map(|(path, task, spec)| {
+            plugins::parse(&task.r#type, spec)
+                .err()
+                .map(|rs| (path, task, rs))
+        })
+        .chain(
+            plugins::bare_plugin_types(flow)
+                .into_iter()
+                .map(|(path, task, r)| (path, task, vec![r])),
+        );
+    for (path, task, refusals) in refused {
+        for r in refusals {
+            report.errors.push(Finding {
+                code: r.code,
+                message: format!("task '{}': {}", task.id, r.message),
+                path: if r.path.is_empty() {
+                    path.clone()
+                } else {
+                    format!("{path}.{}", r.path)
+                },
+            });
         }
     }
 }
@@ -1323,7 +1373,16 @@ fn walk_task(
         // Kestra control-flow aliases -- never reach either warning: the
         // rule is "neither a control-flow variant nor a registered type",
         // not "starts with `core.`".
-        TaskKind::Leaf { .. } if registry::known_type(&task.r#type).is_none() => {
+        // W5b: a `kestra.` type (in the catalog or not) and a bare catalog
+        // FQCN are judged by `validate_plugin_tasks`, which refuses the
+        // ones that cannot run with an ERROR naming them; neither gets the
+        // generic warning below, which would say the opposite ("check for a
+        // typo") of the error's hint.
+        TaskKind::Leaf { .. }
+            if registry::known_type(&task.r#type).is_none()
+                && !task.r#type.starts_with(crate::plugins::PREFIX)
+                && crate::plugins::bare_hint(&task.r#type).is_none() =>
+        {
             if canonical_flow_type(&task.r#type).is_some() {
                 // **No `KESTRA_FLOW_CONTROL` lookup, and the arm that did one
                 // is GONE.** W8 Task 3 fix round 1. It named the package that

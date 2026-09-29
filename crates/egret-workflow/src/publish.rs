@@ -13,12 +13,18 @@
 //!    `scripts::gate::check` -- the workspace's `workflow_containers`
 //!    feature, the runner's `allowed-images` -- or publish is `InvalidInput`
 //!    naming the refusal. See [`ScriptGate`] and [`check_script_tasks`];
+//!    3c. (W5b) every Kestra plugin task (`type: kestra.<FQCN>`) passes ITS
+//!    one gate, `plugins::gate::check` -- `workflow_kestra_plugins` AND
+//!    `workflow_containers`, a configured runner, the `kestra` entry's
+//!    `allowed-types`. See [`check_plugin_tasks`];
 //! 4. walk every task; `registry::known_type(&task.r#type)` -- `None` is
 //!    `InvalidInput`, naming the type, so a typo like `egret.sqll` fails to
 //!    publish instead of resolving vacuously and failing only at run time,
 //!    in W3, with no author present. A `core.subflow` task never reaches this
 //!    check at all -- it is a typed `TaskKind::Subflow`, not a `Leaf`, and is
-//!    resolved by its own arm below instead (fix round 1);
+//!    resolved by its own arm below instead (fix round 1). (W5b) A type
+//!    `plugins::lookup` resolves (a `kestra.<FQCN>` in the catalog) is
+//!    accepted too; a plugin task has no `RefField`s;
 //! 5. for each of that type's declared `RefField`s, read the leaf's own
 //!    field and ask `refs` which workspace owns it, refusing **both** an
 //!    absent object and one owned by a *different* workspace as the
@@ -77,6 +83,7 @@ use egret_core::{Error, Result, UserId};
 use uuid::Uuid;
 
 use crate::models::{Flow, Task, TaskKind, Trigger, TriggerKind};
+use crate::plugins;
 use crate::repo::{FlowRepo, FlowVersionRow};
 use crate::scripts::{self, RunnerKind};
 use crate::spec::{parse, registry, validate};
@@ -108,6 +115,10 @@ pub struct ScriptGate<'a> {
     /// `container_runner`"). `None` when none is configured, in which case a
     /// script task with no `taskRunner:` is refused -- nothing would run it.
     pub default_runner: Option<RunnerKind>,
+    /// (W5b) `workflow_kestra_plugins` is ON for the workspace. A plugin task
+    /// needs this AND [`ScriptGate::feature_enabled`] (`workflow_containers`)
+    /// AND a [`ScriptGate::default_runner`] -- see [`check_plugin_tasks`].
+    pub kestra_plugins_enabled: bool,
 }
 
 static NO_PLUGIN_CONFIGURATIONS: PluginConfigurations = PluginConfigurations(Vec::new());
@@ -121,6 +132,7 @@ impl ScriptGate<'static> {
             feature_enabled: false,
             plugin_configurations: &NO_PLUGIN_CONFIGURATIONS,
             default_runner: None,
+            kestra_plugins_enabled: false,
         }
     }
 }
@@ -205,6 +217,36 @@ pub fn check_script_tasks(flow: &Flow, gate: &ScriptGate<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Step 3c (W5b): every Kestra plugin task in `flow` (`plugins::plugin_tasks`,
+/// which walks `errors:` too) through the ONE plugin gate,
+/// `plugins::gate::check`. The first refusal is `InvalidInput`, naming the
+/// task and the reason.
+///
+/// Runs after `validate`, so every plugin task here already parses; a parse
+/// error is still answered (not unwrapped) in case a caller skipped step 3.
+pub fn check_plugin_tasks(flow: &Flow, gate: &ScriptGate<'_>) -> Result<()> {
+    for (_path, task, spec) in plugins::plugin_tasks(flow) {
+        let parsed = plugins::parse(&task.r#type, spec).map_err(|refusals| {
+            Error::InvalidInput(
+                refusals
+                    .iter()
+                    .map(|r| format!("task '{}': {}", task.id, r.message))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })?;
+        plugins::gate::check(&plugins::gate::GateInput {
+            feature_enabled: gate.kestra_plugins_enabled,
+            containers_enabled: gate.feature_enabled,
+            plugin_configurations: gate.plugin_configurations,
+            runner: gate.default_runner,
+            fqcn: parsed.fqcn,
+        })
+        .map_err(|why| Error::InvalidInput(format!("task '{}': {why}", task.id)))?;
+    }
+    Ok(())
+}
+
 /// Publish `flow`'s current draft: parse, validate, resolve every reference,
 /// freeze a new immutable version, and mark it live. See the module doc for
 /// the ordered steps and where each refusal happens.
@@ -261,6 +303,8 @@ pub async fn publish_gated(
 
     // Step 3b (W5a).
     check_script_tasks(&parsed, gate)?;
+    // Step 3c (W5b).
+    check_plugin_tasks(&parsed, gate)?;
 
     // Steps 4-6: walk every task in all four root lists (mirrors
     // `spec::validate`'s own walk over `tasks`/`errors`/`finally`/
@@ -402,12 +446,18 @@ fn resolve_task<'a>(
                 Ok(())
             }
             TaskKind::Leaf { spec } => {
-                let type_spec = registry::known_type(&task.r#type).ok_or_else(|| {
-                    Error::InvalidInput(format!(
+                let Some(type_spec) = registry::known_type(&task.r#type) else {
+                    // W5b: a catalog plugin type is known too. It names no
+                    // egret object, so there is nothing to resolve; step 3c
+                    // already gated it.
+                    if plugins::lookup(&task.r#type).is_some() {
+                        return Ok(());
+                    }
+                    return Err(Error::InvalidInput(format!(
                         "task '{}' has unknown type '{}'",
                         task.id, task.r#type
-                    ))
-                })?;
+                    )));
+                };
                 for rf in type_spec.references {
                     let value = spec
                         .get(rf.field)

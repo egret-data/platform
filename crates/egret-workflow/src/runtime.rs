@@ -665,7 +665,9 @@ pub async fn reaper_pass(
 ///   orphan sweep. Returns the runner kind, which publish uses for a task with
 ///   no `taskRunner:`.
 ///
-/// `Err` for a Kubernetes configuration egret refuses (`run_as_user <= 0`) or
+/// `Err` for a `plugin_configurations` that fails
+/// `WorkflowConfig::validate_plugin_configurations` (W5b), checked first;
+/// for a Kubernetes configuration egret refuses (`run_as_user <= 0`) or
 /// a cluster client that cannot be built: a deployment that asked for
 /// containers and cannot have them must not start as if it had none.
 pub async fn handlers_for(
@@ -676,6 +678,11 @@ pub async fn handlers_for(
     use crate::worker::commands::{DockerRunner, OrphanSweep, TaskRunner};
     use crate::worker::handlers::script::{register, PgFeatureState, ScriptRuntime};
 
+    // W5b: the boot check on `plugin_configurations`, first -- before
+    // `container_runner = none` returns below, so a misplaced
+    // `allowed-types`/`allowed-images` refuses to start on every deployment.
+    cfg.validate_plugin_configurations()
+        .map_err(egret_core::Error::InvalidInput)?;
     let mut handlers = Handlers::with_core_tasks();
     let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) =
         match cfg.container_runner {

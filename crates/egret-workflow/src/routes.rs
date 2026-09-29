@@ -702,11 +702,10 @@ async fn publish_flow(
     // W5a: the workspace half of the script-task gate. `disabled_features` is
     // the effective set, so an absent `workflow_containers` row reads as OFF
     // (its `default_enabled`), exactly as the `WsContext` gate would read it.
-    let feature_enabled = !st
-        .workspaces
-        .disabled_features(ctx.workspace_id)
-        .await?
-        .contains(crate::scripts::FEATURE_KEY);
+    // W5b: the plugin gate's feature is read from the same effective set.
+    let disabled = st.workspaces.disabled_features(ctx.workspace_id).await?;
+    let feature_enabled = !disabled.contains(crate::scripts::FEATURE_KEY);
+    let kestra_plugins_enabled = !disabled.contains(crate::plugins::FEATURE_KEY);
     let version = crate::publish::publish_gated(
         &st.repo,
         &*st.refs,
@@ -718,6 +717,7 @@ async fn publish_flow(
             feature_enabled,
             plugin_configurations: &st.scripts.plugin_configurations,
             default_runner: st.scripts.default_runner,
+            kestra_plugins_enabled,
         },
     )
     .await?;

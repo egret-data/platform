@@ -1,0 +1,630 @@
+//! W5b Task 3: the `kestra.<FQCN>` plugin-task model -- parsed against the
+//! embedded `catalog.json`, refused at publish by name, and governed by its
+//! own gate (feature `workflow_kestra_plugins`, which requires
+//! `workflow_containers`, and the `kestra` entry's `allowed-types`) -- plus
+//! the refusal of `pluginDefaults:` on every flow. One test per row of spec
+//! §10 this task owns; the refusals are asserted against Task 1's
+//! measurement, `oracle-exec/w5b-plugins.json` (`egret_expected`), where the
+//! fixture holds the answer.
+//!
+//! The pure half needs nothing; the route half is DB-gated and self-skips ONLY
+//! when `EGRET_ALLOW_DB_SKIP` is set (`egret_test_db`'s contract).
+
+mod common;
+
+use axum::http::StatusCode;
+use egret_config::{PluginConfiguration, PluginConfigurationValues, PluginConfigurations};
+use egret_workflow::plugins::{self, gate};
+use egret_workflow::scripts::{self, RunnerKind};
+use egret_workflow::spec;
+use serde_json::{json, Value};
+
+const PG_QUERY: &str = "io.kestra.plugin.jdbc.postgresql.Query";
+const MYSQL_QUERY: &str = "io.kestra.plugin.jdbc.mysql.Query";
+
+fn fixture() -> Value {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/oracle-exec/w5b-plugins.json");
+    serde_json::from_str(&std::fs::read_to_string(path).expect("read w5b-plugins.json"))
+        .expect("parse w5b-plugins.json")
+}
+
+fn prefixed(fqcn: &str) -> String {
+    format!("{}{fqcn}", plugins::PREFIX)
+}
+
+/// The refusals `parse` answers for `spec` on `kestra.<fqcn>`; panics if it
+/// parses.
+fn refusals(fqcn: &str, spec: Value) -> Vec<plugins::PluginRefusal> {
+    match plugins::parse(&prefixed(fqcn), &spec) {
+        Ok(t) => panic!("{fqcn} {spec} parsed: {:?}", t.properties),
+        Err(r) => r,
+    }
+}
+
+/// The one refusal at `path`, asserting its code and a message substring.
+fn assert_refused(errs: &[plugins::PluginRefusal], path: &str, code: &str, needle: &str) {
+    let r = errs
+        .iter()
+        .find(|r| r.path == path)
+        .unwrap_or_else(|| panic!("no refusal at {path:?}: {errs:?}"));
+    assert_eq!(r.code, code, "{r:?}");
+    assert!(
+        r.message.contains(needle),
+        "{needle:?} not in {:?}",
+        r.message
+    );
+}
+
+fn pg(extra: Value) -> Value {
+    let mut base = json!({"url": "jdbc:postgresql://h/db", "sql": "select 1"});
+    base.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    base
+}
+
+fn errors_of(src: &str) -> Vec<spec::Finding> {
+    let flow = spec::parse(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+    spec::validate(&flow).errors
+}
+
+// ---------------------------------------------------------------------------
+// The model
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_catalog_fqcn_with_the_prefix_parses() {
+    let t = plugins::parse(
+        "kestra.io.kestra.plugin.jdbc.postgresql.Query",
+        &json!({"url": "jdbc:postgresql://h/db", "sql": "select 1"}),
+    )
+    .unwrap();
+    assert_eq!(t.fqcn, "io.kestra.plugin.jdbc.postgresql.Query");
+    assert_eq!(t.properties["sql"], "select 1");
+    // Every class of the catalog is reachable through the prefix, and only
+    // through it.
+    for fqcn in plugins::catalog().classes.keys() {
+        assert_eq!(
+            plugins::lookup(&prefixed(fqcn)).map(|(f, _)| f),
+            Some(fqcn.as_str())
+        );
+        assert!(plugins::lookup(fqcn).is_none(), "{fqcn} bare");
+    }
+    assert_eq!(plugins::catalog().classes.len(), 5);
+}
+
+#[test]
+fn a_bare_catalog_fqcn_is_refused_with_the_prefixed_hint() {
+    assert_eq!(
+        plugins::bare_hint(PG_QUERY).as_deref(),
+        Some("kestra.io.kestra.plugin.jdbc.postgresql.Query")
+    );
+    assert_eq!(plugins::bare_hint("io.kestra.plugin.core.log.Log"), None);
+
+    let errs = errors_of(&format!(
+        "id: f\nnamespace: a.b\ntasks:\n  - id: q\n    type: {PG_QUERY}\n    url: jdbc:postgresql://h/db\n    sql: select 1\n"
+    ));
+    let f = errs
+        .iter()
+        .find(|f| f.code == plugins::CODE_TYPE_UNPREFIXED)
+        .unwrap_or_else(|| panic!("{errs:?}"));
+    assert_eq!(f.path, "tasks.q");
+    assert!(
+        f.message
+            .contains("kestra.io.kestra.plugin.jdbc.postgresql.Query"),
+        "{}",
+        f.message
+    );
+
+    // And a `kestra.` type that is not in the catalog is refused by name.
+    let errs = errors_of(
+        "id: f\nnamespace: a.b\ntasks:\n  - id: q\n    type: kestra.io.kestra.plugin.jdbc.postgresql.Trigger\n",
+    );
+    let f = errs
+        .iter()
+        .find(|f| f.code == plugins::CODE_TYPE_UNKNOWN)
+        .unwrap_or_else(|| panic!("{errs:?}"));
+    assert!(
+        f.message
+            .contains("'io.kestra.plugin.jdbc.postgresql.Trigger' is not in the plugin catalog"),
+        "{}",
+        f.message
+    );
+}
+
+#[test]
+fn an_unknown_property_is_refused_by_name() {
+    let errs = refusals(PG_QUERY, pg(json!({"sqll": "select 2"})));
+    assert_refused(&errs, "sqll", plugins::CODE_PROPERTY_UNKNOWN, "'sqll'");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+}
+
+#[test]
+fn a_missing_required_property_is_refused_by_name() {
+    let errs = refusals(PG_QUERY, json!({"sql": "select 1"}));
+    assert_refused(&errs, "url", plugins::CODE_PROPERTY_REQUIRED, "'url'");
+    // `id` and `type` are required in the catalog too, but the `Task` model
+    // consumes them; they are never demanded of the leaf spec.
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    // An explicit `null` is absence.
+    let errs = refusals(PG_QUERY, json!({"sql": "select 1", "url": null}));
+    assert_refused(&errs, "url", plugins::CODE_PROPERTY_REQUIRED, "'url'");
+}
+
+#[test]
+fn fetch_type_store_is_refused_naming_w9() {
+    let errs = refusals(PG_QUERY, pg(json!({"fetchType": "STORE"})));
+    assert_refused(
+        &errs,
+        "fetchType",
+        plugins::CODE_PROPERTY_NEEDS_STORAGE,
+        "W9",
+    );
+    let errs = refusals(PG_QUERY, pg(json!({"store": true})));
+    assert_refused(&errs, "store", plugins::CODE_PROPERTY_NEEDS_STORAGE, "W9");
+    // `inputFile` on MySQL needs storage whatever its value.
+    let errs = refusals(
+        MYSQL_QUERY,
+        json!({"url": "jdbc:mysql://h:9030/", "sql": "select 1", "inputFile": "{{ x }}"}),
+    );
+    assert_refused(
+        &errs,
+        "inputFile",
+        plugins::CODE_PROPERTY_NEEDS_STORAGE,
+        "W9",
+    );
+    // The controls: the other fetch types, and `store: false`, parse.
+    for v in [
+        json!({"fetchType": "FETCH"}),
+        json!({"fetchType": "FETCH_ONE"}),
+        json!({"store": false}),
+    ] {
+        plugins::parse(&prefixed(PG_QUERY), &pg(v.clone()))
+            .unwrap_or_else(|e| panic!("{v}: {e:?}"));
+    }
+}
+
+/// The table egret refuses by value is Task 1's measurement, not a copy
+/// that can drift from it.
+#[test]
+fn the_refused_values_table_is_task_1s_measurement() {
+    assert_eq!(
+        plugins::refused_values_json(),
+        fixture()["egret_expected"]["refused_values"]
+    );
+}
+
+#[test]
+fn task_runner_and_the_seven_base_properties_are_refused() {
+    let seven = [
+        ("assets", json!({"inputs": []})),
+        ("logLevel", json!("INFO")),
+        ("logToFile", json!(true)),
+        ("policyRefs", json!(["p"])),
+        ("taskCache", json!({"enabled": true})),
+        ("version", json!("1")),
+        ("workerSelector", json!({"tags": ["a"]})),
+    ];
+    assert_eq!(plugins::REFUSED_BASE_PROPERTIES.len(), 7);
+    for (key, value) in seven {
+        let errs = refusals(PG_QUERY, pg(json!({ key: value })));
+        assert_refused(
+            &errs,
+            key,
+            plugins::CODE_PROPERTY_NOT_IMPLEMENTED,
+            &format!("property '{key}' is accepted by Kestra on {PG_QUERY} but is not implemented by egret"),
+        );
+    }
+    let errs = refusals(
+        PG_QUERY,
+        pg(json!({"taskRunner": {"type": scripts::DOCKER_RUNNER}})),
+    );
+    assert_refused(
+        &errs,
+        "taskRunner",
+        plugins::CODE_PROPERTY_NOT_IMPLEMENTED,
+        "workflow.container_runner",
+    );
+}
+
+#[test]
+fn a_literal_of_the_wrong_plain_type_is_refused_and_an_expression_is_not() {
+    // `sql` is a plain `string`; a list is not one.
+    let errs = refusals(
+        PG_QUERY,
+        json!({"url": "jdbc:postgresql://h/db", "sql": ["a"]}),
+    );
+    assert_refused(&errs, "sql", plugins::CODE_PROPERTY_INVALID, "string");
+    // `parameters` is a plain `object`; `outputFiles` a plain `array`.
+    let errs = refusals(
+        PG_QUERY,
+        pg(json!({"parameters": "p", "outputFiles": {"a": 1}})),
+    );
+    assert_refused(
+        &errs,
+        "parameters",
+        plugins::CODE_PROPERTY_INVALID,
+        "object",
+    );
+    assert_refused(
+        &errs,
+        "outputFiles",
+        plugins::CODE_PROPERTY_INVALID,
+        "array",
+    );
+    // `fetchType` is an enum.
+    let errs = refusals(PG_QUERY, pg(json!({"fetchType": "ALL"})));
+    assert_refused(
+        &errs,
+        "fetchType",
+        plugins::CODE_PROPERTY_INVALID,
+        "FETCH_ONE",
+    );
+
+    // An expression is judged by the host after rendering, whatever the type.
+    plugins::parse(
+        &prefixed(PG_QUERY),
+        &pg(json!({"parameters": "{{ inputs.p }}", "outputFiles": "{{ x }}", "fetchType": "{{ inputs.t }}"})),
+    )
+    .unwrap();
+    // A schema egret cannot read (`anyOf`) is not type-checked at all.
+    plugins::parse(&prefixed(PG_QUERY), &pg(json!({"fetchSize": [1]}))).unwrap();
+    // Scalars coerce into a string, as Jackson's do.
+    plugins::parse(&prefixed(PG_QUERY), &pg(json!({"password": 1234}))).unwrap();
+}
+
+#[test]
+fn no_native_fqcn_is_in_the_catalog() {
+    for row in spec::registry::TASK_TYPES {
+        assert!(
+            !plugins::catalog().classes.contains_key(row.r#type),
+            "{}",
+            row.r#type
+        );
+        for alias in row.aliases {
+            assert!(!plugins::catalog().classes.contains_key(*alias), "{alias}");
+        }
+    }
+    // The control: the catalog is not empty, so the loop above compared
+    // against something.
+    assert!(plugins::catalog().classes.contains_key(PG_QUERY));
+}
+
+#[test]
+fn plugin_defaults_is_refused_on_every_flow_even_empty() {
+    let log_only = "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+    // The control: without the key, the Log-only flow is clean.
+    assert!(errors_of(log_only).is_empty());
+
+    let with_plugin = format!(
+        "id: f\nnamespace: a.b\ntasks:\n  - id: q\n    type: kestra.{PG_QUERY}\n    url: jdbc:postgresql://h/db\n    sql: select 1\n"
+    );
+    assert!(
+        errors_of(&with_plugin).is_empty(),
+        "{:?}",
+        errors_of(&with_plugin)
+    );
+
+    let list = "pluginDefaults:\n  - type: io.kestra.plugin.core.log.Log\n    values:\n      level: WARN\n";
+    for (name, src) in [
+        ("list, plugin task", format!("{with_plugin}{list}")),
+        (
+            "empty list, Log-only",
+            format!("{log_only}pluginDefaults: []\n"),
+        ),
+        ("list, Log-only", format!("{log_only}{list}")),
+        ("null, Log-only", format!("{log_only}pluginDefaults:\n")),
+    ] {
+        let errs = errors_of(&src);
+        let f = errs
+            .iter()
+            .find(|f| f.code == plugins::CODE_REMOVED_PLUGIN_DEFAULTS)
+            .unwrap_or_else(|| panic!("{name}: {errs:?}"));
+        assert_eq!(f.path, "pluginDefaults", "{name}");
+        assert_eq!(
+            f.message,
+            "`pluginDefaults` was removed in Kestra 2.0; set the properties on each task",
+            "{name}"
+        );
+    }
+    // Kestra answers all three measured shapes by naming the field.
+    let k = &fixture()["egret_expected"]["plugin_defaults_refusal"];
+    assert_eq!(k["status"], 422);
+    assert!(k["detail_prefix"]
+        .as_str()
+        .unwrap()
+        .contains("Unrecognized field \"pluginDefaults\""));
+}
+
+#[test]
+fn a_plugin_task_under_errors_is_parsed_too() {
+    let src = format!(
+        "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: l\n        type: io.kestra.plugin.core.log.Log\n        message: x\n    errors:\n      - id: e\n        type: kestra.{PG_QUERY}\n        url: jdbc:postgresql://h/db\n        sql: select 1\n        sqll: x\n"
+    );
+    let flow = spec::parse(&src).unwrap();
+    let found: Vec<String> = plugins::plugin_tasks(&flow)
+        .into_iter()
+        .map(|(p, ..)| p)
+        .collect();
+    assert_eq!(found, vec!["tasks.s.e"]);
+    let errs = spec::validate(&flow).errors;
+    let f = errs
+        .iter()
+        .find(|f| f.code == plugins::CODE_PROPERTY_UNKNOWN)
+        .unwrap_or_else(|| panic!("{errs:?}"));
+    assert_eq!(f.path, "tasks.s.e.sqll");
+}
+
+// ---------------------------------------------------------------------------
+// The gate
+// ---------------------------------------------------------------------------
+
+fn kestra_entry(types: Option<&[&str]>) -> PluginConfiguration {
+    PluginConfiguration {
+        r#type: plugins::CONFIG_TYPE.to_string(),
+        values: PluginConfigurationValues {
+            allowed_images: None,
+            allowed_types: types.map(|t| t.iter().map(|s| s.to_string()).collect()),
+        },
+    }
+}
+
+fn runner_entry(types: Option<&[&str]>) -> PluginConfiguration {
+    PluginConfiguration {
+        r#type: scripts::DOCKER_RUNNER.to_string(),
+        values: PluginConfigurationValues {
+            allowed_images: Some(vec!["*".into()]),
+            allowed_types: types.map(|t| t.iter().map(|s| s.to_string()).collect()),
+        },
+    }
+}
+
+fn open_input<'a>(pc: &'a PluginConfigurations, fqcn: &'a str) -> gate::GateInput<'a> {
+    gate::GateInput {
+        feature_enabled: true,
+        containers_enabled: true,
+        plugin_configurations: pc,
+        runner: Some(RunnerKind::Docker),
+        fqcn,
+    }
+}
+
+#[test]
+fn no_kestra_entry_allows_the_catalog_and_an_empty_list_allows_none() {
+    // No `kestra` entry (a runner entry does not count): every catalog type.
+    let none = PluginConfigurations(vec![runner_entry(None)]);
+    assert_eq!(none.allowed_types(), None);
+    for fqcn in plugins::catalog().classes.keys() {
+        assert_eq!(gate::check(&open_input(&none, fqcn)), Ok(()), "{fqcn}");
+    }
+    // An empty list: none.
+    let empty = PluginConfigurations(vec![kestra_entry(Some(&[]))]);
+    let refused = gate::check(&open_input(&empty, PG_QUERY)).unwrap_err();
+    assert_eq!(
+        refused,
+        gate::GateRefusal::TypeNotAllowed {
+            fqcn: PG_QUERY.to_string()
+        }
+    );
+    assert!(refused.to_string().contains("allowed-types"), "{refused}");
+    // An entry with no `allowed-types` key names the type: an empty list.
+    let keyless = PluginConfigurations(vec![kestra_entry(None)]);
+    assert_eq!(keyless.allowed_types(), Some(vec![]));
+    assert!(gate::check(&open_input(&keyless, PG_QUERY)).is_err());
+}
+
+#[test]
+fn allowed_types_glob_spans_package_segments() {
+    let jdbc = PluginConfigurations(vec![kestra_entry(Some(&["io.kestra.plugin.jdbc.*"]))]);
+    for fqcn in plugins::catalog().classes.keys() {
+        assert_eq!(gate::check(&open_input(&jdbc, fqcn)), Ok(()), "{fqcn}");
+    }
+    let pg_only = PluginConfigurations(vec![kestra_entry(Some(&[
+        "io.kestra.plugin.jdbc.postgresql.*",
+    ]))]);
+    assert_eq!(gate::check(&open_input(&pg_only, PG_QUERY)), Ok(()));
+    assert!(matches!(
+        gate::check(&open_input(&pg_only, MYSQL_QUERY)),
+        Err(gate::GateRefusal::TypeNotAllowed { .. })
+    ));
+}
+
+#[test]
+fn the_feature_requires_workflow_containers() {
+    let pc = PluginConfigurations::default();
+    let mut input = open_input(&pc, PG_QUERY);
+    assert_eq!(gate::check(&input), Ok(()));
+
+    input.containers_enabled = false;
+    let r = gate::check(&input).unwrap_err();
+    assert_eq!(r, gate::GateRefusal::ContainersDisabled);
+    assert!(r.to_string().contains("'workflow_containers'"), "{r}");
+
+    input.feature_enabled = false;
+    let r = gate::check(&input).unwrap_err();
+    assert_eq!(r, gate::GateRefusal::FeatureDisabled);
+    assert!(r.to_string().contains("'workflow_kestra_plugins'"), "{r}");
+
+    let mut input = open_input(&pc, PG_QUERY);
+    input.runner = None;
+    let r = gate::check(&input).unwrap_err();
+    assert_eq!(r, gate::GateRefusal::NoRunner);
+    assert!(r.to_string().contains("workflow.container_runner"), "{r}");
+
+    // And the workspace catalog cannot hold the feature on with containers off.
+    use egret_workspace::features::{default_enabled, violates_dependencies};
+    assert_eq!(default_enabled(plugins::FEATURE_KEY), Some(false));
+    let disabled: std::collections::HashSet<String> =
+        [scripts::FEATURE_KEY.to_string()].into_iter().collect();
+    assert_eq!(
+        violates_dependencies(&disabled),
+        Some("workflow_kestra_plugins requires workflow_containers to be enabled")
+    );
+}
+
+#[tokio::test]
+async fn allowed_types_on_a_runner_entry_is_refused_at_boot() {
+    let mut cfg = egret_config::Config::default().workflow;
+    cfg.plugin_configurations = PluginConfigurations(vec![runner_entry(Some(&["*"]))]);
+    let e = cfg.validate_plugin_configurations().unwrap_err();
+    assert!(
+        e.contains("'allowed-types'") && e.contains(scripts::DOCKER_RUNNER),
+        "{e}"
+    );
+
+    // `allowed-images` on the `kestra` entry, even an empty list.
+    let mut entry = kestra_entry(Some(&["*"]));
+    entry.values.allowed_images = Some(vec![]);
+    cfg.plugin_configurations = PluginConfigurations(vec![entry]);
+    let e = cfg.validate_plugin_configurations().unwrap_err();
+    assert!(
+        e.contains("'allowed-images'") && e.contains("plugin_host.image"),
+        "{e}"
+    );
+
+    // The boot path runs it first, before `container_runner = none` returns.
+    cfg.plugin_configurations = PluginConfigurations(vec![runner_entry(Some(&["*"]))]);
+    let pool = sqlx::PgPool::connect_lazy("postgres://nobody@localhost:1/none").unwrap();
+    let Err(e) = egret_workflow::runtime::handlers_for(&cfg, pool.clone()).await else {
+        panic!("handlers_for must refuse the configuration");
+    };
+    assert!(e.to_string().contains("'allowed-types'"), "{e}");
+
+    // The control: both in their right place pass, at both sites.
+    cfg.plugin_configurations =
+        PluginConfigurations(vec![runner_entry(None), kestra_entry(Some(&["*"]))]);
+    cfg.validate_plugin_configurations().unwrap();
+    assert!(egret_workflow::runtime::handlers_for(&cfg, pool)
+        .await
+        .is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Through the publish route
+// ---------------------------------------------------------------------------
+
+async fn publish(
+    app: &common::App,
+    ws: uuid::Uuid,
+    user: egret_core::UserId,
+    source: &str,
+) -> (StatusCode, String) {
+    let created = common::json(
+        common::post(
+            app,
+            &format!("/api/ws/{ws}/workflows/flows"),
+            user,
+            json!({ "source": source }),
+        )
+        .await,
+    )
+    .await;
+    let id = created["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{created}"));
+    let res = common::post(
+        app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}/publish"),
+        user,
+        json!({}),
+    )
+    .await;
+    let status = res.status();
+    (status, common::body_text(res).await)
+}
+
+fn plugin_flow(ns: &str, fqcn: &str) -> String {
+    format!(
+        "id: f\nnamespace: {ns}\ntasks:\n  - id: q\n    type: kestra.{fqcn}\n    url: jdbc:postgresql://h/db\n    sql: select 1\n"
+    )
+}
+
+#[tokio::test]
+async fn publish_refuses_a_plugin_task_with_the_feature_off() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app_with_scripts(
+        &db,
+        scripts::ScriptSettings {
+            plugin_configurations: PluginConfigurations(vec![kestra_entry(Some(&[
+                "io.kestra.plugin.jdbc.postgresql.*",
+            ]))]),
+            default_runner: Some(RunnerKind::Docker),
+        },
+    )
+    .await;
+
+    // 1. Neither feature row: the plugin feature is named first.
+    let (s, body) = publish(&app, ws, user, &plugin_flow("w5b.off", PG_QUERY)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.contains("'workflow_kestra_plugins' feature is disabled"),
+        "{body}"
+    );
+
+    // 2. Containers on, plugins still off.
+    common::enable_feature(&db, ws, scripts::FEATURE_KEY).await;
+    let (s, body) = publish(&app, ws, user, &plugin_flow("w5b.off2", PG_QUERY)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.contains("'workflow_kestra_plugins' feature is disabled"),
+        "{body}"
+    );
+
+    common::enable_feature(&db, ws, plugins::FEATURE_KEY).await;
+
+    // 3. Outside `allowed-types`.
+    let (s, body) = publish(&app, ws, user, &plugin_flow("w5b.type", MYSQL_QUERY)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.contains(MYSQL_QUERY) && body.contains("allowed-types"),
+        "{body}"
+    );
+
+    // 4. `pluginDefaults:` blocks publish.
+    let (s, body) = publish(
+        &app,
+        ws,
+        user,
+        &format!(
+            "{}pluginDefaults: []\n",
+            plugin_flow("w5b.defaults", PG_QUERY)
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.contains("`pluginDefaults` was removed in Kestra 2.0"),
+        "{body}"
+    );
+
+    // 5. A bare FQCN, with the hint.
+    let (s, body) = publish(
+        &app,
+        ws,
+        user,
+        &plugin_flow("w5b.bare", PG_QUERY).replace("type: kestra.", "type: "),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains(&prefixed(PG_QUERY)), "{body}");
+
+    // The control: the same task, allowed, publishes -- through step 4's
+    // catalog arm, which accepts a type `TASK_TYPES` does not hold.
+    let (s, body) = publish(&app, ws, user, &plugin_flow("w5b.ok", PG_QUERY)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+
+    // And with no runner configured, it is refused by name.
+    let app = common::app_with_scripts(
+        &db,
+        scripts::ScriptSettings {
+            plugin_configurations: PluginConfigurations::default(),
+            default_runner: None,
+        },
+    )
+    .await;
+    let (s, body) = publish(&app, ws, user, &plugin_flow("w5b.norunner", PG_QUERY)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("no container runner is configured"), "{body}");
+}

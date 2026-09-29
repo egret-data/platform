@@ -94,7 +94,8 @@ fn handler(type_id: &str) -> Script {
             plugin_configurations: PluginConfigurations(vec![PluginConfiguration {
                 r#type: RunnerKind::Docker.fqcn().to_string(),
                 values: PluginConfigurationValues {
-                    allowed_images: vec!["*".into(), "*/*".into(), "*/*/*".into()],
+                    allowed_images: Some(vec!["*".into(), "*/*".into(), "*/*/*".into()]),
+                    allowed_types: None,
                 },
             }]),
             features: Arc::new(FixedFeatureState(true)),

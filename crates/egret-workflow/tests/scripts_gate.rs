@@ -537,7 +537,8 @@ fn configs(entries: &[(&str, &[&str])]) -> PluginConfigurations {
             .map(|(t, imgs)| PluginConfiguration {
                 r#type: t.to_string(),
                 values: PluginConfigurationValues {
-                    allowed_images: imgs.iter().map(|s| s.to_string()).collect(),
+                    allowed_images: Some(imgs.iter().map(|s| s.to_string()).collect()),
+                    allowed_types: None,
                 },
             })
             .collect(),

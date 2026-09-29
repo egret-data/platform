@@ -625,6 +625,14 @@ pub struct WorkflowConfig {
     /// stricter than Kestra OSS, which has no allowlist, and it is deliberate
     /// (the user's decision of 2026-09-28).
     ///
+    /// **W5b adds a second value, `values.allowed-types`, read only on the
+    /// entry of type `kestra`** ([`KESTRA_CONFIG_TYPE`]): glob patterns a
+    /// Kestra plugin task's FQCN must match. The opposite default: **no
+    /// `kestra` entry allows every catalog type**, an empty list allows none
+    /// ([`PluginConfigurations::allowed_types`]). `allowed-types` on any other
+    /// entry, and `allowed-images` on the `kestra` entry, are refused at boot
+    /// ([`WorkflowConfig::validate_plugin_configurations`]).
+    ///
     /// `EGRET_WORKFLOW__PLUGIN_CONFIGURATIONS='[{type="io.kestra.plugin.scripts.runner.docker.Docker",values={allowed-images=["python:*"]}}]'`,
     /// or a `[[workflow.plugin_configurations]]` table in `egret.toml`.
     #[serde(default)]
@@ -822,9 +830,76 @@ impl PluginConfigurations {
         let mut out = Vec::new();
         for entry in self.0.iter().filter(|e| e.r#type == plugin_type) {
             found = true;
-            out.extend(entry.values.allowed_images.iter().map(String::as_str));
+            out.extend(
+                entry
+                    .values
+                    .allowed_images
+                    .iter()
+                    .flatten()
+                    .map(String::as_str),
+            );
         }
         found.then_some(out)
+    }
+
+    /// W5b: the `allowed-types` of the [`KESTRA_CONFIG_TYPE`] entry -- glob
+    /// patterns a `kestra.<FQCN>` plugin task's FQCN must match -- or `None`
+    /// when no entry has that type. **`None` allows every catalog type** (the
+    /// catalog was reviewed as a PR); `Some(vec![])` allows none. An entry
+    /// with no `allowed-types` key is `Some(vec![])`: it names the type, so it
+    /// is a list, and an empty one. Several entries concatenate, as
+    /// [`PluginConfigurations::allowed_images`] does.
+    pub fn allowed_types(&self) -> Option<Vec<&str>> {
+        let mut found = false;
+        let mut out = Vec::new();
+        for entry in self.0.iter().filter(|e| e.r#type == KESTRA_CONFIG_TYPE) {
+            found = true;
+            out.extend(
+                entry
+                    .values
+                    .allowed_types
+                    .iter()
+                    .flatten()
+                    .map(String::as_str),
+            );
+        }
+        found.then_some(out)
+    }
+}
+
+/// W5b: the `plugin_configurations` entry type that governs Kestra plugin
+/// tasks (`type: kestra.<FQCN>`); `egret_workflow::plugins::CONFIG_TYPE`.
+pub const KESTRA_CONFIG_TYPE: &str = "kestra";
+
+impl WorkflowConfig {
+    /// **The boot check on [`WorkflowConfig::plugin_configurations`]** (W5b
+    /// spec §5): `allowed-types` belongs only on the [`KESTRA_CONFIG_TYPE`]
+    /// entry and `allowed-images` never does (the plugin host's image is
+    /// `workflow.plugin_host.image`, not the author's to choose). Either one
+    /// in the wrong place would be read by nothing, so it is refused by name
+    /// rather than accepted and ignored -- the same rule
+    /// [`PluginConfigurationValues`]'s `deny_unknown_fields` applies to an
+    /// unknown key. Called by `egret_workflow::runtime::handlers_for` before
+    /// anything else it does.
+    pub fn validate_plugin_configurations(&self) -> Result<(), String> {
+        for entry in &self.plugin_configurations.0 {
+            let is_kestra = entry.r#type == KESTRA_CONFIG_TYPE;
+            if is_kestra && entry.values.allowed_images.is_some() {
+                return Err(format!(
+                    "workflow.plugin_configurations: 'allowed-images' is not read on the \
+                     '{KESTRA_CONFIG_TYPE}' entry (the plugin host image is \
+                     workflow.plugin_host.image); remove it"
+                ));
+            }
+            if !is_kestra && entry.values.allowed_types.is_some() {
+                return Err(format!(
+                    "workflow.plugin_configurations: 'allowed-types' is read only on the \
+                     '{KESTRA_CONFIG_TYPE}' entry, not on '{}'; remove it",
+                    entry.r#type
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -852,8 +927,27 @@ pub struct PluginConfigurationValues {
     /// host -- see `egret_workflow::scripts::gate::glob_match`) matched
     /// against a script task's image reference. See W5a spec §4 for the
     /// normalisation applied to the reference before matching.
-    #[serde(default, rename = "allowed-images")]
-    pub allowed_images: Vec<String>,
+    ///
+    /// `Option` so that an `allowed-images` written where it is not read (on
+    /// the `kestra` entry) is visible to
+    /// [`WorkflowConfig::validate_plugin_configurations`] even when empty;
+    /// `None` and `Some(vec![])` both allow no image.
+    #[serde(
+        default,
+        rename = "allowed-images",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allowed_images: Option<Vec<String>>,
+    /// W5b: glob patterns matched against a plugin task's FQCN (without
+    /// `kestra.`), read only on the `kestra` entry -- see
+    /// [`PluginConfigurations::allowed_types`]. `*` spans package segments (a
+    /// FQCN holds no `/`): `io.kestra.plugin.jdbc.*` allows every JDBC class.
+    #[serde(
+        default,
+        rename = "allowed-types",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allowed_types: Option<Vec<String>>,
 }
 
 /// `false` — see [`WorkflowConfig::worker_enabled`]. A named function rather
@@ -1298,6 +1392,27 @@ values = { allowed-images = [] }
                     .allowed_images("io.kestra.plugin.ee.kubernetes.runner.Kubernetes"),
                 Some(vec![])
             );
+            Ok(())
+        });
+    }
+
+    /// W5b: `allowed-types` on the `kestra` entry is reachable from the
+    /// environment; with no `kestra` entry it is `None` (every catalog type).
+    #[test]
+    fn allowed_types_is_settable_from_env() {
+        figment::Jail::expect_with(|jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.workflow.plugin_configurations.allowed_types(), None);
+            jail.set_env(
+                "EGRET_WORKFLOW__PLUGIN_CONFIGURATIONS",
+                r#"[{type="kestra",values={allowed-types=["io.kestra.plugin.jdbc.*"]}}]"#,
+            );
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.workflow.plugin_configurations.allowed_types(),
+                Some(vec!["io.kestra.plugin.jdbc.*"])
+            );
+            cfg.workflow.validate_plugin_configurations().unwrap();
             Ok(())
         });
     }

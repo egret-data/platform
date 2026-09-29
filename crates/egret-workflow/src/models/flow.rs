@@ -112,6 +112,36 @@ pub struct Flow {
 
     #[serde(default)]
     pub disabled: bool,
+
+    /// W5b spec §4.1: a top-level `pluginDefaults:` key, captured **only so
+    /// `spec::validate` can refuse it** (`removed_plugin_defaults`) -- Kestra
+    /// 2.0 removed flow-level plugin defaults and its artifact refuses the key
+    /// at save (Task 1, `plugin_defaults_refusal`). `Some` whenever the key is
+    /// present, whatever its value (`null` and `[]` included, see
+    /// [`present`]). Nothing reads the value: a draft that runs anyway applies
+    /// nothing, as Kestra's lenient read path does.
+    ///
+    /// `skip_serializing`: a `Flow` is re-serialised into a stored draft
+    /// `plan`, a published snapshot's `plan`, and a loop body's synthetic
+    /// source (`worker::spawn`); none of them may carry a key egret refuses.
+    #[serde(
+        default,
+        rename = "pluginDefaults",
+        deserialize_with = "present",
+        skip_serializing
+    )]
+    pub plugin_defaults: Option<serde_json::Value>,
+}
+
+/// `Some(value)` for a key that is present, **including `null`**: a plain
+/// `Option<Value>` reads `pluginDefaults:` (YAML null) as `None`, which would
+/// let the one shape with no value at all escape the refusal. An absent key
+/// never reaches this function (`#[serde(default)]` gives `None`).
+fn present<'de, D>(d: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    serde_json::Value::deserialize(d).map(Some)
 }
 
 /// `io.kestra.core.models.Label` -- a key/value pair. Kept as a plain

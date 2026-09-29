@@ -439,7 +439,8 @@ mod tests {
         PluginConfigurations(vec![PluginConfiguration {
             r#type: runner.fqcn().to_string(),
             values: PluginConfigurationValues {
-                allowed_images: images.iter().map(|s| s.to_string()).collect(),
+                allowed_images: Some(images.iter().map(|s| s.to_string()).collect()),
+                allowed_types: None,
             },
         }])
     }
