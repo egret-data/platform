@@ -3511,6 +3511,7 @@ dependencies = [
  "egret-perm",
  "egret-policy",
  "egret-policy-api",
+ "egret-query-api",
  "egret-ranger-eval",
  "egret-secrets",
  "egret-test-db",

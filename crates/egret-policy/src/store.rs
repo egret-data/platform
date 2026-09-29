@@ -774,11 +774,27 @@ pub async fn compiler_targeted_services_via(
 }
 
 /// The `tags.key`s carried by ONE exact resource (`column = ""` means the
-/// table itself), resolved through the catalog's warehouse. SP4a Task 9's
-/// `explain` needs it: `egret_perm::evaluate` takes the tags already resolved
-/// as present on the target (it does no I/O — see `eval::selector_hits`), and
-/// an `explain` that made the caller supply them would answer a question the
-/// caller had already decided the answer to.
+/// table itself), resolved through the catalog's warehouse.
+///
+/// # ⚠ EXACT, not hierarchy-complete — do not feed this to an evaluator
+///
+/// `schema_name` / `table_name` / `column_name` are matched by string
+/// EQUALITY, so asked about `report.country` this does not return a tag
+/// attached to the table `report`. Ranger's `RangerTagEnricher` does the
+/// opposite: it walks the hierarchy and emits ancestor tags, which Ranger
+/// admits for a tag request. Every live assignment today is column-level, so
+/// the difference is invisible in current data and would ship green.
+///
+/// SP4a Task 9 added this so `explain` could hand the resolved set to
+/// `egret_perm::eval::evaluate`, which does no I/O of its own. **SP4d-2a Task 5
+/// stopped doing that.** `explain` now evaluates the artifact each engine
+/// downloads and passes `AccessRequest::resolved_tags: None`, because the
+/// narrowing that field licenses is sound only for a resolution at least as
+/// broad as the enricher's and this one is not. What `explain` still uses this
+/// for is the response's informational `tags` list — "what has egret got
+/// recorded on exactly this resource" — and nothing else. A future caller
+/// wanting a tag set an evaluator may act on needs a different, roll-up-aware
+/// query, not this one.
 pub async fn tag_keys_for_resource_via(
     conn: &mut sqlx::PgConnection,
     catalog_id: uuid::Uuid,

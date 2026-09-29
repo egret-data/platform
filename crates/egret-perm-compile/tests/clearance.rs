@@ -507,8 +507,8 @@ async fn lifting_a_clearance_reaps_the_deny() {
 /// artifact the engine downloads, and on StarRocks a clearance is a per-column
 /// resource DENY in that artifact. So this test is now about the oracle and the
 /// compiler agreeing, which is still worth pinning — the endpoint's own
-/// clearance assertion moved to
-/// `routes.rs::explain_reports_a_clearance_deny_from_the_compiled_artifact`.
+/// clearance assertion moved to `routes.rs`'s
+/// `a_clearance_deny_in_the_artifact_refuses_the_uncleared_and_not_the_cleared`.
 #[tokio::test]
 async fn the_oracle_and_the_compiled_policy_agree_about_a_blocked_subject() {
     let Some(db) = test_db().await else { return };

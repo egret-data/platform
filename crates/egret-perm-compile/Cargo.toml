@@ -67,3 +67,9 @@ egret-events.workspace = true
 egret-secrets.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
+# SP4d-2a Task 5 review (I3): `tests/wire_dtos.rs` asserts that
+# `WireEngineType` and `egret_query_api::Engine` serialise StarRocks to the
+# SAME string, so the two published spellings on one API surface cannot drift
+# apart independently. A leaf contract crate (no sqlx/axum), and dev-only —
+# nothing in `src/` depends on it.
+egret-query-api.workspace = true

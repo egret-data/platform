@@ -92,6 +92,32 @@ fn engine_type_both_variants() {
     );
 }
 
+/// **One spelling of StarRocks per API surface** (SP4d-2a Task 5 review, I3).
+/// `egret_query_api::Engine` already publishes `starrocks` on the same
+/// document, and that same literal is what `policy.authz_services.type`
+/// stores. A `rename_all = "snake_case"` on `WireEngineType` would render
+/// `star_rocks` and force a client correlating the two to translate between
+/// them. Pinned as a WIRE string, because nothing above would notice: the
+/// `From` assertions compare Rust values and pass under either spelling.
+#[test]
+fn engine_type_serialises_the_same_spelling_the_rest_of_the_api_uses() {
+    assert_eq!(
+        serde_json::to_value(WireEngineType::Trino).unwrap(),
+        serde_json::json!("trino")
+    );
+    assert_eq!(
+        serde_json::to_value(WireEngineType::StarRocks).unwrap(),
+        serde_json::json!("starrocks"),
+        "`star_rocks` is a second spelling of a word this API already spells \
+         `starrocks` (`egret_query_api::Engine`, `authz_services.type`)"
+    );
+    assert_eq!(
+        serde_json::to_value(WireEngineType::StarRocks).unwrap(),
+        serde_json::to_value(egret_query_api::Engine::StarRocks).unwrap(),
+        "and the two must not be able to drift apart independently"
+    );
+}
+
 #[test]
 fn plugin_version_both_variants() {
     assert_eq!(

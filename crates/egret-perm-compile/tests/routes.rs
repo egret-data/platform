@@ -2305,7 +2305,7 @@ async fn explain_names_the_reason_class_not_just_a_verdict() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
+    let verdict = access_for(profile_for(&body, "starrocks"), "select");
     assert_eq!(verdict["decision"]["kind"], "denied", "body: {body}");
     assert_eq!(
         verdict["decision"]["reason"], "no_policy_matched",
@@ -2354,7 +2354,7 @@ async fn explain_distinguishes_an_explicit_deny_from_nothing_matching() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
+    let verdict = access_for(profile_for(&body, "starrocks"), "select");
     assert_eq!(verdict["decision"]["kind"], "denied", "body: {body}");
     assert_eq!(
         verdict["decision"]["reason"], "deny_policy_item",
@@ -2385,7 +2385,7 @@ async fn explain_distinguishes_an_explicit_deny_from_nothing_matching() {
     .await;
     assert_eq!(status, StatusCode::OK, "body: {other}");
     assert_eq!(
-        access_for(profile_for(&other, "star_rocks"), "select")["decision"]["reason"],
+        access_for(profile_for(&other, "starrocks"), "select")["decision"]["reason"],
         "no_policy_matched",
         "body: {other}"
     );
@@ -2495,7 +2495,7 @@ async fn a_group_only_grant_is_refused_by_the_artifact_the_engine_downloads() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
+    let verdict = access_for(profile_for(&body, "starrocks"), "select");
     assert_eq!(
         verdict["decision"]["kind"], "denied",
         "the model allows this and no engine will, so the ARTIFACT's answer is a \
@@ -2551,7 +2551,7 @@ async fn explain_reports_the_tags_egret_has_recorded_on_the_target() {
     // carries no `tagPolicies` block, so the verdict is a decision rather than
     // the refusal a block that could decide would produce.
     assert_eq!(
-        access_for(profile_for(&body, "star_rocks"), "select")["decision"]["kind"],
+        access_for(profile_for(&body, "starrocks"), "select")["decision"]["kind"],
         "denied",
         "body: {body}"
     );
@@ -2684,7 +2684,7 @@ async fn explain_agrees_with_the_compiled_policy_for_a_collision_suffixed_member
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
+    let verdict = access_for(profile_for(&body, "starrocks"), "select");
     assert_eq!(
         verdict["decision"]["kind"], "allowed",
         "explain must allow the collision-suffixed member the compiled policy \
@@ -2716,7 +2716,7 @@ async fn explain_agrees_with_the_compiled_policy_for_a_collision_suffixed_member
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body_a}");
     assert_eq!(
-        access_for(profile_for(&body_a, "star_rocks"), "select")["decision"]["kind"],
+        access_for(profile_for(&body_a, "starrocks"), "select")["decision"]["kind"],
         "allowed",
         "body: {body_a}"
     );
@@ -2743,7 +2743,7 @@ async fn explain_agrees_with_the_compiled_policy_for_a_collision_suffixed_member
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body_c}");
     assert_eq!(
-        access_for(profile_for(&body_c, "star_rocks"), "select")["decision"]["kind"],
+        access_for(profile_for(&body_c, "starrocks"), "select")["decision"]["kind"],
         "denied",
         "a username sharing only the base slug is a different person; body: {body_c}"
     );
@@ -2881,7 +2881,7 @@ async fn a_clearance_deny_in_the_artifact_refuses_the_uncleared_and_not_the_clea
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
+    let verdict = access_for(profile_for(&body, "starrocks"), "select");
     assert_eq!(
         verdict["decision"]["kind"], "denied",
         "a caller-supplied role must not clear a subject who does not hold it — this is \
@@ -2925,7 +2925,7 @@ async fn a_clearance_deny_in_the_artifact_refuses_the_uncleared_and_not_the_clea
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
+    let verdict = access_for(profile_for(&body, "starrocks"), "select");
     assert_eq!(
         verdict["decision"]["kind"], "allowed",
         "the role holder must be allowed WITHOUT naming the role in the request; body: {body}"
@@ -3504,10 +3504,12 @@ async fn the_read_surface_names_the_catalog_and_the_tag_for_a_policy_read_only_c
 // would pass against the old model-only evaluator too, which is exactly the
 // implementation this package replaces.
 
-/// The profile block for `engine` — `"trino"` / `"star_rocks"`, which is
-/// `WireEngineType`'s own `rename_all = "snake_case"` spelling and not a
-/// typo. Panics naming the whole body, because a missing profile is the
-/// failure mode every per-profile assertion here would otherwise skip past.
+/// The profile block for `engine` — `"trino"` / `"starrocks"`, which is
+/// `WireEngineType`'s `rename_all = "lowercase"` spelling and the same one
+/// `egret_query_api::Engine` and `authz_services.type` use (SP4d-2a Task 5
+/// review, I3). Panics naming the whole body, because a missing profile is
+/// the failure mode every per-profile assertion here would otherwise skip
+/// past.
 fn profile_for<'a>(body: &'a Value, engine: &str) -> &'a Value {
     body["profiles"]
         .as_array()
@@ -3637,7 +3639,7 @@ async fn explain_answers_once_per_profile_naming_the_profile_and_its_engine() {
         "two profiles serve this catalog, so there are two answers; body: {body}"
     );
 
-    for (engine, service_id) in [("trino", trino_id), ("star_rocks", starrocks_id)] {
+    for (engine, service_id) in [("trino", trino_id), ("starrocks", starrocks_id)] {
         let profile = profile_for(&body, engine);
         assert_eq!(
             profile["service_id"], service_id,
@@ -3778,7 +3780,7 @@ async fn a_write_explain_reports_one_verdict_per_ranger_access_type() {
         vec!["delete".to_string(), "insert".to_string()],
         "Trino's service-def declares no `update`; body: {body}"
     );
-    let starrocks = profile_for(&body, "star_rocks");
+    let starrocks = profile_for(&body, "starrocks");
     assert_eq!(
         access_types(starrocks),
         vec![
@@ -3858,7 +3860,7 @@ async fn a_seeded_egret_admin_policy_is_visible_to_explain() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
+    let verdict = access_for(profile_for(&body, "starrocks"), "select");
     assert_eq!(
         verdict["decision"]["kind"], "allowed",
         "the seeded `egret-admin` policy allows, and explain must say so; body: {body}"
@@ -3929,7 +3931,7 @@ async fn a_raw_operator_written_policy_is_named_with_no_model_attribution() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
+    let verdict = access_for(profile_for(&body, "starrocks"), "select");
     assert_eq!(
         verdict["decision"]["kind"], "denied",
         "the raw policy denies, and it is in the artifact the engine downloads; body: {body}"
@@ -4037,7 +4039,7 @@ async fn a_held_role_and_a_named_group_reach_the_evaluator_empty() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
+    let verdict = access_for(profile_for(&body, "starrocks"), "select");
     assert_eq!(
         verdict["decision"]["kind"], "denied",
         "a policy granting through a role the subject HOLDS, or a group they NAMED, \
@@ -4144,7 +4146,7 @@ async fn a_tag_policy_block_that_could_decide_makes_the_profile_undecidable() {
     // The StarRocks profile alongside it has no tag service at all, so it
     // still decides — the refusal is scoped to the profile that earned it.
     assert_eq!(
-        access_for(profile_for(&body, "star_rocks"), "select")["decision"]["kind"],
+        access_for(profile_for(&body, "starrocks"), "select")["decision"]["kind"],
         "denied",
         "body: {body}"
     );
@@ -4224,7 +4226,7 @@ async fn the_artifact_answer_and_the_model_oracle_agree_on_the_happy_path() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "body: {body}");
-        let kind = access_for(profile_for(&body, "star_rocks"), "select")["decision"]["kind"]
+        let kind = access_for(profile_for(&body, "starrocks"), "select")["decision"]["kind"]
             .as_str()
             .expect("decision kind")
             .to_string();
@@ -4235,4 +4237,131 @@ async fn the_artifact_answer_and_the_model_oracle_agree_on_the_happy_path() {
              artifact {kind}; body: {body}"
         );
     }
+}
+
+/// `policy.authz_policies.id` for one compiled policy under a given profile —
+/// the DB-assigned id `enabled_policies_for_service` injects into the download
+/// body, and the only thing on the wire that can prove WHICH assembler
+/// `explain` used.
+async fn compiled_policy_id(f: &Fixture, service_id: i64, name: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM policy.authz_policies WHERE service_id = $1 AND name = $2",
+    )
+    .bind(service_id)
+    .bind(name)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap_or_else(|e| panic!("read policy id for {name:?}: {e}"))
+}
+
+/// **The assembler `explain` loads a profile's policies with is the same one
+/// the download route uses, and this is what makes that falsifiable** (SP4d-2a
+/// Task 5 review, M4).
+///
+/// `enabled_policies_for_service` does two things nothing else does: it injects
+/// the DB-assigned `id` (and `version`/`isEnabled`) into each body, because the
+/// Ranger policy engine NPEs on a policy whose `id` is null, and it returns
+/// only rows with `enabled = true`. The stored `policy_jsonb` carries neither —
+/// the compiler's rendered body has no `id` field at all. So each half below
+/// pins one of them:
+///
+/// - the verdict's `policy_id` equals the ROW id, which an assembler that
+///   skipped the injection would report as `null`;
+/// - a disabled policy does not decide, which an assembler that read every row
+///   would let decide (the stored body says `"isEnabled": true`; only the
+///   column says otherwise).
+///
+/// Without these, "the same assembler the download route uses" is maintained by
+/// prose and by nobody having changed it — `policy_id` appears in no other
+/// assertion in this file, and no other test disables a policy.
+#[tokio::test]
+async fn explain_reads_the_profile_through_the_download_routes_own_assembler() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    let user = unique("assembler-subject");
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/grants",
+                &token,
+                Some(grant_body(f.catalog_id, &user)),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    let grant_id = body["id"].as_str().expect("grant id").to_string();
+    let policy_name = format!("{COMPILER_GRANT_PREFIX}{grant_id}");
+    let row_id = compiled_policy_id(&f, f.service_id, &policy_name).await;
+
+    // Half 1: the injected id reaches the verdict.
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(f.catalog_id, &user)),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let verdict = access_for(profile_for(&body, "starrocks"), "select");
+    assert_eq!(verdict["decision"]["kind"], "allowed", "body: {body}");
+    assert_eq!(
+        verdict["decision"]["policy_id"], row_id,
+        "the deciding policy must carry the DB-assigned id that ONLY \
+         `enabled_policies_for_service` injects — the stored `policy_jsonb` has no \
+         `id` field, so an assembler that skipped the injection reports null here; \
+         body: {body}"
+    );
+
+    // Half 2: a disabled policy is not in the download, so it cannot decide.
+    // The stored body still says `"isEnabled": true`; only the COLUMN says
+    // otherwise, which is exactly the difference the assembler applies.
+    let stored: Value =
+        sqlx::query_scalar("SELECT policy_jsonb FROM policy.authz_policies WHERE id = $1")
+            .bind(row_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("read stored body");
+    assert_eq!(
+        stored["isEnabled"], true,
+        "the stored body must still claim enabled, or half 2 proves nothing: {stored:#}"
+    );
+    let res = sqlx::query("UPDATE policy.authz_policies SET enabled = false WHERE id = $1")
+        .bind(row_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("disable the policy");
+    assert_eq!(res.rows_affected(), 1, "the disable must have landed");
+
+    let (status, body) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(f.catalog_id, &user)),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let verdict = access_for(profile_for(&body, "starrocks"), "select");
+    assert_eq!(
+        verdict["decision"]["kind"], "denied",
+        "a disabled policy is not served to any plugin, so it cannot decide here \
+         either; body: {body}"
+    );
+    assert_eq!(
+        verdict["decision"]["reason"], "no_policy_matched",
+        "body: {body}"
+    );
 }

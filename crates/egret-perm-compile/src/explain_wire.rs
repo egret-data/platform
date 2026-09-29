@@ -101,8 +101,19 @@ use utoipa::ToSchema;
 // ── small enums used as payload fields ──────────────────────────────────
 
 /// Wire mirror of [`EngineType`].
+///
+/// **`lowercase`, not `snake_case`, and that is the whole point (SP4d-2a
+/// Task 5 review, I3).** `rename_all = "snake_case"` renders `StarRocks` as
+/// `star_rocks`, and this API surface already publishes the other spelling:
+/// `egret_query_api::Engine` is `rename_all = "lowercase"` and serialises
+/// `starrocks`, which is also the literal stored in
+/// `policy.authz_services.type` and matched by
+/// `egret_perm_compile::trigger::engine_type_for`. A client correlating an
+/// `ExplainProfile`'s `engine` with a profile's service type would otherwise
+/// have to translate between two spellings of one word inside one document.
+/// `lowercase` gives `trino` / `starrocks` and makes them the same string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "lowercase")]
 pub enum WireEngineType {
     Trino,
     StarRocks,

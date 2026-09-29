@@ -72,14 +72,16 @@
 //!    for any other reason. Also fail-open, also recorded rather than papered
 //!    over; closing it needs a sweeper, which SP4a does not have.
 //!
-//! **[`workspaces_for_username`] (SP4a Task 15, D3 defect 2).** `explain`
-//! (`crate::routes`) needs the SAME fact this module resolves, in the OTHER
-//! direction: not "which usernames does this workspace's membership expand
-//! to" but "which workspaces is this username currently a member of." Both
-//! read the identical `access_grants` predicate off the identical
-//! `users.username` column — different query, same source of truth — so the
-//! evaluator (`egret_perm::eval`) and the compiler cannot silently disagree
-//! about who a `workspace_members` principal actually names.
+//! **This module no longer answers the reverse question, and nothing asks it
+//! (SP4d-2a Task 5).** `workspaces_for_username` and `roles_for_username`
+//! lived here so `explain` could resolve "which workspaces / roles does this
+//! username hold" off the identical `access_grants` predicate the expansions
+//! below read, keeping the retired model evaluator and the compiler from
+//! silently disagreeing about who a `workspace_members` or `role` principal
+//! names. `explain` now evaluates the compiled artifact, where both have
+//! already been expanded into usernames by [`expand_enumerated_principals`],
+//! so there was no caller left for either. The removal note sits at their old
+//! site, further down this file.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
