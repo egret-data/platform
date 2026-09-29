@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The host's stdout is its protocol with egret (W5b spec §3): one `LEVEL message` line per log
+  event, which egret parses into W11 levels. A line with no level prefix (a stack trace's
+  continuation) takes the level of the line before it.
+
+  egret.task  the plugin's own logger (ShimRunContext.logger()): every level, as Kestra records.
+  egret.host  the host's lines (refusals, failures).
+  root        library noise (the plugin scan, HikariCP, …): warnings only.
+-->
+<configuration>
+  <statusListener class="ch.qos.logback.core.status.NopStatusListener"/>
+
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%level %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <logger name="egret.task" level="TRACE"/>
+  <logger name="egret.host" level="INFO"/>
+
+  <!-- PluginDeserializer logs "No plugin registry was initialized. Use default implementation." at
+       ERROR on every run: that fallback to DefaultPluginRegistry is how the host runs without
+       Micronaut (spike trap 1), not a failure. Its real errors reach the host as exceptions (exit 2). -->
+  <logger name="io.kestra.core.plugins.serdes.PluginDeserializer" level="OFF"/>
+
+  <root level="WARN">
+    <appender-ref ref="STDOUT"/>
+  </root>
+</configuration>

@@ -45,3 +45,6 @@ deploy/trino/catalog/*.properties
 # Python bytecode from oracle-exec/harvest.py
 __pycache__/
 *.pyc
+
+# W5b plugin host: Maven output, including the fetched plugin jars (plugin-host/fetch-plugins.sh)
+plugin-host/target/

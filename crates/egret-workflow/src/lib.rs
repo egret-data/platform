@@ -48,6 +48,9 @@ pub mod flow_trigger;
 /// because `tests/task_logs.rs` drives the repository directly.
 pub mod logs;
 pub mod models;
+/// W5b: real Kestra plugins run by the plugin host (`plugin-host/`). Task 2
+/// holds only the embedded catalog and its lockfile check.
+pub mod plugins;
 pub mod publish;
 pub mod refs;
 pub mod repo;

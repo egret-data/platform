@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  egret's Kestra plugin host (W5b, spec docs/en/specs/2026-09-29-workflow-w5b-kestra-plugin-host-design.md §3).
+
+  One JVM per task-run attempt: `EgretPluginHost run task.json` deserializes one real,
+  unmodified Kestra plugin task and runs it against `ShimRunContext`, with no Micronaut.
+  `EgretPluginHost describe <plugins-dir>` prints the catalog egret embeds.
+
+  The Kestra core is the same artifact the Pebble oracle links (crates/egret-workflow/oracle/pom.xml),
+  pinned by programme spec §7 rule 1. The plugin jars are NOT Maven dependencies (they are fat jars,
+  and their base `plugin-jdbc` is not on Central): `fetch-plugins.sh` downloads them, checked against
+  `plugins.lock`, into a directory that goes on the classpath beside `target/lib/`.
+
+  Requires JDK 25: Kestra 2.x class files are version 69.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.egret</groupId>
+  <artifactId>egret-plugin-host</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <maven.compiler.release>25</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <kestra.version>2.0.0-rc13</kestra.version>
+    <junit.version>5.10.3</junit.version>
+    <!-- Where the tests find the three plugin jars (fetch-plugins.sh target/plugins). -->
+    <plugins.dir>${project.build.directory}/plugins</plugins.dir>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.kestra</groupId>
+      <artifactId>core</artifactId>
+      <version>${kestra.version}</version>
+    </dependency>
+
+    <!-- Bean validation without Micronaut's context: io.kestra:core already resolves this
+         exact version (runtime scope, through micronaut-hibernate-validator); compile scope
+         here only because ShimRunContext names ParameterMessageInterpolator. No new jar. -->
+    <dependency>
+      <groupId>org.hibernate.validator</groupId>
+      <artifactId>hibernate-validator</artifactId>
+      <version>8.0.2.Final</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>egret-plugin-host</finalName>
+    <!-- The tests read the committed catalog as the classpath resource `catalog.json`, the same
+         name the image gives the one it generates (deploy/docker/plugin-host.Dockerfile). -->
+    <testResources>
+      <testResource>
+        <directory>${project.basedir}/../crates/egret-workflow/src/plugins</directory>
+        <includes>
+          <include>catalog.json</include>
+        </includes>
+      </testResource>
+    </testResources>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+        <configuration>
+          <additionalClasspathElements>
+            <additionalClasspathElement>${plugins.dir}/plugin-jdbc-postgres-2.0.0.jar</additionalClasspathElement>
+            <additionalClasspathElement>${plugins.dir}/plugin-jdbc-trino-2.0.0.jar</additionalClasspathElement>
+            <additionalClasspathElement>${plugins.dir}/plugin-jdbc-mysql-2.0.0.jar</additionalClasspathElement>
+          </additionalClasspathElements>
+          <systemPropertyVariables>
+            <egret.plugins.dir>${plugins.dir}</egret.plugins.dir>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+      <!-- The image's classpath is target/lib/* (Kestra core and its dependencies) + the host jar
+           + the three plugin jars; no fat jar, so the jars stay byte-identical to Central's. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.8.1</version>
+        <executions>
+          <execution>
+            <id>copy-dependencies</id>
+            <phase>package</phase>
+            <goals>
+              <goal>copy-dependencies</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}/lib</outputDirectory>
+              <includeScope>runtime</includeScope>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
