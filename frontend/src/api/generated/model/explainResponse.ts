@@ -5,16 +5,31 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
-import type { ExplainReason } from './explainReason';
+import type { ExplainOutcome } from './explainOutcome';
+import type { ExplainProfile } from './explainProfile';
 
+/**
+ * What `explain` answers with: one verdict block per profile serving the
+ * target's catalog, over the SERVED ARTIFACT.
+ */
 export interface ExplainResponse {
-  allowed: boolean;
-  reasons: ExplainReason[];
+  outcome: ExplainOutcome;
+  /** Empty exactly when `outcome` is `no_profile_serves_the_catalog`. */
+  profiles: ExplainProfile[];
   /**
-     * The tag keys egret resolved as present on `target` — the input the
-     * rule selectors were matched against. Returned so a steward can see
-     * WHY a mask did or did not apply, rather than having to guess whether
-     * the tag resolution or the rule was at fault.
+     * The tag keys **egret** resolved as attached to `target`, for the
+     * steward's information only.
+     *
+     * **This is no longer an input to anything, and it is not a complete tag
+     * set.** It used to be what the retired model evaluator matched rule
+     * selectors against. Today the engine's own tags come from
+     * `RangerTagEnricher`, which walks the resource hierarchy and emits
+     * ANCESTOR tags, while `tag_keys_for_resource_via` matches
+     * schema/table/column by exact equality with no roll-up. So this field
+     * answers "what has egret got recorded on exactly this resource" — useful
+     * when asking why a mask did or did not apply — and deliberately does NOT
+     * reach `AccessRequest::resolved_tags`, whose narrowing would be unsound
+     * given a set narrower than the enricher's. See the handler.
      */
   tags: string[];
 }

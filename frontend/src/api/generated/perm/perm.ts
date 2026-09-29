@@ -215,6 +215,38 @@ export const getPermExplainUrl = () => {
 }
 
 /**
+ * # What this answers with, and why it changed (SP4d-2a)
+ *
+ * Until SP4d-2a this handler evaluated egret's OWN permission model
+ * (`egret_perm::eval::evaluate`) and never read `policy.authz_policies` at
+ * all. The engine evaluates the compiled artifact it downloads from egret.
+ * Those were two implementations of one question, and they had already been
+ * measured disagreeing in production — a predecessor package caught `explain`
+ * reporting a decision the engine did not make. So there is now ONE answer
+ * and it is the engine's: the disagreement class disappears instead of
+ * becoming visible.
+ *
+ * It also removes a real blindness. Auto-bind seeds thirteen `egret-admin`
+ * hierarchies granting `*` on everything onto every generated profile
+ * (`egret_policy::default_policies`), and the model-only evaluator could not
+ * see one of them: an operator asking "why can this person read that?" got
+ * `no_grant_matched` while the engine allowed.
+ *
+ * Four properties of the implementation below are load-bearing:
+ *
+ * 1. **The artifact is assembled by [`artifact_for`], which mirrors
+ *    `download_policies` field for field and loads each profile's policy set
+ *    through `enabled_policies_for_service` — the same assembler the download
+ *    route uses, not `list_policies`.** "What explain evaluated" and "what the
+ *    engine received" must not be able to drift.
+ * 2. **`roles` and `groups` are empty** — see [`ExplainSubject`].
+ * 3. **`resolved_tags` is `None`, deliberately.** See the block at the call
+ *    site: egret cannot establish the antecedent the narrowing needs, so a
+ *    profile whose `tagPolicies` block could decide comes back `Undecidable`
+ *    naming that block, rather than answering confidently from a tag set
+ *    narrower than `RangerTagEnricher`'s.
+ * 4. **A `write` explain is several evaluations**, one per Ranger access type
+ *    the action maps to on that engine, reported separately.
  * @summary POST because the request carries a subject, an action and a whole target
 scope — a body, not a query string. **It is nonetheless read-only**: it
 opens no transaction and issues no write. It gates on `policy:read`, not

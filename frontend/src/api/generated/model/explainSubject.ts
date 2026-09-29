@@ -9,43 +9,56 @@
 /**
  * The caller `explain` decides about.
  *
- * **No `workspaces` field (SP4a Task 15, D3 defect 2 — removed, not just
- * ignored).** It used to be caller-supplied, `#[serde(default)]` to
- * `vec![]`, and the evaluator trusted it verbatim — so a caller naming just
- * a `user` (the natural way to call this endpoint) silently got `denied`
- * for every `workspace_members` grant, however real the compiled Ranger
- * policy made that access: the live gate measured exactly that. `explain`
- * now resolves `user`'s CURRENT workspace memberships itself
- * (`crate::members::workspaces_for_username`), off the same
- * `access_grants`/`users.username` truth the compiler's own expansion reads
- * — a caller-supplied list is a second, driftable copy of a fact the
- * database already answers, and keeping the field would let a caller
- * override that fact when what it should be describing is the caller's
- * principal, not a value only egret can verify.
+ * **It carries a `user` and nothing else**, and each of the three fields it
+ * has lost was removed — never merely ignored — for one version of one
+ * reason: a caller-supplied value cannot be allowed to stand in for a fact
+ * only egret can verify.
+ *
+ * **No `workspaces` field (SP4a Task 15, D3 defect 2).** It used to be
+ * caller-supplied, `#[serde(default)]` to `vec![]`, and the retired model
+ * evaluator trusted it verbatim — so a caller naming just a `user` (the
+ * natural way to call this endpoint) silently got `denied` for every
+ * `workspace_members` grant, however real the compiled Ranger policy made
+ * that access; the live gate measured exactly that. SP4a's fix was for
+ * `explain` to resolve the memberships itself. Under SP4d-2a there is nothing
+ * left to resolve: a `workspace_members` grant reaches the artifact already
+ * expanded into usernames by `crate::members::expand_enumerated_principals`,
+ * so the subject's memberships are not an input to the answer at all.
  *
  * **And no `roles` field either (SP4c Task 7 — the same defect, on the field
- * next to it, removed for the same reason).** The SP4c live gate
- * (`docs/en/plans/2026-09-28-sp4c-live-result.md`) measured both directions
- * of it: naming only a `user` returned `clearance_required` for the subject
- * the engine had just served the classified column to, and
+ * next to it).** The SP4c live gate
+ * (`docs/en/plans/2026-09-28-sp4c-live-result.md`) measured both directions of
+ * it: naming only a `user` returned `clearance_required` for the subject the
+ * engine had just served the classified column to, and
  * `{"user":"analyst","roles":["sp4c_cleared"]}` returned `allowed` for the
  * subject the engine refuses — a caller asserting a role it does not hold was
- * believed, so the diagnostic could be told a lie and would repeat it.
- * `explain` now reads the subject's roles from `access_grants`
- * (`crate::members::roles_for_username`) through the same live/`allow`/
- * unexpired predicate the clearance compiler's own expansion uses. **This is
+ * believed, so the diagnostic could be told a lie and would repeat it. SP4c
+ * fixed it by reading the subject's roles from `access_grants`. SP4d-2a keeps
+ * the same rule by a stronger means: the evaluator is sent NO roles at all
+ * (see below), so there is nothing to assert and nothing to filter. **This is
  * not a "what-if" endpoint**: D9 (SP4b) defines it as answering why a subject
  * **is** allowed or refused, and a field that let a caller invent the
  * subject's clearance would answer a different question while looking
  * authoritative.
  *
- * `groups` remains caller-supplied and is deliberately left so: egret runs no
- * usersync and no group provider, so a group name reaches no engine at all
- * (D7/D2) and the UI already says the field is matched here and nowhere else.
- * Resolving it server-side would give the field an authority the data plane
- * does not honour, which is the opposite of the fix above.
+ * **And no `groups` field either, as of SP4d-2a Task 5 — the third field
+ * removed from this struct for the third version of one reason.** Until this
+ * task `groups` was caller-supplied and matched by the model evaluator, on
+ * the argument that the UI said so. `explain` now answers with the artifact
+ * the engine downloads, and `roles` and `groups` reach that evaluator EMPTY:
+ * egret serves no `/service/roles/download` and runs no usersync, so a Ranger
+ * policy item naming a role or a group matches nobody on any engine egret
+ * provisions (D0/D7), and Ranger's `public` — the one group name that DOES
+ * match everybody — matches whatever the request carries. A field whose value
+ * can change no answer is a field that lies about what the endpoint does, so
+ * it is gone rather than ignored, exactly as `workspaces` and `roles` were.
+ *
+ * Sending no roles at all is also the strongest available form of SP4c's rule
+ * that a caller may not assert a role the subject does not hold: there is no
+ * role to assert. A request that still carries `groups` is accepted and the
+ * key ignored (nothing here sets `deny_unknown_fields`), so an older client
+ * keeps working while answering the same question everyone else gets.
  */
 export interface ExplainSubject {
   user: string;
-  groups?: string[];
 }
