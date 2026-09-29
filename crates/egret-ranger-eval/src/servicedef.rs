@@ -374,12 +374,33 @@ impl ServiceDef {
     /// `ranger-plugins-common` that writes that context key is
     /// `RangerTagEnricher.enrich`, through
     /// `RangerAccessRequestUtil.setRequestTagsInContext` (offset 199 of
-    /// `enrich`). `RangerPolicyRepository` instantiates the enrichers named in
-    /// the service-def's `contextEnrichers` and nowhere else. With none
-    /// declared, the tag set stays empty,
+    /// `enrich`). Each `RangerPolicyRepository` instantiates the enrichers
+    /// named in **its own** `serviceDef`'s `contextEnrichers`
+    /// (`buildContextEnrichers`, offsets 12-38) and from nowhere else. With
+    /// none declared anywhere, the tag set stays empty,
     /// `RangerPolicyRepository.getLikelyMatchPolicyEvaluators` returns
     /// `Collections.EMPTY_LIST` at its `isNotEmpty(tags)` branch (offsets 0-9),
     /// and `evaluateTagPolicies` exits at `isNotEmpty(evaluators)`.
+    ///
+    /// # ⚠ THIS ACCESSOR DESCRIBES ONE DEF, AND A DECISION INVOLVES TWO
+    ///
+    /// "its own `serviceDef`" is load-bearing and is why the wording above is
+    /// no longer "the service-def's `contextEnrichers`". A policy download
+    /// carries **two** defs — the top-level one and the `tagPolicies` block's
+    /// own — Ranger builds a repository for each, and
+    /// `PolicyEngine.<init>` UNIONS their enricher lists into
+    /// `allContextEnrichers` (offsets 619-702, an `ArrayList.addAll`). The tag
+    /// repository takes its def from `tagPolicies.getServiceDef()` (tag-ctor
+    /// offsets 33-48), and **Apache Ranger's own stock
+    /// `service-defs/ranger-servicedef-tag.json`, shipped inside
+    /// `ranger-plugins-common` 2.5.0 and 2.8.0, declares `RangerTagEnricher`.**
+    ///
+    /// So `Some(false)` from this accessor on one def does NOT mean tag
+    /// policies are inert — it means that def contributes no tag enricher.
+    /// Every caller narrowing on the answer must ask BOTH defs; see
+    /// `tag_policies_can_decide` in [`crate::eval`], which does, and
+    /// `tests/tag_tiers.rs::the_block_s_own_service_def_can_supply_the_enricher`,
+    /// which fails if it stops.
     ///
     /// egret's `trino.json` declares the enricher and its `starrocks.json` has
     /// `contextEnrichers: []` — which is why two measured StarRocks FEs never
@@ -407,7 +428,9 @@ impl ServiceDef {
     /// def, while the repo's older capture at
     /// `tests/ranger/fixtures/service-policies.json` — also a `trino` def —
     /// omits it entirely, as does the `tag` def embedded inside the live
-    /// download. Reading that silence as `Some(false)` would license the
+    /// download — and that last one is now consulted by the gate, so its
+    /// silence refuses rather than narrows. Reading that silence as
+    /// `Some(false)` would license the
     /// narrowing for a def whose real counterpart does declare the enricher,
     /// and the answer that comes back would be an allow the engine's tag
     /// policies could have denied. Only an explicit, readable, enricher-free

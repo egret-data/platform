@@ -772,7 +772,7 @@ enum SuperUser {
 }
 
 /// Whether an envelope's `tagPolicies` block can reach THIS decision, given
-/// this request and this service-def.
+/// this request and the TWO service-defs involved.
 ///
 /// `false` is a licence to skip the refusal, so every arm here must be a
 /// measurement rather than a plausibility argument. Two escapes exist, and
@@ -780,34 +780,83 @@ enum SuperUser {
 /// [`crate::model::TagPolicyBlock`], [`ServiceDef::has_tag_enricher`] and
 /// [`AccessRequest::resolved_tags`].
 ///
-/// 1. **The def declares no tag enricher.** Nothing then writes the request's
+/// 1. **BOTH defs declare no tag enricher.** Nothing then writes the request's
 ///    tag context, so `getLikelyMatchPolicyEvaluators` returns
 ///    `Collections.EMPTY_LIST` at `isNotEmpty(tags)` and
 ///    `evaluateTagPolicies` exits at `isNotEmpty(evaluators)`. Only an
-///    explicit `Some(false)` counts: `None` means the def handed to this crate
-///    did not say, which is not the same as saying no.
+///    explicit `Some(false)` counts on each: `None` means the def handed to
+///    this crate did not say, which is not the same as saying no.
 /// 2. **The request's resolved tag set is empty.** Same branch, reached from
-///    the request side instead. Only an explicit `Some(empty)` counts, and
-///    ⚠ **whether passing `Some` is sound is a property of the CALLER** —
-///    egret's own tag resolution is narrower than the enricher's, so a `Some`
-///    supplied from `tag_keys_for_resource_via` as it stands today would fail
-///    open. See the ⚠ block on [`AccessRequest::resolved_tags`].
+///    the request side instead, and independent of both defs — no tags means
+///    no evaluators however many enrichers ran. Only an explicit
+///    `Some(empty)` counts, and ⚠ **whether passing `Some` is sound is a
+///    property of the CALLER** — egret's own tag resolution is narrower than
+///    the enricher's, so a `Some` supplied from `tag_keys_for_resource_via` as
+///    it stands today would fail open. See the ⚠ block on
+///    [`AccessRequest::resolved_tags`].
 ///
-/// Note what is deliberately NOT an escape: the engine type. Tag relevance is
-/// a property of the def's `contextEnrichers`, and gating on
-/// [`EngineType::StarRocks`] would go silently wrong the day that field
-/// changes.
+/// # ⚠ Why BOTH defs, and not just the resource def
+///
+/// Ranger builds context enrichers from the resource def **and** from the
+/// `tagPolicies` block's own `serviceDef`, then UNIONS the two lists. Checking
+/// only the resource def is a fail-open. Measured in `ranger-plugins-common`
+/// 2.5.0 and 2.8.0 — offsets are 2.5.0's, 2.8.0 has the same shape a few bytes
+/// earlier:
+///
+/// * `PolicyEngine.<init>` builds the tag repository when
+///   `!options.disableTagPolicyEvaluation && tagPolicies != null &&
+///   !StringUtils.isEmpty(tagPolicies.getServiceName()) &&
+///   tagPolicies.getServiceDef() != null` — offsets 471-500. **There is no
+///   `getPolicies()` call anywhere in that gate**, so the repository exists
+///   even for a block with no policies.
+/// * `RangerPolicyRepository(TagPolicies, ctx, componentDef, componentName)`
+///   sets `this.serviceDef` from `tagPolicies.getServiceDef()` (offsets 33-48)
+///   and `this.zoneName = null` (offset 30).
+/// * `buildContextEnrichers` reads `this.serviceDef.getContextEnrichers()`
+///   under an `isEmpty(zoneName)` guard — offsets 12-38 — which the tag
+///   repository satisfies by construction.
+/// * `PolicyEngine.<init>` then sets `allContextEnrichers =
+///   tagPolicyRepository.getContextEnrichers() ++
+///   policyRepository.getContextEnrichers()` at offsets 619-702: an
+///   `ArrayList.addAll` union, not a choice between the two.
+/// * `RangerDefaultRequestProcessor.enrich` iterates
+///   `PolicyEngine.getAllContextEnrichers()` (offset 4) and calls
+///   `RangerContextEnricher.enrich` on each (offset 110); `preProcess` calls
+///   `enrich` at offset 363.
+///
+/// And the reachable payload: **Apache Ranger's own stock
+/// `service-defs/ranger-servicedef-tag.json`, bundled inside
+/// `ranger-plugins-common` 2.5.0 AND 2.8.0, declares `RangerTagEnricher` in
+/// `contextEnrichers`.** So a non-empty block whose `serviceDef` is the stock
+/// tag def enriches and evaluates tag policies even when the resource def
+/// declares nothing — see
+/// `tests/tag_tiers.rs::the_block_s_own_service_def_can_supply_the_enricher`,
+/// whose fixture is that file verbatim from the jar.
+///
+/// What keeps this from biting egret today is DATA, not this measurement:
+/// `crates/egret-policy/src/service-defs/tag.json` happens to omit
+/// `contextEnrichers`. `ranger/api/download.rs` embeds that def for **any**
+/// engine type with a `tagService` in its config, and the differential corpus
+/// and `examples/live_gate.rs` consume downloads captured elsewhere — so a
+/// resource-def-only check would be closed by one unset field and nothing
+/// would announce the day it is set.
 fn tag_policies_can_decide(
     block: &TagPolicyBlock,
     request: &AccessRequest,
     service_def: &ServiceDef,
+    tag_service_def: &ServiceDef,
 ) -> bool {
     match block {
         // Not shown inert and not countable, so no narrowing applies: a shape
         // this reader does not understand gets the full refusal.
         TagPolicyBlock::Unreadable => true,
         TagPolicyBlock::Policies(_) => {
-            if service_def.has_tag_enricher() == Some(false) {
+            // Both, because Ranger unions the two enricher lists. `None` on
+            // either side is unknown and refuses, exactly as the single-def
+            // case did.
+            if service_def.has_tag_enricher() == Some(false)
+                && tag_service_def.has_tag_enricher() == Some(false)
+            {
                 return false;
             }
             if request
@@ -928,7 +977,12 @@ fn request_preamble(
     // alike and carry opposite risk.
     for construct in &policies.unmodelled {
         if let Unmodelled::TagPolicies(block) = construct {
-            if !tag_policies_can_decide(block, request, service_def) {
+            // The block's own def is a second source of context enrichers, so
+            // the gate needs it too — see `tag_policies_can_decide`. Parsed
+            // through the same `ServiceDef::parse` as the resource def so
+            // there is one enricher predicate, not two.
+            let tag_service_def = ServiceDef::parse(&policies.tag_service_def);
+            if !tag_policies_can_decide(block, request, service_def, &tag_service_def) {
                 continue;
             }
         }

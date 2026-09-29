@@ -43,11 +43,14 @@
 //!
 //! Every claim below was checked with `javap -c` against
 //! `ranger-plugins-common` **2.5.0** (the version `trinodb/trino:470` loads)
-//! and **2.8.0** (`starrocks/fe-ubuntu:4.1-latest`). The two disassemblies of
-//! `RangerPolicyEngineImpl.evaluateTagPolicies` are identical instruction for
-//! instruction — 256 instructions, same offsets, same branch targets — apart
-//! from `commons-lang` → `commons-lang3` in `StringUtils.isNotEmpty`/`equals`
-//! at offsets 214 and 285, which changes no behaviour here.
+//! and **2.8.0** (`starrocks/fe-ubuntu:4.1-latest`). Both
+//! `RangerPolicyEngineImpl.evaluateTagPolicies` bodies are 256 instructions and
+//! agree on every offset and branch target up to 604. There are exactly
+//! **three** differences, none behavioural: `commons-lang` → `commons-lang3` in
+//! `StringUtils.isNotEmpty`/`equals` at offsets 214 and 285, and an `ldc` →
+//! `ldc_w` at 617 inside the trailing debug-log block, which shifts the tail
+//! one byte so the final `ifeq`/`return` land at 668 in 2.8.0 against 667 in
+//! 2.5.0. Every offset cited below is identical in both jars.
 //!
 //! * **Tag policies run FIRST.**
 //!   `evaluatePoliciesForOneAccessTypeNoAudit` calls `evaluateTagPolicies` at
@@ -58,21 +61,38 @@
 //!   result onto the shared result at 531 — so a tag policy can DENY before
 //!   any resource policy is consulted.
 //!
-//! * **An empty block is inert.** `evaluateTagPolicies` computes
-//!   `evaluators` at offsets 109-129 (null repository ⇒ `null`; otherwise
-//!   `RangerPolicyRepository.getLikelyMatchPolicyEvaluators`), then branches
+//! * **An empty block is inert.** `evaluateTagPolicies` computes `evaluators`
+//!   at offsets 109-129 —
+//!   `RangerPolicyRepository.getLikelyMatchPolicyEvaluators`, or `null` if the
+//!   tag repository is itself null — then branches
 //!   `CollectionUtils.isNotEmpty(evaluators)` / `ifeq 582` at 133-136. The
-//!   only writes to the shared result (offsets 508, 531, 557) are inside the
-//!   loop the branch skips.
+//!   only writes to the shared result (offsets 458, 508, 531, 557) are inside
+//!   the loop the branch skips.
+//!
+//!   For a *realistic* empty block the live path is the empty LIST, not the
+//!   null repository: `PolicyEngine.<init>` builds the tag repository whenever
+//!   `tagPolicies != null`, `getServiceName()` is non-empty and
+//!   `getServiceDef() != null` (offsets 471-500, **no `getPolicies()` call in
+//!   the gate**). `isNotEmpty` is false for empty and for null alike, so both
+//!   paths reach the same exit.
 //!
 //!   One correction to how this is usually stated: offset 582 is not a bare
-//!   `return`. It reads `result.getIsAllowed()` and, if true, calls
-//!   `setIsAccessDetermined(true)` at 590. That write cannot change anything
-//!   on this path: the result comes from `createAccessResult` at offset 112
-//!   of the caller with `isAllowed` false, and the one block that can flip it
-//!   first — the super-user short-circuit at caller offsets 133-165 — already
-//!   sets `setIsAccessDetermined(true)` itself at 143. So the write is either
+//!   `return`. It reads `result.getIsAllowed()`, branches `ifeq 596` at 587,
+//!   and on fall-through calls `setIsAccessDetermined(true)` — the
+//!   `invokevirtual` at **593**; 590 is the `aload 5` opening the guarded
+//!   block. That write cannot change anything on this path: the result comes
+//!   from `createAccessResult` at offset 112 of the caller with `isAllowed`
+//!   false, and the one block that can flip it first — the super-user
+//!   short-circuit at caller offsets 133-165 — already sets
+//!   `setIsAccessDetermined(true)` itself at 143. So the write is either
 //!   unreached or idempotent, and the block is inert either way.
+//!
+//!   `ServicePolicies$TagPolicies` also carries a `serviceConfig` map in both
+//!   jars, so an empty block could in principle smuggle one. Safe: its only
+//!   call site is `RangerPolicyRepository` offset 279 → `buildAuditPolicyEvaluators`
+//!   at 282. The super-user `RangerPolicyEngineImpl$ServiceConfig` is built
+//!   from the TOP-LEVEL `ServicePolicies.getServiceConfig()` at 125-136, never
+//!   from the tag block.
 //!
 //! * **No resolved tags ⇒ no evaluators.**
 //!   `RangerPolicyRepository.getLikelyMatchPolicyEvaluators(request, tags,
@@ -80,17 +100,28 @@
 //!   branches `isNotEmpty(tags)` / `ifeq 333` at 6-9, returning that empty
 //!   list. Identical in both jars.
 //!
-//! * **The tag set comes from the enricher, not from the engine type.** The
+//! * **The tag set comes from the enrichers, not from the engine type.** The
 //!   set at offset 104 is
 //!   `RangerAccessRequestUtil.getRequestTagsFromContext(request.getContext())`,
 //!   and the only thing in `ranger-plugins-common` that writes that context
 //!   key is `RangerTagEnricher.enrich`, via
 //!   `RangerAccessRequestUtil.setRequestTagsInContext` (offset 199 of
-//!   `enrich`). `RangerPolicyRepository` instantiates enrichers from the
-//!   service-def's `contextEnrichers`. So the gate is the DEF, never
+//!   `enrich`). Each `RangerPolicyRepository` instantiates enrichers from its
+//!   OWN `serviceDef`'s `contextEnrichers`. So the gate is the DEFS, never
 //!   [`EngineType`]: egret's `trino.json` declares a `RangerTagEnricher` and
 //!   its `starrocks.json` has `contextEnrichers: []`, and the day that one
 //!   field changes an `EngineType::StarRocks` test would go silently wrong.
+//!
+//! * **There are TWO defs, and their enricher lists are UNIONED.** This is
+//!   finding I-1 from the Task 1 review, and it is the reason the gate asks
+//!   both. The full measured chain is on
+//!   [`egret_ranger_eval::eval`]'s `tag_policies_can_decide` and is exercised
+//!   by `the_block_s_own_service_def_can_supply_the_enricher` below; the short
+//!   version is that `PolicyEngine.<init>` builds a second repository from
+//!   `tagPolicies.getServiceDef()` and concatenates its enrichers with the
+//!   resource repository's (offsets 619-702), and Ranger's own stock
+//!   `ranger-servicedef-tag.json` — shipped in both jars — declares the tag
+//!   enricher.
 
 use std::collections::BTreeSet;
 
@@ -137,6 +168,44 @@ fn starrocks_def_json() -> Value {
 
 fn trino_def() -> ServiceDef {
     ServiceDef::parse(&trino_def_json())
+}
+
+/// Apache Ranger's own stock `tag` service-def, extracted verbatim from
+/// `service-defs/ranger-servicedef-tag.json` inside
+/// `ranger-plugins-common-2.5.0.jar` (2449 bytes, sha256
+/// `0bd25d688a15e5578a5dc15c697d4743d51d53c75dc995bd8ac11ad284d211f0`). The
+/// 2.8.0 jar's copy differs only by dropping the `enums` key (2411 bytes,
+/// sha256 `1dde75b3d0645ffae1644dc7ea34aa97af266d4c492e45bb974631396d54fc99`)
+/// and declares a byte-identical `contextEnrichers`.
+///
+/// It is taken from the jar rather than written here on purpose: this fixture
+/// exists to anchor the I-1 test to Ranger's real shipped artefact rather than
+/// to anyone's reading of it.
+fn stock_tag_def_json() -> Value {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/ranger-servicedef-tag-stock-2.5.0.json"
+    );
+    serde_json::from_str(&std::fs::read_to_string(path).expect("read stock tag service-def"))
+        .expect("parse stock tag service-def")
+}
+
+/// A `trino` resource def that explicitly declares NO context enrichers — the
+/// shape egret's `starrocks.json` has, and the only shape that can license the
+/// enricher narrowing.
+fn def_without_enrichers() -> ServiceDef {
+    let mut def_json = trino_def_json();
+    def_json["contextEnrichers"] = json!([]);
+    ServiceDef::parse(&def_json)
+}
+
+/// The live captured `tagPolicies` block with its `serviceDef`'s
+/// `contextEnrichers` replaced by `enrichers`. The three policies stay exactly
+/// as captured; only the def under test changes.
+fn live_tag_policies_with_enrichers(enrichers: Value) -> Value {
+    let mut block = live_tag_policies();
+    block["serviceDef"]["contextEnrichers"] = enrichers;
+    block
 }
 
 /// An envelope with one plain allow policy, plus whatever `extra` top-level
@@ -424,21 +493,183 @@ fn the_embedded_defs_disagree_about_the_tag_enricher() {
 /// `isNotEmpty(tags)` is false and every tag evaluator is skipped — a
 /// non-empty block does not force `Undecidable`.
 ///
-/// This is gated on the DEF, not on [`EngineType`]: gating on
+/// This is gated on the DEFS, not on [`EngineType`]: gating on
 /// `EngineType::StarRocks` would be silently wrong the day `contextEnrichers`
 /// changes.
+///
+/// **Both** defs must say so. Ranger unions the two enricher lists (see
+/// `the_block_s_own_service_def_can_supply_the_enricher` for the measured
+/// chain), so this test has to disclaim the tag def's enrichers as well as the
+/// resource def's. An earlier version of this test passed the live block
+/// unchanged and so only disclaimed the resource def — it was blessing a
+/// fail-open gap, because the live block's `serviceDef` merely happens to omit
+/// `contextEnrichers` rather than declaring none.
 #[test]
-fn a_def_without_the_tag_enricher_makes_a_non_empty_block_decidable() {
-    let set = envelope(json!({"tagPolicies": live_tag_policies()}));
-    let mut def_json = trino_def_json();
-    def_json["contextEnrichers"] = json!([]);
-    let def = ServiceDef::parse(&def_json);
+fn defs_without_the_tag_enricher_make_a_non_empty_block_decidable() {
+    let set = envelope(json!({
+        "tagPolicies": live_tag_policies_with_enrichers(json!([])),
+    }));
+    let def = def_without_enrichers();
     assert_eq!(def.has_tag_enricher(), Some(false));
 
     let d = evaluate(&set, &request(), &def, &no_superusers());
     assert!(
         matches!(d, Decision::Allowed { .. }),
-        "no tag enricher means no tag evaluator can run: {d:?}"
+        "no tag enricher on either def means no tag evaluator can run: {d:?}"
+    );
+}
+
+/// **I-1: the block's OWN `serviceDef` can supply the enricher, so the
+/// resource def alone is not enough to license the narrowing.**
+///
+/// Measured in `ranger-plugins-common` 2.5.0 and 2.8.0 (offsets are 2.5.0's;
+/// 2.8.0 has the same shape at slightly different offsets):
+///
+/// * `PolicyEngine.<init>` builds the tag repository when
+///   `!disableTagPolicyEvaluation && tagPolicies != null &&
+///   !StringUtils.isEmpty(tagPolicies.getServiceName()) &&
+///   tagPolicies.getServiceDef() != null` — offsets 471-500. **There is no
+///   `getPolicies()` call in that gate at all**, in either jar.
+/// * `RangerPolicyRepository(TagPolicies, ctx, componentDef, componentName)`
+///   sets `this.serviceDef` from `tagPolicies.getServiceDef()` (offsets 33-48)
+///   and `this.zoneName = null` (offset 30).
+/// * `buildContextEnrichers` reads `this.serviceDef.getContextEnrichers()`
+///   under an `isEmpty(zoneName)` guard — offsets 12-38. For the tag
+///   repository that guard is satisfied by construction.
+/// * `PolicyEngine.<init>` then sets
+///   `allContextEnrichers = tagPolicyRepository.getContextEnrichers() ++
+///   policyRepository.getContextEnrichers()` — offsets 619-702, a real
+///   `ArrayList.addAll` union, not a choice between them.
+/// * `RangerDefaultRequestProcessor.enrich` iterates
+///   `PolicyEngine.getAllContextEnrichers()` (offset 4) and calls
+///   `RangerContextEnricher.enrich` on each (offset 110); `preProcess` calls
+///   `enrich` at offset 363.
+///
+/// And the payload that makes it reachable: **Apache Ranger's own stock
+/// `service-defs/ranger-servicedef-tag.json`, bundled inside
+/// `ranger-plugins-common` 2.5.0 AND 2.8.0, declares `RangerTagEnricher`** —
+/// see [`stock_tag_def_json`], which is that file verbatim.
+///
+/// So a non-empty block plus a resource def with no tag enricher plus a
+/// `tagPolicies.serviceDef` carrying the stock def means the engine DOES
+/// enrich and DOES evaluate tag policies. Narrowing on the resource def alone
+/// would answer `Allowed` for exactly that case.
+///
+/// What keeps this from biting egret today is DATA, not the measurement:
+/// `crates/egret-policy/src/service-defs/tag.json` happens to omit
+/// `contextEnrichers`. `download.rs` embeds that def for **any** engine type
+/// with a `tagService` in config, and the differential corpus and
+/// `examples/live_gate.rs` consume downloads captured elsewhere — so "safe
+/// because of a field nobody set" is the whole of today's protection.
+#[test]
+fn the_block_s_own_service_def_can_supply_the_enricher() {
+    let stock = stock_tag_def_json();
+    // The premise, asserted rather than described: Ranger's shipped tag def
+    // really does declare the enricher.
+    assert_eq!(
+        ServiceDef::parse(&stock).has_tag_enricher(),
+        Some(true),
+        "the stock tag def must declare RangerTagEnricher"
+    );
+
+    let set = envelope(json!({
+        "tagPolicies": live_tag_policies_with_enrichers(stock["contextEnrichers"].clone()),
+    }));
+    let def = def_without_enrichers();
+    assert_eq!(def.has_tag_enricher(), Some(false));
+
+    let d = evaluate(&set, &request(), &def, &no_superusers());
+    assert_eq!(
+        tag_causes(&d),
+        vec![TagPolicyBlock::Policies(3)],
+        "the tag def's own enricher must still force Undecidable: {d:?}"
+    );
+}
+
+/// The same refusal with the stock def dropped in whole, rather than only its
+/// `contextEnrichers` — the shape a real `tagPolicies` block from a stock
+/// Ranger admin has.
+#[test]
+fn a_block_carrying_the_whole_stock_tag_def_refuses() {
+    let mut block = live_tag_policies();
+    block["serviceDef"] = stock_tag_def_json();
+    let set = envelope(json!({"tagPolicies": block}));
+
+    let d = evaluate(&set, &request(), &def_without_enrichers(), &no_superusers());
+    assert_eq!(tag_causes(&d), vec![TagPolicyBlock::Policies(3)], "{d:?}");
+}
+
+/// A tag `serviceDef` whose `contextEnrichers` key is ABSENT is unknown, not
+/// "declares none" — the same provenance rule the resource def follows, and
+/// the live captured block is exactly this shape.
+#[test]
+fn an_absent_tag_def_enricher_key_is_unknown_not_absent() {
+    // The live block, unmodified: its serviceDef is egret's tag.json, which
+    // omits contextEnrichers.
+    let live = live_tag_policies();
+    assert!(
+        live["serviceDef"].get("contextEnrichers").is_none(),
+        "the captured block's tag def is expected to omit contextEnrichers"
+    );
+    assert_eq!(
+        ServiceDef::parse(&live["serviceDef"]).has_tag_enricher(),
+        None
+    );
+
+    let set = envelope(json!({"tagPolicies": live}));
+    let d = evaluate(&set, &request(), &def_without_enrichers(), &no_superusers());
+    assert_eq!(
+        tag_causes(&d),
+        vec![TagPolicyBlock::Policies(3)],
+        "an unknown tag-def enricher must not take the narrowing: {d:?}"
+    );
+}
+
+/// Neither def alone is sufficient: the narrowing needs `Some(false)` from
+/// both, so each of the three non-(false,false) combinations refuses.
+#[test]
+fn either_def_declaring_an_enricher_blocks_the_narrowing() {
+    let with = stock_tag_def_json()["contextEnrichers"].clone();
+    let cases: [(&str, ServiceDef, Value); 3] = [
+        (
+            "resource none / tag enricher",
+            def_without_enrichers(),
+            with.clone(),
+        ),
+        ("resource enricher / tag none", trino_def(), json!([])),
+        ("resource enricher / tag enricher", trino_def(), with),
+    ];
+    for (label, def, tag_enrichers) in cases {
+        let set = envelope(json!({
+            "tagPolicies": live_tag_policies_with_enrichers(tag_enrichers),
+        }));
+        let d = evaluate(&set, &request(), &def, &no_superusers());
+        assert_eq!(
+            tag_causes(&d),
+            vec![TagPolicyBlock::Policies(3)],
+            "{label} must refuse: {d:?}"
+        );
+    }
+}
+
+/// The request-side escape is independent of both defs: no resolved tags means
+/// `isNotEmpty(tags)` is false however many enrichers ran, so it still narrows
+/// even with the stock tag def in place.
+#[test]
+fn an_empty_resolved_tag_set_narrows_even_with_both_enrichers() {
+    let set = envelope(json!({
+        "tagPolicies": live_tag_policies_with_enrichers(
+            stock_tag_def_json()["contextEnrichers"].clone()
+        ),
+    }));
+    let req = AccessRequest {
+        resolved_tags: Some(BTreeSet::new()),
+        ..request()
+    };
+    let d = evaluate(&set, &req, &trino_def(), &no_superusers());
+    assert!(
+        matches!(d, Decision::Allowed { .. }),
+        "an empty resolved tag set leaves no tag evaluator to run: {d:?}"
     );
 }
 

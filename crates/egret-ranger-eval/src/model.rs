@@ -63,6 +63,16 @@ pub struct ServicePolicySet {
     /// dropped, not yet typed — see the module doc). `Value::Null` when
     /// the envelope omitted it.
     pub service_def: serde_json::Value,
+    /// The `tagPolicies` block's OWN `serviceDef`, round-tripped verbatim.
+    /// `Value::Null` when there is no block or the block carried no def.
+    ///
+    /// This is a SECOND def, and it is not decoration: Ranger builds context
+    /// enrichers from both defs and unions the two lists, so this one can
+    /// supply a `RangerTagEnricher` that the top-level def does not — see
+    /// `tag_policies_can_decide` in [`crate::eval`] for the measured chain.
+    /// Dropping it would leave the tag narrowing reading only half of what
+    /// decides whether tag policies can run.
+    pub tag_service_def: serde_json::Value,
     /// Envelope-level constructs this reader does not model: a non-empty
     /// `securityZones`, `policyDeltas` or `serviceConfig`, and a `tagPolicies`
     /// block this reader could not show inert ([`TagPolicyBlock`]).
@@ -261,30 +271,51 @@ pub enum ItemBucket {
 ///
 /// A block present with an **empty** `policies` list is inert, so it is not
 /// an [`Unmodelled`] construct at all and there is no variant for it here.
-/// Measured with `javap -c` on `ranger-plugins-common` 2.5.0 and 2.8.0, whose
-/// `RangerPolicyEngineImpl.evaluateTagPolicies` disassemblies are identical
-/// instruction for instruction (256 instructions, same offsets, same branch
-/// targets) apart from the `commons-lang` → `commons-lang3` move in
-/// `StringUtils` at offsets 214 and 285:
+/// Measured with `javap -c` on `ranger-plugins-common` 2.5.0 and 2.8.0. Both
+/// `RangerPolicyEngineImpl.evaluateTagPolicies` bodies are 256 instructions
+/// and agree on every offset and branch target up to 604. Exactly three
+/// differences, none behavioural: the `commons-lang` → `commons-lang3` move in
+/// `StringUtils.isNotEmpty`/`equals` at offsets 214 and 285, and an `ldc` →
+/// `ldc_w` at 617 inside the trailing debug-log block, which shifts the tail
+/// one byte so the final `ifeq`/`return` land at 668 in 2.8.0 against 667 in
+/// 2.5.0. Every offset cited below is therefore identical in both jars:
 ///
-/// * Offsets 109-129 compute `evaluators`: a null tag repository yields
-///   `null`, otherwise
+/// * Offsets 109-129 compute `evaluators`:
 ///   `RangerPolicyRepository.getLikelyMatchPolicyEvaluators(request, tags,
-///   policyType, accessTime)`.
+///   policyType, accessTime)`, or `null` if the tag repository itself is null.
+///   **For a realistic empty block the repository IS built and the live path
+///   is the empty LIST, not the null repository.** `PolicyEngine.<init>`
+///   builds it whenever `tagPolicies != null`, `getServiceName()` is non-empty
+///   and `getServiceDef() != null` (offsets 471-500) — there is no
+///   `getPolicies()` call in that gate — so the null-repository path is
+///   reached only by a block that also omits its service name or its def.
 /// * Offsets 131-136 branch on `CollectionUtils.isNotEmpty(evaluators)` with
-///   `ifeq 582`, jumping past the whole loop.
+///   `ifeq 582`, jumping past the whole loop. `isNotEmpty` is false for the
+///   empty list and for null alike, so both paths land here.
 /// * Every write to the SHARED result — `setAuditResultFrom` at 508,
 ///   `setAccessResultFrom` at 531 and 557, `incrementEvaluatedPoliciesCount`
 ///   at 458 — is inside that loop.
 ///
 /// One precision that matters if anyone re-derives this: offset 582 is not a
-/// bare `return`. It reads `result.getIsAllowed()` and, when true, calls
-/// `setIsAccessDetermined(true)` at 590. That write cannot change anything on
-/// this path. The result is the one `createAccessResult` produced at caller
-/// offset 112 with `isAllowed` false, and the only block that can flip it
-/// before the call — the super-user short-circuit at caller offsets 133-165 —
-/// already calls `setIsAccessDetermined(true)` itself at 143. So the write is
-/// either unreached or idempotent, and the block is inert either way.
+/// bare `return`. It reads `result.getIsAllowed()`, branches `ifeq 596` at
+/// 587, and on the fall-through calls `setIsAccessDetermined(true)` — the
+/// `invokevirtual` at **593** (590 is the `aload 5` that begins the guarded
+/// block). That write cannot change anything on this path. The result is the
+/// one `createAccessResult` produced at caller offset 112 with `isAllowed`
+/// false, and the only block that can flip it before the call — the super-user
+/// short-circuit at caller offsets 133-165 — already calls
+/// `setIsAccessDetermined(true)` itself at 143. So the write is either
+/// unreached or idempotent, and the block is inert either way.
+///
+/// The block's own `serviceConfig` is also safely ignored here.
+/// `ServicePolicies$TagPolicies` does carry a `serviceConfig` map in both
+/// jars, so an otherwise-empty block could in principle smuggle one — but its
+/// single call site is `RangerPolicyRepository` offset 279, feeding
+/// `buildAuditPolicyEvaluators(Map)` at 282 and nothing else. The super-user
+/// `RangerPolicyEngineImpl$ServiceConfig` is built from the TOP-LEVEL
+/// `ServicePolicies.getServiceConfig()` (offsets 125-136), never from the tag
+/// block — which is why [`Unmodelled::ServiceConfig`] guards the envelope's map
+/// and this tier need not guard the block's.
 ///
 /// This tier is the whole point of the distinction: `bind_trino_profile`
 /// creates `{name}_tag` with **zero** policies and egret's
@@ -680,12 +711,18 @@ impl<'de> Deserialize<'de> for ServicePolicySet {
         if !raw.service_config.is_empty() {
             unmodelled.push(Unmodelled::ServiceConfig);
         }
+        // The block's own `serviceDef`, kept rather than dropped. `Value`
+        // indexing yields `Null` for a non-object or a missing key, which is
+        // exactly the "the envelope did not say" signal the enricher gate
+        // treats as unknown.
+        let tag_service_def = raw.tag_policies["serviceDef"].clone();
         Ok(ServicePolicySet {
             service_name: raw.service_name,
             service_id: raw.service_id,
             policy_version: raw.policy_version,
             policies: raw.policies,
             service_def: raw.service_def,
+            tag_service_def,
             unmodelled,
         })
     }
