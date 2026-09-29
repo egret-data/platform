@@ -69,6 +69,7 @@ fn full_request(user: &str, access_type: &str) -> AccessRequest {
             .with("table", "orders")
             .with("column", "id"),
         owner: None,
+        resolved_tags: None,
     }
 }
 
@@ -536,6 +537,7 @@ fn a_chained_implied_grant_is_undecidable() {
         access_type: "read".to_string(),
         resource: RequestResource::new().with("catalog", "hive"),
         owner: None,
+        resolved_tags: None,
     };
 
     let d = evaluate(&set, &request, &def, &no_superusers());
@@ -938,11 +940,20 @@ fn a_validity_schedule_forces_undecidable() {
 /// An envelope-level construct — here `tagPolicies`, a whole second,
 /// DENY-capable policy set — forces it too, and is reported as an envelope
 /// cause rather than pinned on some policy.
+///
+/// The block needs a policy in it: SP4d-2a Task 1 measured an EMPTY
+/// `tagPolicies` block inert (`RangerPolicyEngineImpl.evaluateTagPolicies`
+/// returns at `CollectionUtils.isNotEmpty(evaluators)`), so an empty one no
+/// longer refuses. `tests/tag_tiers.rs` owns the tier boundaries and the real
+/// captured block.
 #[test]
 fn an_envelope_construct_forces_undecidable() {
     let set: ServicePolicySet = serde_json::from_value(json!({
         "serviceName": "trino",
-        "tagPolicies": {"serviceName": "tag", "policies": []},
+        "tagPolicies": {
+            "serviceName": "tag",
+            "policies": [{"id": 70, "name": "pii", "policyType": 0}],
+        },
         "policies": [{
             "id": 1, "name": "p", "service": "trino", "policyType": 0,
             "resources": full_resources(),
@@ -960,7 +971,7 @@ fn an_envelope_construct_forces_undecidable() {
     assert!(
         causes(&d).iter().any(|c| matches!(
             c,
-            UndecidableCause::EnvelopeConstruct(Unmodelled::TagPolicies)
+            UndecidableCause::EnvelopeConstruct(Unmodelled::TagPolicies(_))
         )),
         "{d:?}"
     );

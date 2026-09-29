@@ -222,6 +222,10 @@ pub struct ServiceDef {
     per_type: BTreeMap<PolicyType, TypeDefs>,
     access_types: Vec<AccessTypeDef>,
     issues: Vec<ServiceDefIssue>,
+    /// `Some(true)`/`Some(false)` when `contextEnrichers` was readable as a
+    /// list, `None` when the key was absent or not a list — see
+    /// [`ServiceDef::has_tag_enricher`].
+    tag_enricher: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -323,6 +327,7 @@ impl ServiceDef {
             per_type,
             access_types,
             issues,
+            tag_enricher: parse_tag_enricher(def),
         }
     }
 
@@ -357,6 +362,58 @@ impl ServiceDef {
     /// Constructs this crate detected but does not reproduce.
     pub fn issues(&self) -> &[ServiceDefIssue] {
         &self.issues
+    }
+
+    /// Whether this def declares a `RangerTagEnricher` in `contextEnrichers`.
+    ///
+    /// This, and NOT the engine type, is what decides whether tag policies can
+    /// reach a decision. `RangerPolicyEngineImpl.evaluateTagPolicies` takes the
+    /// request's tag set from
+    /// `RangerAccessRequestUtil.getRequestTagsFromContext(request.getContext())`
+    /// (offset 104, identical at 2.5.0 and 2.8.0), and the only thing in
+    /// `ranger-plugins-common` that writes that context key is
+    /// `RangerTagEnricher.enrich`, through
+    /// `RangerAccessRequestUtil.setRequestTagsInContext` (offset 199 of
+    /// `enrich`). `RangerPolicyRepository` instantiates the enrichers named in
+    /// the service-def's `contextEnrichers` and nowhere else. With none
+    /// declared, the tag set stays empty,
+    /// `RangerPolicyRepository.getLikelyMatchPolicyEvaluators` returns
+    /// `Collections.EMPTY_LIST` at its `isNotEmpty(tags)` branch (offsets 0-9),
+    /// and `evaluateTagPolicies` exits at `isNotEmpty(evaluators)`.
+    ///
+    /// egret's `trino.json` declares the enricher and its `starrocks.json` has
+    /// `contextEnrichers: []` — which is why two measured StarRocks FEs never
+    /// wrote a `_tag.json` while a Trino pod wrote one within seconds for a
+    /// service with no tag service bound. Gating on `EngineType::StarRocks`
+    /// instead would be silently wrong the day that one field changes.
+    ///
+    /// # ⚠ `None` is UNKNOWN, and must not be read as "no enricher"
+    ///
+    /// `None` means the def carried no `contextEnrichers` key at all, or
+    /// carried `null`, or carried something that is not a list.
+    ///
+    /// **Ranger itself does not make this distinction**, and the doc would be
+    /// wrong to imply it does: `RangerServiceDef.getContextEnrichers()` is
+    /// null for an absent key and for an explicit `null` alike, and a null or
+    /// empty list both cause `RangerPolicyRepository` to instantiate no
+    /// enrichers. The strictness here is egret's, and it is about
+    /// **provenance**, not about Java.
+    ///
+    /// A def reaching this crate is not necessarily the one the plugin
+    /// loaded. It may be a trimmed or re-serialised copy, and a trimmed copy
+    /// that lost this key looks exactly like a def that declares no enricher.
+    /// That shape is measured, not theoretical: the live download captured at
+    /// `tests/fixtures/tag-policies-live.json` carries the key on its `trino`
+    /// def, while the repo's older capture at
+    /// `tests/ranger/fixtures/service-policies.json` — also a `trino` def —
+    /// omits it entirely, as does the `tag` def embedded inside the live
+    /// download. Reading that silence as `Some(false)` would license the
+    /// narrowing for a def whose real counterpart does declare the enricher,
+    /// and the answer that comes back would be an allow the engine's tag
+    /// policies could have denied. Only an explicit, readable, enricher-free
+    /// list is a licence to narrow.
+    pub fn has_tag_enricher(&self) -> Option<bool> {
+        self.tag_enricher
     }
 
     /// The resource defs backing `policy_type`.
@@ -619,6 +676,26 @@ fn checked_chain(leaf: &ResourceDef, all: &[ResourceDef]) -> Result<Vec<String>,
 
 /// `accessTypes[]` then `markerAccessTypes[]`, in the order
 /// `RangerServiceDefHelper.Delegate.computeImpliedGrants` reads them.
+/// The class name Ranger's tag enricher is registered under. Matched on the
+/// simple name so a repackaged-but-equivalent enricher is still recognised
+/// (the same leniency `ServiceDefIssue::UnmodelledMatcherClass` uses for
+/// matcher classes).
+const TAG_ENRICHER_CLASS: &str = "RangerTagEnricher";
+
+/// Read `contextEnrichers` and say whether a `RangerTagEnricher` is among
+/// them — `None` when the key is absent or is not a list.
+///
+/// See [`ServiceDef::has_tag_enricher`] for why the absent case must stay
+/// distinguishable from "declared none".
+fn parse_tag_enricher(def: &Value) -> Option<bool> {
+    let enrichers = def.get("contextEnrichers")?.as_array()?;
+    Some(enrichers.iter().any(|e| {
+        e.get("enricher")
+            .and_then(Value::as_str)
+            .is_some_and(|c| c.ends_with(TAG_ENRICHER_CLASS))
+    }))
+}
+
 pub fn parse_access_types(def: &Value) -> Vec<AccessTypeDef> {
     let mut ret = Vec::new();
     for key in ["accessTypes", "markerAccessTypes"] {

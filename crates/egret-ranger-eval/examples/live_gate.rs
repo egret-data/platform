@@ -210,6 +210,7 @@ fn main() {
             access_type: "select".to_string(),
             resource,
             owner: None,
+            resolved_tags: None,
         };
         println!("── case {}", case.label);
         println!("   request  {:?}", req.resource);
