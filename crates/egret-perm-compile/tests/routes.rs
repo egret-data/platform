@@ -2264,15 +2264,30 @@ async fn a_preview_of_nothing_or_of_an_unknown_id_is_refused() {
 /// The subject carries no `roles` — SP4c Task 7 removed the field from the
 /// wire, and `explain` resolves the subject's roles server-side. See
 /// `explain_ignores_a_caller_supplied_role_and_resolves_the_subjects_own`.
+/// A `read` explain for `sales.orders` in `catalog_id`.
+///
+/// **`subject` carries only `user`** (SP4d-2a Task 5): `ExplainSubject` has no
+/// `workspaces`, `roles` or `groups` field left, because none of the three can
+/// change what any engine egret provisions decides. Tests that want to prove a
+/// removed field is not honoured set the key on the returned value anyway —
+/// nothing here sets `deny_unknown_fields`, so it is accepted and ignored,
+/// which is the behaviour an older client sees.
 fn explain_body(catalog_id: Uuid, user: &str) -> Value {
     json!({
-        "subject": { "user": user, "groups": [] },
+        "subject": { "user": user },
         "action": "read",
         "target": { "catalog_id": catalog_id, "schema": "sales", "table": "orders", "column": null }
     })
 }
 
-/// The brief's test: `explain` must name the reason CLASS, not just a verdict.
+/// The brief's test, and the package's whole point: `explain` must name the
+/// reason CLASS, not just a verdict.
+///
+/// **Rewritten for SP4d-2a Task 5; the principle is unchanged and the
+/// mechanism is not.** The class is no longer the model's `no_grant_matched`
+/// but Ranger's own `NoPolicyMatched` — the case whose Access audit shows `-`,
+/// which is exactly why naming it is the deliverable. A response carrying only
+/// a boolean would reproduce the blindness this endpoint exists to remove.
 #[tokio::test]
 async fn explain_names_the_reason_class_not_just_a_verdict() {
     let Some(f) = setup().await else { return };
@@ -2290,16 +2305,25 @@ async fn explain_names_the_reason_class_not_just_a_verdict() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["allowed"], false);
+    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
+    assert_eq!(verdict["decision"]["kind"], "denied", "body: {body}");
     assert_eq!(
-        body["reasons"][0]["kind"], "no_grant_matched",
-        "Ranger's audit shows '-' for exactly this case; naming it is the point"
+        verdict["decision"]["reason"], "no_policy_matched",
+        "Ranger's audit shows '-' for exactly this case; naming it is the point; body: {body}"
     );
 }
 
-/// `no_grant_matched` and `explicit_deny` are different facts about the model
-/// and must stay different on the wire. A response that collapsed both into
-/// `allowed: false` would pass the test above and still be useless.
+/// A policy that DENIED and nothing matching at all are different facts, and
+/// must stay different on the wire. A response that collapsed both into a
+/// boolean would pass the test above and still be useless.
+///
+/// **Rewritten for SP4d-2a Task 5.** Ranger keeps the same distinction the
+/// model did — `DenyReason::DenyPolicyItem` against
+/// `DenyReason::NoPolicyMatched` — so the rule survives the mechanism. This
+/// test also asserted that the reason names WHICH grant, which makes it the
+/// acceptance test for Task 3's name -> model-object mapping: the artifact
+/// names a Ranger policy, and `attribution` has to turn that back into the
+/// `perm` grant the operator wrote.
 #[tokio::test]
 async fn explain_distinguishes_an_explicit_deny_from_nothing_matching() {
     let Some(f) = setup().await else { return };
@@ -2330,11 +2354,40 @@ async fn explain_distinguishes_an_explicit_deny_from_nothing_matching() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["allowed"], false);
-    assert_eq!(body["reasons"][0]["kind"], "explicit_deny");
+    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
+    assert_eq!(verdict["decision"]["kind"], "denied", "body: {body}");
     assert_eq!(
-        body["reasons"][0]["grant_id"], grant_id,
-        "the reason must name WHICH grant denied it; body: {body}"
+        verdict["decision"]["reason"], "deny_policy_item",
+        "a deny item matched — NOT the same fact as nothing matching; body: {body}"
+    );
+    assert_eq!(
+        verdict["attribution"]["kind"], "grant",
+        "and the verdict must map the Ranger policy name back to a `perm` grant; body: {body}"
+    );
+    assert_eq!(
+        verdict["attribution"]["grant_id"], grant_id,
+        "which grant denied it; body: {body}"
+    );
+
+    // The other half of the distinction, against the same artifact: a subject
+    // no policy mentions gets `no_policy_matched`, not this deny.
+    let (status, other) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(explain_body(f.catalog_id, &unique("unmentioned"))),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {other}");
+    assert_eq!(
+        access_for(profile_for(&other, "star_rocks"), "select")["decision"]["reason"],
+        "no_policy_matched",
+        "body: {other}"
     );
 }
 
@@ -2377,23 +2430,29 @@ async fn explain_writes_nothing() {
     assert_eq!(f.compiled_policy_names().await, Vec::<String>::new());
 }
 
-/// **SP4c review.** A grant reachable only through a GROUP is allowed by the
-/// model and refused by every engine egret provisions (D7: no usersync, no
-/// group provider, so a Ranger item naming a group matches nobody). It must
-/// therefore not come back wearing `allowed_by_grant`'s wire string — the
-/// reason CLASS is this endpoint's whole deliverable, and the page's prose
-/// warning is not something a caller parsing JSON ever sees.
+/// **The meaning inverts, and that is the point (SP4d-2a Task 5).**
 ///
-/// Asserted over HTTP rather than only on the evaluator, because the wire
-/// string is a separate mapping that can regress on its own.
+/// A grant reachable only through a GROUP is allowed by the model and refused
+/// by every engine egret provisions: D7 measured no usersync and no group
+/// provider, so a Ranger item naming a group matches nobody. While `explain`
+/// answered with the model it had to report that allow under its own reason
+/// class (`allowed_by_group_only`) so a caller parsing JSON could see the
+/// warning the page printed. Measured against the artifact the answer is
+/// simply a REFUSAL — so the reason class disappears because the defect it
+/// existed to flag disappears with it.
+///
+/// The compiled body is read as ground truth first, because the refusal has to
+/// come from the engine's inability to SEE a group and not from a policy that
+/// was never written: the compiler does emit `groups`, and this asserts it.
 #[tokio::test]
-async fn explain_gives_a_group_only_allow_its_own_reason_class_on_the_wire() {
+async fn a_group_only_grant_is_refused_by_the_artifact_the_engine_downloads() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
 
+    let group = unique("contractors");
     let mut grant = grant_body(f.catalog_id, "unused");
     grant["principals"] = json!({
-        "include": [{ "kind": "group", "ref": "contractors" }],
+        "include": [{ "kind": "group", "ref": group }],
         "exclude": []
     });
     let (status, body) = into_json(
@@ -2404,10 +2463,30 @@ async fn explain_gives_a_group_only_allow_its_own_reason_class_on_the_wire() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "body: {body}");
-    let grant_id = body["id"].as_str().unwrap().to_string();
+    let grant_id = body["id"].as_str().expect("grant id").to_string();
 
-    let mut ask = explain_body(f.catalog_id, unique("grouponly").as_str());
-    ask["subject"]["groups"] = json!(["contractors"]);
+    // Ground truth: the policy the engine downloads really does name the group,
+    // and names no user at all.
+    let compiled = f
+        .compiled_policy_body(&format!("{COMPILER_GRANT_PREFIX}{grant_id}"))
+        .await;
+    assert_eq!(
+        compiled["policyItems"][0]["groups"],
+        json!([group]),
+        "the compiler emits `groups`; the refusal below must be about what the \
+         engine can MATCH, not about a missing policy: {compiled:#}"
+    );
+    assert_eq!(
+        compiled["policyItems"][0]["users"],
+        json!([]),
+        "and no user: {compiled:#}"
+    );
+
+    let subject = unique("grouponly");
+    let mut ask = explain_body(f.catalog_id, &subject);
+    // Named anyway, to prove naming it changes nothing — `ExplainSubject` has
+    // no `groups` field left and the evaluator receives an empty set.
+    ask["subject"]["groups"] = json!([group]);
     let (status, body) = into_json(
         f.app()
             .oneshot(req("POST", "/perm/explain", &token, Some(ask)))
@@ -2416,25 +2495,40 @@ async fn explain_gives_a_group_only_allow_its_own_reason_class_on_the_wire() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
+    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
     assert_eq!(
-        body["allowed"], true,
-        "the MODEL allows it, and Cedar enforces exactly this on object access; body: {body}"
+        verdict["decision"]["kind"], "denied",
+        "the model allows this and no engine will, so the ARTIFACT's answer is a \
+         refusal — there is no longer an allow to warn about; body: {body}"
     );
     assert_eq!(
-        body["reasons"][0]["kind"], "allowed_by_group_only",
-        "an allow no engine will honour must not share `allowed_by_grant`'s wire string; \
-         body: {body}"
+        verdict["decision"]["reason"], "no_policy_matched",
+        "the group item matched nobody, which is `-` in Ranger's own audit; body: {body}"
     );
     assert_eq!(
-        body["reasons"][0]["grant_id"], grant_id,
-        "and it must still name WHICH grant; body: {body}"
+        verdict["attribution"],
+        Value::Null,
+        "nothing decided, so nothing to attribute; body: {body}"
     );
 }
 
-/// `explain` resolves the target's tags itself. If it made the caller supply
-/// them it would answer a question the caller had already decided.
+/// `explain` resolves the target's tags itself — it never made the caller
+/// supply them, because that would answer a question the caller had already
+/// decided.
+///
+/// **What the field MEANS changed in SP4d-2a Task 5, and it is kept
+/// deliberately rather than left to rot.** `tags` used to be the input the
+/// model evaluator matched rule selectors against. It cannot mean that now:
+/// the engine's tags come from `RangerTagEnricher`, which walks the resource
+/// hierarchy and emits ancestor tags, while `tag_keys_for_resource_via` matches
+/// schema/table/column by exact equality. So the field now answers exactly one
+/// question — "what has egret got recorded on THIS resource" — which is what a
+/// steward asking why a mask did or did not apply needs, and it reaches the
+/// evaluator nowhere (`resolved_tags` is `None`; see
+/// `a_tag_policy_block_that_could_decide_makes_the_profile_undecidable` for the
+/// refusal that replaces it).
 #[tokio::test]
-async fn explain_resolves_the_targets_tags_itself() {
+async fn explain_reports_the_tags_egret_has_recorded_on_the_target() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
     let mut body = explain_body(f.catalog_id, "analyst");
@@ -2453,6 +2547,14 @@ async fn explain_resolves_the_targets_tags_itself() {
         json!([f.tag_key]),
         "sales.orders.email carries this fixture's tag; body: {body}"
     );
+    // And the tag did not become an evaluator input: this profile's download
+    // carries no `tagPolicies` block, so the verdict is a decision rather than
+    // the refusal a block that could decide would produce.
+    assert_eq!(
+        access_for(profile_for(&body, "star_rocks"), "select")["decision"]["kind"],
+        "denied",
+        "body: {body}"
+    );
 }
 
 /// SP4a Task 15, D3 defect 2: `explain` and the compiled policy must agree
@@ -2462,6 +2564,15 @@ async fn explain_resolves_the_targets_tags_itself() {
 /// would name the FIRST colliding person for the SECOND). Two users share one
 /// email local-part on purpose, so `collide` and `collide-2` are real,
 /// minted, distinguishable identities before this test ever calls `explain`.
+///
+/// **SP4d-2a Task 5 keeps the fixture and the ground-truth read of
+/// `policyItems[0].users`, and the surviving rule is the same one:** a
+/// collision-suffixed identity is distinct from the bare one, and `explain`
+/// must not conflate them. Measured against the artifact it becomes the
+/// end-to-end test of Task 3's mapping over a real compiled body — the
+/// verdict's Ranger policy name has to come back as this grant's uuid — and a
+/// third, non-member identity sharing the same base slug is asked too, so
+/// "allowed" cannot be coming from a prefix match.
 #[tokio::test]
 async fn explain_agrees_with_the_compiled_policy_for_a_collision_suffixed_member() {
     let Some(f) = setup().await else { return };
@@ -2573,17 +2684,19 @@ async fn explain_agrees_with_the_compiled_policy_for_a_collision_suffixed_member
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
+    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
     assert_eq!(
-        body["allowed"], true,
+        verdict["decision"]["kind"], "allowed",
         "explain must allow the collision-suffixed member the compiled policy \
          already serves; body: {body}"
     );
     assert_eq!(
-        body["reasons"][0]["kind"], "allowed_by_grant",
+        verdict["decision"]["policy_name"],
+        format!("{COMPILER_GRANT_PREFIX}{grant_id}"),
         "body: {body}"
     );
     assert_eq!(
-        body["reasons"][0]["grant_id"],
+        verdict["attribution"]["grant_id"],
         grant_id.to_string(),
         "must name the SAME implicit grant the compiler compiled; body: {body}"
     );
@@ -2602,29 +2715,68 @@ async fn explain_agrees_with_the_compiled_policy_for_a_collision_suffixed_member
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body_a}");
-    assert_eq!(body_a["allowed"], true, "body: {body_a}");
+    assert_eq!(
+        access_for(profile_for(&body_a, "star_rocks"), "select")["decision"]["kind"],
+        "allowed",
+        "body: {body_a}"
+    );
+
+    // A THIRD identity slugging from the same base is NOT a member and must be
+    // refused: `{local}-3` would be minted by the next registrant, and an
+    // `explain` matching on the shared base would allow it.
+    let (status, body_c) = into_json(
+        f.app()
+            .oneshot(req(
+                "POST",
+                "/perm/explain",
+                &token,
+                Some(json!({
+                    "subject": { "user": format!("{local}-3") },
+                    "action": "read",
+                    "target": { "catalog_id": f.catalog_id, "schema": null,
+                                "table": null, "column": null }
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body_c}");
+    assert_eq!(
+        access_for(profile_for(&body_c, "star_rocks"), "select")["decision"]["kind"],
+        "denied",
+        "a username sharing only the base slug is a different person; body: {body_c}"
+    );
 }
 
-/// **SP4c Task 7.** `explain` must resolve the subject's ROLES itself, and a
-/// `roles` list in the request body must not be honoured.
+/// **SP4c Task 7, kept by a stronger means (SP4d-2a Task 5).**
 ///
-/// The SP4c live gate (`docs/en/plans/2026-09-28-sp4c-live-result.md`)
-/// measured `ExplainSubject.roles` wrong in both directions at once, on the
-/// field next to the `workspaces` SP4a Task 15 removed for the same reason:
+/// The surviving rule is that a caller may not assert a role the subject does
+/// not hold. The SP4c live gate
+/// (`docs/en/plans/2026-09-28-sp4c-live-result.md`) measured the old
+/// `ExplainSubject::roles` wrong in both directions at once:
+/// `{"user":"analyst","roles":["sp4c_cleared"]}` answered `allowed` for the
+/// very user both engines refuse, and `{"user":"d3member"}` — the natural call
+/// — answered `clearance_required` for the user the engine had just served the
+/// classified column to.
 ///
-/// - `{"user":"analyst","roles":["sp4c_cleared"]}` answered `allowed` for the
-///   very user BOTH engines refuse — a caller asserting a role it does not
-///   hold was believed, so the diagnostic could be told a lie and repeated it.
-/// - `{"user":"d3member"}`, the natural call, answered `clearance_required`
-///   for the user the engine had served the classified column to in the same
-///   minute, because the field defaulted to empty.
+/// Under D2 the rule is now kept by sending NO roles to the evaluator at all,
+/// which is stronger than filtering a caller's list: there is nothing to
+/// filter. The clearance itself has no Ranger analogue on the wire, so the
+/// gating `tag` and its `required_roles` are reconstructed from the compiled
+/// policy NAME (`perm-clearance-{tag_id}-{locator}`) via the `tags` row.
 ///
-/// Both halves are asserted here against ONE fixture, because a test that only
-/// checked the lie is also passed by an `explain` that ignores roles entirely
-/// and therefore refuses everybody — which is the second defect wearing the
-/// first one's fix.
+/// **This measures the STARROCKS path**, which is the fixture's engine and the
+/// one where a clearance is a per-column resource DENY the evaluator handles
+/// (D0b: StarRocks has no tag service). On Trino the same clearance lives in
+/// the tag service, i.e. inside the `tagPolicies` block, which is tier (c) and
+/// therefore `Undecidable` — see
+/// `a_tag_policy_block_that_could_decide_makes_the_profile_undecidable`.
+///
+/// Both directions are asserted against ONE fixture, because a test that only
+/// checked the lie is also passed by an `explain` that refuses everybody.
 #[tokio::test]
-async fn explain_ignores_a_caller_supplied_role_and_resolves_the_subjects_own() {
+async fn a_clearance_deny_in_the_artifact_refuses_the_uncleared_and_not_the_cleared() {
     let Some(f) = setup().await else { return };
     let token = admin_session(&f).await;
 
@@ -2686,9 +2838,9 @@ async fn explain_ignores_a_caller_supplied_role_and_resolves_the_subjects_own() 
     assert_eq!(res.rows_affected(), 1, "the role grant row must exist");
 
     // Gate the fixture's tag on that role, and give BOTH subjects a grant that
-    // would allow the read on its own — so a clearance denial is the only
-    // thing that can refuse either of them, and `allowed` is a real verdict
-    // rather than "no grant matched" wearing a different name.
+    // would allow the read on its own — so the clearance deny is the only thing
+    // that can refuse either of them, and "allowed" is a real verdict rather
+    // than "nothing matched" wearing a different name.
     sqlx::query(
         "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
          VALUES ($1, $2, '{}') \
@@ -2716,7 +2868,8 @@ async fn explain_ignores_a_caller_supplied_role_and_resolves_the_subjects_own() 
     }
 
     // 1. The lie. The uncleared subject asserts the clearing role it does not
-    //    hold; `explain` must answer for the subject the engine sees.
+    //    hold. `roles` is not even a field on `ExplainSubject` any more, so the
+    //    key is ignored — and the artifact's clearance deny stands.
     let mut lying = explain_body(f.catalog_id, &uncleared_name);
     lying["target"]["column"] = json!("email");
     lying["subject"]["roles"] = json!([role_name]);
@@ -2728,28 +2881,40 @@ async fn explain_ignores_a_caller_supplied_role_and_resolves_the_subjects_own() 
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
+    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
     assert_eq!(
-        body["allowed"], false,
-        "a caller-supplied role must not clear a subject who does not hold it — this is the \
-         live gate's `{{\"user\":\"analyst\",\"roles\":[\"sp4c_cleared\"]}}` answering `allowed` \
-         for the user both engines refuse; body: {body}"
+        verdict["decision"]["kind"], "denied",
+        "a caller-supplied role must not clear a subject who does not hold it — this is \
+         the live gate's `{{\"user\":\"analyst\",\"roles\":[\"sp4c_cleared\"]}}` answering \
+         `allowed` for the user both engines refuse; body: {body}"
     );
     assert_eq!(
-        body["reasons"][0]["kind"], "clearance_required",
-        "and the reason must still be the clearance, not a grant miss; body: {body}"
+        verdict["decision"]["reason"], "deny_policy_item",
+        "and the refusal must be the clearance's own deny, not a grant miss; body: {body}"
     );
     assert_eq!(
-        body["reasons"][0]["tag"], f.tag_key,
-        "the reason must name the gating tag; body: {body}"
+        verdict["attribution"]["kind"], "clearance",
+        "the compiled policy NAME is where a clearance is recognisable at all; body: {body}"
     );
     assert_eq!(
-        body["reasons"][0]["required_roles"],
-        json!([role_name]),
+        verdict["attribution"]["tag_id"],
+        tag_id.to_string(),
         "body: {body}"
+    );
+    assert_eq!(
+        verdict["attribution"]["tag"], f.tag_key,
+        "the gating tag has to be reconstructed from that name — it is nowhere on \
+         the wire the engine sees; body: {body}"
+    );
+    assert_eq!(
+        verdict["attribution"]["required_roles"],
+        json!([role_name]),
+        "and so do the roles that would clear it; body: {body}"
     );
 
     // 2. The other direction. The subject who DOES hold the role is cleared
-    //    without naming it, because the server read it from `access_grants`.
+    //    without naming it, because the COMPILER named them in the deny's
+    //    `denyExceptions` — which is the only mechanism any engine honours.
     let mut truthful = explain_body(f.catalog_id, &cleared_name);
     truthful["target"]["column"] = json!("email");
     let (status, body) = into_json(
@@ -2760,15 +2925,14 @@ async fn explain_ignores_a_caller_supplied_role_and_resolves_the_subjects_own() 
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
+    let verdict = access_for(profile_for(&body, "star_rocks"), "select");
     assert_eq!(
-        body["allowed"], true,
-        "the subject holding the clearing role must be allowed WITHOUT naming it in the \
-         request — resolving roles server-side is what makes the natural call correct; \
-         body: {body}"
+        verdict["decision"]["kind"], "allowed",
+        "the role holder must be allowed WITHOUT naming the role in the request; body: {body}"
     );
-    assert_ne!(
-        body["reasons"][0]["kind"], "clearance_required",
-        "body: {body}"
+    assert_eq!(
+        verdict["attribution"]["kind"], "grant",
+        "and be allowed by their GRANT, the clearance having excepted them; body: {body}"
     );
 
     // Lift the gate again. A clearance is installation-wide: left behind, this
