@@ -80,10 +80,19 @@ cache:
 
 ```bash
 command kubectl --context kind-egret exec -n egret-engines <trino-coordinator-pod> -- \
-  cat /tmp/ranger/sp3c2-trino-live/policycache/trino_sp3c2-trino-live_tag.json
+  cat /tmp/ranger/sp3c2-trino-live/policycache/trino_sp3c2-trino-live.json
 ```
 
-Measured 2026-09-29: 2481 bytes, three policies — `8799` (policyType 1, mask,
+**Note the filename.** An earlier draft of this plan pointed at the sibling
+`…_tag.json`, and its byte count matched — but that file is the tag **STORE**
+(`tags`, `serviceResources`, `resourceToTagIds`) and contains **no policies and no
+`tagPolicies` key** at all. The tag policies live inside the main policy cache
+under `tagPolicies`. A matching byte count made the wrong file look confirmed;
+capturing it would have produced a policy-free fixture and every tier-(c) test
+would have passed vacuously.
+
+Measured 2026-09-29 in the main cache (37049 B): tag service 51,
+`policyVersion 22`, three policies — `8799` (policyType 1, mask,
 `resources.tag.values = ["pii"]`), `8805` (policyType 2, row filter), `8839`
 (policyType 0, ACCESS, deny-capable, `denyPolicyItems` for `public` with
 `denyExceptions`). Read-only; do not touch `demo-trino`.
@@ -96,8 +105,14 @@ exactly that.
 
 1. Block **absent** → decidable (already true; a control).
 2. Block present, `policies: []` → **decidable**. Ranger's `evaluateTagPolicies`
-   returns at `CollectionUtils.isNotEmpty(evaluators)` and the shared result is
-   never touched. Verify that claim in the jars before relying on it.
+   exits early at `CollectionUtils.isNotEmpty(evaluators)`. Verify in the jars, and
+   note the precise form: the early-exit target is **not** a bare return — it reads
+   `getIsAllowed()` and can call `setIsAccessDetermined(true)`. The conclusion still
+   holds, because the result arrives from `createAccessResult` with `isAllowed`
+   false and the only block that could flip it first (the super-user short-circuit)
+   already sets that same flag — so the write is unreached or idempotent. Record
+   that reasoning where the code is, so a later reader who finds the write does not
+   conclude the tier analysis was wrong.
 3. Block present, non-empty (the captured fixture) → `Undecidable`, with a cause
    naming how many tag policies could decide. Not a generic envelope refusal.
 4. Block present, non-empty, but the request's resolved tag set is **empty** →
