@@ -891,6 +891,161 @@ async fn extra_profile(f: &Fixture, tag: &str) -> (i64, Uuid) {
     (service.id, catalog_id)
 }
 
+// ---------------------------------------------------------------------------
+// Two-profile fixture (SP4d-2a Task 2)
+// ---------------------------------------------------------------------------
+
+/// One registry catalog attached to TWO engines whose authz profiles are of
+/// DIFFERENT types — one `trino`, one `starrocks`. Returns
+/// `(trino_service_id, starrocks_service_id, catalog_id)`.
+///
+/// This is the shape `extra_profile` deliberately is NOT: that helper reaches
+/// a second, DIFFERENT catalog. This one exists live — warehouse `sp4a10_wh`
+/// is served by profile 52 (Trino) and 55 (StarRocks), and both perm grants
+/// on it compiled to `{"services":[52,55]}` — and until this fixture existed,
+/// nowhere in the test suite. A single `RequestResource` cannot serve both
+/// profiles: `write` is `insert,delete` on Trino and `insert,update,delete`
+/// on StarRocks (`egret_perm::actions`), and the second resource level is
+/// named `schema` on Trino vs `database` on StarRocks (`resource_level_names()`
+/// in `grants.rs`). That is what forces a genuinely per-profile answer instead
+/// of one that only happens to look right with a single profile.
+async fn two_profile_catalog(f: &Fixture, tag: &str) -> (i64, i64, Uuid) {
+    // Held until this function returns — see `TAG_FANOUT_LOCK`.
+    let _universe = advisory_lock(&f.dsn).await;
+    egret_policy::seed_trino(&f.policy)
+        .await
+        .expect("seed trino service-def");
+    let trino_service = f
+        .policy
+        .create_service(&unique(&format!("{tag}_trino")), "trino", &json!({}))
+        .await
+        .expect("create trino service");
+    let starrocks_service = f
+        .policy
+        .create_service(&unique(&format!("{tag}_sr")), "starrocks", &json!({}))
+        .await
+        .expect("create starrocks service");
+    let ws_id: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug, name) VALUES ($1,$2) RETURNING id")
+            .bind(unique(tag))
+            .bind("Perm Two-Profile WS")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("workspace");
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
+         VALUES ($1,'us-east-1','egret-perm-two-profile-test','AKIATEST') RETURNING id",
+    )
+    .bind(unique(tag))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("storage connection");
+    let warehouse_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(unique("perm_two_profile_wh"))
+    .bind(ws_id)
+    .bind(sc_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("warehouse");
+    let trino_engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
+    )
+    .bind(unique(&format!("{tag}_trino_eng")))
+    .bind(trino_service.id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("trino engine");
+    let starrocks_engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'starrocks','egret','{}'::jsonb,$2) RETURNING id",
+    )
+    .bind(unique(&format!("{tag}_sr_eng")))
+    .bind(starrocks_service.id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("starrocks engine");
+    let catalog_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO registry.catalogs (name, kind, config, warehouse_id) \
+         VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                 jsonb_build_object('type', 'egret', 'warehouse_id', $2::uuid::text)), $2) \
+         RETURNING id",
+    )
+    .bind(unique("perm_two_profile_cat"))
+    .bind(warehouse_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("registry catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(trino_engine_id)
+    .bind(catalog_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("attach trino engine to catalog");
+    sqlx::query(
+        "INSERT INTO registry.engine_catalog_attachments (engine_id, catalog_id) VALUES ($1,$2)",
+    )
+    .bind(starrocks_engine_id)
+    .bind(catalog_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("attach starrocks engine to catalog");
+    (trino_service.id, starrocks_service.id, catalog_id)
+}
+
+/// The fixture every downstream per-profile test (Tasks 5, 6, 8, 9) depends
+/// on: this asserts the fixture is what it claims to be, rather than trusting
+/// it. `services_for_catalog_via` is "what an engine actually downloads" —
+/// the exact semantics the served-artifact package cares about — so if either
+/// attachment silently failed to take, or a second engine were created
+/// without an `authz_service_id`, this would degrade to one id and every
+/// per-profile test downstream would pass vacuously.
+#[tokio::test]
+async fn two_profile_catalog_is_really_served_by_two_different_engine_types() {
+    let Some(f) = setup().await else { return };
+    let (trino_service_id, starrocks_service_id, catalog_id) =
+        two_profile_catalog(&f, "two-profile-honesty").await;
+
+    let mut conn = f.db.pool.acquire().await.expect("acquire conn");
+    let mut service_ids = egret_policy::services_for_catalog_via(&mut conn, catalog_id)
+        .await
+        .expect("services_for_catalog_via");
+    service_ids.sort_unstable();
+    let mut expected = vec![trino_service_id, starrocks_service_id];
+    expected.sort_unstable();
+    assert_eq!(
+        service_ids, expected,
+        "the catalog must resolve to exactly the two services the fixture \
+         just attached — a silently-dropped attachment would make every \
+         per-profile test downstream vacuously green; got {service_ids:?}"
+    );
+
+    let trino = f
+        .policy
+        .get_service_by_id(trino_service_id)
+        .await
+        .expect("trino service row");
+    let starrocks = f
+        .policy
+        .get_service_by_id(starrocks_service_id)
+        .await
+        .expect("starrocks service row");
+    assert_eq!(
+        trino.r#type, "trino",
+        "the first profile must genuinely be a Trino profile, not merely a \
+         second StarRocks one"
+    );
+    assert_eq!(
+        starrocks.r#type, "starrocks",
+        "the second profile must genuinely be a StarRocks profile"
+    );
+}
+
 /// Create one grant through the endpoint and return its id.
 async fn create_grant_returning_id(f: &Fixture, token: &str, body: Value) -> String {
     let (status, created) = into_json(
