@@ -735,6 +735,59 @@ fn an_absent_context_enrichers_key_is_unknown_not_absent() {
     );
 }
 
+/// A `tagPolicies.serviceDef` that is missing, `null`, or not an object at all
+/// must parse without panicking and answer UNKNOWN — so it refuses.
+///
+/// This is not hypothetical plumbing: `ServicePolicySet::tag_service_def` is
+/// `Value::Null` for every envelope with no `tagPolicies` block, so
+/// `ServiceDef::parse` is handed a `Null` on the ordinary path. The direction
+/// is what matters — a non-object def is the *least* trustworthy input there
+/// is, and answering `Some(false)` for one would license the narrowing on
+/// garbage.
+#[test]
+fn a_tag_service_def_that_is_not_an_object_is_unknown() {
+    for v in [
+        json!(null),
+        json!("a string"),
+        json!([]),
+        json!(7),
+        json!({}),
+    ] {
+        assert_eq!(
+            ServiceDef::parse(&v).has_tag_enricher(),
+            None,
+            "{v} must be UNKNOWN, never Some(false)"
+        );
+    }
+
+    // And end to end: a block whose `serviceDef` is a non-object refuses even
+    // when the resource def explicitly declares no enricher.
+    let mut block = live_tag_policies();
+    block["serviceDef"] = json!("not a def");
+    let set = envelope(json!({"tagPolicies": block}));
+    let d = evaluate(&set, &request(), &def_without_enrichers(), &no_superusers());
+    assert_eq!(tag_causes(&d), vec![TagPolicyBlock::Policies(3)], "{d:?}");
+}
+
+/// Tier (a) and tier (b) leave `tag_service_def` as `Value::Null`, and both
+/// still narrow — i.e. the `Null` def is reached on the ordinary path and does
+/// not accidentally block the narrowing that tiers (a) and (b) are entitled to.
+#[test]
+fn an_absent_block_leaves_a_null_tag_service_def_and_still_narrows() {
+    let absent = envelope(json!({}));
+    assert!(absent.tag_service_def.is_null());
+
+    let empty = envelope(json!({
+        "tagPolicies": {"serviceName": "trino_tag", "policies": []},
+    }));
+    assert!(empty.tag_service_def.is_null());
+
+    for set in [absent, empty] {
+        let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+        assert!(matches!(d, Decision::Allowed { .. }), "{d:?}");
+    }
+}
+
 // ── the control that keeps the package honest ───────────────────────────
 
 /// `Unmodelled::ServiceConfig` still forces `Undecidable`.
