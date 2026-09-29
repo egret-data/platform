@@ -1413,11 +1413,29 @@ async fn explain(
         // consults) travels inside the same envelope.
         let service_def = ServiceDef::parse(&artifact.service_def);
         let resource = request_resource(engine, &catalog_name, &body.target);
-        // `EngineConfig::without_super_users()` records a MEASUREMENT: neither
-        // live Trino sets `ranger.plugin.super.users` or `.super.groups`
-        // (`docs/en/plans/2026-09-28-sp4d-plugin-version-result.md`), and an
-        // unknown super-user list would make every decision unknowable. The one
-        // field added on top is `engine`, which arms the def cross-check:
+        // `EngineConfig::without_super_users()` records a fact about egret's
+        // own provisioning, and an unknown super-user list would make every
+        // decision unknowable (`isSuperUser` is checked before any policy and
+        // wins with `policyPriority = Integer.MAX_VALUE`).
+        //
+        // **The source is the templating, not only the live pods.**
+        // `docs/en/plans/2026-09-28-sp4d-plugin-version-result.md` measured two
+        // live TRINO coordinators and says so explicitly — it did not measure
+        // StarRocks, and it flags that it never read the templating source, so
+        // on its own it does not license this value for a StarRocks profile.
+        // It does license it here because the renderers themselves were read:
+        // `egret_provisioner::trino`'s `ranger-trino-security.xml` and
+        // `egret_provisioner::starrocks`'s `ranger-starrocks-security.xml` are
+        // both written whole, property by property, and NEITHER emits
+        // `ranger.plugin.super.users` or `.super.groups` — there is no
+        // passthrough that could add one. The other half of the super-user
+        // question, a `serviceConfig` map inside the DOWNLOAD, cannot arise
+        // either: `ServicePolicies` has no such field, so the envelope
+        // `artifact_for` builds never carries one, and
+        // `Unmodelled::ServiceConfig` would refuse the decision if it did.
+        //
+        // The one field added on top is `engine`, which arms the def
+        // cross-check:
         // Trino's middle resource level is `schema` and StarRocks' is
         // `database`, so pairing the wrong def with an engine answers "nothing
         // matched" with full confidence, and declaring the engine turns that
