@@ -239,6 +239,12 @@ impl Args {
         self.positional.clone()
     }
 
+    /// The names passed as keywords, in call order. For a function that
+    /// refuses some of its declared names **by name** (W5b's `secret`).
+    pub(super) fn named_keys(&self) -> impl Iterator<Item = &str> {
+        self.named.iter().map(|(key, _)| key.as_str())
+    }
+
     pub(super) fn get(&self, name: &str, index: usize) -> Option<MjValue> {
         self.named
             .iter()

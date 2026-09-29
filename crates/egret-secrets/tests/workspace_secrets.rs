@@ -393,3 +393,56 @@ async fn global_and_workspace_scopes_are_isolated() {
     // Clean up the global row (workspace rows go with the workspace).
     c.store.delete(None, global_id).await.unwrap();
 }
+
+/// W5b `secret('NAME')`: by name, in the given workspace ONLY. A same-named
+/// secret of another workspace and a global (NULL-workspace) secret are both
+/// `NotFound` -- the global fallback `resolve_plaintext_ws_or_global` takes is
+/// exactly what a user-supplied name must never reach.
+#[tokio::test]
+async fn resolve_typed_by_name_is_workspace_scoped_with_no_global_fallback() {
+    let Some(c) = ctx().await else {
+        eprintln!("skip");
+        return;
+    };
+    let ws = seed_workspace(&c.db).await;
+    let other_ws = seed_workspace(&c.db).await;
+    let data = |v: &str| std::collections::BTreeMap::from([("value".to_string(), v.to_string())]);
+
+    c.store
+        .create_typed(Some(ws), "db", None, "Opaque", &data("mine"))
+        .await
+        .unwrap();
+    c.store
+        .create_typed(Some(other_ws), "db", None, "Opaque", &data("theirs"))
+        .await
+        .unwrap();
+    c.store
+        .create_typed(
+            Some(other_ws),
+            "only-theirs",
+            None,
+            "Opaque",
+            &data("theirs-2"),
+        )
+        .await
+        .unwrap();
+    // A unique name: global names are shared by every test in this database.
+    let global = format!("global-{}", Uuid::new_v4().simple());
+    c.store
+        .create_typed(None, &global, None, "Opaque", &data("platform"))
+        .await
+        .unwrap();
+
+    let got = c.store.resolve_typed_by_name(ws, "db").await.unwrap();
+    assert_eq!((got.r#type.as_str(), got.data), ("Opaque", data("mine")));
+    let got = c.store.resolve_typed_by_name(other_ws, "db").await.unwrap();
+    assert_eq!(got.data, data("theirs"));
+
+    for name in ["only-theirs", global.as_str(), "absent"] {
+        // `TypedSecret` has no `Debug` (it carries values), so no `unwrap_err`.
+        let Err(err) = c.store.resolve_typed_by_name(ws, name).await else {
+            panic!("{name} resolved in the wrong workspace");
+        };
+        assert!(matches!(err, SecretsError::NotFound), "{name}: {err:?}");
+    }
+}

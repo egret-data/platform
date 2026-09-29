@@ -2,6 +2,7 @@
 //! need their own unit/integration tests (e.g. the machine-IdP engine-token minter).
 pub mod engine_minter;
 pub mod identity;
+pub mod workflow_secrets;
 
 use anyhow::Context;
 use egret_auth::groups::GroupRepo;

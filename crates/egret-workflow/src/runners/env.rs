@@ -1879,6 +1879,33 @@ pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderEr
     }
 }
 
+/// [`render_str`] on a copy of the environment that `extend` has changed.
+///
+/// W5b Task 4: `secret()` is refused on the shared [`environment`] and
+/// resolved only on `kestra.*` plugin tasks, so the resolving `secret` has to
+/// be registered **per render**, over the refusal, without touching what
+/// every other caller renders against. `extend` runs on the render thread,
+/// after [`environment`] and before the render context's scope global, so it
+/// can add or replace a function and cannot unbind that global.
+///
+/// Everything [`render_str`] does is kept: the no-`{` short circuit, the
+/// render thread, the fixpoint loop, the rewrite and the raw-region
+/// protection. **`extend` runs once per call and its functions see every pass
+/// of the loop**, so a function that records what it was asked records the
+/// calls of every pass.
+pub(crate) fn render_str_with(
+    template: &str,
+    cx: &RenderContext,
+    extend: &(dyn Fn(&mut Environment<'static>) + Sync),
+) -> Result<String, RenderError> {
+    match render_guarded_with(template, cx, &[], extend)? {
+        GuardedRender::Rendered(text) => Ok(text),
+        GuardedRender::Forbidden(root) => Err(RenderError::Template(format!(
+            "internal: render_str_with refused the root `{root}` with no forbidden list"
+        ))),
+    }
+}
+
 /// What [`render_str_guarded`] answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardedRender {
@@ -1923,6 +1950,16 @@ pub fn render_str_guarded(
     cx: &RenderContext,
     forbidden: &[&str],
 ) -> Result<GuardedRender, RenderError> {
+    render_guarded_with(template, cx, forbidden, &|_| {})
+}
+
+/// [`render_str_guarded`], with [`render_str_with`]'s `extend`.
+fn render_guarded_with(
+    template: &str,
+    cx: &RenderContext,
+    forbidden: &[&str],
+    extend: &(dyn Fn(&mut Environment<'static>) + Sync),
+) -> Result<GuardedRender, RenderError> {
     // `VariableRenderer.java:76-79`: "it's not a Pebble template so we
     // short-circuit rendering". Note the test is `{`, not `{{` -- a source
     // containing a lone `{` still goes through the engine. Done before the
@@ -1945,7 +1982,9 @@ pub fn render_str_guarded(
         let worker = std::thread::Builder::new()
             .name("egret-render".to_string())
             .stack_size(RENDER_STACK_BYTES)
-            .spawn_scoped(scope, || render_on_this_thread(template, cx, forbidden))
+            .spawn_scoped(scope, || {
+                render_on_this_thread(template, cx, forbidden, extend)
+            })
             .map_err(|e| RenderError::Template(format!("could not start a render thread: {e}")))?;
         match worker.join() {
             Ok(result) => result,
@@ -1994,8 +2033,11 @@ fn render_on_this_thread(
     template: &str,
     cx: &RenderContext,
     forbidden: &[&str],
+    extend: &(dyn Fn(&mut Environment<'static>) + Sync),
 ) -> Result<GuardedRender, RenderError> {
     let mut env = environment();
+    // Before the scope global, so an `extend` cannot unbind it.
+    extend(&mut env);
     let variables = cx.to_minijinja();
 
     // The render context's own top-level names, for

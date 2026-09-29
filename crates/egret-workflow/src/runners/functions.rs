@@ -170,15 +170,45 @@ pub(super) fn register(env: &mut Environment<'static>) {
 
     // W2 Task 8's twelve refusals. See [`not_implemented`] for the message
     // shape and why the oracle cannot check it.
-    for (name, needs, package) in REFUSED {
+    for (name, refusal) in REFUSED {
         env.add_function(
             *name,
             move |_args: Rest<MjValue>| -> Result<MjValue, MjError> {
-                Err(not_implemented(name, needs, package))
+                Err(match refusal {
+                    Refusal::NotYet { needs, package } => not_implemented(name, needs, package),
+                    Refusal::Confined(reason) => pebble_error(*reason),
+                })
             },
         );
     }
 }
+
+/// Why a [`REFUSED`] name refuses.
+#[derive(Debug, Clone, Copy)]
+enum Refusal {
+    /// Nothing in egret provides it yet: [`not_implemented`]'s sentence.
+    NotYet {
+        needs: &'static str,
+        package: &'static str,
+    },
+    /// egret provides it in ONE place and refuses it everywhere else, on
+    /// purpose. The message is the whole sentence.
+    Confined(&'static str),
+}
+
+/// `secret()`'s refusal on the shared environment (W5b Task 4, spec §6).
+///
+/// **`secret()` is implemented, but only for `kestra.*` plugin tasks**, where
+/// `runners::secrets::render_with_secrets` registers a resolving `secret` over
+/// this one on a copy of the environment. Every other render -- script tasks,
+/// inputs, `runIf`, `Log`, triggers -- goes through this environment and meets
+/// this sentence. The script task is the one an author will try, so the
+/// reason is written for it: its rendered commands and env are fields of the
+/// pod spec, readable by anyone with `get pods` in the task namespace.
+pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on `kestra.*` \
+     plugin tasks. It is refused here: on a script task the rendered commands and env are \
+     fields of the pod spec, readable by anyone with `get pods` in the task namespace, and \
+     no other render (inputs, runIf, Log, triggers) resolves secrets.";
 
 /// The twelve names egret registers only to refuse, with what each is waiting
 /// for and who owns it.
@@ -205,22 +235,48 @@ pub(super) fn register(env: &mut Environment<'static>) {
 /// `workflow.task_logs` to W11. `secret` and `http` are still in no package's
 /// contents — the same residue of the finding W10 §1 records, left open here
 /// deliberately rather than reassigned a second time.
-const REFUSED: &[(&str, &str, &str)] = &[
+///
+/// **Updated 2026-09-29 (W5b Task 4).** `secret` is no longer waiting for a
+/// package: it resolves on `kestra.*` plugin tasks and is
+/// [`Refusal::Confined`] everywhere else, with [`SECRET_REFUSAL`]'s reason.
+const REFUSED: &[(&str, Refusal)] = &[
     // Registered with a null backing on the built engine.
-    ("secret", "the secret backend", "W9"),
-    ("kv", "the namespace KV store", "W9"),
-    ("read", "internal storage and namespace files", "W9"),
-    ("fileURI", "namespace files", "W9"),
-    ("fileSize", "internal storage and namespace files", "W9"),
-    ("fileExists", "internal storage and namespace files", "W9"),
-    ("isFileEmpty", "internal storage and namespace files", "W9"),
-    ("http", "an outbound HTTP client", "W9"),
+    ("secret", Refusal::Confined(SECRET_REFUSAL)),
+    ("kv", not_yet("the namespace KV store", "W9")),
+    (
+        "read",
+        not_yet("internal storage and namespace files", "W9"),
+    ),
+    ("fileURI", not_yet("namespace files", "W9")),
+    (
+        "fileSize",
+        not_yet("internal storage and namespace files", "W9"),
+    ),
+    (
+        "fileExists",
+        not_yet("internal storage and namespace files", "W9"),
+    ),
+    (
+        "isFileEmpty",
+        not_yet("internal storage and namespace files", "W9"),
+    ),
+    ("http", not_yet("an outbound HTTP client", "W9")),
     // Not registered at all on the built engine: `@Inject @Nullable`, guarded.
-    ("render", "an execution context to render against", "W3"),
-    ("renderOnce", "an execution context to render against", "W3"),
-    ("errorLogs", "the running execution's logs", "W11"),
-    ("subflow", "subflow execution", "W6"),
+    (
+        "render",
+        not_yet("an execution context to render against", "W3"),
+    ),
+    (
+        "renderOnce",
+        not_yet("an execution context to render against", "W3"),
+    ),
+    ("errorLogs", not_yet("the running execution's logs", "W11")),
+    ("subflow", not_yet("subflow execution", "W6")),
 ];
+
+const fn not_yet(needs: &'static str, package: &'static str) -> Refusal {
+    Refusal::NotYet { needs, package }
+}
 
 // ---------------------------------------------------------------------------
 // The structured-data readers
@@ -3094,7 +3150,6 @@ mod tests {
     #[test]
     fn the_twelve_refusals_name_themselves_and_their_owner() {
         let expected = [
-            ("secret", "the secret backend", "W9"),
             ("kv", "the namespace KV store", "W9"),
             ("read", "internal storage and namespace files", "W9"),
             ("fileURI", "namespace files", "W9"),
@@ -3107,13 +3162,24 @@ mod tests {
             ("errorLogs", "the running execution's logs", "W11"),
             ("subflow", "subflow execution", "W6"),
         ];
-        assert_eq!(expected.len(), REFUSED.len(), "a name was added or dropped");
+        // `secret` is the one `Refusal::Confined` row (W5b Task 4); its
+        // sentence is asserted beside the others below.
+        assert_eq!(
+            expected.len() + 1,
+            REFUSED.len(),
+            "a name was added or dropped"
+        );
 
-        for (name, needs, package) in expected {
-            let want = format!(
-                "The '{name}' function is not implemented yet: it needs {needs}, \
-                 which egret's {package} package provides."
-            );
+        let not_yet = expected.iter().map(|(name, needs, package)| {
+            (
+                *name,
+                format!(
+                    "The '{name}' function is not implemented yet: it needs {needs}, \
+                     which egret's {package} package provides."
+                ),
+            )
+        });
+        for (name, want) in not_yet.chain([("secret", SECRET_REFUSAL.to_string())]) {
             // Three argument shapes: none, one named, one positional. A
             // refusal that only fired for one of them would still satisfy the
             // corpus entry.

@@ -33,6 +33,9 @@
 //!   same pre/post-processing `VariableRenderer` does (the `{% raw %}`
 //!   protection, the re-render loop). `Property<T>::render` is `env`'s
 //!   `render_str` plus a conversion.
+//! - `secrets` is W5b's `secret()`: a two-pass render over `env`'s
+//!   `render_str_with` that resolves it for `kestra.*` plugin tasks only. The
+//!   shared environment keeps refusing it (see `secrets`' module doc).
 
 pub mod env;
 mod filters;
@@ -43,6 +46,7 @@ mod javaformat;
 mod javare;
 mod jqsandbox;
 pub mod rewrite;
+pub mod secrets;
 mod yamlfmt;
 
 // `environment` is deliberately NOT re-exported: it is `pub(crate)` and is
