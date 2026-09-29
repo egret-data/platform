@@ -27,24 +27,54 @@
 //! case that reads as benign to a steward. A `_ =>` arm here would convert a
 //! future fail-open defect in the evaluator into a green build here.
 //!
-//! **What is, and is not, mirrored to that same depth.**
+//! **The mirroring goes all the way down, not just to `UndecidableCause`.**
 //! `UndecidableCause::EnvelopeConstruct` / `::PolicyConstruct` carry an
-//! `egret_ranger_eval::model::Unmodelled` payload, and `::ServiceDef` a
-//! `servicedef::ServiceDefIssue` — both themselves multi-variant enums, one
-//! level further down in what the policy-body reader and the service-def
-//! reader detect. Neither is named in this task's produces-list
-//! (`Decision`, `DenyReason`, `UndecidableCause`, and the mask/row-filter
-//! results), and a frontend's `kind` switch only needs to reach the
-//! `UndecidableCause` level — the established convention
-//! (`routes::ExplainReason::kind`) is a `kind` string a caller switches on,
-//! not a nested switchable payload three enums deep. So `construct` and
-//! `issue` below are that inner value's own `Debug` output, not a second
-//! hand-mirrored enum. This is a scope decision, not an oversight: a `Debug`
-//! string can never mislabel a new inner variant as an existing, possibly
-//! benign one — it just is not itself a second `kind` a frontend can switch
-//! on. If a later task needs that (a steward UI switching on `Unmodelled`'s
-//! own variant), mirroring `Unmodelled`/`ServiceDefIssue` the same
-//! exhaustive way is a follow-up, not a silent gap in this one.
+//! `egret_ranger_eval::model::Unmodelled` payload (15 variants), and
+//! `::ServiceDef` a `servicedef::ServiceDefIssue` (4 variants, one of which —
+//! `InvalidResourceGraph` — carries a `PolicyType` and a `GraphProblem` of
+//! its own). An earlier version of this module rendered those nested
+//! payloads with `{:?}` instead of mirroring them, on the theory that a
+//! frontend's `kind` switch only needs to reach the `UndecidableCause`
+//! level. That was wrong, for two reasons a reviewer raised: first, the
+//! operator-facing information — e.g. `Unmodelled::TagPolicies` naming HOW
+//! MANY tag policies could decide a request, the exact fact
+//! `SP4d-2b`/Task 8's steward UI needs to render — lives in that nested
+//! payload, so hiding it behind `{:?}` would force the UI to pattern-match a
+//! Rust `Debug` string, a worse coupling than the one avoiding `utoipa` in
+//! `egret-ranger-eval` was meant to prevent. Second, and decisively: `{:?}`
+//! is not a stable wire contract. Renaming a variant or a field inside
+//! `Unmodelled` changes the wire string with no compile error, no OpenAPI
+//! diff, and no test failure unless a test happens to pin that exact
+//! string — exactly the class of silent drift the no-wildcard-arm
+//! discipline exists to turn into a build break. Stopping that discipline
+//! one level down, where the variants are newest and still moving (Task 1
+//! landed additions to these very enums on this branch), would have
+//! abandoned it exactly where it matters most.
+//!
+//! So `Unmodelled`, `ItemBucket`, `TagPolicyBlock`, `ServiceDefIssue`,
+//! `PolicyType`, and `GraphProblem` are ALL mirrored the same way as
+//! `Decision`/`DenyReason`/`UndecidableCause`: an enum per source enum, a
+//! `From`/`From<&_>` conversion with no wildcard arm, and every variant name
+//! surviving onto the wire as a real, switchable `kind` — never folded into
+//! a formatted string. `Unmodelled::TagPolicies(TagPolicyBlock::Policies(n))`
+//! in particular carries its count as a JSON number
+//! (`WireTagPolicyBlock::Policies { count }`), not embedded in text, because
+//! Task 8 renders it and a later package (SP4d-2b) changes what it means.
+//! No exception was found: every leaf enum here (`ItemBucket`,
+//! `TagPolicyBlock`, `PolicyType`, `GraphProblem`) carries a discriminator a
+//! steward or a later UI can plausibly need to switch on, not one opaque
+//! string with nothing beneath it — so none of them stayed a `Debug` string.
+//! The only genuinely-opaque payloads left as plain typed fields are things
+//! that are NOT discriminators: raw expression text (`expr`, `value`),
+//! resource/zone names, and item-list indices.
+//!
+//! **`usize` fields (`item_index`, list indices) are narrowed to `u32` on
+//! the wire, not mirrored as `usize`.** `utoipa::ToSchema`'s support for
+//! bare `usize` is not exercised anywhere else in this codebase (checked
+//! before choosing this), so `u32` is the safe, unambiguous choice for an
+//! item-list index — small enough that the narrowing itself can never
+//! truncate a real index. Do not "simplify" this back to `usize` without
+//! first confirming `ToSchema` actually derives cleanly for it.
 //!
 //! **Where `policy_id`/`policy_name` live.** Every payload that names a
 //! policy carries both as separate named fields on the same enum variant —
@@ -63,6 +93,8 @@ use egret_ranger_eval::eval::{
     Decision, DenyReason, EngineType, MaskDecision, MaskResult, PluginVersion, RowFilterDecision,
     RowFilterResult, UndecidableCause,
 };
+use egret_ranger_eval::model::{ItemBucket, TagPolicyBlock, Unmodelled};
+use egret_ranger_eval::servicedef::{GraphProblem, PolicyType, ServiceDefIssue};
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -127,24 +159,315 @@ impl From<DenyReason> for WireDenyReason {
     }
 }
 
+// ── ItemBucket / TagPolicyBlock (payloads of `Unmodelled`) ───────────────
+
+/// Wire mirror of [`ItemBucket`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WireItemBucket {
+    PolicyItems,
+    DenyPolicyItems,
+    AllowExceptions,
+    DenyExceptions,
+    DataMaskPolicyItems,
+    RowFilterPolicyItems,
+}
+
+impl From<ItemBucket> for WireItemBucket {
+    fn from(bucket: ItemBucket) -> Self {
+        // NO wildcard arm — see `WireUndecidableCause::from`'s doc.
+        match bucket {
+            ItemBucket::PolicyItems => WireItemBucket::PolicyItems,
+            ItemBucket::DenyPolicyItems => WireItemBucket::DenyPolicyItems,
+            ItemBucket::AllowExceptions => WireItemBucket::AllowExceptions,
+            ItemBucket::DenyExceptions => WireItemBucket::DenyExceptions,
+            ItemBucket::DataMaskPolicyItems => WireItemBucket::DataMaskPolicyItems,
+            ItemBucket::RowFilterPolicyItems => WireItemBucket::RowFilterPolicyItems,
+        }
+    }
+}
+
+/// Wire mirror of [`TagPolicyBlock`]. `Policies` carries its count as a
+/// JSON number (`count`), never folded into a formatted string — Task 8's
+/// steward UI renders it, and SP4d-2b changes what it means.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireTagPolicyBlock {
+    Policies { count: u32 },
+    Unreadable,
+}
+
+impl From<&TagPolicyBlock> for WireTagPolicyBlock {
+    fn from(block: &TagPolicyBlock) -> Self {
+        // NO wildcard arm — see `WireUndecidableCause::from`'s doc.
+        match block {
+            TagPolicyBlock::Policies(count) => WireTagPolicyBlock::Policies {
+                count: *count as u32,
+            },
+            TagPolicyBlock::Unreadable => WireTagPolicyBlock::Unreadable,
+        }
+    }
+}
+
+// ── Unmodelled (15 variants as of this task) ─────────────────────────────
+
+/// Wire mirror of [`Unmodelled`] — the construct a policy or envelope body
+/// carries that this reader detected but does not model. See the module
+/// doc for why this is mirrored exhaustively rather than rendered as a
+/// `Debug` string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireUnmodelled {
+    ValiditySchedules,
+    PolicyConditions,
+    ItemConditions {
+        bucket: WireItemBucket,
+        index: u32,
+    },
+    ZoneName {
+        zone_name: String,
+    },
+    SecurityZones,
+    TagPolicies {
+        block: WireTagPolicyBlock,
+    },
+    PolicyDeltas,
+    ServiceConfig,
+    MaskExpressionMarker {
+        bucket: WireItemBucket,
+        item_index: u32,
+        expr: String,
+    },
+    MaskConditionExpr {
+        bucket: WireItemBucket,
+        item_index: u32,
+    },
+    RowFilterExpressionMarker {
+        bucket: WireItemBucket,
+        item_index: u32,
+        expr: String,
+    },
+    ResourceValueExpressionMarker {
+        additional_index: Option<u32>,
+        resource_type: String,
+        value: String,
+    },
+    UserExpressionMarker {
+        bucket: WireItemBucket,
+        index: u32,
+        user: String,
+    },
+    ExplicitDeny {
+        bucket: WireItemBucket,
+        index: u32,
+        access_type: String,
+    },
+    DelegateAdmin {
+        bucket: WireItemBucket,
+        index: u32,
+    },
+}
+
+impl From<&Unmodelled> for WireUnmodelled {
+    fn from(value: &Unmodelled) -> Self {
+        // NO wildcard arm — see `WireUndecidableCause::from`'s doc.
+        match value {
+            Unmodelled::ValiditySchedules => WireUnmodelled::ValiditySchedules,
+            Unmodelled::PolicyConditions => WireUnmodelled::PolicyConditions,
+            Unmodelled::ItemConditions { bucket, index } => WireUnmodelled::ItemConditions {
+                bucket: WireItemBucket::from(*bucket),
+                index: *index as u32,
+            },
+            Unmodelled::ZoneName(zone_name) => WireUnmodelled::ZoneName {
+                zone_name: zone_name.clone(),
+            },
+            Unmodelled::SecurityZones => WireUnmodelled::SecurityZones,
+            Unmodelled::TagPolicies(block) => WireUnmodelled::TagPolicies {
+                block: WireTagPolicyBlock::from(block),
+            },
+            Unmodelled::PolicyDeltas => WireUnmodelled::PolicyDeltas,
+            Unmodelled::ServiceConfig => WireUnmodelled::ServiceConfig,
+            Unmodelled::MaskExpressionMarker {
+                bucket,
+                item_index,
+                expr,
+            } => WireUnmodelled::MaskExpressionMarker {
+                bucket: WireItemBucket::from(*bucket),
+                item_index: *item_index as u32,
+                expr: expr.clone(),
+            },
+            Unmodelled::MaskConditionExpr { bucket, item_index } => {
+                WireUnmodelled::MaskConditionExpr {
+                    bucket: WireItemBucket::from(*bucket),
+                    item_index: *item_index as u32,
+                }
+            }
+            Unmodelled::RowFilterExpressionMarker {
+                bucket,
+                item_index,
+                expr,
+            } => WireUnmodelled::RowFilterExpressionMarker {
+                bucket: WireItemBucket::from(*bucket),
+                item_index: *item_index as u32,
+                expr: expr.clone(),
+            },
+            Unmodelled::ResourceValueExpressionMarker {
+                additional_index,
+                resource_type,
+                value,
+            } => WireUnmodelled::ResourceValueExpressionMarker {
+                additional_index: additional_index.map(|i| i as u32),
+                resource_type: resource_type.clone(),
+                value: value.clone(),
+            },
+            Unmodelled::UserExpressionMarker {
+                bucket,
+                index,
+                user,
+            } => WireUnmodelled::UserExpressionMarker {
+                bucket: WireItemBucket::from(*bucket),
+                index: *index as u32,
+                user: user.clone(),
+            },
+            Unmodelled::ExplicitDeny {
+                bucket,
+                index,
+                access_type,
+            } => WireUnmodelled::ExplicitDeny {
+                bucket: WireItemBucket::from(*bucket),
+                index: *index as u32,
+                access_type: access_type.clone(),
+            },
+            Unmodelled::DelegateAdmin { bucket, index } => WireUnmodelled::DelegateAdmin {
+                bucket: WireItemBucket::from(*bucket),
+                index: *index as u32,
+            },
+        }
+    }
+}
+
+// ── PolicyType / GraphProblem (payloads of `ServiceDefIssue`) ────────────
+
+/// Wire mirror of [`PolicyType`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WirePolicyType {
+    Access,
+    DataMask,
+    RowFilter,
+}
+
+impl From<PolicyType> for WirePolicyType {
+    fn from(policy_type: PolicyType) -> Self {
+        // NO wildcard arm — see `WireUndecidableCause::from`'s doc.
+        match policy_type {
+            PolicyType::Access => WirePolicyType::Access,
+            PolicyType::DataMask => WirePolicyType::DataMask,
+            PolicyType::RowFilter => WirePolicyType::RowFilter,
+        }
+    }
+}
+
+/// Wire mirror of [`GraphProblem`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireGraphProblem {
+    NoSourcesOrSinks,
+    SinkIsNotAValidLeaf { resource: String },
+    BrokenParentChain { resource: String },
+}
+
+impl From<&GraphProblem> for WireGraphProblem {
+    fn from(problem: &GraphProblem) -> Self {
+        // NO wildcard arm — see `WireUndecidableCause::from`'s doc.
+        match problem {
+            GraphProblem::NoSourcesOrSinks => WireGraphProblem::NoSourcesOrSinks,
+            GraphProblem::SinkIsNotAValidLeaf { resource } => {
+                WireGraphProblem::SinkIsNotAValidLeaf {
+                    resource: resource.clone(),
+                }
+            }
+            GraphProblem::BrokenParentChain { resource } => WireGraphProblem::BrokenParentChain {
+                resource: resource.clone(),
+            },
+        }
+    }
+}
+
+// ── ServiceDefIssue (4 variants as of this task) ─────────────────────────
+
+/// Wire mirror of [`ServiceDefIssue`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireServiceDefIssue {
+    UnmodelledMatcherClass {
+        resource: String,
+        matcher: String,
+    },
+    QuotedCaseSensitive {
+        resource: String,
+    },
+    ChainedImpliedGrants {
+        implying: String,
+        implied: String,
+    },
+    InvalidResourceGraph {
+        policy_type: WirePolicyType,
+        reason: WireGraphProblem,
+    },
+}
+
+impl From<&ServiceDefIssue> for WireServiceDefIssue {
+    fn from(issue: &ServiceDefIssue) -> Self {
+        // NO wildcard arm — see `WireUndecidableCause::from`'s doc.
+        match issue {
+            ServiceDefIssue::UnmodelledMatcherClass { resource, matcher } => {
+                WireServiceDefIssue::UnmodelledMatcherClass {
+                    resource: resource.clone(),
+                    matcher: matcher.clone(),
+                }
+            }
+            ServiceDefIssue::QuotedCaseSensitive { resource } => {
+                WireServiceDefIssue::QuotedCaseSensitive {
+                    resource: resource.clone(),
+                }
+            }
+            ServiceDefIssue::ChainedImpliedGrants { implying, implied } => {
+                WireServiceDefIssue::ChainedImpliedGrants {
+                    implying: implying.clone(),
+                    implied: implied.clone(),
+                }
+            }
+            ServiceDefIssue::InvalidResourceGraph {
+                policy_type,
+                reason,
+            } => WireServiceDefIssue::InvalidResourceGraph {
+                policy_type: WirePolicyType::from(*policy_type),
+                reason: WireGraphProblem::from(reason),
+            },
+        }
+    }
+}
+
 // ── UndecidableCause (13 variants as of this task; see the module doc) ──
 
 /// Wire mirror of [`UndecidableCause`]. `kind` is the discriminator a
-/// frontend switches on; see the module doc for what is, and is not,
-/// mirrored one level deeper for the constructs each cause names.
+/// frontend switches on; see the module doc for how the constructs each
+/// cause names (`Unmodelled`, `ServiceDefIssue`) are mirrored just as
+/// exhaustively, one level deeper.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireUndecidableCause {
     EnvelopeConstruct {
-        construct: String,
+        construct: WireUnmodelled,
     },
     PolicyConstruct {
         policy_id: Option<i64>,
         policy_name: String,
-        construct: String,
+        construct: WireUnmodelled,
     },
     ServiceDef {
-        issue: String,
+        issue: WireServiceDefIssue,
     },
     ResourceOwnerUnknown {
         policy_id: Option<i64>,
@@ -202,7 +525,7 @@ impl From<&UndecidableCause> for WireUndecidableCause {
         match cause {
             UndecidableCause::EnvelopeConstruct(construct) => {
                 WireUndecidableCause::EnvelopeConstruct {
-                    construct: format!("{construct:?}"),
+                    construct: WireUnmodelled::from(construct),
                 }
             }
             UndecidableCause::PolicyConstruct {
@@ -212,10 +535,10 @@ impl From<&UndecidableCause> for WireUndecidableCause {
             } => WireUndecidableCause::PolicyConstruct {
                 policy_id: *policy_id,
                 policy_name: policy_name.clone(),
-                construct: format!("{construct:?}"),
+                construct: WireUnmodelled::from(construct),
             },
             UndecidableCause::ServiceDef(issue) => WireUndecidableCause::ServiceDef {
-                issue: format!("{issue:?}"),
+                issue: WireServiceDefIssue::from(issue),
             },
             UndecidableCause::ResourceOwnerUnknown {
                 policy_id,

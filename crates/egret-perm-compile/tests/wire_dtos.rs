@@ -1,28 +1,43 @@
 //! SP4d-2a Task 4: conversion tests for the hand-written wire DTOs that
 //! mirror `egret_ranger_eval::eval`'s three-valued `Decision`, `DenyReason`,
-//! `UndecidableCause`, and the mask / row-filter results.
+//! `UndecidableCause`, and the mask / row-filter results — and, one level
+//! deeper, the `Unmodelled` / `ServiceDefIssue` (and `ItemBucket` /
+//! `TagPolicyBlock` / `PolicyType` / `GraphProblem`) payloads those causes
+//! carry. All of it is mirrored exhaustively, not just the top level — see
+//! `explain_wire`'s module doc for why an earlier `{:?}` shortcut one level
+//! down was wrong.
 //!
 //! **Why one test per source variant.** The whole point of hand-writing
 //! these conversions (rather than deriving `ToSchema` on the source types
 //! directly, which would require adding `utoipa` to `egret-ranger-eval` and
 //! giving up its `serde`-only discipline) is that the `From` impls match
 //! with no wildcard arm — a variant added upstream fails the BUILD, not a
-//! test. This file cannot exercise that compile-time property directly, but
-//! it can and does prove the mapping is correct for every variant that
-//! exists today, so a reviewer diffing this file against a future
-//! `eval.rs` can see at a glance which arm is missing.
+//! test. This file cannot exercise that compile-time property directly by
+//! itself, but it can and does prove the mapping is correct for every
+//! variant that exists today, so a reviewer diffing this file against a
+//! future `eval.rs`/`model.rs`/`servicedef.rs` can see at a glance which arm
+//! is missing. The compile-time property itself was verified by hand while
+//! writing this: a temporary extra variant added to `UndecidableCause` (in
+//! `eval.rs`) and, separately, to `Unmodelled` (in `model.rs`) each broke
+//! `cargo build -p egret-perm-compile` with `error[E0004]: non-exhaustive
+//! patterns`, pointing at the exact `match` in `explain_wire.rs` missing
+//! that arm — then both were reverted (`git diff --stat -- crates/
+//! egret-ranger-eval/` empty again). See the Task 4 report for the full
+//! transcript.
 //!
 //! Pure conversions, no I/O — no `DATABASE_URL` needed.
 
 use egret_perm_compile::explain_wire::{
-    WireDecision, WireDenyReason, WireEngineType, WireMaskDecision, WireMaskResult,
-    WirePluginVersion, WireRowFilterDecision, WireRowFilterResult, WireUndecidableCause,
+    WireDecision, WireDenyReason, WireEngineType, WireGraphProblem, WireItemBucket,
+    WireMaskDecision, WireMaskResult, WirePluginVersion, WirePolicyType, WireRowFilterDecision,
+    WireRowFilterResult, WireServiceDefIssue, WireTagPolicyBlock, WireUndecidableCause,
+    WireUnmodelled,
 };
 use egret_ranger_eval::eval::{
     Decision, DenyReason, EngineType, MaskDecision, MaskResult, PluginVersion, RowFilterDecision,
     RowFilterResult, UndecidableCause,
 };
-use egret_ranger_eval::model::Unmodelled;
+use egret_ranger_eval::model::{ItemBucket, TagPolicyBlock, Unmodelled};
 use egret_ranger_eval::servicedef::{GraphProblem, PolicyType, ServiceDefIssue};
 
 // ── DenyReason (3 variants) ─────────────────────────────────────────────
@@ -100,53 +115,57 @@ fn plugin_version_both_variants() {
 // ── UndecidableCause (13 variants) ───────────────────────────────────────
 
 #[test]
-fn cause_envelope_construct_carries_a_description() {
-    let cause = UndecidableCause::EnvelopeConstruct(Unmodelled::ServiceConfig);
+fn cause_envelope_construct_carries_the_full_typed_construct() {
+    let cause =
+        UndecidableCause::EnvelopeConstruct(Unmodelled::TagPolicies(TagPolicyBlock::Policies(3)));
     let wire = WireUndecidableCause::from(&cause);
-    match wire {
-        WireUndecidableCause::EnvelopeConstruct { construct } => {
-            assert_eq!(construct, format!("{:?}", Unmodelled::ServiceConfig));
-        }
-        other => panic!("expected EnvelopeConstruct, got {other:?}"),
-    }
+    assert_eq!(
+        wire,
+        WireUndecidableCause::EnvelopeConstruct {
+            construct: WireUnmodelled::TagPolicies {
+                block: WireTagPolicyBlock::Policies { count: 3 },
+            },
+        },
+        "the operator-facing fact (how many tag policies) must survive as a \
+         number, not be buried in a Debug string"
+    );
 }
 
 #[test]
-fn cause_policy_construct_carries_policy_id_name_and_description() {
+fn cause_policy_construct_carries_policy_id_name_and_typed_construct() {
     let cause = UndecidableCause::PolicyConstruct {
         policy_id: Some(42),
         policy_name: "p1".to_string(),
         construct: Unmodelled::ValiditySchedules,
     };
     let wire = WireUndecidableCause::from(&cause);
-    match wire {
+    assert_eq!(
+        wire,
         WireUndecidableCause::PolicyConstruct {
-            policy_id,
-            policy_name,
-            construct,
-        } => {
-            assert_eq!(policy_id, Some(42));
-            assert_eq!(policy_name, "p1");
-            assert_eq!(construct, format!("{:?}", Unmodelled::ValiditySchedules));
+            policy_id: Some(42),
+            policy_name: "p1".to_string(),
+            construct: WireUnmodelled::ValiditySchedules,
         }
-        other => panic!("expected PolicyConstruct, got {other:?}"),
-    }
+    );
 }
 
 #[test]
-fn cause_service_def_carries_a_description() {
+fn cause_service_def_carries_the_full_typed_issue() {
     let issue = ServiceDefIssue::InvalidResourceGraph {
         policy_type: PolicyType::Access,
         reason: GraphProblem::NoSourcesOrSinks,
     };
-    let cause = UndecidableCause::ServiceDef(issue.clone());
+    let cause = UndecidableCause::ServiceDef(issue);
     let wire = WireUndecidableCause::from(&cause);
-    match wire {
-        WireUndecidableCause::ServiceDef { issue: got } => {
-            assert_eq!(got, format!("{issue:?}"));
+    assert_eq!(
+        wire,
+        WireUndecidableCause::ServiceDef {
+            issue: WireServiceDefIssue::InvalidResourceGraph {
+                policy_type: WirePolicyType::Access,
+                reason: WireGraphProblem::NoSourcesOrSinks,
+            },
         }
-        other => panic!("expected ServiceDef, got {other:?}"),
-    }
+    );
 }
 
 #[test]
@@ -455,4 +474,339 @@ fn row_filter_decision_undecidable() {
         }
         other => panic!("expected Undecidable, got {other:?}"),
     }
+}
+
+// ── ItemBucket (6 variants) ──────────────────────────────────────────────
+
+#[test]
+fn item_bucket_every_variant_round_trips() {
+    let cases = [
+        (ItemBucket::PolicyItems, WireItemBucket::PolicyItems),
+        (ItemBucket::DenyPolicyItems, WireItemBucket::DenyPolicyItems),
+        (ItemBucket::AllowExceptions, WireItemBucket::AllowExceptions),
+        (ItemBucket::DenyExceptions, WireItemBucket::DenyExceptions),
+        (
+            ItemBucket::DataMaskPolicyItems,
+            WireItemBucket::DataMaskPolicyItems,
+        ),
+        (
+            ItemBucket::RowFilterPolicyItems,
+            WireItemBucket::RowFilterPolicyItems,
+        ),
+    ];
+    for (source, expected) in cases {
+        assert_eq!(WireItemBucket::from(source), expected);
+    }
+}
+
+// ── TagPolicyBlock (2 variants) ──────────────────────────────────────────
+
+#[test]
+fn tag_policy_block_policies_carries_the_count_as_a_number() {
+    let wire = WireTagPolicyBlock::from(&TagPolicyBlock::Policies(7));
+    assert_eq!(wire, WireTagPolicyBlock::Policies { count: 7 });
+    assert_eq!(
+        serde_json::to_value(&wire).unwrap(),
+        serde_json::json!({"kind": "policies", "count": 7})
+    );
+}
+
+#[test]
+fn tag_policy_block_unreadable() {
+    let wire = WireTagPolicyBlock::from(&TagPolicyBlock::Unreadable);
+    assert_eq!(wire, WireTagPolicyBlock::Unreadable);
+}
+
+// ── Unmodelled (15 variants) ──────────────────────────────────────────────
+
+#[test]
+fn unmodelled_validity_schedules() {
+    assert_eq!(
+        WireUnmodelled::from(&Unmodelled::ValiditySchedules),
+        WireUnmodelled::ValiditySchedules
+    );
+}
+
+#[test]
+fn unmodelled_policy_conditions() {
+    assert_eq!(
+        WireUnmodelled::from(&Unmodelled::PolicyConditions),
+        WireUnmodelled::PolicyConditions
+    );
+}
+
+#[test]
+fn unmodelled_item_conditions() {
+    let source = Unmodelled::ItemConditions {
+        bucket: ItemBucket::DenyExceptions,
+        index: 4,
+    };
+    assert_eq!(
+        WireUnmodelled::from(&source),
+        WireUnmodelled::ItemConditions {
+            bucket: WireItemBucket::DenyExceptions,
+            index: 4,
+        }
+    );
+}
+
+#[test]
+fn unmodelled_zone_name() {
+    let source = Unmodelled::ZoneName("finance-zone".to_string());
+    assert_eq!(
+        WireUnmodelled::from(&source),
+        WireUnmodelled::ZoneName {
+            zone_name: "finance-zone".to_string(),
+        }
+    );
+}
+
+#[test]
+fn unmodelled_security_zones() {
+    assert_eq!(
+        WireUnmodelled::from(&Unmodelled::SecurityZones),
+        WireUnmodelled::SecurityZones
+    );
+}
+
+#[test]
+fn unmodelled_tag_policies_carries_the_block_not_a_string() {
+    let source = Unmodelled::TagPolicies(TagPolicyBlock::Policies(3));
+    assert_eq!(
+        WireUnmodelled::from(&source),
+        WireUnmodelled::TagPolicies {
+            block: WireTagPolicyBlock::Policies { count: 3 },
+        }
+    );
+}
+
+#[test]
+fn unmodelled_policy_deltas() {
+    assert_eq!(
+        WireUnmodelled::from(&Unmodelled::PolicyDeltas),
+        WireUnmodelled::PolicyDeltas
+    );
+}
+
+#[test]
+fn unmodelled_service_config() {
+    assert_eq!(
+        WireUnmodelled::from(&Unmodelled::ServiceConfig),
+        WireUnmodelled::ServiceConfig
+    );
+}
+
+#[test]
+fn unmodelled_mask_expression_marker() {
+    let source = Unmodelled::MaskExpressionMarker {
+        bucket: ItemBucket::DataMaskPolicyItems,
+        item_index: 2,
+        expr: "${{ ctx.tbl }}".to_string(),
+    };
+    assert_eq!(
+        WireUnmodelled::from(&source),
+        WireUnmodelled::MaskExpressionMarker {
+            bucket: WireItemBucket::DataMaskPolicyItems,
+            item_index: 2,
+            expr: "${{ ctx.tbl }}".to_string(),
+        }
+    );
+}
+
+#[test]
+fn unmodelled_mask_condition_expr() {
+    let source = Unmodelled::MaskConditionExpr {
+        bucket: ItemBucket::DataMaskPolicyItems,
+        item_index: 1,
+    };
+    assert_eq!(
+        WireUnmodelled::from(&source),
+        WireUnmodelled::MaskConditionExpr {
+            bucket: WireItemBucket::DataMaskPolicyItems,
+            item_index: 1,
+        }
+    );
+}
+
+#[test]
+fn unmodelled_row_filter_expression_marker() {
+    let source = Unmodelled::RowFilterExpressionMarker {
+        bucket: ItemBucket::RowFilterPolicyItems,
+        item_index: 0,
+        expr: "${{ ctx.user }}".to_string(),
+    };
+    assert_eq!(
+        WireUnmodelled::from(&source),
+        WireUnmodelled::RowFilterExpressionMarker {
+            bucket: WireItemBucket::RowFilterPolicyItems,
+            item_index: 0,
+            expr: "${{ ctx.user }}".to_string(),
+        }
+    );
+}
+
+#[test]
+fn unmodelled_resource_value_expression_marker() {
+    let source = Unmodelled::ResourceValueExpressionMarker {
+        additional_index: Some(2),
+        resource_type: "column".to_string(),
+        value: "{col}".to_string(),
+    };
+    assert_eq!(
+        WireUnmodelled::from(&source),
+        WireUnmodelled::ResourceValueExpressionMarker {
+            additional_index: Some(2),
+            resource_type: "column".to_string(),
+            value: "{col}".to_string(),
+        }
+    );
+}
+
+#[test]
+fn unmodelled_user_expression_marker() {
+    let source = Unmodelled::UserExpressionMarker {
+        bucket: ItemBucket::PolicyItems,
+        index: 0,
+        user: "{OWNER}".to_string(),
+    };
+    assert_eq!(
+        WireUnmodelled::from(&source),
+        WireUnmodelled::UserExpressionMarker {
+            bucket: WireItemBucket::PolicyItems,
+            index: 0,
+            user: "{OWNER}".to_string(),
+        }
+    );
+}
+
+#[test]
+fn unmodelled_explicit_deny() {
+    let source = Unmodelled::ExplicitDeny {
+        bucket: ItemBucket::AllowExceptions,
+        index: 3,
+        access_type: "select".to_string(),
+    };
+    assert_eq!(
+        WireUnmodelled::from(&source),
+        WireUnmodelled::ExplicitDeny {
+            bucket: WireItemBucket::AllowExceptions,
+            index: 3,
+            access_type: "select".to_string(),
+        }
+    );
+}
+
+#[test]
+fn unmodelled_delegate_admin() {
+    let source = Unmodelled::DelegateAdmin {
+        bucket: ItemBucket::PolicyItems,
+        index: 1,
+    };
+    assert_eq!(
+        WireUnmodelled::from(&source),
+        WireUnmodelled::DelegateAdmin {
+            bucket: WireItemBucket::PolicyItems,
+            index: 1,
+        }
+    );
+}
+
+// ── PolicyType (3 variants) ──────────────────────────────────────────────
+
+#[test]
+fn policy_type_every_variant_round_trips() {
+    assert_eq!(
+        WirePolicyType::from(PolicyType::Access),
+        WirePolicyType::Access
+    );
+    assert_eq!(
+        WirePolicyType::from(PolicyType::DataMask),
+        WirePolicyType::DataMask
+    );
+    assert_eq!(
+        WirePolicyType::from(PolicyType::RowFilter),
+        WirePolicyType::RowFilter
+    );
+}
+
+// ── GraphProblem (3 variants) ────────────────────────────────────────────
+
+#[test]
+fn graph_problem_no_sources_or_sinks() {
+    assert_eq!(
+        WireGraphProblem::from(&GraphProblem::NoSourcesOrSinks),
+        WireGraphProblem::NoSourcesOrSinks
+    );
+}
+
+#[test]
+fn graph_problem_sink_is_not_a_valid_leaf() {
+    let source = GraphProblem::SinkIsNotAValidLeaf {
+        resource: "table".to_string(),
+    };
+    assert_eq!(
+        WireGraphProblem::from(&source),
+        WireGraphProblem::SinkIsNotAValidLeaf {
+            resource: "table".to_string(),
+        }
+    );
+}
+
+#[test]
+fn graph_problem_broken_parent_chain() {
+    let source = GraphProblem::BrokenParentChain {
+        resource: "schema".to_string(),
+    };
+    assert_eq!(
+        WireGraphProblem::from(&source),
+        WireGraphProblem::BrokenParentChain {
+            resource: "schema".to_string(),
+        }
+    );
+}
+
+// ── ServiceDefIssue (4 variants; InvalidResourceGraph already covered by
+// cause_service_def_carries_the_full_typed_issue above) ──────────────────
+
+#[test]
+fn service_def_issue_unmodelled_matcher_class() {
+    let source = ServiceDefIssue::UnmodelledMatcherClass {
+        resource: "table".to_string(),
+        matcher: "com.example.CustomMatcher".to_string(),
+    };
+    assert_eq!(
+        WireServiceDefIssue::from(&source),
+        WireServiceDefIssue::UnmodelledMatcherClass {
+            resource: "table".to_string(),
+            matcher: "com.example.CustomMatcher".to_string(),
+        }
+    );
+}
+
+#[test]
+fn service_def_issue_quoted_case_sensitive() {
+    let source = ServiceDefIssue::QuotedCaseSensitive {
+        resource: "column".to_string(),
+    };
+    assert_eq!(
+        WireServiceDefIssue::from(&source),
+        WireServiceDefIssue::QuotedCaseSensitive {
+            resource: "column".to_string(),
+        }
+    );
+}
+
+#[test]
+fn service_def_issue_chained_implied_grants() {
+    let source = ServiceDefIssue::ChainedImpliedGrants {
+        implying: "all".to_string(),
+        implied: "select".to_string(),
+    };
+    assert_eq!(
+        WireServiceDefIssue::from(&source),
+        WireServiceDefIssue::ChainedImpliedGrants {
+            implying: "all".to_string(),
+            implied: "select".to_string(),
+        }
+    );
 }
