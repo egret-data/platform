@@ -42,6 +42,11 @@ egret-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 utoipa.workspace = true
+# SP4d-2a Task 4: hand-written wire DTOs mirroring `egret-ranger-eval`'s
+# `Decision`/`DenyReason`/`UndecidableCause` and mask/row-filter results,
+# because that crate stays `serde`+`serde_json`-only by discipline (see its
+# own `Cargo.toml` and module doc) and does not carry `utoipa` itself.
+egret-ranger-eval.workspace = true
 
 [dev-dependencies]
 egret-metastore.workspace = true
