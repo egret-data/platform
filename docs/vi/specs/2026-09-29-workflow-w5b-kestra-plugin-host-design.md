@@ -56,7 +56,8 @@ Một dự án Maven ở gốc repo, cạnh `crates/egret-workflow/oracle/`:
 - `io.kestra.core.runners.ShimRunContext` kế thừa `DefaultRunContext`, trong chính package của Kestra (bẫy 2 và 3 của spike). `render*` trả lại đầu vào; `logger()` ghi ra stdout; `metric()` ghi một dòng DEBUG; `workingDir()` là `LocalWorkingDir` của Kestra trên thư mục làm việc của pod; `storage()`, `namespaceKv()`, `namespace…()`, `secret…()` và mọi collaborator egret không cung cấp đều ném `EgretUnsupported("… needs internal storage (W9)")`.
 - `io.kestra.core.runners.EgretPluginHost` (main): đọc `task.json` (`{"type": FQCN, "properties": {…}}`), từ chối `type` không có trong `catalog.json` của chính nó (exit 2), deserialize bằng `JacksonMapper` của Kestra và đường fallback plugin registry (bẫy 1 của spike), chạy `validate`, rồi `run(shim)`, in `Output` thành một dòng `::{"outputs": …}::` và thoát.
 - **Mã thoát**, mỗi mã là một lý do FAILED có tên phía egret: `0` thành công; `2` bị từ chối hoặc không hợp lệ (`ConstraintViolationException`, type lạ); `3` plugin ném exception (lớp và thông điệp trong lý do, stack trace trong log ở ERROR); `4` plugin đòi thứ thuộc W9. Mọi mã khác (JVM sập, bị OOM kill) là FAILED kèm mã.
-- **Dòng log:** `LEVEL message`, handler parse sang level của W11; dòng không parse được là INFO.
+- **Dòng log:** `LEVEL message` trên stdout, parse sang level của W11. Dòng không có tiền tố level (dòng tiếp theo của một stack trace) mang level của dòng trước nó, INFO nếu không có. stderr vẫn là ERROR, như mọi container.
+- **Lý do thất bại:** khi thoát với mã khác 0, host in một dòng `::{"egretFailure": {"code": n, "message": "…"}}::` trước khi thoát; handler đặt message (tối đa 4 KiB) vào lý do FAILED. Runner chỉ thu khoá này cho task plugin, nên marker của script không đổi.
 - **`catalog.json`** do `EgretPluginHost describe` sinh ra lúc dựng image: với mỗi lớp task trong ba jar, các thuộc tính kèm JSON schema của Kestra (kiểu, bắt buộc, mặc định, deprecated) và các thuộc tính output. Nó mang sha256 của `plugins.lock`. Được commit tại `crates/egret-workflow/src/plugins/catalog.json` và nhúng bằng `include_str!`. Một test Rust đỏ khi hash lockfile trong catalog đã commit khác `plugins.lock`.
 - Image: `deploy/docker/plugin-host.Dockerfile`, Java 25 (class-file 69 của artifact), classpath Kestra core, ba jar đã kiểm theo `plugins.lock`, chạy bằng uid không phải root. Tham chiếu image lấy từ config, không bao giờ từ flow.
 
@@ -64,7 +65,7 @@ Một dự án Maven ở gốc repo, cạnh `crates/egret-workflow/oracle/`:
 
 - Task có `type` bắt đầu bằng `kestra.` là task plugin. Phần còn lại phải là một FQCN trong `catalog.json`; các dòng của `TASK_TYPES` egret đã port native (`io.kestra.plugin.core.log.Log`, …) bị loại khỏi catalog lúc sinh và một test khẳng định hai tập rời nhau, nên một kiểu native không bao giờ chạy trong JVM.
 - **Bị từ chối lúc publish, có tên:** FQCN `kestra.` không có trong catalog; FQCN trần có trong catalog (gợi ý cách viết có tiền tố); thuộc tính catalog không liệt kê cho lớp đó; thiếu thuộc tính bắt buộc; giá trị thuộc tính cần internal storage — đo theo từng plugin ở Task 1, ít nhất `fetchType: STORE`; `taskRunner` (task plugin chạy trên runner đã cấu hình); bảy thuộc tính gốc egret không đọc (`assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`), như trên task script.
-- Giá trị thuộc tính dạng chữ được kiểm theo kiểu JSON trong catalog; giá trị `{{ }}` được chấp nhận và host kiểm sau khi render (exit 2).
+- Giá trị thuộc tính dạng chữ được kiểm theo kiểu JSON trong catalog khi schema là `string`, `integer`, `number`, `boolean`, `array` hoặc `object` thuần; schema egret không đọc được (`anyOf`, `$ref`, …) và giá trị `{{ }}` được chấp nhận và host kiểm sau khi render (exit 2).
 - `retry`, `timeout`, `disabled`, `runIf`, `allowFailure`, `allowWarning` đi qua mô hình `Task` của egret như mọi task. Task plugin không có `timeout:` chạy dưới `workflow.container_default_timeout_s`.
 
 ### 4.1 `pluginDefaults`
@@ -103,7 +104,9 @@ Handler `kestra` (`worker::handlers::kestra`):
 
 W5a huỷ container với grace 0 (`KubernetesRunner::cancel`, `DockerRunner::cancel` = `docker rm --force`). Cắt kết nối TCP không dừng được query: Postgres chỉ nhận ra khi nó ghi ra socket lần tới, còn Trino và StarRocks giữ query tới khi heartbeat của client hết hạn. Kestra thì gọi `kill()` của task, mà `AbstractJdbcQuery` hiện thực bằng `Statement.cancel()`.
 
-- `TaskCommands` thêm `cancel_grace: Duration`, `0` cho task script (W5a không đổi) và `workflow.plugin_host.kill_grace_s` (mặc định **15 s**) cho task plugin.
+- `TaskRunner::cancel` thêm đối số `grace: Duration`: `0` từ handler script (W5a không đổi) và `workflow.plugin_host.kill_grace_s` (mặc định **15 s**) từ handler plugin.
+- **`cancel` chỉ trả về khi container đã dừng** (hoặc đã qua `grace` + 5 s): outcome commit sau `cancel`, rồi `release` gỡ pod với grace 0, nếu không sẽ cắt ngang `kill()` của plugin.
+- Lệnh là `exec java …`, để JVM là PID 1 và tự nhận SIGTERM; một tiến trình cha `/bin/sh -c` sẽ không chuyển tiếp nó.
 - **Kubernetes:** pod bị xoá với `gracePeriodSeconds = cancel_grace`; kubelet gửi SIGTERM tới `main`, chờ, rồi SIGKILL. **Docker:** `docker stop -t <grace>`, rồi `docker rm --force` của W5a.
 - **Host** đăng ký một JVM shutdown hook: khi nhận SIGTERM nó gọi `kill()` của task đang chạy từ luồng của hook (đúng hợp đồng của Kestra: *"may be invoked from a different thread than the one running the job"*), chờ `run` trả về tối đa `cancel_grace − 2 s`, ghi log `killed: <lý do>` rồi thoát.
 - Outcome là của egret, không phải của host: task FAILED với dòng `Timeout after …` của W11 bất kể host in gì. Việc kill chạy trước khi outcome commit và việc gỡ pod chạy sau, đúng thứ tự của W5a.
