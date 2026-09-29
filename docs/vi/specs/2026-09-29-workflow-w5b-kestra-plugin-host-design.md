@@ -12,6 +12,8 @@
 - **Lockfile đầu tiên có ba plugin:** `plugin-jdbc-postgres`, `plugin-jdbc-trino`, `plugin-jdbc-mysql` (cho StarRocks: Maven Central không có `plugin-jdbc-starrocks`, kiểm 2026-09-29).
 - **Governance:** feature `workflow_kestra_plugins`, **tắt mặc định**, cần `workflow_containers`; platform admin thu hẹp catalog bằng glob `allowed-types`; không có entry thì cho phép cả catalog.
 - **Mỗi task-run attempt một JVM**, trong một pod của W5a. Không JVM sống lâu, không JVM trong `egret-server`.
+- **Timeout huỷ query trên engine** (thêm sau khi so với Kestra): host bị dừng bằng SIGTERM kèm thời gian grace và gọi `kill()` của plugin — với JDBC là `Statement.cancel()` — trước khi pod bị gỡ (§7.1).
+- **`pluginDefaults:` bị từ chối lúc publish, trên mọi flow**, như Kestra 2.0 từ chối nó (§4.1). Hôm nay egret bỏ nó đi mà không báo.
 
 **Bàn giao:** một PR (tài liệu + mã), các task ở §9.
 
@@ -44,6 +46,8 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 | backend `secret()` theo namespace | `workspace_secrets` của workspace chứa execution; `namespace` và `full` bị từ chối có tên | một flow không thể chỉ tới workspace khác |
 | output và file vào internal storage | output inline (trần 1 MiB của W5a); mọi thứ cần storage thì FAILED có tên | internal storage là W9 |
 | Kestra chạy plugin trong JVM worker của nó | một JVM mỗi task-run attempt, trong container của W5a | cách ly: plugin OOM hay `System.exit()` chỉ hạ một pod |
+| `pluginDefaults` mức flow bị bỏ ở 2.0 (commit `ca6cd11fa`, có trong mọi tag từ `v2.0.0-rc6`): bị từ chối lúc save, bị bỏ qua khi đọc flow cũ | bị từ chối lúc publish trên mọi flow; egret bỏ đi không báo cho tới W5b | theo artifact đã pin; tính năng đã chuyển sang Policies bản Enterprise |
+| khi kill hoặc timeout, worker gọi `kill()` của task (`WorkerJobLifecycle.kill`, `WorkerTaskCallable.java:48`) | cùng `kill()` đó, tới qua SIGTERM và thời gian grace (§7.1) | một query JDBC không được sống lâu hơn task của nó trên engine |
 
 ## 3. Host (`plugin-host/`)
 
@@ -62,6 +66,14 @@ Một dự án Maven ở gốc repo, cạnh `crates/egret-workflow/oracle/`:
 - **Bị từ chối lúc publish, có tên:** FQCN `kestra.` không có trong catalog; FQCN trần có trong catalog (gợi ý cách viết có tiền tố); thuộc tính catalog không liệt kê cho lớp đó; thiếu thuộc tính bắt buộc; giá trị thuộc tính cần internal storage — đo theo từng plugin ở Task 1, ít nhất `fetchType: STORE`; `taskRunner` (task plugin chạy trên runner đã cấu hình); bảy thuộc tính gốc egret không đọc (`assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`), như trên task script.
 - Giá trị thuộc tính dạng chữ được kiểm theo kiểu JSON trong catalog; giá trị `{{ }}` được chấp nhận và host kiểm sau khi render (exit 2).
 - `retry`, `timeout`, `disabled`, `runIf`, `allowFailure`, `allowWarning` đi qua mô hình `Task` của egret như mọi task. Task plugin không có `timeout:` chạy dưới `workflow.container_default_timeout_s`.
+
+### 4.1 `pluginDefaults`
+
+Kestra 2.0 đã bỏ `pluginDefaults` mức flow (commit `ca6cd11fa`, *"OSS enablers for EE Policies"*, 2026-07-17; có trong mọi tag từ `v2.0.0-rc6`, nên có trong `rc13` đã pin). `FlowService.validate` của nó trả một constraint violation nêu tên `pluginDefaults` (`FlowServiceTest.shouldReturnConstraintWhenFlowUsesRemovedPluginDefaults`); đường đọc lỏng của nó parse flow như vậy và không áp gì (`FlowParsingServiceTest.shouldIgnorePluginDefaultsWhenParsingLeniently`).
+
+`Flow` của egret không có trường này và không có `deny_unknown_fields`, nên hôm nay một flow có `pluginDefaults:` publish được và các giá trị bị bỏ đi không báo. W5b làm cho `spec::validate` từ chối khoá `pluginDefaults` ở mức cao nhất, bất kể giá trị (kể cả danh sách rỗng), trên **mọi** flow, không chỉ flow có task plugin: *"`pluginDefaults` was removed in Kestra 2.0; set the properties on each task"*. Lời từ chối hiện trên bản nháp và chặn publish. Một bản nháp vẫn được chạy thì không áp gì, như đường đọc của Kestra. Task 1 đo câu chữ và phạm vi của lời từ chối trên artifact.
+
+Các khoá mức cao nhất khác mà egret bỏ đi không báo không được rà ở đây (§11).
 
 ## 5. Governance
 
@@ -87,7 +99,18 @@ Handler `kestra` (`worker::handlers::kestra`):
 4. giao cho runner đã cấu hình (W5a) — cùng cách đặt tên pod, hardening, NetworkPolicy, gia hạn lease, re-attach và xoá-sau-commit;
 5. ánh xạ mã thoát sang outcome; lấy output từ dòng `::{json}::` (bị trần 1 MiB của W5a chặn; vượt thì task FAILED có tên).
 
-`workflow.plugin_host`: `image` (bắt buộc khi `container_runner` khác `none`), `jvm_max_heap` (mặc định `384m`, truyền thành `-Xmx`, dưới giới hạn bộ nhớ mặc định của pod). Với `container_runner: none` không task plugin nào chạy được và publish từ chối chúng, như task script.
+### 7.1 Timeout: huỷ trên engine, rồi mới gỡ
+
+W5a huỷ container với grace 0 (`KubernetesRunner::cancel`, `DockerRunner::cancel` = `docker rm --force`). Cắt kết nối TCP không dừng được query: Postgres chỉ nhận ra khi nó ghi ra socket lần tới, còn Trino và StarRocks giữ query tới khi heartbeat của client hết hạn. Kestra thì gọi `kill()` của task, mà `AbstractJdbcQuery` hiện thực bằng `Statement.cancel()`.
+
+- `TaskCommands` thêm `cancel_grace: Duration`, `0` cho task script (W5a không đổi) và `workflow.plugin_host.kill_grace_s` (mặc định **15 s**) cho task plugin.
+- **Kubernetes:** pod bị xoá với `gracePeriodSeconds = cancel_grace`; kubelet gửi SIGTERM tới `main`, chờ, rồi SIGKILL. **Docker:** `docker stop -t <grace>`, rồi `docker rm --force` của W5a.
+- **Host** đăng ký một JVM shutdown hook: khi nhận SIGTERM nó gọi `kill()` của task đang chạy từ luồng của hook (đúng hợp đồng của Kestra: *"may be invoked from a different thread than the one running the job"*), chờ `run` trả về tối đa `cancel_grace − 2 s`, ghi log `killed: <lý do>` rồi thoát.
+- Outcome là của egret, không phải của host: task FAILED với dòng `Timeout after …` của W11 bất kể host in gì. Việc kill chạy trước khi outcome commit và việc gỡ pod chạy sau, đúng thứ tự của W5a.
+- **Đo ở Task 1, không giả định:** `kill()` của từng plugin trong ba plugin có thật sự kết thúc query trên Postgres (`pg_stat_activity`), Trino (trạng thái trong `system.runtime.queries`) và StarRocks (`SHOW PROCESSLIST`) trong thời gian grace không.
+- egret chưa có kill cho người dùng (phát hiện của W10); khi có, nó đi cùng đường này.
+
+`workflow.plugin_host`: `image` (bắt buộc khi `container_runner` khác `none`), `jvm_max_heap` (mặc định `384m`, truyền thành `-Xmx`, dưới giới hạn bộ nhớ mặc định của pod), `kill_grace_s` (mặc định 15). Với `container_runner: none` không task plugin nào chạy được và publish từ chối chúng, như task script.
 
 ## 8. Bảo mật
 
@@ -98,11 +121,11 @@ Handler `kestra` (`worker::handlers::kestra`):
 
 ## 9. Các task
 
-1. **Đo trên artifact** (Kestra `2.0.0-rc13` với ba plugin): `Query` của mỗi plugin tới Postgres, Trino và StarRocks — hình dạng output theo `fetchType`, `fetchType` mặc định, dòng log và level, việc che secret trong dòng log, các thuộc tính cần storage. `plugin-jdbc-mysql` với StarRocks là đo, không giả định. Fixture `oracle-exec/w5b-plugins.json`.
+1. **Đo trên artifact** (Kestra `2.0.0-rc13` với ba plugin): `Query` của mỗi plugin tới Postgres, Trino và StarRocks — hình dạng output theo `fetchType`, `fetchType` mặc định, dòng log và level, việc che secret trong dòng log, các thuộc tính cần storage, lời từ chối flow có `pluginDefaults`, `kill()` có kết thúc query trên từng engine không. `plugin-jdbc-mysql` với StarRocks là đo, không giả định. Fixture `oracle-exec/w5b-plugins.json`.
 2. **`plugin-host/`:** dự án Maven, shim, main, `describe`, `plugins.lock`, Dockerfile, `catalog.json`; test Java cho shim (lời gọi W9 ném `EgretUnsupported`, mã thoát); test Rust về hash lockfile.
-3. **Mô hình, publish, governance:** kiểu `kestra.` từ catalog; từ chối lúc lưu; `workflow_kestra_plugins`; `allowed-types`; cổng lúc publish.
+3. **Mô hình, publish, governance:** kiểu `kestra.` từ catalog; từ chối lúc lưu; từ chối `pluginDefaults` trên mọi flow; `workflow_kestra_plugins`; `allowed-types`; cổng lúc publish.
 4. **`secret()`:** phân giải, từ chối `namespace`/`full`, từ chối trên task script kèm lý do, che trong phần ingest của `RunLog`; test giá trị vắng mặt khỏi các hàng đã lưu.
-5. **Handler và nối dây:** handler `kestra`; ánh xạ mã thoát; config `workflow.plugin_host`; registry trong `egret-bin`; cổng lúc chạy; Helm chart (giá trị image) và bước dựng image trong CI.
+5. **Handler và nối dây:** handler `kestra`; ánh xạ mã thoát; config `workflow.plugin_host`; registry trong `egret-bin`; `cancel_grace` trong cả hai runner và shutdown hook của host; cổng lúc chạy; Helm chart (giá trị image) và bước dựng image trong CI.
 6. **End to end trên một cụm kind tạm:** `jdbc-postgres` tới một Postgres trong cụm; secret vắng mặt khỏi database và pod spec; feature tắt bị từ chối, không có pod; tuyên bố độ phủ; quét EN/VI; CI cục bộ đầy đủ.
 
 ## 10. Kiểm thử
@@ -120,12 +143,14 @@ Handler `kestra` (`worker::handlers::kestra`):
 | thuộc tính lạ và `fetchType: STORE` bị từ chối lúc publish | bỏ mất kiểm catalog |
 | plugin gọi `storage()` thất bại với exit 4 và lý do nêu W9 | lời gọi W9 không bị bẫy |
 | hash catalog ≠ hash `plugins.lock` làm test Rust đỏ | đổi lockfile mà không sinh lại catalog |
+| một flow có `pluginDefaults:` (kể cả `[]`, kể cả khi không có task plugin) bị từ chối lúc publish, có tên | khoá được nhận rồi bỏ đi |
+| một task timeout trên `SELECT pg_sleep(600)` không để lại query nào trong `pg_stat_activity` sau grace (sống, Docker và kind); tương tự trên Trino (sống, Docker) | grace 0 / thiếu shutdown hook / không gọi `kill()` |
 
 **Ratchet:** kỳ vọng **109 → 109**, đo; corpus không có task plugin.
 
 ## 11. Ngoài phạm vi
 
-Internal storage, KV, namespace files, output dựa trên storage (W9); **trigger của plugin** (`io.kestra.plugin.jdbc.postgresql.Trigger` và mọi polling trigger); plugin flowable và dynamic (`dynamicWorkerResult`); plugin ngoài ba jar; thêm jar lúc chạy; allowlist theo workspace; `secret()` trên task script, vốn cần một Kubernetes Secret mỗi attempt và thêm RBAC; nâng pin của Kestra.
+Internal storage, KV, namespace files, output dựa trên storage (W9); **trigger của plugin** (`io.kestra.plugin.jdbc.postgresql.Trigger` và mọi polling trigger); plugin flowable và dynamic (`dynamicWorkerResult`); plugin ngoài ba jar; thêm jar lúc chạy; allowlist theo workspace; `secret()` trên task script, vốn cần một Kubernetes Secret mỗi attempt và thêm RBAC; nâng pin của Kestra; rà các khoá mức cao nhất khác của flow mà egret bỏ đi không từ chối.
 
 ## 12. Giới hạn đã biết
 

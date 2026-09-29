@@ -10,6 +10,8 @@
 - **The first lockfile holds three plugins:** `plugin-jdbc-postgres`, `plugin-jdbc-trino`, `plugin-jdbc-mysql` (for StarRocks: Maven Central has no `plugin-jdbc-starrocks`, checked 2026-09-29).
 - **Governance:** a feature `workflow_kestra_plugins`, **off by default**, requiring `workflow_containers`; the platform admin narrows the catalog with `allowed-types` globs; no entry allows the whole catalog.
 - **One JVM per task-run attempt**, in a W5a pod. No long-lived JVM, no JVM in `egret-server`.
+- **A timeout cancels the query on the engine** (added after comparing with Kestra): the host is stopped with SIGTERM and a grace period and calls the plugin's `kill()` — for JDBC, `Statement.cancel()` — before the pod is removed (§7.1).
+- **`pluginDefaults:` is refused at publish, on every flow**, as Kestra 2.0 refuses it (§4.1). Today egret drops it silently.
 
 **Delivery:** one PR (docs and code), tasks in §9.
 
@@ -42,6 +44,8 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 | `secret()` backend per namespace | `workspace_secrets` of the execution's workspace; `namespace` and `full` refused by name | a flow cannot name another workspace |
 | outputs and files to internal storage | outputs inline (1 MiB cap, W5a's); anything needing storage fails by name | internal storage is W9 |
 | Kestra runs the plugin in its worker JVM | one JVM per task-run attempt, in W5a's container | isolation: a plugin's OOM or `System.exit()` takes down one pod |
+| flow-level `pluginDefaults` removed in 2.0 (commit `ca6cd11fa`, in every tag from `v2.0.0-rc6`): refused at save, ignored when an old flow is read | refused at publish on every flow; egret drops it silently until W5b | follow the pinned artifact; the feature moved to Enterprise Policies |
+| on kill or timeout the worker calls the task's `kill()` (`WorkerJobLifecycle.kill`, `WorkerTaskCallable.java:48`) | the same `kill()`, reached through SIGTERM and a grace period (§7.1) | a JDBC query must not outlive its task on the engine |
 
 ## 3. The host (`plugin-host/`)
 
@@ -60,6 +64,14 @@ A Maven project at the repo root, beside `crates/egret-workflow/oracle/`:
 - **Refused at publish, by name:** a `kestra.` FQCN not in the catalog; a bare FQCN that is in the catalog (hint: the prefixed spelling); a property the catalog does not list for the class; a missing required property; a property value that needs internal storage — measured per plugin in Task 1, at least `fetchType: STORE`; `taskRunner` (plugin tasks run on the configured runner); the seven base-task properties egret does not read (`assets`, `logLevel`, `logToFile`, `policyRefs`, `taskCache`, `version`, `workerSelector`), as on script tasks.
 - A literal property value is checked against the catalog's JSON type; a `{{ }}` value is accepted and checked by the host after rendering (exit 2).
 - `retry`, `timeout`, `disabled`, `runIf`, `allowFailure`, `allowWarning` go through egret's `Task` model as for every task. A plugin task with no `timeout:` runs under `workflow.container_default_timeout_s`.
+
+### 4.1 `pluginDefaults`
+
+Kestra 2.0 removed flow-level `pluginDefaults` (commit `ca6cd11fa`, *"OSS enablers for EE Policies"*, 2026-07-17; in every tag from `v2.0.0-rc6`, so in the pinned `rc13`). Its `FlowService.validate` returns a constraint violation naming `pluginDefaults` (`FlowServiceTest.shouldReturnConstraintWhenFlowUsesRemovedPluginDefaults`); its lenient read path parses such a flow and applies nothing (`FlowParsingServiceTest.shouldIgnorePluginDefaultsWhenParsingLeniently`).
+
+egret's `Flow` has no such field and no `deny_unknown_fields`, so today a flow with `pluginDefaults:` publishes and the values are silently not applied. W5b makes `spec::validate` refuse a top-level `pluginDefaults` key, whatever its value (an empty list included), on **every** flow, not only flows with plugin tasks: *"`pluginDefaults` was removed in Kestra 2.0; set the properties on each task"*. The refusal shows on a draft and blocks publish. A draft that runs anyway applies nothing, as Kestra's read path does. Task 1 measures the refusal's wording and scope on the artifact.
+
+Other top-level keys egret drops silently are not audited here (§11).
 
 ## 5. Governance
 
@@ -85,7 +97,18 @@ The `kestra` handler (`worker::handlers::kestra`):
 4. hands it to the configured runner (W5a) — same pod naming, hardening, NetworkPolicy, lease renewal, re-attach and delete-after-commit;
 5. maps the exit code to an outcome; takes outputs from the `::{json}::` line (capped at 1 MiB by W5a's cap; over it the task is FAILED by name).
 
-`workflow.plugin_host`: `image` (required when `container_runner` is not `none`), `jvm_max_heap` (default `384m`, passed as `-Xmx`, below the pod's default memory limit). With `container_runner: none` no plugin task can run and publish refuses them, as it does script tasks.
+### 7.1 Timeout: cancel on the engine, then remove
+
+W5a cancels a container with grace 0 (`KubernetesRunner::cancel`, `DockerRunner::cancel` = `docker rm --force`). Cutting the TCP connection does not stop a query: Postgres notices only when it next writes to the socket, and Trino and StarRocks keep the query until the client's heartbeat expires. Kestra instead calls the task's `kill()`, which `AbstractJdbcQuery` implements as `Statement.cancel()`.
+
+- `TaskCommands` gains `cancel_grace: Duration`, `0` for script tasks (W5a unchanged) and `workflow.plugin_host.kill_grace_s` (default **15 s**) for plugin tasks.
+- **Kubernetes:** the pod is deleted with `gracePeriodSeconds = cancel_grace`; the kubelet sends SIGTERM to `main`, waits, then SIGKILL. **Docker:** `docker stop -t <grace>`, then W5a's `docker rm --force`.
+- **The host** registers a JVM shutdown hook: on SIGTERM it calls `kill()` on the running task from the hook's thread (Kestra's own contract: *"may be invoked from a different thread than the one running the job"*), waits for `run` to return up to `cancel_grace − 2 s`, logs `killed: <reason>` and exits.
+- The outcome is egret's, not the host's: the task is FAILED with W11's `Timeout after …` line whatever the host prints. The kill runs before the outcome is committed and the pod removal after it, W5a's order.
+- **Measured in Task 1, not assumed:** that each of the three plugins' `kill()` actually ends the query on Postgres (`pg_stat_activity`), Trino (`system.runtime.queries` state) and StarRocks (`SHOW PROCESSLIST`) within the grace.
+- egret has no user-facing kill yet (W10's finding); when it arrives it takes the same path.
+
+`workflow.plugin_host`: `image` (required when `container_runner` is not `none`), `jvm_max_heap` (default `384m`, passed as `-Xmx`, below the pod's default memory limit), `kill_grace_s` (default 15). With `container_runner: none` no plugin task can run and publish refuses them, as it does script tasks.
 
 ## 8. Security
 
@@ -96,11 +119,11 @@ The `kestra` handler (`worker::handlers::kestra`):
 
 ## 9. Tasks
 
-1. **Measure on the artifact** (Kestra `2.0.0-rc13` with the three plugins): each plugin's `Query` against Postgres, Trino and StarRocks — output shape per `fetchType`, default `fetchType`, log lines and levels, masking of a secret in a log line, the properties that need storage. `plugin-jdbc-mysql` against StarRocks is measured, not assumed. Fixture `oracle-exec/w5b-plugins.json`.
+1. **Measure on the artifact** (Kestra `2.0.0-rc13` with the three plugins): each plugin's `Query` against Postgres, Trino and StarRocks — output shape per `fetchType`, default `fetchType`, log lines and levels, masking of a secret in a log line, the properties that need storage, the refusal of a flow with `pluginDefaults`, whether `kill()` ends the query on each engine. `plugin-jdbc-mysql` against StarRocks is measured, not assumed. Fixture `oracle-exec/w5b-plugins.json`.
 2. **`plugin-host/`:** Maven project, shim, main, `describe`, `plugins.lock`, Dockerfile, `catalog.json`; Java tests of the shim (W9 calls throw `EgretUnsupported`, exit codes); the Rust lockfile-hash test.
-3. **Model, publish, governance:** `kestra.` types from the catalog; save-time refusals; `workflow_kestra_plugins`; `allowed-types`; the gate at publish.
+3. **Model, publish, governance:** `kestra.` types from the catalog; save-time refusals; `pluginDefaults` refused on every flow; `workflow_kestra_plugins`; `allowed-types`; the gate at publish.
 4. **`secret()`:** resolution, `namespace`/`full` refusals, script-task refusal with its reason, masking in `RunLog`'s ingest; tests that the value is absent from stored rows.
-5. **Handler and wiring:** the `kestra` handler; exit-code mapping; `workflow.plugin_host` config; registry in `egret-bin`; the gate at run; the Helm chart (image value) and CI's image build.
+5. **Handler and wiring:** the `kestra` handler; exit-code mapping; `workflow.plugin_host` config; registry in `egret-bin`; `cancel_grace` in both runners and the host's shutdown hook; the gate at run; the Helm chart (image value) and CI's image build.
 6. **End to end on a temporary kind cluster:** `jdbc-postgres` against a Postgres in the cluster; the secret absent from the database and the pod spec; feature off refused with no pod; coverage statement; EN/VI sweep; full local CI.
 
 ## 10. Testing
@@ -118,12 +141,14 @@ The `kestra` handler (`worker::handlers::kestra`):
 | an unknown property and `fetchType: STORE` refused at publish | catalog check dropped |
 | a plugin calling `storage()` fails with exit 4 and a reason naming W9 | W9 calls not trapped |
 | catalog hash ≠ `plugins.lock` hash fails the Rust test | a lockfile change without a regenerated catalog |
+| a flow with `pluginDefaults:` (also `[]`, also with no plugin task) refused at publish by name | the key accepted and dropped |
+| a task timing out on `SELECT pg_sleep(600)` leaves no query in `pg_stat_activity` after the grace (live, Docker and kind); the same on Trino (live, Docker) | grace 0 / no shutdown hook / `kill()` not called |
 
 **Ratchet:** expected **109 → 109**, measured; the corpus has no plugin task.
 
 ## 11. Out of scope
 
-Internal storage, KV, namespace files, storage-backed outputs (W9); **plugin triggers** (`io.kestra.plugin.jdbc.postgresql.Trigger` and every polling trigger); flowable and dynamic plugins (`dynamicWorkerResult`); plugins beyond the three jars; adding jars at run time; per-workspace allowlists; `secret()` on script tasks, which needs a Kubernetes Secret per attempt and more RBAC; bumping Kestra's pins.
+Internal storage, KV, namespace files, storage-backed outputs (W9); **plugin triggers** (`io.kestra.plugin.jdbc.postgresql.Trigger` and every polling trigger); flowable and dynamic plugins (`dynamicWorkerResult`); plugins beyond the three jars; adding jars at run time; per-workspace allowlists; `secret()` on script tasks, which needs a Kubernetes Secret per attempt and more RBAC; bumping Kestra's pins; an audit of the other top-level flow keys egret drops without refusing.
 
 ## 12. Known limits
 
