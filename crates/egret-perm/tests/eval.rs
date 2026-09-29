@@ -8,8 +8,8 @@
 // takes naming the module on purpose. See `egret_perm`'s own lib.rs note.
 use egret_perm::eval::evaluate;
 use egret_perm::{
-    Action, ClearanceGate, Effect, Grant, GrantOrigin, Principal, PrincipalKind,
-    PrincipalSet, Reason, Rule, RuleKind, Scope, Selector, Subject,
+    Action, ClearanceGate, Effect, Grant, GrantOrigin, Principal, PrincipalKind, PrincipalSet,
+    Reason, Rule, RuleKind, Scope, Selector, Subject,
 };
 use uuid::Uuid;
 

@@ -3830,7 +3830,12 @@ async fn a_seeded_egret_admin_policy_is_visible_to_explain() {
 
     let seeded = f
         .policy
-        .seed_admin_all_access(f.service_id, &svc.name, &svc.r#type, &[user.clone()])
+        .seed_admin_all_access(
+            f.service_id,
+            &svc.name,
+            &svc.r#type,
+            std::slice::from_ref(&user),
+        )
         .await
         .expect("seed egret-admin policies");
     assert!(seeded > 0, "the seeder must actually have written policies");
@@ -4065,7 +4070,9 @@ async fn a_tag_policy_block_that_could_decide_makes_the_profile_undecidable() {
 
     // The tag service the Trino profile's plugin embeds as `tagPolicies`,
     // carrying one policy — the shape `download_policies` actually serves.
-    egret_policy::seed_tag(&f.policy).await.expect("seed tag def");
+    egret_policy::seed_tag(&f.policy)
+        .await
+        .expect("seed tag def");
     let trino = f
         .policy
         .get_service_by_id(trino_id)
