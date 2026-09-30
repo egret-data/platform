@@ -1,5 +1,6 @@
 use crate::PolicyStoreError;
 use egret_metastore::Db;
+use egret_ranger_eval::resource::MatchType;
 use serde_json::Value;
 
 #[derive(Clone)]
@@ -817,6 +818,126 @@ pub async fn tag_keys_for_resource_via(
     .bind(column)
     .fetch_all(&mut *conn)
     .await?)
+}
+
+/// One tag attachment the enricher would admit for a request: the tag's
+/// **name** and the [`MatchType`] that attachment produces.
+///
+/// `name` is `tags.name`, not `tags.key`, and the distinction is the whole
+/// point — see [`resolved_tags_for_resource_via`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTag {
+    /// `tags.name` — the identifier the wire carries as the tag's `type`
+    /// (`ServiceTags::from_assignments`) and therefore the one the engine
+    /// matches tag policies on.
+    pub name: String,
+    /// The `MatchType` this attachment produces against the request,
+    /// classified exactly as `RangerTagEnricher.findMatchingTags` does.
+    pub match_type: MatchType,
+}
+
+/// The tag set an engine's `RangerTagEnricher` would resolve for ONE resource —
+/// one entry per admitted attachment, carrying `tags.name` and the attachment's
+/// [`MatchType`]. **This is the resolution an evaluator may act on**, unlike
+/// [`tag_keys_for_resource_via`], which is exact-match attribution only.
+///
+/// `column = ""` in the REQUEST position means the request names the table
+/// itself, mirroring migration 0081's storage convention.
+///
+/// # The rule, measured
+///
+/// `RangerTagEnricher.findMatchingTags` builds a real
+/// `RangerDefaultPolicyResourceMatcher` per tag service resource and calls
+/// `getMatchType` with the **tag's** resource elements in the POLICY position
+/// and the **query's** resource in the request position (measured from
+/// `ranger-plugins-common` bytecode, byte-identical at 2.5.0 and 2.8.0). For a
+/// request naming `catalog/schema/table/column`:
+///
+/// | tag attached at | MatchType | admitted |
+/// |---|---|---|
+/// | the exact resource the request names | `SELF` | yes |
+/// | the table, request names a column | `ANCESTOR` | yes |
+/// | deeper than the request | `DESCENDANT` | **no** |
+///
+/// # Why two levels and not the enricher's four
+///
+/// Schema- and catalog-level attachments also yield `ANCESTOR`, and this
+/// function cannot produce one because **egret's storage cannot express one**:
+/// `public.catalog_tag_assignments` (migration 0081) keys on
+/// `(tag_id, warehouse_id, schema_name, table_name, column_name)` with
+/// `column_name text NOT NULL DEFAULT ''` and the documented convention that
+/// `''` means table-level, while `schema_name` and `table_name` are `NOT NULL`
+/// with **no such convention**. So column- and table-level are the only levels
+/// any row here can carry (SP4d-2b D2, the user's ruling: evaluate what egret
+/// can express, and refuse other payload shapes by shape). Schema- and
+/// catalog-level tagging is a separate feature — a migration, a writer and a UI.
+///
+/// # Three things this gets right that are each a silent fail-open
+///
+/// 1. **It returns `tags.name`, never `tags.key`.** The engine matches tag
+///    policies on the wire tag's `type`, which `ServiceTags::from_assignments`
+///    fills from `tags.name`; `tag_keys_for_resource_via` returns `tags.key`,
+///    and live the two differ for one of three tags (`sp4cgate` vs
+///    `sp4cgate2`). Same shape, different identifier — which is why that
+///    function stays on the attribution surface and one function must not
+///    return both.
+/// 2. **It does not dedupe by name.** `RangerTagForEval`'s `equals`/`hashCode`
+///    include `matchType`, so one tag attached at BOTH levels is TWO entries in
+///    Ranger's set — and MASK evaluators are ordered by
+///    `MATCH_TYPE_COMPARATOR` (ascending `SELF < SELF_AND_ALL_DESCENDANTS <
+///    ANCESTOR`), so collapsing them would silently reorder masks and change
+///    the masking answer. The `DISTINCT` below is over `(name, level)`, which is
+///    exactly `RangerTagForEval`'s own equality — never over the name alone.
+/// 3. **A column attachment is EXCLUDED from a table-level request.** That is
+///    `DESCENDANT`, which the enricher rejects; returning it would fail closed
+///    on `explain` and still disagree with the engine.
+///
+/// Rows come back ordered by match type ascending then name — deterministic,
+/// and in `MATCH_TYPE_COMPARATOR`'s direction. The evaluator still applies its
+/// own ordering; this order exists so the answer is stable, not so a caller can
+/// skip that.
+pub async fn resolved_tags_for_resource_via(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: uuid::Uuid,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<Vec<ResolvedTag>, PolicyStoreError> {
+    // `a.column_name = $4` is the SELF arm; `a.column_name = ''` with a
+    // non-empty request column is the table-level ANCESTOR arm. A request that
+    // names the table ($4 = '') collapses the two into the one SELF arm, and a
+    // column attachment then matches NEITHER — that is the DESCENDANT
+    // exclusion, and it is structural rather than a filter that could be
+    // forgotten.
+    let rows = sqlx::query_as::<_, (String, String)>(
+        r#"SELECT DISTINCT t.name, a.column_name
+           FROM registry.catalogs c
+           JOIN catalog_tag_assignments a ON a.warehouse_id = c.warehouse_id
+           JOIN tags t ON t.id = a.tag_id
+           WHERE c.id = $1 AND a.schema_name = $2 AND a.table_name = $3
+             AND (a.column_name = $4 OR a.column_name = '')
+           ORDER BY a.column_name DESC, t.name"#,
+    )
+    .bind(catalog_id)
+    .bind(schema)
+    .bind(table)
+    .bind(column)
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(name, attached_column)| ResolvedTag {
+            name,
+            match_type: if attached_column == column {
+                MatchType::Self_
+            } else {
+                // The only other row the query can return: `column_name = ''`
+                // (table level) against a request naming a column.
+                MatchType::Ancestor
+            },
+        })
+        .collect())
 }
 
 /// `tags.key` for each of `tag_ids`, as `(id, key)` pairs — the reverse of the
