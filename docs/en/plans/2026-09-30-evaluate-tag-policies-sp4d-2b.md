@@ -131,6 +131,27 @@ policies, ids 8799 (mask), 8805 (row filter), 8839 (deny-capable access):
 - Modify: `crates/egret-ranger-eval/src/eval.rs`
 - Test: `crates/egret-ranger-eval/tests/tag_arbitration.rs`
 
+**Interfaces — what Task 2 built and what it deliberately left to you:**
+- Task 2's three tag-phase functions **do not run `request_preamble`**: no
+  super-user short-circuit, no envelope refusals. That was deliberate, on the
+  premise that **you are their only caller**. So two things are on you: run the
+  preamble exactly once, before the tag phase, and confirm nothing else in the
+  crate or outside it can reach those functions without it. If any can, the
+  boundary is wrong — tighten it to `pub(crate)` rather than adding a second
+  preamble call.
+- `TagDecision` carries `priority`; the arbitration below reads it. You do not
+  need to recompute a tag policy's priority.
+- **Two facts in an earlier brief of mine were wrong; Task 2 corrected them by
+  running the jar, and the corrections are already in the code. Do not
+  re-derive them from my prose:** `NAME_COMPARATOR` is priority DESC → `hasDeny`
+  → name (**not** the policy name alone), and `MATCH_TYPE_COMPARATOR`'s order was
+  obtained by RUNNING it, because the enum's declaration order differs from the
+  comparator's intent — a rank taken from `ordinal()` reorders masks. If your
+  work needs either ordering, call Task 2's code; do not write a second copy.
+- `EvalOrderAmbiguous` does **not** arise on the tag path: both tag comparators
+  are fully reproduced, so there is no tie the crate cannot order. Do not add a
+  refusal for it here.
+
 - [ ] **Step 1: Verify the arbitration in both jars before implementing it.** The
 shape, to be confirmed rather than trusted: tag policies run first; the tag
 verdict's `isAccessDetermined` is **cleared** so resource policies can still
@@ -154,7 +175,15 @@ arm and confirm a test dies; swap the other way on the mask arm and confirm a
 different test dies. The two asymmetries are one character apart and are the
 easiest thing in this package to get backwards.
 
-- [ ] **Step 7: Commit.**
+- [ ] **Step 7: Prove the preamble runs exactly once, and cannot be skipped.**
+Write a test that a super-user is short-circuited on a request that ALSO has tag
+policies that would otherwise deny — if the tag phase ran before the preamble,
+that test fails. Then enumerate every caller of the three tag-phase functions
+(`rg` for each name across the whole workspace, tests included) and record the
+list in your report. The claim to support is not "I added a call" but "no path
+reaches them without it".
+
+- [ ] **Step 8: Commit.**
 
 ---
 
@@ -207,9 +236,21 @@ at one priority; and the same tag at two levels with different match types.
 existing 45 axes have. A corpus that silently stops producing a shape is a gate
 that silently stops being a gate — and it fails green.
 
-- [ ] **Step 3: RE-MEASURE `EvalOrderAmbiguous`.** It was 3.4–4.0% for resource
-policies. MASK evaluators are now ordered by tag match type, a new axis, so the
-old number does not carry forward. Record the new rate; do not reuse the old one.
+- [ ] **Step 3: RE-MEASURE `EvalOrderAmbiguous` — for the RESOURCE path only.**
+Task 2 answered half of the spec's open question and narrowed this step: the
+refusal **does not apply on the tag path at all**, because both the mask and the
+row-filter tag comparators are fully reproduced, so there is no tie the crate
+cannot order. What is still unmeasured is whether the resource path's rate
+(3.4–4.0%) moves once tag cases are in the corpus. Measure that; do not carry the
+old number forward and do not claim the tag path shares it.
+
+- [ ] **Step 3b: Close Task 2's 2.8.0 gap.** Task 2 measured the candidate trie on
+**2.5.0 only** — the 2.8.0 probe could not run because `ranger-authz-api` is not on
+the harness classpath. The trie is the only candidate filter on the tag path and it
+is strictly WIDER than the matcher, which is why Task 2 added a refusal rather than
+answer from the matcher alone. Either put that jar on the classpath and measure
+2.8.0, or state plainly in the README that the trie claim is 2.5.0-only and that
+the refusal is what covers the gap.
 
 - [ ] **Step 4: Observe the gate failing.** Break one tag rule — admitting
 `DESCENDANT` is the sharpest, since it is the fail-open direction — confirm the
