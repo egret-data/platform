@@ -1,5 +1,6 @@
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 
 import java.lang.reflect.Method;
 import java.nio.file.Files;
@@ -126,6 +127,70 @@ public class EgretTagServiceResourceValidationTest {
         assertNotNull(
                 "{catalog} is a SUBSET of catalog/schema/table/column, so Ranger keeps it",
                 matcher);
+    }
+
+    /**
+     * The oracle for the THREE-policy-type loop — fix round 1, ruling 2.
+     *
+     * <p>{@code createRangerServiceResourceMatcher} loops
+     * {@code RangerPolicy.POLICY_TYPES} and keeps a resource that validates under ANY of them.
+     * On every service-def egret ships that loop is <b>unobservable</b>: `trino.json`'s and
+     * `starrocks.json`'s {@code dataMaskDef}/{@code rowFilterDef} resource names are SUBSETS of
+     * their access names, so any key set valid for masking is valid for access and a one-type
+     * loop answers identically. "Right because Ranger does it" is exactly the unfalsifiable
+     * assertion this package keeps catching, so the loop needs a case where the types disagree.
+     *
+     * <p><b>No real def discriminates, so this def is CONSTRUCTED</b>, and it is constructed by
+     * adding ONE resource to the real {@code trino.json}: a {@code dataMaskDef} entry named
+     * {@code maskonly} with no counterpart in {@code resources}. Everything else is the shipped
+     * file, and the helper, the hierarchies and the matcher are still Ranger's. The key set
+     * {@code {maskonly}} then validates under policy type 1 and under no other, so a resource
+     * carrying it survives if and only if the loop really consults the masking hierarchies.
+     */
+    @Test
+    public void aKeySetValidUnderMaskingOnlySurvivesBecauseTheLoopVisitsAllThreeTypes()
+            throws Exception {
+        RangerServiceDef def = trinoServiceDef();
+        RangerServiceDef.RangerResourceDef maskOnly = new RangerServiceDef.RangerResourceDef();
+        maskOnly.setName("maskonly");
+        maskOnly.setType("string");
+        maskOnly.setLevel(10);
+        maskOnly.setMandatory(Boolean.TRUE);
+        maskOnly.setIsValidLeaf(Boolean.TRUE);
+        maskOnly.setMatcher("org.apache.ranger.plugin.resourcematcher.RangerDefaultResourceMatcher");
+        def.getDataMaskDef().getResources().add(maskOnly);
+        // ⚠ RENAMED, and this is not cosmetic. `RangerServiceDefHelper`'s constructor caches
+        // its `Delegate` in a static map keyed on `serviceDef.getName()` + `getUpdateTime()`
+        // (offsets 37-43, 83, 170). Leaving the name as `trino` makes this helper a CACHE HIT on
+        // whatever the other test methods in this class built first, so the added resource is
+        // silently absent and the assertion below passes or fails by JUnit's method order. It
+        // failed exactly that way on the first run of this test.
+        def.setName("trino-maskonly-synthetic");
+
+        RangerServiceDefHelper helper = new RangerServiceDefHelper(def);
+        Method create = createMethod();
+
+        assertNotNull(
+                "{maskonly} validates under policy type 1 only, so it survives exactly when the "
+                        + "loop over RangerPolicy.POLICY_TYPES reaches the masking hierarchies",
+                invoke(create, serviceResource("maskonly"), helper));
+
+        // The falsifier, on the SAME helper: a name in no hierarchy of any type still drops, so
+        // the row above is about `maskonly` being mask-only and not about the def being permissive.
+        assertNull(
+                "a name in no hierarchy of any policy type must still drop",
+                invoke(create, serviceResource("bogus"), helper));
+    }
+
+    private static Object invoke(Method create, RangerServiceResource resource, RangerServiceDefHelper helper)
+            throws Exception {
+        // A FRESH ResourceHierarchies per call: it caches by key set.
+        Object hierarchies = RangerTagEnricher.ResourceHierarchies.class
+                .getDeclaredConstructor()
+                .newInstance();
+        return create.getParameterCount() == 3
+                ? create.invoke(null, resource, helper, hierarchies)
+                : create.invoke(null, resource, helper, hierarchies, null);
     }
 
     private static Method createMethod() {

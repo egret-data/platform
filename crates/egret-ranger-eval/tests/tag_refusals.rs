@@ -3,17 +3,26 @@
 //!
 //! # What is asserted here, and why each is worth an assertion today
 //!
-//! Every refusal in this file is **inert for the payload egret emits**.
-//! `ServiceTags::from_assignments` writes each wire tag as
-//! `{"type": <tags.name>, "owner": 0}` — no `attributes`, no `options`, no
-//! `validityPeriods` — and each service resource from
-//! `catalog_tag_assignments`, whose `schema_name` and `table_name` are
-//! `NOT NULL` with no empty-string convention, so its `resourceElements` always
-//! carries at least `catalog`/`schema`/`table`. Asserting the refusals anyway
-//! is what stops a hand-written `/tags/download` shim, an imported payload or a
-//! future egret feature from changing the answer silently: with the assertion,
-//! the day one of those arrives the verdict says so; without it, the day one of
-//! those arrives the verdict is confidently wrong.
+//! Every refusal in this file is **inert today, and none of them is inert
+//! because of a schema constraint.** `ServiceTags::from_assignments` writes each
+//! wire tag as `{"type": <tags.name>, "owner": 0}` — no `attributes`, no
+//! `options`, no `validityPeriods` — so those three cannot arrive from egret's
+//! own writer. The LEVEL COUNT is different, and fix round 1 corrected this
+//! file's claim about it: `catalog_tag_assignments` has no `CHECK`, `NOT NULL`
+//! does not exclude `''`, the assign routes validate nothing, and
+//! `from_assignments` omits an empty level — so `{"schema": "", "table": ""}`
+//! really does produce a one-level `resourceElements`. What makes the refusal
+//! inert is the READ path: **nothing constructs an
+//! `egret_ranger_eval::eval::ResolvedTag` outside this crate's tests**, and the
+//! `egret_policy::ResolvedTag` that Task 7 will map from is selected by exact
+//! `schema_name`/`table_name` equality, so a `('', '')` row cannot come back for
+//! a real resource. See the ⚠ block on `TagAttachmentProblem::ResourceLevels`.
+//!
+//! Asserting the refusals anyway is what stops a hand-written `/tags/download`
+//! shim, an imported payload or a future egret feature from changing the answer
+//! silently: with the assertion, the day one of those arrives the verdict says
+//! so; without it, the day one of those arrives the verdict is confidently
+//! wrong.
 //!
 //! # The two behaviours that are NOT refusals (D9)
 //!
@@ -38,8 +47,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use egret_ranger_eval::eval::{
-    evaluate, evaluate_data_mask, AccessRequest, Decision, DenyReason, EngineConfig, MaskDecision,
-    ResolvedTag, TagAttachmentProblem, TagServiceResource, UndecidableCause,
+    evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, DenyReason,
+    EngineConfig, MaskDecision, ResolvedTag, RowFilterDecision, TagAttachmentProblem,
+    TagServiceResource, UndecidableCause,
 };
 use egret_ranger_eval::model::{ServicePolicySet, Unmodelled};
 use egret_ranger_eval::resource::{MatchType, RequestResource};
@@ -159,8 +169,19 @@ fn column_tag(name: &str) -> ResolvedTag {
     }
 }
 
-fn levels(names: &[&str]) -> Vec<String> {
+/// The `resourceElements` KEY SET, which is what
+/// [`TagServiceResource::levels`] is: a duplicate key is unrepresentable there,
+/// by type, since fix round 1.
+fn levels(names: &[&str]) -> BTreeSet<String> {
     names.iter().map(|s| s.to_string()).collect()
+}
+
+/// The same names as the `Vec` [`TagAttachmentProblem::ResourceLevels`] carries
+/// for reporting — sorted, because the cause is built from the set.
+fn level_names(names: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+    v.sort();
+    v
 }
 
 fn causes(decision: &Decision) -> Vec<UndecidableCause> {
@@ -406,6 +427,192 @@ fn a_tag_policy_whose_condition_could_read_a_tag_attribute_refuses() {
     );
 }
 
+/// The third door, and the one `collect_causes` reads out of a DIFFERENT bucket:
+/// an ITEM-level `conditions` list. `construct_affects` maps
+/// `Unmodelled::ItemConditions` onto the bucket the decision actually reads, so
+/// a condition in `policyItems` refuses an ACCESS request while one in
+/// `allowExceptions` of the same policy does not — and that mapping had never
+/// been exercised through `PolicyView::for_tag`, which asserts `matched` by
+/// construction instead of computing it.
+#[test]
+fn a_tag_policy_item_condition_refuses_on_the_tag_path() {
+    let policy = tag_policy(
+        15,
+        "tag-item-cond",
+        0,
+        "policyItems",
+        json!([{
+            "users": ["alice"],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "conditions": [{"type": "expression", "values": ["TAG.classification == 'x'"]}],
+        }]),
+    );
+    let d = evaluate(
+        &envelope(json!([policy])),
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        causes(&d).iter().any(|c| matches!(
+            c,
+            UndecidableCause::PolicyConstruct {
+                policy_name,
+                construct: Unmodelled::ItemConditions { .. },
+                ..
+            } if policy_name == "tag-item-cond"
+        )),
+        "an item condition on a TAG policy must refuse: {d:?}"
+    );
+}
+
+/// The row-filter twin of `a_tag_mask_policy_referencing_a_tag_attribute_refuses`.
+/// It is a separate assertion because it runs through a separate bucket
+/// (`rowFilterPolicyItems`), a separate cause, and the third of the three tag
+/// phases.
+#[test]
+fn a_tag_row_filter_policy_referencing_a_tag_attribute_refuses() {
+    let table_request = |tags: Vec<ResolvedTag>| AccessRequest {
+        // TABLE-granular: Trino's `rowFilterDef.resources` names
+        // `catalog`/`schema`/`table` and no `column`, so a column request could
+        // never yield and the assertion would measure nothing.
+        resource: RequestResource::new()
+            .with("catalog", "hive")
+            .with("schema", "sales")
+            .with("table", "orders"),
+        ..request(tags)
+    };
+    let filter_policy = |expr: &str| {
+        envelope(json!([tag_policy(
+            16,
+            "tag-filter",
+            2,
+            "rowFilterPolicyItems",
+            json!([{
+                "users": ["alice"],
+                "accesses": [{"type": "select", "isAllowed": true}],
+                "rowFilterInfo": {"filterExpr": expr},
+            }]),
+        )]))
+    };
+
+    // Control first, or the refusal below is indistinguishable from "nothing
+    // could ever yield here".
+    let d = evaluate_row_filter(
+        &filter_policy("id > 2"),
+        &table_request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        matches!(&d, RowFilterDecision::Filtered(f) if f.filter_expr == "id > 2"),
+        "the control must FILTER: {d:?}"
+    );
+
+    let d = evaluate_row_filter(
+        &filter_policy("dept = '${{TAG.classification}}'"),
+        &table_request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    match &d {
+        RowFilterDecision::Undecidable { why } => assert!(
+            why.iter().any(|c| matches!(
+                c,
+                UndecidableCause::RowFilterExpression { policy_name, expr, .. }
+                    if policy_name == "tag-filter" && expr.contains("TAG.classification")
+            )),
+            "the filter expression must be named: {why:?}"
+        ),
+        other => panic!("a tag row filter referencing a tag attribute must refuse: {other:?}"),
+    }
+}
+
+/// **A FAIL-OPEN found by trying to write this pin — fix round 1.**
+///
+/// The fourth door is a `${{ … }}` expression in the policy's own RESOURCE
+/// value. On the resource path `collect_causes` reports
+/// `Unmodelled::ResourceValueExpressionMarker` **whether or not the policy
+/// matched**, precisely because the marker is what makes `matched` unreliable.
+/// The tag path could not reach that rule: `tag_candidates` builds a
+/// `PolicyView` only for policies whose `resources.tag` covers an admitted tag
+/// NAME, compared as a literal — so a policy whose tag value is an expression
+/// matched nothing, became no candidate, and its marker was never reported.
+///
+/// Ranger does not read it as a literal. `ResourceMatcher`'s constructor builds
+/// a `RangerRequestExprResolver` whenever `hasExpressions(value)` (offsets
+/// 17-41) and `getExpandedValue(evalContext)` calls
+/// `resolver.resolveExpressions(request)` (offsets 22-26), so the value is
+/// resolved PER REQUEST and can match a tag this crate said it could not. The
+/// policy vanished from the candidate set with a confident answer behind it.
+///
+/// Fixed by reporting the marker from the per-`of_kind` sweep, where candidacy
+/// has not been decided yet.
+#[test]
+fn a_tag_policy_whose_tag_value_is_an_expression_refuses() {
+    let mut policy = tag_policy(
+        17,
+        "tag-expr-value",
+        0,
+        "denyPolicyItems",
+        json!([{ "users": ["alice"], "accesses": [{"type": "select", "isAllowed": true}] }]),
+    );
+    policy["resources"] = json!({ "tag": {"values": ["${{TAG.classification}}"]} });
+
+    // The deny policy is the one that matters: with the marker unreported this
+    // returned `Denied{NoPolicyMatched}` for a policy Ranger may have matched
+    // and denied — a confident answer standing in for an unknown one.
+    let d = evaluate(
+        &envelope(json!([policy])),
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        causes(&d).iter().any(|c| matches!(
+            c,
+            UndecidableCause::PolicyConstruct {
+                policy_name,
+                construct: Unmodelled::ResourceValueExpressionMarker { .. },
+                ..
+            } if policy_name == "tag-expr-value"
+        )),
+        "a tag policy whose tag value is resolved per request must refuse: {d:?}"
+    );
+}
+
+/// The control for the fix above: a LITERAL tag value that does not match the
+/// resolved tag must still be an ANSWER, not a refusal. Without this, reporting
+/// the marker over every policy of the kind would be indistinguishable from
+/// refusing every download that carries a dormant tag policy.
+#[test]
+fn a_literal_tag_value_that_does_not_match_still_answers() {
+    let mut dormant = tag_policy(
+        18,
+        "tag-other",
+        0,
+        "denyPolicyItems",
+        json!([{ "users": ["alice"], "accesses": [{"type": "select", "isAllowed": true}] }]),
+    );
+    dormant["resources"] = json!({ "tag": {"values": ["phi"]} });
+
+    let d = evaluate(
+        &envelope(json!([dormant])),
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert_eq!(
+        d,
+        Decision::Denied {
+            policy_id: None,
+            policy_name: String::new(),
+            reason: DenyReason::NoPolicyMatched,
+        },
+        "a literal tag value this crate can compare decides nothing and refuses nothing: {d:?}"
+    );
+}
+
 // ── 3. a tag service resource with fewer than three levels ───────────────
 
 /// `ServiceTags::from_assignments` omits an empty `column`/`schema`/`table`
@@ -434,7 +641,7 @@ fn a_tag_service_resource_with_fewer_than_three_levels_refuses() {
     assert!(
         causes(&d).contains(&UndecidableCause::TagAttachmentNotReproducible {
             tag: "pii".to_string(),
-            problem: TagAttachmentProblem::ResourceLevels(levels(&["catalog", "schema"])),
+            problem: TagAttachmentProblem::ResourceLevels(level_names(&["catalog", "schema"])),
         }),
         "a schema-level attachment must refuse, naming the shape: {d:?}"
     );
@@ -452,6 +659,28 @@ fn a_tag_service_resource_with_fewer_than_three_levels_refuses() {
     assert!(
         matches!(&d, Decision::Allowed { policy_name, .. } if policy_name == "tag-allow"),
         "a table-level attachment is one egret writes and must ANSWER: {d:?}"
+    );
+
+    // FIX ROUND 1, MINOR 1 — the ONE-level shape, asserted on its own. It is the
+    // case a `Vec<String>` `levels` got wrong: `["catalog", "catalog",
+    // "catalog"]` counted three and answered, for an attachment whose real key
+    // set is `{catalog}`. `levels` is a `BTreeSet<String>` now, so the two cannot
+    // disagree — and the shape the bug let through is pinned here rather than
+    // left to the type alone.
+    let mut tag = column_tag("pii");
+    tag.attached_through.levels = levels(&["catalog"]);
+    let d = evaluate(
+        &tag_allow(),
+        &request(vec![tag]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        causes(&d).contains(&UndecidableCause::TagAttachmentNotReproducible {
+            tag: "pii".to_string(),
+            problem: TagAttachmentProblem::ResourceLevels(level_names(&["catalog"])),
+        }),
+        "a one-level attachment — which Ranger KEEPS — must refuse: {d:?}"
     );
 }
 
@@ -475,7 +704,7 @@ fn the_shape_refusal_does_not_depend_on_the_callers_order() {
         assert!(
             causes(&d).contains(&UndecidableCause::TagAttachmentNotReproducible {
                 tag: "pii".to_string(),
-                problem: TagAttachmentProblem::ResourceLevels(levels(&["catalog", "schema"])),
+                problem: TagAttachmentProblem::ResourceLevels(level_names(&["catalog", "schema"])),
             }),
             "{label}: the verdict must not turn on the caller's Vec order: {d:?}"
         );
@@ -763,6 +992,95 @@ fn the_mask_path_drops_the_same_service_resources() {
         d,
         MaskDecision::NoMask,
         "a dropped attachment reaches no tag mask either: {d:?}"
+    );
+}
+
+/// The oracle for the THREE-policy-type loop — fix round 1, ruling 2.
+///
+/// `service_resource_validates` asks all of `{Access, DataMask, RowFilter}`
+/// because `createRangerServiceResourceMatcher` loops
+/// `RangerPolicy.POLICY_TYPES`. On **every service-def egret ships** that loop
+/// is unobservable: `trino.json`'s and `starrocks.json`'s `dataMaskDef` /
+/// `rowFilterDef` resource names are subsets of their access names (checked:
+/// mask `{catalog, schema|database, table, column}`, filter the same minus
+/// `column`, access a superset of both), so a key set valid for masking is
+/// valid for access and a one-type loop answers identically. `tag.json` has one
+/// resource. "Right because Ranger does it" is the unfalsifiable assertion this
+/// package keeps catching, so the loop needs a case where the types disagree.
+///
+/// **No real def discriminates, so this def is CONSTRUCTED**, and it is
+/// constructed by adding ONE resource to the real `trino.json`: a `dataMaskDef`
+/// entry named `maskonly` with no counterpart in `resources`. Everything else
+/// is the shipped file.
+///
+/// The same case is measured against Ranger itself in
+/// `tests/ranger/.../EgretTagServiceResourceValidationTest`
+/// (`aKeySetValidUnderMaskingOnlySurvivesBecauseTheLoopVisitsAllThreeTypes`),
+/// which confirms the real `createRangerServiceResourceMatcher` KEEPS it —
+/// `{maskonly}` is a one-element DATA_MASK hierarchy there because the raw
+/// `dataMaskDef` resources carry no `parent` and each is its own root.
+#[test]
+fn a_key_set_valid_only_for_masking_survives_the_three_policy_type_loop() {
+    let mut def_json = serde_json::from_str::<Value>(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../egret-policy/src/service-defs/trino.json"
+        ))
+        .expect("read trino def"),
+    )
+    .expect("parse trino def");
+    def_json["dataMaskDef"]["resources"]
+        .as_array_mut()
+        .expect("trino.json declares dataMaskDef.resources")
+        .push(json!({
+            "name": "maskonly",
+            "type": "string",
+            "level": 10,
+            "mandatory": true,
+            "isValidLeaf": true,
+            "matcher": "org.apache.ranger.plugin.resourcematcher.RangerDefaultResourceMatcher",
+        }));
+    let synthetic = ServiceDef::parse(&def_json);
+
+    let mut tag = column_tag("pii");
+    tag.attached_through.levels = levels(&["maskonly"]);
+
+    // KEPT — but it is a ONE-level key set, so what proves it was kept is the
+    // shape REFUSAL firing, not an allow. A dropped attachment produces neither.
+    let d = evaluate(
+        &tag_allow(),
+        &request(vec![tag]),
+        &synthetic,
+        &no_superusers(),
+    );
+    assert!(
+        causes(&d).contains(&UndecidableCause::TagAttachmentNotReproducible {
+            tag: "pii".to_string(),
+            problem: TagAttachmentProblem::ResourceLevels(level_names(&["maskonly"])),
+        }),
+        "`maskonly` validates under policy type 1 and no other, so the attachment \
+         survives exactly when the loop consults the masking hierarchies: {d:?}"
+    );
+
+    // The falsifier on the SAME def: a name in no hierarchy of any type still
+    // drops, so the row above is about `maskonly` being mask-only and not about
+    // the def having become permissive.
+    let mut tag = column_tag("pii");
+    tag.attached_through.levels = levels(&["bogus"]);
+    let d = evaluate(
+        &tag_allow(),
+        &request(vec![tag]),
+        &synthetic,
+        &no_superusers(),
+    );
+    assert_eq!(
+        d,
+        Decision::Denied {
+            policy_id: None,
+            policy_name: String::new(),
+            reason: DenyReason::NoPolicyMatched,
+        },
+        "a name in no hierarchy of any policy type must still drop: {d:?}"
     );
 }
 
