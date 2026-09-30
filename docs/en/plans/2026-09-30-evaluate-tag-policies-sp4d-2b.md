@@ -189,6 +189,16 @@ reaches them without it".
 
 ### Task 4: The refusals that keep this honest
 
+**Inherited dependency — read before you model tag attributes.** The crate's tag
+identity is `(name, match_type)`. That is a **coarsening** of Ranger's
+`RangerTagForEval`, whose `equals`/`hashCode` also take in `attributes`,
+`validityPeriods` and `options`. It is harmless while attributes are unmodelled,
+because nothing can tell two same-named tags apart anyway. The moment this task
+models tag **attributes**, that identity must widen in the same commit — otherwise
+two tag members Ranger keeps apart collapse into one, silently, and the dedup that
+looks correct today starts dropping a member. Widen the identity or refuse the
+payload; do not model attributes while leaving the identity narrow.
+
 **Files:**
 - Modify: `crates/egret-ranger-eval/src/{model.rs,eval.rs}`
 - Test: `crates/egret-ranger-eval/tests/tag_refusals.rs`
@@ -243,14 +253,6 @@ row-filter tag comparators are fully reproduced, so there is no tie the crate
 cannot order. What is still unmeasured is whether the resource path's rate
 (3.4–4.0%) moves once tag cases are in the corpus. Measure that; do not carry the
 old number forward and do not claim the tag path shares it.
-
-- [ ] **Step 3b: Close Task 2's 2.8.0 gap.** Task 2 measured the candidate trie on
-**2.5.0 only** — the 2.8.0 probe could not run because `ranger-authz-api` is not on
-the harness classpath. The trie is the only candidate filter on the tag path and it
-is strictly WIDER than the matcher, which is why Task 2 added a refusal rather than
-answer from the matcher alone. Either put that jar on the classpath and measure
-2.8.0, or state plainly in the README that the trie claim is 2.5.0-only and that
-the refusal is what covers the gap.
 
 - [ ] **Step 4: Observe the gate failing.** Break one tag rule — admitting
 `DESCENDANT` is the sharpest, since it is the fail-open direction — confirm the
