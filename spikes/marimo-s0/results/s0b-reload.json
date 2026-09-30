@@ -1,0 +1,92 @@
+{
+  "label": "forkserver",
+  "probe": "automated Playwright, one run, macOS laptop",
+  "steps": [
+    {
+      "pid": 50514,
+      "text": "PY pid=50514 viewer=alice sql=SELECT 1 AS n",
+      "seconds": 7.64,
+      "step": "open",
+      "iframe_url": "http://apps.egret.localhost:8701/r/",
+      "kernels_started": [
+        50514
+      ],
+      "egret_events": [
+        {
+          "kind": "ticket_redeemed",
+          "user": "alice"
+        },
+        {
+          "kind": "query",
+          "user": "alice",
+          "pid": 50514
+        },
+        {
+          "kind": "query",
+          "user": "alice",
+          "pid": 50514
+        }
+      ]
+    },
+    {
+      "pid": 50535,
+      "text": "PY pid=50535 viewer=alice sql=SELECT 1 AS n",
+      "seconds": 3.82,
+      "step": "host_reload",
+      "iframe_url": "http://apps.egret.localhost:8701/r/",
+      "kernels_started": [
+        50535
+      ],
+      "egret_events": [
+        {
+          "kind": "ticket_redeemed",
+          "user": "alice"
+        },
+        {
+          "kind": "token_revoked",
+          "user": "alice"
+        },
+        {
+          "kind": "query",
+          "user": "alice",
+          "pid": 50535
+        },
+        {
+          "kind": "query",
+          "user": "alice",
+          "pid": 50535
+        }
+      ]
+    },
+    {
+      "pid": null,
+      "text": "neither PY line nor error text within 60 s",
+      "seconds": 60.41,
+      "body_excerpt": "",
+      "step": "iframe_reload",
+      "iframe_url": "http://apps.egret.localhost:8701/r/",
+      "kernels_started": [
+        50550
+      ],
+      "egret_events": [
+        {
+          "kind": "token_revoked",
+          "user": "alice"
+        },
+        {
+          "kind": "query_rejected"
+        },
+        {
+          "kind": "query_rejected"
+        }
+      ]
+    }
+  ],
+  "pids": [
+    50514,
+    50535,
+    null
+  ],
+  "host_reload_reused_kernel": false,
+  "iframe_reload_reused_kernel": false
+}

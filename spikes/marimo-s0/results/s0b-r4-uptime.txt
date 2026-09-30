@@ -1,0 +1,35 @@
+gate start 00:18:31  0:18  up 15 days,  4:39, 5 users, load averages: 24.57 14.34 15.96
+gate passed after 15 polls:  0:32  up 15 days,  4:53, 5 users, load averages: 5.89 10.24 13.06
+stop-run took 3s
+run up after 5s
+[thread] before 00:32:38  0:32  up 15 days,  4:53, 5 users, load averages: 5.66 10.12 13.00
+ "first": {  "seconds": 3.46  "sequential_p50_s": 2.12,  "concurrent_max_s": 11.97,  "distinct_pids": 1,  "every_viewer_ok": true 
+[thread] after  00:33:16  0:33  up 15 days,  4:54, 5 users, load averages: 12.05 11.06 13.21
+stop-run took 3s
+run up after 5s
+[direct] before 00:33:24  0:33  up 15 days,  4:54, 5 users, load averages: 14.29 11.54 13.36
+ "first": {  "seconds": 7.47  "sequential_p50_s": 6.09,  "concurrent_max_s": 10.89,  "distinct_pids": 9,  "every_viewer_ok": true 
+[direct] after  00:34:24  0:34  up 15 days,  4:55, 5 users, load averages: 10.16 11.05 13.05
+stop-run took 3s
+run up after 4s
+[pool] before 00:34:30  0:34  up 15 days,  4:55, 5 users, load averages: 10.15 11.03 13.04
+ "first": {  "seconds": 4.48  "sequential_p50_s": 3.54,  "concurrent_max_s": 7.95,  "distinct_pids": 9,  "every_viewer_ok": true 
+[pool] after  00:35:14  0:35  up 15 days,  4:56, 5 users, load averages: 7.98 10.39 12.71
+stop-run took 2s
+run up after 4s
+[pool-skipcheck] before 00:35:20  0:35  up 15 days,  4:56, 5 users, load averages: 7.28 10.16 12.60
+ "first": {  "seconds": 2.79  "sequential_p50_s": 2.43,  "concurrent_max_s": 10.74,  "distinct_pids": 9,  "every_viewer_ok": true 
+[pool-skipcheck] after  00:35:57  0:35  up 15 days,  4:57, 5 users, load averages: 5.79 9.48 12.25
+stop-run took 3s
+run up after 4s
+[forkserver] before 00:36:03  0:36  up 15 days,  4:57, 5 users, load averages: 5.41 9.33 12.19
+ "first": {  "seconds": 5.9  "sequential_p50_s": 3.03,  "concurrent_max_s": 9.84,  "distinct_pids": 9,  "every_viewer_ok": true 
+[forkserver] after  00:36:47  0:36  up 15 days,  4:57, 5 users, load averages: 8.12 9.56 12.12
+stop-run took 2s
+run up after 4s
+[forkserver-skipcheck] before 00:36:53  0:36  up 15 days,  4:58, 5 users, load averages: 7.87 9.48 12.08
+ "first": {  "seconds": 4.98  "sequential_p50_s": 2.95,  "concurrent_max_s": 12.91,  "distinct_pids": 9,  "every_viewer_ok": true 
+[forkserver-skipcheck] after  00:37:38  0:37  up 15 days,  4:58, 5 users, load averages: 22.42 12.59 13.06
+2719 free
+final stop-run took 3s
+DONE

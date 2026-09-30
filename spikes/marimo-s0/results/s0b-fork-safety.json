@@ -1,0 +1,47 @@
+{
+  "probe": "automated Playwright, one viewer per preload, macOS laptop",
+  "runs": [
+    {
+      "preload": "full",
+      "servers_run": "run up after 3s",
+      "forkserver_ready_line": [
+        "FORKSERVER_READY full pid=47994 py_threads=1 polars_loaded=True"
+      ],
+      "forkserver_pid": 47994,
+      "forkserver_os_threads_before_viewer": 1,
+      "forkserver_os_threads_after_fork": 1,
+      "viewer": {
+        "rendered": true,
+        "seconds": 3.27,
+        "py_line": "PY pid=48035 viewer=fsfull sql=SELECT 1 AS n",
+        "sqlcell_line": "SQLCELL viewer=fsfull",
+        "pid": 48035
+      },
+      "kernel_pid_differs_from_forkserver": true,
+      "polars_path_correct": true,
+      "sqlcell_correct": true,
+      "fork_warning_lines": []
+    },
+    {
+      "preload": "light",
+      "servers_run": "run up after 3s",
+      "forkserver_ready_line": [
+        "FORKSERVER_READY light pid=48067 py_threads=1 polars_loaded=False"
+      ],
+      "forkserver_pid": 48067,
+      "forkserver_os_threads_before_viewer": 1,
+      "forkserver_os_threads_after_fork": 1,
+      "viewer": {
+        "rendered": true,
+        "seconds": 3.75,
+        "py_line": "PY pid=48096 viewer=fslight sql=SELECT 1 AS n",
+        "sqlcell_line": "SQLCELL viewer=fslight",
+        "pid": 48096
+      },
+      "kernel_pid_differs_from_forkserver": true,
+      "polars_path_correct": true,
+      "sqlcell_correct": true,
+      "fork_warning_lines": []
+    }
+  ]
+}

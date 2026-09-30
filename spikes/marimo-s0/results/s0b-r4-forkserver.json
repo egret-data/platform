@@ -1,0 +1,66 @@
+{
+  "variant": "forkserver",
+  "first": {
+    "user": "c0",
+    "pid": 59645,
+    "viewer_ok": true,
+    "seconds": 5.9
+  },
+  "sequential": [
+    {
+      "user": "s0",
+      "pid": 59677,
+      "viewer_ok": true,
+      "seconds": 3.54
+    },
+    {
+      "user": "s1",
+      "pid": 59705,
+      "viewer_ok": true,
+      "seconds": 3.03
+    },
+    {
+      "user": "s2",
+      "pid": 59715,
+      "viewer_ok": true,
+      "seconds": 2.88
+    },
+    {
+      "user": "s3",
+      "pid": 59738,
+      "viewer_ok": true,
+      "seconds": 2.89
+    },
+    {
+      "user": "s4",
+      "pid": 59755,
+      "viewer_ok": true,
+      "seconds": 3.56
+    }
+  ],
+  "sequential_p50_s": 3.03,
+  "concurrent": [
+    {
+      "user": "k0",
+      "pid": 59840,
+      "viewer_ok": true,
+      "seconds": 9.75
+    },
+    {
+      "user": "k1",
+      "pid": 59845,
+      "viewer_ok": true,
+      "seconds": 9.84
+    },
+    {
+      "user": "k2",
+      "pid": 59846,
+      "viewer_ok": true,
+      "seconds": 9.8
+    }
+  ],
+  "concurrent_max_s": 9.84,
+  "distinct_pids": 9,
+  "sessions": 9,
+  "every_viewer_ok": true
+}

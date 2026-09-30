@@ -1,0 +1,13 @@
+# ps -o pid,ppid,rss (KB) right after s0b_startup forkserver + q1 (preload full); 48279 = fork server, the rest = forked kernels (macOS rss counts shared copy-on-write pages)
+48279 48277  48528
+48304 48279  35364
+48322 48279  37868
+48347 48279  39940
+48357 48279  39120
+48376 48279  48488
+48385 48279  48392
+48462 48279  48248
+48463 48279  48464
+48464 48279  48524
+48502 48279  50084
+48503 48279  50844
