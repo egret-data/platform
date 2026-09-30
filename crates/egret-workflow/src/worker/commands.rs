@@ -211,7 +211,7 @@ pub const MAX_VARS_BYTES: usize = 1_048_576;
 /// Built by a handler, consumed by a [`TaskRunner`]. A struct rather than
 /// Kestra's interface because there is one shape and no plugin author to let
 /// implement a second.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct TaskCommands {
     /// `TaskCommands.getContainerImage()`. Required — `Docker.run` refuses with
     /// *"This task runner needs the `containerImage` property to be set"*, and
@@ -272,6 +272,29 @@ pub struct TaskCommands {
     /// ([`files_out_script`](super::k8s::pod_spec::files_out_script)). A
     /// script pod (`false`) is W5a's byte for byte.
     pub host_protocol: bool,
+}
+
+impl std::fmt::Debug for TaskCommands {
+    /// Every field but [`TaskCommands::input_files`]' contents, which are
+    /// printed as their names and byte counts (W5b fix round 1, M5): the
+    /// plugin handler's `task.json` holds resolved secrets.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let files: BTreeMap<&str, String> = self
+            .input_files
+            .iter()
+            .map(|(k, v)| (k.as_str(), format!("<{} bytes>", v.len())))
+            .collect();
+        f.debug_struct("TaskCommands")
+            .field("container_image", &self.container_image)
+            .field("interpreter", &self.interpreter)
+            .field("before_commands", &self.before_commands)
+            .field("commands", &self.commands)
+            .field("env", &self.env)
+            .field("input_files", &files)
+            .field("output_files", &self.output_files)
+            .field("host_protocol", &self.host_protocol)
+            .finish()
+    }
 }
 
 impl TaskCommands {
@@ -3150,6 +3173,25 @@ mod tests {
                     .map(|(l, t)| (l, t.into_owned()))
             })
             .collect()
+    }
+
+    /// **`Debug` never prints an input file's contents** (W5b fix round 1,
+    /// M5): the plugin handler's `task.json` holds resolved secrets, and a
+    /// `{:?}` in a `tracing` event or a panic message would write them out.
+    #[test]
+    fn debug_names_the_input_files_but_never_prints_their_contents() {
+        let cmds = TaskCommands {
+            container_image: "img".into(),
+            input_files: BTreeMap::from([(
+                "task.json".to_string(),
+                r#"{"properties":{"password":"pa55-s3cret"}}"#.to_string(),
+            )]),
+            ..TaskCommands::default()
+        };
+        let debug = format!("{cmds:?} {cmds:#?}");
+        assert!(!debug.contains("pa55-s3cret"), "{debug}");
+        assert!(debug.contains("task.json"), "{debug}");
+        assert!(debug.contains("img"), "{debug}");
     }
 
     /// **A re-attach drops the lines the previous holder stored -- compared
