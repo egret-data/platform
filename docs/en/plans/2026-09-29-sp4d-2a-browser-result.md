@@ -39,7 +39,8 @@ machine uses it.
 
 ```bash
 # 0. disk check first — this machine has had Docker killed by a full disk
-df -h /                       # 13Gi free before, unchanged after
+df -h /                       # 13Gi available before, 12Gi after (the scratch DB is 13MB;
+                              # the rest is the warm cargo target dir this worktree already had)
 
 # 1. the local dev stack was already up (deploy/docker-compose.dev.yml):
 #    egret-dev-postgres-1, egret-dev-minio-1, egret-dev-starrocks-1, egret-dev-keycloak-1
@@ -283,7 +284,463 @@ for a hand-written Ranger policy that is not there. If that is what renders, it 
 
 ## 3. Observations
 
-*(Written after the predictions above were committed. Each case: what rendered, verbatim,
-with the network payload beside it.)*
+Driven in Chromium via Playwright against `http://localhost:5199/governance/explain-access`,
+signed in as `admin@egret.local`. Every "rendered" block below is the result element's
+`innerText`, read out of the live DOM, not retyped. Every payload is the response body of the
+`POST /api/control-plane/perm/explain` that produced it, read from the browser's own network
+log.
 
-**To be filled in by the observation pass.**
+### P1 · two profiles, two engine types · **PASS**
+
+Payload:
+
+```json
+{"outcome":"per_profile","profiles":[
+ {"service_id":1,"service_name":"sp4d2a-trino","engine":"trino","accesses":[
+   {"access_type":"select","decision":{"kind":"undecidable","why":[{"kind":"envelope_construct",
+     "construct":{"kind":"tag_policies","block":{"kind":"policies","count":2}}}]},"attribution":null}]},
+ {"service_id":3,"service_name":"sp4d2a-sr","engine":"starrocks","accesses":[
+   {"access_type":"select","decision":{"kind":"allowed","policy_id":19,
+     "policy_name":"egret-admin - catalog, database, table, column"},"attribution":null}]}],
+ "tags":["sp4d2a_ssn"]}
+```
+
+Rendered, verbatim:
+
+```text
+sp4d2a-trino
+Trino
+service id 1
+
+Evaluated over the policy set this profile’s plugin downloads.
+
+select
+Undecidable
+
+Neither allowed nor refused: something stands between the evaluator and a defensible answer,
+and it is named below rather than guessed at in either direction.
+
+The downloaded policy set carries 2 tag policies that could decide this, which egret does not
+evaluate yet — so this access cannot be decided.
+─────
+sp4d2a-sr
+StarRocks
+service id 3
+
+Evaluated over the policy set this profile’s plugin downloads.
+
+select
+Allowed
+
+The policy set this engine downloads allows this access.
+
+Seeded admin policy
+
+egret seeds this policy itself, outside the permission model: auto-bind puts thirteen
+admin-all-access hierarchies onto every generated profile, granting its platform admins all
+access. For an administrator this is the expected explanation.
+
+Ranger policy egret-admin - catalog, database, table, column, id 19
+```
+
+Measured from the DOM: `explain-profile` = **2**, `decision-badge` = **2** (so there is no
+aggregate badge over the two), `no-profile-state` absent, `raw-policy` `data-kind` =
+`seeded-admin` with **0** anchors inside it. Badge classes: Undecidable → `bg-sky-500`,
+Allowed → `bg-green-…` — three distinct colours across the run (sky / green / destructive /
+yellow-600), so `Undecidable` is neither an allow nor a refusal by colour either. The result
+text contains no `Denied`, no `Unrecognized`, no `TagPolicies`, no `{`. `Tags considered`
+renders one badge `sp4d2a_ssn`; the four honest-limits paragraphs are all present and none of
+them claims explain cannot see hand-written Ranger policy.
+
+### P2 · a catalog served by nothing · **PASS**
+
+Payload: `{"outcome":"no_profile_serves_the_catalog","profiles":[],"tags":[]}`
+
+Rendered, verbatim:
+
+```text
+Nothing is enforcing
+
+No policy profile serves this catalog, so no engine plugin is ever consulted about it. This is
+not a denial — nothing is enforcing here, which is a different fact from a policy refusing the
+access. Attach the catalog to a profile if it is meant to be governed.
+
+Tags considered
+
+None.
+```
+
+`explain-profile` = **0**, `decision-badge` = **0**, `no-profile-state` present. Its alert
+classes are `bg-background text-foreground` — the neutral variant, **not** `destructive` — and
+the badge carries `text-foreground` with no `bg-`, i.e. `outline`. Neither "Denied" nor
+"Refused" appears anywhere in the result. So "nothing is enforcing" and "refused" do not look
+alike; the layout is not lying.
+
+### P3a · an allow attributed to a grant · **PASS**
+
+Payload (StarRocks arm): `{"kind":"allowed","policy_id":31,"policy_name":"perm-grant-e7f62547-…"}`
+with `"attribution":{"kind":"grant","grant_id":"e7f62547-dbc3-42b7-87b6-e1d679627983"}`.
+
+Rendered: `View grant e7f62547-dbc3-42b7-87b6-e1d679627983` /
+`Ranger policy perm-grant-e7f62547-dbc3-42b7-87b6-e1d679627983, id 31`, the link's `href`
+read off the DOM as `/governance/data-permissions?grant=e7f62547-dbc3-42b7-87b6-e1d679627983`.
+
+### P3b · the headline win: an admin allowed by a seeded `egret-admin` policy · **PASS**
+
+It is the P1 StarRocks block above, and it reads as the **reassuring explanation**, not as an
+alarm: the neutral `secondary` badge "Seeded admin policy", `data-kind="seeded-admin"`, the
+sentence "For an administrator this is the expected explanation.", and the policy named
+(`egret-admin - catalog, database, table, column`, id 19). The old model-only evaluator could
+not see this policy at all and answered "no grant matched" while the engine allowed; the page
+now names it.
+
+**And the two profiles name DIFFERENT seeded hierarchies** — Trino decided on
+`egret-admin - catalog, schema, table` (id 5, measured in the tag-free run below) and
+StarRocks on `egret-admin - catalog, database, table, column` (id 19). That is each engine's
+own resource vocabulary, from each profile's own download; it is not one answer copied twice.
+
+### P4 · the defect that shipped twice: a clearance denial · **PASS**
+
+Payload (StarRocks arm):
+
+```json
+{"access_type":"select",
+ "decision":{"kind":"denied","policy_id":30,
+   "policy_name":"perm-clearance-88888888-8888-4888-8888-888888888888-sp4d2a_wh.sales.orders.ssn",
+   "reason":"deny_policy_item"},
+ "attribution":{"kind":"clearance","tag_id":"88888888-8888-4888-8888-888888888888",
+   "tag":"sp4d2a_ssn","required_roles":["sp4d2a_cleared"],"locator":"sp4d2a_wh.sales.orders.ssn"}}
+```
+
+Rendered, verbatim:
+
+```text
+select
+Refused by a deny item
+
+Somebody forbade this: a deny item in the downloaded policy set matches this subject and resource.
+
+Clearance required
+Gating tag sp4d2a_ssn
+expansion sp4d2a_wh.sales.orders.ssn
+Ranger policy perm-clearance-88888888-8888-4888-8888-888888888888-sp4d2a_wh.sales.orders.ssn, id 30
+
+Cleared by holding any one of sp4d2a_cleared.
+```
+
+All three facts are there: a real label ("Clearance required", warning badge, `bg-destructive`
+on the verdict badge), the **gating tag** (`sp4d2a_ssn` — the `tags.key`), and the **clearing
+roles** with OR semantics stated. The string `clearance_required` does not appear in the
+rendered text, and neither does "Unrecognized reason class.". The expansion locator is
+rendered too, which is the only thing that says which of N per-column policies decided. A
+grant allows `analyst` `select` on the table and the deny still won, with the *clearance*
+named as the decider rather than the grant.
+
+**This is the defect that shipped for two releases. It is fixed, and it was measured in a
+browser, not inferred from the commit that claims to fix it.**
+
+### P5 · an operator-written raw policy, named and not dropped · **PASS**
+
+Payload (StarRocks arm): `{"kind":"allowed","policy_id":37,"policy_name":"zz-sp4d2a-operator-hand-written"}`,
+`"attribution":null`.
+
+Rendered, verbatim:
+
+```text
+select
+Allowed
+
+The policy set this engine downloads allows this access.
+
+Outside the permission model
+
+egret’s compiler did not mint this policy, so it is outside the permission model and has no
+governance page to open. It is reported by its Ranger name and id, because it decided this access.
+
+Ranger policy zz-sp4d2a-operator-hand-written, id 37
+```
+
+`data-kind="unowned"`, **0** anchors inside the block. Reported by Ranger name and id,
+unlinked, marked outside the model, not dropped.
+
+### P6 · a second `Undecidable` cause, as prose · **PASS**
+
+Payload (StarRocks arm): `{"kind":"undecidable","why":[{"kind":"access_type_case_mismatch",
+"policy_id":38,"policy_name":"zz-sp4d2a-operator-wrong-case","access_type":"SELECT"}]}`
+
+Rendered, verbatim:
+
+```text
+Ranger policy “zz-sp4d2a-operator-wrong-case” (policy id 38) names the access type “SELECT”
+in a different case than the service definition does.
+```
+
+One `undecidable-cause` node, prose, a real id, no Debug token.
+
+### P7 · `write` is several evaluations, never collapsed · **PASS**
+
+`explain-access` rows = **5**, `decision-badge` = **5**, and still no aggregate badge. Trino:
+`insert`, `delete` (both Undecidable). StarRocks: `insert`, `update`, `delete`, each
+**Allowed** by `egret-admin - catalog, database, table` (id 18). The form said so before
+submitting: "Ranger has no write: it is evaluated as insert and delete on Trino, and insert,
+update and delete on StarRocks, each answered separately below."
+
+### P8 · "nobody said yes" ≠ "somebody said no" — **PASS on the verdict, FINDING 1 underneath**
+
+Payload (StarRocks arm):
+`{"kind":"denied","policy_id":null,"policy_name":"","reason":"no_policy_matched"}`,
+`"attribution":null`.
+
+Rendered, verbatim:
+
+```text
+select
+No policy matched
+
+Nobody granted this — not the same as somebody forbidding it. Ranger’s own audit shows “-”
+for exactly this case.
+
+Outside the permission model
+
+egret’s compiler did not mint this policy, so it is outside the permission model and has no
+governance page to open. It is reported by its Ranger name and id, because it decided this access.
+
+Ranger policy , id unknown
+```
+
+The badge is `bg-yellow-600` (warning), kept apart from the two destructive denies — that half
+is right, and it is the distinction Ranger's own audit throws away. **The block under it is
+the finding; see Finding 1.** The prediction that this would happen was written and committed
+before the page was opened.
+
+### F1 · falsification: is the tag-policy count real, or a string? · **PASS**
+
+The claim "2 tag policies" is only worth something if it can be made to say something else.
+One of the two tag-service policies was deleted (`DELETE FROM policy.authz_policies WHERE id
+= 35`) and the same request re-run. Payload went to `"block":{"kind":"policies","count":1}`
+and the page rendered, verbatim:
+
+```text
+The downloaded policy set carries 1 tag policy that could decide this, which egret does not
+evaluate yet — so this access cannot be decided.
+```
+
+The count is content-derived **and** the noun agrees with it ("1 tag policy", "2 tag
+policies"). Not a hardcoded sentence.
+
+### F2 · falsification: can the Trino profile decide at all? · **PASS**
+
+With the tag service emptied (the second policy deleted too), the same `admin` request came
+back `allowed` on **both** profiles, by two different policies — Trino
+`egret-admin - catalog, schema, table` (id 5), StarRocks
+`egret-admin - catalog, database, table, column` (id 19). So the Trino `Undecidable` in P1–P7
+is the tag-policy refusal doing its job, not the Trino arm being broken.
+
+### F3 · the case per-profile exists for: two profiles DISAGREEING · **PASS**, and it matters
+
+With the Trino tag service empty but the StarRocks per-column clearance still in place,
+`analyst` / read / `sp4d2a_wh.sales.orders.ssn` rendered:
+
+```text
+sp4d2a-trino · Trino · service id 1
+  select   Allowed
+           View grant e7f62547-dbc3-42b7-87b6-e1d679627983
+           Ranger policy perm-grant-e7f62547-dbc3-42b7-87b6-e1d679627983, id 28
+─────
+sp4d2a-sr · StarRocks · service id 3
+  select   Refused by a deny item
+           Clearance required
+           Gating tag sp4d2a_ssn
+           expansion sp4d2a_wh.sales.orders.ssn
+           Ranger policy perm-clearance-…-sp4d2a_wh.sales.orders.ssn, id 30
+           Cleared by holding any one of sp4d2a_cleared.
+```
+
+Two `decision-badge`s, no third. **No single word would have been honest here** — the same
+subject on the same column is allowed by one engine's download and refused by the other's,
+because a Trino clearance is a TAG policy and a StarRocks clearance is a per-column resource
+policy. An aggregate "Allowed" over this would have been the most misleading thing on the
+page, and the page does not have one. This is the strongest evidence in the run that the
+per-profile shape is the right one.
+
+---
+
+## 4. Findings
+
+### Finding 1 (Major) — `no_policy_matched` is rendered as a hand-written Ranger policy that does not exist
+
+**Measured**, P8 above. `egret-ranger-eval` returns, by construction,
+
+```rust
+// crates/egret-ranger-eval/src/eval.rs:759-763
+None => Decision::Denied {
+    policy_id: None,
+    policy_name: String::new(),
+    reason: DenyReason::NoPolicyMatched,
+},
+```
+
+— there is **no deciding policy**, that is what the verdict means. But `AccessRow` sends every
+non-`Undecidable` decision to `DecidedBy`, and `DecidedBy` with no attribution renders
+`RawPolicy`. So the page prints, under a verdict that means *nothing matched*:
+
+> **Outside the permission model**
+> egret's compiler did not mint this policy, so it is outside the permission model and has no
+> governance page to open. It is reported by its Ranger name and id, **because it decided this
+> access.**
+> Ranger policy ⟨empty⟩, id unknown
+
+Two separate untruths in four lines. It asserts a policy decided the access when none did, and
+it tells a steward the policy is *outside the permission model* — which sends them looking
+through raw Ranger for a hand-written policy that is not there. The literal rendering is also
+broken text: `Ranger policy , id unknown` (confirmed in the DOM as
+`Ranger policy <span class="font-mono"></span>, id <span class="font-mono">unknown</span>`).
+
+This is the same **class** of error as D10's `clearance_required` defect — a decision variant
+falling into a branch written for a different variant — reached through the new mechanism
+rather than the old one.
+
+**Why no test caught it, and this is the more important half.** The test file's fixture invents
+a shape the backend cannot produce:
+
+```ts
+// frontend/src/routes/governance/__tests__/ExplainAccess.test.tsx:81
+decision: { kind: "denied", policy_id: null, policy_name: "unnamed", reason: "no_policy_matched" },
+```
+
+`"unnamed"` is not a value `explain` can send; the server sends `""`. With a non-empty name the
+`RawPolicy` block reads plausibly and nothing looks wrong, so the fixture hides exactly the
+rendering it is standing in for. This is the trap this package's own Task 1 brief names — *"a
+fixture drawn from the same imagination as the code inherits its blind spots"* — appearing on
+the frontend side of the same package.
+
+**The minimal fix** (not applied — see §5): in `AccessRow`, a `denied` decision whose
+`reason` is `no_policy_matched` has no decider, so render no `DecidedBy` block at all (the hint
+already says everything true about it); and change the test fixture's `policy_name` to `""`,
+which is what the server sends.
+
+### Finding 2 (Major) — the clearance block asserts "it declares only groups" about a gate it has just said it cannot see
+
+**Measured.** `ExplainAttribution::Clearance` reconstructs `tag` and `required_roles` from the
+`tags` row the policy name points at (`routes.rs:1652-1667`). When that row is gone — which the
+page's own copy says happens, "a compiled clearance can outlive its gate until the next
+recompile" — `tag` is `None` **and** `required_roles` is `[]`. The page handles the first
+correctly and then, for the second, commits to one of its two possible causes.
+
+Forced live: the mask rule referencing the tag was deleted through the real API, then
+`DELETE FROM tags WHERE id='8888…'` (which cascades `classification_policies`), leaving policy
+30 compiled. Payload:
+
+```json
+"attribution":{"kind":"clearance","tag_id":"88888888-8888-4888-8888-888888888888",
+               "tag":null,"required_roles":[],"locator":"sp4d2a_wh.sales.orders.ssn"}
+```
+
+Rendered, verbatim, in one block:
+
+```text
+Clearance required
+Gating tag unknown — the tag row is gone until the next recompile
+expansion sp4d2a_wh.sales.orders.ssn
+Ranger policy perm-clearance-88888888-8888-4888-8888-888888888888-sp4d2a_wh.sales.orders.ssn, id 30
+
+No role clears this gate: it declares only groups, and no engine egret provisions can see a group.
+```
+
+The two sentences contradict each other. The first says nothing is known about the gate; the
+second asserts a specific fact about it. And the asserted fact is **false**: this gate declared
+`required_roles: ['sp4d2a_cleared']` and no groups at all. A steward reads "it declares only
+groups" and concludes the classification is misconfigured, when the truth is that its row was
+deleted and the engine is still enforcing the old compilation. Worse, the clearing role — the
+fact D10 exists to surface — is silently absent rather than reported as unknown.
+
+The page's own doc comment already knows there are two causes ("`required_roles` is empty for
+the same reason, and also for a gate that declares only `required_groups`"). The rendering
+picks one.
+
+**The minimal fix** (not applied — see §5): the groups-only sentence is only sayable when
+`tag !== null`. With `tag === null` the honest sentence is that the gate's roles are unknown
+for the same reason its tag is. Two branches, not one. `ExplainAttribution::Clearance` could
+also make this unrepresentable by carrying `required_roles: Option<Vec<String>>`, so "the gate
+says no roles" and "the gate could not be read" cannot arrive as the same value.
+
+### Minor 1 — the honest-limits block talks about "the verdicts above" when there are none
+
+In the no-profile state (P2) the block still renders "…— the verdicts above are what the engine
+reaches for this username alone" and "…this answers why the subject is allowed or refused as
+they are", under a result whose whole point is that nobody is deciding anything. Not false
+exactly, but it reads as though a verdict were somewhere on the page. Cosmetic.
+
+### Minor 2 — "Cleared by holding any one of `sp4d2a_cleared`." with a single role
+
+Correct, and the OR semantics are worth stating explicitly for the multi-role case; with one
+role it reads a little oddly. Cosmetic, no change recommended.
+
+### Minor 3 — "Tags considered" (already flagged by Task 8's own report)
+
+The label still says "considered" for a list the page's next paragraph says decides nothing.
+Task 8's report raised this as its own concern 2; the browser confirms the two sit adjacent,
+`Tags considered` / `sp4d2a_ssn` / "They are shown for information and decide nothing here". A
+reader who stops at the label gets the wrong idea. Worth the reword Task 8 proposed.
+
+### Non-finding, worth knowing: one tag-addressed rule anywhere makes every Trino answer `Undecidable`
+
+Not a defect — it is the sound refusal Task 1 built, and the page explains it in prose with a
+real count. But it is worth a steward knowing the scale: because `explain` passes
+`resolved_tags: None` unconditionally, a **single** tag-selected rule or clearance anywhere in
+the installation turns *every* Trino verdict on *every* catalog into `Undecidable`. In this
+fixture that was two policies, and all seven Trino answers were refusals to answer. The
+StarRocks side is unaffected (no tag service). The page never pretends otherwise, and the
+alternative — answering from egret's non-hierarchy-complete tag resolution — fails open, so
+this is the right trade. It is simply a larger blast radius than "a profile whose tag block
+carries a policy" suggests.
+
+---
+
+## 5. What was NOT done, and why
+
+**Neither finding was fixed.** This is the browser gate; its job is to be the first reader who
+is not the author, and a gate that edits the page to match its own expectation destroys the
+only evidence it was there to produce. Both findings are recorded above with the exact minimal
+change each needs, including the test-fixture correction that would let Finding 1 be caught by
+a test at all. Nothing in `ExplainAccess.tsx`, `explain_wire.rs`, `routes.rs`,
+`egret-ranger-eval` or the generated client was touched by this task.
+
+## 6. Verdict
+
+| # | case | result |
+|---|---|---|
+| P1 | a catalog served by two profiles of different engine types | **PASS** |
+| P2 | a catalog served by nothing, visually distinct from a refusal | **PASS** |
+| P3a | an allow attributed to a grant, with a working deep link | **PASS** |
+| P3b | an admin allowed by a seeded `egret-admin` policy, reading as reassurance | **PASS** |
+| P4 | a clearance denial: real label + gating tag + clearing roles | **PASS** — the D10 defect is gone |
+| P5 | a raw operator policy, named by Ranger name and id, unlinked, not dropped | **PASS** |
+| P6 | an `Undecidable` cause as prose, not a Debug string | **PASS** |
+| P7 | `write` answered per access type, never collapsed | **PASS** |
+| P8 | "no policy matched" kept apart from a deny | **PASS** on the verdict, **FINDING 1** on the block beneath it |
+| F1 | the tag-policy count is content-derived, singular/plural included | **PASS** |
+| F2 | the Trino profile can decide when nothing refuses | **PASS** |
+| F3 | two profiles disagreeing, with no dishonest aggregate | **PASS** |
+| — | a clearance whose tag row is gone | **FINDING 2** |
+
+Six of the six shapes the brief named render correctly. Two defects were found that the 15
+passing unit tests did not, one of them because the test fixture for that very case uses a
+value the backend cannot send.
+
+## 7. Teardown
+
+- `frontend/vite.config.sp4d2a.mts` deleted; `git status` clean.
+- The scratch backend (:8099) and Vite (:5199) were stopped.
+- The stale `:8080` backend and `:5173` Vite from the 2026-09-27 SP4b-2 gate were **left
+  running and untouched** — they belong to another session's setup, not this one.
+- The kind cluster was read with `SELECT`s only. `demo-trino` and its 26 endpoints, alerts and
+  datasets were not touched; nothing was written to the cluster database at any point.
+- The dev database `egret`, `egret_test` and the `_sqlx_test_*` databases were not touched.
+- `egret_sp4d2a` is **left in place**, as `egret_sp4b` was left after the SP4b-2 gate: it is
+  the instrument this document's measurements were taken on, and dropping it would make them
+  unrepeatable. `DROP DATABASE egret_sp4d2a;` removes every object this task created, in one
+  statement; nothing outside that database was added.
+- `df -h /` before 13Gi available, after 12Gi. The scratch database is 13MB (measured); the change
+  is the already-warm 19G `target/` growing during `cargo build -p egret-bin`. Docker was
+  never at risk.
