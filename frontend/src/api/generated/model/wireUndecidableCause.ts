@@ -8,6 +8,7 @@
 import type { WireEngineType } from './wireEngineType';
 import type { WirePluginVersion } from './wirePluginVersion';
 import type { WireServiceDefIssue } from './wireServiceDefIssue';
+import type { WireTagResourceProblem } from './wireTagResourceProblem';
 import type { WireUnmodelled } from './wireUnmodelled';
 
 /**
@@ -72,6 +73,14 @@ export type WireUndecidableCause = {
   policy_ids: (number | null)[];
   policy_names: string[];
   kind: 'eval_order_ambiguous';
+} | {
+  kind: 'tags_unresolved';
+} | {
+  /** @nullable */
+  policy_id?: number | null;
+  policy_name: string;
+  problem: WireTagResourceProblem;
+  kind: 'tag_resource_not_reproducible';
 } | {
   declared: WireEngineType;
   service_def_name: string;

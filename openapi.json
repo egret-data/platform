@@ -41558,6 +41558,57 @@
         ],
         "description": "Wire mirror of [`TagPolicyBlock`]. `Policies` carries its count as a\nJSON number (`count`), never folded into a formatted string — Task 8's\nsteward UI renders it, and SP4d-2b changes what it means."
       },
+      "WireTagResourceProblem": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "not_only_the_tag_resource"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "excludes"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "value",
+              "kind"
+            ],
+            "properties": {
+              "value": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "value_not_trie_prefix_exact"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`TagResourceProblem`]: why a tag policy's resource map is\none the evaluator cannot filter the way Ranger's `RangerResourceTrie` does\n(SP4d-2b Task 2).\n\nCarried as its own `kind`, not a formatted string, for the same reason\n[`WireTagPolicyBlock`] carries a `count`: a steward has to be able to tell\n\"this policy names a second resource level\" from \"this policy's tag value is\na wildcard\", and the remedies differ."
+      },
       "WireUndecidableCause": {
         "oneOf": [
           {
@@ -41845,6 +41896,50 @@
                 "type": "string",
                 "enum": [
                   "eval_order_ambiguous"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The `tagPolicies` block carries policies this decision's type would\nevaluate and the caller resolved no tag set. Not reachable through\n`explain` yet: the tag phase is not composed with the resource phase\nuntil SP4d-2b Task 3.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tags_unresolved"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "policy_name",
+              "problem",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "problem": {
+                "$ref": "#/components/schemas/WireTagResourceProblem"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_resource_not_reproducible"
                 ]
               }
             }

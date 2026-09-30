@@ -30,12 +30,12 @@
 use egret_perm_compile::explain_wire::{
     WireDecision, WireDenyReason, WireEngineType, WireGraphProblem, WireItemBucket,
     WireMaskDecision, WireMaskResult, WirePluginVersion, WirePolicyType, WireRowFilterDecision,
-    WireRowFilterResult, WireServiceDefIssue, WireTagPolicyBlock, WireUndecidableCause,
-    WireUnmodelled,
+    WireRowFilterResult, WireServiceDefIssue, WireTagPolicyBlock, WireTagResourceProblem,
+    WireUndecidableCause, WireUnmodelled,
 };
 use egret_ranger_eval::eval::{
     Decision, DenyReason, EngineType, MaskDecision, MaskResult, PluginVersion, RowFilterDecision,
-    RowFilterResult, UndecidableCause,
+    RowFilterResult, TagResourceProblem, UndecidableCause,
 };
 use egret_ranger_eval::model::{ItemBucket, TagPolicyBlock, Unmodelled};
 use egret_ranger_eval::servicedef::{GraphProblem, PolicyType, ServiceDefIssue};
@@ -138,7 +138,7 @@ fn plugin_version_both_variants() {
     );
 }
 
-// ── UndecidableCause (13 variants) ───────────────────────────────────────
+// ── UndecidableCause (15 variants) ───────────────────────────────────────
 
 #[test]
 fn cause_envelope_construct_carries_the_full_typed_construct() {
@@ -354,6 +354,62 @@ fn cause_plugin_version_mismatch() {
             measured: WirePluginVersion::Ranger2_8_0,
         }
     );
+}
+
+#[test]
+fn cause_tags_unresolved() {
+    let wire = WireUndecidableCause::from(&UndecidableCause::TagsUnresolved);
+    assert_eq!(wire, WireUndecidableCause::TagsUnresolved);
+    assert_eq!(
+        serde_json::to_value(wire).unwrap(),
+        serde_json::json!({"kind": "tags_unresolved"})
+    );
+}
+
+/// SP4d-2b Task 2. All three `TagResourceProblem` arms, because each names a
+/// different remedy for the steward: drop the extra resource level, drop the
+/// `isExcludes`, or spell the tag value out.
+#[test]
+fn cause_tag_resource_not_reproducible_every_problem() {
+    let cases = [
+        (
+            TagResourceProblem::NotOnlyTheTagResource,
+            WireTagResourceProblem::NotOnlyTheTagResource,
+            serde_json::json!({"kind": "not_only_the_tag_resource"}),
+        ),
+        (
+            TagResourceProblem::Excludes,
+            WireTagResourceProblem::Excludes,
+            serde_json::json!({"kind": "excludes"}),
+        ),
+        (
+            TagResourceProblem::ValueNotTriePrefixExact("p*x".to_string()),
+            WireTagResourceProblem::ValueNotTriePrefixExact {
+                value: "p*x".to_string(),
+            },
+            serde_json::json!({"kind": "value_not_trie_prefix_exact", "value": "p*x"}),
+        ),
+    ];
+    for (problem, expected, expected_json) in cases {
+        assert_eq!(WireTagResourceProblem::from(&problem), expected);
+        assert_eq!(
+            serde_json::to_value(WireTagResourceProblem::from(&problem)).unwrap(),
+            expected_json
+        );
+        let cause = UndecidableCause::TagResourceNotReproducible {
+            policy_id: Some(8839),
+            policy_name: "clearance".to_string(),
+            problem: problem.clone(),
+        };
+        assert_eq!(
+            WireUndecidableCause::from(&cause),
+            WireUndecidableCause::TagResourceNotReproducible {
+                policy_id: Some(8839),
+                policy_name: "clearance".to_string(),
+                problem: expected,
+            }
+        );
+    }
 }
 
 // ── Decision (3 variants) — and the Vec<why> is not collapsed ───────────

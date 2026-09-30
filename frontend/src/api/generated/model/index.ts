@@ -475,6 +475,7 @@ export * from './wirePluginVersion';
 export * from './wirePolicyType';
 export * from './wireServiceDefIssue';
 export * from './wireTagPolicyBlock';
+export * from './wireTagResourceProblem';
 export * from './wireUndecidableCause';
 export * from './wireUnmodelled';
 export * from './workflowGetExecutionLogsParams';

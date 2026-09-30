@@ -91,7 +91,7 @@
 
 use egret_ranger_eval::eval::{
     Decision, DenyReason, EngineType, MaskDecision, MaskResult, PluginVersion, RowFilterDecision,
-    RowFilterResult, UndecidableCause,
+    RowFilterResult, TagResourceProblem, UndecidableCause,
 };
 use egret_ranger_eval::model::{ItemBucket, TagPolicyBlock, Unmodelled};
 use egret_ranger_eval::servicedef::{GraphProblem, PolicyType, ServiceDefIssue};
@@ -216,6 +216,39 @@ impl From<&TagPolicyBlock> for WireTagPolicyBlock {
                 count: *count as u32,
             },
             TagPolicyBlock::Unreadable => WireTagPolicyBlock::Unreadable,
+        }
+    }
+}
+
+/// Wire mirror of [`TagResourceProblem`]: why a tag policy's resource map is
+/// one the evaluator cannot filter the way Ranger's `RangerResourceTrie` does
+/// (SP4d-2b Task 2).
+///
+/// Carried as its own `kind`, not a formatted string, for the same reason
+/// [`WireTagPolicyBlock`] carries a `count`: a steward has to be able to tell
+/// "this policy names a second resource level" from "this policy's tag value is
+/// a wildcard", and the remedies differ.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireTagResourceProblem {
+    NotOnlyTheTagResource,
+    Excludes,
+    ValueNotTriePrefixExact { value: String },
+}
+
+impl From<&TagResourceProblem> for WireTagResourceProblem {
+    fn from(problem: &TagResourceProblem) -> Self {
+        // NO wildcard arm — see `WireUndecidableCause::from`'s doc.
+        match problem {
+            TagResourceProblem::NotOnlyTheTagResource => {
+                WireTagResourceProblem::NotOnlyTheTagResource
+            }
+            TagResourceProblem::Excludes => WireTagResourceProblem::Excludes,
+            TagResourceProblem::ValueNotTriePrefixExact(value) => {
+                WireTagResourceProblem::ValueNotTriePrefixExact {
+                    value: value.clone(),
+                }
+            }
         }
     }
 }
@@ -518,6 +551,16 @@ pub enum WireUndecidableCause {
         policy_ids: Vec<Option<i64>>,
         policy_names: Vec<String>,
     },
+    /// The `tagPolicies` block carries policies this decision's type would
+    /// evaluate and the caller resolved no tag set. Not reachable through
+    /// `explain` yet: the tag phase is not composed with the resource phase
+    /// until SP4d-2b Task 3.
+    TagsUnresolved,
+    TagResourceNotReproducible {
+        policy_id: Option<i64>,
+        policy_name: String,
+        problem: WireTagResourceProblem,
+    },
     EngineMismatch {
         declared: WireEngineType,
         service_def_name: String,
@@ -612,6 +655,16 @@ impl From<&UndecidableCause> for WireUndecidableCause {
             } => WireUndecidableCause::EvalOrderAmbiguous {
                 policy_ids: policy_ids.clone(),
                 policy_names: policy_names.clone(),
+            },
+            UndecidableCause::TagsUnresolved => WireUndecidableCause::TagsUnresolved,
+            UndecidableCause::TagResourceNotReproducible {
+                policy_id,
+                policy_name,
+                problem,
+            } => WireUndecidableCause::TagResourceNotReproducible {
+                policy_id: *policy_id,
+                policy_name: policy_name.clone(),
+                problem: WireTagResourceProblem::from(problem),
             },
             UndecidableCause::EngineMismatch {
                 declared,
