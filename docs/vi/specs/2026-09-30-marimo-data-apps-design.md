@@ -3,7 +3,7 @@
 > Bản dịch tham khảo. Bản gốc: [`docs/en/specs/2026-09-30-marimo-data-apps-design.md`](../../en/specs/2026-09-30-marimo-data-apps-design.md).
 > Khi hai bản mâu thuẫn, bản tiếng Anh thắng.
 
-**Trạng thái:** đã thiết kế; spike S0 đã xong (§9)
+**Trạng thái:** đã thiết kế; spike S0 và S0b đã xong (§9)
 **Ngày:** 2026-09-30
 **Thay thế:** notebook Jupyter (`egret-notebook`, nửa Jupyter của `egret-kernel`, `kernel-image/`,
 `frontend/src/components/notebook/`)
@@ -27,7 +27,7 @@ edit là nơi tác giả viết, chế độ run là app đã publish.
 | D4 | **Người xem là người dùng egret đã đăng nhập** — thành viên workspace và guest được share. Không nhúng ra ngoài, không link công khai. | Người xem nào cũng có danh tính để uỷ quyền. |
 | D5 | **Draft + các phiên bản published bất biến.** Bản mới nhất đang chạy; khôi phục = publish lại source cũ. | `app_versions` chỉ ghi thêm. |
 | D6 | **SQL từ app chỉ được đọc.** | Bịt lỗ confused deputy (`DELETE` của tác giả chạy bằng quyền admin đang xem). |
-| D7 | **Chế độ run: mỗi phiên bản app một pod, mỗi session người xem một tiến trình.** Không bao giờ dùng thread. S0 cho thấy `--sandbox` của marimo không cho điều này (nó cô lập theo server); thay vào đó entrypoint của egret ép nhánh kernel IPC của marimo (§2, §6.3). Nếu bản patch đó ngừng chạy sau một lần nâng cấp: mỗi (app × người xem) một pod. | Các session không chung bộ nhớ. Entrypoint patch API nội bộ của marimo: ghim chính xác phiên bản + test hợp đồng. |
+| D7 | **Chế độ run: mỗi phiên bản app một pod, mỗi session người xem một tiến trình.** Không bao giờ dùng thread. S0 cho thấy `--sandbox` của marimo không cho điều này (nó cô lập theo server); thay vào đó entrypoint của egret ép nhánh kernel IPC của marimo (§2, §6.3). S0b: kernel của mỗi người xem có thể lấy từ một tiến trình khởi động sẵn (warm pool hoặc fork server) nằm sau interpreter mà marimo được cấu hình để khởi chạy; chọn cái nào được quyết ở P5 trên Linux (§6.3). Nếu bản patch ngừng chạy sau một lần nâng cấp: mỗi (app × người xem) một pod. | Các session không chung bộ nhớ. Entrypoint patch API nội bộ của marimo: ghim chính xác phiên bản + test hợp đồng. Đầu kernel của một launcher khởi động sẵn chạy `marimo._ipc.launch_kernel`, module mà marimo ghi rõ đường dẫn là public; đầu server vẫn cần các patch nội bộ. |
 | D8 | **Chế độ edit: mỗi (tác giả × workspace) một pod, concurrency lạc quan** (revision + 409). Không khoá, không cộng tác thời gian thực. | Mỗi kernel chạy bằng quyền của đúng một người. |
 | D9 | **Image Python cố định, thư viện chọn sẵn.** Không cài package lúc chạy. | Egress đóng được, chỉ còn tới egret. |
 | D10 | **"Notebooks" đổi thành "Apps"** trong menu Explore; quyền `app:read`, `app:write`, `app:manage`. | Bỏ `notebook:*`. |
@@ -371,9 +371,9 @@ Một service axum trong egret, lắng nghe trên host apps:
 |---|---|---|
 | Khoá | (tác giả, workspace) | phiên bản app |
 | Server | entrypoint egret → `marimo edit`, `EgretStorage` | entrypoint egret → `marimo run`, `include_code=False` |
-| Kernel | mỗi notebook đang mở một tiến trình | mỗi session người xem một tiến trình (D7), qua patch IPC của egret |
-| Vòng đời | reaper khi rảnh, như hiện nay | dừng sau 15 phút không có session; egret hiện màn hình chờ lúc cold start |
-| Giới hạn | như hiện nay (250m/512Mi → 1000m/2Gi), cấu hình được | cấu hình được; tối đa số session mỗi pod, vượt thì 503 "app đang bận" — mức trần (20 là ước đoán trước S0) được đặt lại ở P5 từ các con số dưới đây |
+| Kernel | mỗi notebook đang mở một tiến trình | mỗi session người xem một tiến trình (D7), qua patch IPC của egret; lấy từ một launcher khởi động sẵn (pool hoặc fork server, chọn ở P5) |
+| Vòng đời | reaper khi rảnh, như hiện nay | dừng sau 15 phút không có session; egret hiện màn hình chờ lúc cold start và ở mọi session mới cho tới khi app render lần đầu |
+| Giới hạn | như hiện nay (250m/512Mi → 1000m/2Gi), cấu hình được | cấu hình được; tối đa số session mỗi pod, vượt thì 503 "app đang bận" — mức trần (20 là ước đoán trước S0) và giới hạn bộ nhớ được đặt lại ở P5 từ ngân sách dưới đây, đo trên kind |
 
 - **Mỗi session run một tiến trình là patch của egret, không phải tính năng của marimo** (§2). Entrypoint
   ép `SessionImpl.create` vào nhánh IPC và trỏ `ipc._get_venv_config` tới interpreter của image; các
@@ -381,13 +381,57 @@ Một service axum trong egret, lắng nghe trên host apps:
   `EgretStorage`: image ghim chính xác phiên bản marimo và CI của image có test hợp đồng (N session → N pid
   kernel khác nhau, và header của mỗi session tới đúng kernel của nó). Nếu một lần nâng cấp làm vỡ nó và
   không patch lại được, phương án lùi là mỗi (app × người xem) một pod.
-- **Chi phí đã đo** (S0, mỗi chế độ một lần chạy, laptop dev macOS với tải không đo, không phải pod):
-  ≈ 80 MB RSS mỗi kernel IPC (79,9–81,3 MB) cộng server 77 MB, so với 103,8 MB cho cả một server chế độ
-  thread với 4 session; thời gian tới lần render đầu 13,2 giây cho session đầu tiên và 32,9 giây cho ba
-  session mở cùng lúc, so với 5,24 giây và 17,71 giây ở chế độ thread. Ở cỡ đó 20 session là ≈ 1,6 GB
-  kernel chưa kể dữ liệu của app, và mọi session mới — không chỉ pod lạnh — phải chờ một tiến trình kernel
-  khởi động. **P5 phải đặt lại mức trần session mỗi pod và giới hạn bộ nhớ, và thiết kế UX lúc mở session,
-  từ số đo trên kind** — số trên laptop chỉ cho biết bậc độ lớn.
+- **Chi phí đã đo** (S0 và S0b; Playwright tự động, mỗi trường hợp một lần chạy, laptop dev macOS đang
+  chịu tải nặng không liên quan (load 1 phút 4,5 tới 26), không phải pod; kết quả S0b:
+  [`2026-10-01-marimo-s0b-result.md`](../../en/plans/2026-10-01-marimo-s0b-result.md)):
+  - **Bộ nhớ.** ≈ 80 MB RSS mỗi kernel IPC đang chạy (S0 79,9–81,3 MB; S0b worker pool đã nhận việc
+    ~81 MB) cộng server 77 MB (S0). Khởi động sẵn thêm chi phí lúc rảnh: một worker pool ấm là
+    64,5–70,3 MB và pool cỡ N giữ N+1 worker; tiến trình cha của fork server là 48,5 MB, còn bộ nhớ riêng
+    của mỗi tiến trình con chưa đo (RSS trên macOS tính cả trang copy-on-write dùng chung). Vậy ngân sách
+    mỗi pod là server + launcher lúc rảnh + số session × ~81 MB; ở 20 session riêng kernel đã ≈ 1,6 GB,
+    chưa kể dữ liệu của app.
+  - **Thời gian.** 13,2 giây của S0 cho lần render IPC đầu tiên **không tái hiện được** (S0b: 4,82 giây
+    khi ấm, 7,35 giây với cache `.pyc` rỗng; phần chênh còn lại chưa giải thích). Ở một session ấm
+    ≈ 1,75 giây là trình duyệt tải trang egret và frontend marimo, ở mọi chế độ — một mức sàn không
+    launcher nào thay đổi. Trên đó, khởi chạy IPC trực tiếp thêm ~2,3 giây (T1, load ~4,5); ở vòng 4 của
+    S0b (load 5,4 → 22,4) p50 tuần tự là thread 2,12 giây, direct 6,09, pool 3,54, fork server 3,03. Không
+    chế độ nào, kể cả thread, đạt < 2 giây tuần tự hay < 3 giây cho ba người xem đồng thời trên laptop
+    này; số đồng thời ở đó bị việc tải trang chi phối (5,7–11,8 giây từ ticket → WebSocket ở mọi chế độ)
+    và không xếp hạng được gì.
+  - **Chi phí lớn nhất có thể bỏ** là bước kiểm `has_marimo_installed` của marimo: trước **mỗi** lần
+    khởi chạy kernel từ một interpreter đã cấu hình, không ghi được (patch `_get_venv_config` của egret
+    làm nó thành như vậy), marimo chạy `<python> -c "import marimo, msgspec, zmq; …"`
+    (`marimo/_session/_venv.py:128`), một interpreter mới import marimo — 1,0 tới 1,8 giây. Bỏ qua nó
+    làm spawn → ready của pool giảm từ 1,03–1,27 giây xuống 0,11–0,23 giây. **P3/P5 quyết định cách
+    làm:** (a) shim của launcher trả lời đúng lệnh đó (thứ S0b đã đo — một mẹo dựa vào hành vi nội bộ,
+    cần test hợp đồng sẽ fail khi lệnh đổi); (b) một thay đổi upstream ở marimo (vd. cache kết quả theo
+    interpreter và phiên bản); hoặc (c) chạy bước kiểm một lần lúc build image hay lúc pod khởi động và
+    để patch của entrypoint trả về kết quả đó (thêm một patch nội bộ, cùng quy tắc test hợp đồng).
+- **Launcher.** S0b dựng hai launcher khởi động sẵn sau một shim ở đường dẫn interpreter đã cấu hình:
+  một **warm pool** (N worker dùng một lần đã import sẵn marimo, polars, httpx và `egret_marimo`; các
+  worker thừa kế socket đang listen và mỗi lúc chỉ một worker được "armed", vì truyền socket đã accept
+  bằng `send_fds` làm mất session trên macOS với nguyên nhân chưa chứng minh) và một **fork server** (một
+  tiến trình cha đơn luồng có cùng các import, fork một tiến trình con cho mỗi kernel). Cả hai chạy chính
+  `marimo._ipc.launch_kernel.main()` của marimo, module mà docstring của marimo khai báo đường dẫn là
+  "a public API used by external consumers … Changing this path is a BREAKING CHANGE"
+  (`marimo/_ipc/launch_kernel.py`); payload `KernelArgs` qua stdin và các dòng `KERNEL_READY` /
+  `KERNEL_INFO` không nằm trong câu đó, nên test hợp đồng ở P3 cũng phủ chúng. Cả hai cắt phần p50 tuần
+  tự vượt thread của direct đi hơn một nửa và giữ được cô lập (pid khác nhau, dùng một lần, kernel bị
+  giết khi client của nó ngắt, không còn sống sau session TTL, danh tính đúng). **S0b không chọn được
+  giữa hai cái**: ở vòng 4 chênh lệch p50 tuần tự của chúng là ~0,5 giây và đổi chiều khi bỏ bước kiểm
+  (pool 3,54 so với fork server 3,03 giây; khi bỏ bước kiểm 2,43 so với 2,95 giây), các lần chạy đơn ở
+  load 5–22. Chúng khác nhau ở chỗ khác:
+  bộ nhớ rảnh của pool là (N+1) × ~70 MB và nó treo khi tắt nếu kernel bị giết trước (còn mở, phía
+  marimo chưa điều tra); fork server chỉ an toàn khi tiến trình cha không bao giờ *dùng* polars (chỉ
+  import), điều không gì ép buộc. **P5 chọn** sau khi đo trên một node Linux yên tĩnh trên kind: mọi
+  biến thể xen kẽ, ≥ 5 lần chạy mỗi biến thể, mốc theo từng pha, PSS/USS cho mỗi worker rảnh và mỗi
+  tiến trình con được fork, hành vi tắt của cả hai, với cách xử lý `has_marimo_installed` mà P3/P5 chọn.
+- **UX lúc mở session.** Mọi session người xem mới đều chờ một kernel, không chỉ pod lạnh, và **tải lại
+  không bao giờ dùng lại kernel** (S0b: tải lại trang host được pid mới; tải lại riêng iframe qua proxy
+  của spike để trang trắng vì lúc WebSocket cũ đóng đã thu hồi token mà cookie của nó vẫn trỏ tới — P4
+  cấp ticket lại hoặc từ chối rõ ràng trường hợp đó). Màn hình chờ che toàn bộ khoảng này; P5 đặt cỡ pool
+  theo đợt người xem mới dự kiến (S0b không có số cho người xem tới lúc không còn worker ấm: mọi lần nhận
+  việc đã đo đều gặp một worker ấm), và S0b không cho lý do để đổi thời gian chờ rảnh của pod (15 phút).
 
 - `KernelLauncher` (`crates/egret-kernel/src/launcher.rs`) cùng các cài đặt k8s và subprocess của nó được
   tổng quát hoá để khởi chạy cả hai loại pod; reaper và hardening pod hiện có (non-root, drop ALL,
@@ -434,6 +478,16 @@ Không phương án lùi nào bị kích hoạt; kiến trúc được giữ. Ha
 | 5 | SQL cell có nhận kết nối DB-API của `egret_marimo` làm engine không? | Một lớp engine marimo riêng | **Có**; chỉ hiện trong dropdown sau khi cell của nó đã chạy. Không kích hoạt. DuckDB mặc định là điểm mở cho P3 (§4.4). |
 | 6 | Proxy phải chặn những route nào (terminal, package, secrets, file browser) mà không làm hỏng edit và lưu? | — (đây là phép đo; proxy chặn dù thế nào) | 22 prefix; phát hiện và sửa một lỗ vượt qua bằng dot-segment; ưu tiên allow-list (§6.2). |
 
+### S0b — spike độ trễ khởi động kernel — **đã xong**
+
+Kết quả: [`docs/en/plans/2026-10-01-marimo-s0b-result.md`](../../en/plans/2026-10-01-marimo-s0b-result.md)
+(2026-09-30 tới 2026-10-01, marimo 0.25.0, HeadlessChrome 136, nhánh `spike/marimo-s0` @ `14cc33f1`,
+không bao giờ merge; Playwright tự động, mỗi trường hợp một lần chạy, laptop dev macOS chịu tải nặng).
+
+| # | Câu hỏi | Điều đã xảy ra |
+|---|---|---|
+| S0b | Thời gian khởi động của một người xem mới đi đâu ở chế độ ép IPC, và kernel khởi động sẵn (warm pool, fork server) có giúp không? | ≈ 1,75 giây là tải trang + frontend ở mọi chế độ (mức sàn); bước kiểm `has_marimo_installed` mỗi lần khởi chạy của marimo tốn 1,0–1,8 giây và có thể bỏ; 13,2 giây của S0 không tái hiện được (4,82 giây). p50 tuần tự vòng 4: thread 2,12, direct 6,09, pool 3,54, fork server 3,03 giây; < 2 giây / < 3 giây đồng thời không chế độ nào đạt, kể cả thread. Pool và fork server chưa tách được; P5 chọn trên Linux (§6.3). Cô lập giữ được ở mọi biến thể. |
+
 ### Các PR, theo thứ tự
 
 1. **P1 — Query gateway.** `app_sessions`, bộ kiểm chỉ đọc, `POST /api/apps/query`, audit, rate limit.
@@ -441,15 +495,17 @@ Không phương án lùi nào bị kích hoạt; kiến trúc được giữ. Ha
 2. **P2 — Lưu trữ và vòng đời.** `apps`, `app_drafts`, `app_versions` (+ trigger), API draft với
    revision/409, publish, khôi phục, quyền `app:*`, module tính năng `apps`.
 3. **P3 — Image `egret-apps` và `egret_marimo`.** Entrypoint, `EgretStorage`, DB-API, `egret.sql`, cấu hình
-   marimo đã khoá, patch IPC cho chế độ run; pytest với một egret giả, kể cả test hợp đồng
+   marimo đã khoá, patch IPC cho chế độ run và cách xử lý bước kiểm `has_marimo_installed` mỗi lần khởi
+   chạy của marimo (§6.3: shim trả lời, upstream, hoặc kết quả tính sẵn); pytest với một egret giả, kể cả test hợp đồng
    `StorageInterface` (có ca tải-lại-không-gắn-lại, §5.1) và test hợp đồng IPC (§6.3). Quyết định engine
    mặc định của SQL cell (§4.4).
 4. **P4 — Origin apps, proxy, chế độ edit.** Ticket → cookie, proxy (allow-list route hoặc block list của
    S0, kiểm và chuyển tiếp một đường dẫn thô, xoá hoặc ghim `X-Notebook-Id`), đổi tên cookie sang `__Host-`
    và kiểm qua HTTPS trên kind, kiểm toán phía egret rằng route `GET` không có tác dụng phụ và CSRF vẫn dựa
    trên header (§6.1), launcher edit, trang danh sách Apps và trang Edit.
-5. **P5 — Chế độ run.** Launcher theo phiên bản, UI publish/versions/khôi phục, trang xem app; mức trần
-   session mỗi pod, giới hạn bộ nhớ và UX lúc mở session đặt theo số đo trên kind (§6.3).
+5. **P5 — Chế độ run.** Launcher theo phiên bản, UI publish/versions/khôi phục, trang xem app; launcher
+   kernel (warm pool hoặc fork server), mức trần session mỗi pod, giới hạn bộ nhớ và UX lúc mở session
+   đặt theo số đo trên kind (§6.3).
 6. **P6 — Gỡ notebook.** `egret-notebook`, nửa Jupyter của `egret-kernel`, `kernel-image/`, frontend
    notebook, các bảng notebook và `notebook:*`. Task workflow `egret.python` — đang tham chiếu notebook và
    chưa có handler — được trỏ sang một phiên bản app hoặc đánh dấu chưa hỗ trợ, quyết định trong plan P6.

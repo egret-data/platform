@@ -1,6 +1,6 @@
 # Data Apps on marimo — replacing the notebook
 
-**Status:** designed; S0 spike done (§9)
+**Status:** designed; S0 and S0b spikes done (§9)
 **Date:** 2026-09-30
 **Replaces:** the Jupyter notebook (`egret-notebook`, the Jupyter half of `egret-kernel`, `kernel-image/`,
 `frontend/src/components/notebook/`)
@@ -24,7 +24,7 @@ its edit mode is the authoring surface, its run mode is the published app.
 | D4 | **Viewers are signed-in egret users** — workspace members and share-guests. No external embedding, no public links. | Every viewer has an identity to delegate. |
 | D5 | **Draft + immutable published versions.** Latest version is live; restore = publish an old source again. | Append-only `app_versions`. |
 | D6 | **SQL from an app is read-only.** | Closes the confused-deputy hole (an author's `DELETE` running as an admin viewer). |
-| D7 | **Run mode: one pod per app version, one process per viewer session.** Never threads. S0 showed marimo's `--sandbox` does not give this (it isolates per server); egret's entrypoint forces marimo's IPC kernel branch instead (§2, §6.3). Fallback if that patch stops working on an upgrade: one pod per (app × viewer). | Viewer sessions share no memory. The entrypoint patches private marimo API: exact version pin + contract test. |
+| D7 | **Run mode: one pod per app version, one process per viewer session.** Never threads. S0 showed marimo's `--sandbox` does not give this (it isolates per server); egret's entrypoint forces marimo's IPC kernel branch instead (§2, §6.3). S0b: the per-viewer kernel can come from a pre-started process (a warm pool or a fork server) behind the interpreter marimo is configured to launch; which one is decided in P5 on Linux (§6.3). Fallback if the patch stops working on an upgrade: one pod per (app × viewer). | Viewer sessions share no memory. The entrypoint patches private marimo API: exact version pin + contract test. A pre-started launcher's kernel end runs `marimo._ipc.launch_kernel`, whose module path marimo documents as public; its server end still needs the private patches. |
 | D8 | **Edit mode: one pod per (author × workspace), optimistic concurrency** (revision + 409). No locks, no real-time collaboration. | Every kernel runs as exactly one person. |
 | D9 | **Fixed, curated Python image.** No runtime package install. | Egress can be closed to egret only. |
 | D10 | **"Notebooks" becomes "Apps"** in the Explore menu; permissions `app:read`, `app:write`, `app:manage`. | `notebook:*` is removed. |
@@ -374,9 +374,9 @@ An axum service in egret, listening on the apps host:
 |---|---|---|
 | Key | (author, workspace) | app version |
 | Server | egret entrypoint → `marimo edit`, `EgretStorage` | egret entrypoint → `marimo run`, `include_code=False` |
-| Kernels | one process per open notebook | one process per viewer session (D7), via egret's IPC patch |
-| Lifetime | reaper on idle, as today | stop after 15 min with no session; egret shows a loading screen on cold start |
-| Limits | as today (250m/512Mi → 1000m/2Gi), configurable | configurable; max sessions per pod, then 503 "app busy" — the cap (20 was the pre-S0 guess) is re-set in P5 from the numbers below |
+| Kernels | one process per open notebook | one process per viewer session (D7), via egret's IPC patch; started from a pre-started launcher (pool or fork server, chosen in P5) |
+| Lifetime | reaper on idle, as today | stop after 15 min with no session; egret shows a loading screen on cold start and on every new session until the app first renders |
+| Limits | as today (250m/512Mi → 1000m/2Gi), configurable | configurable; max sessions per pod, then 503 "app busy" — the cap (20 was the pre-S0 guess) and the memory limit are re-set in P5 from the budget below, measured on kind |
 
 - **Run-mode process per session is egret's patch, not a marimo feature** (§2). The entrypoint forces
   `SessionImpl.create` onto the IPC branch and points `ipc._get_venv_config` at the image's
@@ -384,13 +384,55 @@ An axum service in egret, listening on the apps host:
   `EgretStorage`: the image pins an exact marimo version and its CI has a contract test (N sessions → N
   distinct kernel pids, and each session's header reaches its own kernel). If an upgrade breaks it and
   it cannot be re-patched, the fallback is one pod per (app × viewer).
-- **Measured cost** (S0, one run each, macOS dev laptop under unmeasured load, not a pod): ≈ 80 MB RSS
-  per IPC kernel (79.9–81.3 MB) plus a 77 MB server, against 103.8 MB for a whole thread-mode server
-  with 4 sessions; time to first render 13.2 s for the first session and 32.9 s for three opened at once,
-  against 5.24 s and 17.71 s in thread mode. At that size 20 sessions are ≈ 1.6 GB of kernels before
-  any app data, and every new session — not only a cold pod — waits for a kernel process to start.
-  **P5 must re-set the per-pod session cap and the memory limit, and design the session-start UX, from
-  measurements on kind** — the laptop numbers above only set the order of magnitude.
+- **Measured cost** (S0 and S0b; automated Playwright, single run per case, macOS dev laptop under heavy
+  unrelated load (1-minute load 4.5 to 26), not a pod; S0b result:
+  [`2026-10-01-marimo-s0b-result.md`](../plans/2026-10-01-marimo-s0b-result.md)):
+  - **Memory.** ≈ 80 MB RSS per active IPC kernel (S0 79.9–81.3 MB; S0b claimed pool worker ~81 MB)
+    plus a 77 MB server (S0). Pre-starting adds idle cost: a warm pool worker is 64.5–70.3 MB and a pool
+    of size N holds N+1 of them; a fork server's parent is 48.5 MB, and its children's unique memory is
+    unmeasured (macOS RSS counts shared copy-on-write pages). So the per-pod budget is server + launcher
+    idle + sessions × ~81 MB; at 20 sessions the kernels alone are ≈ 1.6 GB before any app data.
+  - **Time.** S0's 13.2 s first IPC render was **not reproduced** (S0b: 4.82 s warm, 7.35 s with an empty
+    `.pyc` cache; the rest of the gap is unexplained). In a warm session ≈ 1.75 s goes to the browser
+    loading egret's page and marimo's frontend, in every mode — a floor no launcher changes. On top of it
+    the direct IPC launch adds ~2.3 s (T1, load ~4.5); in S0b round 4 (load 5.4 → 22.4) sequential p50
+    was thread 2.12 s, direct 6.09, pool 3.54, fork server 3.03. No mode, not even thread, met < 2 s
+    sequential or < 3 s for three concurrent viewers on this laptop; the concurrent figure there was
+    dominated by page load (5.7–11.8 s ticket → WebSocket in every mode) and ranks nothing.
+  - **The single biggest removable cost** is marimo's `has_marimo_installed` check: before **every**
+    kernel launch from a configured, non-writable interpreter (egret's `_get_venv_config` patch makes it
+    one) marimo runs `<python> -c "import marimo, msgspec, zmq; …"` (`marimo/_session/_venv.py:128`), a
+    fresh interpreter importing marimo — 1.0 to 1.8 s. Skipping it cut pool spawn → ready from 1.03–1.27 s
+    to 0.11–0.23 s. **P3/P5 decides how:** (a) the launcher shim answers that exact command (what S0b
+    measured — a hack against private behaviour, needs a contract test that fails when the command
+    changes); (b) an upstream marimo change (e.g. cache the result per interpreter and version); or (c)
+    run the check once at image build or pod start and have the entrypoint patch return it (another
+    private patch, same contract-test rule).
+- **The launcher.** S0b built two pre-started launchers behind a shim at the configured interpreter
+  path: a **warm pool** (N single-use workers that have already imported marimo, polars, httpx and
+  `egret_marimo`; workers inherit the listening socket and one is armed at a time, because passing the
+  accepted socket with `send_fds` lost sessions on macOS for an unproven reason) and a **fork server**
+  (a single-threaded parent with the same imports that forks one child per kernel). Both run marimo's
+  own `marimo._ipc.launch_kernel.main()`, whose module path marimo's docstring declares "a public API
+  used by external consumers … Changing this path is a BREAKING CHANGE" (`marimo/_ipc/launch_kernel.py`);
+  the stdin `KernelArgs` payload and the `KERNEL_READY` / `KERNEL_INFO` lines are not covered by that
+  sentence, so the P3 contract test covers them too. Both cut direct's sequential-p50 excess over thread
+  by more than half and kept isolation (distinct pids, single use, kernel killed when its client
+  disconnects, none alive after the session TTL, identity correct). **S0b cannot choose between them**:
+  in round 4 their sequential-p50 gap was ~0.5 s and flipped sign with the check skipped (pool 3.54 vs
+  fork server 3.03 s; with the skip 2.43 vs 2.95 s), single runs at load 5–22. They differ elsewhere: the pool's idle memory is
+  (N+1) × ~70 MB and it hung on shutdown when its kernels were killed first (open, marimo side
+  uninvestigated); the fork server is safe only while its parent never *uses* polars (only imports it),
+  which nothing enforces. **P5 chooses** after measuring on a quiet Linux node on kind: all variants
+  interleaved, ≥ 5 runs each, per-phase marks, PSS/USS per idle worker and per forked child, the
+  shutdown behaviour of both, with the `has_marimo_installed` fix P3/P5 adopted.
+- **Session-start UX.** Every new viewer session waits for a kernel, not only a cold pod, and **a reload
+  never reuses a kernel** (S0b: a host-page reload got a new pid; an iframe-only reload through the
+  spike proxy stayed blank because the old WebSocket's close had revoked the token its cookie still
+  mapped to — P4 re-tickets or rejects that case clearly). The loading screen covers the whole of it;
+  P5 sets the pool size from the expected burst of new viewers (S0b has no number for a viewer who
+  arrives while no worker is warm: every measured claim found one), and S0b gives no reason to change
+  the pod idle timeout (15 min).
 
 - `KernelLauncher` (`crates/egret-kernel/src/launcher.rs`) and its k8s and subprocess implementations are
   generalised to launch both pod kinds; the reaper and existing pod hardening (non-root, drop ALL,
@@ -438,6 +480,16 @@ No fallback triggered; the architecture stands. Two open questions for the user 
 | 5 | Does a SQL cell accept `egret_marimo`'s DB-API connection as an engine? | A custom marimo engine class | **Yes**; listed in the dropdown only after its cell ran. Not triggered. DuckDB default is an open P3 point (§4.4). |
 | 6 | Which routes must the proxy block (terminal, packages, secrets, file browser) without breaking edit and save? | — (this is a measurement, the proxy blocks regardless) | 22 prefixes; a dot-segment bypass found and fixed; allow-list preferred (§6.2). |
 
+### S0b — kernel start-up latency spike — **done**
+
+Result: [`docs/en/plans/2026-10-01-marimo-s0b-result.md`](../plans/2026-10-01-marimo-s0b-result.md)
+(2026-09-30 to 2026-10-01, marimo 0.25.0, HeadlessChrome 136, branch `spike/marimo-s0` @ `14cc33f1`,
+never merged; automated Playwright, single run per case, macOS dev laptop under heavy load).
+
+| # | Question | What happened |
+|---|---|---|
+| S0b | Where does a new viewer's start-up time go in the forced IPC mode, and do pre-started kernels (warm pool, fork server) help? | ≈ 1.75 s is page + frontend load in every mode (a floor); marimo's per-launch `has_marimo_installed` check costs 1.0–1.8 s and is removable; S0's 13.2 s not reproduced (4.82 s). Round 4 seq p50: thread 2.12, direct 6.09, pool 3.54, fork server 3.03 s; < 2 s / < 3 s concurrent met by no mode, thread included. Pool vs fork server not separated; P5 chooses on Linux (§6.3). Isolation held in every variant. |
+
 ### PRs, in order
 
 1. **P1 — Query gateway.** `app_sessions`, the read-only checker, `POST /api/apps/query`, audit, rate
@@ -445,15 +497,18 @@ No fallback triggered; the architecture stands. Two open questions for the user 
 2. **P2 — Storage and lifecycle.** `apps`, `app_drafts`, `app_versions` (+ trigger), draft API with
    revision/409, publish, restore, `app:*` permissions, the `apps` feature module.
 3. **P3 — `egret-apps` image and `egret_marimo`.** Entrypoints, `EgretStorage`, DB-API, `egret.sql`,
-   locked-down marimo configuration, the run-mode IPC patch; pytest against a fake egret, including the
+   locked-down marimo configuration, the run-mode IPC patch and the fix for marimo's per-launch
+   `has_marimo_installed` check (§6.3: shim answer, upstream, or a pre-computed result); pytest against
+   a fake egret, including the
    `StorageInterface` contract test (with the reload-does-not-rebind case, §5.1) and the IPC contract
    test (§6.3). Decides the SQL-cell default engine (§4.4).
 4. **P4 — Apps origin, proxy, edit mode.** Ticket → cookie, proxy (route allow-list or the S0 block
    list, one raw path checked and forwarded, `X-Notebook-Id` stripped or pinned), `__Host-` cookie rename
    verified over HTTPS on kind, the egret-side audit that `GET` routes have no side effects and CSRF stays
    header-based (§6.1), edit launcher, the Apps list and Edit page.
-5. **P5 — Run mode.** Per-version launcher, publish/versions/restore UI, the viewer page; the per-pod
-   session cap, memory limit and session-start UX set from measurements on kind (§6.3).
+5. **P5 — Run mode.** Per-version launcher, publish/versions/restore UI, the viewer page; the kernel
+   launcher (warm pool or fork server), the per-pod session cap, memory limit and session-start UX set
+   from measurements on kind (§6.3).
 6. **P6 — Remove the notebook.** `egret-notebook`, the Jupyter half of `egret-kernel`, `kernel-image/`,
    the notebook frontend, the notebook tables and `notebook:*`. The workflow task `egret.python`, which
    references a notebook and has no handler, is re-pointed to an app version or marked unsupported —
