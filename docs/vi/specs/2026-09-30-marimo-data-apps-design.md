@@ -3,7 +3,7 @@
 > Bản dịch tham khảo. Bản gốc: [`docs/en/specs/2026-09-30-marimo-data-apps-design.md`](../../en/specs/2026-09-30-marimo-data-apps-design.md).
 > Khi hai bản mâu thuẫn, bản tiếng Anh thắng.
 
-**Trạng thái:** đã thiết kế
+**Trạng thái:** đã thiết kế; spike S0 đã xong (§9)
 **Ngày:** 2026-09-30
 **Thay thế:** notebook Jupyter (`egret-notebook`, nửa Jupyter của `egret-kernel`, `kernel-image/`,
 `frontend/src/components/notebook/`)
@@ -27,7 +27,7 @@ edit là nơi tác giả viết, chế độ run là app đã publish.
 | D4 | **Người xem là người dùng egret đã đăng nhập** — thành viên workspace và guest được share. Không nhúng ra ngoài, không link công khai. | Người xem nào cũng có danh tính để uỷ quyền. |
 | D5 | **Draft + các phiên bản published bất biến.** Bản mới nhất đang chạy; khôi phục = publish lại source cũ. | `app_versions` chỉ ghi thêm. |
 | D6 | **SQL từ app chỉ được đọc.** | Bịt lỗ confused deputy (`DELETE` của tác giả chạy bằng quyền admin đang xem). |
-| D7 | **Chế độ run: mỗi phiên bản app một pod, mỗi session người xem một tiến trình.** Nếu S0 thất bại: mỗi (app × người xem) một pod. Không bao giờ dùng thread. | Các session không chung bộ nhớ. |
+| D7 | **Chế độ run: mỗi phiên bản app một pod, mỗi session người xem một tiến trình.** Không bao giờ dùng thread. S0 cho thấy `--sandbox` của marimo không cho điều này (nó cô lập theo server); thay vào đó entrypoint của egret ép nhánh kernel IPC của marimo (§2, §6.3). Nếu bản patch đó ngừng chạy sau một lần nâng cấp: mỗi (app × người xem) một pod. | Các session không chung bộ nhớ. Entrypoint patch API nội bộ của marimo: ghim chính xác phiên bản + test hợp đồng. |
 | D8 | **Chế độ edit: mỗi (tác giả × workspace) một pod, concurrency lạc quan** (revision + 409). Không khoá, không cộng tác thời gian thực. | Mỗi kernel chạy bằng quyền của đúng một người. |
 | D9 | **Image Python cố định, thư viện chọn sẵn.** Không cài package lúc chạy. | Egress đóng được, chỉ còn tới egret. |
 | D10 | **"Notebooks" đổi thành "Apps"** trong menu Explore; quyền `app:read`, `app:write`, `app:manage`. | Bỏ `notebook:*`. |
@@ -53,10 +53,15 @@ edit là nơi tác giả viết, chế độ run là app đã publish.
 - **Chế độ run của marimo đặt các session vào thread** của cùng một tiến trình
   (`marimo/_session/managers/kernel.py`; lựa chọn nằm ở `marimo/_session/session.py:136-195`). Code của
   tác giả khi đó có thể chuyển dữ liệu của người xem này sang người xem khác qua state của module. D7 đòi
-  mỗi session một tiến trình. Đường có sẵn duy nhất là `--sandbox`, chọn kernel manager subprocess qua
-  ZeroMQ (`managers/ipc.py`) nhưng cũng dựng env uv cho mỗi session; cách còn lại là entrypoint của egret
-  ép nhánh IPC. Câu hỏi 2 của S0 đo cả hai. (`isolate_apps` không phải: nó cô lập theo *file*, không theo
-  session.)
+  mỗi session một tiến trình. **Chế độ run của marimo không có sẵn đường nào dẫn tới đó** (câu hỏi 2 của
+  S0): với `marimo run` một file, `--sandbox` chạy lại (re-exec) *cả server* bên trong một env uv
+  (`marimo/_cli/cli.py:1249-1253`, `_cli/sandbox.py:461`), và server bên trong lại là chế độ thread — 4
+  session, 1 pid. Kernel manager subprocess qua ZeroMQ (`managers/ipc.py`) chỉ tới được bằng cách để
+  entrypoint của egret patch hai hàm nội bộ: `SessionImpl.create` (`marimo/_session/session.py:91,99`)
+  bị ép vào nhánh IPC (`session.py:160`), và `ipc._get_venv_config` (`ipc.py:65`) trỏ tới interpreter
+  của image, vì nếu không, IPC manager dựng một env uv cho mỗi session (`ipc.py:331-431`). Với cả hai,
+  S0 đo được 4 session → 4 tiến trình kernel. (`isolate_apps` không phải: nó cô lập theo *file*, không
+  theo session.)
 - **Xác thực của marimo là một token dùng chung** (`marimo/_server/api/auth.py`), nhưng nó giữ
   `scope["user"]` từ bên ngoài, và code notebook thấy request qua `mo.app_meta().request` (headers,
   cookies, `user`, `meta`). **Request được làm mới theo từng lệnh kernel**, không chụp một lần: nó là một
@@ -69,8 +74,10 @@ edit là nơi tác giả viết, chế độ run là app đã publish.
   mà server chỉ tạo ở một chỗ (`NotebookWorkspace.load`, `marimo/_server/workspace/_base.py:87`). Nhưng
   lúc tải, marimo đọc file thẳng từ đĩa (`load.load_app(path)`, `file_manager.py:285`), và chỉ bước ghi
   cuối của một lần lưu đi qua `storage.write` (`file_manager.py:266`). Lưu mà raise thì thành lỗi HTTP từ
-  `POST /api/kernel/save`, và frontend marimo không xử lý gì ngoài việc để notebook ở trạng thái "chưa
-  lưu" (`frontend/src/core/saving/save-component.tsx:111`).
+  `POST /api/kernel/save`, và frontend marimo **có** báo lỗi đó: câu hỏi 3 của S0 thấy một toast đỏ "Failed
+  to save" mang nội dung `detail` của lỗi, nút lưu vẫn ở trạng thái chưa lưu và buffer đã sửa được giữ.
+  (Một lần đọc `frontend/src/core/saving/save-component.tsx:111` trước đó kết luận frontend im lặng; phép
+  đo bác bỏ điều đó.)
 - **Cấu hình marimo không tắt được** terminal, cài package, file browser hay secrets; chỉ AI có công tắc
   (`[ai] enabled`). Không có biến `MARIMO_CONFIG` — cấu hình được tìm qua `XDG_CONFIG_HOME` hoặc thư mục
   làm việc (`marimo/_config/utils.py`).
@@ -78,7 +85,8 @@ edit là nơi tác giả viết, chế độ run là app đã publish.
   header `Marimo-Server-Token` trên POST (skew protection), proxy phải cho đi qua.
 - **CSRF của egret là double-submit trên cookie host-only** `egret_session` / `egret_csrf`, SameSite=Lax,
   không có tiền tố `__Host-` (`crates/egret-auth/src/cookie.rs`, `csrf.rs`), và egret không có lớp CORS.
-  Một subdomain anh em có thể *tung* (toss) cookie có `Domain=` vào egret (§6.1).
+  Một subdomain anh em có thể *tung* (toss) cookie có `Domain=` vào egret, và request nó gửi tới egret
+  mang theo cookie Lax của egret — S0 đã đo cả hai (§6.1).
 - **SQL cell của marimo tìm engine từ các biến trong notebook** (`marimo/_sql/get_engines.py:35`), kể cả
   mọi kết nối DB-API 2.0. Một object do package helper tạo ra là đủ để SQL cell hiển thị nó.
 - **Cổng tính năng và quyền cần gỡ:** module tính năng `notebooks`
@@ -134,8 +142,10 @@ Token ngẫu nhiên dạng opaque; chỉ lưu hash, trong `analytics.app_session
   trên mọi request chuyển tới pod. Mọi header `X-Egret-*` từ client bị xoá trước. Trình duyệt không bao
   giờ thấy token.
 - Kernel đọc token qua `mo.app_meta().request.headers`, mà marimo làm mới ở mỗi lệnh kernel (§2), nên
-  token một cell thấy là token trên request đã kích hoạt nó. Câu hỏi 1 của S0 xác nhận điều này qua
-  proxy, kể cả với cell chạy lại theo reactive do một UI element.
+  token một cell thấy là token trên request đã kích hoạt nó. Câu hỏi 1 của S0 đã xác nhận điều này qua
+  proxy, kể cả với cell chạy lại theo reactive do một UI element, với session chạy trong thread và với
+  session chạy trong các tiến trình kernel IPC riêng (hai người xem, 14 và 12 query qua gateway, không
+  query nào lẫn người).
 - Token không phải là quyền. **Mỗi lần gọi gateway đều đánh giá lại quyền** (§4.2); gỡ `app:read` của một
   người xem chặn ngay query kế tiếp của họ, không phải session kế tiếp.
 
@@ -183,7 +193,14 @@ chỉ đọc, P1 đo xem kết nối uỷ quyền có dùng được không và 
 Cài trong image `egret-apps`:
 
 - `egret.connect("trino_prod")` → kết nối **DB-API 2.0** mà cursor gọi gateway. marimo nhận nó là
-  engine, nên nó xuất hiện trong dropdown engine của SQL cell (câu hỏi 5 của S0).
+  engine (câu hỏi 5 của S0: `mo.sql(…, engine=db)` chạy qua gateway bằng danh tính người xem). Dropdown
+  engine của SQL cell được dựng từ các biến đang sống trong kernel, nên kết nối chỉ hiện ở đó **sau khi
+  cell định nghĩa nó đã chạy**; trước đó dropdown chỉ có "DuckDB (In-Memory)".
+- **Engine SQL mặc định của marimo là DuckDB**, và một SQL cell không chọn engine sẽ lỗi nếu chưa cài
+  `duckdb` và `sqlglot` (`marimo/_sql/sql.py:112-118`). **Điểm thiết kế còn mở cho P3:** hoặc image cài
+  `duckdb` + `sqlglot` (SQL cell mới khi đó chạy trên DuckDB trong pod cho tới khi tác giả chọn engine
+  egret), hoặc `egret_marimo` đặt engine egret làm mặc định để SQL cell mới nhắm vào gateway. S0 chưa đo
+  phương án nào.
 - `egret.sql("SELECT …", database="trino_prod")` → polars DataFrame, cho code Python.
 - `egret.databases()` → các tên người xem được phép truy vấn, dùng cho picker.
 - Database được tham chiếu **theo tên**, nên app không mang UUID nội bộ nào.
@@ -222,12 +239,19 @@ với `EgretStorage` cài đặt `StorageInterface` của marimo:
 
 - **Khi mở**, `NotebookWorkspace.load` đã được entrypoint patch sẽ lấy draft (`GET …/draft`), ghi ra đĩa
   của pod, nhớ revision, rồi mới tạo `AppFileManager` — vì marimo tải từ đĩa, không qua storage.
-- `write(path, source)` → `PUT …/draft` kèm `If-Match`, rồi ghi bản cục bộ. Lỗi 409 được raise.
+- **Việc lấy lại khi load không được đặt lại revision mà một editor đang mở giữ.** `NotebookWorkspace.load`
+  chạy hai lần mỗi lần mở editor (trang index và session, `marimo/_server/api/endpoints/assets.py:387`,
+  `session_manager.py:191,353`) và chạy lại khi tải lại trang, mở tab thứ hai hoặc fetch index. Patch của
+  S0 lấy lại draft và gắn lại revision ở mỗi lần gọi; một editor đang giữ revision *n* khi đó sẽ lặng lẽ
+  nhận *n + 1* và lần lưu cũ kế tiếp của nó sẽ thành công, ghi đè tác giả kia. P3 gắn revision với session
+  đang sửa (hoặc từ chối gắn lại khi một session còn giữ revision cũ hơn) và test đúng chuỗi này.
+- `write(path, source)` → `PUT …/draft` kèm `If-Match`, rồi ghi bản cục bộ. Lỗi 409 được raise với thông
+  báo nằm trong `detail` của lỗi.
 - `exists`, `rename` → ánh xạ tới app; rename bị từ chối (đổi tên ở egret, không ở marimo).
-- **409 phải hiện ra được.** Frontend marimo không báo lưu thất bại ngoài việc để notebook "chưa lưu"
-  (§2). Câu hỏi 3 của S0 đo tác giả thực sự thấy gì; nếu không thấy gì, header egret (ngoài iframe) hiện
-  "draft này đã được người khác lưu — tải lại", dựa trên việc poll revision của draft mà header vốn cần
-  cho "Publish bản nháp rev N".
+- **409 hiện ngay trong marimo** (câu hỏi 3 của S0): tác giả thấy một toast đỏ "Failed to save" với nội
+  dung của egret ("This draft was saved by someone else — reload."), nút lưu vẫn ở trạng thái chưa lưu,
+  và buffer đã sửa được giữ. Không cần phương án lùi hiển thị xung đột ở header egret. Việc header poll
+  revision của draft chỉ giữ lại nếu "Publish bản nháp rev N" cần.
 - Lớp lưu trữ xác thực bằng danh tính tác giả của pod (kernel token theo pod hiện có) và egret kiểm
   `app:write` ở mỗi lần gọi.
 
@@ -249,28 +273,57 @@ cũ dừng khi rảnh.
 
 ### 6.1 marimo không được chung origin với egret
 
-Ở chế độ run, tác giả có thể xuất HTML và JavaScript tuỳ ý (`mo.Html`, anywidget). Nếu iframe chung origin
-với egret, script đó đọc được document cha và gọi mọi API egret bằng cookie của người xem — kể cả API
-admin. Đó là XSS vào egret, và D3 khiến tác giả là không tin cậy đối với người xem. Vì vậy:
+Ở chế độ run, JavaScript của tác giả chạy trong trình duyệt của người xem. Câu hỏi 4 của S0 đã đo đường
+chạy: một module `_esm` của **anywidget** chạy JS tuỳ ý (theo thiết kế — widget mang theo JS), còn `mo.Html`
+được làm sạch (một thẻ `<script>` và một `<img onerror>` đều không chạy). Nếu iframe chung origin với egret,
+script đó đọc được document cha và gọi mọi API egret bằng cookie của người xem — kể cả API admin. Đó là XSS
+vào egret, và D3 khiến tác giả là không tin cậy đối với người xem. Vì vậy:
 
 - marimo được phục vụ từ **một origin riêng** (vd. `apps.egret.example`; ở local là `apps.egret.localhost`
   cạnh `egret.localhost` — **không phải** một cổng khác, vì cookie không tách theo cổng) trong
   `<iframe sandbox="allow-scripts allow-same-origin allow-forms allow-downloads">`. `allow-same-origin`
   là so với origin *apps*, không phải của egret.
-- Cookie phiên của egret không bao giờ được gửi tới origin apps.
+- Cookie của egret là host-only, nên origin apps không bao giờ *giữ* chúng: S0 thấy `document.cookie` trên
+  origin apps không có cookie nào của egret.
 - Để mở iframe, egret phát **ticket dùng một lần** (TTL 30 giây, gắn với người dùng, app, mode, và phiên
   bản hoặc draft). Origin apps đổi nó tại `/_ticket` lấy cookie của origin apps (HttpOnly, Secure,
-  SameSite=Lax, cùng phạm vi gắn kết). Token session ở §4.1 được tạo từ lần đổi đó.
-- **Origin apps là một subdomain anh em, tức same-site với egret.** Buộc phải thế: cookie trong iframe
-  cross-site là cookie bên thứ ba, bị trình duyệt chặn. Same-site có một cái giá — script trên origin apps
-  có thể đặt cookie với `Domain=<domain cha của egret>` mà egret sẽ nhận (*cookie tossing*), có thể che
-  `egret_csrf` và phá CSRF double-submit. Vì vậy P4 còn:
+  SameSite=Lax, cùng phạm vi gắn kết). Token session ở §4.1 được tạo từ lần đổi đó. S0 đo được ticket chỉ
+  dùng một lần (dùng lại → 403), request không có cookie apps → 401, và cookie của session run → 401 ở
+  upstream edit. (TTL 30 giây chưa được đo.)
+- **S0 đo được JS của tác giả làm được gì và không làm được gì** (Playwright tự động, HeadlessChrome 136,
+  một lần chạy, http, với một egret giả mô phỏng cookie và CSRF double-submit của egret): nó không đọc được
+  document cha của egret (`SecurityError`), cookie của egret, hay bất kỳ response nào của egret (không có
+  cho phép CORS → `TypeError`); POST mang `X-Egret-CSRF` chết ở preflight CORS; session run không tới được
+  editor. **Nhưng có hai thứ đã tới egret:**
+  - **cookie SameSite=Lax của egret đi theo request từ origin apps.** Một `fetch` từ widget tới `whoami`
+    của egret tới nơi kèm cookie phiên của người xem và egret giả thực thi nó bằng danh tính người đó; CORS
+    chỉ ngăn script đọc response. Request same-site mang cookie Lax, nên đây là hành vi của trình duyệt,
+    không phải đặc thù của bản giả.
+  - **một cookie bị tung vào đã tới egret.** Widget đặt `egret_csrf=evil; domain=<domain cha>`, và request
+    kế tiếp của egret mang hai giá trị `egret_csrf`, giá trị thật và `evil`. Không thay đổi trạng thái nào
+    thành công chỉ vì POST no-cors không thêm được header CSRF.
+- **Hệ quả, và yêu cầu cho P4.** Mọi `GET` của egret (hoặc request nào không cần header tuỳ biến) có tác
+  dụng phụ, và mọi kiểm CSRF chỉ so *giá trị* cookie mà không cần một header kẻ tấn công không đặt được,
+  đều bị khai thác được từ bên trong một app. Vì vậy P4:
+  - kiểm toán rằng các route `GET` của egret không có tác dụng phụ, và giữ như vậy (một test fail khi một
+    route thay đổi trạng thái nhận `GET`);
+  - giữ CSRF **dựa trên header** (header `X-Egret-CSRF` phải có và khớp), không bao giờ chỉ so giá trị;
   - đổi tên cookie egret thành `__Host-egret_session` / `__Host-egret_csrf` (tiền tố `__Host-` cấm thuộc
-    tính `Domain`, nên cookie bị tung vào không dùng được tên đó);
+    tính `Domain`, nên cookie bị tung vào lẽ ra không dùng được tên đó) — **lớp phòng thủ này chưa được
+    đo**: qua http, Chromium từ chối lưu hẳn cookie `__Host-` có `Secure`, nên không hình thành được phiên
+    của nạn nhân. P4 kiểm nó qua HTTPS trên kind (kỳ vọng: `__Host-egret_csrf` bị tung vào không bao giờ
+    tới egret);
   - giữ egret không có bất kỳ cho phép CORS nào cho origin apps (request cross-origin mang `X-Egret-CSRF`
-    cần preflight, và preflight sẽ thất bại).
-- Việc này thêm một host vào ingress, Helm, kind và cấu hình OIDC. Câu hỏi 4 của S0 phải chứng minh nó
-  chạy trọn vẹn; nếu không được thì không có phương án lùi nào ngoài xem lại kiến trúc.
+    cần preflight, và preflight sẽ thất bại — S0 đã đo).
+- **Origin apps là một subdomain anh em, tức same-site với egret.** Lý do đưa ra là cookie trong iframe
+  cross-site là cookie bên thứ ba, bị trình duyệt chặn. S0 cho thấy cái giá của same-site (ở trên). **Câu
+  hỏi mở cho người dùng:** phục vụ apps từ *một registrable site khác* (vd. `egret-apps.example`), cách này
+  chặn cookie Lax đi theo và khiến cookie tossing không thể xảy ra, với cái giá là cookie của origin apps
+  thành cookie bên thứ ba bị chặn và ticket → cookie cần cơ chế thay thế. Chưa quyết; S0 chưa đo biến thể
+  cross-site.
+- Việc này thêm một host vào ingress, Helm, kind và cấu hình OIDC. Câu hỏi 4 của S0 cho thấy marimo edit và
+  run chạy trọn vẹn sau proxy trên một origin riêng với `--base-url`, WebSocket và ticket → cookie, nên
+  kiến trúc được giữ.
 
 ### 6.2 Proxy
 
@@ -278,9 +331,30 @@ Một service axum trong egret, lắng nghe trên host apps:
 
 - Chuyển tiếp HTTP và WebSocket; xoá header hop-by-hop và mọi header `X-Egret-*` từ client; cho
   `Marimo-Server-Token` đi qua (skew protection).
-- **Chặn theo route** những gì marimo không tắt được (§2): WebSocket terminal, endpoint cài package,
-  endpoint secrets, và endpoint file browser ngoài những cái editor cần để lưu. Câu hỏi 6 của S0 cho ra
-  danh sách chính xác.
+- **Chặn theo route** những gì marimo không tắt được (§2). Câu hỏi 6 của S0 kiểm kê 107 route của marimo
+  0.25.0 và chặn 22 prefix sau, dưới cả `/e` lẫn `/r`, mà edit, lưu, 409 và chế độ run không đổi:
+  `/terminal`, `/api/packages`, `/api/secrets`, `/api/files`, `/api/ai`, `/api/storage`, `/api/home`,
+  `/api/kernel/copy`, `/api/kernel/rename`, `/api/kernel/install_missing_packages`,
+  `/api/kernel/save_user_config`, `/api/export/auto_export`, `/api/export/requirements`, `/api/lsp`,
+  `/api/datasources`, `/api/cache`, `/api/environment`, `/api/usage`, `/api/sessions`, `/api/status`,
+  `/auth`, `/og`. Lý do cho từng prefix nằm trong kết quả S0. Chính editor gọi `/api/packages/sandbox`,
+  `/api/lsp/health`, `/api/usage` và `/api/datasources/discover` và nhận 403 mà không ảnh hưởng việc
+  sửa; panel settings không còn lưu được thay đổi.
+- **Kiểm và chuyển tiếp cùng một đường dẫn.** Proxy đầu tiên của S0 so khớp một đường dẫn đã chuẩn hoá rồi
+  chuyển tiếp một đường dẫn mà httpx lại chuẩn hoá lần nữa, nên `/e/x/../api/packages/list` trả 200 và các
+  dạng chấm/mã hoá của `/terminal/ws` lọt qua bước kiểm (19 trên 40 biến thể qua raw socket). Proxy lấy
+  đường dẫn thô mà client gửi, **từ chối** nếu nó có segment `.` hoặc `..` (kể cả sau một lần giải mã
+  phần trăm), `//`, `.` `/` `\` `%` hoặc NUL ở dạng mã hoá, hoặc dấu gạch ngược, còn không thì so khớp
+  không phân biệt hoa thường (sau khi giải mã phần trăm) và chuyển tiếp đúng chuỗi đó (đã sửa: 0 trên 40
+  lọt).
+- **Deny-list thì mong manh**: mỗi lần nâng cấp marimo có thể thêm route. P4 nên ưu tiên **allow-list**
+  các route mà editor và app run cần (kết quả S0 phân loại mọi route), và chạy lại việc kiểm kê route ở
+  mỗi lần nâng cấp marimo.
+- Những gì danh sách không đóng được: `/api/kernel/save` là cần thiết và nhận một `filename` (save-as),
+  chỉ bị giới hạn bởi việc marimo kiểm nằm-trong-workspace (`marimo/_server/api/endpoints/files.py:152-180`),
+  nên thư mục workspace của pod không được chứa gì ngoài draft; `/public/{path}` chọn thư mục notebook theo
+  header `X-Notebook-Id` do client gửi (`endpoints/assets.py:712-750`) — proxy xoá nó hoặc ghim nó vào app
+  của session; `/api/kernel/execute` và scratchpad chạy code với quyền như một cell.
 - Gắn token marimo của pod (`--token` của marimo; không bao giờ hiện cho người dùng) và token session.
 - **Edit:** `/e/{pod}/…` chỉ tới pod edit của chính người gọi; app nêu trong `?file=` yêu cầu `app:write`
   (`EgretStorage` kiểm lại lần nữa).
@@ -293,16 +367,32 @@ Một service axum trong egret, lắng nghe trên host apps:
 |---|---|---|
 | Khoá | (tác giả, workspace) | phiên bản app |
 | Server | entrypoint egret → `marimo edit`, `EgretStorage` | entrypoint egret → `marimo run`, `include_code=False` |
-| Kernel | mỗi notebook đang mở một tiến trình | mỗi session người xem một tiến trình (D7) |
+| Kernel | mỗi notebook đang mở một tiến trình | mỗi session người xem một tiến trình (D7), qua patch IPC của egret |
 | Vòng đời | reaper khi rảnh, như hiện nay | dừng sau 15 phút không có session; egret hiện màn hình chờ lúc cold start |
-| Giới hạn | như hiện nay (250m/512Mi → 1000m/2Gi), cấu hình được | cấu hình được; tối đa 20 session mỗi pod, vượt thì 503 "app đang bận" |
+| Giới hạn | như hiện nay (250m/512Mi → 1000m/2Gi), cấu hình được | cấu hình được; tối đa số session mỗi pod, vượt thì 503 "app đang bận" — mức trần (20 là ước đoán trước S0) được đặt lại ở P5 từ các con số dưới đây |
+
+- **Mỗi session run một tiến trình là patch của egret, không phải tính năng của marimo** (§2). Entrypoint
+  ép `SessionImpl.create` vào nhánh IPC và trỏ `ipc._get_venv_config` tới interpreter của image; các
+  kernel dùng chung site-packages của image. Cả hai là **API nội bộ của marimo**, nên, giống
+  `EgretStorage`: image ghim chính xác phiên bản marimo và CI của image có test hợp đồng (N session → N pid
+  kernel khác nhau, và header của mỗi session tới đúng kernel của nó). Nếu một lần nâng cấp làm vỡ nó và
+  không patch lại được, phương án lùi là mỗi (app × người xem) một pod.
+- **Chi phí đã đo** (S0, mỗi chế độ một lần chạy, laptop dev macOS với tải không đo, không phải pod):
+  ≈ 80 MB RSS mỗi kernel IPC (79,9–81,3 MB) cộng server 77 MB, so với 103,8 MB cho cả một server chế độ
+  thread với 4 session; thời gian tới lần render đầu 13,2 giây cho session đầu tiên và 32,9 giây cho ba
+  session mở cùng lúc, so với 5,24 giây và 17,71 giây ở chế độ thread. Ở cỡ đó 20 session là ≈ 1,6 GB
+  kernel chưa kể dữ liệu của app, và mọi session mới — không chỉ pod lạnh — phải chờ một tiến trình kernel
+  khởi động. **P5 phải đặt lại mức trần session mỗi pod và giới hạn bộ nhớ, và thiết kế UX lúc mở session,
+  từ số đo trên kind** — số trên laptop chỉ cho biết bậc độ lớn.
 
 - `KernelLauncher` (`crates/egret-kernel/src/launcher.rs`) cùng các cài đặt k8s và subprocess của nó được
   tổng quát hoá để khởi chạy cả hai loại pod; reaper và hardening pod hiện có (non-root, drop ALL,
   seccomp RuntimeDefault) giữ nguyên.
 - **NetworkPolicy:** ingress chỉ từ egret; egress chỉ tới gateway của egret và DNS.
 - **Cấu hình marimo** (qua `XDG_CONFIG_HOME` trong image) đặt `[ai] enabled = false`; mọi thứ khác bị chặn
-  ở proxy (§6.2). Cài package đằng nào cũng thất bại vì egress đã đóng.
+  ở proxy (§6.2). Cài package đằng nào cũng thất bại vì egress đã đóng. `XDG_CONFIG_HOME` là nơi marimo
+  tìm *cuối cùng* — một `.marimo.toml` ở thư mục làm việc, thư mục cha bất kỳ, hoặc `~` thắng trước
+  (`marimo/_config/utils.py:69-120`) — nên image bảo đảm không có file nào như vậy.
 - **Người xem không thấy code** (`include_code=False`); người có `app:write` xem code ở chế độ edit.
 - Không autoscale ở bản đầu.
 
@@ -325,16 +415,20 @@ Một service axum trong egret, lắng nghe trên host apps:
 
 ## 9. Triển khai
 
-### S0 — spike (code bỏ đi, sản phẩm là một báo cáo viết)
+### S0 — spike (code bỏ đi, sản phẩm là một báo cáo viết) — **đã xong**
 
-| # | Câu hỏi | Nếu không được |
-|---|---|---|
-| 1 | Header do proxy gắn có tới kernel của đúng session qua `mo.app_meta().request` không, kể cả khi chạy lại theo reactive? | Truyền token qua query param khi tạo session |
-| 2 | Chế độ run có chạy mỗi session một tiến trình được không — `--sandbox` offline, hoặc entrypoint ép nhánh IPC — và tốn bao nhiêu thời gian khởi động? | Mỗi (app × người xem) một pod |
-| 3 | Load đã patch + `EgretStorage` có đi trọn vòng một draft không, và tác giả thấy gì khi 409? | Agent đồng bộ theo dõi file; header egret hiển thị 409 |
-| 4 | marimo có chạy được sau proxy với base URL và WebSocket, trên origin riêng, với ticket → cookie không? | Không có — xem lại kiến trúc |
-| 5 | SQL cell có nhận kết nối DB-API của `egret_marimo` làm engine không? | Một lớp engine marimo riêng |
-| 6 | Proxy phải chặn những route nào (terminal, package, secrets, file browser) mà không làm hỏng edit và lưu? | — (đây là phép đo; proxy chặn dù thế nào) |
+Kết quả: [`docs/en/plans/2026-09-30-marimo-s0-result.md`](../../en/plans/2026-09-30-marimo-s0-result.md)
+(2026-09-30, marimo 0.25.0, HeadlessChrome 136, nhánh `spike/marimo-s0` @ `03f7a9fd`, không bao giờ merge).
+Không phương án lùi nào bị kích hoạt; kiến trúc được giữ. Hai câu hỏi mở cho người dùng được liệt kê ở đó.
+
+| # | Câu hỏi | Nếu không được | Điều đã xảy ra |
+|---|---|---|---|
+| 1 | Header do proxy gắn có tới kernel của đúng session qua `mo.app_meta().request` không, kể cả khi chạy lại theo reactive? | Truyền token qua query param khi tạo session | **Có**, ở chế độ thread và IPC. Không kích hoạt (§4.1). |
+| 2 | Chế độ run có chạy mỗi session một tiến trình được không — `--sandbox` offline, hoặc entrypoint ép nhánh IPC — và tốn bao nhiêu thời gian khởi động? | Mỗi (app × người xem) một pod | `--sandbox`: **không** (1 pid cho 4 session). Ép IPC: **có** (4 pid), ≈ 80 MB và 13,2 giây mỗi session lạnh trên laptop. Không kích hoạt; D7 dựa vào patch của egret (§2, §6.3). |
+| 3 | Load đã patch + `EgretStorage` có đi trọn vòng một draft không, và tác giả thấy gì khi 409? | Agent đồng bộ theo dõi file; header egret hiển thị 409 | **Có**; marimo hiện toast "Failed to save" với nội dung của egret. Không cái nào kích hoạt (§5.1). Yêu cầu mới: lấy lại khi load không được đặt lại revision của editor đang mở. |
+| 4 | marimo có chạy được sau proxy với base URL và WebSocket, trên origin riêng, với ticket → cookie không? | Không có — xem lại kiến trúc | **Có**. Không kích hoạt. JS của tác giả chạy được (anywidget); cookie Lax của egret đi theo request của nó và cookie bị tung vào tới egret; `__Host-` chưa đo được trên http → yêu cầu cho P4 và một câu hỏi mở (§6.1). |
+| 5 | SQL cell có nhận kết nối DB-API của `egret_marimo` làm engine không? | Một lớp engine marimo riêng | **Có**; chỉ hiện trong dropdown sau khi cell của nó đã chạy. Không kích hoạt. DuckDB mặc định là điểm mở cho P3 (§4.4). |
+| 6 | Proxy phải chặn những route nào (terminal, package, secrets, file browser) mà không làm hỏng edit và lưu? | — (đây là phép đo; proxy chặn dù thế nào) | 22 prefix; phát hiện và sửa một lỗ vượt qua bằng dot-segment; ưu tiên allow-list (§6.2). |
 
 ### Các PR, theo thứ tự
 
@@ -343,10 +437,15 @@ Một service axum trong egret, lắng nghe trên host apps:
 2. **P2 — Lưu trữ và vòng đời.** `apps`, `app_drafts`, `app_versions` (+ trigger), API draft với
    revision/409, publish, khôi phục, quyền `app:*`, module tính năng `apps`.
 3. **P3 — Image `egret-apps` và `egret_marimo`.** Entrypoint, `EgretStorage`, DB-API, `egret.sql`, cấu hình
-   marimo đã khoá; pytest với một egret giả, kể cả test hợp đồng `StorageInterface`.
-4. **P4 — Origin apps, proxy, chế độ edit.** Ticket → cookie, proxy (có chặn route), đổi tên cookie sang
-   `__Host-`, launcher edit, trang danh sách Apps và trang Edit.
-5. **P5 — Chế độ run.** Launcher theo phiên bản, UI publish/versions/khôi phục, trang xem app.
+   marimo đã khoá, patch IPC cho chế độ run; pytest với một egret giả, kể cả test hợp đồng
+   `StorageInterface` (có ca tải-lại-không-gắn-lại, §5.1) và test hợp đồng IPC (§6.3). Quyết định engine
+   mặc định của SQL cell (§4.4).
+4. **P4 — Origin apps, proxy, chế độ edit.** Ticket → cookie, proxy (allow-list route hoặc block list của
+   S0, kiểm và chuyển tiếp một đường dẫn thô, xoá hoặc ghim `X-Notebook-Id`), đổi tên cookie sang `__Host-`
+   và kiểm qua HTTPS trên kind, kiểm toán phía egret rằng route `GET` không có tác dụng phụ và CSRF vẫn dựa
+   trên header (§6.1), launcher edit, trang danh sách Apps và trang Edit.
+5. **P5 — Chế độ run.** Launcher theo phiên bản, UI publish/versions/khôi phục, trang xem app; mức trần
+   session mỗi pod, giới hạn bộ nhớ và UX lúc mở session đặt theo số đo trên kind (§6.3).
 6. **P6 — Gỡ notebook.** `egret-notebook`, nửa Jupyter của `egret-kernel`, `kernel-image/`, frontend
    notebook, các bảng notebook và `notebook:*`. Task workflow `egret.python` — đang tham chiếu notebook và
    chưa có handler — được trỏ sang một phiên bản app hoặc đánh dấu chưa hỗ trợ, quyết định trong plan P6.
@@ -361,12 +460,17 @@ fail khi code nó bảo vệ bị cố ý làm hỏng.
   comment, và mọi thứ không parse được.
 - Token mất hiệu lực sau logout, sau khi gỡ `app:read`, và sau khi WebSocket của nó đóng.
 - **JavaScript trong app không đọc được cookie của egret và không gọi được API egret** — browser test với
-  một app cố thử, kể cả tung một `egret_csrf` có `Domain=` rồi POST tới egret.
+  một app cố thử, kể cả tung một `egret_csrf` có `Domain=` rồi POST tới egret, chạy qua HTTPS để cookie
+  `__Host-` tồn tại (S0 không làm được, §6.1).
 - **Hai người xem có grant Ranger khác nhau thấy các dòng khác nhau từ cùng một app**, trên Trino thật và
   StarRocks thật trên kind.
 - Admin mở một app chạy `DELETE` nhận 400 và bảng không đổi.
 - `UPDATE` và `DELETE` trên `app_versions` thất bại.
-- Hai người sửa cùng một draft: người thứ hai nhận 409, và marimo hiển thị nó.
+- Hai người sửa cùng một draft: người thứ hai nhận 409, và marimo hiển thị nó — kể cả khi người thứ hai đã
+  tải lại trang hoặc mở tab thứ hai ở giữa (§5.1).
+- Proxy từ chối các dạng dot-segment, `//` và mã hoá phần trăm của một route bị chặn (40 biến thể raw
+  socket của S0), trên HTTP và WebSocket.
+- N session run của một app chạy trong N tiến trình kernel.
 - Kiểm thử sống bằng trình duyệt trên kind cho P4 và P5.
 
 ## 11. Hoàn thành khi
