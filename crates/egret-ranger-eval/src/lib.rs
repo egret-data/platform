@@ -60,3 +60,8 @@ pub mod eval;
 pub mod model;
 pub mod resource;
 pub mod servicedef;
+
+/// SP4d-2b Task 2's tag-phase tests, in-crate because the three functions they
+/// exercise are `pub(crate)` — see the module doc for the boundary argument.
+#[cfg(test)]
+mod tag_eval_tests;

@@ -1,6 +1,20 @@
 //! SP4d-2b Task 2: evaluating the `tagPolicies` block against a resolved tag
 //! set.
 //!
+//! # Why this file lives in `src/` and not in `tests/`
+//!
+//! SP4d-2b Task 3. The three functions exercised here deliberately do NOT run
+//! [`crate::eval::request_preamble`] — no super-user short-circuit, no
+//! `SuperUsersUnknown`, no engine/service-def cross-check — on the premise that
+//! the composed evaluator is their only caller. Task 3's caller enumeration
+//! found exactly one caller that was not: this file, reaching them across the
+//! crate boundary through `pub`. So they are `pub(crate)` now and the file came
+//! inside with them, which is the boundary being right rather than a second
+//! preamble call papering over its being wrong.
+//!
+//! Nothing else changed: the fixtures, the assertions and the measurements
+//! below are Task 2's, and the paths are still `CARGO_MANIFEST_DIR`-relative.
+//!
 //! # The fixture is the one the engine is holding
 //!
 //! `tests/fixtures/tag-policies-live.json` is the policy cache captured from
@@ -71,14 +85,14 @@
 
 use std::collections::BTreeSet;
 
-use egret_ranger_eval::eval::{
+use crate::eval::{
     evaluate_tag_data_mask, evaluate_tag_policies, evaluate_tag_row_filter, AccessRequest,
     DenyReason, MaskDecision, ResolvedTag, RowFilterDecision, TagDecision, TagResourceProblem,
     UndecidableCause,
 };
-use egret_ranger_eval::model::{ServicePolicySet, TagPolicyBlock, Unmodelled};
-use egret_ranger_eval::resource::{MatchType, RequestResource};
-use egret_ranger_eval::servicedef::ServiceDef;
+use crate::model::{ServicePolicySet, TagPolicyBlock, Unmodelled};
+use crate::resource::{MatchType, RequestResource};
+use crate::servicedef::ServiceDef;
 use serde_json::{json, Value};
 
 // ── fixtures ─────────────────────────────────────────────────────────────
@@ -354,7 +368,7 @@ fn ancestor_is_still_not_an_allow_for_a_resource_policy() {
         .with("catalog", "hive")
         .with("schema", "sales");
     assert_eq!(
-        egret_ranger_eval::resource::match_resource(&policy_resources, &requested, &trino_def()),
+        crate::resource::match_resource(&policy_resources, &requested, &trino_def()),
         MatchType::Ancestor,
         "the fixture must actually produce an ANCESTOR match, or it tests nothing"
     );

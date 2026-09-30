@@ -207,6 +207,37 @@ fn tag_policy(
     p
 }
 
+/// A row-filter resource policy, and a request to match it.
+///
+/// Both are TABLE-granular on purpose: Trino's `rowFilterDef.resources` names
+/// `catalog`/`schema`/`table` and no `column`, so a policy naming a column
+/// matches no row-filter hierarchy and can never yield. The control at the end
+/// of `a_tag_row_filter_stands_against_a_same_priority_resource_filter` is what
+/// caught that — the first version of that test shut out a resource policy that
+/// could not have decided anything anyway.
+fn row_filter_resource_policy(id: i64, name: &str, priority: i32, expr: &str) -> Value {
+    json!({
+        "id": id, "name": name, "service": "trino", "policyType": 2,
+        "isEnabled": true, "policyPriority": priority,
+        "resources": {
+            "catalog": {"values": ["hive"]},
+            "schema":  {"values": ["sales"]},
+            "table":   {"values": ["orders"]},
+        },
+        "rowFilterPolicyItems": filter_items(expr),
+    })
+}
+
+fn table_request() -> AccessRequest {
+    AccessRequest {
+        resource: RequestResource::new()
+            .with("catalog", "hive")
+            .with("schema", "sales")
+            .with("table", "orders"),
+        ..request()
+    }
+}
+
 fn mask_items(mask_type: &str) -> Value {
     json!([{
         "users": ["alice"],
@@ -392,22 +423,25 @@ fn a_tag_allow_shuts_out_a_lower_priority_resource_deny() {
 /// The two fixtures are shaped so the restore is the only thing that can
 /// produce the answer:
 ///
-/// * deny arm: the higher-priority resource policy's only item names `bob`, so
-///   nothing matches, `isAllowed` stays false and no evaluator determines.
+/// * deny arm: the higher-priority resource policy ALLOWS alice and is
+///   `hasDeny()` (its deny bucket names `bob`), so it writes an allow that
+///   offset 553 cannot determine for, the loop runs out, and offset 612 puts
+///   the tag deny back over it. Delete the restore and this answers `Allowed`.
 /// * allow arm: the higher-priority resource policy carries `denyPolicyItems`
-///   for `bob` and no allow items. It is `hasDeny()`, so offset 553's
-///   "an allow with no deny items of its own determines" cannot fire either,
-///   and the loop again ends undetermined.
+///   for `bob` and no allow items. It is `hasDeny()`, so offset 553 cannot
+///   fire either, and the loop again ends undetermined.
 #[test]
 fn nothing_else_determines_so_the_tag_verdict_is_restored() {
+    let mut res_allows_but_cannot_determine = resource_policy(
+        1,
+        "res-allow-deny-capable",
+        9,
+        "policyItems",
+        select_for_alice(),
+    );
+    res_allows_but_cannot_determine["denyPolicyItems"] = select_for_bob();
     let deny_side = envelope(
-        json!([resource_policy(
-            1,
-            "res-irrelevant",
-            9,
-            "policyItems",
-            select_for_bob()
-        )]),
+        json!([res_allows_but_cannot_determine]),
         json!([tag_policy(
             10,
             "tag-deny",
@@ -545,27 +579,24 @@ fn a_tag_mask_stands_against_a_same_priority_resource_mask() {
 /// arbitration is the same opcode.
 #[test]
 fn a_tag_row_filter_stands_against_a_same_priority_resource_filter() {
-    let mut res = resource_policy(
-        1,
-        "res-filter",
-        0,
-        "rowFilterPolicyItems",
-        filter_items("id > 9"),
-    );
-    res["policyType"] = json!(2);
-    let set = envelope(
-        json!([res]),
-        json!([tag_policy(
+    let tag = |values: Value| {
+        let mut p = tag_policy(
             10,
             "tag-filter",
             0,
             2,
             "rowFilterPolicyItems",
-            filter_items("id > 2")
-        )]),
+            filter_items("id > 2"),
+        );
+        p["resources"]["tag"]["values"] = values;
+        p
+    };
+    let set = envelope(
+        json!([row_filter_resource_policy(1, "res-filter", 0, "id > 9")]),
+        json!([tag(json!(["pii"]))]),
     );
 
-    let d = evaluate_row_filter(&set, &request(), &trino_def(), &no_superusers());
+    let d = evaluate_row_filter(&set, &table_request(), &trino_def(), &no_superusers());
     match &d {
         RowFilterDecision::Filtered(f) => {
             assert_eq!(f.policy_name, "tag-filter", "{d:?}");
@@ -573,6 +604,39 @@ fn a_tag_row_filter_stands_against_a_same_priority_resource_filter() {
         }
         other => panic!("a same-priority resource filter must not displace the tag one: {other:?}"),
     }
+
+    // The control WITHOUT which the assertion above is unfalsifiable: shutting
+    // out a resource policy that could never have yielded proves nothing. Same
+    // envelope, tag policy pointed at another tag, so the tag phase yields
+    // nothing and the resource filter must answer.
+    let alone = envelope(
+        json!([row_filter_resource_policy(1, "res-filter", 0, "id > 9")]),
+        json!([tag(json!(["other"]))]),
+    );
+    let d = evaluate_row_filter(&alone, &table_request(), &trino_def(), &no_superusers());
+    match &d {
+        RowFilterDecision::Filtered(f) => assert_eq!(f.filter_expr, "id > 9", "{d:?}"),
+        other => panic!("the resource filter must be able to yield at all: {other:?}"),
+    }
+
+    // And the other side of the `>=`: a STRICTLY higher-priority resource
+    // filter does run, and splits the reported id from the expression.
+    let split = envelope(
+        json!([row_filter_resource_policy(1, "res-filter", 1, "id > 9")]),
+        json!([tag(json!(["pii"]))]),
+    );
+    let d = evaluate_row_filter(&split, &table_request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(
+            &d,
+            RowFilterDecision::Undecidable { why }
+                if why.iter().any(|c| matches!(
+                    c,
+                    UndecidableCause::TagSubResultSplitByResourcePolicy { .. }
+                ))
+        ),
+        "{d:?}"
+    );
 }
 
 /// The other side of arm 3, and the reason it is a REFUSAL rather than an

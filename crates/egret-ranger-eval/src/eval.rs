@@ -1075,13 +1075,21 @@ pub fn evaluate(
     // outcome that is itself a deny.
     if !determined {
         if is_denied_by_tags {
-            allowed = false;
+            // `setIsAllowed(false)`, and with it the identity to report. The
+            // one shape that reaches here with a resource verdict in hand is a
+            // strictly higher-priority DENY-CAPABLE resource policy that
+            // allowed: offset 553 cannot determine for it, so the loop runs
+            // out and the tag deny is restored over its allow.
             outcome = tag_verdict;
         } else if is_allowed_by_tags {
-            allowed = true;
+            // `setIsAllowed(true)`, a no-op BY CONSTRUCTION rather than by
+            // accident: after a tag allow the only thing that can clear
+            // `allowed` is a resource deny, and a deny sets `determined`.
+            // Asserted rather than assumed, because "provably idempotent" is
+            // the kind of claim a later change breaks quietly.
+            debug_assert!(allowed && outcome.as_ref().is_some_and(|o| o.allowed));
         }
     }
-    debug_assert_eq!(allowed, outcome.as_ref().is_some_and(|o| o.allowed));
 
     match outcome {
         Some(Outcome {
@@ -2195,9 +2203,28 @@ struct TagCandidate<'a> {
 /// # ⚠ This is ONE PHASE, not an answer
 ///
 /// It does not arbitrate with the resource policies, and it does not run
-/// [`request_preamble`]. A caller wanting a decision calls [`evaluate`]; this
-/// exists so the composed evaluator can put the two phases together the way
-/// `evaluatePoliciesForOneAccessTypeNoAudit` does.
+/// [`request_preamble`] — no super-user short-circuit, no `SuperUsersUnknown`,
+/// no engine/service-def cross-check. A caller wanting a decision calls
+/// [`evaluate`]; this exists so the composed evaluator can put the two phases
+/// together the way `evaluatePoliciesForOneAccessTypeNoAudit` does.
+///
+/// **SP4d-2b Task 3 made that premise enforceable rather than documented.** The
+/// function is `pub(crate)`, its two mask/row-filter siblings are `#[cfg(test)]`
+/// as well, and the Task 2 tests that used to reach them across the crate
+/// boundary moved into `crate::tag_eval_tests`. The whole caller set is now:
+///
+/// | caller | preamble | note |
+/// |---|---|---|
+/// | [`evaluate`] | **yes**, the statement before | the composed ACCESS answer |
+/// | `evaluate_sub` (via [`evaluate_tag_sub`]) | **yes**, the statement before | the composed MASK / ROW-FILTER answer |
+/// | `crate::tag_eval_tests` | no | `#[cfg(test)]`, in-crate, and pins THIS phase deliberately |
+///
+/// The claim to hold this to is not "a call was added" but "no path reaches
+/// them without it", and the two production callers put the preamble in the
+/// statement immediately before the phase, with only the `SuperUser::Yes`
+/// return between them. `tests/tag_arbitration.rs` asserts the consequence from
+/// the outside, for all three policy types, with a fixture whose tag policy
+/// would otherwise deny.
 ///
 /// # Every input this phase reads, and every input it could have read
 ///
@@ -2300,7 +2327,7 @@ struct TagCandidate<'a> {
 /// authored. A future narrowing has to reproduce the two lines above, and
 /// `tests/ranger/src/test/java/EgretTagTrieAgreementTest.java` is the
 /// measurement it would have to keep passing.
-pub fn evaluate_tag_policies(
+pub(crate) fn evaluate_tag_policies(
     policies: &ServicePolicySet,
     request: &AccessRequest,
     tag_service_def: &ServiceDef,
@@ -2396,7 +2423,15 @@ pub fn evaluate_tag_policies(
 /// [`evaluate_tag_policies`] for `policyType` 1. Same loop, same comparator
 /// dispatch — the difference is that the deciding list is the block's MASK
 /// policies and the ordering key is the tag's match type.
-pub fn evaluate_tag_data_mask(
+///
+/// **Test-only since SP4d-2b Task 3.** The composed evaluator calls
+/// [`evaluate_tag_sub`] directly, because the cross-phase arbitration needs the
+/// winning tag policy's priority and [`MaskDecision`] cannot carry it. What
+/// survives here is the phase's typed answer, which is what
+/// `tag_eval_tests` pins — shipping it as dead code in the library would be
+/// worse than saying so.
+#[cfg(test)]
+pub(crate) fn evaluate_tag_data_mask(
     policies: &ServicePolicySet,
     request: &AccessRequest,
     tag_service_def: &ServiceDef,
@@ -2411,8 +2446,10 @@ pub fn evaluate_tag_data_mask(
     }
 }
 
-/// [`evaluate_tag_policies`] for `policyType` 2.
-pub fn evaluate_tag_row_filter(
+/// [`evaluate_tag_policies`] for `policyType` 2. Test-only, for the reason on
+/// [`evaluate_tag_data_mask`].
+#[cfg(test)]
+pub(crate) fn evaluate_tag_row_filter(
     policies: &ServicePolicySet,
     request: &AccessRequest,
     tag_service_def: &ServiceDef,
