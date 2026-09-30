@@ -1,0 +1,8 @@
+    import egret_marimo as egret
+  File "/Users/1pro-l4r8/Documents/github/data-portal/egret-wt-marimo-s0/spikes/marimo-s0/egret_marimo/__init__.py", line 5, in <module>
+    import httpx
+ModuleNotFoundError: No module named 'httpx'
+[E 260930 19:08:17 notification_utils:256] (error_id=ee157fe3-db00-4b96-a8d9-c7990ab66a75) No module named 'httpx'
+[E 260930 19:08:17 notification_utils:256] (error_id=ee40ab31-30fb-45d8-922a-37d3069f7e61) An ancestor raised an exception (ModuleNotFoundError): 
+[E 260930 19:08:17 notification_utils:256] (error_id=bf9f66c8-2c3d-4d8a-9571-eb8a3c935088) An ancestor raised an exception (ModuleNotFoundError): 
+[E 260930 19:08:17 notification_utils:256] (error_id=e0721ca7-8ccb-455f-8661-a6c826dd9297) An ancestor raised an exception (ModuleNotFoundError): 

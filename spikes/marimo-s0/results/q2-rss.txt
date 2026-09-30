@@ -1,0 +1,12 @@
+## ipc mode, 4 sessions open (server=13181, kernels=13247,13251,13416,13417,13418,)
+  PID    RSS COMMAND
+13181  77064 /usr/local/Cellar/python@3.12/3.12.11/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python entr
+13247  11708 /usr/local/Cellar/python@3.12/3.12.11/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python -c f
+13251  79988 /usr/local/Cellar/python@3.12/3.12.11/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python -m m
+13416  80440 /usr/local/Cellar/python@3.12/3.12.11/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python -m m
+13417  80892 /usr/local/Cellar/python@3.12/3.12.11/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python -m m
+13418  81280 /usr/local/Cellar/python@3.12/3.12.11/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python -m m
+## thread mode, 4 sessions open
+  PID    RSS COMMAND
+ 9996  18328 uv run python entrypoint.py --mode run --process-mode thread
+10000 103776 /usr/local/Cellar/python@3.12/3.12.11/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python entrypoint.py --mode run --process-mode thread

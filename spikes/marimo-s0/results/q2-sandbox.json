@@ -1,0 +1,27 @@
+{
+  "mode": "sandbox",
+  "sessions": [
+    {
+      "user": "u0",
+      "pid": 12881,
+      "seconds": 5.34
+    },
+    {
+      "user": "u1",
+      "pid": 12881,
+      "seconds": 11.87
+    },
+    {
+      "user": "u2",
+      "pid": 12881,
+      "seconds": 12.0
+    },
+    {
+      "user": "u3",
+      "pid": 12881,
+      "seconds": 11.93
+    }
+  ],
+  "distinct_pids": 1,
+  "max_seconds": 12.0
+}

@@ -14,6 +14,12 @@ WORKDIR = pathlib.Path(os.environ["APPS_WORKDIR"]).resolve()
 HERE = pathlib.Path(__file__).parent.resolve()
 
 
+SANDBOX_HEADER = """# /// script
+# dependencies = ["marimo>=0.25.0", "httpx", "polars", "duckdb", "sqlglot"]
+# ///
+"""
+
+
 def fetch_draft(app_id: str) -> dict:
     r = httpx.get(f"{EGRET}/api/apps/{app_id}/draft", headers={"authorization": f"Bearer {POD_TOKEN}"})
     r.raise_for_status()
@@ -66,7 +72,7 @@ def install_force_ipc_patch() -> None:
     from marimo._session.managers import ipc as ipc_mod
     from marimo._session.model import SessionMode
 
-    original_create = session_mod.Session.create.__func__
+    original_create = session_mod.SessionImpl.create.__func__
 
     async def create(cls, *args, **kwargs):
         # Verified (Step 7): Session.create is keyword-only (`*,` at
@@ -75,7 +81,7 @@ def install_force_ipc_patch() -> None:
             kwargs["sandbox"] = True
         return await original_create(cls, *args, **kwargs)
 
-    session_mod.Session.create = classmethod(create)
+    session_mod.SessionImpl.create = classmethod(create)
 
     # Step 7 adaptation: IPCKernelManagerImpl has no `_sandbox` flag in 0.25.0. Without a
     # configured `[venv] path` it always builds a uv NotebookSandbox
@@ -113,7 +119,11 @@ def main() -> None:
                 print(f"[s0] skipping draft {app_id}: {e.response.status_code}", flush=True)
         argv = ["edit", str(WORKDIR), "--port", "2718", "--base-url", "/e"]
     else:
-        (WORKDIR / f"{a.app}.py").write_text(fetch_draft(a.app)["source"])
+        source = fetch_draft(a.app)["source"]
+        if a.process_mode == "sandbox":
+            # the sandbox kernel runs in a fresh uv env holding only marimo: the app's imports must be declared (PEP 723)
+            source = SANDBOX_HEADER + source
+        (WORKDIR / f"{a.app}.py").write_text(source)
         argv = ["run", str(WORKDIR / f"{a.app}.py"), "--port", "2719", "--base-url", "/r"]
         if a.process_mode == "sandbox":
             argv.append("--sandbox")
@@ -126,6 +136,8 @@ def main() -> None:
 
     from marimo._cli.cli import main as marimo_main
 
+    # --sandbox re-execs `python -m marimo <sys.argv[1:]>`, so sys.argv must look like marimo's own
+    sys.argv = ["marimo", *argv]
     marimo_main.main(args=argv, standalone_mode=True)
 
 

@@ -1,0 +1,27 @@
+{
+  "mode": "thread",
+  "sessions": [
+    {
+      "user": "u0",
+      "pid": 10000,
+      "seconds": 5.24
+    },
+    {
+      "user": "u1",
+      "pid": 10000,
+      "seconds": 16.62
+    },
+    {
+      "user": "u2",
+      "pid": 10000,
+      "seconds": 17.71
+    },
+    {
+      "user": "u3",
+      "pid": 10000,
+      "seconds": 17.67
+    }
+  ],
+  "distinct_pids": 1,
+  "max_seconds": 17.71
+}

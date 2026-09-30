@@ -1,0 +1,27 @@
+{
+  "mode": "ipc",
+  "sessions": [
+    {
+      "user": "u0",
+      "pid": 13251,
+      "seconds": 13.24
+    },
+    {
+      "user": "u1",
+      "pid": 13417,
+      "seconds": 32.73
+    },
+    {
+      "user": "u2",
+      "pid": 13418,
+      "seconds": 32.76
+    },
+    {
+      "user": "u3",
+      "pid": 13416,
+      "seconds": 32.9
+    }
+  ],
+  "distinct_pids": 4,
+  "max_seconds": 32.9
+}
