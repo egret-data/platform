@@ -1416,34 +1416,93 @@ fn an_unrelated_policy_cannot_end_the_evaluation_at_553() {
 /// every lookup) with `getMatchType` `NONE`.
 #[test]
 fn a_policy_whose_candidacy_is_unprovable_refuses_when_it_decides() {
-    let mut excludes = resource_policy(1, "res-excludes", 5, "policyItems", select_for_dave());
-    excludes["resources"]["table"] = json!({"values": ["orders"], "isExcludes": true});
+    // FIX ROUND 4. `level_excluded_by_trie` declines to reason from THREE
+    // shapes, and until this round only the first was pinned — dropping either
+    // of the other two survived the whole suite, in the fail-open direction.
+    // Each row below is one shape, measured `present|NONE` in the jar at both
+    // plugin versions by `EgretResourceTrieCandidacyTest`: Ranger holds the
+    // policy and stops at 553, the crate's matcher rejects it, neither half can
+    // be proved, so it refuses rather than letting the deny behind it run.
+    let shapes: [(&str, Value); 3] = [
+        // `isExcludes` — `addInheritedEvaluator`, unioned into every lookup.
+        (
+            "isExcludes on the table level",
+            json!({"values": ["orders"], "isExcludes": true}),
+        ),
+        // `isRecursive` — `insert` ends `if (isWildcard || isRecursive)
+        // addWildcardEvaluator(...)` and the caller passes `getIsRecursive()`
+        // with no `recursiveSupported` check, so `order` is a PREFIX in the trie
+        // and comes back for `orders`, while the matcher — which never reads the
+        // flag — tests it exactly.
+        (
+            "isRecursive on the table level",
+            json!({"values": ["order"], "isRecursive": true}),
+        ),
+        // A leading wildcard — `getNonWildcardPrefix` is empty, so the value is
+        // parked at the trie ROOT and comes back for every request value.
+        (
+            "a leading-wildcard table value",
+            json!({"values": ["*xyz"]}),
+        ),
+    ];
+
+    let tag = json!([tag_policy(
+        10,
+        "tag-allow",
+        0,
+        0,
+        "policyItems",
+        select_for_alice()
+    )]);
+    for (label, table_level) in shapes {
+        let mut unprovable =
+            resource_policy(1, "res-unprovable", 5, "policyItems", select_for_dave());
+        unprovable["resources"]["table"] = table_level;
+        let set = envelope(
+            json!([
+                unprovable,
+                resource_policy(2, "res-deny", 1, "denyPolicyItems", select_for_alice()),
+            ]),
+            tag.clone(),
+        );
+
+        let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+        assert!(
+            matches!(
+                &d,
+                Decision::Undecidable { why }
+                    if why.iter().any(|c| matches!(
+                        c,
+                        UndecidableCause::ResourceCandidacyNotReproducible {
+                            policy_id: Some(1), ..
+                        }
+                    ))
+            ),
+            "{label} is in Ranger's list and not in the matcher's: {}",
+            named(&d)
+        );
+    }
+
+    // The control the three rows need: the SAME policy with a plain literal that
+    // does not match is provably ABSENT, so the deny behind it runs. Without it,
+    // "it refused" could be a blanket on anything at priority 5.
+    let mut literal = resource_policy(1, "res-literal", 5, "policyItems", select_for_dave());
+    literal["resources"]["table"] = json!({"values": ["othertable"]});
     let set = envelope(
         json!([
-            excludes,
+            literal,
             resource_policy(2, "res-deny", 1, "denyPolicyItems", select_for_alice()),
         ]),
-        json!([tag_policy(
-            10,
-            "tag-allow",
-            0,
-            0,
-            "policyItems",
-            select_for_alice()
-        )]),
+        tag,
     );
-
     let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
     assert!(
         matches!(
             &d,
-            Decision::Undecidable { why }
-                if why.iter().any(|c| matches!(
-                    c,
-                    UndecidableCause::ResourceCandidacyNotReproducible { policy_id: Some(1), .. }
-                ))
+            Decision::Denied { policy_name, reason: DenyReason::DenyPolicyItem, .. }
+                if policy_name == "res-deny"
         ),
-        "an isExcludes policy is in Ranger's list and not in the matcher's: {}",
+        "a plain literal mismatch IS provable, so the deny behind it runs: {}",
         named(&d)
     );
 }

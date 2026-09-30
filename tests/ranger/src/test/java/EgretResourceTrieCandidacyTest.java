@@ -20,6 +20,7 @@ import org.apache.ranger.plugin.policyevaluator.RangerDefaultPolicyEvaluator;
 import org.apache.ranger.plugin.policyevaluator.RangerPolicyEvaluator;
 import org.apache.ranger.plugin.policyresourcematcher.RangerPolicyResourceMatcher;
 import org.apache.ranger.plugin.util.RangerResourceEvaluatorsRetriever;
+import org.apache.ranger.plugin.util.ServiceDefUtil;
 import org.junit.Test;
 
 /**
@@ -129,6 +130,21 @@ public class EgretResourceTrieCandidacyTest {
         // shape that makes "the policy does not declare this level" a fail-open
         // if read as a proof of absence.
         t.put("excludes-schema-partial | hive/EXCL:sales/-/-", "present|NONE");
+        // FIX ROUND 4, the two conditions of `level_excluded_by_trie` that no
+        // Rust test pinned — each is a shape where the trie is WIDER than the
+        // matcher for a reason of its own, so reading the matcher's non-match as
+        // absence would skip a policy Ranger holds.
+        //
+        // `isRecursive`: `RangerResourceTrie.insert` ends
+        // `if (isWildcard || isRecursive) addWildcardEvaluator(...)` and the
+        // caller passes `getIsRecursive()` with NO `recursiveSupported` check,
+        // so `sale` becomes a PREFIX in the trie and matches `sales`, while
+        // `RangerDefaultResourceMatcher` — which contains no reference to the
+        // flag at all — still tests it exactly.
+        t.put("recursive-schema | hive/REC:sale/-/-", "present|NONE");
+        // A leading wildcard: `getNonWildcardPrefix` is the empty string, so the
+        // value is parked at the trie ROOT and returned for every request value.
+        t.put("leading-wildcard-table | hive/sales/*xyz/*", "present|NONE");
         return t;
     }
 
@@ -158,6 +174,8 @@ public class EgretResourceTrieCandidacyTest {
         t.put("endswith-table | hive/sales/*ders/*", "present|SELF_AND_ALL_DESCENDANTS");
         t.put("excludes-table | hive/sales/EXCL:orders/*", "present|NONE");
         t.put("excludes-schema-partial | hive/EXCL:sales/-/-", "present|NONE");
+        t.put("recursive-schema | hive/REC:sale/-/-", "present|NONE");
+        t.put("leading-wildcard-table | hive/sales/*xyz/*", "present|NONE");
         return t;
     }
 
@@ -181,6 +199,32 @@ public class EgretResourceTrieCandidacyTest {
                 + "request, opposite treatment in the crate.",
             expectedForTableRequest(),
             measure(TABLE_REQUEST, expectedForTableRequest().keySet()));
+    }
+
+    /**
+     * **The sub path, pinned rather than argued.** `provably_a_candidate` is read on the
+     * mask / row-filter walk too, and `RangerPolicyRepository.createResourceTrieMap` builds
+     * all three trie maps from `serviceDef.getResources()` — the ACCESS defs — while the
+     * match type comes from the mask def's own (normalized) hierarchy. So the two columns
+     * are produced by different halves of the def and could in principle disagree there
+     * when they agree here.
+     *
+     * <p>Same policies, same request, `policyType = DATAMASK`. The presence column must be
+     * identical to the ACCESS one, because the tries are the same objects.
+     */
+    @Test
+    public void candidacyAndMatchTypeForAColumnMaskRequest() {
+        Map<String, String> measured =
+            measure(
+                COLUMN_REQUEST,
+                expectedForColumnRequest().keySet(),
+                RangerPolicy.POLICY_TYPE_DATAMASK);
+        assertEquals(
+            "The DATAMASK answers changed. `provably_a_candidate` is used on the "
+                + "mask/row-filter walk as well, so ANCESTOR must be present and NONE absent "
+                + "here exactly as on the ACCESS path.",
+            expectedForColumnRequest(),
+            measured);
     }
 
     /**
@@ -214,13 +258,18 @@ public class EgretResourceTrieCandidacyTest {
     // ── the measurement ──────────────────────────────────────────────────
 
     private static Map<String, String> measure(String[][] request, Iterable<String> labels) {
+        return measure(request, labels, RangerPolicy.POLICY_TYPE_ACCESS);
+    }
+
+    private static Map<String, String> measure(
+        String[][] request, Iterable<String> labels, int policyType) {
         RangerServiceDef def = trinoServiceDef();
 
         List<RangerPolicyEvaluator> evaluators = new ArrayList<>();
         List<String> ordered = new ArrayList<>();
         for (String label : labels) {
             ordered.add(label);
-            evaluators.add(evaluatorFor(label, def));
+            evaluators.add(evaluatorFor(label, def, policyType));
         }
 
         // One trie per resource def, over every resource evaluator — exactly what
@@ -287,7 +336,12 @@ public class EgretResourceTrieCandidacyTest {
             if (def == null) {
                 throw new IllegalStateException("trino.json did not parse into a RangerServiceDef");
             }
-            return def;
+            // `RangerPolicyRepository` normalizes before it builds anything, and the
+            // mask/row-filter rows below need it: `trino.json`'s `dataMaskDef.resources`
+            // are name-only stubs with null `level` and null `parent`, which
+            // `ServiceDefUtil.normalize` fills from the access defs. Without it a
+            // DATAMASK policy has no hierarchy and every match type is NONE.
+            return ServiceDefUtil.normalize(def);
         } catch (java.io.IOException e) {
             throw new RuntimeException("cannot read trino.json — is the CWD tests/ranger?", e);
         }
@@ -304,13 +358,14 @@ public class EgretResourceTrieCandidacyTest {
     }
 
     /** A real {@link RangerDefaultPolicyEvaluator} over a real {@link RangerPolicy}. */
-    private static RangerPolicyEvaluator evaluatorFor(String label, RangerServiceDef def) {
+    private static RangerPolicyEvaluator evaluatorFor(
+        String label, RangerServiceDef def, int policyType) {
         RangerPolicy policy = new RangerPolicy();
         policy.setId((long) Math.abs(label.hashCode()));
         policy.setName(label);
         policy.setService("trino");
         policy.setServiceType("trino");
-        policy.setPolicyType(RangerPolicy.POLICY_TYPE_ACCESS);
+        policy.setPolicyType(policyType);
         policy.setIsEnabled(true);
         policy.setResources(parse(label));
 
@@ -320,7 +375,15 @@ public class EgretResourceTrieCandidacyTest {
         access.setType("select");
         access.setIsAllowed(true);
         item.setAccesses(new ArrayList<>(Collections.singletonList(access)));
-        policy.setPolicyItems(new ArrayList<>(Collections.singletonList(item)));
+        if (policyType == RangerPolicy.POLICY_TYPE_DATAMASK) {
+            RangerPolicy.RangerDataMaskPolicyItem mask = new RangerPolicy.RangerDataMaskPolicyItem();
+            mask.setUsers(item.getUsers());
+            mask.setAccesses(item.getAccesses());
+            mask.setDataMaskInfo(new RangerPolicy.RangerPolicyItemDataMaskInfo("MASK", null, null));
+            policy.setDataMaskPolicyItems(new ArrayList<>(Collections.singletonList(mask)));
+        } else {
+            policy.setPolicyItems(new ArrayList<>(Collections.singletonList(item)));
+        }
 
         RangerDefaultPolicyEvaluator evaluator = new RangerDefaultPolicyEvaluator();
         evaluator.init(policy, def, new RangerPolicyEngineOptions());
@@ -341,10 +404,14 @@ public class EgretResourceTrieCandidacyTest {
             if (excludes) {
                 v = v.substring("EXCL:".length());
             }
+            boolean recursive = v.startsWith("REC:");
+            if (recursive) {
+                v = v.substring("REC:".length());
+            }
             map.put(
                 names[i],
                 new RangerPolicy.RangerPolicyResource(
-                    new ArrayList<>(Collections.singletonList(v)), excludes, false));
+                    new ArrayList<>(Collections.singletonList(v)), excludes, recursive));
         }
         return map;
     }

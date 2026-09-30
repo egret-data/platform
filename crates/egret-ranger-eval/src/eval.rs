@@ -617,6 +617,44 @@ pub enum UndecidableCause {
     /// if not, the evaluators behind it still run. Those two verdicts differ, or
     /// this cause is not raised — see [`trie_excludes`] for what the crate CAN
     /// prove and the jar measurement behind it.
+    ///
+    /// # ⚠ The REACH of this refusal, by code path
+    ///
+    /// FIX ROUND 4. Two earlier statements of this bound were wrong, in the same
+    /// way twice: both named a POPULATION ("nothing egret authored", "downloads
+    /// egret did not author") instead of a code path, and the second's
+    /// authorship clause is not enforced by anything. Phrased properly, what
+    /// lands here is a policy matching `NONE` on every resource map that the
+    /// crate also cannot prove absent — i.e. every request level it declares
+    /// either matches or is one of the three shapes
+    /// [`crate::resource::level_excluded_by_trie`] declines to reason from —
+    /// positioned where offset 553 would fire and where the verdict behind it
+    /// differs.
+    ///
+    /// The three shapes, and what does or does not keep egret's own compiler out
+    /// of each:
+    ///
+    /// | shape | what the compiler does | enforced? |
+    /// |---|---|---|
+    /// | `isExcludes` | `egret-perm-compile`'s `grants::level()` hard-codes `is_excludes: false` on every level it builds, and it is the only constructor `scope_to_resources` uses | **yes**, by construction |
+    /// | `isRecursive` | the same constructor hard-codes `is_recursive: false` | **yes**, by construction |
+    /// | a non-prefix wildcard in a VALUE (`*xyz`, `or?ers`) | `scope_to_resources` copies `scope.schema` / `scope.table` / `scope.column` into the policy **verbatim**, and `validate_grant_shape` checks principals only — nothing validates scope string CONTENT | **NO.** A grant scoped to a table named, or mistyped as, `ord*rs` compiles to exactly this shape |
+    ///
+    /// So the honest statement is: two of the three shapes cannot come from
+    /// egret's compiler because one constructor forbids them; the third can, and
+    /// the only thing standing between it and this refusal is that nobody has
+    /// typed a `*` into a scope. Everything in a download egret did not author —
+    /// the raw-JSON policy editor, an imported payload, a real Ranger install —
+    /// can carry all three, and that is the population `explain` reads off a
+    /// live plugin.
+    ///
+    /// **What would falsify this table:** `grants::level()` ceasing to pin the
+    /// two flags, or a scope-content validator arriving (which would move the
+    /// third row to "yes"). It is NOT `scope_to_resources`'s `Access` arm and its
+    /// `*` fill — an earlier version of this cell said so, and that falsifier
+    /// belonged to the key-count rule FIX ROUND 3 replaced: an egret ACCESS
+    /// policy declaring fewer than four keys now matches at `ANCESTOR` and
+    /// determines, so the fill decides nothing here any more.
     ResourceCandidacyNotReproducible {
         policy_id: Option<i64>,
         policy_name: String,
@@ -881,7 +919,7 @@ pub enum Decision {
 /// | refusal | population | by what mechanism | what would falsify it |
 /// |---|---|---|---|
 /// | [`UndecidableCause::EvalOrderAmbiguous`] (from this loop) | a tag DENY plus a `hasDeny` band above its priority holding both an allower and a denier | offset 469's `>=` reading a `policyPriority` an allowing band member just raised | a download where deny-capable resource policies share a priority above a clearance tag policy's — no corpus generates a tag block, so the rate is UNMEASURED |
-/// | [`UndecidableCause::ResourceCandidacyNotReproducible`] | policies egret did **not** author carrying `isExcludes` / `isRecursive` / a non-prefix wildcard, positioned where 553 fires | see the ⚠ table on that variant | `scope_to_resources`'s `Access` arm ceasing to fill unnamed levels with `*` |
+/// | [`UndecidableCause::ResourceCandidacyNotReproducible`] | a policy matching `NONE` everywhere whose every declared request level is `isExcludes`, `isRecursive` or a non-prefix wildcard, positioned where 553 fires | the three shapes [`crate::resource::level_excluded_by_trie`] declines to reason from — the ⚠ table on that variant says which of them `grants::level()` forbids and which (the wildcard) **nothing** forbids | `grants::level()` ceasing to pin `is_excludes`/`is_recursive` false, or a scope-content validator arriving |
 /// | [`UndecidableCause::TagSubResultSplitByResourcePolicy`] (from `evaluate_sub`) | a tag mask/filter that yields plus a resource policy Ranger reaches that also yields | offsets 11-88 writing the DATA unconditionally and the identity only `if (!isAllowed)` | nothing today; the shape needs a tag block, which no corpus generates |
 /// | the tag-phase refusals | see the ⚠ tables on [`evaluate_tag_policies`] | — | — |
 ///
@@ -2460,15 +2498,24 @@ fn evaluate_sub(
                 break;
             }
             reachable.push(view);
-            // ⚠ FIX ROUND 2. Only a MATCHED view is provably in Ranger's
-            // candidate list (trie ⊇ matcher, measured), so only a matched view
-            // may end the walk at 553. An unmatched one might not be there at
-            // all — and unlike the ACCESS path this needs no ruling of its own:
-            // if Ranger DID stop on it, nothing behind it wrote and the tag
-            // verdict stands, which is what this walk answers when nothing
-            // behind it yields; and if anything behind it DOES yield, the two
-            // possibilities disagree and the split refusal below is the honest
-            // answer either way.
+            // ⚠ Only a view PROVABLY in Ranger's candidate list may end the
+            // walk at 553 — which is any match type other than `NONE`, see
+            // [`PolicyView::provably_a_candidate`]. A view the crate cannot
+            // place there might not be in it at all, and unlike the ACCESS path
+            // that needs no ruling of its own: if Ranger DID stop on it, nothing
+            // behind it wrote and the tag verdict stands, which is what this
+            // walk answers when nothing behind it yields; and if anything behind
+            // it DOES yield, the two possibilities disagree and the split
+            // refusal below is the honest answer either way.
+            //
+            // FIX ROUND 4: this paragraph said "only a MATCHED view" until the
+            // line below had already stopped meaning that — round-2 prose left
+            // standing over round-3 code, in this file's most safety-relevant
+            // walk. Twice now a superseded justification has outlived the branch
+            // it justified, and the first time it was the stale comment that
+            // made the defect invisible. A superseded justification is a defect
+            // of the same weight as a superseded branch: the next reader cannot
+            // tell which of the two is current.
             if !view.has_deny && view.provably_a_candidate() {
                 determining_band.get_or_insert(view.policy.policy_priority);
             }
