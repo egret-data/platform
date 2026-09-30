@@ -34,6 +34,7 @@ edit là nơi tác giả viết, chế độ run là app đã publish.
 | D11 | **Dùng UI của chính marimo trong iframe**, phục vụ qua reverse proxy của egret. Không fork frontend, không tự viết UI trên giao thức của nó. | Iframe không theo design OKLCH của egret; theme sáng/tối truyền qua query param. |
 | D12 | **Origin apps là một subdomain anh em** (`apps.<host egret>`), same-site với egret (2026-10-01). | P4 phải có cookie `__Host-` (kiểm trên HTTPS), GET không có tác dụng phụ, CSRF dựa trên header, không cho phép CORS cho origin apps (§6.1). |
 | D13 | **SQL cell: cài DuckDB, engine egret là mặc định** (2026-10-01). | DuckDB để viết SQL trên DataFrame đã lấy về, chỉ trong pod; SQL cell mới nhắm vào gateway (§4.4). |
+| D14 | **Bước kiểm `has_marimo_installed` mỗi lần khởi chạy của marimo do shim của launcher trả lời** (2026-10-01). | Một mẹo dựa vào hành vi nội bộ của marimo: ghim phiên bản marimo, test hợp đồng trong CI của image sẽ fail khi lệnh đổi; hiện chưa theo hướng sửa upstream (§6.3). |
 
 ## 2. Những gì code nói
 
@@ -409,7 +410,8 @@ Một service axum trong egret, lắng nghe trên host apps:
     (`marimo/_session/_venv.py:128`), một interpreter mới import marimo. Ở lần chạy pool, spawn → worker
     nhận việc mất 1,0 tới 1,8 giây, phần lớn là bước kiểm này (khoảng đó gồm cả lúc shim khởi động). Bỏ
     qua nó làm spawn → ready của pool giảm từ 1,03–1,27 giây xuống 0,11–0,23 giây (một giá trị ngoại lai
-    1,48 giây). **P3/P5 quyết định cách làm:** (a) shim của launcher trả lời đúng lệnh đó (thứ S0b đã đo —
+    1,48 giây). **Đã quyết với người dùng (2026-10-01, D14): phương án (a)** — shim của launcher trả lời
+    bước kiểm, được bảo vệ bằng test hợp đồng trong CI của image. Các phương án đã cân nhắc: (a) shim của launcher trả lời đúng lệnh đó (thứ S0b đã đo —
     một mẹo dựa vào hành vi nội bộ, cần test hợp đồng sẽ fail khi lệnh đổi); (b) một thay đổi upstream ở
     marimo (vd. cache kết quả theo interpreter và phiên bản); hoặc (c) chạy bước kiểm một lần lúc build
     image hay lúc pod khởi động và để patch của entrypoint trả về kết quả đó (thêm một patch nội bộ, cùng
@@ -504,7 +506,8 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
    revision/409, publish, khôi phục, quyền `app:*`, module tính năng `apps`.
 3. **P3 — Image `egret-apps` và `egret_marimo`.** Entrypoint, `EgretStorage`, DB-API, `egret.sql`, cấu hình
    marimo đã khoá, patch IPC cho chế độ run và cách xử lý bước kiểm `has_marimo_installed` mỗi lần khởi
-   chạy của marimo (§6.3: shim trả lời, upstream, hoặc kết quả tính sẵn); pytest với một egret giả, kể
+   chạy của marimo (D14: shim của launcher trả lời, với test hợp đồng sẽ fail khi marimo đổi lệnh); pytest
+   với một egret giả, kể
    cả test hợp đồng `StorageInterface` (có ca tải-lại-không-gắn-lại, §5.1) và test hợp đồng IPC (§6.3).
    Quyết định engine mặc định của SQL cell (§4.4).
 4. **P4 — Origin apps, proxy, chế độ edit.** Ticket → cookie, proxy (allow-list route hoặc block list của

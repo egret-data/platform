@@ -31,6 +31,7 @@ its edit mode is the authoring surface, its run mode is the published app.
 | D11 | **marimo's own UI in an iframe**, served by an egret reverse proxy. Not a fork of its frontend, not a custom UI over its protocol. | The iframe does not use egret's OKLCH design; theme (light/dark) is passed by query param. |
 | D12 | **The apps origin is a sibling subdomain** (`apps.<egret host>`), same-site with egret (2026-10-01). | P4 must ship `__Host-` cookies (verified over HTTPS), side-effect-free GETs, header-based CSRF, no CORS for the apps origin (§6.1). |
 | D13 | **SQL cells: ship DuckDB, egret engine is the default** (2026-10-01). | DuckDB for SQL over fetched DataFrames, in-pod only; a new SQL cell targets the gateway (§4.4). |
+| D14 | **marimo's per-launch `has_marimo_installed` check is answered by the launcher shim** (2026-10-01). | A hack against private marimo behaviour: pinned marimo, a contract test in the image's CI that fails when the command changes; no upstream change pursued for now (§6.3). |
 
 ## 2. What the code says
 
@@ -411,7 +412,8 @@ An axum service in egret, listening on the apps host:
     one) marimo runs `<python> -c "import marimo, msgspec, zmq; …"` (`marimo/_session/_venv.py:128`), a
     fresh interpreter importing marimo. Spawn → worker claimed took 1.0 to 1.8 s in the pool run, mostly
     this check (the span includes the shim start). Skipping it cut pool spawn → ready from 1.03–1.27 s to
-    0.11–0.23 s (one outlier 1.48 s). **P3/P5 decides how:** (a) the launcher shim answers that exact
+    0.11–0.23 s (one outlier 1.48 s). **Decided with the user (2026-10-01, D14): option (a)** — the
+    launcher shim answers the check, guarded by a contract test in the image's CI. Options considered: (a) the launcher shim answers that exact
     command (what S0b measured — a hack against private behaviour, needs a contract test that fails when
     the command changes); (b) an upstream marimo change (e.g. cache the result per interpreter and
     version); or (c) run the check once at image build or pod start and have the entrypoint patch return
@@ -507,7 +509,8 @@ never merged; automated Playwright, single run per case, macOS dev laptop under 
    revision/409, publish, restore, `app:*` permissions, the `apps` feature module.
 3. **P3 — `egret-apps` image and `egret_marimo`.** Entrypoints, `EgretStorage`, DB-API, `egret.sql`,
    locked-down marimo configuration, the run-mode IPC patch and the fix for marimo's per-launch
-   `has_marimo_installed` check (§6.3: shim answer, upstream, or a pre-computed result); pytest against
+   `has_marimo_installed` check (D14: the launcher shim answers it, with a contract test that fails when
+   marimo changes the command); pytest against
    a fake egret, including the
    `StorageInterface` contract test (with the reload-does-not-rebind case, §5.1) and the IPC contract
    test (§6.3). Decides the SQL-cell default engine (§4.4).
