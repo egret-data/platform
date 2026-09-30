@@ -223,7 +223,10 @@ function tagAttachmentProblemPhrase(p: WireTagAttachmentProblem): string {
     case "validity_periods":
       return `carries ${p.count} validity period${p.count === 1 ? "" : "s"}, which restrict when the tag applies`;
     case "resource_levels":
-      return `is attached at ${p.levels.length === 0 ? "no resource level at all" : p.levels.join("/")}, which is not a shape egret's own tag download writes`;
+      // A comma list, not a slash path: the wire carries the `resourceElements`
+      // KEY SET (sorted), and a slash would imply a hierarchy order the set does
+      // not carry — `catalog/table` would read as a path that does not exist.
+      return `is attached at the resource level${p.levels.length === 1 ? "" : "s"} ${p.levels.length === 0 ? "— none at all" : p.levels.join(", ")}, which is not a shape egret's own tag download writes`;
   }
   const _never: never = p;
   return _never;

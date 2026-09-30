@@ -3171,9 +3171,15 @@ struct TagCandidate<'a> {
 ///
 /// # ⚠ A deliberate, named OVER-refusal
 ///
+/// FIX ROUND 1 adds a second of the same shape, and with the same bound: the
+/// resource-value expression refusal is also raised per POLICY, from the
+/// `of_kind` sweep. Both sweeps sit BELOW the `admitted.is_empty()` return, so
+/// the population is every request of that policy type **that resolves at least
+/// one admitted tag** — not every request.
+///
 /// [`UndecidableCause::TagResourceNotReproducible`] is raised per POLICY and is
 /// independent of the tag being asked about, so one hand-authored `p*x` tag
-/// policy makes every tag request of that policy type undecidable — even for a
+/// policy makes every such tag request undecidable — even for a
 /// tag where the trie and the matcher demonstrably agree (measured: `*ii`
 /// differs for `PII`/`p`/`pix`/`pi`/`""`/`piix`/`pii_x` but **not** for `pii`).
 /// Likewise `isRecursive` on an already-wildcard value adds nothing and is

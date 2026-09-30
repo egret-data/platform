@@ -912,7 +912,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(causes[1]).toHaveTextContent("phi");
     expect(causes[1]).toHaveTextContent(/2 validity periods/);
     expect(causes[2]).toHaveTextContent("pci");
-    expect(causes[2]).toHaveTextContent("catalog/schema");
+    expect(causes[2]).toHaveTextContent("catalog, schema");
 
     // Three shapes, three sentences. Two that read alike would hide which of
     // the three remedies applies.

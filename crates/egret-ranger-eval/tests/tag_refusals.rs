@@ -321,6 +321,70 @@ fn an_unadmitted_tag_does_not_refuse_beside_an_admitted_one() {
     );
 }
 
+/// **A SURVIVING MUTATION found this gap — fix round 1.** Reducing
+/// `dedup_causes` to "keep only the first cause" passed the whole suite, because
+/// nothing asserted that two DISTINCT causes both reach the caller. A helper
+/// added to collapse duplicates that silently collapses findings instead would
+/// be strictly worse than the duplicates it was added for: the refusal would
+/// still be a refusal, and the operator would be handed one reason where there
+/// are two, with no signal that anything was dropped.
+///
+/// Both directions, in one test: two distinct problems on the same attachment
+/// survive as two causes, and the same problem on two attachments that Ranger
+/// keeps apart is reported once.
+#[test]
+fn distinct_causes_all_survive_and_only_duplicates_collapse() {
+    let mut tag = column_tag("pii");
+    tag.options.insert("TAG_VALIDITY_PERIODS".to_string());
+    tag.validity_periods = 1;
+
+    let d = evaluate(
+        &tag_allow(),
+        &request(vec![tag.clone()]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    let why = causes(&d);
+    assert!(
+        why.contains(&UndecidableCause::TagAttachmentNotReproducible {
+            tag: "pii".to_string(),
+            problem: TagAttachmentProblem::Options(vec!["TAG_VALIDITY_PERIODS".to_string()]),
+        }) && why.contains(&UndecidableCause::TagAttachmentNotReproducible {
+            tag: "pii".to_string(),
+            problem: TagAttachmentProblem::ValidityPeriods(1),
+        }),
+        "two distinct problems on one attachment are two findings, not one: {why:?}"
+    );
+
+    // And a DUPLICATE is collapsed. Two attachments of `pii` that differ only in
+    // the service resource are ONE member of Ranger's set, and the option key is
+    // the same, so the same cause is derived twice.
+    let mut second = tag.clone();
+    second.attached_through.levels = levels(&["catalog", "schema", "table"]);
+    let d = evaluate(
+        &tag_allow(),
+        &request(vec![tag, second]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    let options_causes = causes(&d)
+        .into_iter()
+        .filter(|c| {
+            matches!(
+                c,
+                UndecidableCause::TagAttachmentNotReproducible {
+                    problem: TagAttachmentProblem::Options(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        options_causes, 1,
+        "one finding reported twice must reach the caller once: {d:?}"
+    );
+}
+
 // ── 2. a tag policy referencing a tag ATTRIBUTE ──────────────────────────
 
 /// A tag attribute is reachable from a policy through exactly two doors, and
