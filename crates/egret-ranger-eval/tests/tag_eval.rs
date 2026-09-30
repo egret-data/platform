@@ -660,13 +660,16 @@ fn access_evaluators_are_ordered_by_priority_descending() {
 }
 
 /// ...and at EQUAL priority `hasDeny` comes first, which is what stops an allow
-/// hiding a same-priority deny. Same two policies, same names, only the
-/// priority levelled.
+/// hiding a same-priority deny.
+///
+/// The names run the OTHER way here on purpose — `a-allow` before `z-deny` —
+/// because with the deny already first alphabetically the assertion would hold
+/// under a name-only ordering too, and would be testing nothing.
 #[test]
 fn access_evaluators_put_deny_capable_policies_first_at_equal_priority() {
     let set = tagged(json!([
-        tag_policy(1, "z-allow", 0, json!(["t"]), allow_select_for_public()),
-        tag_policy(2, "a-deny", 0, json!(["t"]), deny_select_for_public()),
+        tag_policy(1, "a-allow", 0, json!(["t"]), allow_select_for_public()),
+        tag_policy(2, "z-deny", 0, json!(["t"]), deny_select_for_public()),
     ]));
     let d = evaluate_tag_policies(
         &set,
@@ -682,6 +685,55 @@ fn access_evaluators_put_deny_capable_policies_first_at_equal_priority() {
             }
         ),
         "hasDeny sorts first at equal priority: {d:?}"
+    );
+}
+
+/// **An allow from a policy that HAS deny items does not DETERMINE**, so a
+/// later deny still wins — offsets 472-493, `if (tagEvalResult.getIsAllowed()
+/// && !evaluator.hasDeny()) setIsAccessDetermined(true)`.
+///
+/// This is the one rule in the tag loop that no ordering test can reach, and
+/// dropping it turns a deny into an allow. The fixture puts the allowing policy
+/// FIRST — equal priority, both `hasDeny`, and `a-both` sorts before `z-deny` —
+/// so the deny is only reachable if the allow declines to determine.
+#[test]
+fn an_allow_from_a_deny_capable_policy_does_not_close_the_question() {
+    let set = tagged(json!([
+        tag_policy(
+            1,
+            "a-both",
+            0,
+            json!(["t"]),
+            json!({
+                // Present, so `hasDeny()` is true — but it names nobody in this
+                // request, so it does not itself deny.
+                "denyPolicyItems": [{
+                    "users": ["nobody"],
+                    "accesses": [{"type": "select", "isAllowed": true}],
+                }],
+                "policyItems": [{
+                    "groups": ["public"],
+                    "accesses": [{"type": "select", "isAllowed": true}],
+                }],
+            })
+        ),
+        tag_policy(2, "z-deny", 0, json!(["t"]), deny_select_for_public()),
+    ]));
+    let d = evaluate_tag_policies(
+        &set,
+        &request("alice", Some(vec![tag("t", MatchType::Self_)])),
+        &live_tag_def(),
+    );
+    assert!(
+        matches!(
+            d,
+            TagDecision::Denied {
+                policy_id: Some(2),
+                ..
+            }
+        ),
+        "an allow recorded by a deny-capable policy must leave the question \
+         open for the later deny: {d:?}"
     );
 }
 
