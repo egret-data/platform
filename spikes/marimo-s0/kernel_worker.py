@@ -14,9 +14,10 @@ import timing
 # Pay the import cost before any viewer arrives.
 import marimo._ipc.launch_kernel as launch_kernel  # noqa: E402
 import marimo._runtime.runtime  # noqa: E402,F401
-import polars  # noqa: E402,F401
 import httpx  # noqa: E402,F401
-import egret_marimo  # noqa: E402,F401
+
+# polars (and egret_marimo, which imports polars) are imported in main(), not here: the fork server
+# (variant B) imports this module for serve_one and must be able to leave polars out (--preload light).
 
 # The shim client adds this key to the env payload; the worker pops it and chdirs there, so the
 # kernel runs in the launcher's cwd exactly as `python -m marimo._ipc.launch_kernel` would.
@@ -79,6 +80,9 @@ def serve_one(conn: socket.socket) -> None:
 
 
 def main() -> None:
+    import polars  # noqa: F401  variant A: still paid before WORKER_WARM, as before
+    import egret_marimo  # noqa: F401
+
     channel = socket.socket(fileno=int(sys.argv[1]))  # inherited from the pool
     listener = socket.socket(fileno=int(sys.argv[2]))  # the pool's listening socket, inherited at spawn
     print(f"WORKER_WARM {os.getpid()}", file=sys.stderr, flush=True)

@@ -111,8 +111,9 @@ def install_force_ipc_patch(venv_path: str) -> None:
     ipc_mod.IPCKernelManagerImpl.start_kernel = start_kernel
 
 
-def start_kernel_pool() -> str:
-    """S0b variant A: start kernel_pool.py, wait for POOL_READY, return the shim venv path."""
+def _start_launcher_helper(name: str, cmd: list[str], ready_prefix: str) -> str:
+    """S0b: start a kernel-launcher helper (pool or fork server), wait for its READY line,
+    return the shim venv path that makes marimo's kernel Popen go through shim_client.py."""
     import subprocess
     import threading
 
@@ -126,25 +127,35 @@ def start_kernel_pool() -> str:
         import marimo
 
         os.environ["S0_SHIM_SKIP_CHECK"] = marimo.__version__
-    size = os.environ.get("S0_POOL_SIZE", "3")
-    pool = subprocess.Popen(
-        [sys.executable, str(HERE / "kernel_pool.py"), "--size", size, "--socket", str(sock)],
-        stdout=subprocess.PIPE, text=True,
-    )
+    proc = subprocess.Popen([sys.executable, *cmd, "--socket", str(sock)], stdout=subprocess.PIPE, text=True)
     ready = threading.Event()
 
     def relay() -> None:
-        for line in pool.stdout:
-            print(f"[pool] {line.rstrip()}", flush=True)
-            if line.strip() == "POOL_READY":
+        for line in proc.stdout:
+            print(f"[{name}] {line.rstrip()}", flush=True)
+            if line.startswith(ready_prefix):
                 ready.set()
 
     threading.Thread(target=relay, daemon=True).start()
     if not ready.wait(timeout=120):
-        pool.kill()
-        raise SystemExit("kernel pool not ready within 120 s")
-    print(f"[s0] kernel pool ready (size {size}, pid {pool.pid})", flush=True)
+        proc.kill()
+        raise SystemExit(f"kernel {name} not ready within 120 s")
+    print(f"[s0] kernel {name} ready (pid {proc.pid})", flush=True)
     return str(HERE / "shim")
+
+
+def start_kernel_pool() -> str:
+    """S0b variant A: a warm pool of single-use workers."""
+    size = os.environ.get("S0_POOL_SIZE", "3")
+    return _start_launcher_helper("pool", [str(HERE / "kernel_pool.py"), "--size", size], "POOL_READY")
+
+
+def start_kernel_forkserver() -> str:
+    """S0b variant B: one preloaded fork server; a fresh forked child per kernel."""
+    preload = os.environ.get("S0_FORKSERVER_PRELOAD", "light")
+    return _start_launcher_helper(
+        "forkserver", [str(HERE / "kernel_forkserver.py"), "--preload", preload], "FORKSERVER_READY"
+    )
 
 
 def main() -> None:
@@ -152,7 +163,7 @@ def main() -> None:
     p.add_argument("--mode", choices=["edit", "run"], required=True)
     p.add_argument("--process-mode", choices=["thread", "sandbox", "ipc"], default="thread")
     p.add_argument("--app", default="probe")
-    p.add_argument("--kernel-launcher", choices=["direct", "pool"], default="direct")
+    p.add_argument("--kernel-launcher", choices=["direct", "pool", "forkserver"], default="direct")
     a = p.parse_args()
 
     os.environ["XDG_CONFIG_HOME"] = str(HERE / "config")
@@ -180,7 +191,8 @@ def main() -> None:
             argv.append("--sandbox")
         if a.process_mode == "ipc":
             os.environ["S0_VENV"] = sys.prefix
-            venv_path = start_kernel_pool() if a.kernel_launcher == "pool" else sys.prefix
+            starters = {"pool": start_kernel_pool, "forkserver": start_kernel_forkserver}
+            venv_path = starters[a.kernel_launcher]() if a.kernel_launcher in starters else sys.prefix
             install_force_ipc_patch(venv_path)
 
     argv += ["--host", "127.0.0.1", "--headless", "--token-password", POD_MARIMO_TOKEN]

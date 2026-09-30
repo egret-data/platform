@@ -11,7 +11,8 @@ from playwright.async_api import async_playwright
 
 from common import open_app, wait_text
 
-VARIANT = sys.argv[1]  # direct | pool | forkserver — must match the running server
+VARIANT = sys.argv[1]  # thread | direct | pool | pool-skipcheck | forkserver | ... — must match the running server
+ROUND = sys.argv[2] if len(sys.argv) > 2 else ""  # e.g. r4 -> results/s0b-r4-<variant>.json
 OUT = pathlib.Path(__file__).parent.parent / "results"
 
 
@@ -43,7 +44,7 @@ async def main() -> None:
         "sessions": len(everyone),
         "every_viewer_ok": all(s["viewer_ok"] for s in everyone),
     }
-    (OUT / f"s0b-{VARIANT}.json").write_text(json.dumps(result, indent=2))
+    (OUT / f"s0b-{ROUND + '-' if ROUND else ''}{VARIANT}.json").write_text(json.dumps(result, indent=2))
     print(json.dumps({k: v for k, v in result.items() if k not in ("sequential", "concurrent")}, indent=2))
 
 
