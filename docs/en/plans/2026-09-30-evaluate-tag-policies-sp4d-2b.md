@@ -258,6 +258,17 @@ at one priority; and the same tag at two levels with different match types.
 existing 45 axes have. A corpus that silently stops producing a shape is a gate
 that silently stops being a gate — and it fails green.
 
+- [ ] **Step 3c: Measure the `trie_excludes` over-refusal rate.** Task 3 added a
+three-valued candidate rule, and its third value refuses. It will over-refuse on
+hand-written downloads that use mid-name wildcards, or place `isExcludes` where it
+decides. egret's own compiler emits literal values, so nothing egret authored
+reaches it — but Task 3 could not measure the rate, because the differential corpus
+generates no `tagPolicies` block, so `allowed` is never seeded before the loop and
+the rule is **unreachable in the corpus as it stands**. Once this step's tag cases
+exist the rule becomes reachable; measure how often it fires, and report it beside
+the two `EvalOrderAmbiguous` rates. A refusal nobody has ever measured the cost of
+is a refusal nobody can triage.
+
 - [ ] **Step 3: RE-MEASURE `EvalOrderAmbiguous` on the RESOURCE path AND the
 COMPOSED path.** This step has been narrowed once and widened once; here is where
 it stands. Task 2 established the refusal does **not** apply to the tag phase in
