@@ -280,6 +280,15 @@ fn literal_keys(source: &str) -> Vec<String> {
 /// renderer on nested `{}` and on `{% raw %}` regions, which let an editor
 /// save a call the gate could not see.
 ///
+/// **Fix round 3:** `undeclared_variables` does not report an assignment
+/// target (`{% set secret = secret %}`, `with`, `for`, tuple unpacking) or a
+/// `{% filter %}` tag's arguments, so a string it clears is also probed with
+/// [`super::env::name_in_code`]: any `secret` minijinja lexes as code counts,
+/// including one that is only assigned to. False positives only block an
+/// editor. **This is the save gate, and it is best-effort;** the boundary is
+/// the run-time resolver, which resolves only in strings this function flags
+/// ([`render_with_secrets_detected_by`]).
+///
 /// A string without the letters `secret` names no such identifier: minijinja
 /// identifiers are written out in the source, and neither the raw-tag pass
 /// nor `rewrite` builds one. `render()`/`renderOnce()`, which would render a
@@ -290,7 +299,8 @@ pub fn text_uses_secret(text: &str) -> bool {
         return false;
     }
     match super::env::referenced_roots(text) {
-        Ok(roots) => roots.contains("secret"),
+        Ok(roots) if roots.contains("secret") => true,
+        Ok(_) => super::env::name_in_code(text, "secret"),
         Err(_) => true,
     }
 }
@@ -887,6 +897,15 @@ mod tests {
             "{% filter upper %}{{ secret('db') }}{% endfilter %}",
             "{{ x | default(secret('db')) }}",
             "{% if x is defined %}{{ secret('db') }}{% endif %}",
+            // Fix round 3: `undeclared_variables` blind spots.
+            "{% set secret = secret %}{{ secret('db') }}",
+            "{% set a, secret = 1, secret %}{{ secret('db') }}",
+            "{% with secret = secret %}{{ secret('db') }}{% endwith %}",
+            "{% set secret = x if secret('db') else 2 %}",
+            "{% filter join(secret('db')) %}ab{% endfilter %}",
+            "{% filter replace('a', secret('db')) %}a{% endfilter %}",
+            "{% filter upper %}{% filter join(secret('db')) %}ab{% endfilter %}{% endfilter %}",
+            "{% for secret in [1] %}{% endfor %}",
         ] {
             assert!(text_uses_secret(yes), "{yes}");
         }
@@ -928,6 +947,36 @@ mod tests {
         assert!(source.reads.lock().unwrap().is_empty(), "nothing fetched");
         assert!(err.contains("resolves only on `kestra.*`"), "{err}");
         assert!(!err.contains("pa55word"), "{err}");
+    }
+
+    /// Fix round 3: the `undeclared_variables` blind spots, forced through a
+    /// detector miss, fetch nothing and return the refusal with no value --
+    /// the run-time resolver is the boundary, whatever the save gate saw.
+    #[tokio::test]
+    async fn the_round_three_blind_spots_fetch_nothing_when_missed() {
+        for text in [
+            "{% set secret = secret %}{{ secret('db', subkey='password') }}",
+            "{% set a, secret = 1, secret %}{{ secret('db', subkey='password') }}",
+            "{% with secret = secret %}{{ secret('db', subkey='password') }}{% endwith %}",
+            "{% set secret = x if secret('db', subkey='password') else 2 %}{{ secret }}",
+            "{% filter join(secret('db', subkey='password')) %}ab{% endfilter %}",
+            "{% filter replace('a', secret('db', subkey='password')) %}a{% endfilter %}",
+            "{% filter upper %}{% filter join(secret('db', subkey='password')) %}ab{% endfilter %}{% endfilter %}",
+        ] {
+            let source = table();
+            let out = render_with_secrets_detected_by(
+                json!({ "v": text }).as_object().unwrap(),
+                &RenderContext::new(),
+                WS,
+                &source,
+                |_| false,
+            )
+            .await;
+            assert!(source.reads.lock().unwrap().is_empty(), "{text}: fetched");
+            let err = out.expect_err(text);
+            assert!(err.contains("resolves only on `kestra.*`"), "{text}: {err}");
+            assert!(!err.contains("pa55word"), "{text}: {err}");
+        }
     }
 
     /// Fix round 2, C1: the three strings the round-1 detector missed are

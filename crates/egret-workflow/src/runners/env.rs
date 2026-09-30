@@ -2045,6 +2045,43 @@ pub fn referenced_roots(template: &str) -> Result<std::collections::BTreeSet<Str
     Ok(tmpl.undeclared_variables(false).into_iter().collect())
 }
 
+/// Whether `name` occurs as CODE in `template` -- anywhere minijinja's lexer
+/// reads it as an identifier, not as template data, a string literal, a
+/// comment or a `{% raw %}` body -- after the same raw-tag protection and
+/// `rewrite` a render applies (W5b fix round 3).
+///
+/// **A probe, not a lexer of our own:** each occurrence of `name` that is not
+/// an attribute (`x.name`) or part of a longer identifier is followed, one at
+/// a time, by `@`, a character minijinja's lexer refuses in code and accepts
+/// everywhere else. If that copy no longer parses, the occurrence was code.
+/// Unlike [`referenced_roots`] this sees assignment targets
+/// (`{% set name = … %}`, `with`, `for`, tuple unpacking) and `{% filter %}`
+/// arguments, which `undeclared_variables` does not report. A template that
+/// does not rewrite or parse at all answers `true`.
+// `let_and_return`: see the binding's comment.
+#[allow(clippy::let_and_return)]
+pub(crate) fn name_in_code(template: &str, name: &str) -> bool {
+    let (protected, _replacers) = replace_raw_tags(template);
+    let Ok(rewritten) = rewrite(&protected) else {
+        return true;
+    };
+    let env = environment();
+    if env.template_from_str(&rewritten).is_err() {
+        return true;
+    }
+    let Ok(pattern) = regex::Regex::new(&format!(r"(?:^|[^.\w]){}\b", regex::escape(name))) else {
+        return true;
+    };
+    let ends: Vec<usize> = pattern.find_iter(&rewritten).map(|m| m.end()).collect();
+    ends.into_iter().any(|end| {
+        let probe = format!("{}@{}", &rewritten[..end], &rewritten[end..]);
+        // Bound first: the template borrows `probe` and `env`, and must be
+        // dropped before either.
+        let refused = env.template_from_str(&probe).is_err();
+        refused
+    })
+}
+
 /// The render loop, on the thread [`render_str`] gave it.
 fn render_on_this_thread(
     template: &str,
