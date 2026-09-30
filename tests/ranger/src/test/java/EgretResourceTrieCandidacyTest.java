@@ -1,26 +1,30 @@
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.apache.ranger.authorization.utils.JsonUtils;
 import org.apache.ranger.plugin.model.RangerPolicy;
 import org.apache.ranger.plugin.model.RangerServiceDef;
-import org.apache.ranger.plugin.model.validation.RangerServiceDefHelper;
 import org.apache.ranger.plugin.policyengine.RangerAccessResourceImpl;
+import org.apache.ranger.plugin.policyengine.RangerPolicyEngineOptions;
 import org.apache.ranger.plugin.policyengine.RangerResourceTrie;
-import org.apache.ranger.plugin.policyresourcematcher.RangerDefaultPolicyResourceMatcher;
+import org.apache.ranger.plugin.policyevaluator.RangerDefaultPolicyEvaluator;
+import org.apache.ranger.plugin.policyevaluator.RangerPolicyEvaluator;
 import org.apache.ranger.plugin.policyresourcematcher.RangerPolicyResourceMatcher;
-import org.apache.ranger.plugin.policyresourcematcher.RangerResourceEvaluator;
-import org.apache.ranger.plugin.resourcematcher.RangerResourceMatcher;
 import org.apache.ranger.plugin.util.RangerResourceEvaluatorsRetriever;
 import org.junit.Test;
 
 /**
- * SP4d-2b Task 3, fix round 2: which RESOURCE policies {@code
- * getLikelyMatchPolicyEvaluators} returns, measured from the real jar.
+ * SP4d-2b Task 3: which RESOURCE policies {@code getLikelyMatchPolicyEvaluators} returns,
+ * measured from the real jar.
  *
  * <p><b>Why this exists, and why the answer is load-bearing now when it was not before.</b>
  * {@code egret-ranger-eval} evaluates every enabled policy of the requested type and lets
@@ -30,328 +34,318 @@ import org.junit.Test;
  * ({@code if (result.getIsAllowed() && !evaluator.hasDeny()) setIsAccessDetermined(true)}) broke
  * that: 553 lives in the ENGINE loop, after {@code evaluate} returns, and reads only
  * {@code hasDeny()}. A policy the trie never returns can therefore end the evaluation in this
- * crate and not in Ranger. So the crate now needs to know, per policy, whether Ranger's candidate
- * filter would have returned it — and what it cannot establish, it refuses.
+ * crate and not in Ranger, and a policy it DOES return must be allowed to. So the crate needs
+ * this table in both directions, and what it cannot establish it refuses.
  *
- * <p>{@code RangerPolicyEngineOptions} reads
- * {@code .policyengine.option.disable.trie.lookup.prefilter} with default {@code false}, so the
- * trie is ON in both plugins and this is the live path, not a configurable one.
+ * <p>{@code RangerPolicyEngineOptions.configureForPlugin} reads
+ * {@code .policyengine.option.disable.trie.lookup.prefilter} with {@code iconst_0} as its
+ * default, so the trie is ON in both plugins and this is the live path, not a configurable one.
  *
- * <p><b>The three claims the Rust side depends on</b>, one row each below:
+ * <p><b>Nothing here is hand-built, and that is the point (FIX ROUND 3).</b> The first version of
+ * this file constructed its own {@code RangerServiceDef} and its own
+ * {@link org.apache.ranger.plugin.policyresourcematcher.RangerResourceEvaluator} — including a
+ * hand-written {@code isAncestorOf}, <em>the very gate row 6 measures</em>. Two drafts of it
+ * measured the fixture instead of Ranger: one stubbed {@code isAncestorOf} to {@code false} and
+ * made ANCESTOR look ABSENT (which would have licensed exactly the wrong fix), and one set
+ * {@code isValidLeaf(false)} on {@code column}, where {@code trino.json} omits the field, which
+ * invalidated every hierarchy and made every {@code getMatchType} answer {@code NONE}. Both were
+ * caught only because a second assertion disagreed.
+ *
+ * <p>So this version hand-builds nothing that Ranger can build itself:
+ *
+ * <ul>
+ *   <li>the service-def is {@code crates/egret-policy/src/service-defs/trino.json}, the file the
+ *       plugin actually downloads, parsed by Ranger's own {@code JsonUtils} — all 13 resource
+ *       defs, not a hand-written four;
+ *   <li>the evaluators are real {@link RangerDefaultPolicyEvaluator}s built from real
+ *       {@link RangerPolicy} objects, so {@code isAncestorOf}, {@code leafResourceDef} and the
+ *       resource matchers are Ranger's;
+ *   <li>the tries are built over {@code getResourceEvaluators()} and queried through
+ *       {@link RangerResourceEvaluatorsRetriever}, which is what
+ *       {@code RangerPolicyRepository.getLikelyMatchPolicyEvaluators(Map, request)} invokes.
+ * </ul>
+ *
+ * <p><b>What the crate reads off this table:</b>
  *
  * <ol>
- *   <li><b>trie ⊇ matcher.</b> A policy the matcher accepts at {@code SELF} is always returned,
- *       so the crate may let a {@code matched} view determine at 553.
- *   <li><b>NONE with literal values and the request's own key set ⟹ NOT returned.</b> This is the
- *       one that lets the crate answer at all: the ordinary "some other table's policy" is
- *       provably absent from Ranger's list, so it must not determine at 553.
- *   <li><b>ANCESTOR and DESCENDANT ARE returned.</b> Both are {@code MatchType != SELF}, i.e.
- *       {@code !matched} on the Rust side — so "exclude everything the matcher does not match"
- *       would be WRONG, in the direction that lets a later policy decide where Ranger had already
- *       stopped. This row is why the crate's rule is three-valued (returned / not returned /
- *       cannot tell) instead of two.
+ *   <li><b>trie ⊇ matcher.</b> {@code SELF} is always present, so a {@code matched} view may end
+ *       the evaluation at 553.
+ *   <li><b>{@code ANCESTOR} is PRESENT</b> — {@code RangerResourceTrie}'s build loop adds a
+ *       policy declaring no value for a level as an <em>inherited</em> evaluator when
+ *       {@code isAncestorOf(resourceDef)}, and inherited evaluators are unioned into every
+ *       lookup. That is the ordinary table-level grant against a column request, and the crate
+ *       determines on it rather than refusing.
+ *   <li><b>{@code NONE} with the request's own key set and literal values is ABSENT</b>, which is
+ *       what lets ordinary requests answer at all.
+ *   <li><b>{@code isExcludes} and mid-name wildcards are PRESENT while the matcher rejects
+ *       them</b>, which is why the crate's rule is three-valued (present / absent / cannot tell)
+ *       and not two.
  * </ol>
- *
- * <p>The def is Trino's four-level {@code catalog/schema/table/column} hierarchy from
- * {@code crates/egret-policy/src/service-defs/trino.json}, including its
- * {@code ignoreCase: true} — the opposite of the {@code tag} def, which is why this measurement
- * cannot be inferred from {@code EgretTagTrieAgreementTest}'s.
  */
 public class EgretResourceTrieCandidacyTest {
 
     /** `hive.sales.orders.id` — the column-level shape a Trino access check has. */
-    private static final String[][] REQUEST = {
+    private static final String[][] COLUMN_REQUEST = {
         {"catalog", "hive"}, {"schema", "sales"}, {"table", "orders"}, {"column", "id"}
     };
 
+    /** `hive.sales.orders` — the table-level shape a row-filter check has. */
+    private static final String[][] TABLE_REQUEST = {
+        {"catalog", "hive"}, {"schema", "sales"}, {"table", "orders"}
+    };
+
     /**
-     * policy label → is this policy in {@code RangerResourceEvaluatorsRetriever}'s answer for the
-     * request above?
+     * policy label → {@code present|matchType}, where {@code present} is membership of
+     * {@link RangerResourceEvaluatorsRetriever}'s answer and {@code matchType} is what the
+     * policy's own matcher says. Both columns in one map so they cannot drift apart.
      *
-     * <p>Each label is {@code name | catalog/schema/table/column}, with {@code -} for a level the
-     * policy does not declare.
+     * <p>The label is {@code name | catalog/schema/table/column}, with {@code -} for a level the
+     * policy does not declare and {@code EXCL:} for {@code isExcludes}.
      */
-    private static Map<String, Boolean> expectedCandidacy() {
-        Map<String, Boolean> table = new LinkedHashMap<>();
-        // 1. trie ⊇ matcher: the exact match, and the wildcard-column match.
-        table.put("self-exact | hive/sales/orders/id", true);
-        table.put("self-star-column | hive/sales/orders/*", true);
-        // 2. NONE with literal values and the request's key set: provably absent.
-        table.put("other-table | hive/sales/other/*", false);
-        table.put("other-schema | hive/otherdb/othertable/*", false);
-        table.put("other-catalog | otherc/sales/orders/*", false);
-        // 3. ANCESTOR and DESCENDANT: present, though the matcher is not SELF.
-        table.put("ancestor-schema | hive/sales/-/-", true);
-        table.put("descendant-subcolumn | hive/sales/orders/id/sub", true);
-        // The shapes the crate refuses rather than classifies, kept as a control that the
-        // trie really is WIDER here too and not only on the tag def.
-        table.put("endswith-table | hive/sales/*ders/*", true);
-        table.put("excludes-table | hive/sales/EXCL:orders/*", true);
-        return table;
+    private static Map<String, String> expectedForColumnRequest() {
+        Map<String, String> t = new LinkedHashMap<>();
+        // 1. trie superset of matcher.
+        t.put("self-exact | hive/sales/orders/id", "present|SELF");
+        t.put("self-star-column | hive/sales/orders/*", "present|SELF");
+        // 2. ANCESTOR — the ordinary table-level grant. PRESENT, and not SELF.
+        t.put("ancestor-table | hive/sales/orders/-", "present|ANCESTOR");
+        t.put("ancestor-schema | hive/sales/-/-", "present|ANCESTOR");
+        t.put("ancestor-catalog | hive/-/-/-", "present|ANCESTOR");
+        // 3. NONE with the request's own key set and literal values: provably absent.
+        t.put("other-table | hive/sales/other/*", "absent|NONE");
+        t.put("other-schema | hive/otherdb/othertable/*", "absent|NONE");
+        t.put("other-catalog | otherc/sales/orders/*", "absent|NONE");
+        // …and an ancestor of ANOTHER branch is absent too, so row 2 is about the hierarchy
+        // and not about "declares fewer levels".
+        t.put("ancestor-other-schema | hive/otherdb/-/-", "absent|NONE");
+        // 4. Present while the matcher rejects: the shapes the crate can only refuse.
+        t.put("endswith-table | hive/sales/*ders/*", "present|SELF");
+        t.put("excludes-table | hive/sales/EXCL:orders/*", "present|NONE");
+        // FIX ROUND 3, from a SURVIVING mutation: a policy that declares only a
+        // PREFIX of the request's levels AND carries `isExcludes` on one of
+        // them. Match type NONE (so the crate cannot call it a candidate), yet
+        // present twice over — inherited at `schema` because of the excludes,
+        // and inherited at `table`/`column` because of `isAncestorOf`. It is the
+        // shape that makes "the policy does not declare this level" a fail-open
+        // if read as a proof of absence.
+        t.put("excludes-schema-partial | hive/EXCL:sales/-/-", "present|NONE");
+        return t;
+    }
+
+    /**
+     * The same policies against a TABLE-level request, which is the only way to measure a real
+     * {@code DESCENDANT} — a policy naming MORE levels than the request.
+     *
+     * <p>The crate does NOT use this row to determine: `DESCENDANT` is left in the "cannot tell"
+     * bucket deliberately, because a descendant policy can also carry `isExcludes` or a wildcard
+     * at the deeper level and this table measures one shape of it. It is here so the claim is
+     * recorded rather than assumed, and so a future narrowing has its measurement already.
+     */
+    private static Map<String, String> expectedForTableRequest() {
+        Map<String, String> t = new LinkedHashMap<>();
+        t.put("self-exact | hive/sales/orders/id", "present|DESCENDANT");
+        // A trailing `*` is SELF_AND_ALL_DESCENDANTS, not DESCENDANT — which the crate's
+        // `matched` already accepts. Predicted DESCENDANT here and measured otherwise; the
+        // measured value stands.
+        t.put("self-star-column | hive/sales/orders/*", "present|SELF_AND_ALL_DESCENDANTS");
+        t.put("ancestor-table | hive/sales/orders/-", "present|SELF");
+        t.put("ancestor-schema | hive/sales/-/-", "present|ANCESTOR");
+        t.put("ancestor-catalog | hive/-/-/-", "present|ANCESTOR");
+        t.put("other-table | hive/sales/other/*", "absent|NONE");
+        t.put("other-schema | hive/otherdb/othertable/*", "absent|NONE");
+        t.put("other-catalog | otherc/sales/orders/*", "absent|NONE");
+        t.put("ancestor-other-schema | hive/otherdb/-/-", "absent|NONE");
+        t.put("endswith-table | hive/sales/*ders/*", "present|SELF_AND_ALL_DESCENDANTS");
+        t.put("excludes-table | hive/sales/EXCL:orders/*", "present|NONE");
+        t.put("excludes-schema-partial | hive/EXCL:sales/-/-", "present|NONE");
+        return t;
     }
 
     @Test
-    public void theResourceTrieReturnsExactlyWhatTheCrateAssumes() {
+    public void candidacyAndMatchTypeForAColumnRequest() {
+        assertEquals(
+            "RangerResourceEvaluatorsRetriever's answer for hive.sales.orders.id changed, or "
+                + "getMatchType's did. egret_ranger_eval::eval reads BOTH columns: `present` rows "
+                + "whose matchType is SELF or ANCESTOR are the ones it may end the evaluation on "
+                + "at offset 553, and `absent` rows are the ones trie_excludes is allowed to skip. "
+                + "A row moving either way is a defect in the crate.",
+            expectedForColumnRequest(),
+            measure(COLUMN_REQUEST, expectedForColumnRequest().keySet()));
+    }
+
+    @Test
+    public void candidacyAndMatchTypeForATableRequest() {
+        assertEquals(
+            "The table-level request's answers changed. This is where DESCENDANT is visible at "
+                + "all, and where `ancestor-table` becomes SELF — the same policy, a different "
+                + "request, opposite treatment in the crate.",
+            expectedForTableRequest(),
+            measure(TABLE_REQUEST, expectedForTableRequest().keySet()));
+    }
+
+    /**
+     * The premise the whole table rests on, asserted rather than assumed: the def really did come
+     * off disk with the shape the crate's own copy has.
+     */
+    @Test
+    public void theServiceDefIsTheOneThePluginDownloads() {
+        RangerServiceDef def = trinoServiceDef();
+        assertEquals("trino", def.getName());
+        assertTrue(
+            "trino.json is expected to declare more than the four data levels; a hand-written "
+                + "four-level def is what the first version of this file used",
+            def.getResources().size() > 4);
+
+        Map<String, String> leafness = new LinkedHashMap<>();
+        for (String name : Arrays.asList("catalog", "schema", "table", "column")) {
+            RangerServiceDef.RangerResourceDef r = resourceDef(def, name);
+            leafness.put(name, r.getLevel() + "/" + r.getIsValidLeaf() + "/" + r.getMandatory());
+        }
+        Map<String, String> expected = new LinkedHashMap<>();
+        expected.put("catalog", "10/true/true");
+        expected.put("schema", "20/true/true");
+        expected.put("table", "30/true/true");
+        // `column` OMITS isValidLeaf. Setting it to FALSE instead invalidates the only
+        // four-level hierarchy and turns every getMatchType into NONE — the second draft's bug.
+        expected.put("column", "40/null/true");
+        assertEquals(expected, leafness);
+    }
+
+    // ── the measurement ──────────────────────────────────────────────────
+
+    private static Map<String, String> measure(String[][] request, Iterable<String> labels) {
         RangerServiceDef def = trinoServiceDef();
 
-        List<String> labels = new ArrayList<>(expectedCandidacy().keySet());
-        List<Ev> evaluators = new ArrayList<>();
-        for (int i = 0; i < labels.size(); i++) {
-            evaluators.add(new Ev(i, labels.get(i), def));
+        List<RangerPolicyEvaluator> evaluators = new ArrayList<>();
+        List<String> ordered = new ArrayList<>();
+        for (String label : labels) {
+            ordered.add(label);
+            evaluators.add(evaluatorFor(label, def));
         }
 
-        // One trie per resource level, exactly as `RangerPolicyRepository.init` builds them.
-        Map<String, RangerResourceTrie<Ev>> tries = new HashMap<>();
-        for (RangerServiceDef.RangerResourceDef resourceDef : def.getResources()) {
-            tries.put(
-                resourceDef.getName(), new RangerResourceTrie<>(resourceDef, evaluators));
+        // One trie per resource def, over every resource evaluator — exactly what
+        // `RangerPolicyRepository.init` builds, and over the same `getResourceEvaluators()`
+        // list, so `isAncestorOf` and `leafResourceDef` are Ranger's own.
+        List<RangerPolicyEvaluator.RangerPolicyResourceEvaluator> resourceEvaluators =
+            new ArrayList<>();
+        for (RangerPolicyEvaluator e : evaluators) {
+            resourceEvaluators.addAll(e.getResourceEvaluators());
+        }
+        Map<String, RangerResourceTrie<RangerPolicyEvaluator.RangerPolicyResourceEvaluator>> tries =
+            new HashMap<>();
+        for (RangerServiceDef.RangerResourceDef rd : def.getResources()) {
+            tries.put(rd.getName(), new RangerResourceTrie<>(rd, resourceEvaluators));
         }
 
         RangerAccessResourceImpl resource = new RangerAccessResourceImpl();
         resource.setServiceDef(def);
-        for (String[] level : REQUEST) {
+        for (String[] level : request) {
             resource.setValue(level[0], level[1]);
         }
 
-        java.util.Collection<Ev> returned =
+        java.util.Collection<RangerPolicyEvaluator.RangerPolicyResourceEvaluator> returned =
             RangerResourceEvaluatorsRetriever.getEvaluators(
                 tries, resource.getAsMap(), Collections.emptyMap());
 
-        Map<String, Boolean> measured = new LinkedHashMap<>();
-        for (int i = 0; i < labels.size(); i++) {
-            measured.put(labels.get(i), returned != null && returned.contains(evaluators.get(i)));
-        }
-
-        assertEquals(
-            "RangerResourceEvaluatorsRetriever's answer for hive.sales.orders.id changed. "
-                + "egret_ranger_eval::eval::trie_excludes reads this table: rows that are FALSE "
-                + "are the ones it is allowed to skip at offset 553, and any row flipping to TRUE "
-                + "is a fail-open in the crate.",
-            expectedCandidacy(),
-            measured);
-    }
-
-    /**
-     * The companion half: what {@code getMatchType} says about the same policies. Asserted in the
-     * same file so the two columns cannot drift apart, and so the ANCESTOR/DESCENDANT rows are
-     * visibly {@code != SELF} rather than being asserted as prose.
-     */
-    @Test
-    public void theMatcherIsStrictlyNarrowerThanTheTrieOnThisRequest() {
-        RangerServiceDef def = trinoServiceDef();
-
-        RangerAccessResourceImpl resource = new RangerAccessResourceImpl();
-        resource.setServiceDef(def);
-        for (String[] level : REQUEST) {
-            resource.setValue(level[0], level[1]);
-        }
-
         Map<String, String> measured = new LinkedHashMap<>();
-        int i = 0;
-        for (String label : expectedCandidacy().keySet()) {
-            Ev ev = new Ev(i++, label, def);
-            measured.put(
-                label,
-                String.valueOf(
-                    ev.getPolicyResourceMatcher()
-                        .getMatchType(resource, Collections.emptyMap(), null)));
+        for (int i = 0; i < ordered.size(); i++) {
+            RangerPolicyEvaluator evaluator = evaluators.get(i);
+            boolean present = false;
+            RangerPolicyResourceMatcher.MatchType best =
+                RangerPolicyResourceMatcher.MatchType.NONE;
+            for (RangerPolicyEvaluator.RangerPolicyResourceEvaluator re :
+                evaluator.getResourceEvaluators()) {
+                if (returned != null && returned.contains(re)) {
+                    present = true;
+                }
+                RangerPolicyResourceMatcher.MatchType m =
+                    re.getPolicyResourceMatcher()
+                        .getMatchType(resource, Collections.emptyMap(), null);
+                if (m != RangerPolicyResourceMatcher.MatchType.NONE) {
+                    best = m;
+                }
+            }
+            measured.put(ordered.get(i), (present ? "present" : "absent") + "|" + best);
         }
-
-        Map<String, String> expected = new LinkedHashMap<>();
-        expected.put("self-exact | hive/sales/orders/id", "SELF");
-        expected.put("self-star-column | hive/sales/orders/*", "SELF");
-        expected.put("other-table | hive/sales/other/*", "NONE");
-        expected.put("other-schema | hive/otherdb/othertable/*", "NONE");
-        expected.put("other-catalog | otherc/sales/orders/*", "NONE");
-        expected.put("ancestor-schema | hive/sales/-/-", "ANCESTOR");
-        expected.put("descendant-subcolumn | hive/sales/orders/id/sub", "NONE");
-        expected.put("endswith-table | hive/sales/*ders/*", "SELF");
-        expected.put("excludes-table | hive/sales/EXCL:orders/*", "NONE");
-
-        assertEquals(
-            "getMatchType's answers changed. Read together with the candidacy table above: every "
-                + "row where the matcher says SELF must be a TRUE there (trie superset of "
-                + "matcher), and the rows where it says ANCESTOR/NONE-but-TRUE are why the crate "
-                + "cannot simply exclude what the matcher rejects.",
-            expected,
-            measured);
+        return measured;
     }
 
-    // ── fixtures ─────────────────────────────────────────────────────────
+    // ── fixtures, none of them hand-rolling Ranger behaviour ─────────────
 
     /**
-     * Trino's four data levels, verbatim from
-     * {@code crates/egret-policy/src/service-defs/trino.json}: {@code wildCard: true},
-     * {@code ignoreCase: true}, {@code excludesSupported: true}, every level {@code mandatory}
-     * and the first three {@code isValidLeaf}.
+     * `crates/egret-policy/src/service-defs/trino.json` — the def egret's
+     * `/service/plugins/policies/download` embeds and the plugin evaluates against — parsed by
+     * Ranger's own {@code JsonUtils}, as `EgretRangerEnforcementTest` parses its fixture.
      */
     private static RangerServiceDef trinoServiceDef() {
-        RangerServiceDef def = new RangerServiceDef();
-        def.setName("trino");
-
-        String[] names = {"catalog", "schema", "table", "column"};
-        String[] parents = {"", "catalog", "schema", "table"};
-        List<RangerServiceDef.RangerResourceDef> resources = new ArrayList<>();
-        for (int i = 0; i < names.length; i++) {
-            RangerServiceDef.RangerResourceDef r = new RangerServiceDef.RangerResourceDef();
-            r.setItemId((long) (i + 1));
-            r.setName(names[i]);
-            r.setType("string");
-            r.setLevel((i + 1) * 10);
-            r.setParent(parents[i]);
-            r.setMandatory(true);
-            // trino.json sets `isValidLeaf` on the first three levels and OMITS it on
-            // `column`. Setting it to FALSE there instead of leaving it null makes the only
-            // four-level hierarchy invalid, `init()` fails, and every getMatchType comes back
-            // NONE — which is what the first draft did.
-            if (i < 3) {
-                r.setIsValidLeaf(true);
+        try {
+            String json =
+                new String(
+                    Files.readAllBytes(
+                        Paths.get("../../crates/egret-policy/src/service-defs/trino.json")));
+            RangerServiceDef def = JsonUtils.jsonToObject(json, RangerServiceDef.class);
+            if (def == null) {
+                throw new IllegalStateException("trino.json did not parse into a RangerServiceDef");
             }
-            r.setExcludesSupported(true);
-            r.setMatcher("org.apache.ranger.plugin.resourcematcher.RangerDefaultResourceMatcher");
-            Map<String, String> options = new HashMap<>();
-            options.put("wildCard", "true");
-            options.put("ignoreCase", "true");
-            r.setMatcherOptions(options);
-            resources.add(r);
+            return def;
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("cannot read trino.json — is the CWD tests/ranger?", e);
         }
-        def.setResources(resources);
-
-        RangerServiceDef.RangerAccessTypeDef select = new RangerServiceDef.RangerAccessTypeDef();
-        select.setItemId(1L);
-        select.setName("select");
-        def.setAccessTypes(new ArrayList<>(Collections.singletonList(select)));
-
-        return def;
     }
 
-    /**
-     * The minimum {@link RangerResourceEvaluator} the trie and the retriever need. The label
-     * carries the policy's resource map so the fixture and the assertion table are the same text.
-     */
-    private static final class Ev implements RangerResourceEvaluator {
-        private final long id;
-        private final RangerServiceDef def;
-        private final RangerDefaultPolicyResourceMatcher matcher;
-        private final Map<String, RangerPolicy.RangerPolicyResource> resources;
-
-        Ev(long id, String label, RangerServiceDef def) {
-            this.id = id;
-            this.def = def;
-            this.resources = parse(label);
-
-            // Order copied from EgretTagTrieAgreementTest: def and helper BEFORE the
-            // resources. Setting the resources first leaves `init()` with no hierarchy to
-            // validate against and every getMatchType comes back NONE — which the first
-            // draft of this file did, and the second assertion below caught.
-            RangerDefaultPolicyResourceMatcher m = new RangerDefaultPolicyResourceMatcher();
-            m.setServiceDef(def);
-            m.setServiceDefHelper(new RangerServiceDefHelper(def, false));
-            m.setPolicyResources(this.resources, RangerPolicy.POLICY_TYPE_ACCESS);
-            m.init();
-            this.matcher = m;
-        }
-
-        /** `name | a/b/c/d`, `-` for an undeclared level, `EXCL:` for `isExcludes`. */
-        private static Map<String, RangerPolicy.RangerPolicyResource> parse(String label) {
-            String[] names = {"catalog", "schema", "table", "column", "subcolumn"};
-            String[] values = label.substring(label.indexOf('|') + 1).trim().split("/");
-            Map<String, RangerPolicy.RangerPolicyResource> map = new LinkedHashMap<>();
-            for (int i = 0; i < values.length && i < names.length; i++) {
-                String v = values[i];
-                if ("-".equals(v)) {
-                    continue;
-                }
-                boolean excludes = v.startsWith("EXCL:");
-                if (excludes) {
-                    v = v.substring("EXCL:".length());
-                }
-                map.put(
-                    names[i],
-                    new RangerPolicy.RangerPolicyResource(
-                        new ArrayList<>(Collections.singletonList(v)), excludes, false));
+    private static RangerServiceDef.RangerResourceDef resourceDef(
+        RangerServiceDef def, String name) {
+        for (RangerServiceDef.RangerResourceDef r : def.getResources()) {
+            if (name.equals(r.getName())) {
+                return r;
             }
-            return map;
         }
+        throw new IllegalStateException("trino.json declares no resource named " + name);
+    }
 
-        @Override
-        public long getId() {
-            return id;
-        }
+    /** A real {@link RangerDefaultPolicyEvaluator} over a real {@link RangerPolicy}. */
+    private static RangerPolicyEvaluator evaluatorFor(String label, RangerServiceDef def) {
+        RangerPolicy policy = new RangerPolicy();
+        policy.setId((long) Math.abs(label.hashCode()));
+        policy.setName(label);
+        policy.setService("trino");
+        policy.setServiceType("trino");
+        policy.setPolicyType(RangerPolicy.POLICY_TYPE_ACCESS);
+        policy.setIsEnabled(true);
+        policy.setResources(parse(label));
 
-        @Override
-        public RangerPolicyResourceMatcher getPolicyResourceMatcher() {
-            return matcher;
-        }
+        RangerPolicy.RangerPolicyItem item = new RangerPolicy.RangerPolicyItem();
+        item.setUsers(new ArrayList<>(Collections.singletonList("alice")));
+        RangerPolicy.RangerPolicyItemAccess access = new RangerPolicy.RangerPolicyItemAccess();
+        access.setType("select");
+        access.setIsAllowed(true);
+        item.setAccesses(new ArrayList<>(Collections.singletonList(access)));
+        policy.setPolicyItems(new ArrayList<>(Collections.singletonList(item)));
 
-        @Override
-        public Map<String, RangerPolicy.RangerPolicyResource> getPolicyResource() {
-            return resources;
-        }
+        RangerDefaultPolicyEvaluator evaluator = new RangerDefaultPolicyEvaluator();
+        evaluator.init(policy, def, new RangerPolicyEngineOptions());
+        return evaluator;
+    }
 
-        @Override
-        public RangerResourceMatcher getResourceMatcher(String resourceName) {
-            return matcher == null ? null : matcher.getResourceMatcher(resourceName);
-        }
-
-        /**
-         * {@code ServiceDefUtil.isAncestorOf(serviceDef, leafResourceDef, resourceDef)},
-         * reproduced: walk up from {@code resourceDef} through {@code getParent()} and answer
-         * whether this policy's LEAF level is a strict ancestor of it.
-         *
-         * <p>This is not decoration. {@code RangerResourceTrie}'s build loop (2.5.0 offsets
-         * 376-430) does: if the policy declares no value for this level, {@code
-         * addInheritedEvaluator(evaluator)} — but ONLY {@code if (evaluator.isAncestorOf(
-         * resourceDef))}. Inherited evaluators are unioned into every lookup, so this method IS
-         * the mechanism by which a schema-level policy is a candidate for a column request. The
-         * first draft returned {@code false} here and measured the stub instead of Ranger: the
-         * ancestor row came back {@code false} and would have licensed the crate to skip
-         * ancestor policies at offset 553, which is the fail-open this whole round is about.
-         */
-        @Override
-        public boolean isAncestorOf(RangerServiceDef.RangerResourceDef resourceDef) {
-            String leaf = leafLevelName();
-            if (leaf == null || resourceDef == null) {
-                return false;
+    /** `name | a/b/c/d`, `-` for an undeclared level, `EXCL:` for `isExcludes`. */
+    private static Map<String, RangerPolicy.RangerPolicyResource> parse(String label) {
+        String[] names = {"catalog", "schema", "table", "column"};
+        String[] values = label.substring(label.indexOf('|') + 1).trim().split("/");
+        Map<String, RangerPolicy.RangerPolicyResource> map = new LinkedHashMap<>();
+        for (int i = 0; i < values.length && i < names.length; i++) {
+            String v = values[i];
+            if ("-".equals(v)) {
+                continue;
             }
-            for (RangerServiceDef.RangerResourceDef walk = resourceDef;
-                    walk != null;
-                    walk = resourceDefByName(walk.getParent())) {
-                if (leaf.equalsIgnoreCase(walk.getParent())) {
-                    return true;
-                }
+            boolean excludes = v.startsWith("EXCL:");
+            if (excludes) {
+                v = v.substring("EXCL:".length());
             }
-            return false;
+            map.put(
+                names[i],
+                new RangerPolicy.RangerPolicyResource(
+                    new ArrayList<>(Collections.singletonList(v)), excludes, false));
         }
-
-        /** The deepest level this policy declares, by the def's own {@code level} ordering. */
-        private String leafLevelName() {
-            String leaf = null;
-            int deepest = Integer.MIN_VALUE;
-            for (RangerServiceDef.RangerResourceDef r : def.getResources()) {
-                if (resources.containsKey(r.getName()) && r.getLevel() > deepest) {
-                    deepest = r.getLevel();
-                    leaf = r.getName();
-                }
-            }
-            return leaf;
-        }
-
-        private RangerServiceDef.RangerResourceDef resourceDefByName(String name) {
-            if (name == null || name.isEmpty()) {
-                return null;
-            }
-            for (RangerServiceDef.RangerResourceDef r : def.getResources()) {
-                if (name.equalsIgnoreCase(r.getName())) {
-                    return r;
-                }
-            }
-            return null;
-        }
-
-        /** 2.8.0 added this to the interface; harmless on 2.5.0, which has no such method. */
-        public boolean isLeaf(String resourceName) {
-            return false;
-        }
+        return map;
     }
 }

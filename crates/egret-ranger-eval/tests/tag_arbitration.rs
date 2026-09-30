@@ -1573,3 +1573,205 @@ fn an_unrelated_row_filter_policy_does_not_shut_out_a_yielder_ranger_reaches() {
         "the row-filter path has the same candidate-set rule: {d:?}"
     );
 }
+
+// ── ANCESTOR is PRESENT in Ranger's list, so it determines ───────────────
+
+/// **FIX ROUND 3, the re-review's measured over-refusal.**
+///
+/// An ordinary table-level grant — `catalog/schema/table` with no `column` —
+/// against a column-level request. The crate's matcher calls that `ANCESTOR`,
+/// which is not an allow, so it decides nothing. But
+/// `EgretResourceTrieCandidacyTest` measures it **present** in
+/// `getLikelyMatchPolicyEvaluators`'s answer: `RangerResourceTrie` adds a policy
+/// declaring no value for a level as an INHERITED evaluator of that level when
+/// `isAncestorOf(resourceDef)`, and inherited evaluators are unioned into every
+/// lookup. So Ranger runs it, offset 553 fires, and the deny behind it never
+/// runs.
+///
+/// Fix round 2 proved that row and then did not use it: `trie_excludes` requires
+/// the policy to declare exactly the request's keys, so a three-key policy fell
+/// through to "cannot tell" and refused. That is a refusal at a place where
+/// reproduction was available AND already measured — the expensive kind.
+///
+/// Three fixtures, differing only in the resource map, so this is about the
+/// hierarchy relation and nothing else.
+#[test]
+fn a_table_level_grant_is_in_rangers_list_and_ends_the_evaluation() {
+    let table_level = |id: i64, name: &str, priority: i32, schema: &str, table: &str| {
+        json!({
+            "id": id, "name": name, "service": "trino", "policyType": 0,
+            "isEnabled": true, "policyPriority": priority,
+            "resources": {
+                "catalog": {"values": ["hive"]},
+                "schema":  {"values": [schema]},
+                "table":   {"values": [table]},
+            },
+            "policyItems": select_for_dave(),
+        })
+    };
+    let deny = resource_policy(2, "res-deny", 1, "denyPolicyItems", select_for_alice());
+    let tag = json!([tag_policy(
+        10,
+        "tag-allow",
+        0,
+        0,
+        "policyItems",
+        select_for_alice()
+    )]);
+
+    // 1. ANCESTOR of the request: present, so 553 fires and the tag allow stands.
+    let set = envelope(
+        json!([
+            table_level(1, "res-table-level", 5, "sales", "orders"),
+            deny.clone()
+        ]),
+        tag.clone(),
+    );
+    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(&d, Decision::Allowed { policy_name, .. } if policy_name == "tag-allow"),
+        "an ANCESTOR policy is in Ranger's list and determines at 553: {}",
+        named(&d)
+    );
+
+    // 2. The same SHAPE on another branch: `NONE`, not `ANCESTOR`, and measured
+    //    ABSENT — so the rule is the hierarchy relation, not "declares fewer
+    //    levels". The deny behind it must therefore still run.
+    let set = envelope(
+        json!([
+            table_level(1, "res-elsewhere", 5, "otherdb", "othertable"),
+            deny.clone()
+        ]),
+        tag.clone(),
+    );
+    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(
+            &d,
+            Decision::Denied { policy_name, reason: DenyReason::DenyPolicyItem, .. }
+                if policy_name == "res-deny"
+        ),
+        "a three-key policy on another branch is NOT an ancestor of this request: {}",
+        named(&d)
+    );
+
+    // 3. The four-key version of fixture 1, which was already right before this
+    //    round — so a regression here would tell the two rules apart.
+    let set = envelope(
+        json!([
+            resource_policy(1, "res-four-key", 5, "policyItems", select_for_dave()),
+            deny,
+        ]),
+        tag,
+    );
+    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(&d, Decision::Allowed { policy_name, .. } if policy_name == "tag-allow"),
+        "the SELF-matching version determines, as it always did: {}",
+        named(&d)
+    );
+}
+
+/// The mask twin: an ancestor-level mask policy is in Ranger's data-mask list
+/// too, so it ends the walk and the tag mask stands rather than the yielder
+/// behind it splitting the result.
+#[test]
+fn a_table_level_mask_policy_ends_the_sub_walk_too() {
+    let ancestor = json!({
+        "id": 1, "name": "res-mask-ancestor", "service": "trino", "policyType": 1,
+        "isEnabled": true, "policyPriority": 5,
+        "resources": {
+            "catalog": {"values": ["hive"]},
+            "schema":  {"values": ["sales"]},
+        },
+        "dataMaskPolicyItems": json!([{
+            "users": ["bob"],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": "HASH"},
+        }]),
+    });
+    let mut low = resource_policy(
+        2,
+        "res-mask-low",
+        1,
+        "dataMaskPolicyItems",
+        mask_items("HASH"),
+    );
+    low["policyType"] = json!(1);
+
+    let set = envelope(
+        json!([ancestor, low]),
+        json!([tag_policy(
+            10,
+            "tag-mask",
+            0,
+            1,
+            "dataMaskPolicyItems",
+            mask_items("MASK")
+        )]),
+    );
+    let d = evaluate_data_mask(&set, &request(), &trino_def(), &no_superusers());
+    match &d {
+        MaskDecision::Masked(m) => assert_eq!(m.policy_name, "tag-mask", "{d:?}"),
+        other => panic!("an ancestor mask policy is in Ranger's list and ends the walk: {other:?}"),
+    }
+}
+
+/// **A fail-open a SURVIVING mutation found, and no review did.**
+///
+/// The mutation was "read a level the policy does not declare as a proof of
+/// absence". It survived the whole suite, because a policy declaring a prefix of
+/// the request's levels normally matches at `ANCESTOR` and never reaches
+/// `trie_excludes` at all.
+///
+/// The shape that does reach it: a prefix policy carrying `isExcludes` on one of
+/// the levels it DOES declare. Its match type is `NONE` — excludes inverts the
+/// level — so the crate cannot call it a candidate; and it is present in
+/// Ranger's list twice over, inherited at `schema` because of the excludes and
+/// at `table`/`column` because of `isAncestorOf`. Measured as
+/// `excludes-schema-partial | hive/EXCL:sales/-/-` → `present|NONE` in
+/// `EgretResourceTrieCandidacyTest`, at both plugin versions.
+///
+/// So the crate can prove neither presence nor absence, and it decides the
+/// request: refuse. Reading the undeclared `table`/`column` levels as absence
+/// would instead skip it and answer `Denied`, which is Ranger's opposite.
+#[test]
+fn an_undeclared_level_is_not_a_proof_of_absence() {
+    let partial_excludes = json!({
+        "id": 1, "name": "res-partial-excludes", "service": "trino", "policyType": 0,
+        "isEnabled": true, "policyPriority": 5,
+        "resources": {
+            "catalog": {"values": ["hive"]},
+            "schema":  {"values": ["sales"], "isExcludes": true},
+        },
+        "policyItems": select_for_dave(),
+    });
+    let set = envelope(
+        json!([
+            partial_excludes,
+            resource_policy(2, "res-deny", 1, "denyPolicyItems", select_for_alice()),
+        ]),
+        json!([tag_policy(
+            10,
+            "tag-allow",
+            0,
+            0,
+            "policyItems",
+            select_for_alice()
+        )]),
+    );
+
+    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(
+            &d,
+            Decision::Undecidable { why }
+                if why.iter().any(|c| matches!(
+                    c,
+                    UndecidableCause::ResourceCandidacyNotReproducible { policy_id: Some(1), .. }
+                ))
+        ),
+        "a level the policy does not declare is the inherited path, never absence: {}",
+        named(&d)
+    );
+}

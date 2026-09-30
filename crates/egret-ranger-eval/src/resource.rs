@@ -277,6 +277,53 @@ pub fn trie_reproduces_matcher(policy_value: &str, wild_card: bool) -> bool {
     }
 }
 
+/// Whether ONE resource level's trie provably does not return a policy carrying
+/// `level`, for the request value at that level.
+///
+/// The per-level half of Ranger's candidate filter.
+/// `RangerResourceEvaluatorsRetriever.getEvaluators` intersects, over the keys
+/// the REQUEST carries, the evaluator set each level's trie returns — so one
+/// level answering "not in this trie" removes the policy from the whole answer,
+/// whatever the other levels say. That makes absence provable locally, which is
+/// the only way it is provable at all: a policy that declares FEWER levels than
+/// the request is added to the missing levels' tries as an *inherited*
+/// evaluator (`isAncestorOf`) and is unioned into every lookup there, so nothing
+/// can be concluded from a level the policy does not declare.
+///
+/// Three conditions, and all three are about this level only:
+///
+/// * **no `isExcludes`** — `RangerResourceTrie`'s build loop sends an excludes
+///   resource to `addInheritedEvaluator` for THIS level, i.e. it is returned for
+///   every value of it;
+/// * **no `isRecursive`** — `insert` ends
+///   `if (isWildcard || isRecursive) addWildcardEvaluator(...)`, so the value
+///   becomes a prefix match in the trie while the matcher still reads it exactly;
+/// * **every value trie-prefix-exact** ([`trie_reproduces_matcher`]) — otherwise
+///   the trie parks the value at a shorter prefix than the matcher tests, and a
+///   matcher non-match is not a trie non-match.
+///
+/// With those, this level's trie membership IS [`LevelMatcher::is_match`], and a
+/// non-match is a proof of absence. Measured per row in
+/// `tests/ranger/src/test/java/EgretResourceTrieCandidacyTest.java`.
+pub fn level_excluded_by_trie(
+    level: &ResourceLevel,
+    def: Option<&ResourceDef>,
+    request_value: &str,
+) -> bool {
+    if level.is_excludes || level.is_recursive {
+        return false;
+    }
+    let wild_card = def.map(|d| d.matcher_options.wild_card).unwrap_or(true);
+    if !level
+        .values
+        .iter()
+        .all(|v| trie_reproduces_matcher(v, wild_card))
+    {
+        return false;
+    }
+    !LevelMatcher::build(level, def).is_match(Some(request_value))
+}
+
 // ── The matcher itself ───────────────────────────────────────────────────
 
 /// One initialised `RangerDefaultPolicyResourceMatcher`.

@@ -107,7 +107,7 @@ use crate::model::{
     ServicePolicySet, TagPolicyBlock, Unmodelled,
 };
 use crate::resource::{
-    match_policy_resources, match_resource_of_type, trie_reproduces_matcher, MatchType,
+    level_excluded_by_trie, match_policy_resources, trie_reproduces_matcher, MatchType,
     RequestResource,
 };
 use crate::servicedef::{PolicyType, ServiceDef, ServiceDefIssue};
@@ -870,6 +870,27 @@ pub enum Decision {
 /// | the candidate ORDER | **yes** | `sort_eval_order`'s `getEvalOrder()` stand-in. Order-free for the outcome on every arm except the tag-deny one — see the ⚠ block in the loop |
 /// | the candidate SET | **yes, at offset 553 and NOWHERE ELSE** | ⚠ **FIX ROUND 2, and the finding of this round.** Ranger's list is its resource trie's answer; this crate's is every enabled policy of the type. That gap is invisible to the arbitration — it only ever SETS `determined`, and on a priority-DESC list a firing at one candidate fires at every later one, so an extra candidate moves nothing — and invisible to `decide`, which re-asks the matcher. It is visible at 553, which reads `hasDeny()` alone. [`trie_excludes`] proves the ordinary case absent; what it cannot prove is ruled on after the loop |
 ///
+/// ## The REACH of each refusal this function owns
+///
+/// FIX ROUND 3. Three times in this task a claim about *reach* — who lands in a
+/// refusal, and how often — has been wrong while the claim about *behaviour* was
+/// right. Behaviour is measured against the jar and gets caught; reach is
+/// asserted in prose and does not. So each refusal below names its population,
+/// the mechanism that decides it, and what would falsify it.
+///
+/// | refusal | population | by what mechanism | what would falsify it |
+/// |---|---|---|---|
+/// | [`UndecidableCause::EvalOrderAmbiguous`] (from this loop) | a tag DENY plus a `hasDeny` band above its priority holding both an allower and a denier | offset 469's `>=` reading a `policyPriority` an allowing band member just raised | a download where deny-capable resource policies share a priority above a clearance tag policy's — no corpus generates a tag block, so the rate is UNMEASURED |
+/// | [`UndecidableCause::ResourceCandidacyNotReproducible`] | policies egret did **not** author carrying `isExcludes` / `isRecursive` / a non-prefix wildcard, positioned where 553 fires | see the ⚠ table on that variant | `scope_to_resources`'s `Access` arm ceasing to fill unnamed levels with `*` |
+/// | [`UndecidableCause::TagSubResultSplitByResourcePolicy`] (from `evaluate_sub`) | a tag mask/filter that yields plus a resource policy Ranger reaches that also yields | offsets 11-88 writing the DATA unconditionally and the identity only `if (!isAllowed)` | nothing today; the shape needs a tag block, which no corpus generates |
+/// | the tag-phase refusals | see the ⚠ tables on [`evaluate_tag_policies`] | — | — |
+///
+/// **None of these rates is measured on a corpus**, and that is the honest state
+/// rather than an omission being hidden: the differential corpus generates no
+/// `tagPolicies` block, so on it `allowed` is never seeded before the resource
+/// loop and the first two are unreachable by construction. Task 5 is where they
+/// become measurable.
+///
 /// ## Not an input at all
 ///
 /// * **[`EngineConfig`]** — the super-user short-circuit is at caller offsets
@@ -1025,8 +1046,6 @@ pub fn evaluate(
     // Resolved after the loop, because whether it matters depends on what the
     // rest of the loop does.
     let mut unknown_stop: Option<(Option<i64>, String, bool)> = None;
-    let request_shape_known =
-        request_shape_is_reproducible(&request.resource, service_def, PolicyType::Access);
 
     for view in &candidates {
         // ── the three-way arbitration, offsets 452-535 ─────────────────
@@ -1139,16 +1158,14 @@ pub fn evaluate(
         // ordinary "some other table's policy" absent, and anything it cannot
         // prove is recorded here and ruled on after the loop.
         if allowed && !view.has_deny {
-            if view.matched {
+            if view.provably_a_candidate() {
                 determined = true;
-            } else if !(request_shape_known
-                && trie_excludes(
-                    view.policy,
-                    &request.resource,
-                    service_def,
-                    PolicyType::Access,
-                ))
-                && unknown_stop.is_none()
+            } else if !trie_excludes(
+                view.policy,
+                &request.resource,
+                service_def,
+                PolicyType::Access,
+            ) && unknown_stop.is_none()
             {
                 unknown_stop = Some((view.policy.id, view.policy.name.clone(), allowed));
             }
@@ -1465,7 +1482,28 @@ fn tag_policies_can_decide(
 ///
 /// # The conditions, each traced to a line of that build loop
 ///
-/// Every resource map of the policy must satisfy all of:
+/// Absence is proved **per level**, because that is the only place it is
+/// provable: `RangerResourceEvaluatorsRetriever` intersects, over the keys the
+/// REQUEST carries, what each level's trie returns — so ONE level answering "not
+/// in this trie" removes the policy from the whole answer, whatever the others
+/// say. A level the policy does not declare proves nothing: it is the inherited
+/// path (row 6). [`crate::resource::level_excluded_by_trie`] holds the three
+/// conditions a level must meet to serve as the proof, each traced to a line of
+/// the build loop.
+///
+/// Every resource map of the policy (primary and each `additionalResources`,
+/// because `RangerAbstractPolicyEvaluator.init` builds one evaluator per map)
+/// must have at least one such level.
+///
+/// **FIX ROUND 3 replaced a whole-policy rule with this one.** The old rule
+/// required the policy to declare EXACTLY the request's keys and then read
+/// `getMatchType`'s `NONE` as "a level mismatched" — which needed a separate
+/// guard that the request's keys were a gapless hierarchy prefix (else `NONE`
+/// could mean `init()` failed), and which could prove nothing about a policy
+/// declaring fewer keys, including ones measured ABSENT (`hive/otherdb` against
+/// a `hive/sales/…` request). The per-level rule needs neither the key-count
+/// test nor the hierarchy guard, and proves strictly more. The superseded
+/// conditions, kept because the reasoning is the same and only its scope moved:
 ///
 /// * **it declares exactly the request's resource keys.** Fewer, and the
 ///   `isAncestorOf` branch can make it an inherited evaluator (row 6); more or
@@ -1495,58 +1533,21 @@ fn trie_excludes(
 ) -> bool {
     let maps = std::iter::once(&policy.resources).chain(policy.additional_resources.iter());
     for map in maps {
-        // Exactly the request's keys — see the ANCESTOR row.
-        if map.len() != request.len() || !request.keys().all(|k| map.contains_key(k)) {
-            return false;
-        }
-        for (name, level) in map {
-            if level.is_excludes || level.is_recursive {
+        let excluded = request.keys().any(|name| {
+            let Some(level) = map.get(name) else {
+                // A level the policy does not declare is the INHERITED path
+                // (row 6): the trie holds it there for every value, so it
+                // proves nothing.
                 return false;
-            }
-            let wild_card = service_def
-                .resource(policy_type, name)
-                .map(|r| r.matcher_options.wild_card)
-                .unwrap_or(true);
-            if !level
-                .values
-                .iter()
-                .all(|v| trie_reproduces_matcher(v, wild_card))
-            {
-                return false;
-            }
-        }
-        if match_resource_of_type(map, request, service_def, policy_type) != MatchType::None {
+            };
+            let value = request.get(name).expect("name came from request.keys()");
+            level_excluded_by_trie(level, service_def.resource(policy_type, name), value)
+        });
+        if !excluded {
             return false;
         }
     }
     true
-}
-
-/// Whether the REQUEST's resource keys are a gapless prefix of one of the def's
-/// hierarchies for this policy type.
-///
-/// [`trie_excludes`]'s last condition reads `getMatchType`'s `NONE` as "a level
-/// mismatched". That reading is only available when `init()` cannot have failed
-/// for a policy carrying the request's own key set — and `init()` fails when
-/// those keys are not a gapless prefix of exactly one hierarchy. A request for
-/// `{catalog, table}` on Trino is the shape that breaks it: no hierarchy skips
-/// `schema`, so the matcher answers `NONE` for hierarchy reasons while the trie,
-/// which is per level and knows nothing of hierarchies, still returns the
-/// policy.
-///
-/// Computed once per request rather than per policy, because it is a property of
-/// the request.
-fn request_shape_is_reproducible(
-    request: &RequestResource,
-    service_def: &ServiceDef,
-    policy_type: PolicyType,
-) -> bool {
-    service_def.hierarchies(policy_type).iter().any(|h| {
-        h.len() >= request.len()
-            && h[..request.len()]
-                .iter()
-                .all(|lvl| request.get(lvl).is_some())
-    })
 }
 
 /// Phase 1's gate: the tag service-def to evaluate the `tagPolicies` block
@@ -1793,6 +1794,15 @@ struct PolicyView<'a> {
     /// [`PolicyView::build`] for why `SELF`/`SELF_AND_ALL_DESCENDANTS` is
     /// the whole test.
     matched: bool,
+    /// Whether any resource map matched at ALL — any match type other than
+    /// `NONE`, which for a resource request means `ANCESTOR` and `DESCENDANT`
+    /// as well as the two [`PolicyView::matched`] accepts.
+    ///
+    /// NOT an allow: `RangerDefaultPolicyEvaluator.evaluate` admits `ANCESTOR`
+    /// only for a `RangerTagAccessRequest` and never admits `DESCENDANT` at the
+    /// `SELF` scope, so this never makes `decide` return anything. It exists for
+    /// [`PolicyView::provably_a_candidate`] alone.
+    any_match: bool,
 }
 
 impl<'a> PolicyView<'a> {
@@ -1823,7 +1833,41 @@ impl<'a> PolicyView<'a> {
             has_deny: policy.is_deny_all_else || !policy.deny_policy_items.is_empty(),
             has_allow: !policy.policy_items.is_empty(),
             matched,
+            any_match: match_policy_resources(policy, &request.resource, service_def)
+                .into_iter()
+                .any(|m| m.match_type != MatchType::None),
         }
+    }
+
+    /// Whether Ranger's candidate filter PROVABLY returns this policy — the
+    /// positive half of the table [`trie_excludes`] reads the negative half of.
+    ///
+    /// **Any match type other than `NONE`**, which is exactly what
+    /// `tests/ranger/src/test/java/EgretResourceTrieCandidacyTest.java` measures
+    /// at both plugin versions over a column-level and a table-level request:
+    /// every `present` row there is a non-`NONE` row, except the two the crate
+    /// cannot prove either way (`isExcludes`, which the per-level proof
+    /// correctly declines). One argument covers all four:
+    ///
+    /// * `SELF`, `SELF_AND_ALL_DESCENDANTS`, `DESCENDANT` — every level the
+    ///   REQUEST carries matched, and the retriever intersects over exactly
+    ///   those levels. A matching value is in its level's trie for every value
+    ///   shape (the trie parks a value at a prefix the match already requires),
+    ///   so the intersection holds the policy.
+    /// * `ANCESTOR` — the policy declares no value for some of the request's
+    ///   levels, and `RangerResourceTrie`'s build loop (2.5.0 offsets 376-430)
+    ///   adds it to those levels as an *inherited* evaluator
+    ///   `if (evaluator.isAncestorOf(resourceDef))`; inherited evaluators are
+    ///   unioned into every lookup. The levels it DOES declare matched, or the
+    ///   match type would not be `ANCESTOR`.
+    ///
+    /// The table's `ancestor-other-schema` row (`hive/otherdb` against a
+    /// `hive/sales/…` request) is measured **absent** with match type `NONE`, so
+    /// this is the hierarchy relation and not merely "declares fewer levels" —
+    /// which is what makes `!= NONE` the right predicate rather than a
+    /// key-count.
+    fn provably_a_candidate(&self) -> bool {
+        self.any_match
     }
 
     /// The same view for a TAG evaluator, where `matched` is not this
@@ -1842,6 +1886,11 @@ impl<'a> PolicyView<'a> {
             has_deny: policy.is_deny_all_else || !policy.deny_policy_items.is_empty(),
             has_allow: !policy.policy_items.is_empty(),
             matched: true,
+            // The tag phase has its own candidate filter (`tag_candidates`) and
+            // its own refusal for what it cannot reproduce
+            // ([`UndecidableCause::TagResourceNotReproducible`]); nothing on
+            // that path reads this.
+            any_match: true,
         }
     }
 
@@ -2420,7 +2469,7 @@ fn evaluate_sub(
             // behind it yields; and if anything behind it DOES yield, the two
             // possibilities disagree and the split refusal below is the honest
             // answer either way.
-            if !view.has_deny && view.matched {
+            if !view.has_deny && view.provably_a_candidate() {
                 determining_band.get_or_insert(view.policy.policy_priority);
             }
         }
