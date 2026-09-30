@@ -96,6 +96,18 @@ def install_force_ipc_patch() -> None:
 
     ipc_mod._get_venv_config = get_venv_config
 
+    from timing import mark
+
+    original_start_kernel = ipc_mod.IPCKernelManagerImpl.start_kernel
+
+    async def start_kernel(self):
+        mark("kernel_spawn_begin")
+        result = await original_start_kernel(self)
+        mark("kernel_ready")
+        return result
+
+    ipc_mod.IPCKernelManagerImpl.start_kernel = start_kernel
+
 
 def main() -> None:
     p = argparse.ArgumentParser()

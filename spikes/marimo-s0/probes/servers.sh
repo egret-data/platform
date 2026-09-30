@@ -1,6 +1,8 @@
 #!/bin/bash
 # usage: servers.sh up-support | run <mode> [ENV=..] | stop-run | restart-egret [ENV=..] | down
 cd "$(dirname "$0")/.."
+mkdir -p .work/logs
+export S0_TIMING_LOG=$PWD/.work/logs/timing.jsonl
 case "$1" in
 up-support)
   nohup uv run uvicorn fake_egret:app --host 127.0.0.1 --port 8700 > .work/logs/egret.log 2>&1 &

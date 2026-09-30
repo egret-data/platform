@@ -6,6 +6,7 @@ app = marimo.App()
 
 @app.cell
 def _():
+    import timing; timing.mark("kernel_first_cell")
     import os
 
     import marimo as mo

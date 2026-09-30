@@ -1,0 +1,158 @@
+{
+  "mode": "thread",
+  "sessions": [
+    {
+      "user": "b0",
+      "total_s": 4.436,
+      "events": [
+        {
+          "event": "ticket_redeemed",
+          "at_s": 1.099,
+          "pid": 7246
+        },
+        {
+          "event": "ws_open",
+          "at_s": 3.353,
+          "pid": 7246
+        },
+        {
+          "event": "kernel_first_cell",
+          "at_s": 3.546,
+          "pid": 7263
+        },
+        {
+          "event": "gateway_request",
+          "at_s": 3.992,
+          "pid": 7263
+        },
+        {
+          "event": "egret_query",
+          "at_s": 4.005,
+          "pid": 7247
+        },
+        {
+          "event": "gateway_response",
+          "at_s": 4.007,
+          "pid": 7263
+        },
+        {
+          "event": "gateway_request",
+          "at_s": 4.027,
+          "pid": 7263
+        },
+        {
+          "event": "egret_query",
+          "at_s": 4.04,
+          "pid": 7247
+        },
+        {
+          "event": "gateway_response",
+          "at_s": 4.042,
+          "pid": 7263
+        }
+      ]
+    },
+    {
+      "user": "b1",
+      "total_s": 2.004,
+      "events": [
+        {
+          "event": "ticket_redeemed",
+          "at_s": 0.115,
+          "pid": 7246
+        },
+        {
+          "event": "ws_open",
+          "at_s": 1.78,
+          "pid": 7246
+        },
+        {
+          "event": "kernel_first_cell",
+          "at_s": 1.825,
+          "pid": 7263
+        },
+        {
+          "event": "gateway_request",
+          "at_s": 1.829,
+          "pid": 7263
+        },
+        {
+          "event": "egret_query",
+          "at_s": 1.85,
+          "pid": 7247
+        },
+        {
+          "event": "gateway_response",
+          "at_s": 1.851,
+          "pid": 7263
+        },
+        {
+          "event": "gateway_request",
+          "at_s": 1.853,
+          "pid": 7263
+        },
+        {
+          "event": "egret_query",
+          "at_s": 1.863,
+          "pid": 7247
+        },
+        {
+          "event": "gateway_response",
+          "at_s": 1.865,
+          "pid": 7263
+        }
+      ]
+    },
+    {
+      "user": "b2",
+      "total_s": 1.979,
+      "events": [
+        {
+          "event": "ticket_redeemed",
+          "at_s": 0.116,
+          "pid": 7246
+        },
+        {
+          "event": "ws_open",
+          "at_s": 1.742,
+          "pid": 7246
+        },
+        {
+          "event": "kernel_first_cell",
+          "at_s": 1.791,
+          "pid": 7263
+        },
+        {
+          "event": "gateway_request",
+          "at_s": 1.794,
+          "pid": 7263
+        },
+        {
+          "event": "egret_query",
+          "at_s": 1.811,
+          "pid": 7247
+        },
+        {
+          "event": "gateway_response",
+          "at_s": 1.813,
+          "pid": 7263
+        },
+        {
+          "event": "gateway_request",
+          "at_s": 1.814,
+          "pid": 7263
+        },
+        {
+          "event": "egret_query",
+          "at_s": 1.826,
+          "pid": 7247
+        },
+        {
+          "event": "gateway_response",
+          "at_s": 1.827,
+          "pid": 7263
+        }
+      ]
+    }
+  ]
+}

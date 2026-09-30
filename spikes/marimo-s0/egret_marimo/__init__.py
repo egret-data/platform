@@ -27,12 +27,16 @@ def _token() -> str:
 
 
 def _query(database: str, sql: str, params=()) -> dict:
+    from timing import mark
+
+    mark("gateway_request", sql=sql)
     r = httpx.post(
         f"{_base()}/api/apps/query",
         json={"database": database, "sql": sql, "params": list(params), "pid": os.getpid()},
         headers={"authorization": f"Bearer {_token()}"},
         timeout=60,
     )
+    mark("gateway_response", sql=sql, status=r.status_code)
     if r.status_code == 401:
         raise RuntimeError("session expired — reload the app")
     r.raise_for_status()

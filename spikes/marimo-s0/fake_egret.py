@@ -5,6 +5,7 @@ import pathlib
 import secrets
 import time
 
+from timing import mark
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
@@ -114,6 +115,7 @@ async def query(request: Request) -> Response:
         STATE.log("query_rejected")
         return JSONResponse({"error": "session expired"}, status_code=401)
     body = await request.json()
+    mark("egret_query", user=info["user"], sql=body["sql"])
     STATE.log("query", user=info["user"], app_id=info["app_id"], sql=body["sql"], pid=body.get("pid"))
     return JSONResponse(
         {"columns": [{"name": "viewer"}, {"name": "sql"}], "rows": [[info["user"], body["sql"]]], "truncated": False}

@@ -8,6 +8,7 @@ from urllib.parse import unquote
 
 import httpx
 import websockets
+from timing import mark
 from starlette.applications import Starlette
 from starlette.background import BackgroundTask
 from starlette.requests import Request
@@ -50,6 +51,7 @@ async def ticket(request: Request) -> Response:
     if r.status_code != 200:
         return PlainTextResponse("ticket rejected", status_code=403)
     sess = r.json()
+    mark("ticket_redeemed", user=sess["user"])
     sid = secrets.token_urlsafe(16)
     SESSIONS[sid] = sess
     target = f"/e/?file={sess['app_id']}.py" if sess["mode"] == "edit" else "/r/"
@@ -101,6 +103,7 @@ async def ws_relay(ws: WebSocket) -> None:
         await ws.close(code=4403)
         return
     await ws.accept()
+    mark("ws_open", path=ws.url.path, user=sess["user"])
     url = f"ws://{UPSTREAMS[prefix]}{path}" + (f"?{ws.url.query}" if ws.url.query else "")
     headers = forward_headers(ws.headers, sess["session_token"], POD_MARIMO_TOKEN)
     headers.pop("origin", None)
