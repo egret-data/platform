@@ -56,7 +56,13 @@ impl Fixture {
         .fetch_one(&db.pool)
         .await
         .expect("insert app");
-        Self { db, user: UserId(user), ws: WorkspaceId(ws), app, login_sid }
+        Self {
+            db,
+            user: UserId(user),
+            ws: WorkspaceId(ws),
+            app,
+            login_sid,
+        }
     }
 
     fn new_run(&self) -> NewAppSession {
@@ -95,7 +101,11 @@ impl Fixture {
     }
 
     async fn exec(&self, sql: &'static str, id: Uuid) {
-        sqlx::query(sql).bind(id).execute(&self.db.pool).await.expect("exec");
+        sqlx::query(sql)
+            .bind(id)
+            .execute(&self.db.pool)
+            .await
+            .expect("exec");
     }
 
     async fn exec_with_hash(&self, sql: &'static str, token: &str) {
@@ -117,7 +127,9 @@ async fn mint_then_resolve_returns_the_session_and_stores_only_the_hash() {
     assert_eq!(s.user_id, fx.user);
     assert_eq!(s.app_id, fx.app);
     assert!(matches!(s.mode, AppMode::Run));
-    let stored: String = fx.scalar("SELECT token_hash FROM analytics.app_sessions WHERE app_id = $1").await;
+    let stored: String = fx
+        .scalar("SELECT token_hash FROM analytics.app_sessions WHERE app_id = $1")
+        .await;
     assert_ne!(stored, token);
     assert_eq!(stored, egret_core::token::hash_token(&token));
 }
@@ -145,10 +157,22 @@ async fn unknown_revoked_idle_and_absolute_expired_tokens_do_not_resolve() {
 async fn resolve_slides_idle_expiry_but_never_past_absolute() {
     let fx = Fixture::new().await;
     let repo = AppSessionRepo::new(fx.db.clone());
-    let token = repo.mint(&fx.new_run(), Duration::from_secs(60), Duration::from_secs(90)).await.unwrap();
-    let before: chrono::DateTime<chrono::Utc> = fx.scalar("SELECT idle_expires_at FROM analytics.app_sessions WHERE app_id = $1").await;
+    let token = repo
+        .mint(
+            &fx.new_run(),
+            Duration::from_secs(60),
+            Duration::from_secs(90),
+        )
+        .await
+        .unwrap();
+    let before: chrono::DateTime<chrono::Utc> = fx
+        .scalar("SELECT idle_expires_at FROM analytics.app_sessions WHERE app_id = $1")
+        .await;
     tokio::time::sleep(Duration::from_millis(1100)).await; // a gap, so equal clocks cannot pass
-    repo.resolve(&token, Duration::from_secs(3600)).await.unwrap().expect("live");
+    repo.resolve(&token, Duration::from_secs(3600))
+        .await
+        .unwrap()
+        .expect("live");
     let (idle, abs): (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) =
         fx.row2("SELECT idle_expires_at, absolute_expires_at FROM analytics.app_sessions WHERE app_id = $1").await;
     assert!(idle > before);
@@ -160,7 +184,8 @@ async fn deleting_the_login_session_revokes_by_cascade() {
     let fx = Fixture::new().await;
     let repo = AppSessionRepo::new(fx.db.clone());
     let token = repo.mint(&fx.new_run(), IDLE, ABS).await.unwrap();
-    fx.exec("DELETE FROM sessions WHERE id = $1", fx.login_sid).await;
+    fx.exec("DELETE FROM sessions WHERE id = $1", fx.login_sid)
+        .await;
     assert!(repo.resolve(&token, IDLE).await.unwrap().is_none());
 }
 
