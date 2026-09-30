@@ -106,6 +106,21 @@ pub fn catalog() -> &'static Catalog {
     &CATALOG
 }
 
+static PREFIXED_TYPES: LazyLock<Vec<String>> = LazyLock::new(|| {
+    catalog()
+        .classes
+        .keys()
+        .map(|fqcn| format!("{PREFIX}{fqcn}"))
+        .collect()
+});
+
+/// Every catalog class as a flow writes it, `kestra.<FQCN>`, sorted: the
+/// keys the plugin handler is registered under (`handlers::kestra::register`).
+/// `'static`, because a `TaskHandler::type_id` is.
+pub fn prefixed_types() -> impl Iterator<Item = &'static str> {
+    PREFIXED_TYPES.iter().map(String::as_str)
+}
+
 /// The catalog class a `kestra.<FQCN>` type names: `(FQCN, class)`. `None`
 /// for a type without the prefix (a bare FQCN is NOT a plugin task) or a
 /// FQCN the catalog does not hold.

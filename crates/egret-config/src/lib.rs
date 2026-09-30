@@ -670,6 +670,55 @@ pub struct WorkflowConfig {
     /// it is author-settable. `EGRET_WORKFLOW__KUBERNETES__NAMESPACE=egret-tasks`.
     #[serde(default)]
     pub kubernetes: WorkflowKubernetesConfig,
+
+    /// `[workflow.plugin_host]` -- the image and JVM that run Kestra plugin
+    /// tasks (`type: kestra.<FQCN>`, W5b spec §7). None of it is
+    /// author-settable. `EGRET_WORKFLOW__PLUGIN_HOST__IMAGE=egret-plugin-host:dev`.
+    #[serde(default)]
+    pub plugin_host: PluginHostConfig,
+}
+
+/// `[workflow.plugin_host]`: how egret runs the Kestra plugin host image (W5b
+/// spec §7).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginHostConfig {
+    /// The plugin host image (`deploy/docker/plugin-host.Dockerfile`).
+    /// **Required when [`WorkflowConfig::container_runner`] is not `none`**
+    /// ([`WorkflowConfig::validate_plugin_host`], a boot error). It is **not**
+    /// matched against `allowed-images`: the author cannot choose it.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// The JVM's `-Xmx`, below the pod's default memory limit. Default `384m`.
+    /// Digits and one optional unit letter (`k`, `m`, `g`), checked at boot:
+    /// it is written into the container's shell command.
+    #[serde(default = "default_jvm_max_heap")]
+    pub jvm_max_heap: String,
+    /// Seconds a timed-out plugin task gets between SIGTERM (the host calls
+    /// the plugin's `kill()`, which cancels the query on the engine) and
+    /// SIGKILL. Default `15`. Script tasks keep grace 0.
+    #[serde(default = "default_kill_grace_s")]
+    pub kill_grace_s: u64,
+}
+
+impl Default for PluginHostConfig {
+    fn default() -> Self {
+        Self {
+            image: None,
+            jvm_max_heap: default_jvm_max_heap(),
+            kill_grace_s: default_kill_grace_s(),
+        }
+    }
+}
+
+/// `384m` -- see [`PluginHostConfig::jvm_max_heap`].
+fn default_jvm_max_heap() -> String {
+    "384m".to_string()
+}
+
+/// `15` -- see [`PluginHostConfig::kill_grace_s`].
+fn default_kill_grace_s() -> u64 {
+    15
 }
 
 /// [`WorkflowConfig::container_runner`].
@@ -901,6 +950,39 @@ impl WorkflowConfig {
         }
         Ok(())
     }
+
+    /// **The boot check on [`WorkflowConfig::plugin_host`]** (W5b spec §7):
+    /// with a container runner configured, `plugin_host.image` is required --
+    /// every `kestra.*` task would otherwise fail at run for a setting the
+    /// operator never made -- and `jvm_max_heap` must be a JVM size (digits
+    /// and one optional `k`/`m`/`g`), because it is written into the
+    /// container's shell command. Called by
+    /// `egret_workflow::runtime::handlers_for` once it knows a runner exists.
+    pub fn validate_plugin_host(&self) -> Result<(), String> {
+        let heap = self.plugin_host.jvm_max_heap.as_str();
+        let digits = heap.trim_end_matches(['k', 'K', 'm', 'M', 'g', 'G']);
+        let unit_len = heap.len() - digits.len();
+        if digits.is_empty() || unit_len > 1 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!(
+                "workflow.plugin_host.jvm_max_heap: {heap:?} is not a JVM size (e.g. 384m)"
+            ));
+        }
+        if self.container_runner != ContainerRunner::None
+            && self
+                .plugin_host
+                .image
+                .as_deref()
+                .is_none_or(|i| i.trim().is_empty())
+        {
+            return Err(
+                "workflow.plugin_host.image is required when workflow.container_runner is not \
+                 none: it is the image Kestra plugin tasks (kestra.*) run in \
+                 (EGRET_WORKFLOW__PLUGIN_HOST__IMAGE)"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// One entry of [`PluginConfigurations`].
@@ -1047,6 +1129,7 @@ fn default_workflow() -> WorkflowConfig {
         plugin_configurations: PluginConfigurations::default(),
         container_runner: ContainerRunner::None,
         kubernetes: WorkflowKubernetesConfig::default(),
+        plugin_host: PluginHostConfig::default(),
     }
 }
 
@@ -1417,6 +1500,53 @@ values = { allowed-images = [] }
         });
     }
 
+    /// W5b: `workflow.plugin_host` has the spec's defaults (`384m`, 15 s, no
+    /// image), is settable from the environment, and the boot check refuses a
+    /// runner without an image and a heap that is not a JVM size.
+    #[test]
+    fn plugin_host_defaults_env_and_boot_check() {
+        figment::Jail::expect_with(|jail| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.workflow.plugin_host,
+                PluginHostConfig {
+                    image: None,
+                    jvm_max_heap: "384m".into(),
+                    kill_grace_s: 15,
+                }
+            );
+            // `none` needs no image.
+            cfg.workflow.validate_plugin_host().unwrap();
+
+            jail.set_env("EGRET_WORKFLOW__CONTAINER_RUNNER", "docker");
+            let cfg: Config = Config::figment().extract()?;
+            let e = cfg.workflow.validate_plugin_host().unwrap_err();
+            assert!(e.contains("workflow.plugin_host.image is required"), "{e}");
+
+            jail.set_env(
+                "EGRET_WORKFLOW__PLUGIN_HOST__IMAGE",
+                "egret-plugin-host:dev",
+            );
+            jail.set_env("EGRET_WORKFLOW__PLUGIN_HOST__KILL_GRACE_S", "20");
+            jail.set_env("EGRET_WORKFLOW__PLUGIN_HOST__JVM_MAX_HEAP", "1g");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(
+                cfg.workflow.plugin_host.image.as_deref(),
+                Some("egret-plugin-host:dev")
+            );
+            assert_eq!(cfg.workflow.plugin_host.kill_grace_s, 20);
+            cfg.workflow.validate_plugin_host().unwrap();
+
+            for bad in ["384m; rm -rf /", "", "m", "12mm", "1.5g", "$(id)"] {
+                let mut w = cfg.workflow.clone();
+                w.plugin_host.jvm_max_heap = bad.into();
+                let e = w.validate_plugin_host().unwrap_err();
+                assert!(e.contains("jvm_max_heap"), "{bad}: {e}");
+            }
+            Ok(())
+        });
+    }
+
     /// W5a Task 5: `container_runner` is `none` unless a deployment says
     /// otherwise, and `[workflow.kubernetes]` has the documented defaults.
     #[test]
@@ -1529,6 +1659,18 @@ values = { allowed-images = [] }
             r#"EGRET_WORKFLOW__CONTAINER_RUNNER: "{{ .Values.workflow.containerRunner }}""#
         ));
         assert!(read("values.yaml").contains("  containerRunner: none\n"));
+        // W5b: the plugin host's three settings, under the runner's block.
+        let env = read("templates/configmap-env.yaml");
+        for key in [
+            "EGRET_WORKFLOW__PLUGIN_HOST__IMAGE: {{ required",
+            "EGRET_WORKFLOW__PLUGIN_HOST__JVM_MAX_HEAP: {{ $h.jvmMaxHeap | quote }}",
+            "EGRET_WORKFLOW__PLUGIN_HOST__KILL_GRACE_S: {{ $h.killGraceS | quote }}",
+        ] {
+            assert!(env.contains(key), "{key}");
+        }
+        let values = read("values.yaml");
+        assert!(values.contains("    jvmMaxHeap: 384m\n"));
+        assert!(values.contains("    killGraceS: 15\n"));
         let rbac = read("templates/rbac-tasks.yaml");
         let rules: Vec<&str> = rbac
             .lines()

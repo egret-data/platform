@@ -41,6 +41,7 @@
 
 pub mod container;
 pub mod fail;
+pub mod kestra;
 pub mod log;
 pub mod python;
 pub mod ret;

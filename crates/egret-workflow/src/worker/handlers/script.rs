@@ -99,6 +99,12 @@ pub trait FeatureState: Send + Sync + std::fmt::Debug {
     /// `Err` is egret's own outage (the database did not answer): the run is
     /// not refused on a guess, it stays leased for the reaper.
     async fn containers_enabled(&self, workspace: uuid::Uuid) -> Result<bool>;
+
+    /// Whether the workspace has `workflow_kestra_plugins` ON (W5b): the
+    /// plugin handler's half of the gate, read at run time like
+    /// [`containers_enabled`](Self::containers_enabled), with the same
+    /// default-off rule. `Err` is egret's outage, as above.
+    async fn kestra_plugins_enabled(&self, workspace: uuid::Uuid) -> Result<bool>;
 }
 
 /// [`FeatureState`] over `workspace_features`, through the same
@@ -116,9 +122,13 @@ impl PgFeatureState {
     }
 }
 
-#[async_trait::async_trait]
-impl FeatureState for PgFeatureState {
-    async fn containers_enabled(&self, workspace: uuid::Uuid) -> Result<bool> {
+impl PgFeatureState {
+    /// Whether `key` is ON for `workspace`, through
+    /// [`effective_disabled`](egret_workspace::features::effective_disabled):
+    /// an absent row is the key's catalog default (OFF for both workflow
+    /// keys). A dependency is not folded in here: the plugin gate reads
+    /// `workflow_containers` itself (`plugins::gate`, rule 2).
+    async fn enabled(&self, workspace: uuid::Uuid, key: &str, what: &str) -> Result<bool> {
         let rows: Vec<(String, bool)> = sqlx::query_as(
             "SELECT feature, enabled FROM workspace_features WHERE workspace_id = $1",
         )
@@ -127,11 +137,27 @@ impl FeatureState for PgFeatureState {
         .await
         .map_err(|e| {
             Error::Internal(anyhow::anyhow!(
-                "reading the workspace's '{}' feature for a script task: {e}",
-                scripts::FEATURE_KEY
+                "reading the workspace's '{key}' feature for {what}: {e}"
             ))
         })?;
-        Ok(!egret_workspace::features::effective_disabled(rows).contains(scripts::FEATURE_KEY))
+        Ok(!egret_workspace::features::effective_disabled(rows).contains(key))
+    }
+}
+
+#[async_trait::async_trait]
+impl FeatureState for PgFeatureState {
+    async fn containers_enabled(&self, workspace: uuid::Uuid) -> Result<bool> {
+        self.enabled(workspace, scripts::FEATURE_KEY, "a script task")
+            .await
+    }
+
+    async fn kestra_plugins_enabled(&self, workspace: uuid::Uuid) -> Result<bool> {
+        self.enabled(
+            workspace,
+            crate::plugins::FEATURE_KEY,
+            "a Kestra plugin task",
+        )
+        .await
     }
 }
 
@@ -143,6 +169,9 @@ pub struct FixedFeatureState(pub bool);
 #[async_trait::async_trait]
 impl FeatureState for FixedFeatureState {
     async fn containers_enabled(&self, _workspace: uuid::Uuid) -> Result<bool> {
+        Ok(self.0)
+    }
+    async fn kestra_plugins_enabled(&self, _workspace: uuid::Uuid) -> Result<bool> {
         Ok(self.0)
     }
 }
@@ -1034,6 +1063,9 @@ mod tests {
         #[async_trait::async_trait]
         impl FeatureState for Down {
             async fn containers_enabled(&self, _: uuid::Uuid) -> Result<bool> {
+                Err(Error::Internal(anyhow::anyhow!("database down")))
+            }
+            async fn kestra_plugins_enabled(&self, _: uuid::Uuid) -> Result<bool> {
                 Err(Error::Internal(anyhow::anyhow!("database down")))
             }
         }

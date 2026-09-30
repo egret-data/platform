@@ -2104,6 +2104,28 @@ fn the_config_default_container_timeout_equals_the_workers_own() {
 
 // ── W5a Task 5: the deployment's registry, and the orphan sweep's call site ──
 
+/// W5b: a `SecretSource` for registries these tests build but never run a
+/// plugin task through.
+struct NoSecrets;
+
+#[async_trait::async_trait]
+impl egret_workflow::runners::secrets::SecretSource for NoSecrets {
+    async fn get(
+        &self,
+        _: uuid::Uuid,
+        name: &str,
+    ) -> Result<
+        std::collections::BTreeMap<String, String>,
+        egret_workflow::runners::secrets::SecretError,
+    > {
+        Err(egret_workflow::runners::secrets::SecretError::NotFound { name: name.into() })
+    }
+}
+
+fn no_secrets() -> std::sync::Arc<dyn egret_workflow::runners::secrets::SecretSource> {
+    std::sync::Arc::new(NoSecrets)
+}
+
 /// A pool that is never connected: `handlers_for` stores it for the run-time
 /// feature read and the re-attach window, and none of these tests runs a task.
 fn unconnected_pool() -> sqlx::PgPool {
@@ -2127,9 +2149,10 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
         egret_config::ContainerRunner::None,
         "`none` is the shipping default"
     );
-    let (reg, default_runner) = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool())
-        .await
-        .expect("`none` needs nothing");
+    let (reg, default_runner) =
+        egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
+            .await
+            .expect("`none` needs nothing");
     assert_eq!(reg.type_ids(), Handlers::with_core_tasks().type_ids());
     assert_eq!(default_runner, None, "publish has no runner to default to");
     assert!(reg.orphan_sweep().is_none(), "nothing to sweep");
@@ -2137,15 +2160,37 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
     // The control: the same call with a runner configured DOES register --
     // so the equality above is not a function that never registers anything.
     cfg.container_runner = egret_config::ContainerRunner::Docker;
-    let (reg, default_runner) = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool())
+    // W5b: a runner needs the plugin host's image, a boot error without it.
+    let err = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
         .await
-        .expect("the Docker runner is built without a daemon");
+        .expect_err("a runner without workflow.plugin_host.image");
+    assert!(
+        err.to_string().contains("workflow.plugin_host.image"),
+        "{err}"
+    );
+    cfg.plugin_host.image = Some("egret-plugin-host:dev".into());
+    let (reg, default_runner) =
+        egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
+            .await
+            .expect("the Docker runner is built without a daemon");
     let core = Handlers::with_core_tasks().type_ids().len();
     let added: Vec<&str> = reg
         .type_ids()
         .into_iter()
         .filter(|id| Handlers::with_core_tasks().get(id).is_none())
+        .filter(|id| !id.starts_with(egret_workflow::plugins::PREFIX))
         .collect();
+    // W5b: plus one `kestra.<FQCN>` per catalog class, over the same runner.
+    let plugins: Vec<&str> = reg
+        .type_ids()
+        .into_iter()
+        .filter(|id| id.starts_with(egret_workflow::plugins::PREFIX))
+        .collect();
+    assert_eq!(
+        plugins,
+        egret_workflow::plugins::prefixed_types().collect::<Vec<_>>()
+    );
+    assert_eq!(plugins.len(), 5);
     assert_eq!(
         added,
         vec![
@@ -2157,7 +2202,7 @@ async fn with_container_runner_none_the_registry_is_unchanged() {
             "io.kestra.plugin.scripts.shell.Script",
         ]
     );
-    assert_eq!(reg.type_ids().len(), core + 6);
+    assert_eq!(reg.type_ids().len(), core + 6 + 5);
     assert_eq!(default_runner, Some(RunnerKind::Docker));
     assert!(
         reg.orphan_sweep().is_some(),
@@ -2172,7 +2217,7 @@ async fn a_refused_kubernetes_configuration_stops_the_process_at_start() {
     let mut cfg = egret_config::Config::default().workflow;
     cfg.container_runner = egret_config::ContainerRunner::Kubernetes;
     cfg.kubernetes.run_as_user = 0;
-    let err = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool())
+    let err = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
         .await
         .expect_err("runAsNonRoot pods cannot run as uid 0");
     assert!(err.to_string().contains("run_as_user"), "{err}");

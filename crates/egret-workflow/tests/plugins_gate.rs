@@ -485,7 +485,8 @@ async fn allowed_types_on_a_runner_entry_is_refused_at_boot() {
     // The boot path runs it first, before `container_runner = none` returns.
     cfg.plugin_configurations = PluginConfigurations(vec![runner_entry(Some(&["*"]))]);
     let pool = sqlx::PgPool::connect_lazy("postgres://nobody@localhost:1/none").unwrap();
-    let Err(e) = egret_workflow::runtime::handlers_for(&cfg, pool.clone()).await else {
+    let Err(e) = egret_workflow::runtime::handlers_for(&cfg, pool.clone(), no_secrets()).await
+    else {
         panic!("handlers_for must refuse the configuration");
     };
     assert!(e.to_string().contains("'allowed-types'"), "{e}");
@@ -494,9 +495,11 @@ async fn allowed_types_on_a_runner_entry_is_refused_at_boot() {
     cfg.plugin_configurations =
         PluginConfigurations(vec![runner_entry(None), kestra_entry(Some(&["*"]))]);
     cfg.validate_plugin_configurations().unwrap();
-    assert!(egret_workflow::runtime::handlers_for(&cfg, pool)
-        .await
-        .is_ok());
+    assert!(
+        egret_workflow::runtime::handlers_for(&cfg, pool, no_secrets())
+            .await
+            .is_ok()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -706,4 +709,26 @@ async fn a_version_carrying_plugin_defaults_runs_and_the_defaults_apply_nothing(
             .await
             .unwrap();
     assert_eq!(history, json!(["CREATED", "RUNNING", "SUCCESS"]));
+}
+
+/// W5b: a `SecretSource` for registries these tests build but never run a
+/// plugin task through.
+struct NoSecrets;
+
+#[async_trait::async_trait]
+impl egret_workflow::runners::secrets::SecretSource for NoSecrets {
+    async fn get(
+        &self,
+        _: uuid::Uuid,
+        name: &str,
+    ) -> Result<
+        std::collections::BTreeMap<String, String>,
+        egret_workflow::runners::secrets::SecretError,
+    > {
+        Err(egret_workflow::runners::secrets::SecretError::NotFound { name: name.into() })
+    }
+}
+
+fn no_secrets() -> std::sync::Arc<dyn egret_workflow::runners::secrets::SecretSource> {
+    std::sync::Arc::new(NoSecrets)
 }

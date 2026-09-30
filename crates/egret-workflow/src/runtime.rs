@@ -670,9 +670,16 @@ pub async fn reaper_pass(
 /// for a Kubernetes configuration egret refuses (`run_as_user <= 0`) or
 /// a cluster client that cannot be built: a deployment that asked for
 /// containers and cannot have them must not start as if it had none.
+///
+/// W5b: with a runner, every catalog class is registered as `kestra.<FQCN>`
+/// ([`crate::worker::handlers::kestra`]) over the SAME runner `Arc`, and
+/// `secrets` is where their `secret()` reads (egret-bin passes its
+/// `WorkspaceSecretSource`). `workflow.plugin_host.image` is then required
+/// (`WorkflowConfig::validate_plugin_host`), a boot error.
 pub async fn handlers_for(
     cfg: &egret_config::WorkflowConfig,
     pool: PgPool,
+    secrets: Arc<dyn crate::runners::secrets::SecretSource>,
 ) -> egret_core::Result<(Handlers, Option<crate::scripts::RunnerKind>)> {
     use crate::scripts::RunnerKind;
     use crate::worker::commands::{DockerRunner, OrphanSweep, TaskRunner};
@@ -682,6 +689,9 @@ pub async fn handlers_for(
     // `container_runner = none` returns below, so a misplaced
     // `allowed-types`/`allowed-images` refuses to start on every deployment.
     cfg.validate_plugin_configurations()
+        .map_err(egret_core::Error::InvalidInput)?;
+    // W5b: the plugin host's image (required with a runner) and heap.
+    cfg.validate_plugin_host()
         .map_err(egret_core::Error::InvalidInput)?;
     let mut handlers = Handlers::with_core_tasks();
     let (kind, runner, sweep): (RunnerKind, Arc<dyn TaskRunner>, Arc<dyn OrphanSweep>) =
@@ -709,13 +719,26 @@ pub async fn handlers_for(
                 (RunnerKind::Kubernetes, r.clone(), r)
             }
         };
+    let features: Arc<dyn crate::worker::handlers::script::FeatureState> =
+        Arc::new(PgFeatureState::new(pool));
     register(
         &mut handlers,
         Arc::new(ScriptRuntime {
             runner_kind: kind,
-            runner,
+            runner: runner.clone(),
             plugin_configurations: cfg.plugin_configurations.clone(),
-            features: Arc::new(PgFeatureState::new(pool)),
+            features: features.clone(),
+        }),
+    );
+    crate::worker::handlers::kestra::register(
+        &mut handlers,
+        Arc::new(crate::worker::handlers::kestra::KestraRuntime {
+            runner,
+            runner_kind: kind,
+            features,
+            plugin_configurations: cfg.plugin_configurations.clone(),
+            host: cfg.plugin_host.clone(),
+            secrets,
         }),
     );
     Ok((handlers.with_orphan_sweep(sweep), Some(kind)))

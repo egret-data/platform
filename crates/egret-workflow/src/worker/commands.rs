@@ -4441,6 +4441,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A panic unwinding through the staging scope removes the directory**
+    /// (W5b Task 6: it holds a plugin task's rendered `task.json`, secrets
+    /// included). The workspace builds with `panic = "unwind"` (no profile
+    /// sets `abort`), so `Drop` runs on unwind; this pins it.
+    #[test]
+    fn a_panic_unwinding_through_the_staging_scope_removes_the_directory() {
+        let task = leased(1_700_000_000);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let staging = tempdir(&task).expect("staging");
+            stage_input(staging.path(), "task.json", "{\"password\":\"s3cr3t\"}").expect("staged");
+            tx.send(staging.path().to_path_buf()).expect("send");
+            panic!("a panic between staging and `docker cp`");
+        }));
+        assert!(unwound.is_err(), "the closure panicked");
+        let dir = rx.recv().expect("the path");
+        assert!(
+            !dir.exists(),
+            "{} outlived a panic, holding the rendered task.json",
+            dir.display()
+        );
+    }
+
     /// **A dropped future leaves no staging directory behind.**
     ///
     /// The whole-branch review's Minor 3, and it is cross-task: `timeout::guard`
