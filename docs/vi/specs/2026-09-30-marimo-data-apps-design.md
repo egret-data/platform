@@ -253,7 +253,8 @@ cũ dừng khi rảnh.
 với egret, script đó đọc được document cha và gọi mọi API egret bằng cookie của người xem — kể cả API
 admin. Đó là XSS vào egret, và D3 khiến tác giả là không tin cậy đối với người xem. Vì vậy:
 
-- marimo được phục vụ từ **một origin riêng** (vd. `apps.egret.example`; ở local là một cổng khác) trong
+- marimo được phục vụ từ **một origin riêng** (vd. `apps.egret.example`; ở local là `apps.egret.localhost`
+  cạnh `egret.localhost` — **không phải** một cổng khác, vì cookie không tách theo cổng) trong
   `<iframe sandbox="allow-scripts allow-same-origin allow-forms allow-downloads">`. `allow-same-origin`
   là so với origin *apps*, không phải của egret.
 - Cookie phiên của egret không bao giờ được gửi tới origin apps.

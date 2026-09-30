@@ -253,7 +253,8 @@ same-origin with egret, that script could read the parent document and call ever
 viewer's cookie — including admin APIs. That is XSS into egret, and D3 makes the author untrusted with
 respect to the viewer. Therefore:
 
-- marimo is served from a **separate origin** (e.g. `apps.egret.example`; locally, a different port) in
+- marimo is served from a **separate origin** (e.g. `apps.egret.example`; locally `apps.egret.localhost`
+  beside `egret.localhost` — **not** a different port, because cookies are not isolated by port) in
   `<iframe sandbox="allow-scripts allow-same-origin allow-forms allow-downloads">`. `allow-same-origin`
   is relative to the *apps* origin, not egret's.
 - egret's session cookie is never sent to the apps origin.
