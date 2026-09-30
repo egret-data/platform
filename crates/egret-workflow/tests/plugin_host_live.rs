@@ -423,6 +423,15 @@ fn pg_flow(id: &str, port: u16, sql: &str, extra: &str) -> String {
     )
 }
 
+/// An unexported `DATABASE_URL` does not skip the `#[sqlx::test]`s below — it
+/// silently points them at the database `.env` names, which is the DEV one.
+/// Not `#[ignore]`d, so the plain `cargo test` run checks it. See
+/// `egret_test_db::assert_database_url_is_exported`.
+#[test]
+fn database_url_is_exported_rather_than_read_from_dotenv() {
+    egret_test_db::assert_database_url_is_exported();
+}
+
 /// **A `kestra.…postgresql.Query` runs end to end**: rows in `outputs`, its
 /// lines through W11's API, the password from a workspace secret, a line that
 /// echoes the secret stored as `******`; then Trino and StarRocks (skippable);
