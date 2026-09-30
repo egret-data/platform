@@ -287,6 +287,53 @@ pub fn source_uses_secret(source: &str) -> bool {
     }
 }
 
+/// Why `namespace` or `full` is refused: the one sentence, at run
+/// ([`parse_call`]) and at publish ([`written_refused_arguments`]'s caller).
+pub fn refused_argument_message(name: &str) -> String {
+    format!(
+        "The 'secret' function's argument '{name}' is not supported: egret resolves a secret by \
+         name in the execution's workspace only, and a subkey only by `subkey=`."
+    )
+}
+
+/// The refused arguments (`namespace`, `full`) WRITTEN in the `secret(`
+/// calls of `source`: `namespace=`/`full=` by keyword, or a second
+/// positional argument after a literal key -- Kestra's signature reads it as
+/// `namespace` (fix round 1, I2: spec §6's "refused at publish when
+/// literal").
+///
+/// The same regex approach, and the same blind spots, as [`literal_keys`]: a
+/// call whose argument list holds a nested call, or `secret` bound to
+/// another name, is not seen here and is refused at run by [`parse_call`].
+pub fn written_refused_arguments(source: &str) -> Vec<&'static str> {
+    static PATTERNS: std::sync::OnceLock<[regex::Regex; 2]> = std::sync::OnceLock::new();
+    if !source.contains("secret") {
+        return Vec::new();
+    }
+    let [keyword, positional] = PATTERNS.get_or_init(|| {
+        let literal = r#"(?:'[^'\\]*'|"[^"\\]*")"#;
+        [
+            regex::Regex::new(r"\bsecret\s*\([^()]*?\b(namespace|full)\s*=")
+                .expect("keyword pattern"),
+            regex::Regex::new(&format!(
+                r"\bsecret\s*\(\s*{literal}\s*,\s*[^\s=,)]+\s*[,)]"
+            ))
+            .expect("positional pattern"),
+        ]
+    });
+    let mut out = Vec::new();
+    for c in keyword.captures_iter(source) {
+        let name = if &c[1] == "full" { "full" } else { "namespace" };
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    if positional.is_match(source) && !out.contains(&"namespace") {
+        out.push("namespace");
+    }
+    out
+}
+
 /// One `secret(...)` call's arguments, after the refusals.
 struct Call {
     key: String,
@@ -306,11 +353,7 @@ fn parse_call(rest: Rest<MjValue>) -> Result<Call, MjError> {
         .find(|name| REFUSED_ARGUMENTS.contains(name) || !ARGUMENT_NAMES.contains(name));
     if let Some(name) = refused {
         return Err(pebble_error(if REFUSED_ARGUMENTS.contains(&name) {
-            format!(
-                "The 'secret' function's argument '{name}' is not supported: egret resolves a \
-                 secret by name in the execution's workspace only, and a subkey only by \
-                 `subkey=`."
-            )
+            refused_argument_message(name)
         } else {
             format!("The 'secret' function has no argument '{name}'.")
         }));

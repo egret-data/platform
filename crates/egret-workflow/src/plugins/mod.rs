@@ -171,6 +171,13 @@ pub const CODE_PROPERTY_NOT_IMPLEMENTED: &str = "plugin_property_not_implemented
 pub const CODE_PROPERTY_NEEDS_STORAGE: &str = "plugin_property_needs_storage";
 /// A literal that is not of the schema's plain type (or not in its enum).
 pub const CODE_PROPERTY_INVALID: &str = "plugin_property_invalid";
+/// `secret()` written anywhere but a `kestra.*` task's properties -- a
+/// script task, `runIf`, an input, a `Log`, a trigger (fix round 1, I2; spec
+/// §6). Refused at save and publish; the run-time refusal stays.
+pub const CODE_SECRET_OUTSIDE_PLUGIN_TASK: &str = "secret_outside_plugin_task";
+/// A `secret()` call on a `kestra.*` task that passes `namespace` or `full`
+/// in the source (fix round 1, I2; spec §6).
+pub const CODE_SECRET_ARGUMENT_REFUSED: &str = "secret_argument_refused";
 /// A top-level `pluginDefaults:` (spec §4.1), on any flow.
 pub const CODE_REMOVED_PLUGIN_DEFAULTS: &str = "removed_plugin_defaults";
 /// The one message for [`CODE_REMOVED_PLUGIN_DEFAULTS`], verbatim from spec

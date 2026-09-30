@@ -947,3 +947,134 @@ async fn use_secrets_is_seeded_to_ws_admin_only() {
     assert_eq!(holders, vec!["ws_admin".to_string()]);
     assert!(egret_core::rbac::is_known(USE_SECRETS));
 }
+
+// ---------------------------------------------------------------------------
+// Fix round 1, I2: the publish-time refusals of spec §6 -- `secret()`
+// anywhere but a `kestra.*` task's properties, and a `namespace=`/`full=`
+// written in a call on one. One function, `spec::validate`, so save (the
+// draft's report) and publish (which refuses on any error) agree.
+// ---------------------------------------------------------------------------
+
+const SECRET: &str = "\"{{ secret('db', subkey='password') }}\"";
+
+fn codes_at(src: &str, code: &str) -> Vec<String> {
+    errors_of(src)
+        .into_iter()
+        .filter(|f| f.code == code)
+        .map(|f| f.path)
+        .collect()
+}
+
+#[test]
+fn secret_outside_a_plugin_tasks_properties_is_refused_by_name() {
+    let pg = format!("type: kestra.{PG_QUERY}\n    url: jdbc:postgresql://h/db\n    sql: select 1");
+    let cases = [
+        (
+            "a script task's commands",
+            format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.scripts.shell.Commands\n    \
+                 containerImage: alpine\n    commands:\n      - echo {SECRET}\n"
+            ),
+            "tasks.s.commands[0]",
+        ),
+        (
+            "a plugin task's runIf",
+            format!("id: f\nnamespace: a.b\ntasks:\n  - id: q\n    {pg}\n    runIf: {SECRET}\n"),
+            "tasks.q.runIf",
+        ),
+        (
+            "an input's defaults",
+            format!(
+                "id: f\nnamespace: a.b\ninputs:\n  - id: i\n    type: STRING\n    defaults: {SECRET}\n\
+                 tasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+            ),
+            "inputs.i.defaults",
+        ),
+        (
+            "a Log under a flowable's errors",
+            format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    \
+                 tasks:\n      - id: l\n        type: io.kestra.plugin.core.log.Log\n        message: x\n    \
+                 errors:\n      - id: e\n        type: io.kestra.plugin.core.log.Log\n        message: {SECRET}\n"
+            ),
+            "tasks.s.errors.e.message",
+        ),
+        (
+            "a trigger",
+            format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n\
+                 triggers:\n  - id: w\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: {SECRET}\n"
+            ),
+            "triggers.w.key",
+        ),
+    ];
+    for (name, src, path) in cases {
+        let errs = errors_of(&src);
+        let f = errs
+            .iter()
+            .find(|f| f.code == plugins::CODE_SECRET_OUTSIDE_PLUGIN_TASK)
+            .unwrap_or_else(|| panic!("{name}: {errs:?}"));
+        assert_eq!(f.path, path, "{name}");
+        assert!(f.message.contains("secret()"), "{name}: {}", f.message);
+        assert!(
+            f.message
+                .contains("resolves only on `kestra.*` plugin tasks"),
+            "{name}: {}",
+            f.message
+        );
+        // Save-only: a stored draft that carries one still plans, and the
+        // render refuses the call at run as before.
+        let flow = spec::parse(&src).unwrap();
+        assert!(
+            !spec::validate_for_run(&flow)
+                .errors
+                .iter()
+                .any(|f| f.code == plugins::CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+            "{name}"
+        );
+    }
+
+    // The control: the same call in a plugin task's property is allowed,
+    // including one nested under `errors:`.
+    let ok = format!(
+        "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    \
+         tasks:\n      - id: q\n        {}\n        password: {SECRET}\n    \
+         errors:\n      - id: e\n        {}\n        password: {SECRET}\n",
+        pg.replace("\n    ", "\n        "),
+        pg.replace("\n    ", "\n        ")
+    );
+    assert!(errors_of(&ok).is_empty(), "{:?}", errors_of(&ok));
+}
+
+#[test]
+fn namespace_and_full_written_in_a_call_are_refused_at_publish() {
+    let with = |call: &str| {
+        format!(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: q\n    type: kestra.{PG_QUERY}\n    \
+             url: jdbc:postgresql://h/db\n    sql: select 1\n    password: \"{call}\"\n"
+        )
+    };
+    for (call, arg) in [
+        ("{{ secret('db', namespace='other') }}", "namespace"),
+        ("{{ secret(key='db', full=true) }}", "full"),
+        ("{{ secret('db', 'other.ns') }}", "namespace"),
+    ] {
+        let errs = errors_of(&with(call));
+        let f = errs
+            .iter()
+            .find(|f| f.code == plugins::CODE_SECRET_ARGUMENT_REFUSED)
+            .unwrap_or_else(|| panic!("{call}: {errs:?}"));
+        assert_eq!(f.path, "tasks.q.password", "{call}");
+        assert!(
+            f.message.contains(&format!("'{arg}'")),
+            "{call}: {}",
+            f.message
+        );
+    }
+    // `subkey=` is Kestra's, and allowed.
+    assert!(codes_at(
+        &with("{{ secret('db', subkey='password') }}"),
+        plugins::CODE_SECRET_ARGUMENT_REFUSED
+    )
+    .is_empty());
+}

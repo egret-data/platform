@@ -57,4 +57,7 @@ mod yamlfmt;
 pub use env::{
     referenced_roots, render_str, render_str_guarded, GuardedRender, RenderContext, RenderError,
 };
+/// The refusal every render but a `kestra.*` task's gives `secret()`, also
+/// the message of `spec::validate`'s publish-time refusal (W5b fix round 1).
+pub(crate) use functions::SECRET_REFUSAL;
 pub use rewrite::{rewrite, RewriteError};
