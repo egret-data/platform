@@ -299,7 +299,7 @@ impl Fx {
     ) -> (String, Option<serde_json::Value>, Option<String>) {
         sqlx::query_as(
             "SELECT state, outputs, message FROM workflow.task_runs \
-              WHERE execution_id = $1 AND task_id = $2 ORDER BY attempt DESC LIMIT 1",
+              WHERE execution_id = $1 AND task_id = $2",
         )
         .bind(exec)
         .bind(task)
