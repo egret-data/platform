@@ -1,0 +1,55 @@
+{
+  "method": "automated Playwright, headless Chromium (not manual)",
+  "ui_attempt": {
+    "clicked": "keyboard Control+`"
+  },
+  "ws_terminal_e": {
+    "state": "closed",
+    "code": 1006,
+    "wasClean": false
+  },
+  "ws_main_e": {
+    "state": "open"
+  },
+  "http_blocked_e": {
+    "GET /e/api/packages/list": 403,
+    "POST /e/api/secrets/keys": 403,
+    "POST /e/api/files/list_files": 403,
+    "POST /e/api/ai/chat": 403,
+    "POST /e/api/storage/list_entries": 403,
+    "POST /e/api/home/recent_files": 403,
+    "POST /e/api/kernel/copy": 403,
+    "POST /e/api/kernel/rename": 403,
+    "GET /e/api/lsp/health": 403,
+    "POST /e/api/export/auto_export/html": 403,
+    "GET /e/terminal/ws": 403
+  },
+  "http_allowed_e": {
+    "GET /e/api/kernel/status": 500,
+    "GET /e/api/version": 200,
+    "GET /e/health": 200
+  },
+  "ws_terminal_r": {
+    "state": "closed",
+    "code": 1006,
+    "wasClean": false
+  },
+  "http_blocked_r": {
+    "GET /r/api/packages/list": 403,
+    "POST /r/api/secrets/keys": 403,
+    "POST /r/api/files/list_files": 403,
+    "POST /r/api/ai/chat": 403,
+    "POST /r/api/storage/list_entries": 403,
+    "POST /r/api/home/recent_files": 403,
+    "POST /r/api/kernel/copy": 403,
+    "POST /r/api/kernel/rename": 403,
+    "GET /r/api/lsp/health": 403,
+    "POST /r/api/export/auto_export/html": 403,
+    "GET /r/terminal/ws": 403
+  },
+  "http_allowed_r": {
+    "GET /r/api/kernel/status": 401,
+    "GET /r/api/version": 200,
+    "GET /r/health": 200
+  }
+}

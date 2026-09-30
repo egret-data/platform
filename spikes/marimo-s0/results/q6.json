@@ -1,0 +1,50 @@
+{
+  "route_count": 107,
+  "routes_covered_by_block_list": 44,
+  "S0_BLOCKED": "/terminal,/api/packages,/api/secrets,/api/files,/api/ai,/api/storage,/api/home,/api/kernel/copy,/api/kernel/rename,/api/kernel/install_missing_packages,/api/export/auto_export,/api/export/requirements,/api/lsp",
+  "block_list_reasons": {
+    "/terminal": "PTY shell as the pod user (upstream WS opens with the pod token, verified); never for authors",
+    "/api/packages": "pip/uv install/remove/sync in the shared pod env; editor only probes /api/packages/sandbox (403, editing unaffected)",
+    "/api/secrets": "reads/writes secret keys and .env files on the pod filesystem",
+    "/api/files": "arbitrary file browse/read/create/move/delete/download in the workspace dir",
+    "/api/ai": "AI chat/completion and MCP refresh use pod-side provider keys; no egret policy over them",
+    "/api/storage": "lists/downloads objects from storage backends configured on the pod",
+    "/api/home": "workspace file listing, recent files, tutorial open (creates a file), other sessions' shutdown",
+    "/api/kernel/copy": "creates a second notebook file on the pod (Save-as copy) outside the draft store",
+    "/api/kernel/rename": "renames the notebook file, detaching it from the draft binding",
+    "/api/kernel/install_missing_packages": "installs packages from a cell's imports (same as /api/packages)",
+    "/api/export/auto_export": "writes html/md/ipynb into __marimo__/ beside the notebook",
+    "/api/export/requirements": "installs export dependencies (pip)",
+    "/api/lsp": "restarts/starts language-server subprocesses; editor probes /api/lsp/health (403, editing unaffected)"
+  },
+  "kernel_routes_that_create_or_move_files": {
+    "blocked": [
+      "/api/kernel/copy",
+      "/api/kernel/rename"
+    ],
+    "not_blockable_by_prefix": {
+      "/api/kernel/save": "needed for editing; accepts a `filename` (save-as) but marimo validates it is inside the workspace dir (files.py:152-180), so a rogue save can create/overwrite files inside the workspace only",
+      "/api/kernel/save_app_config": "needed to edit app config; rewrites the notebook header only",
+      "/api/kernel/save_user_config": "writes marimo.toml under XDG_CONFIG_HOME, shared by every editor on the pod; left open (not needed to be blocked for editing, but a design point: mount config read-only)"
+    }
+  },
+  "left_open_but_notable": [
+    "/api/kernel/execute and /api/kernel/scratchpad/run (run code; same power as a cell)",
+    "/api/kernel/shutdown, /api/sessions, /api/status/connections (session mgmt)",
+    "/api/export/{html,ipynb,markdown,script,pdf} (return content, do not write files)",
+    "/api/export/update_cell_outputs (rewrites notebook outputs, inside the draft file)"
+  ],
+  "editing_still_works_with_block_list": {
+    "q3": "results/q3-blocked.json: same round trip, same 409 conflict as results/q3.json (only timestamps differ; the committed q3.json also carries extra hand annotation keys)",
+    "q1": "results/q1-blocked.json: alice/bob each see own viewer, sql cell via gateway, no rejects; only pids/timestamps differ"
+  },
+  "prefixes_the_editor_actually_requested_and_got_403": [
+    "/api/packages/sandbox (POST, twice per open)",
+    "/api/lsp/health (GET)"
+  ],
+  "no_prefix_had_to_be_narrowed": true,
+  "run_mode_covered": "results/q6-terminal.json: same prefixes 403 on /r, /r/terminal/ws closed",
+  "terminal": "results/q6-terminal.json + q6-terminal.png; method automated Playwright (not manual); proxy log shows `WebSocket /e/terminal/ws` 403 and `GET /e/terminal/ws` 403; browser sees code 1006 (proxy closes before accept, 4403 not visible to the browser); control: the same WS straight to :2718 with the pod token opens. The UI has no discoverable terminal button in the headless page, so the UI attempt was a keyboard fallback, the direct WS from the page is the real evidence.",
+  "traffic_cross_check": "results/q6-traffic.json: 260 distinct paths seen in proxy.log, 0 unmatched by build_routes; 234 are /assets/* static files served by the `/{path:path}` catch-all; /e/health, /e/public-files-sw.js, /ws are listed routes",
+  "build_routes_quirk": "/assets is listed as WEBSOCKET only because it is a static Mount without methods; it serves static files"
+}

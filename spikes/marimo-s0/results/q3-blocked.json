@@ -1,0 +1,60 @@
+{
+  "revision_before": 1,
+  "revision_after_first_save": 2,
+  "marker_in_draft": true,
+  "external_put_status": 200,
+  "revision_after_external_put": 3,
+  "second_marker_in_final_draft": false,
+  "revision_final": 3,
+  "save_responses": [
+    {
+      "url": "http://apps.egret.localhost:8701/e/api/kernel/save",
+      "status": 200,
+      "body": "import marimo\n\n__generated_with = \"0.25.0\"\napp = marimo.App()\n\n\n@app.cell\ndef _():\n    import os\n\n    import marimo as mo\n\n    import egret_marimo as egret\n\n    return egret, mo, os\n\n\n@app.cell\ndef _(egret):\n    db = egret.connect(\"trino_prod\")\n    return (db,)\n\n\n@app.cell\ndef _(mo):\n    n = mo.ui.slider(1, 10, value=1, label=\"n\")\n    n\n    return (n,)\n\n\n@app.cell\ndef _(egret, mo, n, os):\n    py_df = egret.sql(f\"SELECT {n.value} AS n\", database=\"trino_prod\")\n    mo.md(\n        f\"PY pid={os.getpi"
+    },
+    {
+      "url": "http://apps.egret.localhost:8701/e/api/kernel/save",
+      "status": 409,
+      "body": "{\"detail\":\"This draft was saved by someone else \u2014 reload.\"}"
+    },
+    {
+      "url": "http://apps.egret.localhost:8701/e/api/kernel/save",
+      "status": 409,
+      "body": "{\"detail\":\"This draft was saved by someone else \u2014 reload.\"}"
+    }
+  ],
+  "save_responses_before_external_put": 1,
+  "storage_binds": {
+    "revisions_bound_before_external_put": [
+      1,
+      1
+    ],
+    "revisions_bound_total": [
+      1,
+      1
+    ],
+    "binds_after_external_put": 0,
+    "note": "0 binds after the external PUT means no page load re-fetched the revision, so the second save used the stale revision"
+  },
+  "conflict_events": [
+    {
+      "t": 1790772808.5730891,
+      "kind": "draft_conflict",
+      "app_id": "probe",
+      "sent": "2",
+      "current": 3
+    },
+    {
+      "t": 1790772809.464191,
+      "kind": "draft_conflict",
+      "app_id": "probe",
+      "sent": "2",
+      "current": 3
+    }
+  ],
+  "toast_texts": [
+    ""
+  ],
+  "ui_mentions_conflict": true,
+  "ui_text_excerpt": "1\n2\n3\n4\n5\nimport os\n\n\nimport marimo as mo\n\n\nimport egret_marimo as egret\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\n1\ndb = egret.connect(\"trino_prod\")\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\n1\n2\nn = mo.ui.slider(1, 10, value=1, label=\"n\")\nn\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\n1\n2\n3\n4\n\u2304\npy_df = egret.sql(f\"SELECT {n.value} AS n\", database=\"trino_prod\")\nmo.md(\n    f\"PY pid={os.getpid()} viewer={py_df['viewer'][0]} sql={py_df['sql'][0]}\"\n)\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\n1\n2\n3\n4\nsql_df = mo.sql(f\"SELECT {n.value} AS via_sql_cell\", engine=db)\ns0_marker = 12345\ns0_second = 1\nmo.md(f\"SQLCELL viewer={sql_df['viewer'][0]}\")\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\nPYTHON\nMARKDOWN\nSQL\nErrors\nScratchpad\nTracing\nSecrets\nLogs\nTerminal\nSnippets\nKernel\n0\n0\nFailed to save\nThis draft was saved by someone else \u2014 reload."
+}

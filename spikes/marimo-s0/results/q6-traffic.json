@@ -1,0 +1,48 @@
+{
+  "seen_distinct": 260,
+  "not_matched_by_any_route": [],
+  "matched_only_by_template": [],
+  "matched_only_by_static_catchall_count": 234,
+  "catchall_examples": [
+    {
+      "method": "GET",
+      "path": "/assets/Deferred-CrTnjj37.js",
+      "statuses": [
+        "200"
+      ],
+      "matched": "/{path:path}"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/ErrorBoundary-DrliQ_7g.js",
+      "statuses": [
+        "200"
+      ],
+      "matched": "/{path:path}"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/FiraMono-Bold-C6PDArdf.woff2",
+      "statuses": [
+        "200"
+      ],
+      "matched": "/{path:path}"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/FiraMono-Medium-D5MAsWEG.woff2",
+      "statuses": [
+        "200"
+      ],
+      "matched": "/{path:path}"
+    },
+    {
+      "method": "GET",
+      "path": "/assets/FiraMono-Regular-CEsLFVD9.woff2",
+      "statuses": [
+        "200"
+      ],
+      "matched": "/{path:path}"
+    }
+  ]
+}

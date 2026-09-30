@@ -1,0 +1,670 @@
+[
+  {
+    "path": "/",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/@file/{filename_and_length:path}",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/ai/chat",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/ai/completion",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/ai/inline_completion",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/ai/invoke_tool",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/ai/mcp/refresh",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/ai/mcp/status",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/cache/clear",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/cache/info",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/datasources/discover",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/datasources/preview_column",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/datasources/preview_datasource_connection",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/datasources/preview_sql_schema_list",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/datasources/preview_sql_table",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/datasources/preview_sql_table_list",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/document/transaction",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/documentation/snippets",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/environment",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/export/auto_export/html",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/export/auto_export/ipynb",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/export/auto_export/markdown",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/export/availability",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/export/html",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/export/ipynb",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/export/markdown",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/export/pdf",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/export/requirements/install",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/export/script",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/export/update_cell_outputs",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/files/copy",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/files/create",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/files/delete",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/files/download",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/files/file_details",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/files/list_files",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/files/move",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/files/open",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/files/roots",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/files/search",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/files/update",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/home/recent_files",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/home/running_notebooks",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/home/shutdown_session",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/home/tutorial/open",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/home/workspace_files",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/code_autocomplete",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/copy",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/delete",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/execute",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/focus_cell",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/format",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/function_call",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/install_missing_packages",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/instantiate",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/interrupt",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/pdb/breakpoints",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/pdb/pm",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/read_code",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/rename",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/restart_session",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/run",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/save",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/save_app_config",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/save_user_config",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/scratchpad/run",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/set_cell_config",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/set_model_value",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/set_ui_element_value",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/shutdown",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/status",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/kernel/stdin",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/kernel/takeover",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/lsp/health",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/lsp/restart",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/packages/add",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/packages/list",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/packages/manifest",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/packages/remove",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/packages/sandbox",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/packages/sync",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/packages/tree",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/secrets/create",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/secrets/delete",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/secrets/keys",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/sessions",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/sql/validate",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/status",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/status/connections",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/storage/download",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/storage/list_entries",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/api/usage",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/api/version",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/assets",
+    "methods": [
+      "WEBSOCKET"
+    ]
+  },
+  {
+    "path": "/auth/login",
+    "methods": [
+      "POST"
+    ]
+  },
+  {
+    "path": "/auth/login",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/auth/token",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/health",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/healthz",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/og/thumbnail",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/public-files-sw.js",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/public/{filepath:path}",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/sse",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  },
+  {
+    "path": "/terminal/ws",
+    "methods": [
+      "WEBSOCKET"
+    ]
+  },
+  {
+    "path": "/ws",
+    "methods": [
+      "WEBSOCKET"
+    ]
+  },
+  {
+    "path": "/ws_sync",
+    "methods": [
+      "WEBSOCKET"
+    ]
+  },
+  {
+    "path": "/{path:path}",
+    "methods": [
+      "GET",
+      "HEAD"
+    ]
+  }
+]
