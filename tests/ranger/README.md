@@ -241,6 +241,28 @@ each is acceptable. Anything not on this list and not `Undecidable` is a bug.
   the duels below); nothing in this crate asserts a reported ACCESS policy id,
   which is why the gate is green in spite of it.
 
+- **A tag deny restored over a discarded resource allow reports the TAG
+  policy, deliberately.** SP4d-2b Task 3, and the one entry on this list that
+  is a CHOICE this crate makes rather than a consequence of something it could
+  not reproduce — recorded here so a later corpus run does not read it as a new
+  finding and send someone hunting a regression.
+
+  The shape: tag policies deny; a strictly higher-priority resource policy
+  allows but is `hasDeny()`, so offset 553 cannot determine for it; the loop
+  runs out and the restore at offsets 599-632 calls `setIsAllowed(false)`. That
+  call does not touch `policyId`, so **Ranger names the resource policy that
+  ALLOWED as the source of the deny.** This crate names the tag policy that
+  actually denied.
+
+  The allow/deny OUTCOME is identical — only the reported id differs, so this
+  sits inside the ACCESS reported-id divergence above rather than adding a new
+  class of disagreement, and the same "nothing asserts a reported ACCESS policy
+  id" argument keeps the gate green. The reason for the choice is that Ranger's
+  answer sends a reader to a policy that allows, to explain a deny.
+  `eval.rs`'s restore block carries the same note at the site;
+  `tag_arbitration.rs::nothing_else_determines_so_the_tag_verdict_is_restored`
+  is the fixture.
+
 - **`isAccessDetermined` is not modelled.** Ranger sets it `true` even when
   nothing matched at all, alongside `policyId = -1`: measured in **716 of 1972
   compared ACCESS cases**. This crate reports that state as

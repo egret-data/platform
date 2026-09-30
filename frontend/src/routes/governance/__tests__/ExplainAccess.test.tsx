@@ -714,6 +714,127 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(causes[0]).not.toHaveTextContent(/1 tag policies/);
   });
 
+  /**
+   * **SP4d-2b Task 3, fix round 1 (review Minor 4).** Task 2 and Task 3 added
+   * four `WireUndecidableCause` variants and a four-armed
+   * `WireTagResourceProblem`, and the only thing holding them was `tsc`'s
+   * `const _never: never` guard on `causeSentence`. That guard proves the switch
+   * is EXHAUSTIVE. It proves nothing about what any arm renders — an arm
+   * returning the wrong sentence, the wrong field, or `""` is exhaustive and
+   * wrong, and would have shipped.
+   *
+   * One fixture carrying all four causes plus all four problem shapes, asserted
+   * per cause: each must name the thing a steward would act on (the policy, the
+   * value, the shape), and none may render empty.
+   */
+  test("the tag causes each render a sentence naming what a steward must act on", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "undecidable",
+                  why: [
+                    { kind: "tags_unresolved" },
+                    {
+                      kind: "tag_resource_not_reproducible",
+                      policy_id: 8839,
+                      policy_name: "clearance-a",
+                      problem: { kind: "not_only_the_tag_resource" },
+                    },
+                    {
+                      kind: "tag_resource_not_reproducible",
+                      policy_id: 8840,
+                      policy_name: "clearance-b",
+                      problem: { kind: "excludes" },
+                    },
+                    {
+                      kind: "tag_resource_not_reproducible",
+                      policy_id: 8841,
+                      policy_name: "clearance-c",
+                      problem: { kind: "value_not_trie_prefix_exact", value: "p*x" },
+                    },
+                    {
+                      kind: "tag_resource_not_reproducible",
+                      policy_id: 8842,
+                      policy_name: "clearance-d",
+                      problem: { kind: "recursive" },
+                    },
+                    {
+                      kind: "tag_sub_policy_is_deny_capable",
+                      policy_id: 8799,
+                      policy_name: "mask-pii",
+                    },
+                    {
+                      kind: "tag_sub_result_split_by_resource_policy",
+                      tag_policy_id: 8799,
+                      tag_policy_name: "mask-pii",
+                      resource_policy_id: 42,
+                      resource_policy_name: "mask-ssn",
+                    },
+                  ],
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: ["pii"],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const causes = within(result).getAllByTestId("undecidable-cause");
+    expect(causes).toHaveLength(7);
+
+    // Every arm renders SOMETHING — the failure an exhaustive switch cannot
+    // catch is an arm that returns "".
+    for (const cause of causes) {
+      expect(cause.textContent?.trim().length ?? 0).toBeGreaterThan(20);
+    }
+
+    // `tags_unresolved`: the distinction it exists to make is "did not resolve"
+    // versus "there are none", so the sentence has to carry it.
+    expect(causes[0]).toHaveTextContent(/did not resolve/i);
+    expect(causes[0]).toHaveTextContent(/not the same as there being none/i);
+
+    // The four `tag_resource_not_reproducible` shapes have four different
+    // remedies, so each must read differently and name its own policy.
+    expect(causes[1]).toHaveTextContent("clearance-a");
+    expect(causes[1]).toHaveTextContent(/resource level other than/i);
+    expect(causes[2]).toHaveTextContent("clearance-b");
+    expect(causes[2]).toHaveTextContent(/isExcludes/);
+    expect(causes[3]).toHaveTextContent("clearance-c");
+    expect(causes[3]).toHaveTextContent(/p\*x/);
+    expect(causes[4]).toHaveTextContent("clearance-d");
+    expect(causes[4]).toHaveTextContent(/isRecursive/);
+    const problemSentences = [causes[1], causes[2], causes[3], causes[4]].map(
+      (c) => c.textContent,
+    );
+    expect(new Set(problemSentences).size).toBe(4);
+
+    expect(causes[5]).toHaveTextContent("mask-pii");
+    expect(causes[5]).toHaveTextContent(/deny items/i);
+
+    // The split names BOTH policies — a sentence naming only one of them is the
+    // shape that sends a steward to the wrong policy, which is the whole reason
+    // this cause refuses instead of answering.
+    expect(causes[6]).toHaveTextContent("mask-pii");
+    expect(causes[6]).toHaveTextContent("mask-ssn");
+    expect(causes[6]).toHaveTextContent(/higher-priority/i);
+  });
+
   test("tags render honestly when the target carries none", async () => {
     mutateAsync.mockResolvedValueOnce({
       status: 200,

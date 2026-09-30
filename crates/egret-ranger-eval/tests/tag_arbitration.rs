@@ -4,10 +4,17 @@
 //! # What was measured in the jars for this task, and where
 //!
 //! `RangerPolicyEngineImpl.evaluatePoliciesForOneAccessTypeNoAudit`, disassembled
-//! with `javap -c -p` on `ranger-plugins-common` **2.5.0** and **2.8.0**. The
-//! method is byte-identical between the two versions at every offset cited
-//! below — same branch targets, same comparison opcodes — so one set of offsets
-//! serves both:
+//! with `javap -c -p` on `ranger-plugins-common` **2.5.0** and **2.8.0**. Across
+//! the whole arbitration the two versions are identical at every offset, branch
+//! target and comparison opcode, so one set of offsets serves both.
+//!
+//! FIX ROUND 1: not "byte-identical", which an earlier version of this doc
+//! claimed and which is a measurement claim the measurement does not support —
+//! at offset 127, OUTSIDE the arbitration, the `_super_user` compare is
+//! `commons-lang`'s `StringUtils.equals(String, String)` in 2.5.0 and
+//! `commons-lang3`'s `equals(CharSequence, CharSequence)` in 2.8.0. Same
+//! semantics, no bearing on anything below, but the claim is scoped to what was
+//! measured.
 //!
 //! ```java
 //! //  61-165: isSuperUser / _super_user short-circuit; sets policyPriority = MAX_VALUE
@@ -1095,5 +1102,201 @@ fn a_tag_deny_over_a_band_that_cannot_disagree_still_answers() {
         matches!(&d, Decision::Allowed { .. }),
         "two allowers in one band agree in every order, so this must answer: {}",
         named(&d)
+    );
+}
+
+// ── offset 553 on the mask path: what Ranger actually REACHES ────────────
+
+/// **FIX ROUND 1, the review's measured over-refusal.**
+///
+/// A tag mask leaves `isAllowed` true on the shared result, so offset 553
+/// (`if (result.getIsAllowed() && !evaluator.hasDeny()) setIsAccessDetermined(true)`)
+/// fires for the first strictly-higher evaluator with no deny items of its own
+/// **whether or not it yielded** — and `RangerDefaultPolicyEvaluator.evaluate`'s
+/// 380-384 guard then skips every later evaluator's items.
+///
+/// So the priority-5 policy here writes nothing, determines anyway, and the
+/// priority-1 policy that WOULD have yielded never runs. The order that decides
+/// this is between priority bands, which is fully determined and which this
+/// crate already sorts by — so the answer is the tag mask, not a refusal.
+///
+/// The first version of this package's split refusal walked every evaluator
+/// above the tag's priority and refused here.
+#[test]
+fn a_reachable_non_yielder_shuts_out_the_lower_priority_yielder_behind_it() {
+    let mut high = resource_policy(
+        1,
+        "res-mask-high",
+        5,
+        "dataMaskPolicyItems",
+        json!([{
+            "users": ["bob"],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": "HASH"},
+        }]),
+    );
+    high["policyType"] = json!(1);
+    let mut low = resource_policy(
+        2,
+        "res-mask-low",
+        1,
+        "dataMaskPolicyItems",
+        mask_items("HASH"),
+    );
+    low["policyType"] = json!(1);
+
+    let set = envelope(
+        json!([high, low.clone()]),
+        json!([tag_policy(
+            10,
+            "tag-mask",
+            0,
+            1,
+            "dataMaskPolicyItems",
+            mask_items("MASK")
+        )]),
+    );
+    let d = evaluate_data_mask(&set, &request(), &trino_def(), &no_superusers());
+    match &d {
+        MaskDecision::Masked(m) => {
+            assert_eq!(m.policy_name, "tag-mask", "{d:?}");
+            assert_eq!(m.mask_type.as_deref(), Some("MASK"), "{d:?}");
+        }
+        other => panic!("offset 553 makes this deterministic, so it must answer: {other:?}"),
+    }
+
+    // The control WITHOUT which the assertion above proves nothing about 553:
+    // the priority-1 policy really can yield, and does when it is reachable.
+    let alone = envelope(
+        json!([low]),
+        json!([tag_policy(
+            10,
+            "tag-mask",
+            0,
+            1,
+            "dataMaskPolicyItems",
+            mask_items("MASK")
+        )]),
+    );
+    let d = evaluate_data_mask(&alone, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(
+            &d,
+            MaskDecision::Undecidable { why }
+                if why.iter().any(|c| matches!(
+                    c,
+                    UndecidableCause::TagSubResultSplitByResourcePolicy {
+                        resource_policy_id: Some(2), ..
+                    }
+                ))
+        ),
+        "with nothing shutting it out, the priority-1 policy splits the result: {d:?}"
+    );
+}
+
+/// The other half of rule 2: a strictly-higher evaluator that yields nothing but
+/// IS deny-capable does **not** determine at 553, so the loop continues and the
+/// yielder behind it is reached after all — and that one does split.
+///
+/// One `denyPolicyItems` entry is the whole difference between this test and the
+/// one above, which is what makes `hasDeny` the load-bearing field rather than
+/// "it wrote nothing".
+#[test]
+fn a_deny_capable_non_yielder_does_not_shut_out_the_yielder_behind_it() {
+    let mut high = resource_policy(
+        1,
+        "res-mask-high",
+        5,
+        "dataMaskPolicyItems",
+        json!([{
+            "users": ["bob"],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": "HASH"},
+        }]),
+    );
+    high["policyType"] = json!(1);
+    high["denyPolicyItems"] = select_for_bob();
+    let mut low = resource_policy(
+        2,
+        "res-mask-low",
+        1,
+        "dataMaskPolicyItems",
+        mask_items("HASH"),
+    );
+    low["policyType"] = json!(1);
+
+    let set = envelope(
+        json!([high, low]),
+        json!([tag_policy(
+            10,
+            "tag-mask",
+            0,
+            1,
+            "dataMaskPolicyItems",
+            mask_items("MASK")
+        )]),
+    );
+    let d = evaluate_data_mask(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(
+            &d,
+            MaskDecision::Undecidable { why }
+                if why.iter().any(|c| matches!(
+                    c,
+                    UndecidableCause::TagSubResultSplitByResourcePolicy {
+                        resource_policy_id: Some(2), ..
+                    }
+                ))
+        ),
+        "a hasDeny() evaluator cannot determine at 553, so the yielder is reached: {d:?}"
+    );
+}
+
+/// Rule 3: the determining band is taken WHOLE, because which of its members
+/// ran first is `getEvalOrder()`. Two priority-5 policies with no deny items —
+/// one yields, one does not — so the answer depends on an order this crate
+/// cannot compute, and it refuses rather than picking the member it happened to
+/// sort first.
+#[test]
+fn the_determining_band_is_taken_whole_because_its_order_is_unknown() {
+    let mut quiet = resource_policy(
+        1,
+        "a-quiet",
+        5,
+        "dataMaskPolicyItems",
+        json!([{
+            "users": ["bob"],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": "HASH"},
+        }]),
+    );
+    quiet["policyType"] = json!(1);
+    let mut yielder = resource_policy(2, "b-yields", 5, "dataMaskPolicyItems", mask_items("HASH"));
+    yielder["policyType"] = json!(1);
+
+    let set = envelope(
+        json!([quiet, yielder]),
+        json!([tag_policy(
+            10,
+            "tag-mask",
+            0,
+            1,
+            "dataMaskPolicyItems",
+            mask_items("MASK")
+        )]),
+    );
+    let d = evaluate_data_mask(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(
+            &d,
+            MaskDecision::Undecidable { why }
+                if why.iter().any(|c| matches!(
+                    c,
+                    UndecidableCause::TagSubResultSplitByResourcePolicy {
+                        resource_policy_id: Some(2), ..
+                    }
+                ))
+        ),
+        "`a-quiet` sorts first here, but Ranger's order is getEvalOrder(): {d:?}"
     );
 }

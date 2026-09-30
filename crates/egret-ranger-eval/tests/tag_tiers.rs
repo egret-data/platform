@@ -126,7 +126,8 @@
 use std::collections::BTreeSet;
 
 use egret_ranger_eval::eval::{
-    evaluate, AccessRequest, Decision, EngineConfig, ResolvedTag, UndecidableCause,
+    evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, EngineConfig,
+    MaskDecision, ResolvedTag, RowFilterDecision, UndecidableCause,
 };
 use egret_ranger_eval::model::{ServicePolicySet, TagPolicyBlock, Unmodelled};
 use egret_ranger_eval::resource::{MatchType, RequestResource};
@@ -386,6 +387,32 @@ fn a_block_this_reader_cannot_count_still_refuses() {
             )],
             "{block} must force Undecidable naming the unreadable block: {d:?}"
         );
+    }
+}
+
+/// **FIX ROUND 1, MINOR 2.** The `Unreadable` refusal was asserted only through
+/// `evaluate`. It reaches a MASK and a ROW-FILTER decision by the same two
+/// routes — `request_preamble`'s envelope sweep and `tag_candidates`'s, which
+/// since this round skip the same thing — and `evaluateTagPolicies` runs for
+/// policy types 1 and 2 as well, so an unreadable block can hide a tag mask
+/// exactly as it can hide a tag deny.
+///
+/// Asserted as an EXACT cause vector on both, which is also what pins that the
+/// two sweeps' overlap is deduplicated rather than reported twice.
+#[test]
+fn a_block_this_reader_cannot_count_refuses_a_mask_and_a_row_filter_too() {
+    let set = envelope(json!({"tagPolicies": json!("tagPolicies-as-a-string")}));
+    let expected = vec![UndecidableCause::EnvelopeConstruct(
+        Unmodelled::TagPolicies(TagPolicyBlock::Unreadable),
+    )];
+
+    match evaluate_data_mask(&set, &request(), &trino_def(), &no_superusers()) {
+        MaskDecision::Undecidable { why } => assert_eq!(why, expected),
+        other => panic!("an unreadable tag block must refuse a mask: {other:?}"),
+    }
+    match evaluate_row_filter(&set, &request(), &trino_def(), &no_superusers()) {
+        RowFilterDecision::Undecidable { why } => assert_eq!(why, expected),
+        other => panic!("an unreadable tag block must refuse a row filter: {other:?}"),
     }
 }
 
