@@ -91,11 +91,22 @@ impl Drop for Engine {
 
 /// `docker run -d -P` and the host port published for `inner`.
 async fn start_engine(image: &str, inner: u16, extra: &[&str]) -> Result<Engine, String> {
+    start_engine_with(image, inner, extra, &[]).await
+}
+
+/// [`start_engine`] with `cmd` after the image: the server's own arguments.
+async fn start_engine_with(
+    image: &str,
+    inner: u16,
+    extra: &[&str],
+    cmd: &[&str],
+) -> Result<Engine, String> {
     let name = format!("egret-w5b-t6-{}", Uuid::new_v4().simple());
     let port_spec = format!("127.0.0.1::{inner}");
     let mut args = vec!["run", "-d", "--name", &name, "-p", &port_spec];
     args.extend_from_slice(extra);
     args.push(image);
+    args.extend_from_slice(cmd);
     let (ok, out) = docker(&args).await;
     if !ok {
         return Err(format!("docker run {image}: {out}"));
@@ -115,9 +126,14 @@ async fn start_engine(image: &str, inner: u16, extra: &[&str]) -> Result<Engine,
 }
 
 async fn start_postgres() -> Engine {
+    start_postgres_with(&[]).await
+}
+
+/// [`start_postgres`] with the server's `-c name=value` arguments.
+async fn start_postgres_with(server_args: &[&str]) -> Engine {
     gate();
     let pw = format!("POSTGRES_PASSWORD={PG_PASSWORD}");
-    let pg = start_engine(
+    let pg = start_engine_with(
         PG_IMAGE,
         5432,
         &[
@@ -128,6 +144,7 @@ async fn start_postgres() -> Engine {
             "-e",
             &pw,
         ],
+        server_args,
     )
     .await
     .expect("the Postgres target starts");
@@ -567,22 +584,44 @@ async fn plugin_tasks_run_end_to_end_and_no_secret_is_stored(pool: sqlx::PgPool)
 /// the query is gone from `pg_stat_activity` 20 s later -- the host's
 /// shutdown hook called `kill()`, which Postgres honours (Task 1). The scan
 /// closes it. (StarRocks's `kill()` blocks, spec §12: not asserted.)
+///
+/// **The budget is 30 s, not 5 s, and the server log must show the query
+/// was sent.** The budget covers the JVM's boot: ~3.6 s to the plugin's
+/// connect on an idle machine, over 5 s at load average 35-49 (W5b Task 6
+/// fix 1, measured). A SIGTERM that lands before the host registered its
+/// hook ends the JVM (exit 143) with nothing sent -- nothing to cancel,
+/// correctly -- and a 5 s budget then failed this test on "no cancel line"
+/// 10 runs in 16 while measuring nothing. Hence the `sent` assertion first:
+/// a boot slower than the budget fails as that, never as a missing cancel.
 #[sqlx::test(migrations = "../../migrations")]
 #[ignore = "needs EGRET_PLUGIN_HOST_LIVE=1, Docker and egret-plugin-host:dev"]
 async fn a_timed_out_query_is_cancelled_on_postgres(pool: sqlx::PgPool) {
     gate();
-    let pg = start_postgres().await;
+    // Every statement and connection in the server's log, with times: whether
+    // the query was ever SENT is read from it, not inferred.
+    let pg = start_postgres_with(&[
+        "-c",
+        "log_statement=all",
+        "-c",
+        "log_connections=on",
+        "-c",
+        "log_disconnections=on",
+        "-c",
+        "log_line_prefix=%m [%p] ",
+    ])
+    .await;
     let fx = fx(&pool).await;
     fx.secret("pg", &[("username", "w5b"), ("password", PG_PASSWORD)])
         .await;
     let started = Instant::now();
+    println!("EXEC START (UTC): {}", chrono::Utc::now());
     let exec = fx
         .run(
             &pg_flow(
                 "pg_sleep",
                 pg.port,
                 "SELECT pg_sleep(600)",
-                "    timeout: PT5S\n",
+                "    timeout: PT30S\n",
             ),
             15,
             Duration::from_secs(120),
@@ -591,7 +630,7 @@ async fn a_timed_out_query_is_cancelled_on_postgres(pool: sqlx::PgPool) {
     println!("TIMEOUT: execution terminal after {:?}", started.elapsed());
     let (state, _, message) = fx.task_run(exec, "q").await;
     assert_eq!(state, "FAILED");
-    assert_eq!(message.as_deref(), Some("Timeout after 00:00:05.000"));
+    assert_eq!(message.as_deref(), Some("Timeout after 00:00:30.000"));
 
     tokio::time::sleep(Duration::from_secs(20)).await;
     let sleeping = psql(
@@ -607,12 +646,27 @@ async fn a_timed_out_query_is_cancelled_on_postgres(pool: sqlx::PgPool) {
             .expect("docker logs");
         (true, String::from_utf8_lossy(&o.stderr).to_string())
     };
-    let cancelled = format!("{log}\n{err_log}").contains("canceling statement due to user request");
-    println!("PG_STAT_ACTIVITY pg_sleep active 20 s later: {sleeping}; server log cancel line: {cancelled}");
+    let server_log = format!("{log}\n{err_log}");
+    let cancelled = server_log.contains("canceling statement due to user request");
+    let sent = server_log
+        .lines()
+        .filter(|l| l.contains("execute <unnamed>: SELECT pg_sleep(600)"))
+        .count();
+    println!("PG_STAT_ACTIVITY pg_sleep active 20 s later: {sleeping}; server log cancel line: {cancelled}; query sent: {sent}");
+    for l in server_log.lines().filter(|l| {
+        l.contains("host=172.") || l.contains("execute <unnamed>") || l.contains("canceling")
+    }) {
+        println!("PG LOG: {l}");
+    }
     assert_eq!(
         sleeping.trim(),
         "0",
         "the query outlived its timed-out task"
+    );
+    assert_eq!(
+        sent, 1,
+        "the query was never sent: the budget ran out before the JVM reached it, so there \
+         was nothing to cancel and this run measured nothing"
     );
     assert!(
         cancelled,
