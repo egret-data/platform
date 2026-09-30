@@ -695,7 +695,19 @@ const CREATE_REFUSED: usize = 4;
 /// refused at parse ([`PARSE_REFUSED`]). It is an over-acceptance closing: the
 /// pinned artifact refused it (422, `checkout-drift`), so it has no golden
 /// entry and the ratchet cannot see it move.
-const LIVE: usize = 247;
+///
+/// # 247 → **245** at W5b final fix round 1
+///
+/// `valids/secrets` (`secret()` in a `Return`'s `format` and a `Log`) and
+/// `valids/webhook-secret-key` (`secret()` in a `Webhook` trigger's `key`)
+/// are now refused at publish by W5b spec §6: `secret()` resolves only in a
+/// `kestra.*` task's properties, and anywhere else is a save-only finding,
+/// `secret_outside_plugin_task`. **This is a deliberate divergence, not an
+/// over-refusal to close**: the pinned artifact published both, and egret
+/// refused the call at run before W5b and still does (the render's
+/// `SECRET_REFUSAL`), so publishing them only postponed the same refusal to
+/// run time. They moved to [`VALIDATE_REFUSED`].
+const LIVE: usize = 245;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -756,7 +768,10 @@ const UNKNOWN_TYPE_REFUSED: usize = 68;
 /// enough to be judged on its own merits, so this population can only grow when
 /// [`UNKNOWN_TYPE_REFUSED`] shrinks. One flow moved between the two buckets;
 /// nothing became newly wrong.
-const VALIDATE_REFUSED: usize = 20;
+///
+/// **20 → 22 at W5b final fix round 1**: the two `secret()` flows [`LIVE`]
+/// names, refused by W5b spec §6's publish-time rule.
+const VALIDATE_REFUSED: usize = 22;
 
 /// Every corpus flow that has a draft row and no live version — the sum of the
 /// two above, derived rather than written down a third time.

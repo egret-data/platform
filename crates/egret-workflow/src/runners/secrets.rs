@@ -240,14 +240,16 @@ fn literal_keys(source: &str) -> Vec<String> {
 /// is rendered (fix round 1: the publish refusals of I2 and the
 /// `workflow:use_secrets` gate of I3).
 ///
-/// **The identifier, not the call.** `{% set s = secret %}{{ s('k') }}`
-/// calls it with no `secret(` in the text, so any `secret` that is not an
-/// attribute (`inputs.secret`) or part of a longer name (`mysecret`,
-/// `secret_task`) counts, in a string that holds a `{{` or a `{%` -- a string
-/// with neither renders as itself. The whole string is scanned rather than
-/// the regions between delimiters: `{{ "}}" ~ secret('k') }}` would end a
-/// naive region early. Over-matching (the word inside a string literal of a
-/// template) costs a refusal the author can read, never a secret.
+/// **The identifier, not the call, inside a template region.** `{% set s =
+/// secret %}{{ s('k') }}` calls it with no `secret(` in the text, so any
+/// `secret` in the code of a `{{ }}` or `{% %}` region counts, unless it is
+/// an attribute (`inputs.secret`), part of a longer name (`mysecret`,
+/// `secret_task`) or inside a string literal. Text outside every region --
+/// `message: "secret is {{ x }}"` -- renders as itself and does not count,
+/// nor does a `{# #}` comment. A region ends at its closing delimiter
+/// OUTSIDE a string literal, so `{{ "}}" ~ secret('k') }}` is one region; an
+/// unclosed one runs to the end. `{% raw %}` is not modelled: a call inside
+/// one counts, which errs towards "yes".
 ///
 /// Complete while nothing can look a function up by a computed name:
 /// minijinja has no such lookup, and Kestra's `render()`/`renderOnce()`,
@@ -255,12 +257,72 @@ fn literal_keys(source: &str) -> Vec<String> {
 /// (`functions::REFUSED`). If either arrives, this must change with it.
 pub fn text_uses_secret(text: &str) -> bool {
     static IDENT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    if !(text.contains("{{") || text.contains("{%")) || !text.contains("secret") {
+    if !text.contains("secret") {
         return false;
     }
-    IDENT
-        .get_or_init(|| regex::Regex::new(r"(?:^|[^.\w])secret\b").expect("identifier pattern"))
-        .is_match(text)
+    let ident = IDENT
+        .get_or_init(|| regex::Regex::new(r"(?:^|[^.\w])secret\b").expect("identifier pattern"));
+    template_code(text).iter().any(|code| ident.is_match(code))
+}
+
+/// The code of every `{{ }}` and `{% %}` region of `text`, with the contents
+/// of its string literals blanked (quotes kept), for [`text_uses_secret`].
+fn template_code(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    loop {
+        let Some(open) = ["{{", "{%", "{#"]
+            .iter()
+            .filter_map(|d| rest.find(d).map(|i| (i, *d)))
+            .min_by_key(|(i, _)| *i)
+        else {
+            return out;
+        };
+        let body = &rest[open.0 + 2..];
+        if open.1 == "{#" {
+            match body.find("#}") {
+                Some(end) => rest = &body[end + 2..],
+                None => return out,
+            }
+            continue;
+        }
+        let close = if open.1 == "{{" { "}}" } else { "%}" };
+        let mut code = String::new();
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        let mut consumed = body.len();
+        for (i, c) in body.char_indices() {
+            match quote {
+                Some(q) => {
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' {
+                        escaped = true;
+                    } else if c == q {
+                        quote = None;
+                        code.push(c);
+                        continue;
+                    }
+                    code.push(' ');
+                }
+                None => {
+                    if body[i..].starts_with(close) {
+                        consumed = i + close.len();
+                        break;
+                    }
+                    if c == '\'' || c == '"' {
+                        quote = Some(c);
+                    }
+                    code.push(c);
+                }
+            }
+        }
+        out.push(code);
+        if consumed >= body.len() {
+            return out;
+        }
+        rest = &body[consumed..];
+    }
 }
 
 /// Whether any string or mapping key of the flow `source` can call
@@ -840,6 +902,8 @@ mod tests {
             "x {{ 'a' ~ secret('db') }} y",
             "{% if secret('a') %}1{% endif %}",
             "{{ \"}}\" ~ secret('db') }}",
+            "{{ '\\'}}' ~ secret('db') }}",
+            "{{ x }} then {{ secret('db')",
         ] {
             assert!(text_uses_secret(yes), "{yes}");
         }
@@ -851,6 +915,10 @@ mod tests {
             "{{ mysecret('x') }}",
             "{{ secrets('x') }}",
             "",
+            // Text outside every region renders as itself.
+            "secret is {{ outputs.encrypted.value }}",
+            "{{ 'a secret' }} and {{ \"secret('x')\" }}",
+            "{# secret('db') #}",
         ] {
             assert!(!text_uses_secret(no), "{no}");
         }
