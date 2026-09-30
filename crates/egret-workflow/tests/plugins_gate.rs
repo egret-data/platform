@@ -628,3 +628,82 @@ async fn publish_refuses_a_plugin_task_with_the_feature_off() {
     assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("no container runner is configured"), "{body}");
 }
+
+// ---------------------------------------------------------------------------
+// `pluginDefaults:` at run time (fix round 1, user ruling 2A): refused at
+// save and publish only; a version that already carries it -- published
+// before W5b, when egret dropped the key silently -- still plans and runs,
+// and the key applies nothing.
+// ---------------------------------------------------------------------------
+
+/// A `Return` with no `format:` outputs `{}`; the defaults would give it a
+/// `value` if anything applied them.
+const RETURN_ONLY: &str =
+    "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    type: io.kestra.plugin.core.debug.Return\n";
+const DEFAULTS: &str = "pluginDefaults:\n  - type: io.kestra.plugin.core.debug.Return\n    values:\n      format: FROM_DEFAULTS\n";
+
+#[test]
+fn a_version_carrying_plugin_defaults_still_builds_the_same_plan() {
+    let with = format!("{RETURN_ONLY}{DEFAULTS}");
+    // The draft/publish half still refuses it (the control that the source
+    // really carries the key).
+    assert!(errors_of(&with)
+        .iter()
+        .any(|f| f.code == plugins::CODE_REMOVED_PLUGIN_DEFAULTS));
+    // The run-time half does not, and builds exactly the plan the source
+    // without the key builds.
+    let planned = egret_workflow::executor::build_plan(&with)
+        .unwrap_or_else(|e| panic!("build_plan refused a published pluginDefaults: {e}"));
+    assert_eq!(
+        planned,
+        egret_workflow::executor::build_plan(RETURN_ONLY).unwrap()
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_version_carrying_plugin_defaults_runs_and_the_defaults_apply_nothing(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = egret_metastore::Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let ex = egret_workflow::worker::start_execution(
+        &pool,
+        ws,
+        None,
+        &format!("{RETURN_ONLY}{DEFAULTS}"),
+        json!({}),
+    )
+    .await
+    .expect("an execution of a source carrying pluginDefaults starts");
+    let handlers = egret_workflow::worker::Handlers::with_core_tasks();
+    for _ in 0..16 {
+        if egret_workflow::worker::tick(&pool, 8, &handlers)
+            .await
+            .expect("tick")
+            == 0
+        {
+            break;
+        }
+    }
+    let (state, outputs): (String, Option<Value>) = sqlx::query_as(
+        "SELECT state, outputs FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'r'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("the task ran");
+    assert_eq!(state, "SUCCESS");
+    assert_eq!(
+        outputs,
+        Some(json!({})),
+        "pluginDefaults must apply nothing"
+    );
+    let history: Value =
+        sqlx::query_scalar("SELECT history FROM workflow.executions WHERE id = $1")
+            .bind(ex)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(history, json!(["CREATED", "RUNNING", "SUCCESS"]));
+}

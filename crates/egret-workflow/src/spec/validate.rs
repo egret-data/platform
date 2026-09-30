@@ -288,7 +288,45 @@ struct FeaturePresence {
     triggers: bool,
 }
 
+/// **The save-time report**: what a draft shows and what blocks publish
+/// (`routes::draft_dto`, `POST .../validate`, `publish`). It is
+/// [`validate_for_run`] plus the findings that only SAVING a flow may raise
+/// ([`save_only_findings`]).
+///
+/// W5b fix round 1 (user ruling 2A): `pluginDefaults:` is refused here and
+/// NOT at run time. egret dropped the key silently before W5b, so a version
+/// published then may carry it; spec §4.1: *"The refusal shows on a draft and
+/// blocks publish. A draft that runs anyway applies nothing, as Kestra's read
+/// path does."* The run-time gate, `executor::build_plan`, calls
+/// [`validate_for_run`], which cannot raise a save-only finding because it
+/// never calls [`save_only_findings`] -- the separation is in which function
+/// is called, not in a flag a caller must remember to pass.
 pub fn validate(flow: &Flow) -> ValidationReport {
+    let mut report = validate_for_run(flow);
+    save_only_findings(flow, &mut report);
+    report
+}
+
+/// Findings that refuse SAVING a flow but must never stop a stored version
+/// from running (see [`validate`]). Today: a top-level `pluginDefaults:`,
+/// whatever its value, on every flow (W5b spec §4.1) -- Kestra 2.0 removed it
+/// and refuses the key at save.
+fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
+    use crate::plugins;
+    if flow.plugin_defaults.is_some() {
+        report.errors.push(Finding {
+            code: plugins::CODE_REMOVED_PLUGIN_DEFAULTS,
+            message: plugins::REMOVED_PLUGIN_DEFAULTS_MESSAGE.to_string(),
+            path: "pluginDefaults".to_string(),
+        });
+    }
+}
+
+/// **The run-time gate** (`executor::build_plan`'s third gate): every
+/// structural, semantic and not-yet-enforced finding -- everything
+/// [`validate`] reports except [`save_only_findings`]. A stored version that
+/// passes this runs.
+pub fn validate_for_run(flow: &Flow) -> ValidationReport {
     let mut report = ValidationReport::default();
 
     validate_namespace(flow, &mut report);
@@ -405,20 +443,13 @@ fn validate_script_tasks(flow: &Flow, report: &mut ValidationReport) {
 /// flowable's `errors:` is refused too -- which is also why the bare-FQCN
 /// error is raised here rather than in `walk_task`'s `Leaf` arm.
 ///
-/// And, on **every** flow, a top-level `pluginDefaults:` (spec §4.1),
-/// whatever its value: Kestra 2.0 removed it and refuses the key at save.
+/// (`pluginDefaults:` is NOT here: it is a save-only finding, see
+/// [`save_only_findings`].)
 ///
 /// The governance gate (features, `allowed-types`, a runner) is NOT here;
 /// `publish::check_plugin_tasks` runs it after this.
 fn validate_plugin_tasks(flow: &Flow, report: &mut ValidationReport) {
     use crate::plugins;
-    if flow.plugin_defaults.is_some() {
-        report.errors.push(Finding {
-            code: plugins::CODE_REMOVED_PLUGIN_DEFAULTS,
-            message: plugins::REMOVED_PLUGIN_DEFAULTS_MESSAGE.to_string(),
-            path: "pluginDefaults".to_string(),
-        });
-    }
     let refused = plugins::plugin_tasks(flow)
         .into_iter()
         .filter_map(|(path, task, spec)| {

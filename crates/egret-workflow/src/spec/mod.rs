@@ -10,4 +10,4 @@ pub mod registry;
 pub(crate) mod validate;
 
 pub use parse::{parse, ParseError};
-pub use validate::{validate, Finding, ValidationReport};
+pub use validate::{validate, validate_for_run, Finding, ValidationReport};
