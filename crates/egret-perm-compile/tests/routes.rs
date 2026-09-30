@@ -3954,10 +3954,21 @@ async fn a_raw_operator_written_policy_is_named_with_no_model_attribution() {
 
 /// Requirement 6. **`roles` and `groups` reach the evaluator EMPTY.** egret
 /// serves no `/service/roles/download` and runs no usersync, so a policy item
-/// naming a role or a group matches nobody on any engine egret provisions
-/// (D0/D7). Sending neither is also the strongest available form of SP4c's
-/// rule that a caller may not assert a role the subject does not hold: there
-/// is no role to assert.
+/// naming a role, or a group OTHER THAN `public`, matches nobody on any engine
+/// egret provisions (D0/D7). Sending neither is also the strongest available
+/// form of SP4c's rule that a caller may not assert a role the subject does
+/// not hold: there is no role to assert.
+///
+/// **`public` is the exception, and it is not a hole in this test.**
+/// `egret-ranger-eval` matches `GROUP_PUBLIC` by NAME, independently of
+/// `request.groups` (`eval.rs`'s `match_user_group_and_owner`), because that
+/// is what Ranger does — the group check needs only a non-null `userGroups`
+/// and `setUserGroups` normalises `null` to an empty set. egret's own compiler
+/// relies on it: every clearance deny and every mask and row-filter item is
+/// emitted with `groups: ["public"]`. So a policy granting to `public` DOES
+/// decide here, and "a group matches nobody" is true only of the groups a
+/// caller could name. The group below is unique and is not `public`, which is
+/// what makes it a measurement of the forwarding and not of `public`.
 ///
 /// Both halves are made to fail OPEN if the handler forwards them — each raw
 /// policy would allow, and the subject genuinely holds the role in
@@ -4050,6 +4061,95 @@ async fn a_held_role_and_a_named_group_reach_the_evaluator_empty() {
         verdict["decision"]["reason"], "no_policy_matched",
         "and nothing matched at all, which is Ranger's own answer here; body: {body}"
     );
+}
+
+/// **A target that skips a level is REFUSED, not answered** (whole-branch
+/// review, I-4 — fail-open).
+///
+/// `request_resource` stops at the first absent level, which is the shape an
+/// engine request really has. Its comment used to cite `validate_grant_shape`
+/// and the picker as the reason a gap cannot reach it; neither guards this
+/// path. `validate_grant_shape` validates PRINCIPALS only, and the real
+/// level-skip guard is a CHECK on the stored `perm.grants`/`perm.rules` rows
+/// (`migrations/0154_perm_model.sql`) — an `explain` request body is never
+/// stored, so any `policy:read` caller can post one.
+///
+/// The consequence is fail-open and silent: `{schema: null, table: "t"}`
+/// builds the request resource `{catalog}` alone, a catalog-wide grant matches
+/// it as `SELF_AND_ALL_DESCENDANTS` while a table-level clearance deny is only
+/// a `DESCENDANT` match — which `eval.rs`'s allow test does not admit. So the
+/// caller asks about the table, the evaluator answers about the catalog, and
+/// the page says **Allowed** with full confidence. Refusing the body is the
+/// only answer that cannot mislead: there is no engine request this shape
+/// corresponds to.
+#[tokio::test]
+async fn a_target_that_skips_a_level_is_refused() {
+    let Some(f) = setup().await else { return };
+    let token = admin_session(&f).await;
+
+    for (label, target) in [
+        (
+            "a table under no schema",
+            json!({ "catalog_id": f.catalog_id, "schema": null, "table": "orders", "column": null }),
+        ),
+        (
+            "a column under no table",
+            json!({ "catalog_id": f.catalog_id, "schema": "sales", "table": null, "column": "amount" }),
+        ),
+        (
+            "a column under no schema either",
+            json!({ "catalog_id": f.catalog_id, "schema": null, "table": null, "column": "amount" }),
+        ),
+    ] {
+        let mut ask = explain_body(f.catalog_id, "alice-doe");
+        ask["target"] = target;
+        let (status, body) = into_json(
+            f.app()
+                .oneshot(req("POST", "/perm/explain", &token, Some(ask)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{label} names no resource any engine request could carry, and answering \
+             it would answer about the nearest named ANCESTOR instead — silently, and \
+             in the allow direction; body: {body}"
+        );
+    }
+
+    // The shapes that DO name a resource keep working, so the guard cannot be
+    // satisfied by refusing everything.
+    for (label, target) in [
+        (
+            "catalog only",
+            json!({ "catalog_id": f.catalog_id, "schema": null, "table": null, "column": null }),
+        ),
+        (
+            "catalog and schema",
+            json!({ "catalog_id": f.catalog_id, "schema": "sales", "table": null, "column": null }),
+        ),
+        (
+            "down to the column",
+            json!({ "catalog_id": f.catalog_id, "schema": "sales", "table": "orders", "column": "amount" }),
+        ),
+    ] {
+        let mut ask = explain_body(f.catalog_id, "alice-doe");
+        ask["target"] = target;
+        let (status, body) = into_json(
+            f.app()
+                .oneshot(req("POST", "/perm/explain", &token, Some(ask)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{label} is a resource an engine request can carry; body: {body}"
+        );
+    }
 }
 
 /// **Step 3b, pinned.** egret's tag resolution (`tag_keys_for_resource_via`)

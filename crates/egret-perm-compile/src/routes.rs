@@ -411,9 +411,19 @@ pub enum ExplainAttribution {
     /// `tags.name`) and from `classification_policies`. `tag` is `None` when
     /// the tag row is gone — a compiled clearance can outlive its gate until
     /// the next recompile, and inventing a name for it would be worse than
-    /// saying none is known. `required_roles` is empty for the same reason,
-    /// and also for a gate that declares only `required_groups` (which
-    /// compiles to no engine deny at all — D2/D7).
+    /// saying none is known.
+    ///
+    /// **`required_roles` is empty under THREE different facts, and the wire
+    /// cannot tell them apart.** (1) The `tags` row is gone, so `tag` is
+    /// `None` and there was no key to look a gate up by. (2) The gate declares
+    /// only `required_groups`, which compiles to no engine deny at all
+    /// (D2/D7). (3) There is no `classification_policies` row for the tag at
+    /// all — `clearance_gates_for_tags_via` filters on
+    /// `cardinality(cp.required_roles) > 0` and the lookup here
+    /// `.unwrap_or_default()`s, so a DELETED gate whose compiled clearance
+    /// policy is still being served reads exactly like an empty one. The page
+    /// states all three; this doc is the only place a Rust reader learns the
+    /// field is ambiguous, so it has to state them too.
     Clearance {
         tag_id: Uuid,
         tag: Option<String>,
@@ -1356,6 +1366,7 @@ async fn preview(
     request_body = ExplainRequest,
     responses(
         (status = 200, description = "One verdict per profile over the artifact each engine downloads", body = ExplainResponse),
+        (status = 400, description = "The target skips a resource level (a column implies a table implies a schema)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing policy:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1367,6 +1378,32 @@ async fn explain(
     Json(body): Json<ExplainRequest>,
 ) -> Result<Json<ExplainResponse>, PermHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
+    // **A target that skips a level is refused here, and it has to be refused
+    // rather than answered** (whole-branch review, I-4 — fail-open).
+    // `request_resource` stops at the first absent level, so
+    // `{schema: None, table: Some(_)}` builds the resource `{catalog}` alone:
+    // the caller asks about a table and the evaluator answers about its
+    // catalog. That is not a harmless approximation — a catalog-wide grant
+    // matches `{catalog}` as `SELF_AND_ALL_DESCENDANTS` (an allow) while the
+    // table-level clearance deny that would have decided the real target is
+    // only a `DESCENDANT` match, which the allow test does not admit. So the
+    // silently-substituted answer is **Allowed, with full confidence**.
+    //
+    // Nothing upstream stops it: `ScopePicker` narrows progressively so the
+    // page cannot send this, but the level-skip rule lives in a CHECK on the
+    // STORED `perm.grants`/`perm.rules` rows and an `explain` body is never
+    // stored.
+    if body.target.schema.is_none() && (body.target.table.is_some() || body.target.column.is_some())
+        || body.target.table.is_none() && body.target.column.is_some()
+    {
+        return Err(PermHttpError::BadRequest(
+            "a target cannot skip a level: a column implies a table implies a schema. \
+             An engine request names exactly the levels the query touched, so a gap \
+             names no resource any engine could ask about — and answering it would \
+             answer about the nearest named ancestor instead"
+                .into(),
+        ));
+    }
     let mut conn = st.perm.pool().acquire().await.map_err(PermHttpError::db)?;
 
     // Reported for the steward, and NOT passed to the evaluator — see
@@ -1553,10 +1590,21 @@ fn request_resource(engine: EngineType, catalog_name: &str, target: &Scope) -> R
     ] {
         match value {
             Some(v) => resource.insert(name, v),
-            // A gap below a named level cannot happen — `validate_grant_shape`
-            // and the picker both forbid `{schema: None, table: Some(_)}` — but
-            // stopping at the first absent level is the shape an engine request
-            // has either way.
+            // Stopping at the first absent level is the shape an engine
+            // request has, and it is only correct because a gap below a named
+            // level cannot reach here: `explain` refuses
+            // `{schema: None, table: Some(_)}` with a 400 at the top of the
+            // handler, and `ScopePicker` narrows progressively so the page
+            // never sends one.
+            //
+            // **The guard is the handler's, not `validate_grant_shape`'s.**
+            // This comment used to cite that function, and the citation was
+            // wrong in a way that mattered: `validate_grant_shape` validates
+            // PRINCIPALS only, and the real level-skip rule is a CHECK on the
+            // stored `perm.grants`/`perm.rules` rows
+            // (`migrations/0154_perm_model.sql`), which an unstored request
+            // body never passes through. Breaking here under a gap answers
+            // about the nearest named ANCESTOR — fail-open, see the handler.
             None => break,
         }
     }

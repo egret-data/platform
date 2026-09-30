@@ -132,7 +132,17 @@ function unmodelledPhrase(u: WireUnmodelled): string {
     case "delegate_admin":
       return `a delegated-admin item (${BUCKET_LABEL[u.bucket]} ${u.index})`;
   }
-  return "a construct this page does not recognise yet";
+  // **No wildcard, and no string fallback either** (whole-branch review,
+  // I-5). `explain_wire.rs`'s module doc spends 25 lines arguing that a
+  // catch-all here "would convert a future fail-open defect in the evaluator
+  // into a green build", and a whole pushback round was spent enforcing
+  // exhaustive mirroring BY BUILD BREAK. A trailing `return "…"` undoes
+  // exactly that: TypeScript already proves the switch above exhaustive
+  // (removing the fallback produces no `tsc` diagnostic), so the string was
+  // unreachable and its only effect was to let a new variant compile. SP4d-2b
+  // adds variants to these very enums.
+  const _never: never = u;
+  return _never;
 }
 
 function graphProblemPhrase(p: WireGraphProblem): string {
@@ -144,7 +154,8 @@ function graphProblemPhrase(p: WireGraphProblem): string {
     case "broken_parent_chain":
       return `“${p.resource}” has a broken parent chain`;
   }
-  return "the definition does not describe a usable hierarchy";
+  const _never: never = p;
+  return _never;
 }
 
 function serviceDefIssuePhrase(i: WireServiceDefIssue): string {
@@ -158,7 +169,8 @@ function serviceDefIssuePhrase(i: WireServiceDefIssue): string {
     case "invalid_resource_graph":
       return `the ${POLICY_TYPE_LABEL[i.policy_type]} resource graph is invalid: ${graphProblemPhrase(i.reason)}`;
   }
-  return "its definition carries something egret does not model";
+  const _never: never = i;
+  return _never;
 }
 
 /**
@@ -217,7 +229,8 @@ function causeSentence(c: WireUndecidableCause): string {
     case "plugin_version_mismatch":
       return `This profile declares ${PLUGIN_LABEL[c.declared]} but ${ENGINE_LABEL[c.engine]} is running ${PLUGIN_LABEL[c.measured]}, and the two evaluate differently.`;
   }
-  return "The evaluator named a cause this page does not recognise yet.";
+  const _never: never = c;
+  return _never;
 }
 
 /**
@@ -305,7 +318,15 @@ function RawPolicy({
   // (`seed_admin_all_access` → `egret-admin - …`, `seed_default_trino_policies`
   // → `all - …`). A seeded admin policy is the EXPECTED explanation for an
   // administrator, so it must not be dressed as a finding.
+  //
+  // **The two families are seeded by different paths and the copy below must
+  // not claim one origin for both** (whole-branch review, Minor). Auto-bind's
+  // thirteen `egret-admin` hierarchies go onto every GENERATED profile;
+  // `seed_default_trino_policies`' `all - …` family only ever runs on a
+  // NON-generated one, so naming auto-bind for it would say the opposite of
+  // the truth.
   const seeded = policyName.startsWith("egret-admin") || policyName.startsWith("all - ");
+  const seededByAutoBind = policyName.startsWith("egret-admin");
   return (
     <div
       data-testid="raw-policy"
@@ -318,7 +339,9 @@ function RawPolicy({
       </Badge>
       <p className="text-xs text-muted-foreground">
         {seeded
-          ? "egret seeds this policy itself, outside the permission model: auto-bind puts thirteen admin-all-access hierarchies onto every generated profile, granting its platform admins all access. For an administrator this is the expected explanation."
+          ? seededByAutoBind
+            ? "egret seeds this policy itself, outside the permission model: auto-bind puts thirteen admin-all-access hierarchies onto every generated profile, granting its platform admins all access. For an administrator this is the expected explanation."
+            : "egret seeds this policy itself, outside the permission model: it belongs to the default Trino policy set, which is seeded onto a profile egret did not generate. For an administrator this is the expected explanation."
           : "egret’s compiler did not mint this policy, so it is outside the permission model and has no governance page to open. It is reported by its Ranger name and id, because it decided this access."}
       </p>
       <p className="text-xs text-muted-foreground">
@@ -792,7 +815,14 @@ export default function ExplainAccess() {
                colour: nothing is enforcing on this target, which is a
                different fact from something refusing the access. Collapsing
                the two would tell a steward the model is withholding an access
-               when in truth no plugin is ever consulted about the resource. */
+               when in truth no policy set egret compiles covers the resource.
+
+               **It does not say "no plugin is ever consulted"** (whole-branch
+               review, Minor). `ExplainOutcome::NoProfileServesTheCatalog` has
+               three routes in, and in the second — a profile egret's compiler
+               does not target, a tag service say — a plugin IS downloading.
+               What is true of all three is that no profile egret compiles for
+               covers this catalog, so that is what the copy claims. */
             <Alert data-testid="no-profile-state">
               <AlertDescription className="space-y-1">
                 <Badge variant="outline" className="gap-1">
@@ -800,10 +830,10 @@ export default function ExplainAccess() {
                   Nothing is enforcing
                 </Badge>
                 <p className="text-sm">
-                  No policy profile serves this catalog, so no engine plugin is ever
-                  consulted about it. This is not a denial — nothing is enforcing here,
-                  which is a different fact from a policy refusing the access. Attach the
-                  catalog to a profile if it is meant to be governed.
+                  No policy profile serves this catalog, so no policy set egret compiles
+                  covers it. This is not a denial — nothing is enforcing here, which is a
+                  different fact from a policy refusing the access. Attach the catalog to a
+                  profile if it is meant to be governed.
                 </p>
               </AlertDescription>
             </Alert>
@@ -856,15 +886,28 @@ export default function ExplainAccess() {
                 resolve.
               </p>
               <p>
-                A policy that grants through a role or a group matches nobody on these
-                engines: egret serves no roles download and runs no usersync, so explain
-                sends neither — any verdict here is what the engine reaches for this
-                username alone.
+                A policy that grants through a role, or through any group except{" "}
+                <span className="font-mono">public</span>, matches nobody on these engines:
+                egret serves no roles download and runs no usersync, so explain sends
+                neither.{" "}
+                <span className="font-mono">public</span> is the exception and it does
+                decide — Ranger matches it by name whatever the request carries, and egret’s
+                own compiler grants and denies through it, so a verdict here can come from a{" "}
+                <span className="font-mono">public</span> policy. Otherwise any verdict is
+                what the engine reaches for this username alone.
               </p>
               <p>
                 There is no field here to assert a role, a group or a workspace the subject
                 does not hold, so this answers why the subject is allowed or refused as they
                 are — not what would happen if they held something else.
+              </p>
+              <p>
+                This answers about ACCESS only. A column the engine masks, or a table whose
+                rows it filters, is reported here exactly like one it does not: the verdict
+                says whether the read is permitted, never that what comes back is redacted.
+                The previous version of this page named the masking or filtering rule;
+                evaluating the served artifact answers access, and mask and row-filter
+                verdicts arrive with SP4d-2b.
               </p>
               <p>
                 Each plugin polls for its policy set on an interval, so an engine can still

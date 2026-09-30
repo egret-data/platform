@@ -6179,6 +6179,16 @@
               }
             }
           },
+          "400": {
+            "description": "The target skips a resource level (a column implies a table implies a schema)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Not authenticated",
             "content": {
@@ -34629,7 +34639,7 @@
           },
           {
             "type": "object",
-            "description": "`perm-clearance-{tag_id}[-{locator}]`. A clearance has no Ranger\nanalogue on the wire, so `tag` and `required_roles` are reconstructed\nhere from the `tags` row the name points at (`tags.key`, not\n`tags.name`) and from `classification_policies`. `tag` is `None` when\nthe tag row is gone — a compiled clearance can outlive its gate until\nthe next recompile, and inventing a name for it would be worse than\nsaying none is known. `required_roles` is empty for the same reason,\nand also for a gate that declares only `required_groups` (which\ncompiles to no engine deny at all — D2/D7).",
+            "description": "`perm-clearance-{tag_id}[-{locator}]`. A clearance has no Ranger\nanalogue on the wire, so `tag` and `required_roles` are reconstructed\nhere from the `tags` row the name points at (`tags.key`, not\n`tags.name`) and from `classification_policies`. `tag` is `None` when\nthe tag row is gone — a compiled clearance can outlive its gate until\nthe next recompile, and inventing a name for it would be worse than\nsaying none is known.\n\n**`required_roles` is empty under THREE different facts, and the wire\ncannot tell them apart.** (1) The `tags` row is gone, so `tag` is\n`None` and there was no key to look a gate up by. (2) The gate declares\nonly `required_groups`, which compiles to no engine deny at all\n(D2/D7). (3) There is no `classification_policies` row for the tag at\nall — `clearance_gates_for_tags_via` filters on\n`cardinality(cp.required_roles) > 0` and the lookup here\n`.unwrap_or_default()`s, so a DELETED gate whose compiled clearance\npolicy is still being served reads exactly like an empty one. The page\nstates all three; this doc is the only place a Rust reader learns the\nfield is ambiguous, so it has to state them too.",
             "required": [
               "tag_id",
               "required_roles",

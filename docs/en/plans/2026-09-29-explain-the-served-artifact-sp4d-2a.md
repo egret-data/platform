@@ -56,6 +56,23 @@ as a test oracle.
 - Commands over ~120s are auto-backgrounded; a completion notification is a
   finished result to read, not a signal to wait. Commit before running one.
 
+## Non-goals
+
+- **Tag-policy evaluation** — SP4d-2b, see the spec's own Non-goals.
+- **Reporting masks and row filters at all** — SP4d-2b. The retired
+  `ExplainReason` carried `masked_by_rule` / `filtered_by_rule` with their
+  `mask_type` and `filter_expr`, and the old page rendered both; the per-profile
+  response carries an ACCESS decision and nothing else, so a steward asking
+  about read access on a masked column is no longer told the column is masked.
+  `WireMaskDecision` and `WireRowFilterDecision` exist and are deliberately
+  unregistered — registering a mirror for a field no response returns would
+  invent a contract — so the limit is stated instead, on the page and here.
+  **It was only visible from the whole branch:** no task diff shows it as a
+  removal, because the old reason mapping went out wholesale with the model
+  evaluator. This is D9 in its dual form — a limit that now holds and is
+  unstated teaches a reader the tool is more complete than it is.
+- **Narrowing `ServiceConfig`** — fail-open, see the spec's D3.
+
 ---
 
 ### Task 1: Narrow the `tagPolicies` refusal to the tier that can actually decide

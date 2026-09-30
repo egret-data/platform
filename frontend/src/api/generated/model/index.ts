@@ -186,7 +186,6 @@ export * from './explainAccess';
 export * from './explainAttribution';
 export * from './explainOutcome';
 export * from './explainProfile';
-export * from './explainReason';
 export * from './explainRequest';
 export * from './explainResponse';
 export * from './explainSubject';

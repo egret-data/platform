@@ -182,6 +182,11 @@ export const usePermCompile = <TError = ErrorBody,
   status: 200
 }
 
+export type permExplainResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type permExplainResponse401 = {
   data: ErrorBody
   status: 401
@@ -200,7 +205,7 @@ export type permExplainResponse500 = {
 export type permExplainResponseSuccess = (permExplainResponse200) & {
   headers: Headers;
 };
-export type permExplainResponseError = (permExplainResponse401 | permExplainResponse403 | permExplainResponse500) & {
+export type permExplainResponseError = (permExplainResponse400 | permExplainResponse401 | permExplainResponse403 | permExplainResponse500) & {
   headers: Headers;
 };
 

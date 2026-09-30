@@ -664,6 +664,56 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(causes[1]).not.toHaveTextContent(/every catalog this profile serves/i);
   });
 
+  /**
+   * **The count is content-derived, and a count of ONE is the case the suite
+   * did not hold** (whole-branch review, the surviving mutant). Every other
+   * fixture here carries 2 or 3 tag policies, so replacing
+   * `count === 1 ? "policy" : "policies"` with a bare `"policies"` left all
+   * nineteen tests green. The browser gate falsified it live — deleting one of
+   * two tag policies moved the sentence to "1 tag policy" — but nothing in the
+   * suite could have caught the regression, and a count that reads "1 tag
+   * policies" is the shape a hard-coded number wears.
+   */
+  test("one tag policy is named in the singular", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "undecidable",
+                  why: [
+                    {
+                      kind: "envelope_construct",
+                      construct: { kind: "tag_policies", block: { kind: "policies", count: 1 } },
+                    },
+                  ],
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const causes = within(result).getAllByTestId("undecidable-cause");
+    expect(causes[0]).toHaveTextContent(/\b1 tag policy\b/);
+    expect(causes[0]).not.toHaveTextContent(/1 tag policies/);
+  });
+
   test("tags render honestly when the target carries none", async () => {
     mutateAsync.mockResolvedValueOnce({
       status: 200,
@@ -717,10 +767,17 @@ describe("ExplainAccess — the subject is a user and nothing else", () => {
    * removed from that struct for the third version of one reason: a
    * caller-supplied value cannot stand in for a fact only egret can verify.
    * `roles` and `groups` reach the evaluator EMPTY because egret serves no
-   * roles download and runs no usersync, so a policy item naming either
-   * matches nobody on any engine egret provisions. A field whose value can
-   * change no answer lies about what the endpoint does, so the input is gone
-   * and the request carries neither key.
+   * roles download and runs no usersync, so a policy item naming a role, or a
+   * group OTHER THAN `public`, matches nobody on any engine egret provisions.
+   * A field whose value can change no answer lies about what the endpoint
+   * does, so the input is gone and the request carries neither key.
+   *
+   * **`public` is the exception, and the reason removing the field loses
+   * nothing.** `egret-ranger-eval` matches `public` by NAME, independently of
+   * what the request carries, because Ranger does — so a policy granting to
+   * `public` decides here either way, and a caller could never have changed
+   * that by naming it. Every other group name is a value only egret could
+   * verify and egret cannot.
    */
   test("offers no Groups or Roles field and sends neither key", async () => {
     const user = userEvent.setup();
