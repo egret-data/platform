@@ -13,9 +13,34 @@ them.
 
 **Spec:** `docs/en/specs/2026-09-30-evaluate-tag-policies-sp4d-2b-design.md`
 
-## Open item for the whole-branch review — raised by Task 5, not closed
+## Open items — raised by Task 5, ranked
 
-**Is the composed ACCESS path finished?** Task 5's gate found **five** defects in
+### Item 0 (top): model or refuse `accessTypeResults`, before any further corpus work
+
+`evaluatePolicyItems`' **`accessTypeResults` map lives in the request context and
+spans evaluators**, and it is live on **every** request, not only `_any` ones
+(`getAllRequestedAccessTypes` falls back to `singleton(getAccessType())`). Two
+defects already trace to it: T4 (the tag phase arbitrates by `policyPriority`, which
+the crate's prose asserted it did not) and T7 (`evaluatePolicyItems` offsets 627-643
+copy the map's priority back via `setAccessResultFrom(getCompositeAccessResult(…))`,
+so a tag ALLOW makes `result` already-allowed at a *lower* priority than a resource
+allower, and the composite raises a priority the crate's model says does not move).
+
+**T7 does NOT reach merged `main`** — measured at both plugin versions with no tag
+block: Ranger and the crate agree, id for id, and `main` declines any tag block that
+could decide. So this is a branch finding, not a shipped defect.
+
+Why it is nonetheless item 0: the corpus now carries **two held-out shapes** (T6's
+empty request level, T7's resource priorities) plus **one refusal with no corpus
+coverage**, all pointing at this one mechanism — and with T7's shape held out,
+**nothing executable in the gate can report the mechanism at all**. Both the
+implementer and the reviewer independently concluded that no further corpus
+extension should precede this. Tasks 6-8 do not extend the corpus, so they are not
+blocked; anything that does, is.
+
+### Item 1: is the composed ACCESS path finished?
+
+**No, on the evidence.** Task 5's gate found **five** defects in
 code that 127 unit tests and three review rounds had passed, and the fifth only
 became visible once the fourth was fixed. Its implementer said plainly it does not
 believe the path is done, and named the one audit it could not close:
