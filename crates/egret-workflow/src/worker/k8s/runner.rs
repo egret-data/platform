@@ -77,8 +77,8 @@ use crate::scripts::RunnerSpec;
 use crate::worker::commands::{
     expand_outputs, listing_too_big, output_problem, pattern_dirs, relative_problem, run_liveness,
     stream_line, CommandsResult, LineObserver, OrphanSweep, StreamState, TaskCommands, TaskRunner,
-    MAX_LISTING_BYTES, MAX_OUTPUT_FILE_BYTES, MAX_OUTPUT_NAMES, MAX_VARS_BYTES, RUN_NAME_PREFIX,
-    TASKRUN_LABEL, WORKING_DIR,
+    CANCEL_WAIT_MARGIN, MAX_LISTING_BYTES, MAX_OUTPUT_FILE_BYTES, MAX_OUTPUT_NAMES, MAX_VARS_BYTES,
+    RUN_NAME_PREFIX, TASKRUN_LABEL, WORKING_DIR,
 };
 use crate::worker::TaskInput;
 
@@ -210,6 +210,36 @@ impl KubernetesRunner {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(()),
             Err(e) => Err(internal("deleting the task pod", e)),
+        }
+    }
+
+    /// Poll `name` until it is gone or `main` has terminated, for at most
+    /// `bound`; past it, a WARN. A read that fails is retried until the
+    /// bound: the delete has been issued, and an early return would let
+    /// `release`'s grace-0 delete cut the grace short.
+    async fn wait_main_stopped(&self, task: &TaskInput, name: &str, bound: Duration) {
+        let deadline = tokio::time::Instant::now() + bound;
+        loop {
+            match self.pods().get_opt(name).await {
+                Ok(None) => return,
+                Ok(Some(p)) if matches!(phase(status_of(&p, MAIN)), Phase::Terminated { .. }) => {
+                    return
+                }
+                Ok(Some(_)) => {}
+                Err(e) => {
+                    tracing::debug!(pod = %name, "waiting for the cancelled task pod to stop: {e}")
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    run = %task.run_id,
+                    pod = %name,
+                    "the task pod had not stopped {bound:?} after it was deleted with a \
+                     grace; it is left to the kubelet's SIGKILL"
+                );
+                return;
+            }
+            tokio::time::sleep(self.poll).await;
         }
     }
 
@@ -374,6 +404,7 @@ impl KubernetesRunner {
                     self.max_vars_bytes,
                     &line,
                     is_err,
+                    cmds.host_protocol,
                 )
                 .await;
             }
@@ -1173,11 +1204,41 @@ impl TaskRunner for KubernetesRunner {
         }
     }
 
-    /// Delete the attempt's pod with grace 0 — Kestra's `killGracePeriod`
-    /// default of zero. A pod that is not there is `Ok(())`.
-    async fn cancel(&self, task: &TaskInput) -> Result<()> {
-        self.delete_pod(&pod_name(task.run_id, attempt_of(task)))
+    /// Delete the attempt's pod. A pod that is not there is `Ok(())`.
+    ///
+    /// **Grace 0** is W5a's cancel exactly: delete with `gracePeriodSeconds`
+    /// 0 -- Kestra's `killGracePeriod` default -- and return.
+    ///
+    /// **A grace (W5b, spec §7.1)** deletes with `gracePeriodSeconds =
+    /// grace` (whole seconds, rounded up): the kubelet sends SIGTERM to every
+    /// container and SIGKILL at the grace. Then this waits, polling the pod,
+    /// until it is gone or `main` shows terminated. **In practice that is the
+    /// pod gone**: measured on kind (1.33.1), the kubelet reports no
+    /// container terminated until all of them have stopped, which is why
+    /// `files-out` exits on SIGTERM ([`pod_spec::files_out_script`]) -- the
+    /// pod then goes when `main` does. The wait is bounded by `grace` +
+    /// [`CANCEL_WAIT_MARGIN`]; a pod still there then is a WARN and
+    /// `Ok(())`, since the outcome is the budget's either way (`cancel.rs`
+    /// fact 2). [`release`](TaskRunner::release) then deletes with grace 0.
+    async fn cancel(&self, task: &TaskInput, grace: Duration) -> Result<()> {
+        let name = pod_name(task.run_id, attempt_of(task));
+        if grace.is_zero() {
+            return self.delete_pod(&name).await;
+        }
+        let secs = grace.as_secs() + u64::from(grace.subsec_nanos() > 0);
+        let secs = u32::try_from(secs).unwrap_or(u32::MAX);
+        match self
+            .pods()
+            .delete(&name, &DeleteParams::default().grace_period(secs))
             .await
+        {
+            Ok(_) => {}
+            Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(()),
+            Err(e) => return Err(internal("deleting the task pod", e)),
+        }
+        self.wait_main_stopped(task, &name, grace + CANCEL_WAIT_MARGIN)
+            .await;
+        Ok(())
     }
 
     /// After the commit: delete the pod (grace 0) when `spec.delete`, else

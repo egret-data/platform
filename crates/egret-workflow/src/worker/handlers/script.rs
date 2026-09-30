@@ -268,6 +268,7 @@ impl Script {
             env,
             input_files,
             output_files,
+            host_protocol: false,
         })
     }
 }
@@ -401,7 +402,7 @@ impl TaskHandler for Script {
     /// another is refused before any runner is called -- so there is nothing
     /// to choose.
     async fn cancel(&self, task: &TaskInput) -> Result<()> {
-        self.rt.runner.cancel(task).await
+        self.rt.runner.cancel(task, std::time::Duration::ZERO).await
     }
 
     /// **After the outcome committed** (`claim::run_one`; final review I3):
@@ -1092,6 +1093,11 @@ mod tests {
         assert_eq!(
             spy.cancelled.lock().unwrap().as_slice(),
             ["egret-run-00000000000000000000000000000009-1"]
+        );
+        assert_eq!(
+            spy.cancel_graces.lock().unwrap().as_slice(),
+            [std::time::Duration::ZERO],
+            "a script task cancels with grace 0: W5a's cancel, unchanged (W5b)"
         );
     }
 

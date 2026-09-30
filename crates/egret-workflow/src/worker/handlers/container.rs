@@ -185,6 +185,8 @@ pub(super) mod testing {
         /// The `taskRunner:` spec each run was given.
         pub specs: Mutex<Vec<crate::scripts::RunnerSpec>>,
         pub cancelled: Mutex<Vec<String>>,
+        /// The `grace` every `cancel` was given.
+        pub cancel_graces: Mutex<Vec<std::time::Duration>>,
         /// `(container name, delete)` for every `release`.
         pub released: Mutex<Vec<(String, bool)>>,
         /// What `adopt` answers: `Some` = a started container exists for the
@@ -253,6 +255,7 @@ pub(super) mod testing {
                     usize::MAX,
                     &line,
                     is_err,
+                    commands.host_protocol,
                 )
                 .await;
             }
@@ -263,7 +266,8 @@ pub(super) mod testing {
                 .unwrap_or_else(|| Ok(CommandsResult::default()))
         }
 
-        async fn cancel(&self, task: &TaskInput) -> Result<()> {
+        async fn cancel(&self, task: &TaskInput, grace: std::time::Duration) -> Result<()> {
+            self.cancel_graces.lock().unwrap().push(grace);
             self.cancelled
                 .lock()
                 .unwrap()

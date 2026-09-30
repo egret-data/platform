@@ -207,9 +207,25 @@ pub fn main_argv(cmds: &TaskCommands) -> Vec<String> {
 /// log (`tail -F`, from the first line, retried until the file exists), then
 /// wait for [`ENDED_MARKER`]. Nothing else writes to this container's stdout,
 /// so its log IS `main`'s stderr (plus the end sentinel egret appends).
+///
+/// # It exits on SIGTERM (W5b Task 5)
+///
+/// A cancel with a grace deletes the pod with `gracePeriodSeconds` and waits
+/// for it to go ([`TaskRunner::cancel`]). Measured on kind (Kubernetes
+/// 1.33.1): while a pod terminates, the kubelet reports NO container as
+/// terminated until every container has stopped -- `main` exited at +5 s
+/// and showed `running` until +31 s, when this helper, which ignored SIGTERM
+/// as a PID 1 without a handler, was SIGKILLed at the grace. So this helper
+/// must stop on SIGTERM, or every graceful cancel sits out its whole grace.
+/// Nothing reads this stream after a cancel -- the run's future was dropped
+/// by the budget before `cancel` is called -- and a grace-0 delete is
+/// SIGKILL either way, so W5a's paths see no difference.
+///
+/// [`TaskRunner::cancel`]: crate::worker::commands::TaskRunner::cancel
 pub fn files_out_script() -> String {
     format!(
-        "touch {STDERR_FILE}\n\
+        "trap 'exit 0' TERM\n\
+         touch {STDERR_FILE}\n\
          tail -n +1 -F {STDERR_FILE} 2>/dev/null &\n\
          while [ ! -f {MARKERS_DIR}/{ENDED_MARKER} ]\n\
          do\n  sleep 0.5\n\
@@ -686,6 +702,7 @@ mod tests {
             env: BTreeMap::from([("B".into(), "2".into()), ("A".into(), "1".into())]),
             input_files: BTreeMap::new(),
             output_files: vec![],
+            host_protocol: false,
         }
     }
 
@@ -1235,6 +1252,10 @@ mod tests {
             "{script}"
         );
         assert!(script.contains("/egret/markers/ended"), "{script}");
+        assert!(
+            script.starts_with("trap 'exit 0' TERM\n"),
+            "files-out stops on SIGTERM, so a graceful delete ends when main does: {script}"
+        );
         assert!(
             !script.contains("echo"),
             "files-out's log IS main's stderr, so the helper itself prints nothing: {script}"

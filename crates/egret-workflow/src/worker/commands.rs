@@ -250,6 +250,25 @@ pub struct TaskCommands {
     /// and failed a missing one. The 1 MiB per-file and total caps stay: the
     /// value is the contents, not a storage URI (W9).
     pub output_files: Vec<String>,
+    /// **The plugin host's stdout protocol** (W5b): `false` for every script
+    /// task, which keeps W5a's and W11's line rules byte for byte.
+    ///
+    /// `true` only from the `kestra.*` handler, whose image runs
+    /// `EgretPluginHost` with logback's `%level %msg%n` on stdout. Then
+    /// [`ingest_line`]:
+    ///
+    /// * levels a stdout line that starts with `TRACE`, `DEBUG`, `INFO`,
+    ///   `WARN` or `ERROR` and ONE space, and strips that prefix;
+    /// * gives a stdout line with no prefix -- a Java stack trace's `\tat …`
+    ///   and `Caused by: …` -- the level of the stdout line before it (INFO,
+    ///   or DEBUG inside a bracket, when there is none);
+    /// * harvests a `::{"egretFailure": {"code": n, "message": "…"}}::`
+    ///   marker into [`CommandsResult::host_failure`].
+    ///
+    /// stderr stays ERROR, and the debug bracket and the `outputs` marker
+    /// rules are unchanged. Not part of the container: the argv, env and pod
+    /// are built the same way whatever this says.
+    pub host_protocol: bool,
 }
 
 impl TaskCommands {
@@ -314,7 +333,29 @@ pub struct CommandsResult {
     /// now reserved for egret's own outage, which is the split
     /// [`handlers::container::mapped`](super::handlers::container) reads.
     pub failure: Option<String>,
+    /// The plugin host's `::{"egretFailure": {"code": n, "message": "…"}}::`
+    /// line, **harvested only under [`TaskCommands::host_protocol`]** -- for a
+    /// script the key is ignored like every non-`outputs` key (W11's rule).
+    ///
+    /// The runner records it and decides nothing: the handler maps the exit
+    /// code and puts the message in the FAILED reason (and on a timeout the
+    /// outcome is the budget's whatever the host printed, `cancel.rs` fact 2).
+    /// When the host prints more than one, the last one stands.
+    pub host_failure: Option<HostFailure>,
 }
+
+/// What the plugin host said about its own failure.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostFailure {
+    /// The host's exit code as it printed it (`2`, `3`, `4`).
+    pub code: i32,
+    /// At most [`MAX_HOST_FAILURE_BYTES`], cut at a char boundary.
+    pub message: String,
+}
+
+/// The longest an `egretFailure` message is kept, in bytes (W5b global
+/// constraints: 4 KiB). It becomes a task run's FAILED reason.
+pub const MAX_HOST_FAILURE_BYTES: usize = 4096;
 
 /// **Where** a command runs.
 ///
@@ -399,7 +440,21 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
     ///
     /// The caller is [`cancel::guarded`](super::TaskHandler::cancel) by way of
     /// a handler, and it has no handle to pass: see [`container_name`].
-    async fn cancel(&self, task: &TaskInput) -> Result<()>;
+    ///
+    /// # `grace` (W5b)
+    ///
+    /// `Duration::ZERO` is W5a's cancel, unchanged: kill and remove at once
+    /// (Kestra's `killGracePeriod` default). The script handler passes it.
+    ///
+    /// A non-zero `grace` asks the container to stop: SIGTERM to its PID 1,
+    /// SIGKILL after `grace`. **`cancel` then returns only once the container
+    /// has stopped, or `grace` + [`CANCEL_WAIT_MARGIN`] has passed** -- the
+    /// outcome commits after `cancel`, and [`release`](Self::release) then
+    /// removes the container with grace 0, which would otherwise cut the
+    /// plugin host's `kill()` short (spec §7.1). A container still running at
+    /// the bound is a WARN and `Ok(())`: the outcome is the budget's either
+    /// way (`cancel.rs` fact 2).
+    async fn cancel(&self, task: &TaskInput, grace: std::time::Duration) -> Result<()>;
 
     /// Free `task`'s container or pod once its outcome has **committed**
     /// (`TaskHandler::release`): delete it when `spec.delete` (the default),
@@ -411,6 +466,10 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
     /// means to it.
     async fn release(&self, task: &TaskInput, spec: &RunnerSpec) -> Result<()>;
 }
+
+/// How long past its `grace` a [`TaskRunner::cancel`] waits for the container
+/// to stop before giving up with a WARN.
+pub const CANCEL_WAIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Something that sees each line a runner writes, before it goes to
 /// `task.log` — `handlers::python`'s `NameHintSink`, which connects a
@@ -438,6 +497,10 @@ impl LineObserver for NoObserver {
 pub(crate) struct StreamState {
     pub vars_bytes: usize,
     pub debug: bool,
+    /// Under [`TaskCommands::host_protocol`]: the level of the last stdout
+    /// line that carried a prefix, which a line with none (a stack trace's
+    /// continuation) takes. `None` until the first one.
+    pub last_level: Option<LogLevel>,
 }
 
 /// The line that opens a DEBUG bracket: `DefaultLogConsumer.LOG_DEBUG_MARKER`.
@@ -451,6 +514,9 @@ pub const LOG_INFO_MARKER: &str = "##kestra:log:info##";
 /// The async half of line handling, shared by [`DockerRunner`] and every fake
 /// runner in the tests, so a test driving a fake exercises the same levels and
 /// the same destination the real runner does.
+// Eight plain arguments, each [`ingest_line`]'s or the sink's; a struct for
+// one call shape shared by three runners and a fake would only rename them.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_line(
     task: &TaskInput,
     observer: &dyn LineObserver,
@@ -459,8 +525,11 @@ pub(crate) async fn stream_line(
     max_vars_bytes: usize,
     line: &str,
     is_err: bool,
+    host_protocol: bool,
 ) {
-    if let Some((level, text)) = ingest_line(result, state, max_vars_bytes, line, is_err) {
+    if let Some((level, text)) =
+        ingest_line(result, state, max_vars_bytes, line, is_err, host_protocol)
+    {
         observer.observe(level, &text);
         task.log.line(level, &text).await;
     }
@@ -582,6 +651,11 @@ pub fn labels(task: &TaskInput) -> Vec<(String, String)> {
 /// 3. stderr is **ERROR** — measured with `warningOnStdErr` default, `false`
 ///    and `true` alike, and `parseOut` tests the stream before the bracket, so
 ///    also inside one. stdout is DEBUG inside a bracket and INFO outside.
+/// 4. **Under `host_protocol` only** (W5b, [`TaskCommands::host_protocol`]):
+///    a stdout line `LEVEL message` is stored at `LEVEL` as `message`, a
+///    stdout line with no prefix at the previous prefixed line's level (rule
+///    3's when there is none), and an `egretFailure` marker fills
+///    [`CommandsResult::host_failure`]. With it off, none of this happens.
 ///
 /// **The cap sets [`CommandsResult::failure`] and clears the vars rather than
 /// returning an error.** Returning one mid-stream abandoned the exit code and
@@ -594,6 +668,7 @@ pub(crate) fn ingest_line<'a>(
     max_vars_bytes: usize,
     line: &'a str,
     is_err: bool,
+    host_protocol: bool,
 ) -> Option<(LogLevel, std::borrow::Cow<'a, str>)> {
     let bare = line.trim_end_matches(['\r', '\n']);
     if bare == LOG_DEBUG_MARKER {
@@ -621,6 +696,13 @@ pub(crate) fn ingest_line<'a>(
     match classify_marker(line) {
         Marker::Ordinary => {}
         Marker::Object(obj) => {
+            // The host's failure line: read only under the protocol, so a
+            // script's own `egretFailure` key stays ignored (W11's rule).
+            if host_protocol {
+                if let Some(failure) = host_failure_of(&obj) {
+                    result.host_failure = Some(failure);
+                }
+            }
             if let Some(serde_json::Value::Object(outputs)) = obj.get("outputs") {
                 for (k, v) in outputs {
                     state.vars_bytes += k.len() + v.to_string().len();
@@ -647,14 +729,67 @@ pub(crate) fn ingest_line<'a>(
         }
     }
 
-    let level = if is_err {
-        LogLevel::Error
-    } else if state.debug {
+    let unprefixed = if state.debug {
         LogLevel::Debug
     } else {
         LogLevel::Info
     };
-    Some((level, std::borrow::Cow::Borrowed(line)))
+    if is_err {
+        return Some((LogLevel::Error, std::borrow::Cow::Borrowed(line)));
+    }
+    if host_protocol {
+        // `%level %msg%n`: the prefix is the level and is not stored. A line
+        // without one (a stack trace's `\tat …`, `Caused by: …`) belongs to
+        // the log event before it, so it takes that event's level.
+        return Some(match host_prefix(line) {
+            Some((level, message)) => {
+                state.last_level = Some(level);
+                (level, std::borrow::Cow::Borrowed(message))
+            }
+            None => (
+                state.last_level.unwrap_or(unprefixed),
+                std::borrow::Cow::Borrowed(line),
+            ),
+        });
+    }
+    Some((unprefixed, std::borrow::Cow::Borrowed(line)))
+}
+
+/// `LEVEL message` -> `(LEVEL, message)`: one of the five names, exactly as
+/// logback's `%level` prints them, then ONE space. Anything else is `None`.
+fn host_prefix(line: &str) -> Option<(LogLevel, &str)> {
+    let (head, message) = line.split_once(' ')?;
+    LogLevel::parse(head).map(|level| (level, message))
+}
+
+/// `{"egretFailure": {"code": n, "message": "…"}}` -> a [`HostFailure`], the
+/// message cut to [`MAX_HOST_FAILURE_BYTES`]. A payload of any other shape
+/// is ignored: the exit code still fails the task, and the handler names it.
+fn host_failure_of(obj: &serde_json::Map<String, serde_json::Value>) -> Option<HostFailure> {
+    let failure = obj.get("egretFailure")?.as_object()?;
+    let code = i32::try_from(failure.get("code")?.as_i64()?).ok()?;
+    let message = failure
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    Some(HostFailure {
+        code,
+        message: truncate_on_char_boundary(message, MAX_HOST_FAILURE_BYTES).to_string(),
+    })
+}
+
+/// The longest prefix of `s` that is at most `max` bytes and ends on a char
+/// boundary. One slice, no re-encoding: the cut moves back at most three
+/// bytes (a UTF-8 char is at most four).
+pub(crate) fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// What [`classify_marker`] makes of a line.
@@ -1436,8 +1571,21 @@ impl TaskRunner for DockerRunner {
     /// **A container that is not there is `Ok(())`**, which is the artifact's
     /// answer too -- `Docker.kill`'s exception table catches
     /// `NotFoundException` and returns without logging.
-    async fn cancel(&self, task: &TaskInput) -> Result<()> {
+    ///
+    /// # With a `grace` (W5b): `docker stop -t <grace>` first
+    ///
+    /// The plugin host's shutdown hook needs its SIGTERM and the time to run
+    /// the plugin's `kill()` (spec §7.1). `docker stop` sends SIGTERM to PID
+    /// 1, SIGKILL after `grace` (whole seconds, rounded up), and **blocks
+    /// until the container has stopped** -- which is what makes `cancel`
+    /// return only then. Its wait is bounded by `grace` +
+    /// [`CANCEL_WAIT_MARGIN`] in case the daemon never answers. Then W5a's
+    /// `rm --force`, unchanged. A grace of zero is W5a's path exactly.
+    async fn cancel(&self, task: &TaskInput, grace: std::time::Duration) -> Result<()> {
         let name = container_name(task);
+        if !grace.is_zero() {
+            self.stop(task, &name, grace).await?;
+        }
         let out = self.cli(&["rm", "--force", &name]).await?;
         if out.status.success() {
             return Ok(());
@@ -1459,11 +1607,44 @@ impl TaskRunner for DockerRunner {
         if !spec.delete {
             return Ok(());
         }
-        self.cancel(task).await
+        // Grace 0: the outcome has committed, so there is nothing left to
+        // let finish.
+        self.cancel(task, std::time::Duration::ZERO).await
     }
 }
 
 impl DockerRunner {
+    /// `docker stop -t <grace>` on `name`, for [`TaskRunner::cancel`]: blocks
+    /// until the container has stopped, bounded by `grace` +
+    /// [`CANCEL_WAIT_MARGIN`] (a WARN and `Ok(())` past it -- the outcome is
+    /// the budget's either way). A container that is not there, or is already
+    /// being removed, is `Ok(())`, as `rm --force`'s answer is.
+    async fn stop(&self, task: &TaskInput, name: &str, grace: std::time::Duration) -> Result<()> {
+        let secs = (grace.as_secs() + u64::from(grace.subsec_nanos() > 0)).to_string();
+        let bound = grace + CANCEL_WAIT_MARGIN;
+        let Ok(out) = tokio::time::timeout(bound, self.cli(&["stop", "-t", &secs, name])).await
+        else {
+            tracing::warn!(
+                run = %task.run_id,
+                container = %name,
+                "the task container did not stop within {bound:?} of its SIGTERM; removing it"
+            );
+            return Ok(());
+        };
+        let out = out?;
+        if out.status.success() {
+            return Ok(());
+        }
+        // `docker stop` on a name that does not exist exits 1, unlike `rm
+        // --force`; the probe decides, not the stderr.
+        if matches!(self.find(name).await?, Found::Absent | Found::Going) {
+            return Ok(());
+        }
+        Err(self
+            .classify("stop", &String::from_utf8_lossy(&out.stderr))
+            .await)
+    }
+
     /// The state of the container called `name`, per [`Found`].
     ///
     /// A failed `inspect` is **absent** when the daemon answers the probe and
@@ -1548,7 +1729,13 @@ impl DockerRunner {
                 Error::Internal(anyhow::anyhow!("could not run `{} logs`: {e}", self.binary))
             })?;
         let mut result = self
-            .pump(task, observer, &mut child, Some(&mut replayed))
+            .pump(
+                task,
+                observer,
+                &mut child,
+                Some(&mut replayed),
+                commands.host_protocol,
+            )
             .await?;
         child.wait().await.map_err(io_err)?;
 
@@ -1585,6 +1772,7 @@ impl DockerRunner {
         observer: &dyn LineObserver,
         child: &mut tokio::process::Child,
         mut replayed: Option<&mut crate::worker::k8s::runner::Replayed>,
+        host_protocol: bool,
     ) -> Result<CommandsResult> {
         let mut out_lines = BufReader::new(child.stdout.take().expect("stdout piped")).lines();
         let mut err_lines = BufReader::new(child.stderr.take().expect("stderr piped")).lines();
@@ -1623,6 +1811,7 @@ impl DockerRunner {
                 self.max_vars_bytes,
                 &line,
                 is_err,
+                host_protocol,
             )
             .await;
         }
@@ -1691,7 +1880,9 @@ impl DockerRunner {
                 ))
             })?;
 
-        let mut result = self.pump(task, observer, &mut child, None).await?;
+        let mut result = self
+            .pump(task, observer, &mut child, None, commands.host_protocol)
+            .await?;
         let status = child.wait().await.map_err(io_err)?;
 
         // ---- the exit code, read from the container and not from the CLI ---
@@ -2866,7 +3057,215 @@ mod tests {
         line: &str,
         is_err: bool,
     ) -> Option<(LogLevel, String)> {
-        ingest_line(r, st, max, line, is_err).map(|(l, t)| (l, t.into_owned()))
+        ingest_line(r, st, max, line, is_err, false).map(|(l, t)| (l, t.into_owned()))
+    }
+
+    /// Every stdout line of `lines` through [`ingest_line`] with
+    /// `host_protocol`, over one state: what is stored, in order.
+    fn stored(
+        r: &mut CommandsResult,
+        host_protocol: bool,
+        lines: &[&str],
+    ) -> Vec<(LogLevel, String)> {
+        let mut st = StreamState::default();
+        lines
+            .iter()
+            .filter_map(|l| {
+                ingest_line(r, &mut st, 1 << 20, l, false, host_protocol)
+                    .map(|(l, t)| (l, t.into_owned()))
+            })
+            .collect()
+    }
+
+    /// **The host's `%level %msg%n`, parsed** (W5b Task 5): the prefix is the
+    /// level and is stripped, and a line with none -- a stack trace's
+    /// continuation -- keeps the level of the line before it.
+    #[test]
+    fn host_protocol_levels_stdout_and_a_continuation_keeps_the_previous_level() {
+        let mut r = CommandsResult::default();
+        let got = stored(
+            &mut r,
+            true,
+            &[
+                "WARN a",
+                "\tat x.y(Z.java:1)",
+                "INFO b",
+                "ERROR boom: java.lang.IllegalStateException: no",
+                "Caused by: java.io.IOException: gone",
+                "\t... 3 more",
+                "DEBUG d",
+                "TRACE t",
+                "INFO  two spaces keep the second",
+            ],
+        );
+        assert_eq!(
+            got,
+            vec![
+                (LogLevel::Warn, "a".to_string()),
+                (LogLevel::Warn, "\tat x.y(Z.java:1)".to_string()),
+                (LogLevel::Info, "b".to_string()),
+                (
+                    LogLevel::Error,
+                    "boom: java.lang.IllegalStateException: no".to_string()
+                ),
+                (
+                    LogLevel::Error,
+                    "Caused by: java.io.IOException: gone".to_string()
+                ),
+                (LogLevel::Error, "\t... 3 more".to_string()),
+                (LogLevel::Debug, "d".to_string()),
+                (LogLevel::Trace, "t".to_string()),
+                (LogLevel::Info, " two spaces keep the second".to_string()),
+            ]
+        );
+        assert_eq!(r.stdout_line_count, 9, "every line is still counted");
+
+        // No line before it: INFO -- and DEBUG inside a bracket, whose rule
+        // is unchanged.
+        let mut r = CommandsResult::default();
+        assert_eq!(
+            stored(&mut r, true, &["\tat first"]),
+            vec![(LogLevel::Info, "\tat first".to_string())]
+        );
+        let mut r = CommandsResult::default();
+        assert_eq!(
+            stored(&mut r, true, &[LOG_DEBUG_MARKER, "bare", "WARN w", "bare2"]),
+            vec![
+                (LogLevel::Debug, "bare".to_string()),
+                (LogLevel::Warn, "w".to_string()),
+                (LogLevel::Warn, "bare2".to_string()),
+            ]
+        );
+
+        // Only the five names, case-sensitively, and only with the space.
+        let mut r = CommandsResult::default();
+        assert_eq!(
+            stored(
+                &mut r,
+                true,
+                &["ERROR x", "warn y", "WARNING z", "WARN", "FATAL f"]
+            ),
+            vec![
+                (LogLevel::Error, "x".to_string()),
+                (LogLevel::Error, "warn y".to_string()),
+                (LogLevel::Error, "WARNING z".to_string()),
+                (LogLevel::Error, "WARN".to_string()),
+                (LogLevel::Error, "FATAL f".to_string()),
+            ]
+        );
+
+        // stderr stays ERROR, and does not become the continuation's level.
+        let mut r = CommandsResult::default();
+        let mut st = StreamState::default();
+        let mut go = |line: &str, is_err: bool| {
+            ingest_line(&mut r, &mut st, 1 << 20, line, is_err, true)
+                .map(|(l, t)| (l, t.into_owned()))
+        };
+        assert_eq!(go("DEBUG q", false), Some((LogLevel::Debug, "q".into())));
+        assert_eq!(
+            go("INFO on stderr", true),
+            Some((LogLevel::Error, "INFO on stderr".into()))
+        );
+        assert_eq!(go("cont", false), Some((LogLevel::Debug, "cont".into())));
+    }
+
+    /// **Without the protocol a level prefix is ordinary text** -- a script's
+    /// `echo "WARN disk"` is W11's INFO line, text unchanged.
+    #[test]
+    fn without_host_protocol_a_level_prefix_is_ordinary_text() {
+        let mut r = CommandsResult::default();
+        assert_eq!(
+            stored(&mut r, false, &["WARN a", "\tat x", "ERROR e"]),
+            vec![
+                (LogLevel::Info, "WARN a".to_string()),
+                (LogLevel::Info, "\tat x".to_string()),
+                (LogLevel::Info, "ERROR e".to_string()),
+            ]
+        );
+    }
+
+    /// **`egretFailure` is the host's, so only the host protocol reads it**:
+    /// for a script it is ignored like any non-`outputs` key, and the marker
+    /// line is not stored either way.
+    #[test]
+    fn the_egret_failure_marker_is_harvested_only_under_host_protocol() {
+        let line =
+            r#"::{"egretFailure": {"code": 3, "message": "java.lang.RuntimeException: é boom"}}::"#;
+        for host in [false, true] {
+            let mut r = CommandsResult::default();
+            assert_eq!(stored(&mut r, host, &[line]), vec![], "host={host}");
+            assert!(r.vars.is_empty(), "host={host}: {r:?}");
+            assert_eq!(r.failure, None, "host={host}");
+            let want = host.then(|| HostFailure {
+                code: 3,
+                message: "java.lang.RuntimeException: é boom".to_string(),
+            });
+            assert_eq!(r.host_failure, want, "host={host}");
+        }
+
+        // The success marker still fills the vars under the protocol, and a
+        // later failure marker (the SIGTERM path) replaces an earlier one.
+        let mut r = CommandsResult::default();
+        stored(
+            &mut r,
+            true,
+            &[
+                r#"::{"outputs": {"size": 2}}::"#,
+                r#"::{"egretFailure": {"code": 2, "message": "first"}}::"#,
+                r#"::{"egretFailure": {"code": 3, "message": "second"}}::"#,
+            ],
+        );
+        assert_eq!(r.vars.get("size"), Some(&serde_json::json!(2)));
+        assert_eq!(
+            r.host_failure,
+            Some(HostFailure {
+                code: 3,
+                message: "second".into()
+            })
+        );
+    }
+
+    /// **The message is capped at 4 KiB, cut at a char boundary** -- it
+    /// becomes the FAILED reason, and a multi-byte char straddling the cap
+    /// must not panic or be split.
+    #[test]
+    fn an_egret_failure_message_over_4_kib_is_truncated_on_a_char_boundary() {
+        assert_eq!(MAX_HOST_FAILURE_BYTES, 4096);
+        // 4095 ASCII bytes, then a 2-byte `é` that would end at byte 4097.
+        let message = format!("{}é{}", "a".repeat(4095), "b".repeat(100));
+        let line = format!(
+            "::{}::",
+            serde_json::json!({"egretFailure": {"code": 3, "message": message}})
+        );
+        let mut r = CommandsResult::default();
+        stored(&mut r, true, &[line.as_str()]);
+        let got = r.host_failure.expect("harvested").message;
+        assert_eq!(got.len(), 4095, "the straddling char is dropped whole");
+        assert_eq!(got, "a".repeat(4095));
+
+        // Exactly at the cap is kept whole; one byte under too.
+        for n in [4096usize, 4094] {
+            let m = "é".repeat(n / 2);
+            let line = format!(
+                "::{}::",
+                serde_json::json!({"egretFailure": {"code": 4, "message": m}})
+            );
+            let mut r = CommandsResult::default();
+            stored(&mut r, true, &[line.as_str()]);
+            assert_eq!(r.host_failure.expect("harvested").message, m, "{n}");
+        }
+
+        // A huge message stays linear: 8 MiB of 3-byte chars truncates at once.
+        let m = "€".repeat(8 << 20 >> 2);
+        let line = format!(
+            "::{}::",
+            serde_json::json!({"egretFailure": {"code": 3, "message": m}})
+        );
+        let mut r = CommandsResult::default();
+        stored(&mut r, true, &[line.as_str()]);
+        let got = r.host_failure.expect("harvested").message;
+        assert_eq!(got.len(), 4095, "1365 whole `€`s");
+        assert!(got.chars().all(|c| c == '€'));
     }
 
     /// **Both streams are counted, and the level says which one it was** —

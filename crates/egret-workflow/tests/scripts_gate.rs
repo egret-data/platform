@@ -1122,7 +1122,11 @@ impl egret_workflow::worker::commands::TaskRunner for SpyRunner {
             .push(commands.container_image.clone());
         Ok(egret_workflow::worker::commands::CommandsResult::default())
     }
-    async fn cancel(&self, _task: &egret_workflow::worker::TaskInput) -> egret_core::Result<()> {
+    async fn cancel(
+        &self,
+        _task: &egret_workflow::worker::TaskInput,
+        _grace: std::time::Duration,
+    ) -> egret_core::Result<()> {
         Ok(())
     }
     /// Nothing ever exists to adopt: this runner creates nothing.
@@ -1420,7 +1424,11 @@ impl egret_workflow::worker::commands::TaskRunner for FakeDaemon {
     ) -> egret_core::Result<Option<egret_workflow::worker::commands::CommandsResult>> {
         Ok(self.existing(&egret_workflow::worker::commands::container_name(task)))
     }
-    async fn cancel(&self, task: &egret_workflow::worker::TaskInput) -> egret_core::Result<()> {
+    async fn cancel(
+        &self,
+        task: &egret_workflow::worker::TaskInput,
+        _grace: std::time::Duration,
+    ) -> egret_core::Result<()> {
         self.work
             .lock()
             .unwrap()
