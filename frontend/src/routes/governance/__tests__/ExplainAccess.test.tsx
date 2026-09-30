@@ -892,6 +892,19 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
                       policy_name: "mask-no-type",
                       problem: { kind: "mask_type_absent" },
                     },
+                    {
+                      kind: "tag_priority_arbitration_not_modelled",
+                      policy_ids: [8910, 8911],
+                      policy_names: ["clearance-low", "clearance-high"],
+                      priorities: [0, 3],
+                    },
+                    {
+                      kind: "tag_deny_reopened_differs_by_plugin_version",
+                      tag_policy_id: 8920,
+                      tag_policy_name: "clearance-deny",
+                      resource_policy_id: 55,
+                      resource_policy_name: "grant-orders",
+                    },
                   ],
                 },
                 attribution: null,
@@ -908,7 +921,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
 
     const result = await screen.findByTestId("explain-result");
     const causes = within(result).getAllByTestId("undecidable-cause");
-    expect(causes).toHaveLength(3);
+    expect(causes).toHaveLength(5);
     for (const cause of causes) {
       expect(cause.textContent?.trim().length ?? 0).toBeGreaterThan(20);
     }
@@ -926,7 +939,25 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     // sentence.
     expect(causes[2]).toHaveTextContent(/fail|not load|loading/i);
     expect(causes[2]).not.toHaveTextContent(/component-qualified/i);
-    expect(new Set(causes.map((c) => c.textContent)).size).toBe(3);
+
+    // The priority arbitration has to name BOTH policies AND both priorities:
+    // the priorities are the thing a steward changes, and a sentence that named
+    // only the policies would leave them with nothing to do.
+    expect(causes[3]).toHaveTextContent("clearance-low");
+    expect(causes[3]).toHaveTextContent("clearance-high");
+    expect(causes[3]).toHaveTextContent(/priority 0/);
+    expect(causes[3]).toHaveTextContent(/priority 3/);
+
+    // The version split has to say that the PLUGIN VERSION is what is missing —
+    // "egret cannot decide this" would send a steward to the policies, which are
+    // both fine.
+    expect(causes[4]).toHaveTextContent("clearance-deny");
+    expect(causes[4]).toHaveTextContent("grant-orders");
+    expect(causes[4]).toHaveTextContent(/2\.5\.0/);
+    expect(causes[4]).toHaveTextContent(/2\.8\.0/);
+    expect(causes[4]).toHaveTextContent(/version/i);
+
+    expect(new Set(causes.map((c) => c.textContent)).size).toBe(5);
   });
 
   /**

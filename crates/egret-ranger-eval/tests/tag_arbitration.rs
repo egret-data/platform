@@ -84,7 +84,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use egret_ranger_eval::eval::{
     evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, DenyReason,
-    EngineConfig, MaskDecision, ResolvedTag, RowFilterDecision, TagServiceResource,
+    EngineConfig, MaskDecision, PluginVersion, ResolvedTag, RowFilterDecision, TagServiceResource,
     UndecidableCause,
 };
 use egret_ranger_eval::model::ServicePolicySet;
@@ -187,6 +187,27 @@ fn column_tag(name: &str, match_type: MatchType) -> ResolvedTag {
 
 fn no_superusers() -> EngineConfig {
     EngineConfig::without_super_users()
+}
+
+/// The same config with the plugin version stated as **2.8.0**.
+///
+/// SP4d-2b Task 5. One composed shape — a tag DENY reopened by a STRICTLY
+/// higher-priority resource ALLOW — is answered DIFFERENTLY by the two plugin
+/// versions (measured on both real engines; see
+/// `UndecidableCause::TagDenyReopenedDiffersByPluginVersion`). This crate
+/// reproduces 2.8.0's answer and refuses on 2.5.0 and on an unstated version, so
+/// every test of that shape has to say which engine it is about — and
+/// `plugin_version: None` refusing IS the contract, not an inconvenience.
+///
+/// `engine` stays `None` on purpose: naming StarRocks (the engine that runs
+/// 2.8.0) would make the trino service-def these tests use an
+/// `EngineMismatch`, and the shape under test has nothing to do with the
+/// resource vocabulary.
+fn plugin_2_8_0() -> EngineConfig {
+    EngineConfig {
+        plugin_version: Some(PluginVersion::Ranger2_8_0),
+        ..EngineConfig::without_super_users()
+    }
 }
 
 fn select_for_alice() -> Value {
@@ -344,8 +365,15 @@ fn a_tag_deny_stands_against_a_same_priority_resource_allow() {
 /// The other side of the same comparison, and the case the engine logs in
 /// prose at offset 224: *"access denied by a tag policy. Higher priority
 /// resource policies will be evaluated to check for allow."*
+///
+/// ⚠ **This is TRUE ON 2.8.0 ONLY, and the differential gate is what
+/// established that.** The log line is 2.5.0's own, and 2.5.0 does NOT do what
+/// it says: measured on both engines, the identical download answers `Allowed`
+/// by the resource policy on 2.8.0 and `Denied` by the TAG policy on 2.5.0. So
+/// the config here states the version, and the sibling below asserts the refusal
+/// the other two answers force.
 #[test]
-fn a_tag_deny_is_reopened_by_a_strictly_higher_priority_resource_allow() {
+fn a_tag_deny_is_reopened_by_a_strictly_higher_priority_resource_allow_on_2_8_0() {
     let set = envelope(
         json!([resource_policy(
             1,
@@ -364,12 +392,43 @@ fn a_tag_deny_is_reopened_by_a_strictly_higher_priority_resource_allow() {
         )]),
     );
 
-    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    let d = evaluate(&set, &request(), &trino_def(), &plugin_2_8_0());
     assert!(
         matches!(&d, Decision::Allowed { policy_name, .. } if policy_name == "res-allow"),
-        "a strictly higher-priority resource allow must reopen a tag deny: {}",
+        "on 2.8.0 a strictly higher-priority resource allow must reopen a tag deny: {}",
         named(&d)
     );
+
+    // …and on 2.5.0, and on an unstated version, the two engines disagree so the
+    // crate must REFUSE rather than pick one. Both halves here, because a refusal
+    // that fired only for `None` would leave 2.5.0 answering 2.8.0's verdict.
+    for engine in [
+        EngineConfig {
+            plugin_version: Some(PluginVersion::Ranger2_5_0),
+            ..EngineConfig::without_super_users()
+        },
+        no_superusers(),
+    ] {
+        let d = evaluate(&set, &request(), &trino_def(), &engine);
+        match &d {
+            Decision::Undecidable { why } => assert!(
+                why.iter().any(|c| matches!(
+                    c,
+                    UndecidableCause::TagDenyReopenedDiffersByPluginVersion {
+                        resource_policy_name,
+                        tag_policy_name,
+                        ..
+                    } if resource_policy_name == "res-allow" && tag_policy_name == "tag-deny"
+                )),
+                "the refusal must name both policies: {why:?}"
+            ),
+            other => panic!(
+                "the two plugin versions answer this shape differently, so {:?} must refuse: \
+                 {other:?}",
+                engine.plugin_version
+            ),
+        }
+    }
 }
 
 // ── arm 2: a tag ALLOW versus a resource ACCESS policy, against `>` ───────
@@ -1988,5 +2047,85 @@ fn an_undeclared_level_is_not_a_proof_of_absence() {
         ),
         "a level the policy does not declare is the inherited path, never absence: {}",
         named(&d)
+    );
+}
+
+// ── the candidate filter reaches the ARBITRATION (SP4d-2b Task 5) ─────────
+
+/// **A defect the differential gate found, and its minimal reproducer.**
+///
+/// The three-way arbitration sets `determined` from the PRIORITY alone and never
+/// asks the matcher, so a resource policy Ranger's trie removed could end the
+/// loop, skip the restore at offsets 599-632, and change the verdict. The crate
+/// used to iterate every enabled policy of the type there.
+///
+/// MEASURED on the real 2.8.0 engine, this exact shape: `Denied, policyId 2` —
+/// the allowing policy wrote its id and `setIsAllowed(false)` in the restore then
+/// cleared `isAllowed` without touching it — and the same answer with the third
+/// policy REMOVED, because its evaluator is never in the loop's list at all.
+/// Before the fix this crate answered `Allowed` with it and `Denied` without it:
+/// the entire divergence was a policy neither engine ever evaluates.
+///
+/// The `excluded` policy's `schema` value is a LITERAL that does not match the
+/// request, which is what makes `trie_excludes` able to prove absence. A wildcard
+/// there would leave the crate unable to prove it and the skip would not fire —
+/// which is the point of the second assertion below.
+#[test]
+fn a_trie_excluded_policy_cannot_end_the_loop_and_skip_the_restore() {
+    let allower_with_deny = json!({
+        "id": 2, "name": "res-allow-deny-capable", "service": "trino", "policyType": 0,
+        "isEnabled": true, "policyPriority": 1,
+        "resources": {
+            "catalog": {"values": ["hive"]}, "schema": {"values": ["sales"]},
+            "table": {"values": ["orders"]}, "column": {"values": ["*"]},
+        },
+        "policyItems": select_for_alice(),
+        // Deny items that match NOBODY: `hasDeny()` is true, so offset 553
+        // cannot determine for this policy and the loop must run out.
+        "denyPolicyItems": select_for_bob(),
+    });
+    // Same hierarchy depth, a literal `schema` the request does not carry, and
+    // NO deny items — so before the fix it triggered offset 469 and broke the
+    // loop.
+    let trie_excluded = json!({
+        "id": 3, "name": "res-other-schema", "service": "trino", "policyType": 0,
+        "isEnabled": true, "policyPriority": 0,
+        "resources": {
+            "catalog": {"values": ["hive"]}, "schema": {"values": ["otherschema"]},
+            "table": {"values": ["orders"]}, "column": {"values": ["*"]},
+        },
+        "policyItems": select_for_alice(),
+    });
+    let tag_deny = json!([tag_policy(
+        10,
+        "tag-deny",
+        0,
+        0,
+        "denyPolicyItems",
+        select_for_alice()
+    )]);
+
+    let with_excluded = envelope(
+        json!([allower_with_deny.clone(), trie_excluded]),
+        tag_deny.clone(),
+    );
+    let d = evaluate(&with_excluded, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(&d, Decision::Denied { policy_name, .. } if policy_name == "tag-deny"),
+        "a policy Ranger's trie does not hold must not end the loop, so the restore must \
+         put the tag deny back: {}",
+        named(&d)
+    );
+
+    // The control, and the half that makes the assertion above mean something:
+    // WITHOUT the excluded policy the answer must be the SAME. Ranger's answer
+    // does not move when a policy it never evaluates is added or removed, and
+    // that invariance is the whole finding — before the fix these two differed.
+    let without = envelope(json!([allower_with_deny]), tag_deny);
+    let d_without = evaluate(&without, &request(), &trino_def(), &no_superusers());
+    assert_eq!(
+        format!("{d:?}"),
+        format!("{d_without:?}"),
+        "adding a policy Ranger's trie excludes must not change the verdict"
     );
 }

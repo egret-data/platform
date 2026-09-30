@@ -435,6 +435,9 @@ struct Case {
     /// duel falsifies "order cannot change the outcome", and this one
     /// falsifies "…and composing the phases does not change that".
     composed_duel: bool,
+    /// Built by [`candidacy_duel`]: the only shape that reaches offset 553's
+    /// candidate-set refusal. Counted so that its rate has a denominator.
+    candidacy_duel: bool,
     service_policies: Value,
     request: AccessRequest,
 }
@@ -1134,7 +1137,12 @@ struct TagLayer {
 /// `is_enabled` varies although nothing reads it: `processServiceTags` never
 /// consults it, and a corpus that only ever emitted `true` could not tell that
 /// ruling from an omission.
-fn resolved_tag(rng: &mut Rng, profile: &Profile, name: &str, match_type: MatchType) -> ResolvedTag {
+fn resolved_tag(
+    rng: &mut Rng,
+    profile: &Profile,
+    name: &str,
+    match_type: MatchType,
+) -> ResolvedTag {
     let depth = 3 + rng.below(2);
     let levels: BTreeSet<String> = profile
         .hierarchy
@@ -1263,10 +1271,7 @@ fn tag_policy(
     p.insert("policyType".to_string(), json!(policy_type));
     p.insert("isEnabled".to_string(), json!(!rng.chance(1, 12)));
     p.insert("policyPriority".to_string(), json!(priority));
-    p.insert(
-        "resources".to_string(),
-        json!({"tag": {"values": [value]}}),
-    );
+    p.insert("resources".to_string(), json!({"tag": {"values": [value]}}));
 
     match policy_type {
         1 => {
@@ -1463,10 +1468,7 @@ fn composed_duel(
     tag_policy.insert("policyType".to_string(), json!(0));
     tag_policy.insert("isEnabled".to_string(), json!(true));
     tag_policy.insert("policyPriority".to_string(), json!(0));
-    tag_policy.insert(
-        "resources".to_string(),
-        json!({"tag": {"values": [name]}}),
-    );
+    tag_policy.insert("resources".to_string(), json!({"tag": {"values": [name]}}));
     tag_policy.insert(
         bucket.to_string(),
         json!([{
@@ -1478,6 +1480,105 @@ fn composed_duel(
         policies,
         TagLayer {
             block: tag_block(profile, tag_def, vec![Value::Object(tag_policy)]),
+            tags: vec![tag],
+        },
+    )
+}
+
+/// The `trie_excludes` / candidate-rule refusal, built on purpose.
+///
+/// Offset 553 reads `hasDeny()` and NOT the matcher, so an evaluator Ranger's
+/// trie holds and this crate's matcher does not can stop the loop. Reaching it
+/// needs FOUR things at once, which is why 800 generated cases produced none:
+///
+/// 1. `allowed` true when a non-matching evaluator is visited — and on the
+///    resource path alone `allowed` only becomes true at a MATCHING evaluator,
+///    which then determines. **A tag ALLOW is the only thing that seeds it**,
+///    which is exactly why Task 3 could not measure this rate and this step can;
+/// 2. that evaluator has no deny items, so offset 553 applies to it;
+/// 3. this crate cannot place it in Ranger's candidate list — it matches nothing
+///    (`provably_a_candidate` false) and `trie_excludes` cannot prove it absent,
+///    which needs a level whose value is not trie-prefix-exact. `*z` is
+///    `EndsWith`: the trie parks it at the ROOT and returns it for every value,
+///    where the matcher rejects it;
+/// 4. the verdict DIFFERS between "Ranger stopped there" and "Ranger did not",
+///    which needs a later resource policy to DENY.
+///
+/// `sort_eval_order` puts every `hasDeny` member of a priority ahead of every
+/// non-`hasDeny` one, so the unmatched no-deny policy has to sit at a STRICTLY
+/// HIGHER priority than the denier or it is never reached. Both sit above the
+/// tag allow's priority, or offset 505's `>` shuts them out.
+///
+/// A REFUSAL is the expected outcome, not a failure: it is counted on its own
+/// axis and reported as a rate, which is the measurement this shape exists for.
+/// A rate over a population that cannot produce the shape is not a measurement.
+fn candidacy_duel(
+    rng: &mut Rng,
+    profile: &Profile,
+    shape: &Shape,
+    tag_def: &Value,
+) -> (Vec<Value>, TagLayer) {
+    let root = profile.hierarchy[0];
+    let request_root = shape
+        .request_levels
+        .first()
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    // A value that CANNOT match the request's root level and that
+    // `trie_reproduces_matcher` classifies as `EndsWith`, so `trie_excludes`
+    // declines to prove absence. Built from the request's own value so a
+    // generator change to `REQUEST_VALUES` cannot make it accidentally match.
+    let unmatchable = format!("*{request_root}_no_such_suffix");
+
+    let exact: Value = Value::Object(
+        shape
+            .request_levels
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    json!({"values": [if value.is_empty() || value == "*" { "*" } else { value }]}),
+                )
+            })
+            .collect(),
+    );
+
+    let unmatched = json!({
+        "id": 1, "name": "cand-a-unmatched", "service": profile.service_name, "policyType": 0,
+        "isEnabled": true, "policyPriority": 2,
+        "resources": { root: {"values": [unmatchable]} },
+        // No deny bucket at all: offset 553 applies only to `!hasDeny()`.
+        "policyItems": [{
+            "users": ["nobody_at_all"], "groups": [], "roles": [],
+            "accesses": [{"type": shape.access_type, "isAllowed": true}],
+        }],
+    });
+    let denier = json!({
+        "id": 2, "name": "cand-b-deny", "service": profile.service_name, "policyType": 0,
+        "isEnabled": true, "policyPriority": 1,
+        "resources": exact,
+        "denyPolicyItems": [{
+            "users": [shape.user], "groups": [], "roles": [],
+            "accesses": [{"type": shape.access_type, "isAllowed": true}],
+        }],
+    });
+
+    let name = rng.pick(TAG_NAMES).to_string();
+    let match_type = *rng.pick(ADMITTED_TAG_MATCH_TYPES);
+    let tag = resolved_tag(rng, profile, &name, match_type);
+    let tag_policy = json!({
+        "id": 90, "name": "t-candidacy", "service": profile.tag_service_name, "policyType": 0,
+        "isEnabled": true, "policyPriority": 0,
+        "resources": {"tag": {"values": [name]}},
+        "policyItems": [{
+            "users": [shape.user], "groups": [], "roles": [],
+            "accesses": [{"type": shape.access_type, "isAllowed": true}],
+        }],
+    });
+    (
+        vec![unmatched, denier],
+        TagLayer {
+            block: tag_block(profile, tag_def, vec![tag_policy]),
             tags: vec![tag],
         },
     )
@@ -1497,6 +1598,24 @@ fn generate_case(
     };
     let shape = build_shape(rng, profile, policy_type);
 
+    // One ACCESS case in eight is the deliberate CANDIDACY duel — the only
+    // shape that reaches offset 553's refusal at all.
+    if policy_type == 0 && rng.chance(1, 8) {
+        let (policies, tags) = candidacy_duel(rng, profile, &shape, tag_def);
+        return finish_case(Finish {
+            profile,
+            service_def,
+            policies,
+            shape,
+            index,
+            policy_type,
+            duel: false,
+            composed_duel: false,
+            candidacy_duel: true,
+            tags: Some(tags),
+        });
+    }
+
     // One ACCESS case in six is the deliberate COMPOSED order duel: the tag
     // phase writes a verdict and a deny-capable resource band sits strictly
     // above it. Drawn before the resource-only duel so the two are disjoint
@@ -1512,6 +1631,7 @@ fn generate_case(
             policy_type,
             duel: true,
             composed_duel: true,
+            candidacy_duel: false,
             tags: Some(tags),
         });
     }
@@ -1530,6 +1650,7 @@ fn generate_case(
             policy_type,
             duel: true,
             composed_duel: false,
+            candidacy_duel: false,
             tags: None,
         });
     }
@@ -1565,6 +1686,7 @@ fn generate_case(
         policy_type,
         duel: false,
         composed_duel: false,
+        candidacy_duel: false,
         tags,
     })
 }
@@ -1582,15 +1704,13 @@ struct Finish<'a> {
     policy_type: i32,
     duel: bool,
     composed_duel: bool,
+    candidacy_duel: bool,
     tags: Option<TagLayer>,
 }
 
 fn finish_case(f: Finish<'_>) -> Case {
     let mut envelope = Map::new();
-    envelope.insert(
-        "serviceName".to_string(),
-        json!(f.profile.service_name),
-    );
+    envelope.insert("serviceName".to_string(), json!(f.profile.service_name));
     envelope.insert("serviceId".to_string(), json!(1));
     envelope.insert("policyVersion".to_string(), json!(1));
     envelope.insert("serviceDef".to_string(), f.service_def.clone());
@@ -1615,6 +1735,7 @@ fn finish_case(f: Finish<'_>) -> Case {
         policy_type: f.policy_type,
         duel: f.duel,
         composed_duel: f.composed_duel,
+        candidacy_duel: f.candidacy_duel,
         service_policies,
         request: AccessRequest {
             user: f.shape.user,
@@ -1671,6 +1792,18 @@ enum Declined {
     ResourceCandidacy,
     /// [`UndecidableCause::TagSubResultSplitByResourcePolicy`].
     TagSubResultSplit,
+    /// [`UndecidableCause::TagPriorityArbitrationNotModelled`] — the tag phase's
+    /// per-access-type priority arbitration, which this crate refuses rather than
+    /// models. The corpus generates multi-priority tag blocks on purpose: this
+    /// rate IS the over-refusal cost, and the follow-up task that models the
+    /// arbitration is the one that gets to spend it.
+    TagPriorityArbitration,
+    /// [`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`] — the one
+    /// composed shape the two plugin versions answer differently. **It fires on
+    /// the 2.5.0 half of the corpus and never on the 2.8.0 half**, by
+    /// construction, which is itself the assertion: a run where the two halves'
+    /// rates were equal would mean the version input had stopped being read.
+    TagDenyVersionSplit,
 }
 
 impl Declined {
@@ -1679,6 +1812,8 @@ impl Declined {
             Declined::EvalOrder => "EvalOrderAmbiguous",
             Declined::ResourceCandidacy => "ResourceCandidacyNotReproducible",
             Declined::TagSubResultSplit => "TagSubResultSplitByResourcePolicy",
+            Declined::TagPriorityArbitration => "TagPriorityArbitrationNotModelled",
+            Declined::TagDenyVersionSplit => "TagDenyReopenedDiffersByPluginVersion",
         }
     }
 }
@@ -1691,6 +1826,12 @@ fn declined_kind(cause: &UndecidableCause) -> Option<Declined> {
         }
         UndecidableCause::TagSubResultSplitByResourcePolicy { .. } => {
             Some(Declined::TagSubResultSplit)
+        }
+        UndecidableCause::TagPriorityArbitrationNotModelled { .. } => {
+            Some(Declined::TagPriorityArbitration)
+        }
+        UndecidableCause::TagDenyReopenedDiffersByPluginVersion { .. } => {
+            Some(Declined::TagDenyVersionSplit)
         }
         _ => None,
     }
@@ -2158,6 +2299,11 @@ const AXES: &[Axis] = &[
     // produced the tag half would let a crate that pruned BOTH paths look
     // right.
     Axis {
+        name: "tag: candidacy duel (offset 553 reachable)",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
         name: "tag: audit-disabled policy with NO items (pruned)",
         min_per_mille: 0,
         only: None,
@@ -2338,9 +2484,7 @@ fn tag_facts(case: &Case) -> TagFacts {
         }
     }
     priorities_of_kind.sort_unstable();
-    facts.several_at_one_priority = priorities_of_kind
-        .windows(2)
-        .any(|pair| pair[0] == pair[1]);
+    facts.several_at_one_priority = priorities_of_kind.windows(2).any(|pair| pair[0] == pair[1]);
     facts
 }
 
@@ -2679,7 +2823,10 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
         ("eval-order duel", case.duel),
         ("tag: tagPolicies block present", tags.block_present),
         ("tag: a tag the block's policies REACH", tags.reached),
-        ("tag: a tag the block's policies do NOT reach", tags.unreached),
+        (
+            "tag: a tag the block's policies do NOT reach",
+            tags.unreached,
+        ),
         ("tag: match SELF", tags.match_types[0]),
         ("tag: match SELF_AND_ALL_DESCENDANTS", tags.match_types[1]),
         ("tag: match ANCESTOR", tags.match_types[2]),
@@ -2690,7 +2837,10 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
         ("tag: attachment carrying attributes", tags.attributes),
         ("tag: deny-capable ACCESS policy", tags.deny_capable_access),
         ("tag: MASK policy of this kind", tags.mask_policy),
-        ("tag: ROW FILTER policy of this kind", tags.row_filter_policy),
+        (
+            "tag: ROW FILTER policy of this kind",
+            tags.row_filter_policy,
+        ),
         (
             "tag: several policies of this kind at ONE priority",
             tags.several_at_one_priority,
@@ -2706,6 +2856,10 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
             tags.case_only_value,
         ),
         ("tag: composed eval-order duel", case.composed_duel),
+        (
+            "tag: candidacy duel (offset 553 reachable)",
+            case.candidacy_duel,
+        ),
         (
             "tag: audit-disabled policy with NO items (pruned)",
             tags.audit_pruned,
@@ -2806,6 +2960,12 @@ struct Tally {
     /// …of which these were issued UNDER a tag verdict.
     composed_duels: usize,
     composed_duels_agreeing: usize,
+    /// Deliberate candidacy duels, and the DENOMINATOR of the
+    /// `ResourceCandidacyNotReproducible` rate. Over the whole corpus that rate
+    /// is ~0, because 800 random cases produced the four-way conjunction zero
+    /// times — and a rate of 0/800 measures the generator, not the refusal.
+    candidacy_duels: usize,
+    candidacy_duels_declined: usize,
     /// Cases carrying a `tagPolicies` block. **The denominator of every
     /// composed rate**, and the complement of the denominator of every
     /// resource-path rate — which is why the two are counted rather than
@@ -2837,6 +2997,8 @@ impl Tally {
         self.duels_agreeing += other.duels_agreeing;
         self.composed_duels += other.composed_duels;
         self.composed_duels_agreeing += other.composed_duels_agreeing;
+        self.candidacy_duels += other.candidacy_duels;
+        self.candidacy_duels_declined += other.candidacy_duels_declined;
         self.tagged += other.tagged;
         for (key, count) in &other.declined {
             *self.declined.entry(*key).or_default() += count;
@@ -2875,6 +3037,8 @@ fn report_rates(label: &str, tally: &Tally) {
         Declined::EvalOrder,
         Declined::ResourceCandidacy,
         Declined::TagSubResultSplit,
+        Declined::TagPriorityArbitration,
+        Declined::TagDenyVersionSplit,
     ] {
         eprintln!(
             "  {:34}  resource path {:>26}   composed {:>26}",
@@ -2883,6 +3047,21 @@ fn report_rates(label: &str, tally: &Tally) {
             pct(tally.declined_count(kind, true), tally.tagged),
         );
     }
+    // The two rates whose shape a random draw does not produce, over the
+    // populations built to produce them. Reported separately and NEVER folded
+    // into the numbers above: a rate over a population that cannot reach the
+    // refusal reads as "this never happens", which is the opposite of what it
+    // measures.
+    eprintln!(
+        "  {:34}  {} of the deliberate composed duels agreed with the engine",
+        "composed eval-order duels",
+        pct(tally.composed_duels_agreeing, tally.composed_duels),
+    );
+    eprintln!(
+        "  {:34}  {} of the deliberate candidacy duels REFUSED",
+        "candidate-set (offset 553) refusals",
+        pct(tally.candidacy_duels_declined, tally.candidacy_duels),
+    );
 }
 
 fn ranger_dir() -> PathBuf {
@@ -2955,6 +3134,7 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
                 id: "pin-f1-wildcard".to_string(),
                 duel: false,
                 composed_duel: false,
+                candidacy_duel: false,
                 policy_type: 0,
                 service_policies: service_policies(json!([{
                     "id": 1, "name": "f1", "service": "trino_prod", "policyType": 0,
@@ -3017,6 +3197,7 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
                 id: "pin-f2-missing-datamaskinfo".to_string(),
                 duel: false,
                 composed_duel: false,
+                candidacy_duel: false,
                 policy_type: 1,
                 service_policies: service_policies(json!([
                     {
@@ -3128,12 +3309,18 @@ fn check_pinned_divergences(def_json: &Value, def: &ServiceDef, engine: &EngineC
 /// which the corpus itself does not do — `EgretTagServiceResourceValidationTest`
 /// already runs the same def at both versions, and nothing in this claim is
 /// about the resource def at all.
-fn check_measured_tag_crash(def_json: &Value, tag_def_json: &Value, def: &ServiceDef, engine: &EngineConfig) {
+fn check_measured_tag_crash(
+    def_json: &Value,
+    tag_def_json: &Value,
+    def: &ServiceDef,
+    engine: &EngineConfig,
+) {
     let case = Case {
         id: "pin-tag-mask-null-crash".to_string(),
         policy_type: 1,
         duel: false,
         composed_duel: false,
+        candidacy_duel: false,
         service_policies: json!({
             "serviceName": "trino_prod",
             "serviceId": 1,
@@ -3206,7 +3393,8 @@ fn check_measured_tag_crash(def_json: &Value, tag_def_json: &Value, def: &Servic
             .and_then(Value::as_str)
             .unwrap_or_default();
         assert!(
-            error.contains("NullPointerException") && error.contains("normalizeAndPrunePolicyItems"),
+            error.contains("NullPointerException")
+                && error.contains("normalizeAndPrunePolicyItems"),
             "ranger {version} was expected to THROW in \
              RangerPolicyRepository.normalizeAndPrunePolicyItems for a tag mask item with no \
              dataMaskInfo. It did not, so the refusal this crate now carries is resting on a \
@@ -3447,6 +3635,9 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
         if case.composed_duel {
             tally.composed_duels += 1;
         }
+        if case.candidacy_duel {
+            tally.candidacy_duels += 1;
+        }
         let tagged = case.service_policies.get("tagPolicies").is_some();
         if tagged {
             tally.tagged += 1;
@@ -3454,6 +3645,9 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
 
         if let Outcome::Declined(kind) = mine {
             *tally.declined.entry((*kind, tagged)).or_default() += 1;
+            if case.candidacy_duel && *kind == Declined::ResourceCandidacy {
+                tally.candidacy_duels_declined += 1;
+            }
             continue;
         }
 
@@ -3624,6 +3818,27 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
          composed EvalOrderAmbiguous rate below is a rate over nothing",
         total.composed_duels,
         total.cases
+    );
+    // …and the candidacy duel, whose whole purpose is to give offset 553's
+    // refusal a denominator. Without this floor a generator edit that stopped
+    // producing it would print `0/0` and read as "this refusal never fires".
+    assert!(
+        total.candidacy_duels * 80 >= total.cases,
+        "only {} deliberate candidacy duels in {} cases — the shape that reaches offset 553's \
+         candidate-set refusal has stopped being generated, so its rate is a rate over nothing",
+        total.candidacy_duels,
+        total.cases
+    );
+    // …and it must actually REACH the refusal. A duel that stopped refusing
+    // would mean the shape had drifted, and the rate would then be measuring a
+    // shape that is no longer the one described.
+    assert!(
+        total.candidacy_duels_declined * 2 >= total.candidacy_duels,
+        "only {} of {} deliberate candidacy duels reached the candidate-set refusal — the \
+         four-way conjunction the shape is built around has drifted, and the rate below is \
+         no longer a rate of what it says",
+        total.candidacy_duels_declined,
+        total.candidacy_duels
     );
     // A corpus with no tag phase reports two composed rates of 0/0 and looks
     // exactly like one where the tag generator was deleted.

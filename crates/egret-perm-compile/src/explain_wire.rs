@@ -289,9 +289,7 @@ impl From<&TagNormalisationProblem> for WireTagNormalisationProblem {
                     mask_type: mask_type.clone(),
                 }
             }
-            TagNormalisationProblem::MaskTypeAbsent => {
-                WireTagNormalisationProblem::MaskTypeAbsent
-            }
+            TagNormalisationProblem::MaskTypeAbsent => WireTagNormalisationProblem::MaskTypeAbsent,
         }
     }
 }
@@ -663,6 +661,30 @@ pub enum WireUndecidableCause {
         policy_name: String,
         problem: WireTagNormalisationProblem,
     },
+    /// Two or more tag policies at DIFFERENT `policyPriority` each decide, and
+    /// the engine settles which survives with an arbitration the evaluator does
+    /// not model.
+    ///
+    /// The three lists are POSITIONAL — `policy_ids[i]`, `policy_names[i]` and
+    /// `priorities[i]` describe one policy — for the same reason
+    /// [`WireUndecidableCause::EvalOrderAmbiguous`] carries two: a steward needs
+    /// to see which policies are in contention and at what priority, and
+    /// flattening that into a sentence would lose the priorities, which are the
+    /// thing to change.
+    TagPriorityArbitrationNotModelled {
+        policy_ids: Vec<Option<i64>>,
+        policy_names: Vec<String>,
+        priorities: Vec<i32>,
+    },
+    /// A tag DENY and a strictly higher-priority resource policy that allows —
+    /// a shape Ranger 2.5.0 and 2.8.0 answer DIFFERENTLY, so it can only be
+    /// decided once the running plugin version is known.
+    TagDenyReopenedDiffersByPluginVersion {
+        tag_policy_id: Option<i64>,
+        tag_policy_name: String,
+        resource_policy_id: Option<i64>,
+        resource_policy_name: String,
+    },
     /// A tag mask or row filter was displaced in part by a strictly
     /// higher-priority resource policy: Ranger reports the tag policy's id with
     /// the resource policy's mask.
@@ -824,6 +846,26 @@ impl From<&UndecidableCause> for WireUndecidableCause {
                 policy_id: *policy_id,
                 policy_name: policy_name.clone(),
                 problem: WireTagNormalisationProblem::from(problem),
+            },
+            UndecidableCause::TagPriorityArbitrationNotModelled {
+                policy_ids,
+                policy_names,
+                priorities,
+            } => WireUndecidableCause::TagPriorityArbitrationNotModelled {
+                policy_ids: policy_ids.clone(),
+                policy_names: policy_names.clone(),
+                priorities: priorities.clone(),
+            },
+            UndecidableCause::TagDenyReopenedDiffersByPluginVersion {
+                tag_policy_id,
+                tag_policy_name,
+                resource_policy_id,
+                resource_policy_name,
+            } => WireUndecidableCause::TagDenyReopenedDiffersByPluginVersion {
+                tag_policy_id: *tag_policy_id,
+                tag_policy_name: tag_policy_name.clone(),
+                resource_policy_id: *resource_policy_id,
+                resource_policy_name: resource_policy_name.clone(),
             },
             UndecidableCause::TagAttachmentNotReproducible { tag, problem } => {
                 WireUndecidableCause::TagAttachmentNotReproducible {

@@ -95,6 +95,19 @@ export type WireUndecidableCause = {
   problem: WireTagNormalisationProblem;
   kind: 'tag_policy_not_normalisable';
 } | {
+  policy_ids: (number | null)[];
+  policy_names: string[];
+  priorities: number[];
+  kind: 'tag_priority_arbitration_not_modelled';
+} | {
+  /** @nullable */
+  tag_policy_id?: number | null;
+  tag_policy_name: string;
+  /** @nullable */
+  resource_policy_id?: number | null;
+  resource_policy_name: string;
+  kind: 'tag_deny_reopened_differs_by_plugin_version';
+} | {
   /** @nullable */
   tag_policy_id?: number | null;
   tag_policy_name: string;

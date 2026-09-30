@@ -312,6 +312,12 @@ function causeSentence(c: WireUndecidableCause): string {
       return `The tag “${c.tag}” on this resource ${tagAttachmentProblemPhrase(c.problem)}, so egret cannot tell whether the engine would evaluate its tag policies here.`;
     case "tag_sub_result_split_by_resource_policy":
       return `Tag policy ${policyRef(c.tag_policy_name, c.tag_policy_id)} produced a mask or row filter and the higher-priority Ranger policy ${policyRef(c.resource_policy_name, c.resource_policy_id)} then produced one too, so Ranger reports the tag policy's id with the other policy's mask.`;
+    case "tag_deny_reopened_differs_by_plugin_version":
+      return `Tag policy ${policyRef(c.tag_policy_name, c.tag_policy_id)} denies this, and the higher-priority Ranger policy ${policyRef(c.resource_policy_name, c.resource_policy_id)} allows it — a combination Ranger 2.5.0 and 2.8.0 resolve differently, so it can only be answered once this profile records which plugin version its engine is running.`;
+    case "tag_priority_arbitration_not_modelled":
+      return `Several tag policies at different priorities each decide this, and which one the engine keeps depends on an arbitration egret does not reproduce: ${c.policy_names
+        .map((name, i) => `${policyRef(name, c.policy_ids[i] ?? null)} at priority ${c.priorities[i]}`)
+        .join(", ")}. Giving them the same priority makes this decidable.`;
     case "tag_policy_not_normalisable":
       return c.problem.kind === "mask_type_absent"
         ? `Tag policy ${policyRef(c.policy_name, c.policy_id)} ${tagNormalisationProblemPhrase(c.problem)} — so the engine is serving no decisions from this download at all, and this one cannot be answered either.`

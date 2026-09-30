@@ -543,23 +543,33 @@ fn the_three_policy_types_cannot_answer_each_other_s_question() {
 /// **MASK orders by the TAG's match type, and that key comes FIRST — before
 /// priority.**
 ///
-/// The fixture makes every other key point the other way: the `ANCESTOR` tag's
-/// policy has the HIGHER priority (1 against 0) and the EARLIER name
-/// (`a-ancestor` against `z-self`). Only `MATCH_TYPE_COMPARATOR`, with the match
-/// type as its first key, picks `z-self`.
+/// The `ANCESTOR` tag's policy has the EARLIER name (`a-ancestor` against
+/// `z-self`), so only `MATCH_TYPE_COMPARATOR`, with the match type as its first
+/// key, picks `z-self`.
 ///
 /// This is the shape SP4d-2b's D4 exists for: two attachments of tags at
 /// different levels produce a different masking answer, so a resolution that
 /// deduped by tag name — or a phase that inherited the resolver's order —
 /// would silently report the wrong mask.
+///
+/// ⚠ SP4d-2b Task 5: the two policies used to carry DIFFERENT priorities (1 and
+/// 0), to make "every other key point the other way". They are levelled now,
+/// because a multi-priority tag candidate set is refused —
+/// [`UndecidableCause::TagPriorityArbitrationNotModelled`] — and the test would
+/// be asserting the refusal rather than the comparator. Nothing is lost: with
+/// the priorities equal, `a-ancestor` still sorts before `z-self` by NAME, so
+/// the match type is still the only key that can pick `z-self`, which is the
+/// whole claim.
 #[test]
-fn mask_evaluators_are_ordered_by_tag_match_type_before_priority() {
+fn mask_evaluators_are_ordered_by_tag_match_type_before_the_name() {
     let set = tagged(json!([
-        tag_policy(1, "a-ancestor", 1, json!(["a"]), {
-            let mut v = mask_for_public("MASK_HASH");
-            v["policyPriority"] = json!(1);
-            v
-        }),
+        tag_policy(
+            1,
+            "a-ancestor",
+            1,
+            json!(["a"]),
+            mask_for_public("MASK_HASH")
+        ),
         tag_policy(2, "z-self", 1, json!(["b"]), mask_for_public("MASK_NULL")),
     ]));
     let d = evaluate_tag_data_mask(
@@ -577,8 +587,7 @@ fn mask_evaluators_are_ordered_by_tag_match_type_before_priority() {
         MaskDecision::Masked(m) => assert_eq!(
             (m.policy_id, m.mask_type.as_deref()),
             (Some(2), Some("MASK_NULL")),
-            "SELF sorts before ANCESTOR, and the match type outranks both \
-             priority and name"
+            "SELF sorts before ANCESTOR, and the match type outranks the name"
         ),
         other => panic!("expected a mask: {other:?}"),
     }
@@ -621,11 +630,24 @@ fn row_filter_evaluators_ignore_the_tag_match_type() {
     }
 }
 
-/// `NAME_COMPARATOR` is **not** just the name: its first key is priority DESC.
-/// Same two row-filter policies, priorities swapped so that the
-/// alphabetically-later policy outranks the earlier one.
+/// **REWRITTEN, SP4d-2b Task 5.** This asserted that `NAME_COMPARATOR`'s first
+/// key is priority DESC and that the alphabetically-later, higher-priority
+/// policy therefore wins — `Filtered { policy_id: 2, "b = 1" }`.
+///
+/// The comparator claim is still true and is still what `sort_tag_candidates`
+/// implements. What was NOT true is that the comparator is the only thing
+/// priority reaches in this phase: the differential gate measured
+/// `RangerDefaultPolicyEvaluator.evaluatePolicyItems` arbitrating a per-access-type
+/// result map by `policyPriority` ACROSS tag evaluators, and this crate does not
+/// model that. So a tag candidate set whose deciding members sit at more than one
+/// priority now REFUSES, and this fixture is one.
+///
+/// The assertion is inverted rather than the fixture levelled, because a
+/// row-filter test with equal priorities is already
+/// `row_filter_evaluators_ignore_the_tag_match_type` just below — this one's only
+/// content was the priority key, so the refusal is now its content.
 #[test]
-fn the_name_comparator_reads_priority_first() {
+fn a_multi_priority_row_filter_candidate_set_refuses() {
     let set = tagged(json!([
         tag_policy(
             1,
@@ -649,21 +671,85 @@ fn the_name_comparator_reads_priority_first() {
         &live_tag_def(),
     );
     match d {
+        RowFilterDecision::Undecidable { why } => assert!(
+            why.iter().any(|c| matches!(
+                c,
+                UndecidableCause::TagPriorityArbitrationNotModelled { priorities, .. }
+                    if priorities.contains(&0) && priorities.contains(&1)
+            )),
+            "the refusal must name both priorities it could not arbitrate: {why:?}"
+        ),
+        other => panic!(
+            "two deciding tag row-filter policies at different priorities must refuse, \
+             not answer: {other:?}"
+        ),
+    }
+}
+
+/// The control for the refusal above, and the thing that stops it from being
+/// "refuse whenever two tag policies decide": the SAME two policies at ONE
+/// priority still answer, by the comparator.
+#[test]
+fn a_single_priority_row_filter_candidate_set_still_answers() {
+    let set = tagged(json!([
+        tag_policy(
+            1,
+            "a-ancestor",
+            2,
+            json!(["a"]),
+            row_filter_for_public("a = 1")
+        ),
+        tag_policy(2, "z-self", 2, json!(["b"]), row_filter_for_public("b = 1")),
+    ]));
+    let d = evaluate_tag_row_filter(
+        &set,
+        &request(
+            "alice",
+            Some(vec![tag("a", MatchType::Self_), tag("b", MatchType::Self_)]),
+        ),
+        &live_tag_def(),
+    );
+    match d {
         RowFilterDecision::Filtered(f) => assert_eq!(
             (f.policy_id, f.filter_expr.as_str()),
-            (Some(2), "b = 1"),
-            "priority DESC outranks the name in NAME_COMPARATOR"
+            (Some(1), "a = 1"),
+            "at one priority the NAME decides, and `a-ancestor` sorts first"
         ),
         other => panic!("expected a row filter: {other:?}"),
     }
 }
 
-/// ACCESS orders by priority DESC first. A higher-priority ALLOW carrying no
+/// **REWRITTEN, SP4d-2b Task 5, and the rewrite is a LOSS that is recorded
+/// rather than hidden.**
+///
+/// This asserted `Allowed { policy_id: 1 }` — a higher-priority ALLOW carrying no
 /// deny items DETERMINES (offsets 472-493), so the lower-priority deny is never
-/// reached — and the tag loop, unlike the resource loop, compares no priorities
-/// of its own, so the comparator is the only thing that can produce this.
+/// reached. **That answer is CORRECT**: the differential gate measured the real
+/// 2.8.0 engine on this family of shapes and it answers Allowed by the
+/// higher-priority allow.
+///
+/// It refuses now anyway, because the crate was right here for the wrong reason.
+/// The old doc ended *"the tag loop, unlike the resource loop, compares no
+/// priorities of its own, so the comparator is the only thing that can produce
+/// this"* — and that is the sentence the gate falsified. Priority is arbitrated
+/// again, after the comparator, in
+/// `RangerDefaultPolicyEvaluator.evaluatePolicyItems`'s per-access-type result
+/// map; with the allower's deny bucket non-empty (so it does NOT determine) the
+/// crate answered `Denied` where Ranger answers `Allowed`, and the comparator
+/// model cannot tell the two fixtures apart.
+///
+/// So the refusal covers a shape this crate answered correctly. **That is a
+/// measured over-refusal**, named here so the follow-up task that models the
+/// arbitration has the row to aim at:
+///
+/// | shape | Ranger (measured, 2.8.0) | this crate today |
+/// |---|---|---|
+/// | allow@1 without deny items, deny@0 | Allowed by the allow | REFUSES (was: Allowed ✓) |
+/// | allow@1 WITH deny items, deny@0 | Allowed by the allow | REFUSES (was: Denied ✗) |
+/// | allow@0, deny@0 | Denied by the deny | Denied ✓ |
+/// | allow@0, deny@1 | Denied by the deny | Denied ✓ |
 #[test]
-fn access_evaluators_are_ordered_by_priority_descending() {
+fn a_multi_priority_access_candidate_set_refuses() {
     let higher_allow = tag_policy(1, "z-allow", 0, json!(["t"]), {
         let mut v = allow_select_for_public();
         v["policyPriority"] = json!(1);
@@ -676,15 +762,40 @@ fn access_evaluators_are_ordered_by_priority_descending() {
         &request("alice", Some(vec![tag("t", MatchType::Self_)])),
         &live_tag_def(),
     );
+    match &d {
+        TagDecision::Undecidable { why } => assert!(
+            why.iter().any(|c| matches!(
+                c,
+                UndecidableCause::TagPriorityArbitrationNotModelled { priorities, .. }
+                    if priorities.contains(&0) && priorities.contains(&1)
+            )),
+            "the refusal must name both priorities it could not arbitrate: {why:?}"
+        ),
+        other => panic!(
+            "two deciding tag ACCESS policies at different priorities must refuse: {other:?}"
+        ),
+    }
+
+    // The control: the SAME two policies at ONE priority answer, and answer
+    // DENIED — the comparator puts the `hasDeny` policy first at equal priority,
+    // which is the rule this phase does still reproduce.
+    let level_allow = tag_policy(1, "z-allow", 0, json!(["t"]), allow_select_for_public());
+    let level_deny = tag_policy(2, "a-deny", 0, json!(["t"]), deny_select_for_public());
+    let level = tagged(json!([level_allow, level_deny]));
+    let d = evaluate_tag_policies(
+        &level,
+        &request("alice", Some(vec![tag("t", MatchType::Self_)])),
+        &live_tag_def(),
+    );
     assert!(
         matches!(
-            d,
-            TagDecision::Allowed {
-                policy_id: Some(1),
+            &d,
+            TagDecision::Denied {
+                policy_id: Some(2),
                 ..
             }
         ),
-        "the higher-priority allow determines before the deny is reached: {d:?}"
+        "at one priority the deny wins and the phase still answers: {d:?}"
     );
 }
 

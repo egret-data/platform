@@ -42138,6 +42138,84 @@
           },
           {
             "type": "object",
+            "description": "Two or more tag policies at DIFFERENT `policyPriority` each decide, and\nthe engine settles which survives with an arbitration the evaluator does\nnot model.\n\nThe three lists are POSITIONAL — `policy_ids[i]`, `policy_names[i]` and\n`priorities[i]` describe one policy — for the same reason\n[`WireUndecidableCause::EvalOrderAmbiguous`] carries two: a steward needs\nto see which policies are in contention and at what priority, and\nflattening that into a sentence would lose the priorities, which are the\nthing to change.",
+            "required": [
+              "policy_ids",
+              "policy_names",
+              "priorities",
+              "kind"
+            ],
+            "properties": {
+              "policy_ids": {
+                "type": "array",
+                "items": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64"
+                }
+              },
+              "policy_names": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "priorities": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_priority_arbitration_not_modelled"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A tag DENY and a strictly higher-priority resource policy that allows —\na shape Ranger 2.5.0 and 2.8.0 answer DIFFERENTLY, so it can only be\ndecided once the running plugin version is known.",
+            "required": [
+              "tag_policy_name",
+              "resource_policy_name",
+              "kind"
+            ],
+            "properties": {
+              "tag_policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "tag_policy_name": {
+                "type": "string"
+              },
+              "resource_policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "resource_policy_name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_deny_reopened_differs_by_plugin_version"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
             "description": "A tag mask or row filter was displaced in part by a strictly\nhigher-priority resource policy: Ranger reports the tag policy's id with\nthe resource policy's mask.",
             "required": [
               "tag_policy_name",

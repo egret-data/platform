@@ -755,6 +755,126 @@ pub enum UndecidableCause {
         policy_name: String,
         problem: TagNormalisationProblem,
     },
+    /// Two tag policies at DIFFERENT `policyPriority` both decide, and which of
+    /// them the engine keeps is settled by an arbitration this crate does not
+    /// model (SP4d-2b Task 5).
+    ///
+    /// # ⚠ Found by the differential gate, and it falsified this file's prose
+    ///
+    /// [`evaluate_tag_policies`] used to say *"unlike the resource loop this one
+    /// compares no priorities: the first evaluator to determine is final"*. That
+    /// is false, and the mechanism is not in `evaluateTagPolicies` at all — which
+    /// is why reading that method could not find it.
+    ///
+    /// `RangerDefaultPolicyEvaluator.evaluatePolicyItems` keeps a per-access-type
+    /// result map, `RangerAccessRequestUtil.getAccessTypeResults(request)`, which
+    /// lives in the request CONTEXT and therefore **survives from one tag
+    /// evaluator to the next** (every `RangerTagAccessRequest` wraps the same
+    /// request). Offsets 366-573 in 2.8.0 arbitrate the slot by
+    /// `policyPriority`, with the comparison depending on what is already stored:
+    /// `<=` when an ACCESS policy overwrites a stored ALLOW, `<` otherwise, and a
+    /// further pair of arms when the stored entry is a DENY. `getCompositeAccessResult`
+    /// then copies the surviving slot back.
+    ///
+    /// MEASURED on the real 2.8.0 engine, three cases differing only in
+    /// `policyPriority` (one tag allow and one tag deny, both matching the same
+    /// tag, nothing else in the download):
+    ///
+    /// | allow priority | deny priority | Ranger |
+    /// |---|---|---|
+    /// | 1 | 0 | **Allowed** by the allow |
+    /// | 0 | 0 | Denied by the deny |
+    /// | 0 | 1 | Denied by the deny |
+    ///
+    /// The first row is the one this crate got wrong: it answered `Denied`, and
+    /// ten further probe variants agreed with the table.
+    ///
+    /// # Why this REFUSES rather than modelling the arbitration
+    ///
+    /// The table above is consistent with "the highest-priority deciding
+    /// candidate wins, and at equal priority a deny beats an allow", and that
+    /// rule matched all thirteen measured rows. It is not modelled here anyway,
+    /// for two reasons:
+    ///
+    /// * the same `accessTypeResults` map is live on the RESOURCE path, where
+    ///   this crate models a DIFFERENT mechanism (the engine loop's offsets
+    ///   469/505/529) and is green over 4000 corpus cases. The two coincide
+    ///   there — the engine loop shuts out a lower-priority evaluator before it
+    ///   can reach the map — but "green over 4000 cases" is not a proof, and a
+    ///   rule written here in terms of priority would need that audit to be
+    ///   done first or it would be two models of one mechanism;
+    /// * a wrong allow or deny derived from thirteen data points is a security
+    ///   defect, and a refusal whose cost is measured is not.
+    ///
+    /// **The cost is measured and it is zero on egret's own data**:
+    /// `egret-perm-compile` never emits `policyPriority` on a tag policy, and all
+    /// three policies of `tests/fixtures/tag-policies-live.json` — the download
+    /// captured from a live plugin's cache — carry `policyPriority: 0`. A
+    /// single-priority tag block cannot reach this refusal at all, because the
+    /// equal-priority case is the one this crate already reproduces.
+    ///
+    /// Modelling it is named as follow-up work in `tests/ranger/README.md`, with
+    /// the measured table to model it against.
+    TagPriorityArbitrationNotModelled {
+        /// Every deciding tag policy, and its priority, in candidate order.
+        policy_ids: Vec<Option<i64>>,
+        policy_names: Vec<String>,
+        priorities: Vec<i32>,
+    },
+    /// A tag DENY and a STRICTLY HIGHER-priority resource policy that allows —
+    /// a shape the two plugin versions answer DIFFERENTLY, and this crate
+    /// reproduces only 2.8.0's answer (SP4d-2b Task 5).
+    ///
+    /// # ⚠ Found by the differential gate, and it is a VERSION split
+    ///
+    /// MEASURED on both real engines, on one minimal download (a tag ACCESS
+    /// policy denying `select` to bob at priority 0, one resource ACCESS policy
+    /// allowing it, request `hive.sales`, tag `pii` at `SELF`):
+    ///
+    /// | resource allow | deny items on it | 2.5.0 | 2.8.0 |
+    /// |---|---|---|---|
+    /// | priority 1 | none | **Denied**, the TAG policy's id | **Allowed**, the resource policy's id |
+    /// | priority 1 | present (matching nobody) | Denied, the resource policy's id | Denied, the resource policy's id |
+    /// | priority 2 | none | **Denied**, the TAG policy's id | **Allowed**, the resource policy's id |
+    /// | priority 0 | none | Denied, the TAG policy's id | Denied, the TAG policy's id |
+    /// | (no tag block) | none | Allowed | Allowed |
+    ///
+    /// So on 2.8.0 a strictly higher-priority resource allow reopens a tag deny —
+    /// which is Ranger's own log line at offset 224, *"access denied by a tag
+    /// policy. Higher priority resource policies will be evaluated to check for
+    /// allow"* — and **on 2.5.0 it does not**. The equal-priority row and the
+    /// deny-capable row agree across versions, which is what makes this a
+    /// specific divergence rather than a general one.
+    ///
+    /// The mechanism was NOT established. The candidate is
+    /// `RangerDefaultPolicyEvaluator.evaluatePolicyItems`' per-access-type
+    /// `accessTypeResults` map (`RangerAccessRequestUtil.getAccessTypeResults`),
+    /// which lives in the request context and therefore spans both phases; its
+    /// branch structure at 2.8.0 offsets 366-573 is a five-armed priority
+    /// arbitration whose operand order could not be read reliably from a
+    /// disassembly. **A rule fitted to five rows without its mechanism is a
+    /// guess**, and in the allow/deny path a guess is a security defect, so this
+    /// refuses instead — but only where the crate is measured WRONG:
+    ///
+    /// * `Some(Ranger2_8_0)` — the crate's model is the measured 2.8.0 answer, so
+    ///   nothing refuses;
+    /// * `Some(Ranger2_5_0)` — the crate would reopen a deny 2.5.0 keeps, so it
+    ///   refuses;
+    /// * `None` — the caller did not say which plugin is running, and the two
+    ///   answers differ, so it refuses. This is the one place in this crate where
+    ///   `plugin_version: None` costs an ACCESS answer, and it costs it because
+    ///   the versions genuinely disagree.
+    ///
+    /// Modelling 2.5.0's arm is named as follow-up work in
+    /// `tests/ranger/README.md`, with the table above to model it against.
+    TagDenyReopenedDiffersByPluginVersion {
+        /// The tag policy that denied.
+        tag_policy_id: Option<i64>,
+        tag_policy_name: String,
+        /// The strictly higher-priority resource policy that allowed.
+        resource_policy_id: Option<i64>,
+        resource_policy_name: String,
+    },
     /// The TAG phase produced a mask or row filter and a strictly
     /// higher-priority RESOURCE policy then produced one too, so Ranger
     /// reports the tag policy's id with the resource policy's data.
@@ -1474,6 +1594,46 @@ pub fn evaluate(
     let mut unknown_stop: Option<(Option<i64>, String, bool)> = None;
 
     for view in &candidates {
+        // ── the candidate filter, BEFORE the arbitration ───────────────
+        //
+        // ⚠ SP4d-2b Task 5, found by the differential gate. Ranger's loop
+        // iterates `getLikelyMatchPolicyEvaluators` — its resource trie's answer
+        // — and this crate's `candidates` is every enabled policy of the type.
+        // That gap was argued harmless because an extra candidate cannot
+        // `decide` (trie ⊇ matcher, measured) and because offset 553 was guarded
+        // separately. It is not harmless: **the three-way arbitration below sets
+        // `determined` from the PRIORITY alone and never asks the matcher**, so a
+        // policy Ranger's trie removed could end this crate's loop, skip the
+        // restore at 599-632, and change the verdict.
+        //
+        // MEASURED, minimal reproducer (ranger 2.8.0): a tag DENY at priority 0,
+        // one resource policy at priority 1 that ALLOWS and is deny-capable, and
+        // one resource policy at priority 0 whose `database` value the trie
+        // provably does not hold for this request. Ranger answers
+        // `Denied, policyId 2` — the allowing policy wrote its id and the restore
+        // then cleared `isAllowed` — with or without that third policy, because
+        // its evaluator is never built into the loop's list. This crate answered
+        // `Allowed` when it was present and `Denied` when it was not: the whole
+        // divergence was a policy neither engine ever evaluates.
+        //
+        // The skip is a pure NARROWING of this crate's list towards Ranger's:
+        // `trie_excludes` proves absence per level, and a policy it excludes
+        // cannot match either, so it could never have decided anything. What it
+        // could do — and now cannot — is determine.
+        //
+        // `evaluate_sub`'s walk needs no such guard and has none: it ends its walk
+        // only at a view that is `provably_a_candidate()`, which is exactly the
+        // complement of this test, and a view that decides nothing contributes
+        // nothing to its split.
+        if trie_excludes(
+            view.policy,
+            &request.resource,
+            service_def,
+            PolicyType::Access,
+        ) {
+            continue;
+        }
+
         // ── the three-way arbitration, offsets 452-535 ─────────────────
         //
         // One character separates the two comparisons, and they are the two
@@ -1575,10 +1735,7 @@ pub fn evaluate(
                     return Decision::Undecidable {
                         why: vec![UndecidableCause::EvalOrderAmbiguous {
                             policy_ids: vec![view.policy.id, rival.policy.id],
-                            policy_names: vec![
-                                view.policy.name.clone(),
-                                rival.policy.name.clone(),
-                            ],
+                            policy_names: vec![view.policy.name.clone(), rival.policy.name.clone()],
                         }],
                     };
                 }
@@ -1595,6 +1752,38 @@ pub fn evaluate(
                 outcome = Some(found);
                 determined = true;
             } else if !allowed {
+                // ⚠ THE VERSION SPLIT (SP4d-2b Task 5). A tag DENY reopened by a
+                // STRICTLY higher-priority resource allow is `Allowed` on 2.8.0
+                // and `Denied` on 2.5.0 — measured on both engines, see
+                // [`UndecidableCause::TagDenyReopenedDiffersByPluginVersion`].
+                // Two conditions narrow it to the row that was measured to
+                // differ, and each was measured NOT to differ:
+                //
+                // * `> priority`, not `>=` — at EQUAL priority both versions keep
+                //   the tag deny;
+                // * `!view.has_deny` — with deny items on the allowing policy both
+                //   versions answer `Denied` too, because offset 553 cannot
+                //   determine for it and the restore at 599-632 puts the tag deny
+                //   back. That is the row this crate already reproduces on both
+                //   versions, and refusing it would be a pure over-refusal.
+                if is_denied_by_tags
+                    && !view.has_deny
+                    && view.policy.policy_priority > priority
+                    && engine.plugin_version != Some(PluginVersion::Ranger2_8_0)
+                {
+                    let (tag_policy_id, tag_policy_name) = tag_verdict
+                        .as_ref()
+                        .map(|o| (o.policy_id, o.policy_name.clone()))
+                        .unwrap_or((None, String::new()));
+                    return Decision::Undecidable {
+                        why: vec![UndecidableCause::TagDenyReopenedDiffersByPluginVersion {
+                            tag_policy_id,
+                            tag_policy_name,
+                            resource_policy_id: view.policy.id,
+                            resource_policy_name: view.policy.name.clone(),
+                        }],
+                    };
+                }
                 allowed = true;
                 priority = found.priority;
                 outcome = Some(found);
@@ -3380,6 +3569,11 @@ pub(crate) fn evaluate_tag_policies(
         Ok(c) => c,
     };
     let implied = tag_service_def.implied_access_grants();
+    if let Some(why) =
+        tag_priority_arbitration(DecisionKind::Access, &candidates, request, &implied)
+    {
+        return TagDecision::Undecidable { why };
+    }
 
     // The loop at offsets 157-579, reduced. Three things make the reduction
     // exact, and each is a measured branch rather than a simplification:
@@ -3395,8 +3589,20 @@ pub(crate) fn evaluate_tag_policies(
     //   access outcome. (The loop itself only breaks when auditing is ALSO
     //   determined, at 560-576; the extra iterations are no-ops for access.)
     //
-    // Unlike the resource loop this one compares no priorities: the first
-    // evaluator to determine is final, and the order is the comparator's.
+    // ⚠ CORRECTED (SP4d-2b Task 5). This comment used to read "unlike the
+    // resource loop this one compares no priorities: the first evaluator to
+    // determine is final". It is false, and reading `evaluateTagPolicies` is
+    // exactly why: the priority arbitration is not in this method. It is in
+    // `RangerDefaultPolicyEvaluator.evaluatePolicyItems`, on the
+    // `accessTypeResults` map that lives in the request CONTEXT and therefore
+    // survives from one tag evaluator to the next. See
+    // [`UndecidableCause::TagPriorityArbitrationNotModelled`] for the measured
+    // table and for why this loop refuses a multi-priority candidate set instead
+    // of ordering it.
+    //
+    // What remains true, and is what the loop below models, is the
+    // EQUAL-priority case: the first evaluator to determine is final, in the
+    // comparator's order.
     let mut allowed = false;
     let mut determined = false;
     let mut winner: Option<Outcome> = None;
@@ -3573,6 +3779,9 @@ fn evaluate_tag_sub(
 ) -> Result<Option<(SubResult, i32)>, Vec<UndecidableCause>> {
     let candidates = tag_candidates(kind, policies, request, tag_service_def)?;
     let implied = tag_service_def.implied_access_grants();
+    if let Some(why) = tag_priority_arbitration(kind, &candidates, request, &implied) {
+        return Err(why);
+    }
 
     let mut allowed = false;
     let mut determined = false;
@@ -3693,6 +3902,53 @@ fn evaluate_tag_sub(
 /// `SELF_OR_DESCENDANTS`, and `NONE` never does. **This is the opposite of the
 /// resource path**, where `ANCESTOR` is not an allow at all
 /// ([`crate::resource::MatchType::Ancestor`]). Same enum, two rules.
+/// The tag phase's `policyPriority` arbitration, as far as this crate models it
+/// — which is: only when every deciding candidate shares one priority.
+///
+/// `Some` is the refusal. See
+/// [`UndecidableCause::TagPriorityArbitrationNotModelled`] for the measurement
+/// and for why this is a refusal rather than a model.
+///
+/// Keyed on the POLICY, not on the candidate: one policy reached through two
+/// tags is one policy, and reporting it twice would read as two findings. The
+/// deciding test is the KIND's own (`decide` for access, `decide_sub` for a mask
+/// or a row filter), because a candidate that decides nothing cannot occupy the
+/// `accessTypeResults` slot and so cannot be arbitrated against anything.
+fn tag_priority_arbitration<'a>(
+    kind: DecisionKind,
+    candidates: &[TagCandidate<'a>],
+    request: &AccessRequest,
+    implied: &BTreeMap<&str, BTreeSet<&str>>,
+) -> Option<Vec<UndecidableCause>> {
+    let mut deciding: Vec<&'a RangerPolicy> = Vec::new();
+    for candidate in candidates {
+        if deciding
+            .iter()
+            .any(|p| std::ptr::eq(*p, candidate.view.policy))
+        {
+            continue;
+        }
+        let decides = match kind {
+            DecisionKind::Access => candidate.view.decide(request, implied).is_some(),
+            _ => candidate.view.decide_sub(kind, request, implied).is_some(),
+        };
+        if decides {
+            deciding.push(candidate.view.policy);
+        }
+    }
+    let mut priorities: Vec<i32> = deciding.iter().map(|p| p.policy_priority).collect();
+    priorities.sort_unstable();
+    priorities.dedup();
+    if priorities.len() < 2 {
+        return None;
+    }
+    Some(vec![UndecidableCause::TagPriorityArbitrationNotModelled {
+        policy_ids: deciding.iter().map(|p| p.id).collect(),
+        policy_names: deciding.iter().map(|p| p.name.clone()).collect(),
+        priorities: deciding.iter().map(|p| p.policy_priority).collect(),
+    }])
+}
+
 fn tag_candidates<'a>(
     kind: DecisionKind,
     policies: &'a ServicePolicySet,
@@ -4214,7 +4470,11 @@ fn collect_tag_resource_causes(
         }
     }
     for item in &policy.data_mask_policy_items {
-        if let Some(mask_type) = item.data_mask_info.as_ref().and_then(|i| i.mask_type.as_ref()) {
+        if let Some(mask_type) = item
+            .data_mask_info
+            .as_ref()
+            .and_then(|i| i.mask_type.as_ref())
+        {
             if mask_type.contains(':') {
                 why.push(UndecidableCause::TagPolicyNotNormalisable {
                     policy_id: policy.id,

@@ -30,12 +30,14 @@
 use egret_perm_compile::explain_wire::{
     WireDecision, WireDenyReason, WireEngineType, WireGraphProblem, WireItemBucket,
     WireMaskDecision, WireMaskResult, WirePluginVersion, WirePolicyType, WireRowFilterDecision,
-    WireRowFilterResult, WireServiceDefIssue, WireTagAttachmentProblem, WireTagPolicyBlock,
-    WireTagResourceProblem, WireUndecidableCause, WireUnmodelled,
+    WireRowFilterResult, WireServiceDefIssue, WireTagAttachmentProblem,
+    WireTagNormalisationProblem, WireTagPolicyBlock, WireTagResourceProblem, WireUndecidableCause,
+    WireUnmodelled,
 };
 use egret_ranger_eval::eval::{
     Decision, DenyReason, EngineType, MaskDecision, MaskResult, PluginVersion, RowFilterDecision,
-    RowFilterResult, TagAttachmentProblem, TagResourceProblem, UndecidableCause,
+    RowFilterResult, TagAttachmentProblem, TagNormalisationProblem, TagResourceProblem,
+    UndecidableCause,
 };
 use egret_ranger_eval::model::{ItemBucket, TagPolicyBlock, Unmodelled};
 use egret_ranger_eval::servicedef::{GraphProblem, PolicyType, ServiceDefIssue};
@@ -138,7 +140,7 @@ fn plugin_version_both_variants() {
     );
 }
 
-// ── UndecidableCause (16 variants) ───────────────────────────────────────
+// ── UndecidableCause (19 variants) ───────────────────────────────────────
 
 #[test]
 fn cause_envelope_construct_carries_the_full_typed_construct() {
@@ -487,6 +489,105 @@ fn cause_tag_sub_policy_is_deny_capable() {
             "kind": "tag_sub_policy_is_deny_capable",
             "policy_id": 8799,
             "policy_name": "mask-with-deny"
+        })
+    );
+}
+
+/// **SP4d-2b Task 5.** The three shapes of `TagNormalisationProblem`, each on the
+/// wire as its own `kind`.
+///
+/// `mask_type_absent` carries no payload and is the one that matters most: it is
+/// not "egret cannot decide this", it is "the engine's plugin throws while
+/// loading this download". A wire shape that folded it onto the other two would
+/// leave the UI nothing to distinguish an editable name from an incident.
+#[test]
+fn cause_tag_policy_not_normalisable_every_problem() {
+    let cases = [
+        (
+            TagNormalisationProblem::NamespacedAccessType("trino:select".to_string()),
+            WireTagNormalisationProblem::NamespacedAccessType {
+                access_type: "trino:select".to_string(),
+            },
+            serde_json::json!({"kind": "namespaced_access_type", "access_type": "trino:select"}),
+        ),
+        (
+            TagNormalisationProblem::NamespacedMaskType("hive:MASK_HASH".to_string()),
+            WireTagNormalisationProblem::NamespacedMaskType {
+                mask_type: "hive:MASK_HASH".to_string(),
+            },
+            serde_json::json!({"kind": "namespaced_mask_type", "mask_type": "hive:MASK_HASH"}),
+        ),
+        (
+            TagNormalisationProblem::MaskTypeAbsent,
+            WireTagNormalisationProblem::MaskTypeAbsent,
+            serde_json::json!({"kind": "mask_type_absent"}),
+        ),
+    ];
+    for (problem, expected, expected_json) in cases {
+        assert_eq!(WireTagNormalisationProblem::from(&problem), expected);
+        assert_eq!(
+            serde_json::to_value(WireTagNormalisationProblem::from(&problem)).unwrap(),
+            expected_json
+        );
+        let cause = UndecidableCause::TagPolicyNotNormalisable {
+            policy_id: Some(8901),
+            policy_name: "clearance".to_string(),
+            problem: problem.clone(),
+        };
+        assert_eq!(
+            WireUndecidableCause::from(&cause),
+            WireUndecidableCause::TagPolicyNotNormalisable {
+                policy_id: Some(8901),
+                policy_name: "clearance".to_string(),
+                problem: expected,
+            }
+        );
+    }
+}
+
+/// The priority arbitration keeps the three lists POSITIONAL.
+///
+/// A steward acts on the PRIORITIES, so losing them — or letting them drift out
+/// of step with the names — would leave nothing to change. Asserted on the JSON
+/// as well as on the enum, because the positional contract is a property of the
+/// serialisation and not of the Rust type.
+#[test]
+fn cause_tag_priority_arbitration_keeps_names_and_priorities_in_step() {
+    let cause = UndecidableCause::TagPriorityArbitrationNotModelled {
+        policy_ids: vec![Some(8910), None],
+        policy_names: vec!["low".to_string(), "high".to_string()],
+        priorities: vec![0, 3],
+    };
+    assert_eq!(
+        serde_json::to_value(WireUndecidableCause::from(&cause)).unwrap(),
+        serde_json::json!({
+            "kind": "tag_priority_arbitration_not_modelled",
+            "policy_ids": [8910, null],
+            "policy_names": ["low", "high"],
+            "priorities": [0, 3],
+        })
+    );
+}
+
+/// The version split names BOTH policies, and they are not interchangeable: one
+/// is the TAG policy that denies and one is the RESOURCE policy that allows, and
+/// a UI that swapped them would send a steward to the wrong service entirely.
+#[test]
+fn cause_tag_deny_reopened_names_the_tag_and_the_resource_policy_apart() {
+    let cause = UndecidableCause::TagDenyReopenedDiffersByPluginVersion {
+        tag_policy_id: Some(8920),
+        tag_policy_name: "clearance-deny".to_string(),
+        resource_policy_id: Some(55),
+        resource_policy_name: "grant-orders".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(WireUndecidableCause::from(&cause)).unwrap(),
+        serde_json::json!({
+            "kind": "tag_deny_reopened_differs_by_plugin_version",
+            "tag_policy_id": 8920,
+            "tag_policy_name": "clearance-deny",
+            "resource_policy_id": 55,
+            "resource_policy_name": "grant-orders",
         })
     );
 }
