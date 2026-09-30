@@ -1,0 +1,19 @@
+[package]
+name = "egret-apps"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egret-core = { workspace = true, features = ["token"] }
+egret-metastore.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+# Used from Task 3 (the read-only gate); declared now so Cargo.lock changes once.
+sqlparser.workspace = true
+
+[dev-dependencies]
+egret-test-db.workspace = true
+tokio.workspace = true
+chrono.workspace = true
