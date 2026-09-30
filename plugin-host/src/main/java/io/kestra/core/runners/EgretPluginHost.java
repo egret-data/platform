@@ -59,6 +59,9 @@ public final class EgretPluginHost {
     /** grace 15 s (workflow.plugin_host.kill_grace_s) − 2 s, when EGRET_KILL_WAIT_MS is unset. */
     static final long DEFAULT_KILL_WAIT_MS = 13_000;
 
+    /** The JDBC plugins' pool switch, forced off by {@link #load}. */
+    static final String CONNECTION_POOLING = "connectionPooling";
+
     private static final Logger HOST_LOG = LoggerFactory.getLogger("egret.host");
     private static final ObjectMapper MAPPER = JacksonMapper.ofJson();
     private static final TypeReference<Map<String, Object>> MAP = new TypeReference<>() {};
@@ -184,13 +187,13 @@ public final class EgretPluginHost {
         return EXIT_OK;
     }
 
-    private static final class Refused extends Exception {
+    static final class Refused extends Exception {
         Refused(String message) {
             super(message);
         }
     }
 
-    private static Task load(Path taskJson) throws Refused {
+    static Task load(Path taskJson) throws Refused {
         Map<String, Object> doc;
         try {
             doc = MAPPER.readValue(Files.readAllBytes(taskJson), MAP);
@@ -205,8 +208,8 @@ public final class EgretPluginHost {
             throw new Refused("task.json \"properties\" is not an object");
         }
 
-        Set<String> catalog = catalogTypes();
-        if (!catalog.contains(type)) {
+        Map<?, ?> catalog = catalogClasses();
+        if (!(catalog.get(type) instanceof Map<?, ?> cls)) {
             throw new Refused("type " + type + " is not in the plugin host's catalog");
         }
 
@@ -214,6 +217,20 @@ public final class EgretPluginHost {
         properties.forEach((k, v) -> spec.put(String.valueOf(k), v));
         spec.put("id", "egret");
         spec.put("type", type);
+        // W5b Task 6 fix 1: every JDBC task runs WITHOUT a connection pool, whatever the author
+        // wrote. The plugin defaults to a Hikari pool that registers its own JVM shutdown hook
+        // (`kestra-jdbc-pool-shutdown`), which on SIGTERM aborts the connection -- closing the
+        // socket and sending no cancel -- concurrently with our KillSwitch's kill(). When it wins,
+        // pgjdbc's cancelQuery() sees a closed connection and never sends the cancel, and the query
+        // outlives its timed-out task. A one-shot JVM gains nothing from a pool, so an author's
+        // `connectionPooling: true` is overridden rather than refused: it changes performance only,
+        // never what the task does.
+        if (cls.get("properties") instanceof Map<?, ?> schema && schema.containsKey(CONNECTION_POOLING)) {
+            if (spec.containsKey(CONNECTION_POOLING)) {
+                HOST_LOG.debug("{}: {} = {} overridden to false", type, CONNECTION_POOLING, spec.get(CONNECTION_POOLING));
+            }
+            spec.put(CONNECTION_POOLING, false);
+        }
 
         Task task;
         try {
@@ -232,19 +249,17 @@ public final class EgretPluginHost {
         return task;
     }
 
-    private static Set<String> catalogTypes() throws Refused {
+    /** The catalog's {@code classes} map: FQCN -> {properties, outputs}. */
+    private static Map<?, ?> catalogClasses() throws Refused {
         try (InputStream in = EgretPluginHost.class.getClassLoader().getResourceAsStream("catalog.json")) {
             if (in == null) {
                 throw new Refused("the plugin host has no catalog.json on its classpath");
             }
             Map<String, Object> catalog = MAPPER.readValue(in, MAP);
-            Object classes = catalog.get("classes");
-            if (!(classes instanceof Map<?, ?> m)) {
+            if (!(catalog.get("classes") instanceof Map<?, ?> m)) {
                 throw new Refused("the plugin host's catalog.json has no \"classes\"");
             }
-            @SuppressWarnings("unchecked")
-            Set<String> types = (Set<String>) m.keySet();
-            return types;
+            return m;
         } catch (IOException e) {
             throw new Refused("the plugin host's catalog.json cannot be read: " + e.getMessage());
         }

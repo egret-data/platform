@@ -277,13 +277,35 @@ pub(super) mod testing {
 
         async fn adopt(
             &self,
-            _task: &TaskInput,
-            _commands: &TaskCommands,
+            task: &TaskInput,
+            commands: &TaskCommands,
             _spec: &crate::scripts::RunnerSpec,
-            _observer: &dyn crate::worker::commands::LineObserver,
+            observer: &dyn crate::worker::commands::LineObserver,
         ) -> Result<Option<CommandsResult>> {
             *self.adopt_calls.lock().unwrap() += 1;
-            Ok(self.adoptable.lock().unwrap().clone())
+            let adopted = self.adoptable.lock().unwrap().clone();
+            // A real re-attach reads the existing container's lines into
+            // `task.log`; this one streams what the test set with
+            // `streaming`, and nothing when it set nothing.
+            let lines = self.streams.lock().unwrap().clone();
+            if let (Some(_), Some(lines)) = (&adopted, lines) {
+                let mut scratch = CommandsResult::default();
+                let mut state = crate::worker::commands::StreamState::default();
+                for (is_err, line) in lines {
+                    crate::worker::commands::stream_line(
+                        task,
+                        observer,
+                        &mut scratch,
+                        &mut state,
+                        usize::MAX,
+                        &line,
+                        is_err,
+                        commands.host_protocol,
+                    )
+                    .await;
+                }
+            }
+            Ok(adopted)
         }
 
         async fn release(&self, task: &TaskInput, spec: &crate::scripts::RunnerSpec) -> Result<()> {

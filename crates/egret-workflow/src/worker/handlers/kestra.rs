@@ -516,6 +516,30 @@ mod tests {
         assert_eq!(spy.seen.lock().unwrap().len(), 1);
     }
 
+    /// **An adopted run is masked too**: the lines a re-attached holder reads
+    /// from the existing container go through the same masked log.
+    #[tokio::test]
+    async fn an_adopted_runs_lines_are_masked() {
+        let spy = Spy::ok(ok(serde_json::json!({}))).streaming(vec![(
+            false,
+            format!("INFO still connected with {PASSWORD}"),
+        )]);
+        *spy.adoptable.lock().unwrap() = Some(ok(serde_json::json!({})));
+        let h = Kestra {
+            type_id: QUERY,
+            rt: runtime(spy.clone(), false, PluginConfigurations::default()),
+        };
+        let (mut t, rec) = recorded(QUERY, spec());
+        t.render = task().render;
+        let out = h.run(&t).await.expect("no worker error");
+        assert_eq!(out.state, RunState::Success, "{:?}", out.message);
+        assert_eq!(*spy.adopt_calls.lock().unwrap(), 1);
+        assert_eq!(
+            rec.texts(),
+            vec![(LogLevel::Info, "still connected with ******".to_string())]
+        );
+    }
+
     /// An unreadable feature state is egret's outage: `Err`, no runner call.
     #[tokio::test]
     async fn an_unreadable_feature_state_is_a_worker_failure_and_calls_no_runner() {

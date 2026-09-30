@@ -696,7 +696,8 @@ pub struct PluginHostConfig {
     pub jvm_max_heap: String,
     /// Seconds a timed-out plugin task gets between SIGTERM (the host calls
     /// the plugin's `kill()`, which cancels the query on the engine) and
-    /// SIGKILL. Default `15`. Script tasks keep grace 0.
+    /// SIGKILL. Default `15`, minimum [`MIN_KILL_GRACE_S`] (a boot error below).
+    /// Script tasks keep grace 0.
     #[serde(default = "default_kill_grace_s")]
     pub kill_grace_s: u64,
 }
@@ -715,6 +716,10 @@ impl Default for PluginHostConfig {
 fn default_jvm_max_heap() -> String {
     "384m".to_string()
 }
+
+/// The smallest [`PluginHostConfig::kill_grace_s`] the boot check accepts:
+/// the host waits `grace - 2 s` for `kill()`, so anything below leaves it 0 s.
+pub const MIN_KILL_GRACE_S: u64 = 3;
 
 /// `15` -- see [`PluginHostConfig::kill_grace_s`].
 fn default_kill_grace_s() -> u64 {
@@ -965,6 +970,15 @@ impl WorkflowConfig {
         if digits.is_empty() || unit_len > 1 || !digits.bytes().all(|b| b.is_ascii_digit()) {
             return Err(format!(
                 "workflow.plugin_host.jvm_max_heap: {heap:?} is not a JVM size (e.g. 384m)"
+            ));
+        }
+        // The host's kill wait is the grace less 2 s (spec §7.1): below 3 s it is 0 and the hook
+        // returns before the cancel is sent, and 0 takes the runner's SIGKILL path.
+        if self.plugin_host.kill_grace_s < MIN_KILL_GRACE_S {
+            return Err(format!(
+                "workflow.plugin_host.kill_grace_s: {} is below the minimum {MIN_KILL_GRACE_S}; \
+                 the plugin's kill() needs the grace less 2 s to cancel the query",
+                self.plugin_host.kill_grace_s
             ));
         }
         if self.container_runner != ContainerRunner::None
@@ -1537,6 +1551,18 @@ values = { allowed-images = [] }
             assert_eq!(cfg.workflow.plugin_host.kill_grace_s, 20);
             cfg.workflow.validate_plugin_host().unwrap();
 
+            for grace in [0, 1, 2] {
+                let mut w = cfg.workflow.clone();
+                w.plugin_host.kill_grace_s = grace;
+                let e = w.validate_plugin_host().unwrap_err();
+                assert!(
+                    e.contains("workflow.plugin_host.kill_grace_s") && e.contains("minimum 3"),
+                    "{grace}: {e}"
+                );
+            }
+            let mut w = cfg.workflow.clone();
+            w.plugin_host.kill_grace_s = 3;
+            w.validate_plugin_host().expect("3 is the minimum");
             for bad in ["384m; rm -rf /", "", "m", "12mm", "1.5g", "$(id)"] {
                 let mut w = cfg.workflow.clone();
                 w.plugin_host.jvm_max_heap = bad.into();

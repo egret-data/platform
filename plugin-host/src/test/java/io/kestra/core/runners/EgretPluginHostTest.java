@@ -175,6 +175,66 @@ class EgretPluginHostTest {
         assertTrue(ms < 5_000, "returned when run returned: " + ms + " ms");
     }
 
+    /**
+     * W5b Task 6 fix 1: the hook must not return while the kill it started is still running. On
+     * SIGTERM the JDBC pool's own shutdown hook can close the connection first, making run() throw and
+     * open the latch while kill() (the Postgres cancel) is still in flight; the JVM then halts and the
+     * cancel is never sent.
+     */
+    @Test
+    void the_hook_waits_for_a_kill_in_flight_after_run_returned() throws Exception {
+        var cancelSent = new AtomicBoolean();
+        var killSwitch = new KillSwitch(() -> {
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            cancelSent.set(true);
+        }, 10_000);
+        new Thread(() -> {
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException ignored) {
+            }
+            killSwitch.runReturned();
+        }).start();
+        killSwitch.onTerm(new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+        assertTrue(cancelSent.get(), "onTerm returned before the kill in flight finished");
+    }
+
+    /** Fix 1 (iii): a kill() that found nothing to cancel yet is tried again until run() returns. */
+    @Test
+    void kill_is_retried_until_run_returns() throws Exception {
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var killSwitch = new KillSwitch(calls::incrementAndGet, 10_000);
+        new Thread(() -> {
+            try {
+                Thread.sleep(1_000);
+            } catch (InterruptedException ignored) {
+            }
+            killSwitch.runReturned();
+        }).start();
+        killSwitch.onTerm(new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8));
+        int n = calls.get();
+        assertTrue(n >= 3, "kill() re-invoked while run() had not returned: " + n + " calls");
+        Thread.sleep(500);
+        assertEquals(n, calls.get(), "no kill() after run() returned");
+    }
+
+    /** Fix 1 (i): a one-shot JVM runs every JDBC task without a pool, whatever the author wrote. */
+    @Test
+    void load_turns_connection_pooling_off() throws Exception {
+        for (String pooling : new String[] {"", ", \"connectionPooling\": true"}) {
+            Path file = tmp.resolve("pool.json");
+            Files.writeString(file, "{\"type\": \"io.kestra.plugin.jdbc.postgresql.Query\", \"properties\": "
+                + "{\"url\": \"jdbc:postgresql://127.0.0.1:1/x\", \"sql\": \"SELECT 1\"" + pooling + "}}");
+            var task = EgretPluginHost.load(file);
+            Object value = io.kestra.core.serializers.JacksonMapper.toMap(task).get("connectionPooling");
+            assertEquals("false", String.valueOf(value), "connectionPooling with '" + pooling + "'");
+        }
+    }
+
     @Test
     void after_run_returned_the_hook_does_not_kill() {
         var killed = new AtomicBoolean();

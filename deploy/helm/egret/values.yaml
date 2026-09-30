@@ -123,7 +123,8 @@ workflow:
     # The JVM's -Xmx, below the pod's default memory limit (512Mi).
     jvmMaxHeap: 384m
     # Seconds between SIGTERM (the host calls the plugin's kill(), which
-    # cancels the query on Postgres/Trino) and SIGKILL on a timeout.
+    # cancels the query on Postgres/Trino) and SIGKILL on a timeout. Minimum 3
+    # (egret refuses to start below it: the host waits the grace less 2 s).
     killGraceS: 15
   tasks:
     namespace: egret-tasks
