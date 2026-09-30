@@ -1,0 +1,336 @@
+# SP4d-2b — evaluate the tag policies the engine is enforcing
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task.
+
+**Goal:** lift the `Undecidable` that SP4d-2a shipped for any profile whose tag
+service carries a policy, by evaluating tag policies the way the engine does.
+
+**Architecture:** the caller resolves the tag set for a resource — using the same
+`RangerDefaultPolicyResourceMatcher` the crate already ports, with the tag
+assignment in the policy position — and hands it in. The crate gains a tag phase
+before the resource phase, with Ranger's three-way priority arbitration between
+them.
+
+**Spec:** `docs/en/specs/2026-09-30-evaluate-tag-policies-sp4d-2b-design.md`
+
+## Global Constraints
+
+- **`egret-ranger-eval` stays dependency-pure:** `serde` + `serde_json` only. No
+  utoipa, no sqlx, no I/O in library code. Wire DTOs live in the route crate.
+- **The tag set is an INPUT.** The crate never queries a database. The resolution
+  lives in `egret-policy`; the evaluation lives in the crate.
+- **Match tag policies on `tags.name`, never `tags.key`.** They are different
+  columns and live they differ (`sp4cgate` vs `sp4cgate2`). `tags.key` stays on
+  `explain`'s attribution surface. One function must not return both.
+- **Never dedupe a tag by name.** `RangerTagForEval`'s `equals`/`hashCode` include
+  `matchType`, and MASK evaluators are ordered by match type, so the same tag at
+  two levels produces a different masking answer. Deduping silently reorders masks.
+- **Evaluate only column- and table-level attachments**, and **refuse by shape**
+  rather than assume: a tag service resource with fewer than three resource
+  elements did not come from `from_assignments`, so answer `Undecidable` naming it.
+- **Gate tag relevance on the service-def's `contextEnrichers`, never on
+  `EngineType`.** Both defs are consulted; `None` on either refuses. SP4d-2a
+  proved the single-def version fail-open.
+- **Do NOT narrow `Unmodelled::ServiceConfig`.** Super-users short-circuit before
+  any policy at `Integer.MAX_VALUE` priority.
+- Never run tests against the dev DB `egret`; use `egret_test` with
+  `env -u EGRET_ALLOW_DB_SKIP` and `RUST_TEST_THREADS=4`.
+- Never use `git stash`. Never override the git author.
+- Frontend: **no prettier** (`eslint .` only); `var(--token)` never
+  `hsl(var(--token))`; regenerate with **`npm run gen:api`**, never bare `orval`.
+- The OpenAPI drift gate must be run as
+  `cargo test -p egret-server --lib committed_openapi_json_is_current` —
+  **without `--lib` it reports "0 passed, 1 filtered out" and exits 0.**
+- `cp` is `cp -i` and `rm` is `rm -i`, both silently no-op: restore with
+  `cat backup > file`, delete with `command rm -f`. After a substitution, verify
+  the file changed before believing a SURVIVED.
+- zsh has no `${PIPESTATUS[0]}`; capture exit codes from the command itself.
+- **A command over ~120s is auto-backgrounded and its notification IS the finished
+  result.** Commit before running anything long; two tasks on the predecessor
+  branch stalled on this and had to be taken over. Leave `git status` clean, not
+  merely `git diff` clean.
+
+---
+
+### Task 1: Resolve the tag set the way the enricher does
+
+**Files:**
+- Modify: `crates/egret-policy/src/store.rs`
+- Test: `crates/egret-policy/tests/tag_resolution.rs`
+
+**Interfaces:**
+- Produces: a resolution returning, per matched attachment, the tag **name** and
+  its `MatchType`, with no deduplication.
+
+- [ ] **Step 1: Build the fixture no live data provides.** Every one of the six
+live tag assignments is **column-level**. The table-level arm — the one that
+produces `ANCESTOR` — is representable in the schema (`column_name = ''`) and
+**exercised by nothing**. Create it: a tag attached at table level, queried at
+column level.
+
+Also build the case D4 exists for: **the same tag attached at both the table and
+the column**, which must come back **twice** with different match types.
+
+- [ ] **Step 2: Write the failing tests.**
+1. Column attachment, column request → one entry, `SELF`.
+2. Table attachment, column request → one entry, `ANCESTOR`.
+3. Both → **two** entries, `SELF` and `ANCESTOR`, not one.
+4. A column attachment with a **table-level** request → **excluded** (that is
+   `DESCENDANT`, which the enricher rejects). Returning it would fail closed on
+   `explain` and still disagree with the engine.
+5. The returned identifier is `tags.name`, not `tags.key` — assert against a
+   fixture where they **differ**, or the test cannot tell.
+
+- [ ] **Step 3: Run them, watch them fail. Step 4: Implement. Step 5: Confirm green.**
+
+- [ ] **Step 6: Mutation-check the two that hide.** Dedupe by name and confirm test
+3 dies. Return `key` instead of `name` and confirm test 5 dies. Both are silent
+fail-opens; a test that does not die here is not testing them.
+
+- [ ] **Step 7: Commit.**
+
+---
+
+### Task 2: Carry the match type into the crate, and evaluate a tag policy
+
+**Files:**
+- Modify: `crates/egret-ranger-eval/src/{model.rs,eval.rs}`
+- Test: `crates/egret-ranger-eval/tests/tag_eval.rs`
+
+**Interfaces:**
+- Consumes: Task 1's shape.
+- Produces: a tag phase that evaluates `tagPolicies.policies` against
+  `{tag: <name>}` using the block's own `serviceDef`.
+
+- [ ] **Step 1: Read what already exists before designing.** `resource.rs`'s
+`match_type` / `matching_hierarchy` / `init` are the enricher's algorithm, already
+differentially tested against the real Java engine. This task **must not
+reimplement matching** — it calls it with the tag's resource in the policy
+position. If you find yourself writing a matcher, stop and re-read.
+
+- [ ] **Step 2: Write the failing tests**, using the real captured fixture
+`crates/egret-ranger-eval/tests/fixtures/tag-policies-live.json` — three real tag
+policies, ids 8799 (mask), 8805 (row filter), 8839 (deny-capable access):
+1. A tag in the resolved set matching policy 8839's `tag` value ⇒ a deny.
+2. A tag NOT in the set ⇒ that policy cannot decide.
+3. `ANCESTOR` is admitted on the tag path (it is not, for a resource policy).
+4. `DESCENDANT` and `NONE` are not admitted.
+5. The tag def, not the resource def, drives matching — `tag.json` has one
+   resource, `excludesSupported: false`, and **`ignoreCase: false`**, so tag
+   matching is case-SENSITIVE where resource matching is not.
+
+- [ ] **Step 3: Run, watch fail. Step 4: Implement. Step 5: Confirm green.**
+
+- [ ] **Step 6: Commit.**
+
+---
+
+### Task 3: Two phases, and the three-way arbitration
+
+**Files:**
+- Modify: `crates/egret-ranger-eval/src/eval.rs`
+- Test: `crates/egret-ranger-eval/tests/tag_arbitration.rs`
+
+- [ ] **Step 1: Verify the arbitration in both jars before implementing it.** The
+shape, to be confirmed rather than trusted: tag policies run first; the tag
+verdict's `isAccessDetermined` is **cleared** so resource policies can still
+decide; it is restored afterwards if nothing else determined. Then per resource
+evaluator, before `evaluate` is called:
+- tag **deny** ⇒ a resource policy runs only if **strictly higher** priority
+  (`>=` stands the tag verdict);
+- tag **allow** vs a resource **access** policy ⇒ same-or-higher still runs
+  (`>` stands it);
+- tag **allow** vs a resource **mask/row-filter** policy ⇒ `>=`.
+
+- [ ] **Step 2: Write the failing tests**, one per arm, plus: a tag deny that a
+higher-priority resource allow reopens; a tag allow that a same-priority resource
+deny closes; and the case where nothing else determines, so the tag verdict is
+restored.
+
+- [ ] **Step 3: Run, watch fail. Step 4: Implement. Step 5: Confirm green.**
+
+- [ ] **Step 6: Mutation-check each asymmetry.** Swap `>` for `>=` on the access
+arm and confirm a test dies; swap the other way on the mask arm and confirm a
+different test dies. The two asymmetries are one character apart and are the
+easiest thing in this package to get backwards.
+
+- [ ] **Step 7: Commit.**
+
+---
+
+### Task 4: The refusals that keep this honest
+
+**Files:**
+- Modify: `crates/egret-ranger-eval/src/{model.rs,eval.rs}`
+- Test: `crates/egret-ranger-eval/tests/tag_refusals.rs`
+
+- [ ] **Step 1: Write the failing tests.**
+1. A tag carrying `options` or `validityPeriods` ⇒ `Undecidable`. egret cannot
+   emit either, so this is provably inert **today** — and asserting it is what
+   stops a hand-written `/tags/download` shim or a future feature from silently
+   changing the answer.
+2. A matched tag policy referencing a tag **attribute** ⇒ `Undecidable`. Unlike a
+   validity period, an absent attribute expands to an **empty string** — a value,
+   and a different one from Ranger's. This must be a refusal, not an omission.
+3. A tag service resource with **fewer than three** resource elements ⇒
+   `Undecidable` naming the shape. That payload did not come from
+   `from_assignments`, so the schema/catalog narrowing does not apply to it.
+4. A tag policy carrying `validitySchedules` or `conditions` ⇒ `Undecidable`. The
+   existing refusal must be reachable on the tag path, not only the resource path.
+5. **Control:** `Unmodelled::ServiceConfig` still refuses. Assert it explicitly so
+   a future narrowing cannot take it by accident.
+
+- [ ] **Step 2: Run, watch fail. Step 3: Implement. Step 4: Confirm green.**
+
+- [ ] **Step 5: Also reproduce D9**, measured in the enricher: a service resource
+whose key set validates under no policy type is **dropped**, and its
+`resourceToTagIds` entry removed with it — and `isEnabled` on a service resource
+is **never consulted**. Test both.
+
+- [ ] **Step 6: Commit.**
+
+---
+
+### Task 5: Extend the differential gate, and re-measure the refusal rate
+
+**Files:**
+- Modify: `crates/egret-ranger-eval/tests/differential.rs`
+- Modify: `tests/ranger/src/test/java/EgretCaseRunner.java`
+- Modify: `tests/ranger/README.md`
+
+- [ ] **Step 1: Generate tag cases** through the existing case-runner protocol, at
+**both** plugin versions. Axes: a tag in the set and not; each admitted match type;
+the deny-capable access policy, the mask and the row filter; several tag policies
+at one priority; and the same tag at two levels with different match types.
+
+- [ ] **Step 2: Give every new axis a coverage counter and a floor**, as the
+existing 45 axes have. A corpus that silently stops producing a shape is a gate
+that silently stops being a gate — and it fails green.
+
+- [ ] **Step 3: RE-MEASURE `EvalOrderAmbiguous`.** It was 3.4–4.0% for resource
+policies. MASK evaluators are now ordered by tag match type, a new axis, so the
+old number does not carry forward. Record the new rate; do not reuse the old one.
+
+- [ ] **Step 4: Observe the gate failing.** Break one tag rule — admitting
+`DESCENDANT` is the sharpest, since it is the fail-open direction — confirm the
+differential catches it, restore, verify byte-identical.
+
+- [ ] **Step 5: Commit.**
+
+---
+
+### Task 6: `required_roles` becomes an `Option`
+
+**Files:**
+- Modify: `crates/egret-perm-compile/src/routes.rs`
+- Modify: `openapi.json`, `frontend/src/api/generated/**` (by generator only)
+- Modify: `frontend/src/routes/governance/ExplainAccess.tsx` and its test
+
+- [ ] **Step 1: Make the ambiguity unrepresentable.** The field currently conflates
+three facts, and the page re-derives the distinction from a **second** field
+(`attribution.tag === null`) because the first cannot carry it. The
+`.unwrap_or_default()` in the handler is the exact place a missing row becomes an
+empty list.
+
+Be honest about the gain: this is **3→2**, not 3→3. "Declares only groups" and
+"no `classification_policies` row" both legitimately produce `Some([])`.
+
+- [ ] **Step 2: Regenerate, in order.** `cargo run -q -p egret-bin -- openapi > openapi.json`,
+then the drift gate **with `--lib`**, then `cd frontend && npm run gen:api`.
+Never hand-edit either generated artefact.
+
+- [ ] **Step 3: Rewrite the page's three branches** to read one field instead of
+two, and update the three fixtures. Keep three branches — the wire now
+distinguishes one of them properly and the other two honestly stay together.
+
+- [ ] **Step 4: Commit.**
+
+---
+
+### Task 7: Wire it up — the refusal lifts
+
+**Files:**
+- Modify: `crates/egret-perm-compile/src/routes.rs`
+- Modify: `frontend/src/routes/governance/ExplainAccess.tsx` and its test
+
+- [ ] **Step 1: Pass the resolved tags.** The handler currently sends
+`resolved_tags: None` deliberately, because egret's resolution was not
+enricher-equivalent. Task 1 makes it equivalent for the two levels egret can
+express; pass it, and keep the shape refusal for anything else.
+
+- [ ] **Step 2: Write the failing test that matters most:** a profile whose tag
+service carries a real policy now **answers** instead of refusing. Use the
+two-profile fixture. Then the sibling: a payload whose shape egret could not have
+produced still refuses.
+
+- [ ] **Step 3: The page's copy changes meaning.** SP4d-2a's blast-radius sentence
+said a tag policy anywhere makes every verdict `Undecidable` installation-wide.
+That stops being true for the cases this package handles. **Rewrite it to what is
+now true, do not delete it** — the shape refusal and the attribute refusal remain,
+and a reader needs to know which is which.
+
+- [ ] **Step 4: Confirm `explain_writes_nothing` and
+`policy_read_permits_the_reads_and_refuses_the_writes` still pass unchanged.**
+
+- [ ] **Step 5: Commit.**
+
+---
+
+### Task 8: Ask the engine that is actually enforcing
+
+**Files:**
+- Create: `docs/en/plans/2026-09-30-sp4d-2b-live-result.md`
+
+**This is the task the package exists for.** Trino profile `sp3c2-trino-live` has
+**ingested** three tag policies — its plugin cache holds them at `policyVersion 22`,
+matching egret's store — including a deny-capable clearance. Until now `explain`
+answered `Undecidable` for it. This task asks whether the answer it now gives is
+the answer the engine gives.
+
+- [ ] **Step 1: Predict first, in writing, and commit the predictions separately**
+from the observations — as the predecessor's browser gate did, so the method is
+auditable. A prediction recorded after the observation proves nothing.
+
+- [ ] **Step 2: The cases.**
+1. A column carrying the live `pii` tag, against the live mask tag policy (8799) —
+   read the masked value back.
+2. The same column against the row-filter tag policy (8805) — **at table
+   granularity**, because `rowFilterDef.resources` names no `column`.
+3. The clearance tag policy (8839): an uncleared subject denied, a cleared one not.
+4. **A table-level tag attachment**, which no live data has and Task 1's fixture
+   invented — create it, and confirm the engine agrees it is an `ANCESTOR` match.
+   This is the arm derived from bytecode and never observed; it is the single most
+   valuable measurement in the package.
+5. The same tag at both table and column level, to confirm the mask ordering the
+   `MATCH_TYPE_COMPARATOR` implies.
+
+- [ ] **Step 3: Remember the poll.** egret IS the Ranger Admin and the plugin polls
+every 30 seconds. Show evidence the plugin holds the version you predicted from —
+a `policyVersion`, a cache dump, a log line. Not "waited 40 seconds".
+
+- [ ] **Step 4: A disagreement is a FINDING.** Do not tune the evaluator, the
+resolution or the page to match a prediction. Work out which of the three is
+wrong — evaluator, resolution, or this package's reading of Ranger — and say so.
+
+- [ ] **Step 5: Commit the result doc.**
+
+---
+
+## Definition of done
+
+- A profile whose tag service carries a policy gets an **answer**; one whose
+  payload shape egret could not have produced still refuses, naming the shape.
+- Tag matching uses `tags.name`; the same tag at two levels appears twice with
+  different match types and is not deduped.
+- The three-way arbitration is implemented and each asymmetry is mutation-pinned.
+- Validity periods, tag attributes, tag-policy constructs and the payload shape all
+  refuse, and `ServiceConfig` still refuses.
+- The differential gate covers tag cases at both plugin versions, every new axis
+  has a floor, the gate has been **observed failing**, and `EvalOrderAmbiguous` is
+  **re-measured** rather than carried forward.
+- `required_roles` is an `Option`, with the honest 3→2 stated.
+- The live gate records a prediction made before each observation, including the
+  table-level `ANCESTOR` arm that no live data previously exercised.
+- All crate suites green against `egret_test`; `cargo check --workspace`, fmt,
+  clippy, `tsc`, `eslint`, the page's vitest file alone, and the drift gate with
+  `--lib` all green.
