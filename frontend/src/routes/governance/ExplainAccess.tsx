@@ -28,6 +28,7 @@ import type {
   WirePluginVersion,
   WirePolicyType,
   WireServiceDefIssue,
+  WireTagResourceProblem,
   WireUndecidableCause,
   WireUnmodelled,
 } from "@/api/generated/model";
@@ -185,6 +186,26 @@ function serviceDefIssuePhrase(i: WireServiceDefIssue): string {
  * tag resolution would fail open), but a steward reading one undecidable verdict
  * would otherwise think it was specific to their target.
  */
+/**
+ * Why a tag policy's candidacy cannot be reproduced. The four shapes have four
+ * different remedies, which is why the wire carries them apart rather than as
+ * one sentence — see `UndecidableCause::TagResourceNotReproducible`.
+ */
+function tagResourceProblemPhrase(p: WireTagResourceProblem): string {
+  switch (p.kind) {
+    case "not_only_the_tag_resource":
+      return "names a resource level other than `tag`";
+    case "excludes":
+      return "sets `isExcludes` on its tag resource";
+    case "value_not_trie_prefix_exact":
+      return `matches tags with the wildcard value “${p.value}”`;
+    case "recursive":
+      return "sets `isRecursive` on its tag resource";
+  }
+  const _never: never = p;
+  return _never;
+}
+
 function causeScopeNote(c: WireUndecidableCause): string | null {
   const construct =
     c.kind === "envelope_construct" || c.kind === "policy_construct" ? c.construct : null;
@@ -228,6 +249,14 @@ function causeSentence(c: WireUndecidableCause): string {
       return `This profile declares ${ENGINE_LABEL[c.declared]} but carries the service definition “${c.service_def_name}”, whose resource levels are a different vocabulary.`;
     case "plugin_version_mismatch":
       return `This profile declares ${PLUGIN_LABEL[c.declared]} but ${ENGINE_LABEL[c.engine]} is running ${PLUGIN_LABEL[c.measured]}, and the two evaluate differently.`;
+    case "tags_unresolved":
+      return "This profile's tag service carries policies that would be evaluated against this resource's tags, and egret did not resolve them for this request — which is not the same as there being none, so no verdict here could be relied on.";
+    case "tag_resource_not_reproducible":
+      return `Tag policy ${policyRef(c.policy_name, c.policy_id)} ${tagResourceProblemPhrase(c.problem)}, so egret cannot tell which tags the engine would run it for.`;
+    case "tag_sub_policy_is_deny_capable":
+      return `Tag policy ${policyRef(c.policy_name, c.policy_id)} produced a mask or row filter and also carries deny items, and Ranger can then report this policy's id with a later policy's mask.`;
+    case "tag_sub_result_split_by_resource_policy":
+      return `Tag policy ${policyRef(c.tag_policy_name, c.tag_policy_id)} produced a mask or row filter and the higher-priority Ranger policy ${policyRef(c.resource_policy_name, c.resource_policy_id)} then produced one too, so Ranger reports the tag policy's id with the other policy's mask.`;
   }
   const _never: never = c;
   return _never;

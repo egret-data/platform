@@ -4232,15 +4232,28 @@ async fn a_tag_policy_block_that_could_decide_makes_the_profile_undecidable() {
         verdict["decision"]["kind"], "undecidable",
         "a `tagPolicies` block that could decide must refuse, not be guessed past; body: {body}"
     );
+    // SP4d-2b Task 3 changed WHICH refusal this is, and it is worth reading the
+    // change carefully because it is not a weakening.
+    //
+    // The evaluator used to refuse the `tagPolicies` block itself, on the
+    // envelope, and the cause carried the block's policy COUNT. It now
+    // EVALUATES the block — so the count is no longer a refusal to report — and
+    // the refusal that stands is the phase's own first one: this handler still
+    // sends `resolved_tags: None`, and `None` is "the caller did not resolve",
+    // never the empty set. SP4d-2b Task 7 is what makes the handler send a real
+    // tag set, and THAT is the commit after which this profile answers.
+    //
+    // So the claim the test makes is unchanged — a profile whose tag service
+    // carries a policy does not get a guessed answer — and it now rests on the
+    // narrower fact.
     let why = verdict["decision"]["why"].as_array().expect("why");
-    let cause = why
-        .iter()
-        .find(|c| c["construct"]["kind"] == "tag_policies")
-        .unwrap_or_else(|| panic!("no tag_policies cause in {body}"));
-    assert_eq!(cause["kind"], "envelope_construct", "body: {body}");
-    assert_eq!(
-        cause["construct"]["block"]["count"], 1,
-        "the refusal must carry HOW MANY tag policies could decide; body: {body}"
+    assert!(
+        why.iter().any(|c| c["kind"] == "tags_unresolved"),
+        "no tags_unresolved cause in {body}"
+    );
+    assert!(
+        !why.iter().any(|c| c["construct"]["kind"] == "tag_policies"),
+        "the envelope refusal for a decidable tag block must be gone; body: {body}"
     );
 
     // The StarRocks profile alongside it has no tag service at all, so it
