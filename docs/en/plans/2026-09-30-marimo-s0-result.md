@@ -18,12 +18,12 @@ run on a macOS dev laptop under unmeasured load and is not a pod figure.
 
 | # | Question | Answer | Evidence | Design consequence |
 |---|---|---|---|---|
-| 1 | Header reaches the right kernel, incl. reactive re-runs | **Yes**, in thread and ipc modes. 2 viewers, first run then slider-driven reactive re-runs (gateway saw alice n=1,2,4 and bob n=1,2,3,4; alice's n=3 absent, keypress coalescing suspected): every alice page shows alice, every bob page bob; 14 gateway queries (thread), 12 (ipc), 0 rejected. | `results/q1.json` (thread, both sessions pid 544); `results/q1-ipc.json` (alice pid 13553, bob pid 13545); `results/q1-blocked.json` (same result with the final block list, 14 queries) | None. Query-parameter fallback not needed. |
+| 1 | Header reaches the right kernel, incl. reactive re-runs | **Yes**, in thread and ipc modes. 2 viewers, first run then slider-driven reactive re-runs (slider values n=1..4; n=3 is missing for some viewer in each run — alice in `q1.json`, both in `q1-ipc.json`, bob in `q1-blocked.json` — keypress coalescing suspected): every alice page shows alice, every bob page bob; 14 gateway queries (thread), 12 (ipc), 0 rejected. | `results/q1.json` (thread, both sessions pid 544); `results/q1-ipc.json` (alice pid 13553, bob pid 13545); `results/q1-blocked.json` (same result with the final block list, 14 queries) | None. Query-parameter fallback not needed. |
 | 2 | Process per run session | **thread:** 1 pid for 4 sessions, 5.24 s first render alone, 17.71 s max with 3 concurrent. **`--sandbox`:** 1 pid for 4 sessions (per server, not per session), 12.0 s max offline / 17.18 s online. **ipc (egret patch):** 4 pids for 4 sessions, 13.2 s cold, 32.9 s max with 3 concurrent; ≈ 80 MB RSS per kernel (79.9–81.3 MB). | `results/q2-thread.json`, `q2-sandbox.json`, `q2-sandbox-online.json`, `q2-ipc.json`, `q2-rss.txt`, `q2-sandbox-attempt1-error.txt` | D7 holds **only via egret's own patch** (force the IPC branch in `SessionImpl.create` + point `_get_venv_config` at the image interpreter). Pod-per-viewer fallback not triggered. Private API → pin + contract test. Per-pod cap (20) and cold-start UX must be re-set against these numbers. |
 | 3 | Draft round-trip; what the author sees on 409 | Round-trip **works** (rev 1 → 2, marker in the draft). A stale save gets **409** and marimo shows a red **"Failed to save"** toast with egret's `detail` text; the save button stays unsaved; the edited buffer is kept. | `results/q3.json` (`save_responses` 200, 409, 409; `binds_after_external_put` 0); `results/q3-conflict.png` (agent-viewed screenshot); `results/q3-blocked.json` (same with the final block list) | Header-driven 409 **not needed**. Sync-agent fallback not triggered. New requirement: re-fetch on load must not reset a live editor's revision (see Findings). |
 | 4 | Separate origin + ticket → cookie; author-JS reach | marimo edit + run **work** behind the proxy on `apps.egret.localhost` with `--base-url`, WebSockets and ticket → `apps_sid` cookie. Ticket single-use (replay **403**); no cookie → **401**; run cookie → `/e` **401**. Author JS **executes** (anywidget `_esm`); `mo.Html` `<script>` / `onerror` stay inert. From the apps origin JS cannot read the parent document (`SecurityError`), egret cookies (`""`) or egret responses (CORS `TypeError`); the header-bearing POST dies at preflight. **But** egret's SameSite=Lax cookies **ride** requests from the apps origin (egret logged `whoami` as `alice`), and a tossed `Domain=` `egret_csrf=evil` **reached egret** beside the real one. `any_mutate_succeeded=false`. **`__Host-` defence unmeasured.** | `results/q4.json`, `results/q4.png`; `results/q4-host-prefix.json` (`login_ok=false`, 0 cookies stored: Chromium refused `Secure` cookies over http); `results/smoke.png` | Architecture holds functionally — no revisit. §6.1 rewritten: same-site ambient authority is real → P4 requirements (GETs side-effect free, header-based CSRF, `__Host-` verified over HTTPS on kind). Open question to the user: a different registrable site for apps. |
 | 5 | SQL cell accepts the DB-API connection | **Yes** — `mo.sql(..., engine=db)` ran through the gateway as the viewer. The engine dropdown lists `db` **only after** its defining cell has run (before: only "DuckDB (In-Memory)"). marimo's default SQL engine is DuckDB and errors without `duckdb` + `sqlglot`. | `results/q1.json` (`sql_cell_used_gateway: true`, `q5_dropdown`); `results/q5-dropdown.png`, `results/q5-dropdown-after-run.png` (automated Playwright capture; options also scraped into `q1.json`) | No custom engine class. Open design point for P3: ship duckdb in the image, or make the egret engine the SQL-cell default. |
-| 6 | Block list | 107 routes inventoried; **22 prefixes** blocked (list below); edit, save, 409 and run unchanged with them. Terminal WS 403 on `/e` and `/r`. Dot-segment bypass found (**19 of 40** raw variants reached marimo) and fixed (**0 of 40**). | `results/q6.json`, `q6-routes.json`, `q6-traffic.json` (260 distinct paths, 0 unmatched), `q6-terminal.json`, `q6-terminal.png`, `q6-bypass.json`, `q6-bypass-fixed.json`, `q1-blocked.json`, `q3-blocked.json` | §6.2 block list for P4; proxy checks and forwards one raw path; P4 should prefer an allow-list; strip/pin `X-Notebook-Id`. |
+| 6 | Block list | 107 routes inventoried; **22 prefixes** blocked (list below); edit, save, 409 and run unchanged with them. Terminal WS 403 on `/e` and `/r`. Dot-segment bypass found — of 40 raw variants: **3** HTTP GETs 200 (reached marimo), **16** WS forms 101 from the proxy but upstream-rejected (no shell), **2** POSTs reached marimo (401 from marimo), rest stopped or unattributed — and fixed (**0 of 40**: 28 × 403, 12 × 400). | `results/q6.json`, `q6-routes.json`, `q6-traffic.json` (260 distinct paths, 0 unmatched), `q6-terminal.json`, `q6-terminal.png`, `q6-bypass.json`, `q6-bypass-fixed.json`, `q1-blocked.json`, `q3-blocked.json` | §6.2 block list for P4; proxy checks and forwards one raw path; P4 should prefer an allow-list; strip/pin `X-Notebook-Id`. |
 
 ### Question 6 — the final block list
 
@@ -103,7 +103,8 @@ header-bearing variant failed the CORS preflight. Scope: the egret side is `fake
 egret's host-only, SameSite=Lax, double-submit cookies; it is not egret's code.
 
 **Q4 — the `__Host-` defence could not run on http.** With `COOKIE_PREFIX=__Host-` the fake egret sets
-`Secure` cookies; HeadlessChrome 136 stored none over `http://egret.localhost` (login 200, cookies `[]`,
+`Secure` cookies; HeadlessChrome 136 stored none over `http://egret.localhost` (login 200 per the Task 6 report, `context.cookies()` `[]`;
+`login_ok: false`,
 host page "login first"), so no victim session formed and nothing was measured
 (`results/q4-host-prefix.json`). Whether a `Domain=` toss can shadow `__Host-egret_csrf` is **unmeasured**.
 The widget-side `__Host-egret_csrf=evil` toss not taking has two equally good explanations (the `Domain`
@@ -126,11 +127,16 @@ default SQL cell errored (`results/q1.json` `q5_dropdown.after_run_all.note`).
 `GET /e/x/../api/packages/list`, `/e/x/%2e%2e/…` and `/e/x/..%2f…` returned **200** (package list), and 16
 WebSocket forms of `/terminal/ws` (`x/../`, `./`, `//`, `Terminal`, `%2e%2e`, `x/%2e%2e`, `..%2f`, `%2e`, on
 `/e` and `/r`) got **101 from the proxy**; the shell was not reached only because marimo refused the
-un-collapsed upstream URL (`results/q6-bypass.json`, 19 of 40 variants passed the check). Fixed by
+un-collapsed upstream URL. In addition `POST /e/x/../api/files/list_files` and its `/r` twin passed the
+check and reached marimo, which answered 401 (missing server token — a raw client lacks it; an author has
+it from the served page). The `/r` dot-form `GET`s got 401 (one captured body is marimo's "Authorization
+header required", the other two have none) and the `//` / `API` forms 404; those are not attributed.
+So of 40 variants: 3 × 200 reaching marimo, 16 × 101 from the proxy with no shell, 2 POSTs reaching
+marimo, the rest stopped or unattributed (`results/q6-bypass.json` and its `ws_note`). Fixed by
 `forwarded_path()` (`proxy.py:31-40`): one value, the raw path the client sent, is both matched
 (percent-decoded, case-insensitive) and forwarded; dot segments (also after one decode), `//`, encoded
-`.` `/` `\` `%`, backslash and NUL are rejected (HTTP 400, WS 403). After: 0 of 40 variants pass
-(`results/q6-bypass-fixed.json`). ASGI's `raw_path` is optional; the spike fails closed without it.
+`.` `/` `\` `%`, backslash and NUL are rejected (HTTP 400, WS 403). After: 0 of 40 variants pass — 28 × 403,
+12 × 400 (`results/q6-bypass-fixed.json`). ASGI's `raw_path` is optional; the spike fails closed without it.
 Browsers normalise paths themselves, so the Playwright terminal probe (`results/q6-terminal.json`) could
 not see this; the raw-socket probe `probes/q6_bypass.py` did.
 
@@ -175,7 +181,7 @@ Applied in the same commit, `en` and `vi`:
   the different-registrable-site alternative as an open question.
 - **§6.2** — the 22-prefix list, one raw path checked and forwarded, allow-list preferred, `X-Notebook-Id`,
   save-as.
-- **§9** — S0 done, with a "What happened" column beside each fallback; P3, P4 and P5 items gain the work above. **§10** gains tests for the reload case, the path-normalisation variants and N sessions → N kernels, and runs the cookie-toss test over HTTPS.
+- **§9** — S0 done, with a "What happened" column beside each fallback; P3, P4 and P5 items gain the work above. **§10** gains tests for the reload case, the path-normalisation variants and N sessions → N kernels, and splits the app-JS criterion into three measurable ones (cannot read egret's cookies or responses; cannot complete a state change — no side-effect GETs, header-based CSRF; a tossed `__Host-` cookie never reaches egret, over HTTPS on kind); **§11** drops "cannot reach egret's API", which S0 showed false for requests.
 
 ## Open questions for the user
 

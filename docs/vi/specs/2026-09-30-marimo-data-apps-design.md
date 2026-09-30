@@ -283,8 +283,9 @@ vào egret, và D3 khiến tác giả là không tin cậy đối với người
   cạnh `egret.localhost` — **không phải** một cổng khác, vì cookie không tách theo cổng) trong
   `<iframe sandbox="allow-scripts allow-same-origin allow-forms allow-downloads">`. `allow-same-origin`
   là so với origin *apps*, không phải của egret.
-- Cookie của egret là host-only, nên origin apps không bao giờ *giữ* chúng: S0 thấy `document.cookie` trên
-  origin apps không có cookie nào của egret.
+- Cookie của egret là host-only, nên theo thiết kế origin apps không bao giờ giữ chúng. S0 chỉ xác nhận
+  một phần: `document.cookie` trên origin apps không có cookie nào của egret, một phép kiểm không thấy
+  được cookie HttpOnly.
 - Để mở iframe, egret phát **ticket dùng một lần** (TTL 30 giây, gắn với người dùng, app, mode, và phiên
   bản hoặc draft). Origin apps đổi nó tại `/_ticket` lấy cookie của origin apps (HttpOnly, Secure,
   SameSite=Lax, cùng phạm vi gắn kết). Token session ở §4.1 được tạo từ lần đổi đó. S0 đo được ticket chỉ
@@ -341,12 +342,15 @@ Một service axum trong egret, lắng nghe trên host apps:
   `/api/lsp/health`, `/api/usage` và `/api/datasources/discover` và nhận 403 mà không ảnh hưởng việc
   sửa; panel settings không còn lưu được thay đổi.
 - **Kiểm và chuyển tiếp cùng một đường dẫn.** Proxy đầu tiên của S0 so khớp một đường dẫn đã chuẩn hoá rồi
-  chuyển tiếp một đường dẫn mà httpx lại chuẩn hoá lần nữa, nên `/e/x/../api/packages/list` trả 200 và các
-  dạng chấm/mã hoá của `/terminal/ws` lọt qua bước kiểm (19 trên 40 biến thể qua raw socket). Proxy lấy
+  chuyển tiếp một đường dẫn mà httpx lại chuẩn hoá lần nữa. Trong 40 biến thể qua raw socket: 3 `GET` HTTP
+  (`/e/x/../api/packages/list` và các dạng `%2e%2e` / `..%2f`) trả 200 kèm danh sách package; 16 dạng
+  WebSocket của `/terminal/ws` nhận 101 từ proxy nhưng marimo từ chối URL upstream chưa gộp, nên không tới
+  shell; 2 `POST …/x/../api/files/list_files` lọt bước kiểm và tới marimo (401 từ marimo); các 401 của
+  `GET` dạng chấm trên `/r` và các 404 của dạng `//` / `API` chưa xác định được nguồn. Proxy lấy
   đường dẫn thô mà client gửi, **từ chối** nếu nó có segment `.` hoặc `..` (kể cả sau một lần giải mã
   phần trăm), `//`, `.` `/` `\` `%` hoặc NUL ở dạng mã hoá, hoặc dấu gạch ngược, còn không thì so khớp
   không phân biệt hoa thường (sau khi giải mã phần trăm) và chuyển tiếp đúng chuỗi đó (đã sửa: 0 trên 40
-  lọt).
+  lọt — 28 × 403, 12 × 400).
 - **Deny-list thì mong manh**: mỗi lần nâng cấp marimo có thể thêm route. P4 nên ưu tiên **allow-list**
   các route mà editor và app run cần (kết quả S0 phân loại mọi route), và chạy lại việc kiểm kê route ở
   mỗi lần nâng cấp marimo.
@@ -424,7 +428,7 @@ Không phương án lùi nào bị kích hoạt; kiến trúc được giữ. Ha
 | # | Câu hỏi | Nếu không được | Điều đã xảy ra |
 |---|---|---|---|
 | 1 | Header do proxy gắn có tới kernel của đúng session qua `mo.app_meta().request` không, kể cả khi chạy lại theo reactive? | Truyền token qua query param khi tạo session | **Có**, ở chế độ thread và IPC. Không kích hoạt (§4.1). |
-| 2 | Chế độ run có chạy mỗi session một tiến trình được không — `--sandbox` offline, hoặc entrypoint ép nhánh IPC — và tốn bao nhiêu thời gian khởi động? | Mỗi (app × người xem) một pod | `--sandbox`: **không** (1 pid cho 4 session). Ép IPC: **có** (4 pid), ≈ 80 MB và 13,2 giây mỗi session lạnh trên laptop. Không kích hoạt; D7 dựa vào patch của egret (§2, §6.3). |
+| 2 | Chế độ run có chạy mỗi session một tiến trình được không — `--sandbox` offline, hoặc entrypoint ép nhánh IPC — và tốn bao nhiêu thời gian khởi động? | Mỗi (app × người xem) một pod | `--sandbox`: **không** (1 pid cho 4 session). Ép IPC: **có** (4 pid), ≈ 80 MB mỗi kernel, 13,2 giây cho session đầu tiên và 32,9 giây cho ba session đồng thời, trên laptop. Không kích hoạt; D7 dựa vào patch của egret (§2, §6.3). |
 | 3 | Load đã patch + `EgretStorage` có đi trọn vòng một draft không, và tác giả thấy gì khi 409? | Agent đồng bộ theo dõi file; header egret hiển thị 409 | **Có**; marimo hiện toast "Failed to save" với nội dung của egret. Không cái nào kích hoạt (§5.1). Yêu cầu mới: lấy lại khi load không được đặt lại revision của editor đang mở. |
 | 4 | marimo có chạy được sau proxy với base URL và WebSocket, trên origin riêng, với ticket → cookie không? | Không có — xem lại kiến trúc | **Có**. Không kích hoạt. JS của tác giả chạy được (anywidget); cookie Lax của egret đi theo request của nó và cookie bị tung vào tới egret; `__Host-` chưa đo được trên http → yêu cầu cho P4 và một câu hỏi mở (§6.1). |
 | 5 | SQL cell có nhận kết nối DB-API của `egret_marimo` làm engine không? | Một lớp engine marimo riêng | **Có**; chỉ hiện trong dropdown sau khi cell của nó đã chạy. Không kích hoạt. DuckDB mặc định là điểm mở cho P3 (§4.4). |
@@ -459,9 +463,13 @@ fail khi code nó bảo vệ bị cố ý làm hỏng.
 - Gateway từ chối `DELETE`, `INSERT`, `GRANT`, `SELECT 1; DROP TABLE t`, CTE sửa dữ liệu, câu lệnh giấu sau
   comment, và mọi thứ không parse được.
 - Token mất hiệu lực sau logout, sau khi gỡ `app:read`, và sau khi WebSocket của nó đóng.
-- **JavaScript trong app không đọc được cookie của egret và không gọi được API egret** — browser test với
-  một app cố thử, kể cả tung một `egret_csrf` có `Domain=` rồi POST tới egret, chạy qua HTTPS để cookie
-  `__Host-` tồn tại (S0 không làm được, §6.1).
+- **JavaScript trong app không đọc được cookie của egret hay response của egret** — browser test với một
+  app cố thử. (Request của nó *có* tới egret bằng danh tính người xem, §6.1; vì thế mới có hai mục sau.)
+- **JavaScript trong app không hoàn tất được bất kỳ thay đổi trạng thái nào trên egret** — kiểm bằng việc
+  kiểm toán rằng không `GET` nào của egret có tác dụng phụ và mọi route thay đổi trạng thái đều đòi header
+  `X-Egret-CSRF` (CSRF dựa trên header), cộng một browser test thử POST no-cors và POST mang header.
+- **Cookie `__Host-` bị tung vào không bao giờ tới egret** — app đặt `__Host-egret_csrf` có `Domain=` rồi
+  POST; kiểm qua HTTPS trên kind để cookie `__Host-` tồn tại (S0 không làm được, §6.1).
 - **Hai người xem có grant Ranger khác nhau thấy các dòng khác nhau từ cùng một app**, trên Trino thật và
   StarRocks thật trên kind.
 - Admin mở một app chạy `DELETE` nhận 400 và bảng không đổi.
@@ -477,7 +485,8 @@ fail khi code nó bảo vệ bị cố ý làm hỏng.
 
 - Tác giả xây một app có SQL cell và widget UI trên Trino và trên StarRocks, rồi publish.
 - Hai người xem thấy kết quả theo quyền của chính họ.
-- Admin mở một app độc hại không ghi được dữ liệu và không chạm được API egret.
+- Admin mở một app độc hại không ghi được dữ liệu, không đọc được cookie hay response của egret, và không
+  hoàn tất được bất kỳ thay đổi trạng thái nào trên egret.
 - Notebook Jupyter đã được gỡ.
 
 ## 12. Ngoài phạm vi

@@ -286,8 +286,9 @@ viewer. Therefore:
   beside `egret.localhost` — **not** a different port, because cookies are not isolated by port) in
   `<iframe sandbox="allow-scripts allow-same-origin allow-forms allow-downloads">`. `allow-same-origin`
   is relative to the *apps* origin, not egret's.
-- egret's cookies are host-only, so the apps origin never *holds* them: S0 found `document.cookie` on the
-  apps origin empty of egret cookies.
+- egret's cookies are host-only, so by design the apps origin never holds them. S0 corroborates this
+  only partly: `document.cookie` on the apps origin was empty of egret cookies, a check that cannot see
+  HttpOnly cookies.
 - To open an iframe, egret issues a **one-time ticket** (TTL 30 s, bound to user, app, mode, and version
   or draft). The apps origin redeems it at `/_ticket` for an apps-origin cookie (HttpOnly, Secure,
   SameSite=Lax, scoped to the same binding). The session token of §4.1 is minted from that redemption.
@@ -345,11 +346,14 @@ An axum service in egret, listening on the apps host:
   `/api/packages/sandbox`, `/api/lsp/health`, `/api/usage` and `/api/datasources/discover` and gets 403
   with no effect on editing; the settings panel can no longer persist changes.
 - **Checks and forwards the same path.** S0's first proxy matched a normalised path and forwarded one
-  that httpx normalised again, so `/e/x/../api/packages/list` returned 200 and dot/encoded forms of
-  `/terminal/ws` passed the check (19 of 40 raw-socket variants). The proxy takes the raw path the client
+  that httpx normalised again. Of 40 raw-socket variants: 3 HTTP `GET`s (`/e/x/../api/packages/list`
+  and its `%2e%2e` / `..%2f` forms) returned 200 with the package list; 16 WebSocket forms of
+  `/terminal/ws` got 101 from the proxy but marimo rejected the un-collapsed upstream URL, so no shell;
+  2 `POST …/x/../api/files/list_files` passed the check and reached marimo (401 from marimo); the `/r`
+  dot-form `GET` 401s and the `//` / `API` 404s are not attributed. The proxy takes the raw path the client
   sent, **rejects** it if it has a `.` or `..` segment (also after one percent-decode), `//`, an encoded
   `.` `/` `\` `%` or NUL, or a backslash, and otherwise matches it case-insensitively (percent-decoded)
-  and forwards that same string (fixed: 0 of 40 pass).
+  and forwards that same string (fixed: 0 of 40 pass — 28 × 403, 12 × 400).
 - **A deny-list is fragile**: every marimo upgrade can add routes. P4 should prefer an **allow-list** of
   the routes the editor and run app need (the S0 result classifies all 107), and re-run the route
   inventory on every marimo upgrade.
@@ -428,7 +432,7 @@ No fallback triggered; the architecture stands. Two open questions for the user 
 | # | Question | Fallback if no | What happened |
 |---|---|---|---|
 | 1 | Does a proxy-injected header reach the right session's kernel through `mo.app_meta().request`, including on reactive re-runs? | Pass the token as a query parameter at session creation | **Yes**, thread and IPC modes. Not triggered (§4.1). |
-| 2 | Can run mode run each session in its own process — `--sandbox` offline, or the IPC branch forced by the entrypoint — and at what start-up cost? | One pod per (app × viewer) | `--sandbox`: **no** (1 pid for 4 sessions). Forced IPC: **yes** (4 pids), ≈ 80 MB and 13.2 s per cold session on a laptop. Not triggered; D7 rests on egret's patch (§2, §6.3). |
+| 2 | Can run mode run each session in its own process — `--sandbox` offline, or the IPC branch forced by the entrypoint — and at what start-up cost? | One pod per (app × viewer) | `--sandbox`: **no** (1 pid for 4 sessions). Forced IPC: **yes** (4 pids), ≈ 80 MB per kernel, 13.2 s for the first session and 32.9 s for three concurrent, on a laptop. Not triggered; D7 rests on egret's patch (§2, §6.3). |
 | 3 | Does the patched load + `EgretStorage` round-trip a draft, and what does the author see on 409? | File-watching sync agent; 409 shown by the egret header | **Yes**; marimo shows a "Failed to save" toast with egret's text. Neither triggered (§5.1). New requirement: re-fetch on load must not reset a live editor's revision. |
 | 4 | Does marimo work behind the proxy with a base URL and WebSockets, on a separate origin, with ticket → cookie? | None — revisit the architecture | **Yes**. Not triggered. Author JS runs (anywidget); egret's Lax cookies ride its requests and a tossed cookie reaches egret; `__Host-` unmeasured on http → P4 requirements and one open question (§6.1). |
 | 5 | Does a SQL cell accept `egret_marimo`'s DB-API connection as an engine? | A custom marimo engine class | **Yes**; listed in the dropdown only after its cell ran. Not triggered. DuckDB default is an open P3 point (§4.4). |
@@ -464,9 +468,14 @@ when the code it guards is broken on purpose.
 - The gateway rejects `DELETE`, `INSERT`, `GRANT`, `SELECT 1; DROP TABLE t`, a data-modifying CTE,
   statements hidden behind comments, and anything unparseable.
 - A token stops working after logout, after `app:read` is removed, and after its WebSocket closes.
-- **JavaScript inside an app cannot read egret's cookies or call egret's API** — a browser test with an
-  app that tries, including tossing a `Domain=`-scoped `egret_csrf` and then POSTing to egret, run over
-  HTTPS so the `__Host-` cookies exist (S0 could not, §6.1).
+- **JavaScript inside an app cannot read egret's cookies or egret's responses** — a browser test with an
+  app that tries. (Its requests *do* reach egret as the viewer, §6.1; that is why the next two exist.)
+- **JavaScript inside an app cannot complete any state change on egret** — tested by the audit that no
+  egret `GET` has a side effect and that every state-changing route requires the `X-Egret-CSRF` header
+  (header-based CSRF), plus a browser test that tries a no-cors POST and a header-bearing POST.
+- **A tossed `__Host-` cookie never reaches egret** — the app sets a `Domain=`-scoped
+  `__Host-egret_csrf` and then POSTs; tested over HTTPS on kind so the `__Host-` cookies exist (S0 could
+  not, §6.1).
 - **Two viewers with different Ranger grants see different rows from the same app**, on real Trino and
   real StarRocks on kind.
 - An admin opening an app that runs `DELETE` gets a 400 and the table is unchanged.
@@ -482,7 +491,8 @@ when the code it guards is broken on purpose.
 
 - An author builds an app with a SQL cell and a UI widget over Trino and over StarRocks, and publishes it.
 - Two viewers see results under their own permissions.
-- An admin opening a malicious app cannot write data or reach egret's API.
+- An admin opening a malicious app cannot write data, read egret's cookies or responses, or complete any
+  state change on egret.
 - The Jupyter notebook is gone.
 
 ## 12. Out of scope
