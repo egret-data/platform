@@ -144,6 +144,25 @@ pub async fn render_with_secrets(
     workspace: Uuid,
     source: &dyn SecretSource,
 ) -> Result<(Map<String, Value>, Resolved), String> {
+    render_with_secrets_detected_by(props, cx, workspace, source, text_uses_secret).await
+}
+
+/// [`render_with_secrets`] with the detector as a parameter, so a test can
+/// stand in for a detector miss.
+///
+/// **Detection and resolution agree by construction** (fix round 2, C1): a
+/// string `uses_secret` says does not call `secret()` is rendered with the
+/// shared environment, where `secret` is refused, and contributes no name to
+/// the fetch. A string the save-time gate (`workflow:use_secrets`) passed
+/// therefore cannot resolve a secret at run, whatever a future detector gets
+/// wrong: a miss makes `secret()` inert, never a bypass.
+pub(crate) async fn render_with_secrets_detected_by(
+    props: &Map<String, Value>,
+    cx: &RenderContext,
+    workspace: Uuid,
+    source: &dyn SecretSource,
+    uses_secret: fn(&str) -> bool,
+) -> Result<(Map<String, Value>, Resolved), String> {
     // Pass 1: collect. An error here is not final: `""` in place of a secret
     // can fail an expression the real value satisfies, and pass 3 reproduces
     // any error that does not depend on a value.
@@ -151,7 +170,9 @@ pub async fn render_with_secrets(
     {
         let mut names = collected.names.lock().expect("collect lock");
         let _ = walk_object(props, "", &mut |_, text| {
-            names.extend(literal_keys(text));
+            if uses_secret(text) {
+                names.extend(literal_keys(text));
+            }
             Ok(String::new())
         });
     }
@@ -162,7 +183,9 @@ pub async fn render_with_secrets(
             env.add_function("secret", move |rest: Rest<MjValue>| c.call(rest));
         };
         let _ = walk_object(props, "", &mut |_, text| {
-            let _ = render_once_with(text, cx, &extend);
+            if uses_secret(text) {
+                let _ = render_once_with(text, cx, &extend);
+            }
             Ok(String::new())
         });
     }
@@ -188,7 +211,13 @@ pub async fn render_with_secrets(
             env.add_function("secret", move |rest: Rest<MjValue>| r.call(rest));
         };
         walk_object(props, "", &mut |path, text| {
-            render_once_with(text, cx, &extend).map_err(|e| format!("`{path}` did not render: {e}"))
+            let rendered = if uses_secret(text) {
+                render_once_with(text, cx, &extend)
+            } else {
+                // The shared environment: `secret` refuses there.
+                render_once_with(text, cx, &|_: &mut Environment<'static>| {})
+            };
+            rendered.map_err(|e| format!("`{path}` did not render: {e}"))
         })
     };
     let values = resolver.handed.lock().expect("resolve lock").clone();
@@ -237,91 +266,32 @@ fn literal_keys(source: &str) -> Vec<String> {
 }
 
 /// Whether one string, as the author wrote it, can call `secret()` when it
-/// is rendered (fix round 1: the publish refusals of I2 and the
-/// `workflow:use_secrets` gate of I3).
+/// is rendered: the ONE detector behind I2's publish refusal, I3's
+/// `workflow:use_secrets` gate, and -- fix round 2 -- whether
+/// [`render_with_secrets`] resolves `secret()` in that string at all.
 ///
-/// **The identifier, not the call, inside a template region.** `{% set s =
-/// secret %}{{ s('k') }}` calls it with no `secret(` in the text, so any
-/// `secret` in the code of a `{{ }}` or `{% %}` region counts, unless it is
-/// an attribute (`inputs.secret`), part of a longer name (`mysecret`,
-/// `secret_task`) or inside a string literal. Text outside every region --
-/// `message: "secret is {{ x }}"` -- renders as itself and does not count,
-/// nor does a `{# #}` comment. A region ends at its closing delimiter
-/// OUTSIDE a string literal, so `{{ "}}" ~ secret('k') }}` is one region; an
-/// unclosed one runs to the end. `{% raw %}` is not modelled: a call inside
-/// one counts, which errs towards "yes".
+/// **Read by the renderer's own front end** (fix round 2, C1), as
+/// [`super::env::referenced_roots`] does: `{% raw %}` protection, `rewrite`,
+/// minijinja's parser, then `undeclared_variables`. A use is `secret` among
+/// the names the template reads from outside itself -- a call, `{% set s =
+/// secret %}`, a macro argument, a `{% call %}` body, a `with`/`for` binding,
+/// a filter argument. A string that does not rewrite or parse counts as a
+/// use (fail closed). Round 1 lexed templates itself and disagreed with the
+/// renderer on nested `{}` and on `{% raw %}` regions, which let an editor
+/// save a call the gate could not see.
 ///
-/// Complete while nothing can look a function up by a computed name:
-/// minijinja has no such lookup, and Kestra's `render()`/`renderOnce()`,
-/// which would render a string built at run time, are refused
-/// (`functions::REFUSED`). If either arrives, this must change with it.
+/// A string without the letters `secret` names no such identifier: minijinja
+/// identifiers are written out in the source, and neither the raw-tag pass
+/// nor `rewrite` builds one. `render()`/`renderOnce()`, which would render a
+/// string built at run time, are refused (`functions::REFUSED`); if either
+/// arrives, this must change with it.
 pub fn text_uses_secret(text: &str) -> bool {
-    static IDENT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     if !text.contains("secret") {
         return false;
     }
-    let ident = IDENT
-        .get_or_init(|| regex::Regex::new(r"(?:^|[^.\w])secret\b").expect("identifier pattern"));
-    template_code(text).iter().any(|code| ident.is_match(code))
-}
-
-/// The code of every `{{ }}` and `{% %}` region of `text`, with the contents
-/// of its string literals blanked (quotes kept), for [`text_uses_secret`].
-fn template_code(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    loop {
-        let Some(open) = ["{{", "{%", "{#"]
-            .iter()
-            .filter_map(|d| rest.find(d).map(|i| (i, *d)))
-            .min_by_key(|(i, _)| *i)
-        else {
-            return out;
-        };
-        let body = &rest[open.0 + 2..];
-        if open.1 == "{#" {
-            match body.find("#}") {
-                Some(end) => rest = &body[end + 2..],
-                None => return out,
-            }
-            continue;
-        }
-        let close = if open.1 == "{{" { "}}" } else { "%}" };
-        let mut code = String::new();
-        let mut quote: Option<char> = None;
-        let mut escaped = false;
-        let mut consumed = body.len();
-        for (i, c) in body.char_indices() {
-            match quote {
-                Some(q) => {
-                    if escaped {
-                        escaped = false;
-                    } else if c == '\\' {
-                        escaped = true;
-                    } else if c == q {
-                        quote = None;
-                        code.push(c);
-                        continue;
-                    }
-                    code.push(' ');
-                }
-                None => {
-                    if body[i..].starts_with(close) {
-                        consumed = i + close.len();
-                        break;
-                    }
-                    if c == '\'' || c == '"' {
-                        quote = Some(c);
-                    }
-                    code.push(c);
-                }
-            }
-        }
-        out.push(code);
-        if consumed >= body.len() {
-            return out;
-        }
-        rest = &body[consumed..];
+    match super::env::referenced_roots(text) {
+        Ok(roots) => roots.contains("secret"),
+        Err(_) => true,
     }
 }
 
@@ -904,6 +874,19 @@ mod tests {
             "{{ \"}}\" ~ secret('db') }}",
             "{{ '\\'}}' ~ secret('db') }}",
             "{{ x }} then {{ secret('db')",
+            // Fix round 2, C1: lexed as the renderer lexes them.
+            "{{ {'a': {}} ~ secret('db') }}",
+            "{% raw %}{{ \"{% endraw %}{{ secret('db') }}",
+            "{% raw %}{{ '{% endraw %}{{ secret('db') }}",
+            // Every other way to reach the name.
+            "{% macro m(f) %}{{ f('db') }}{% endmacro %}{{ m(secret) }}",
+            "{% macro m() %}{{ secret('db') }}{% endmacro %}{{ m() }}",
+            "{% macro m() %}{{ caller() }}{% endmacro %}{% call m() %}{{ secret('db') }}{% endcall %}",
+            "{% with s = secret %}{{ s('db') }}{% endwith %}",
+            "{% for f in [secret] %}{{ f('db') }}{% endfor %}",
+            "{% filter upper %}{{ secret('db') }}{% endfilter %}",
+            "{{ x | default(secret('db')) }}",
+            "{% if x is defined %}{{ secret('db') }}{% endif %}",
         ] {
             assert!(text_uses_secret(yes), "{yes}");
         }
@@ -919,8 +902,49 @@ mod tests {
             "secret is {{ outputs.encrypted.value }}",
             "{{ 'a secret' }} and {{ \"secret('x')\" }}",
             "{# secret('db') #}",
+            "{% raw %}{{ secret('db') }}{% endraw %}",
         ] {
             assert!(!text_uses_secret(no), "{no}");
+        }
+    }
+
+    /// **A detector miss makes `secret()` inert, never a bypass** (fix round
+    /// 2, C1): a string the detector says calls nothing is rendered where
+    /// `secret` refuses, and no name in it is fetched.
+    #[tokio::test]
+    async fn a_string_the_detector_misses_fetches_no_secret() {
+        let source = table();
+        let err = render_with_secrets_detected_by(
+            json!({ "v": "{{ secret('db', subkey='password') }}" })
+                .as_object()
+                .unwrap(),
+            &RenderContext::new(),
+            WS,
+            &source,
+            |_| false,
+        )
+        .await
+        .expect_err("refused");
+        assert!(source.reads.lock().unwrap().is_empty(), "nothing fetched");
+        assert!(err.contains("resolves only on `kestra.*`"), "{err}");
+        assert!(!err.contains("pa55word"), "{err}");
+    }
+
+    /// Fix round 2, C1: the three strings the round-1 detector missed are
+    /// real calls -- the render resolves `db` in each.
+    #[tokio::test]
+    async fn the_round_one_misses_really_call_secret() {
+        for text in [
+            "{{ {'a': {}} ~ secret('db') }}",
+            "{% raw %}{{ \"{% endraw %}{{ secret('db', subkey='username') }}",
+            "{% raw %}{{ '{% endraw %}{{ secret('db', subkey='username') }}",
+        ] {
+            let source = table();
+            let _ = render(json!({ "v": text }), &source).await;
+            assert!(
+                source.reads.lock().unwrap().contains(&"db".to_string()),
+                "{text}"
+            );
         }
     }
 

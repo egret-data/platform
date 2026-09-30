@@ -1078,3 +1078,111 @@ fn namespace_and_full_written_in_a_call_are_refused_at_publish() {
     )
     .is_empty());
 }
+
+/// Fix round 2, C1: the three spellings the round-1 detector lexed
+/// differently from the renderer. Each is a real `secret()` call (see
+/// `runners::secrets::tests::the_round_one_misses_really_call_secret`), so an
+/// editor without `workflow:use_secrets` cannot save one.
+#[tokio::test]
+async fn the_round_one_detector_misses_are_refused_to_an_editor() {
+    let Some(db) = common::db().await else { return };
+    let (ws, editor) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, editor, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+    for (i, call) in [
+        r#"{{ {'a': {}} ~ secret('db') }}"#,
+        r#"{% raw %}{{ \"{% endraw %}{{ secret('db') }}"#,
+        r#"{% raw %}{{ '{% endraw %}{{ secret('db') }}"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let src = format!(
+            "id: f\nnamespace: c1.n{i}\ntasks:\n  - id: q\n    type: kestra.{PG_QUERY}\n    \
+             url: jdbc:postgresql://h/db\n    password: \"{call}\"\n    sql: select 1\n"
+        );
+        let res = common::post(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows"),
+            editor,
+            json!({ "source": src }),
+        )
+        .await;
+        let (s, body) = (res.status(), common::body_text(res).await);
+        assert_names_the_permission(s, &body);
+    }
+}
+
+/// Fix round 2, m1: the BUILT-IN memberships, not a test role. `ws_admin`
+/// saves and publishes a flow that calls `secret()`; `ws_editor` is refused
+/// by name; the platform admin (the unrestricted Cedar template) can.
+#[tokio::test]
+async fn built_in_roles_ws_admin_and_platform_admin_may_use_secrets_and_ws_editor_may_not() {
+    let Some(db) = common::db().await else { return };
+    let (ws, admin) = common::seed_workspace(&db).await;
+    let editor = another_user(&db).await;
+    let platform = another_user(&db).await;
+    for (user, role) in [(admin, "ws_admin"), (editor, "ws_editor")] {
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'user', $1, id, 'workspace', $2 FROM roles \
+             WHERE scope = 'workspace' AND name = $3",
+        )
+        .bind(user.0)
+        .bind(ws)
+        .bind(role)
+        .execute(&db.pool)
+        .await
+        .expect("grant built-in role");
+    }
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $1, id, 'platform', NULL FROM roles \
+         WHERE scope = 'platform' AND name = 'platform_admin'",
+    )
+    .bind(platform.0)
+    .execute(&db.pool)
+    .await
+    .expect("grant platform_admin");
+    common::enable_feature(&db, ws, scripts::FEATURE_KEY).await;
+    common::enable_feature(&db, ws, plugins::FEATURE_KEY).await;
+    let app = common::app_with_scripts(
+        &db,
+        scripts::ScriptSettings {
+            plugin_configurations: PluginConfigurations(vec![kestra_entry(Some(&[
+                "io.kestra.plugin.jdbc.postgresql.*",
+            ]))]),
+            default_runner: Some(RunnerKind::Docker),
+        },
+    )
+    .await;
+    let flows = format!("/api/ws/{ws}/workflows/flows");
+
+    let res = common::post(
+        &app,
+        &flows,
+        editor,
+        json!({ "source": secret_flow("m1.e") }),
+    )
+    .await;
+    let (s, body) = (res.status(), common::body_text(res).await);
+    assert_names_the_permission(s, &body);
+
+    for (user, ns) in [(admin, "m1.a"), (platform, "m1.p")] {
+        let created = common::json(
+            common::post(&app, &flows, user, json!({ "source": secret_flow(ns) })).await,
+        )
+        .await;
+        let id = created["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{ns}: {created}"))
+            .to_string();
+        let res = common::post(&app, &format!("{flows}/{id}/publish"), user, json!({})).await;
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "{ns}: {}",
+            common::body_text(res).await
+        );
+    }
+}
