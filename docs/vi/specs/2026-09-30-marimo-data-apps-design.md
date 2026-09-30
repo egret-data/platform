@@ -32,6 +32,7 @@ edit là nơi tác giả viết, chế độ run là app đã publish.
 | D9 | **Image Python cố định, thư viện chọn sẵn.** Không cài package lúc chạy. | Egress đóng được, chỉ còn tới egret. |
 | D10 | **"Notebooks" đổi thành "Apps"** trong menu Explore; quyền `app:read`, `app:write`, `app:manage`. | Bỏ `notebook:*`. |
 | D11 | **Dùng UI của chính marimo trong iframe**, phục vụ qua reverse proxy của egret. Không fork frontend, không tự viết UI trên giao thức của nó. | Iframe không theo design OKLCH của egret; theme sáng/tối truyền qua query param. |
+| D12 | **Origin apps là một subdomain anh em** (`apps.<host egret>`), same-site với egret (2026-10-01). | P4 phải có cookie `__Host-` (kiểm trên HTTPS), GET không có tác dụng phụ, CSRF dựa trên header, không cho phép CORS cho origin apps (§6.1). |
 
 ## 2. Những gì code nói
 
@@ -318,10 +319,12 @@ vào egret, và D3 khiến tác giả là không tin cậy đối với người
     cần preflight, và preflight sẽ thất bại — S0 đã đo).
 - **Origin apps là một subdomain anh em, tức same-site với egret.** Lý do đưa ra là cookie trong iframe
   cross-site là cookie bên thứ ba, bị trình duyệt chặn. S0 cho thấy cái giá của same-site (ở trên). **Câu
-  hỏi mở cho người dùng:** phục vụ apps từ *một registrable site khác* (vd. `egret-apps.example`), cách này
-  chặn cookie Lax đi theo và khiến cookie tossing không thể xảy ra, với cái giá là cookie của origin apps
-  thành cookie bên thứ ba bị chặn và ticket → cookie cần cơ chế thay thế. Chưa quyết; S0 chưa đo biến thể
-  cross-site.
+  hỏi này đã được quyết với người dùng (2026-10-01, D12): giữ subdomain anh em** và trả giá bằng các việc
+  hardening của P4 ở trên (cookie `__Host-` kiểm trên HTTPS, GET không có tác dụng phụ, CSRF dựa trên
+  header, không cho phép CORS). Đã loại: một registrable site khác (vd. `egret-apps.example`) — chặn được
+  cookie Lax đi theo và cookie tossing, nhưng cookie của origin apps thành cookie bên thứ ba bị chặn và
+  ticket → cookie cần cơ chế thay thế; S0 chưa đo. Chưa thử: phục vụ iframe từ chính host egret với
+  `sandbox` không có `allow-same-origin` (origin rỗng) — marimo sẽ mất cookie và storage; cần một spike.
 - Việc này thêm một host vào ingress, Helm, kind và cấu hình OIDC. Câu hỏi 4 của S0 cho thấy marimo edit và
   run chạy trọn vẹn sau proxy trên một origin riêng với `--base-url`, WebSocket và ticket → cookie, nên
   kiến trúc được giữ.
@@ -470,7 +473,7 @@ Một service axum trong egret, lắng nghe trên host apps:
 
 Kết quả: [`docs/en/plans/2026-09-30-marimo-s0-result.md`](../../en/plans/2026-09-30-marimo-s0-result.md)
 (2026-09-30, marimo 0.25.0, HeadlessChrome 136, nhánh `spike/marimo-s0` @ `03f7a9fd`, không bao giờ merge).
-Không phương án lùi nào bị kích hoạt; kiến trúc được giữ. Hai câu hỏi mở cho người dùng được liệt kê ở đó.
+Không phương án lùi nào bị kích hoạt; kiến trúc được giữ. Hai câu hỏi mở cho người dùng được liệt kê ở đó; câu về origin apps đã được quyết (D12, subdomain).
 
 | # | Câu hỏi | Nếu không được | Điều đã xảy ra |
 |---|---|---|---|

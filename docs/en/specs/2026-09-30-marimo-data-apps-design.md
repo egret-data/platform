@@ -29,6 +29,7 @@ its edit mode is the authoring surface, its run mode is the published app.
 | D9 | **Fixed, curated Python image.** No runtime package install. | Egress can be closed to egret only. |
 | D10 | **"Notebooks" becomes "Apps"** in the Explore menu; permissions `app:read`, `app:write`, `app:manage`. | `notebook:*` is removed. |
 | D11 | **marimo's own UI in an iframe**, served by an egret reverse proxy. Not a fork of its frontend, not a custom UI over its protocol. | The iframe does not use egret's OKLCH design; theme (light/dark) is passed by query param. |
+| D12 | **The apps origin is a sibling subdomain** (`apps.<egret host>`), same-site with egret (2026-10-01). | P4 must ship `__Host-` cookies (verified over HTTPS), side-effect-free GETs, header-based CSRF, no CORS for the apps origin (§6.1). |
 
 ## 2. What the code says
 
@@ -321,10 +322,13 @@ viewer. Therefore:
     `X-Egret-CSRF` needs a preflight, which then fails — measured in S0).
 - **The apps origin is a sibling subdomain, i.e. same-site with egret.** The reason given was that a
   cross-site iframe's cookies are third-party cookies, which browsers block. S0 showed what same-site
-  costs (above). **Open question for the user:** serve apps from a *different registrable site* (e.g.
-  `egret-apps.example`), which would stop Lax cookies riding and make cookie tossing impossible, at the
-  cost that the apps-origin cookie becomes a blocked third-party cookie and ticket → cookie needs a
-  replacement. Not decided; S0 did not measure the cross-site variant.
+  costs (above). **Decided with the user (2026-10-01, D12): keep the sibling subdomain** and pay for it
+  with the P4 hardening above (`__Host-` cookies verified over HTTPS, side-effect-free GETs, header-based
+  CSRF, no CORS allowance). Rejected: a different registrable site (e.g. `egret-apps.example`) — it would
+  stop Lax cookies riding and make tossing impossible, but the apps-origin cookie becomes a blocked
+  third-party cookie and ticket → cookie needs a replacement; S0 did not measure it. Not tried: serving
+  the iframe from egret's own host with `sandbox` lacking `allow-same-origin` (opaque origin) — marimo
+  would lose cookies and storage; a spike would be needed.
 - This adds a host to ingress, Helm, kind and the OIDC configuration. S0 question 4 showed marimo edit
   and run working end to end behind the proxy on a separate origin with `--base-url`, WebSockets and
   ticket → cookie, so the architecture stands.
@@ -471,7 +475,7 @@ An axum service in egret, listening on the apps host:
 
 Result: [`docs/en/plans/2026-09-30-marimo-s0-result.md`](../plans/2026-09-30-marimo-s0-result.md)
 (2026-09-30, marimo 0.25.0, HeadlessChrome 136, branch `spike/marimo-s0` @ `03f7a9fd`, never merged).
-No fallback triggered; the architecture stands. Two open questions for the user are listed there.
+No fallback triggered; the architecture stands. Two open questions for the user are listed there; the apps-origin one is decided (D12, subdomain).
 
 | # | Question | Fallback if no | What happened |
 |---|---|---|---|
