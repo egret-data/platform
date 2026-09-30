@@ -138,7 +138,15 @@ the key ignored. What changes is the declared contract, and the frontend, which
 is rewritten in this same package.
 
 The page states plainly that a role- or group-granted policy matches nobody on
-these engines, and why.
+these engines, and why — **with the one exception this document's own Measured
+premises name**: Ranger matches the literal `public` group **by name**,
+independent of what the request carries. That is not a corner case here. egret's
+own compiler emits `groups: ["public"]` on every clearance deny and on every
+mask and row-filter item, calling it the one expressible half of the pair. So a
+policy granting to `public` does match, and `explain` answers `Allowed` for it.
+Any copy that says group grants match nobody must carry that exception, or it
+contradicts the verdicts shown beside it — and it makes egret's own clearance
+mechanism look inert.
 
 ### D3 — narrow the `tagPolicies` refusal to tier (c), and name the cause there
 
@@ -157,14 +165,31 @@ nothing downstream can override.
 
 ### D4 — tag relevance is gated on the service-def, never on the engine type
 
-Whether tag policies can decide is determined by whether the def being evaluated
-declares a `RangerTagEnricher` in `contextEnrichers` — read from the download.
-egret's `trino` def declares one; its `starrocks` def has `contextEnrichers: []`,
-which is why two measured StarRocks FEs never fetched tags at all.
+Whether tag policies can decide is determined by the service-def, not by the
+engine type. Gating on `EngineType::StarRocks` would be silently wrong the day
+one def field changes.
 
-Gating on `EngineType::StarRocks` would be silently wrong the day that one field
-changes. `crates/egret-ranger-eval/src/servicedef.rs` does not parse
-`contextEnrichers` today; it must.
+**Amended during implementation, and the first version was fail-open.** This
+section originally said the gate is whether *the def being evaluated* declares a
+`RangerTagEnricher`, citing egret's `starrocks.json` `contextEnrichers: []` as
+the licence. Task 1's review measured that this is not enough: Ranger builds
+context enrichers from **both** defs — `PolicyEngine.<init>` unions
+`tagPolicyRepository.getContextEnrichers()` with the resource repository's — and
+Apache Ranger's own stock `ranger-servicedef-tag.json`, bundled inside both the
+2.5.0 and 2.8.0 jars, **declares the enricher**. So a download whose top-level
+def has no enricher but whose `tagPolicies.serviceDef` carries the stock def gets
+its tags enriched and its tag policies evaluated.
+
+The implemented gate therefore requires `Some(false)` from **both** the resource
+def and the block's own `serviceDef`; `None` on either means unknown and refuses.
+What kept the original rule from biting was **data, not the measurement**:
+egret's `crates/egret-policy/src/service-defs/tag.json` has no `contextEnrichers`
+key at all, so the tag half always reads unknown and always refuses.
+
+**Consequence a reader needs, and SP4d-2b especially:** for an egret-served
+download the enricher escape can never fire, because that tag def has no such
+key. Only tier (b) — a block whose `policies` array is empty — narrows in
+production today.
 
 ### D5 — a policy is mapped back to a model object where one exists, and named where none does
 
