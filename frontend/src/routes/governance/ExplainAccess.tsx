@@ -162,6 +162,25 @@ function serviceDefIssuePhrase(i: WireServiceDefIssue): string {
 }
 
 /**
+ * How far a cause reaches, when that is wider than the request being explained.
+ *
+ * **Measured by the browser gate (2026-09-29), and stated rather than
+ * changed.** `explain` passes `resolved_tags: None` unconditionally, so the
+ * `tagPolicies` refusal is not about the target at all: while a profile's tag
+ * block carries any policy, EVERY access on every catalog it serves comes back
+ * undecidable — all seven Trino answers in the gate's fixture, from two tag
+ * policies. The refusal is sound (deciding from egret's non-hierarchy-complete
+ * tag resolution would fail open), but a steward reading one undecidable verdict
+ * would otherwise think it was specific to their target.
+ */
+function causeScopeNote(c: WireUndecidableCause): string | null {
+  const construct =
+    c.kind === "envelope_construct" || c.kind === "policy_construct" ? c.construct : null;
+  if (construct?.kind !== "tag_policies") return null;
+  return "This is not specific to your target: while this profile's tag block carries any policy at all, every access on every catalog this profile serves answers the same way, and one tag-addressed rule or clearance anywhere in the installation is enough to put a profile in this state.";
+}
+
+/**
  * One named cause, as a sentence a steward can act on.
  *
  * **Every cause is rendered, never just the first** — `why` is a list because
@@ -249,7 +268,7 @@ function decisionMeta(d: WireDecision): {
     case "no_policy_matched":
       return {
         label: "No policy matched",
-        hint: "Nobody granted this — not the same as somebody forbidding it. Ranger’s own audit shows “-” for exactly this case.",
+        hint: "Nobody granted this — not the same as somebody forbidding it. Ranger’s own audit shows “-” for exactly this case. There is no deciding policy to open: the evaluator names none, because none matched.",
         variant: "warning",
         icon: HelpCircle,
       };
@@ -412,14 +431,48 @@ function DecidedBy({
           ))}
           .
         </p>
+      ) : attribution.tag === null ? (
+        /* **Browser-gate Finding 2.** An empty `required_roles` has TWO causes
+           on this wire: `attribution_for` returns `Vec::new()` whenever the tag
+           row could not be read (`routes.rs:1659-1667`), as well as for a gate
+           that really declares no roles. So the list is only readable as a fact
+           about the gate once the tag resolved. With the tag unresolved the page
+           used to assert "it declares only groups" — contradicting the sentence
+           directly above it, and false for the gate the gate measured, which
+           declared a role. Unknown is a different thing from none, and the
+           clearing role is the one fact this block exists to surface. */
+        <p className="text-xs text-muted-foreground">
+          The clearing roles are unknown too: they are read from that same tag row, so this
+          is unknown rather than none — the engine is still enforcing the compilation as it
+          was.
+        </p>
       ) : (
         <p className="text-xs text-muted-foreground">
-          No role clears this gate: it declares only groups, and no engine egret provisions
-          can see a group.
+          No clearing role is recorded for this tag: a gate that declares only groups looks
+          like this — no engine egret provisions can see a group — and so does a gate row
+          that has already been deleted.
         </p>
       )}
     </div>
   );
+}
+
+/**
+ * Does this decision name a policy at all?
+ *
+ * **`no_policy_matched` does not, by construction** — `egret-ranger-eval`
+ * returns `policy_name: String::new()` and `policy_id: None` for it
+ * (`eval.rs:759-763`), because nothing matching is what the verdict MEANS.
+ * Routing it through the decider block was browser-gate Finding 1: it printed
+ * "Outside the permission model … because it decided this access. / Ranger
+ * policy , id unknown" — asserting that a policy decided when none did,
+ * calling that non-existent policy hand-written, and leaving a hole where the
+ * name goes, which sends a steward into raw Ranger hunting for it. The same
+ * CLASS as D10's `clearance_required` defect: a decision variant rendered by a
+ * branch written for a different variant.
+ */
+function namesADecidingPolicy(d: DecidedDecision): boolean {
+  return d.kind === "allowed" || d.reason !== "no_policy_matched";
 }
 
 /** One access type's verdict inside one profile. A `write` explain is several
@@ -448,9 +501,10 @@ function AccessRow({ verdict }: { verdict: AccessVerdict }) {
               <li
                 key={`${cause.kind}-${i}`}
                 data-testid="undecidable-cause"
-                className="text-xs text-muted-foreground"
+                className="space-y-1 text-xs text-muted-foreground"
               >
-                {causeSentence(cause)}
+                <p>{causeSentence(cause)}</p>
+                {causeScopeNote(cause) && <p className="italic">{causeScopeNote(cause)}</p>}
               </li>
             ))}
             {verdict.decision.why.length === 0 && (
@@ -461,7 +515,9 @@ function AccessRow({ verdict }: { verdict: AccessVerdict }) {
             )}
           </ul>
         ) : (
-          <DecidedBy decision={verdict.decision} attribution={verdict.attribution} />
+          namesADecidingPolicy(verdict.decision) && (
+            <DecidedBy decision={verdict.decision} attribution={verdict.attribution} />
+          )
         )}
       </div>
     </li>
@@ -765,7 +821,7 @@ export default function ExplainAccess() {
           )}
 
           <div className="space-y-1.5">
-            <Label>Tags considered</Label>
+            <Label>Tags egret has recorded on this resource</Label>
             {result.tags.length > 0 ? (
               <div className="flex flex-wrap gap-1">
                 {result.tags.map((t) => (
@@ -802,7 +858,7 @@ export default function ExplainAccess() {
               <p>
                 A policy that grants through a role or a group matches nobody on these
                 engines: egret serves no roles download and runs no usersync, so explain
-                sends neither — the verdicts above are what the engine reaches for this
+                sends neither — any verdict here is what the engine reaches for this
                 username alone.
               </p>
               <p>

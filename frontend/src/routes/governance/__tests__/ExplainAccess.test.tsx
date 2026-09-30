@@ -78,7 +78,13 @@ const TWO_PROFILES: ExplainResponse = {
         },
         {
           access_type: "delete",
-          decision: { kind: "denied", policy_id: null, policy_name: "unnamed", reason: "no_policy_matched" },
+          // **`""`, because that is what the server sends.** `eval.rs:759-763`
+          // returns `policy_name: String::new()` and `policy_id: None` for this
+          // reason by construction — there IS no deciding policy, that is what
+          // the verdict means. This fixture used to say `"unnamed"`, a value
+          // `explain` cannot produce, and that invention is the whole reason the
+          // browser gate found Finding 1 and these tests did not.
+          decision: { kind: "denied", policy_id: null, policy_name: "", reason: "no_policy_matched" },
           attribution: null,
         },
       ],
@@ -435,6 +441,227 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(limits).toHaveTextContent(/sends neither/i);
     // The tag limit still holds and stays.
     expect(limits).toHaveTextContent(/names both a schema and a table/i);
+  });
+
+  /**
+   * **Browser-gate Finding 1 (Major), measured 2026-09-29.** `no_policy_matched`
+   * means NOTHING matched, so `egret-ranger-eval` sends `policy_name: ""` and
+   * `policy_id: None` by construction. The page used to route every
+   * non-`Undecidable` decision through the raw-policy block, so it printed
+   * "Outside the permission model … because it decided this access. / Ranger
+   * policy , id unknown" — two untruths and a hole where the name goes, and it
+   * sends a steward into raw Ranger hunting for a policy that does not exist.
+   *
+   * The same CLASS as D10's `clearance_required` defect: a decision variant
+   * falling into a branch written for a different variant.
+   */
+  test("no_policy_matched names no deciding policy, because there is none", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 12,
+            service_name: "egret-starrocks-prod",
+            engine: "starrocks",
+            accesses: [
+              {
+                access_type: "select",
+                // Exactly the payload the browser gate captured.
+                decision: {
+                  kind: "denied",
+                  policy_id: null,
+                  policy_name: "",
+                  reason: "no_policy_matched",
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const row = within(result).getByTestId("explain-access");
+    expect(within(row).getByTestId("decision-badge")).toHaveTextContent("No policy matched");
+
+    // No decider block at all, and none of its claims.
+    expect(within(result).queryByTestId("raw-policy")).not.toBeInTheDocument();
+    expect(row).not.toHaveTextContent(/outside the permission model/i);
+    expect(row).not.toHaveTextContent(/because it decided this access/i);
+    expect(row).not.toHaveTextContent(/Ranger policy/);
+    expect(row).not.toHaveTextContent(/id unknown/);
+    // And it says so, so nobody goes looking in raw Ranger.
+    expect(row).toHaveTextContent(/no deciding policy to open/i);
+  });
+
+  /**
+   * **Browser-gate Finding 2 (Major), forced live by deleting the `tags` row
+   * while the compiled clearance policy survived** — a state this page's own
+   * copy says occurs. The payload was `tag: null, required_roles: []`, and the
+   * page rendered "Gating tag unknown — the tag row is gone" beside "No role
+   * clears this gate: it declares only groups": two sentences that contradict
+   * each other, the second FALSE (the gate declared `['sp4d2a_cleared']`), and
+   * the clearing role — the fact D10 exists to surface — silently absent rather
+   * than reported as unknown.
+   *
+   * `required_roles: []` has two causes on this wire (`routes.rs:1659-1667`
+   * returns `Vec::new()` whenever `tag` is `None`), so the empty list may only
+   * be read as "the gate says no roles" when the tag DID resolve.
+   */
+  test("an unresolved clearance reports its roles as unknown, not as groups-only", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "denied",
+                  policy_id: 30,
+                  policy_name:
+                    "perm-clearance-88888888-8888-4888-8888-888888888888-sp4d2a_wh.sales.orders.ssn",
+                  reason: "deny_policy_item",
+                },
+                attribution: {
+                  kind: "clearance",
+                  tag_id: "88888888-8888-4888-8888-888888888888",
+                  tag: null,
+                  required_roles: [],
+                  locator: "sp4d2a_wh.sales.orders.ssn",
+                },
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const clearance = within(result).getByTestId("clearance-attribution");
+    expect(clearance).toHaveTextContent(/the tag row is gone/i);
+    // The false half must be gone: nothing is known about this gate.
+    expect(clearance).not.toHaveTextContent(/declares only groups/i);
+    // And the missing fact is reported as unknown rather than omitted.
+    expect(clearance).toHaveTextContent(/clearing roles are unknown/i);
+  });
+
+  /** Finding 2's other half — the case where the empty list IS readable. With
+   *  the tag resolved, no clearing role recorded is a fact about the gate, and
+   *  it must not be reported as unknown either. Both branches are pinned so the
+   *  two cannot be confused again. */
+  test("a resolved clearance with no roles states that, without claiming it is unknown", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "denied",
+                  policy_id: 30,
+                  policy_name: "perm-clearance-88888888-8888-4888-8888-888888888888",
+                  reason: "deny_policy_item",
+                },
+                attribution: {
+                  kind: "clearance",
+                  tag_id: "88888888-8888-4888-8888-888888888888",
+                  tag: "sp4d2a_ssn",
+                  required_roles: [],
+                  locator: null,
+                },
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const clearance = within(result).getByTestId("clearance-attribution");
+    expect(clearance).toHaveTextContent("sp4d2a_ssn");
+    expect(clearance).toHaveTextContent(/no clearing role is recorded/i);
+    expect(clearance).not.toHaveTextContent(/clearing roles are unknown/i);
+    expect(clearance).not.toHaveTextContent(/the tag row is gone/i);
+  });
+
+  /**
+   * **The blast radius, which the gate measured and asked to be stated rather
+   * than changed.** `explain` passes `resolved_tags: None` unconditionally, so a
+   * single tag-addressed rule or clearance anywhere turns EVERY verdict on every
+   * catalog the profile serves into `Undecidable` — in the gate's fixture, all
+   * seven Trino answers. The refusal is sound (the alternative fails open); the
+   * scale is what a steward needs to know, so it is said where they read it, and
+   * only on the cause it is true of.
+   */
+  test("a tag-policy refusal says its scope, and other causes do not borrow it", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "undecidable",
+                  why: [
+                    {
+                      kind: "envelope_construct",
+                      construct: { kind: "tag_policies", block: { kind: "policies", count: 2 } },
+                    },
+                    { kind: "super_users_unknown" },
+                  ],
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const causes = within(result).getAllByTestId("undecidable-cause");
+    expect(causes[0]).toHaveTextContent(/2 tag policies/);
+    expect(causes[0]).toHaveTextContent(/every catalog this profile serves/i);
+    expect(causes[0]).toHaveTextContent(/installation/i);
+    // Content-derived, not stapled onto every undecidable cause.
+    expect(causes[1]).not.toHaveTextContent(/every catalog this profile serves/i);
   });
 
   test("tags render honestly when the target carries none", async () => {
