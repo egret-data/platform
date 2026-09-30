@@ -48,16 +48,35 @@ Read before designing; each of these shaped the design.
 - **marimo's `create_asgi_app` is run-mode only** (`marimo/_server/asgi.py:354`, "This only works for
   application that are in Run mode"). Edit mode is served only by the `marimo edit` server, so it cannot
   be mounted in egret; it must run in a pod.
-- **marimo's run mode puts sessions in threads** of one process (`marimo/_session/managers/kernel.py`).
-  An author's code could then pass one viewer's rows to another through module state. D7 requires one
-  process per session; marimo has a subprocess kernel manager over ZeroMQ (`managers/ipc.py`, used for
-  sandboxes) — whether run mode can use it is S0 question 2.
+- **marimo's run mode puts sessions in threads** of one process (`marimo/_session/managers/kernel.py`;
+  the choice is `marimo/_session/session.py:136-195`). An author's code could then pass one viewer's rows
+  to another through module state. D7 requires one process per session. The only built-in path to that
+  is `--sandbox`, which selects the ZeroMQ subprocess manager (`managers/ipc.py`) but also builds a uv
+  environment per session; the alternative is to force the IPC branch from the egret entrypoint. S0
+  question 2 measures both. (`isolate_apps` is not it: it isolates per *file*, not per session.)
 - **marimo's auth is one shared token** (`marimo/_server/api/auth.py`), but it keeps an outer
   `scope["user"]`, and notebook code sees the request through `mo.app_meta().request` (headers, cookies,
-  `user`, `meta`). That is the only per-session channel into a kernel.
-- **marimo has a storage seam, but it is private.** `StorageInterface` (read/write/exists/rename,
-  `marimo/_session/notebook/storage.py`) is accepted by `AppFileManager(storage=…)`
-  (`file_manager.py:73`), but nothing public lets you supply one.
+  `user`, `meta`). **The request is refreshed per kernel command**, not captured once: it is a
+  contextvar set around each command (`marimo/_runtime/kernel_request_handlers.py`), taken from the
+  WebSocket handshake for the first run (`ws_session_connector.py:262`) and from every later
+  `/run`, `/set_ui_element_value`, `/instantiate` call (`endpoints/execution.py`). Headers beginning
+  `marimo` / `x-marimo` are dropped; `X-Egret-*` passes. That is the per-session channel into a kernel.
+- **marimo has a storage seam, but it is private and covers only writes.** `StorageInterface`
+  (`marimo/_session/notebook/storage.py:15`) is accepted by `AppFileManager(storage=…)`
+  (`file_manager.py:69`), which the server builds in one place (`NotebookWorkspace.load`,
+  `marimo/_server/workspace/_base.py:87`). But loading reads the file from disk directly
+  (`load.load_app(path)`, `file_manager.py:285`), and only the final write of a save goes through
+  `storage.write` (`file_manager.py:266`). A save that raises becomes an HTTP error from
+  `POST /api/kernel/save`, and marimo's frontend has no handler for it beyond leaving the notebook
+  "unsaved" (`frontend/src/core/saving/save-component.tsx:111`).
+- **marimo's configuration cannot switch off** the terminal, package installation, the file browser or
+  secrets; only AI has a switch (`[ai] enabled`). There is no `MARIMO_CONFIG` variable — config is found
+  via `XDG_CONFIG_HOME` or the working directory (`marimo/_config/utils.py`).
+- **marimo does no Origin, Host or CSRF check** and sets no `X-Frame-Options`/CSP on app pages; it
+  requires a `Marimo-Server-Token` header on POSTs (skew protection), which a proxy must pass through.
+- **egret's CSRF is double-submit on host-only cookies** `egret_session` / `egret_csrf`, SameSite=Lax,
+  no `__Host-` prefix (`crates/egret-auth/src/cookie.rs`, `csrf.rs`), and egret has no CORS layer. A
+  sibling subdomain can *toss* a `Domain=`-scoped cookie at egret (§6.1).
 - **marimo SQL cells find engines from notebook variables** (`marimo/_sql/get_engines.py:35`), including
   any DB-API 2.0 connection. An object the helper package creates is enough for a SQL cell to offer it.
 - **The notebook gate and permissions to retire:** the `notebooks` feature module
@@ -112,8 +131,9 @@ An opaque random token; only its hash is stored, in `analytics.app_sessions`:
 - **The proxy mints it** when a marimo session is opened (§6.2), and injects it as `X-Egret-App-Token`
   on every request it forwards to the pod. Any `X-Egret-*` header arriving from the client is removed
   first. The browser never sees the token.
-- The kernel reads it through `mo.app_meta().request.headers`. That this reaches the kernel of *the right
-  session* is S0 question 1; fallback: pass it as a query parameter on session creation.
+- The kernel reads it through `mo.app_meta().request.headers`, which marimo refreshes on every kernel
+  command (§2), so the token a cell sees is the one on the request that triggered it. S0 question 1
+  confirms this through the proxy, including for cells re-run reactively by a UI element.
 - A token is not a permission. **Every gateway call re-evaluates authorization** (§4.2); removing a
   viewer's `app:read` stops their next query, not their next session.
 
@@ -198,10 +218,15 @@ data migration (D1):
 The pod does not run `marimo edit` directly. It runs an egret entrypoint that starts the marimo edit
 server with an `EgretStorage` implementing marimo's `StorageInterface`:
 
-- `read(path)` → `GET …/draft`, remembering the revision.
-- `write(path, source)` → `PUT …/draft` with `If-Match`. A 409 raises, and marimo shows its own "save
-  failed" message: "this draft was saved by someone else — reload". No extra channel needed.
+- **On open**, the entrypoint's patched `NotebookWorkspace.load` fetches the draft (`GET …/draft`),
+  writes it to the pod's disk, remembers the revision, and only then builds the `AppFileManager` —
+  because marimo loads from disk, not through the storage.
+- `write(path, source)` → `PUT …/draft` with `If-Match`, then writes the local copy. A 409 raises.
 - `exists`, `rename` → map to the app; rename is refused (names change in egret, not in marimo).
+- **The 409 must be visible.** marimo's frontend does not report a failed save beyond leaving the
+  notebook "unsaved" (§2). S0 question 3 measures what the author actually sees; if it is nothing, the
+  egret header (outside the iframe) shows "this draft was saved by someone else — reload", driven by a
+  draft-revision poll the header already needs for "Publish draft rev N".
 - The storage authenticates as the pod's author (the per-pod kernel token that exists today) and egret
   checks `app:write` on every call.
 
@@ -235,6 +260,14 @@ respect to the viewer. Therefore:
 - To open an iframe, egret issues a **one-time ticket** (TTL 30 s, bound to user, app, mode, and version
   or draft). The apps origin redeems it at `/_ticket` for an apps-origin cookie (HttpOnly, Secure,
   SameSite=Lax, scoped to the same binding). The session token of §4.1 is minted from that redemption.
+- **The apps origin is a sibling subdomain, i.e. same-site with egret.** It has to be: a cross-site
+  iframe's cookies are third-party cookies, which browsers block. Same-site has one cost — a script on
+  the apps origin can set a cookie with `Domain=<egret's parent domain>` that egret then receives
+  (*cookie tossing*), which could shadow `egret_csrf` and defeat double-submit CSRF. So P4 also:
+  - renames egret's cookies to `__Host-egret_session` / `__Host-egret_csrf` (the `__Host-` prefix
+    forbids a `Domain` attribute, so a tossed cookie cannot use that name);
+  - keeps egret without any CORS allowance for the apps origin (a cross-origin request carrying
+    `X-Egret-CSRF` needs a preflight, which then fails).
 - This adds a host to ingress, Helm, kind and the OIDC configuration. S0 question 4 must prove it end to
   end; it has no fallback short of revisiting the architecture.
 
@@ -242,7 +275,11 @@ respect to the viewer. Therefore:
 
 An axum service in egret, listening on the apps host:
 
-- Relays HTTP and WebSocket; strips hop-by-hop headers and every client `X-Egret-*` header.
+- Relays HTTP and WebSocket; strips hop-by-hop headers and every client `X-Egret-*` header; passes
+  `Marimo-Server-Token` through (skew protection).
+- **Blocks by route** what marimo cannot switch off (§2): the terminal WebSocket, package-install
+  endpoints, secrets endpoints, and file-browser endpoints other than those the editor needs to save.
+  S0 question 6 produces the exact list.
 - Injects the pod's marimo token (marimo `--token`; never shown to a user) and the session token.
 - **Edit:** `/e/{pod}/…` reaches only the caller's own edit pod; the app named by `?file=` requires
   `app:write` (checked again by `EgretStorage`).
@@ -263,9 +300,8 @@ An axum service in egret, listening on the apps host:
   generalised to launch both pod kinds; the reaper and existing pod hardening (non-root, drop ALL,
   seccomp RuntimeDefault) carry over.
 - **NetworkPolicy:** ingress only from egret; egress only to egret's gateway and DNS.
-- **marimo configuration in the image disables:** the terminal, AI assistant, package installation, file
-  browser, secrets panel, and file create/rename. Anything config cannot disable, the proxy blocks by
-  route.
+- **marimo configuration** (via `XDG_CONFIG_HOME` in the image) sets `[ai] enabled = false`; everything
+  else is blocked at the proxy (§6.2). Package installation would fail anyway, egress being closed.
 - **Viewers do not see code** (`include_code=False`); people with `app:write` see it in edit mode.
 - No autoscaling in v1.
 
@@ -293,12 +329,12 @@ An axum service in egret, listening on the apps host:
 
 | # | Question | Fallback if no |
 |---|---|---|
-| 1 | Does a proxy-injected header reach the right session's kernel through `mo.app_meta().request`? | Pass the token as a query parameter at session creation |
-| 2 | Can run mode run each session in its own process (IPC manager)? | One pod per (app × viewer) |
-| 3 | Does `EgretStorage` plug into `StorageInterface`, and does a 409 show in marimo's UI? | File-watching sync agent |
+| 1 | Does a proxy-injected header reach the right session's kernel through `mo.app_meta().request`, including on reactive re-runs? | Pass the token as a query parameter at session creation |
+| 2 | Can run mode run each session in its own process — `--sandbox` offline, or the IPC branch forced by the entrypoint — and at what start-up cost? | One pod per (app × viewer) |
+| 3 | Does the patched load + `EgretStorage` round-trip a draft, and what does the author see on 409? | File-watching sync agent; 409 shown by the egret header |
 | 4 | Does marimo work behind the proxy with a base URL and WebSockets, on a separate origin, with ticket → cookie? | None — revisit the architecture |
 | 5 | Does a SQL cell accept `egret_marimo`'s DB-API connection as an engine? | A custom marimo engine class |
-| 6 | Can configuration disable terminal, AI, package install and file browser? | Block those routes at the proxy |
+| 6 | Which routes must the proxy block (terminal, packages, secrets, file browser) without breaking edit and save? | — (this is a measurement, the proxy blocks regardless) |
 
 ### PRs, in order
 
@@ -309,8 +345,8 @@ An axum service in egret, listening on the apps host:
 3. **P3 — `egret-apps` image and `egret_marimo`.** Entrypoints, `EgretStorage`, DB-API, `egret.sql`,
    locked-down marimo configuration; pytest against a fake egret, including the `StorageInterface`
    contract test.
-4. **P4 — Apps origin, proxy, edit mode.** Ticket → cookie, proxy, edit launcher, the Apps list and Edit
-   page.
+4. **P4 — Apps origin, proxy, edit mode.** Ticket → cookie, proxy (with route blocking), `__Host-`
+   cookie rename, edit launcher, the Apps list and Edit page.
 5. **P5 — Run mode.** Per-version launcher, publish/versions/restore UI, the viewer page.
 6. **P6 — Remove the notebook.** `egret-notebook`, the Jupyter half of `egret-kernel`, `kernel-image/`,
    the notebook frontend, the notebook tables and `notebook:*`. The workflow task `egret.python`, which
@@ -327,7 +363,7 @@ when the code it guards is broken on purpose.
   statements hidden behind comments, and anything unparseable.
 - A token stops working after logout, after `app:read` is removed, and after its WebSocket closes.
 - **JavaScript inside an app cannot read egret's cookies or call egret's API** — a browser test with an
-  app that tries.
+  app that tries, including tossing a `Domain=`-scoped `egret_csrf` and then POSTing to egret.
 - **Two viewers with different Ranger grants see different rows from the same app**, on real Trino and
   real StarRocks on kind.
 - An admin opening an app that runs `DELETE` gets a 400 and the table is unchanged.
