@@ -538,6 +538,39 @@ pub(crate) async fn stream_line(
     }
 }
 
+/// [`stream_line`] for a re-attach: a line the previous holder already
+/// stored (`replayed`) is decided like any other -- counted, its marker
+/// harvested, its level carried to the next continuation line -- but not
+/// written again.
+///
+/// **Compared as stored** (W5b fix round 1, M1): `replayed` holds stored
+/// text, which under `host_protocol` is the message without its level prefix
+/// and, on a masked log, with each secret replaced. The raw line matched
+/// neither, so the comparison is made after [`ingest_line`] and
+/// `RunLog::stored_form`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn stream_replayed_line(
+    task: &TaskInput,
+    observer: &dyn LineObserver,
+    result: &mut CommandsResult,
+    state: &mut StreamState,
+    max_vars_bytes: usize,
+    line: &str,
+    is_err: bool,
+    host_protocol: bool,
+    replayed: &mut crate::worker::k8s::runner::Replayed,
+) {
+    if let Some((level, text)) =
+        ingest_line(result, state, max_vars_bytes, line, is_err, host_protocol)
+    {
+        if replayed.already_stored(&task.log.stored_form(&text)) {
+            return;
+        }
+        observer.observe(level, &text);
+        task.log.line(level, &text).await;
+    }
+}
+
 /// The container this run attempt owns: `egret-run-<run id, hyphenless>-<attempt>`
 /// -- the Kubernetes runner's [`pod_name`](super::k8s::pod_name), exactly.
 ///
@@ -1807,25 +1840,38 @@ impl DockerRunner {
                     None => { err_open = false; continue }
                 },
             };
-            if let Some(r) = replayed.as_deref_mut() {
-                if r.already_stored(&line) {
-                    continue;
-                }
-            }
             // **Every decision about this line is [`ingest_line`]'s**, and
             // this loop keeps only the pipes. See that function for why the
             // split is a merge condition and not a tidy-up.
-            stream_line(
-                task,
-                observer,
-                &mut result,
-                &mut state,
-                self.max_vars_bytes,
-                &line,
-                is_err,
-                host_protocol,
-            )
-            .await;
+            match replayed.as_deref_mut() {
+                Some(r) => {
+                    stream_replayed_line(
+                        task,
+                        observer,
+                        &mut result,
+                        &mut state,
+                        self.max_vars_bytes,
+                        &line,
+                        is_err,
+                        host_protocol,
+                        r,
+                    )
+                    .await
+                }
+                None => {
+                    stream_line(
+                        task,
+                        observer,
+                        &mut result,
+                        &mut state,
+                        self.max_vars_bytes,
+                        &line,
+                        is_err,
+                        host_protocol,
+                    )
+                    .await
+                }
+            }
         }
         Ok(result)
     }
@@ -3087,6 +3133,46 @@ mod tests {
                     .map(|(l, t)| (l, t.into_owned()))
             })
             .collect()
+    }
+
+    /// **A re-attach drops the lines the previous holder stored -- compared
+    /// as stored** (W5b fix round 1, M1). Under `host_protocol` the stored
+    /// text is the message without its level prefix, masked; the raw line
+    /// re-read from the container is neither. Comparing the raw line with the
+    /// stored text never matched, so every overlap line was stored twice on
+    /// each re-attach of a plugin pod.
+    #[tokio::test]
+    async fn a_reattach_drops_an_overlap_line_compared_as_it_was_stored() {
+        let (mut task, rec) = crate::worker::handlers::testing::recorded(
+            "kestra.io.kestra.plugin.jdbc.postgresql.Query",
+            serde_json::json!({}),
+        );
+        task.log = task.log.masked(&["pa55".to_string()]);
+        // What the previous holder stored for its last two lines.
+        let mut replayed = crate::worker::k8s::runner::Replayed::new(vec![
+            "connecting with ******".to_string(),
+            "\tat Foo.bar".to_string(),
+        ]);
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "printf 'INFO connecting with pa55\\n\\tat Foo.bar\\nINFO new line\\n'",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("sh");
+        DockerRunner::new()
+            .pump(&task, &NoObserver, &mut child, Some(&mut replayed), true)
+            .await
+            .expect("pumped");
+        child.wait().await.expect("exited");
+        assert_eq!(
+            rec.texts(),
+            vec![(LogLevel::Info, "new line".to_string())],
+            "only the line the previous holder did not store is stored"
+        );
     }
 
     /// **The host's `%level %msg%n`, parsed** (W5b Task 5): the prefix is the

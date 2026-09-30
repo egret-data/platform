@@ -76,9 +76,9 @@ use crate::logs::{LogLevel, LogRepo, RunIdentity};
 use crate::scripts::RunnerSpec;
 use crate::worker::commands::{
     expand_outputs, listing_too_big, output_problem, pattern_dirs, relative_problem, run_liveness,
-    stream_line, CommandsResult, LineObserver, OrphanSweep, StreamState, TaskCommands, TaskRunner,
-    CANCEL_WAIT_MARGIN, MAX_LISTING_BYTES, MAX_OUTPUT_FILE_BYTES, MAX_OUTPUT_NAMES, MAX_VARS_BYTES,
-    RUN_NAME_PREFIX, TASKRUN_LABEL, WORKING_DIR,
+    stream_replayed_line, CommandsResult, LineObserver, OrphanSweep, StreamState, TaskCommands,
+    TaskRunner, CANCEL_WAIT_MARGIN, MAX_LISTING_BYTES, MAX_OUTPUT_FILE_BYTES, MAX_OUTPUT_NAMES,
+    MAX_VARS_BYTES, RUN_NAME_PREFIX, TASKRUN_LABEL, WORKING_DIR,
 };
 use crate::worker::TaskInput;
 
@@ -317,7 +317,7 @@ impl KubernetesRunner {
         // ---- follow main's stdout, and its stderr through files-out --------
         //
         // Two producers, one consumer: every line of both streams reaches
-        // `stream_line` from ONE place, so the `StreamState` (the markers' vars
+        // `stream_replayed_line` from ONE place, so the `StreamState` (the markers' vars
         // cap, the `##kestra:log:debug##` bracket) is shared across the streams
         // as W11 requires. The order BETWEEN the streams is best-effort: each
         // stream is in order, but a stderr line reaches egret up to `tail -F`'s
@@ -396,10 +396,8 @@ impl KubernetesRunner {
         };
         let consume = async {
             while let Some((is_err, line)) = rx.recv().await {
-                if replayed.already_stored(&line) {
-                    continue;
-                }
-                stream_line(
+                // Compared as stored, not as read (W5b fix round 1, M1).
+                stream_replayed_line(
                     task,
                     observer,
                     &mut result,
@@ -408,6 +406,7 @@ impl KubernetesRunner {
                     &line,
                     is_err,
                     cmds.host_protocol,
+                    &mut replayed,
                 )
                 .await;
             }
@@ -1031,7 +1030,10 @@ impl Replayed {
         Self { left }
     }
 
-    /// True (and consumed) when `line` is one of the stored overlap.
+    /// True (and consumed) when `line` is one of the stored overlap. `line`
+    /// must be in its STORED form (`commands::stream_replayed_line`): level
+    /// prefix stripped, masked -- the raw line re-read from a plugin
+    /// container is neither (W5b fix round 1, M1).
     pub(crate) fn already_stored(&mut self, line: &str) -> bool {
         match self.left.get_mut(line.trim_end_matches(['\r', '\n'])) {
             Some(n) if *n > 0 => {

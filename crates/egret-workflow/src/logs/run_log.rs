@@ -142,6 +142,19 @@ impl RunLog {
         )
     }
 
+    /// `message` as [`line`](Self::line) would store it, before the split:
+    /// masked, U+0000 removed. What a re-attach compares a re-read line with
+    /// (`k8s::runner::Replayed`, W5b fix round 1 M1), so the comparison is
+    /// with the stored text rather than with the raw line.
+    pub fn stored_form(&self, message: &str) -> String {
+        let masked = mask_prepared(message, &self.secrets);
+        if masked.contains('\0') {
+            masked.replace('\0', "")
+        } else {
+            masked.into_owned()
+        }
+    }
+
     pub fn identity(&self) -> &RunIdentity {
         &self.identity
     }
