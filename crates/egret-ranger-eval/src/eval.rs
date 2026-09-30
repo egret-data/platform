@@ -519,6 +519,31 @@ pub enum UndecidableCause {
         policy_id: Option<i64>,
         policy_name: String,
     },
+    /// The TAG phase produced a mask or row filter and a strictly
+    /// higher-priority RESOURCE policy then produced one too, so Ranger
+    /// reports the tag policy's id with the resource policy's data.
+    ///
+    /// The cross-phase twin of [`UndecidableCause::TagSubPolicyIsDenyCapable`],
+    /// and the same mechanism seen from the other side.
+    /// `RangerDefaultDataMaskPolicyItemEvaluator.updateAccessResult` writes
+    /// `maskType` / `maskedValue` / `maskCondition` **unconditionally** (offsets
+    /// 11-88) and only then calls
+    /// `RangerPolicyEvaluator.updateAccessResult(result, matchType, true,
+    /// comments)`, whose allow branch is guarded by
+    /// `if (!result.getIsAllowed())` — and the tag phase has already set
+    /// `isAllowed` on the shared result. [`MaskResult`] and [`RowFilterResult`]
+    /// bundle the identity with the data and cannot express the split.
+    ///
+    /// Raised for a resource policy that YIELDS. One that runs and matches
+    /// nothing writes neither half, so the tag verdict still stands and the
+    /// answer is not lost — see
+    /// `tests/tag_arbitration.rs::a_higher_priority_resource_mask_that_yields_nothing_leaves_the_tag_mask`.
+    TagSubResultSplitByResourcePolicy {
+        tag_policy_id: Option<i64>,
+        tag_policy_name: String,
+        resource_policy_id: Option<i64>,
+        resource_policy_name: String,
+    },
     /// [`EngineConfig::plugin_version`] disagrees with the version measured
     /// for [`EngineConfig::engine`] ([`EngineType::plugin_version`]). The
     /// deployment being described is not one this crate has been read
@@ -711,6 +736,73 @@ pub enum Decision {
 /// [`ServiceDef::parse`] of `policies.service_def`, but is taken separately
 /// so a caller can supply the embedded def for a download whose envelope
 /// omitted one.
+///
+/// # ⚠ Every input the cross-phase arbitration reads, and every input it could
+/// have read
+///
+/// SP4d-2b Task 3. Arbitration is dense with this package's recurring defect
+/// shape — *a condition that changes the answer, reaching a function that does
+/// not look at it* — because it reads two verdicts, two priorities and a policy
+/// type. So the list below is exhaustive by construction rather than by
+/// inspection, on the pattern [`evaluate_tag_policies`] set. **A new field on
+/// [`TagDecision`], [`PolicyView`] or [`RangerPolicy`] is a new row here.**
+///
+/// Two rows were findings: the LIVE `policyPriority` (table C), which is what
+/// makes the eval-order refusal below necessary, and `isApplicable` (table B).
+///
+/// ## A — what phase 1 left, [`TagDecision`]
+///
+/// | field / variant | read | ruling |
+/// |---|---|---|
+/// | `NotDetermined` | **yes** | both flags false, and the loop is then the pre-Task-3 resource loop exactly — which is why every existing resource test still holds |
+/// | `Allowed { priority }` | **yes** | seeds `isAllowed` and `policyPriority`; selects offset 505's `>` arm |
+/// | `Denied { priority }` | **yes** | seeds both; selects offset 469's `>=` arm, the tighter one |
+/// | `Allowed`/`Denied` `{ policy_id, policy_name }` | **yes, for REPORTING only** | they are `RangerAccessResult.policyId`; no comparison reads them |
+/// | `Denied { reason }` | reporting only | Ranger's `reason` is free text and is never compared |
+/// | `Undecidable { why }` | **yes → refuses** | merged into the composed `why` by [`merge_causes`]. The engine has no such state, so it cannot be an arbitration input at all: a verdict this crate could not compute cannot be arbitrated with |
+///
+/// ## B — each resource candidate, [`PolicyView`] and its [`RangerPolicy`]
+///
+/// | field | read | ruling |
+/// |---|---|---|
+/// | `policy.policy_priority` | **yes** | the right-hand side of all three comparisons |
+/// | `has_deny` | **yes** | offset 553, the eval-order band, and the refusal below |
+/// | the six item buckets, `is_deny_all_else` | through `decide` | unchanged by this task |
+/// | `policy.id`, `policy.name` | reporting only | |
+/// | `policy.policy_type`, `is_enabled` | **yes, upstream** | the candidate filter. `RangerPolicyRepository.init` keeps the three evaluator lists disjoint, so a mask policy can never arbitrate against an ACCESS tag verdict — the two arms live in two functions rather than behind a flag |
+/// | `unmodelled` | **yes → refuses** | `collect_causes`, before the loop |
+/// | `isApplicable` / `validitySchedules` | **not read, and measured unreachable** | offset 437 `continue`s a policy outside its validity window BEFORE the arbitration, and this crate has no clock. A MATCHED policy carrying `validitySchedules` already refuses (`construct_affects` ⇒ true), so only an UNMATCHED one can reach the loop — and an unmatched policy decides nothing, so the only thing it can do differently is set `determined` at offset 553. That needs `isAllowed` already true, and every candidate after it is at the same or lower priority, where both surviving arms determine anyway. The skip is therefore outcome-free, not unmodelled |
+///
+/// ## C — the shared `RangerAccessResult`, which IS the loop's state
+///
+/// | field | read | ruling |
+/// |---|---|---|
+/// | `isAccessDetermined` | **yes** | cleared at 391, set by the arbitration and by 553, restored at 599 |
+/// | `isAllowed` | **yes, and LIVE** | offset 481 re-reads it every iteration, so a resource allow changes which arm LATER evaluators take |
+/// | `policyPriority` | **yes, and LIVE** | ⚠ **a finding.** `updateAccessResult` moves it, so under a tag deny an allowing resource policy raises the left-hand side of offset 469's `>=` and shuts out the rest of its own band. Modelling it as `tag.priority` — the obvious reading of "the tag verdict's priority" — would have been wrong, and wrong towards allow. It is a mutable local for that reason, and the [`UndecidableCause::EvalOrderAmbiguous`] refusal in the loop is the consequence |
+/// | `isAuditedDetermined` | **no** | offsets 577-596 break only when audit is ALSO determined. The extra iterations cannot change access: `evaluatePolicyItems` is guarded by `!getIsAccessDetermined()` (`RangerDefaultPolicyEvaluator` 380-384) and nothing clears the flag again, so `break`-on-determined is exact |
+/// | `getIsFallbackSupported()` | **no** | offsets 640-650 set `isAccessDetermined` for a deny and change neither `isAllowed` nor `policyId`. It is a signal to the HOST about a native fallback authorizer, which [`DenyReason::NoPolicyMatched`] already carries |
+/// | `maskType` / `maskedValue` / `filterExpr` | not on this path | `evaluate_sub` owns them, and owns the id/data split they create |
+///
+/// ## D — which arm, and what chooses it
+///
+/// | input | read | ruling |
+/// |---|---|---|
+/// | `policyType` (offset 489) | **yes** | `0` ⇒ `>`; `1`/`2` ⇒ `>=`. Split across this function and `evaluate_sub` so each has exactly ONE arm — a wrong argument cannot select the wrong comparison |
+/// | `hasResourcePolicies` (offset 337) | **no** | its `false` arm skips clear, loop and restore in one jump (350 → 715) and is measured indistinguishable from its `true` arm with an empty evaluator list. `tests/tag_arbitration.rs` pins the equivalence |
+/// | the candidate ORDER | **yes** | `sort_eval_order`'s `getEvalOrder()` stand-in. Order-free for the outcome on every arm except the tag-deny one — see the ⚠ block in the loop |
+///
+/// ## Not an input at all
+///
+/// * **[`EngineConfig`]** — the super-user short-circuit is at caller offsets
+///   114-165, before `evaluateTagPolicies` at 176 and before everything here.
+///   It is [`request_preamble`]'s, and running it exactly once, first, is what
+///   makes both phases safe.
+/// * **The security zone** — `evaluateTagPolicies` has its own zone gate; the
+///   resource loop has none. Refused upstream through
+///   `Unmodelled::SecurityZones`.
+/// * **[`AccessRequest::resolved_tags`]** — read by phase 1 only. The
+///   arbitration sees a verdict, never the tag set.
 pub fn evaluate(
     policies: &ServicePolicySet,
     request: &AccessRequest,
@@ -724,6 +816,19 @@ pub fn evaluate(
             policy_id: Some(SUPERUSER_POLICY_ID),
             policy_name: "superuser".to_string(),
         };
+    }
+
+    // ── phase 1: the tag policies (caller offset 176) ──────────────────
+    //
+    // After the super-user block at 114-165 and before everything below.
+    // `tag_phase_input` is the only gate; a `None` from it is Ranger's own
+    // "no evaluator can run", not a narrowing this crate invented.
+    let tag = match tag_phase_input(policies, request, service_def) {
+        None => TagDecision::NotDetermined,
+        Some(tag_service_def) => evaluate_tag_policies(policies, request, &tag_service_def),
+    };
+    if let TagDecision::Undecidable { why: tag_why } = &tag {
+        merge_causes(&mut why, tag_why);
     }
 
     let implied = service_def.implied_access_grants();
@@ -819,53 +924,164 @@ pub fn evaluate(
     // `evaluatePolicyItems` always takes its `accessTypeResults` branch with
     // exactly one entry, and `getCompositeAccessResult` copies that entry
     // straight back into the shared result.)
-    let mut outcome: Option<Outcome> = None;
+    // The loop's state IS `RangerAccessResult`, seeded from what phase 1 left
+    // on it. `createAccessResult` starts `isAllowed` false and
+    // `policyPriority` 0, and the tag phase then writes a verdict or does not
+    // — which is exactly what [`TagDecision`]'s three non-refusal arms say.
+    let mut outcome: Option<Outcome> = tag_verdict_as_outcome(&tag);
+    let tag_verdict = outcome.clone();
+    let mut allowed = outcome.as_ref().is_some_and(|o| o.allowed);
+    let mut priority = outcome.as_ref().map_or(0, |o| o.priority);
+
+    // Offsets 291-335, both computed from the result BEFORE the clear, and
+    // both constant for the whole loop.
+    let is_allowed_by_tags = outcome.is_some() && allowed;
+    let is_denied_by_tags = outcome.is_some() && !allowed;
+
+    // Offset 391, `result.setIsAccessDetermined(false)` — the CLEAR, which is
+    // what lets a resource policy decide at all after the tag phase determined.
+    let mut determined = false;
+
     for view in &candidates {
-        // Top of the loop: an allow recorded by a strictly higher-priority
-        // policy is final.
+        // ── the three-way arbitration, offsets 452-535 ─────────────────
         //
-        //   } else if (ret.getIsAllowed()) {
-        //       if (policyType == POLICY_TYPE_ACCESS) {
-        //           if (ret.getPolicyPriority() > evaluator.getPolicyPriority()) {
-        //               ret.setIsAccessDetermined(true);
-        if let Some(current) = &outcome {
-            if current.allowed && current.priority > view.policy.policy_priority {
-                break;
+        // One character separates the two comparisons, and they are the two
+        // halves of Ranger's own log lines at offsets 224 and 264: a tag DENY
+        // lets only a STRICTLY higher-priority resource policy through, a tag
+        // ALLOW lets a SAME-or-higher one through so it can still deny. The
+        // third arm — `policyType != 0`, offset 529 — belongs to
+        // `evaluate_sub`, which is the only place a mask request reaches.
+        //
+        // `setIsAccessDetermined(true)` here does not skip the evaluator: the
+        // engine still calls `evaluate`, and `RangerDefaultPolicyEvaluator`
+        // guards `evaluatePolicyItems` with `!getIsAccessDetermined()` at
+        // offsets 380-384. Nothing clears the flag again, so a `break` is
+        // exact for the access outcome.
+        if is_denied_by_tags {
+            //     469: if_icmplt 538 — determined unless the evaluator is
+            //          STRICTLY higher priority.
+            if priority >= view.policy.policy_priority {
+                determined = true;
             }
+        } else if allowed {
+            //     505: if_icmple 538 — determined only when the result is
+            //          STRICTLY higher priority, so an EQUAL-priority
+            //          evaluator still runs and can deny.
+            if priority > view.policy.policy_priority {
+                determined = true;
+            }
+        }
+        if determined {
+            break;
         }
 
         if let Some(found) = view.decide(request, &implied) {
-            match &outcome {
-                None => outcome = Some(found),
-                Some(current) => {
-                    // The `accessTypeResults` arbitration. A deny of the
-                    // same or higher priority replaces an allow; an allow
-                    // needs a STRICTLY higher priority to replace an allow.
-                    // (The `old is a deny` branches are unreachable: a deny
-                    // sets `isAccessDetermined` and the loop stops below.)
-                    let replace = if current.allowed && !found.allowed {
-                        found.priority >= current.priority
-                    } else if current.allowed && found.allowed {
-                        found.priority > current.priority
-                    } else {
-                        false
-                    };
-                    if replace {
-                        outcome = Some(found);
+            // `RangerDefaultPolicyEvaluator.updateAccessResult`: the deny
+            // branch (offsets 83-132) writes id, priority and reason
+            // unconditionally; the allow branch (135-184) writes only
+            // `if (!result.getIsAllowed())`. So a resource ALLOW landing on a
+            // result the tag phase already allowed writes NOTHING — the tag
+            // policy stays the reported one, and `priority` does not move.
+            if !found.allowed {
+                allowed = false;
+                priority = found.priority;
+                outcome = Some(found);
+                determined = true;
+            } else if !allowed {
+                // ⚠ THE ONE PLACE `getEvalOrder()` DECIDES AN ACCESS OUTCOME,
+                // and it exists only under a tag DENY.
+                //
+                // `priority` moves to this policy's, and offset 469's `>=` then
+                // shuts out every remaining evaluator at that priority —
+                // including the rest of this policy's own band. So in a
+                // `hasDeny` band above the tag deny's priority, whichever of an
+                // allowing and a denying member runs FIRST wins, and which that
+                // is comes from `RangerOptimizedPolicyEvaluator.computeEvalOrder()`,
+                // the resource-specificity score this crate does not compute.
+                //
+                // Neither of the other two arms can reach this shape, which is
+                // why the guard is on `is_denied_by_tags` rather than on the
+                // band:
+                //
+                // * with no tag verdict and with a tag ALLOW, offset 505's `>`
+                //   lets the same-priority rival run after the allow, so the
+                //   deny still wins whichever ran first;
+                // * with a tag ALLOW the allow branch of `updateAccessResult`
+                //   does not fire at all (`isAllowed` is already set), so
+                //   `priority` never moves and nothing is shut out.
+                //
+                // A rival EARLIER in this crate's order would already have
+                // denied and broken the loop, so scanning the whole band minus
+                // this policy is the same scan as "the rest of the band" — and
+                // it does not depend on this crate's order being Ranger's,
+                // which is the point.
+                if is_denied_by_tags && view.has_deny {
+                    let band = (view.policy.policy_priority, view.has_deny);
+                    let rival = candidates
+                        .iter()
+                        .filter(|other| !std::ptr::eq(other.policy, view.policy))
+                        .filter(|other| (other.policy.policy_priority, other.has_deny) == band)
+                        .find(|other| other.decide(request, &implied).is_some_and(|o| !o.allowed));
+                    if let Some(rival) = rival {
+                        return Decision::Undecidable {
+                            why: vec![UndecidableCause::EvalOrderAmbiguous {
+                                policy_ids: vec![view.policy.id, rival.policy.id],
+                                policy_names: vec![
+                                    view.policy.name.clone(),
+                                    rival.policy.name.clone(),
+                                ],
+                            }],
+                        };
                     }
                 }
+                allowed = true;
+                priority = found.priority;
+                outcome = Some(found);
             }
         }
 
-        // `setIsAllowed(false)` sets `isAccessDetermined`, so a deny ends
-        // the evaluation; and once allowed, the first evaluator with no
-        // deny items of its own does too.
-        match &outcome {
-            Some(o) if !o.allowed => break,
-            Some(o) if o.allowed && !view.has_deny => break,
-            _ => {}
+        // Offset 553: once allowed, the first evaluator with no deny items of
+        // its own determines. (`setIsAllowed(false)` sets the flag itself, so
+        // the deny above is already `determined`.)
+        if allowed && !view.has_deny {
+            determined = true;
+        }
+        if determined {
+            break;
         }
     }
+
+    // ── the restore, offsets 599-632 ───────────────────────────────────
+    //
+    // Nothing determined, so the tag verdict goes back. The allow arm is a
+    // no-op by construction and is written out anyway, because "provably
+    // idempotent" is a claim a later change can quietly break: after a tag
+    // allow, `allowed` can only become false through a resource deny, and a
+    // deny sets `determined`.
+    //
+    // ⚠ The deny arm is where this crate reports a DIFFERENT policy from
+    // Ranger, deliberately. `setIsAllowed(false)` does not touch `policyId`,
+    // so Ranger names whatever wrote last — which in the one reachable shape
+    // is a resource policy that ALLOWED and was then discarded. Reporting that
+    // policy as the source of a deny would send a reader to a policy that
+    // allows. This crate names the tag policy that actually denied, which is
+    // an instance of the ACCESS reported-id divergence already declared above
+    // and in `tests/ranger/README.md` (nothing in this crate asserts a
+    // reported policy id for an ACCESS decision).
+    //
+    // Both arms leave `outcome.allowed == allowed`, so no fix-up follows: the
+    // loop's invariant is that `allowed` is `outcome`'s (a deny writes both, an
+    // allow writes both when it writes at all), and the deny arm restores an
+    // outcome that is itself a deny.
+    if !determined {
+        if is_denied_by_tags {
+            allowed = false;
+            outcome = tag_verdict;
+        } else if is_allowed_by_tags {
+            allowed = true;
+        }
+    }
+    debug_assert_eq!(allowed, outcome.as_ref().is_some_and(|o| o.allowed));
 
     match outcome {
         Some(Outcome {
@@ -893,6 +1109,47 @@ pub fn evaluate(
             policy_name: String::new(),
             reason: DenyReason::NoPolicyMatched,
         },
+    }
+}
+
+/// What phase 1 left on the shared `RangerAccessResult`, in the resource
+/// loop's own currency.
+///
+/// `None` is `isAccessDetermined == false` with `isAllowed` false and
+/// `policyPriority` 0 — `createAccessResult`'s untouched result, which is what
+/// [`TagDecision::NotDetermined`] means. A refusal is not a state the engine
+/// has, so it produces `None` here and is carried to the caller as a cause
+/// instead.
+///
+/// The `reason` an ALLOW carries is `DenyReason::NoPolicyMatched`, the same
+/// placeholder [`PolicyView::decide`] uses for an allow: Ranger's `reason` is a
+/// free-text comment and this crate only reads it when the answer is a deny.
+fn tag_verdict_as_outcome(tag: &TagDecision) -> Option<Outcome> {
+    match tag {
+        TagDecision::NotDetermined | TagDecision::Undecidable { .. } => None,
+        TagDecision::Allowed {
+            policy_id,
+            policy_name,
+            priority,
+        } => Some(Outcome {
+            allowed: true,
+            priority: *priority,
+            policy_id: *policy_id,
+            policy_name: policy_name.clone(),
+            reason: DenyReason::NoPolicyMatched,
+        }),
+        TagDecision::Denied {
+            policy_id,
+            policy_name,
+            priority,
+            reason,
+        } => Some(Outcome {
+            allowed: false,
+            priority: *priority,
+            policy_id: *policy_id,
+            policy_name: policy_name.clone(),
+            reason: *reason,
+        }),
     }
 }
 
@@ -1003,6 +1260,64 @@ fn tag_policies_can_decide(
     }
 }
 
+/// Phase 1's gate: the tag service-def to evaluate the `tagPolicies` block
+/// against, or `None` when Ranger's tag phase provably cannot write to the
+/// shared result for this request.
+///
+/// `None` is an answer, not a refusal — see [`tag_policies_can_decide`] for the
+/// two measured escapes and why each is independently sufficient.
+///
+/// # The gate keys on the DECIDING SET, not only on the reader's label
+///
+/// `Unmodelled::TagPolicies` is a classification and
+/// [`ServicePolicySet::tag_policies`] is what the phase actually evaluates. If
+/// those two ever disagree — a reader change, a new tier — keying on the label
+/// alone would skip the phase while a non-empty deciding set sat there, which
+/// is this package's recurring defect shape: a condition that changes the
+/// answer reaching a function that does not look at it. So a non-empty
+/// `tag_policies` runs the phase whether or not a construct was reported, under
+/// the block tier its own length implies.
+fn tag_phase_input(
+    policies: &ServicePolicySet,
+    request: &AccessRequest,
+    service_def: &ServiceDef,
+) -> Option<ServiceDef> {
+    let declared = policies.unmodelled.iter().find_map(|c| match c {
+        Unmodelled::TagPolicies(block) => Some(block.clone()),
+        _ => None,
+    });
+    let block = match declared {
+        Some(block) => block,
+        None if !policies.tag_policies.is_empty() => {
+            TagPolicyBlock::Policies(policies.tag_policies.len())
+        }
+        None => return None,
+    };
+    // The block's own def is a second source of context enrichers, so the gate
+    // needs it too — see `tag_policies_can_decide`. Parsed through the same
+    // `ServiceDef::parse` as the resource def so there is one enricher
+    // predicate, not two.
+    let tag_service_def = ServiceDef::parse(&policies.tag_service_def);
+    tag_policies_can_decide(&block, request, service_def, &tag_service_def)
+        .then_some(tag_service_def)
+}
+
+/// Append phase-1 causes to the composed `why`, without repeating one the
+/// preamble already raised.
+///
+/// The two sweeps overlap on purpose: [`tag_candidates`] refuses the same
+/// envelope constructs [`request_preamble`] does, so the phase stays safe for
+/// any caller rather than depending on one. What must not leak out of that
+/// overlap is a `why` naming `policyDeltas` twice — a reader would read two
+/// findings where there is one.
+fn merge_causes(why: &mut Vec<UndecidableCause>, from: &[UndecidableCause]) {
+    for cause in from {
+        if !why.contains(cause) {
+            why.push(cause.clone());
+        }
+    }
+}
+
 /// Everything the engine checks before it reaches the first policy, and
 /// everything about the download and the service-def that is true whatever
 /// the policy type. Shared by [`evaluate`], [`evaluate_data_mask`] and
@@ -1100,23 +1415,22 @@ fn request_preamble(
     // partial whatever is being asked; `securityZones` and `serviceConfig`
     // likewise.
     //
-    // `tagPolicies` is the one envelope construct with a request- and
-    // def-dependent escape: `Unmodelled::TagPolicies` is only raised for a
-    // block the reader could not show inert on the envelope alone, and two
-    // further conditions can still make it unable to decide. Nothing here
-    // narrows `ServiceConfig` — see the ⚠ block on
+    // ⚠ `tagPolicies` is NOT refused here, and that is SP4d-2b Task 3's whole
+    // change to this function. The block is now EVALUATED — `tag_phase_input`
+    // gates it and the tag phase answers it — so refusing it here would refuse
+    // the feature. The refusals that block still owes have not gone anywhere:
+    // `tag_candidates`'s own envelope sweep raises
+    // `EnvelopeConstruct(TagPolicies(Unreadable))` for a block whose shape the
+    // reader could not count, and every other tag-side refusal reaches the
+    // composed answer through the phase's `Undecidable`. Both callers of this
+    // function run the phase; nothing else may.
+    //
+    // Nothing here narrows `ServiceConfig` — see the ⚠ block on
     // `crate::model::Unmodelled::ServiceConfig` for why the two refusals look
     // alike and carry opposite risk.
     for construct in &policies.unmodelled {
-        if let Unmodelled::TagPolicies(block) = construct {
-            // The block's own def is a second source of context enrichers, so
-            // the gate needs it too — see `tag_policies_can_decide`. Parsed
-            // through the same `ServiceDef::parse` as the resource def so
-            // there is one enricher predicate, not two.
-            let tag_service_def = ServiceDef::parse(&policies.tag_service_def);
-            if !tag_policies_can_decide(block, request, service_def, &tag_service_def) {
-                continue;
-            }
+        if matches!(construct, Unmodelled::TagPolicies(_)) {
+            continue;
         }
         why.push(UndecidableCause::EnvelopeConstruct(construct.clone()));
     }
@@ -1574,6 +1888,16 @@ enum SubResult {
     RowFilter(RowFilterResult),
 }
 
+/// The policy a [`SubResult`] names. Both arms carry the same two fields;
+/// bundling them with the DATA is exactly what
+/// [`UndecidableCause::TagSubResultSplitByResourcePolicy`] exists to refuse.
+fn sub_result_identity(result: &SubResult) -> (Option<i64>, String) {
+    match result {
+        SubResult::Mask(m) => (m.policy_id, m.policy_name.clone()),
+        SubResult::RowFilter(f) => (f.policy_id, f.policy_name.clone()),
+    }
+}
+
 /// Evaluate one data-mask request against one policy download.
 ///
 /// Pure, like [`evaluate`], and the same three-valued contract: a mask this
@@ -1666,6 +1990,24 @@ fn evaluate_sub(
         return Ok(None);
     }
 
+    // ── phase 1, for policy type 1 or 2 (caller offset 176) ────────────
+    //
+    // `evaluateTagPolicies` runs for every policy type, so a tag mask decides a
+    // mask request exactly as a tag deny decides an access one. The priority
+    // comes back with the result because the arbitration below compares it.
+    let tag = match tag_phase_input(policies, request, service_def) {
+        None => None,
+        Some(tag_service_def) => {
+            match evaluate_tag_sub(kind, policies, request, &tag_service_def) {
+                Err(tag_why) => {
+                    merge_causes(&mut why, &tag_why);
+                    None
+                }
+                Ok(found) => found,
+            }
+        }
+    };
+
     let implied = service_def.implied_access_grants();
     let all_access_types: BTreeSet<&str> = service_def
         .access_types()
@@ -1700,6 +2042,52 @@ fn evaluate_sub(
     // winner has no deny items of its own, offset 553 has already set the
     // flag before the loop even advances.)
     //
+    // ── arm 3 of the arbitration: a tag verdict already on the result ──
+    //
+    // Offset 529, `if_icmplt 538`: with `isAllowed` set — which a tag mask
+    // leaves, because `RangerDefault{DataMask,RowFilter}PolicyItemEvaluator`
+    // reports allow unconditionally — a resource evaluator is shut out unless
+    // its priority is STRICTLY higher. That is the `>=` arm, and it is one
+    // character from `evaluate`'s `>`.
+    //
+    // `isDeniedByTags` cannot arise here, and that is structural rather than
+    // lucky: for policy types 1 and 2 `getMatchingPolicyItem` takes the
+    // single-list overload (no deny bucket), `isDenyAllElse`'s fallback is
+    // guarded by `policyType == null || policyType == 0`, and the item
+    // evaluator's `updateAccessResult` passes `true`. No tag mask can deny, so
+    // offset 452's branch is unreachable on this path and `evaluate_tag_sub`'s
+    // type — which cannot express a deny — is the right one.
+    //
+    // What a strictly higher-priority resource evaluator does when it DOES run
+    // is the refusal below. Note the loop needs no `hasDeny` bookkeeping: if no
+    // strictly-higher evaluator yields then none of them writes either half,
+    // whatever order they run in, and the restore at 599-632 puts the tag
+    // verdict back; if any of them yields then every order either splits the
+    // result or stops before doing so, and refusing covers both.
+    if let Some((tag_result, tag_priority)) = tag {
+        let split: Vec<&PolicyView<'_>> = candidates
+            .iter()
+            // The negation of offset 529's `>=`, on a list already sorted by
+            // priority DESC: everything from the first shut-out evaluator on is
+            // shut out too, so `take_while` and a filter say the same thing.
+            .take_while(|view| tag_priority < view.policy.policy_priority)
+            .filter(|view| view.decide_sub(kind, request, &implied).is_some())
+            .collect();
+        if !split.is_empty() {
+            let (tag_policy_id, tag_policy_name) = sub_result_identity(&tag_result);
+            return Err(split
+                .into_iter()
+                .map(|view| UndecidableCause::TagSubResultSplitByResourcePolicy {
+                    tag_policy_id,
+                    tag_policy_name: tag_policy_name.clone(),
+                    resource_policy_id: view.policy.id,
+                    resource_policy_name: view.policy.name.clone(),
+                })
+                .collect());
+        }
+        return Ok(Some(tag_result));
+    }
+
     // Which evaluator is "first" is decided within a `(priority, hasDeny)`
     // band by `getEvalOrder()`, which this crate does not compute. So the
     // band decides, not the order inside it: if the band holds one yield
@@ -2016,8 +2404,8 @@ pub fn evaluate_tag_data_mask(
     match evaluate_tag_sub(DecisionKind::DataMask, policies, request, tag_service_def) {
         Err(why) => MaskDecision::Undecidable { why },
         Ok(None) => MaskDecision::NoMask,
-        Ok(Some(SubResult::Mask(m))) => MaskDecision::Masked(m),
-        Ok(Some(SubResult::RowFilter(_))) => {
+        Ok(Some((SubResult::Mask(m), _))) => MaskDecision::Masked(m),
+        Ok(Some((SubResult::RowFilter(_), _))) => {
             unreachable!("DataMask kind yields only SubResult::Mask")
         }
     }
@@ -2032,8 +2420,8 @@ pub fn evaluate_tag_row_filter(
     match evaluate_tag_sub(DecisionKind::RowFilter, policies, request, tag_service_def) {
         Err(why) => RowFilterDecision::Undecidable { why },
         Ok(None) => RowFilterDecision::NoFilter,
-        Ok(Some(SubResult::RowFilter(f))) => RowFilterDecision::Filtered(f),
-        Ok(Some(SubResult::Mask(_))) => {
+        Ok(Some((SubResult::RowFilter(f), _))) => RowFilterDecision::Filtered(f),
+        Ok(Some((SubResult::Mask(_), _))) => {
             unreachable!("RowFilter kind yields only SubResult::RowFilter")
         }
     }
@@ -2089,12 +2477,21 @@ pub fn evaluate_tag_row_filter(
 ///    current behaviour. Refused as
 ///    [`UndecidableCause::TagSubPolicyIsDenyCapable`], at the point the split
 ///    can start rather than for every such policy in the block.
+///
+/// # What the `i32` is
+///
+/// `RangerAccessResult.getPolicyPriority()` as the phase leaves it — the
+/// yielding tag policy's `policyPriority`, written by
+/// `RangerDefaultPolicyEvaluator.updateAccessResult`'s allow branch alongside
+/// the id. Task 3's cross-phase arbitration compares it against each resource
+/// evaluator's, so it is returned rather than recomputed at the call site: the
+/// policy that produced the result is the only one that may name it.
 fn evaluate_tag_sub(
     kind: DecisionKind,
     policies: &ServicePolicySet,
     request: &AccessRequest,
     tag_service_def: &ServiceDef,
-) -> Result<Option<SubResult>, Vec<UndecidableCause>> {
+) -> Result<Option<(SubResult, i32)>, Vec<UndecidableCause>> {
     let candidates = tag_candidates(kind, policies, request, tag_service_def)?;
     let implied = tag_service_def.implied_access_grants();
 
@@ -2163,7 +2560,13 @@ fn evaluate_tag_sub(
             }]);
         }
     }
-    Ok(found)
+    // `found` and `winner` are set together and only together: a candidate that
+    // yields and is `hasDeny` returns above, so the one that yields always
+    // determines, and the loop cannot reach a second.
+    Ok(found.map(|result| {
+        let won = winner.expect("a yielded sub-result always records its candidate");
+        (result, won.view.policy.policy_priority)
+    }))
 }
 
 /// The `PolicyEvaluatorForTag` list `evaluateTagPolicies` iterates:

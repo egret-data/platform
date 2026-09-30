@@ -41986,6 +41986,43 @@
           },
           {
             "type": "object",
+            "description": "A tag mask or row filter was displaced in part by a strictly\nhigher-priority resource policy: Ranger reports the tag policy's id with\nthe resource policy's mask.",
+            "required": [
+              "tag_policy_name",
+              "resource_policy_name",
+              "kind"
+            ],
+            "properties": {
+              "tag_policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "tag_policy_name": {
+                "type": "string"
+              },
+              "resource_policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "resource_policy_name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_sub_result_split_by_resource_policy"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
             "required": [
               "declared",
               "service_def_name",

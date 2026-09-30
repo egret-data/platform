@@ -569,6 +569,15 @@ pub enum WireUndecidableCause {
         policy_id: Option<i64>,
         policy_name: String,
     },
+    /// A tag mask or row filter was displaced in part by a strictly
+    /// higher-priority resource policy: Ranger reports the tag policy's id with
+    /// the resource policy's mask.
+    TagSubResultSplitByResourcePolicy {
+        tag_policy_id: Option<i64>,
+        tag_policy_name: String,
+        resource_policy_id: Option<i64>,
+        resource_policy_name: String,
+    },
     EngineMismatch {
         declared: WireEngineType,
         service_def_name: String,
@@ -671,6 +680,17 @@ impl From<&UndecidableCause> for WireUndecidableCause {
             } => WireUndecidableCause::TagSubPolicyIsDenyCapable {
                 policy_id: *policy_id,
                 policy_name: policy_name.clone(),
+            },
+            UndecidableCause::TagSubResultSplitByResourcePolicy {
+                tag_policy_id,
+                tag_policy_name,
+                resource_policy_id,
+                resource_policy_name,
+            } => WireUndecidableCause::TagSubResultSplitByResourcePolicy {
+                tag_policy_id: *tag_policy_id,
+                tag_policy_name: tag_policy_name.clone(),
+                resource_policy_id: *resource_policy_id,
+                resource_policy_name: resource_policy_name.clone(),
             },
             UndecidableCause::TagResourceNotReproducible {
                 policy_id,

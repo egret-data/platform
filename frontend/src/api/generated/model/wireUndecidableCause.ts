@@ -87,6 +87,14 @@ export type WireUndecidableCause = {
   policy_name: string;
   kind: 'tag_sub_policy_is_deny_capable';
 } | {
+  /** @nullable */
+  tag_policy_id?: number | null;
+  tag_policy_name: string;
+  /** @nullable */
+  resource_policy_id?: number | null;
+  resource_policy_name: string;
+  kind: 'tag_sub_result_split_by_resource_policy';
+} | {
   declared: WireEngineType;
   service_def_name: string;
   kind: 'engine_mismatch';
