@@ -9109,6 +9109,141 @@ statement, true), three unrelated *"only implementation"* in
 `egret-perm-compile` and the SP4b plan, and the W5a plan quoting the brief.
 `handlers/container.rs` had **0** hits: Task 5 had rewritten it.
 
+### W5b — Kestra plugins run in the host image, and the ratchet cannot see one
+
+**109 before W5b and 109 at its tip.** The tip figure is the
+`executor_matches_golden` line printed with `--nocapture` in Task 7's gate:
+**294 golden entries, 109 mismatching, 109 baselined, 0 broken** at the
+Task 7 commit. The base figure is derived from a pass, as W5a's was: the test
+was `ok` in W5b's Task 1 gate (`baseline-gate.txt`, at `f4a84116`, whose
+workflow code is the package base `6acb1d68`'s), and it fails on any stale or
+banked entry, so `ok` means the mismatching set equals `baseline.txt`'s
+**109** entries. `baseline.txt`, `golden.json` and `corpus/` are
+byte-identical between the base and the tip (`git diff --quiet 6acb1d68 HEAD
+-- …` exits 0).
+
+What the ratchet can see of W5b, and what it cannot:
+
+- **It cannot see a plugin task.** Of **68** distinct `type:` values in
+  `oracle-exec/corpus/` (`/usr/bin/grep -rhoE '^ *type: *[A-Za-z0-9_.]+'`),
+  **0** start with `kestra.` or name a JDBC class. No corpus flow reaches the
+  `kestra` handler, the host, the catalog or the gate.
+- **The driver names none of W5b's code.** `plugins::`, `kestra::`,
+  `secrets::`, `plugin_host` and `render_with_secrets` each occur **0** times
+  in `oracle-exec/driver.rs` and in `tests/executor.rs`, against `worker::` at
+  **26** and **37** (the same positive control W5a used).
+- **It can see two things W5b changed, and both still match.** (1)
+  `pluginDefaults:` is now refused at publish on every flow: **0** corpus
+  files and **0** lines of `corpus.json` and `golden.json` hold the key, so the
+  refusal meets nothing. (2) `secret()`: **2** corpus flows call it
+  (`valids/secrets` on `Return` and `Log`, `valids/webhook-secret-key` in a
+  webhook trigger's `key`), none on a `kestra.*` task, so W5b's refusal still
+  applies to both, with its new reason; neither is in `baseline.txt`, and the
+  pass means both still match their golden.
+- **The golden holds nothing W5b writes.** No trace carries a log line, a
+  pod, a secret or a plugin output.
+
+| | ratchet | what the task shipped |
+|---|---|---|
+| package base `6acb1d68` (+ spec and plan `377f3e1c..343eb72e`) | 109 (derived from the pass, above) | -- |
+| Task 1 | 109 | the three plugins measured on the pinned artifact (`oracle-exec/w5b-plugins.json`): outputs per `fetchType`, log levels, masking, the properties needing storage, `pluginDefaults` refused at save, `kill()` per engine |
+| Task 2 | 109 | `plugin-host/`: `ShimRunContext`, `EgretPluginHost` (`run`, `describe`), exit codes 0/2/3/4, `plugins.lock`, the Dockerfile, `catalog.json` and the lockfile-hash test |
+| Task 3 | 109 | `kestra.<FQCN>` types from the catalog, the refusals by name at publish, `pluginDefaults` refused at publish (ignored at run, user ruling 2A), `workflow_kestra_plugins`, `allowed-types`, the gate at publish |
+| Task 4 | 109 | `secret()` on `kestra.*` tasks from the execution's workspace, render once (user ruling 1A), masking in `RunLog` |
+| Task 5 | 109 | both runners speak the host protocol and cancel with a grace; `files-out` trap for plugin pods only |
+| Task 6 | 109 | the `kestra` handler, `workflow.plugin_host` config, the chart value, the live tests; fix round: no connection pool in the host, `kill_grace_s` ≥ 3 |
+| Task 7 | **109** (measured, above) | the end to end on a temporary kind cluster, this section, the specs' corrections, the full local gate |
+
+#### What is covered live, and by which gate
+
+**Live on a real cluster, through egret's API** (Task 7, a temporary kind
+cluster `egret-w5b-e2e`, kind v0.29 / Kubernetes v1.33.1, kindnet; the chart
+installed from this branch with `workflow.containerRunner=kubernetes`,
+`workflow.workerEnabled=true` and `workflow.pluginHost.image=egret-plugin-host:dev`;
+a Postgres 16 in its own namespace `e2e-data`; the transcripts are
+`task-7-e2e-*.txt` in the package's working notes, and every figure below is
+copied from them):
+
+1. **A `kestra.…postgresql.Query` flow publishes and runs in pods.** Two
+   tasks, both with `password: "{{ secret('pg', subkey='password') }}"` from a
+   basic-auth workspace secret created through the API: `hold`
+   (`SELECT pg_sleep(20)`) and `rows` (three rows from `generate_series`, with
+   the secret in a SQL comment). SUCCESS in 32.1 s; `rows`' outputs are
+   `{"rows": [{"n": 1, "label": "row-1"}, …, {"n": 3, "label": "row-3"}],
+   "size": 3}`; the logs route returns the plugin's own `DEBUG Starting query:
+   … /* ****** */` line, `complete: true`. One pod per task, each `Killing`
+   right after its task, and `egret-tasks` held **0** pods afterwards.
+2. **The pod spec holds no secret.** `kubectl get pods -n egret-tasks -o yaml`
+   taken **while** `hold`'s `pg_sleep(20)` was active on Postgres (1 active
+   backend at the moment of the dump): 8430 bytes, 1 pod, **0** occurrences
+   of the password, against **2** of `egret-plugin-host:dev` (the control).
+   The pod's env is `WORKING_DIR` and `EGRET_KILL_WAIT_MS=13000` only.
+3. **The database holds no secret.** A `pg_dump --data-only` of egret's
+   metadata database after every scenario: schema `workflow` (13 flows, 7
+   versions, 6 executions, 8 task runs, 13 log lines) **0** matches; every
+   schema **0** matches; egret's server log **0**. Controls in the same dumps:
+   the flow source's `secret('pg'` 22, the masked `/* ****** */` 2, the
+   outputs' `row-3` 2, and the connection's plaintext username 1.
+4. **A timeout cancels the query on Postgres.** `SELECT pg_sleep(600)` with
+   `timeout: PT30S`: the query reached Postgres at 11 s, the task FAILED
+   `Timeout after 00:00:30.000`, and Postgres logged a second connection from
+   the pod's IP followed by `ERROR: canceling statement due to user request`
+   on the query's backend in the same millisecond, then its disconnection;
+   `pg_stat_activity` held **0** `pg_sleep(600)` backends at every sample
+   from then to 65 s. The pod went to `Failed` with a deletion grace of 15 s,
+   then was removed.
+   **With `timeout: PT10S`, as the plan wrote it, the check is vacuous**:
+   in two runs the pod's `main` started at about 6 s and the plugin never
+   connected (Postgres' connection log holds no connection from the pod), so
+   the "0 active" those runs show proves nothing. That is the
+   timeout-shorter-than-boot limit (W5b spec §12), measured on kind.
+5. **A disabled feature refuses at publish and at run, and creates no pod.**
+   With `workflow_kestra_plugins` off, publishing a new flow and re-publishing
+   an old one both answered **400** `the 'workflow_kestra_plugins' feature is
+   disabled for this workspace; …`; starting the version published while it
+   was on ran the run-time gate: FAILED in 1.0 s with the same reason as its
+   one ERROR log line, and **0** `egret-tasks` events and **0** pods from that
+   moment on, against 12 events in the minute before (the control).
+6. **`pluginDefaults:` is refused**: a list on a flow with a plugin task,
+   `[]` on a flow with only a `Log`, and a list on a flow with only a `Log`
+   each show `removed_plugin_defaults` in `validate` and answer **400** at
+   publish; the same `Log` flow without the key validates clean and
+   publishes (the control).
+
+**Found live, not by any test:** nothing new in the product. The chart's
+bundled MinIO image (`quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z…`)
+answered **401** from quay.io, so the chart's post-install hooks never ran and
+`egret init` was applied by hand from `helm template --show-only
+templates/init-job.yaml`; that is the chart's MinIO pin, not W5b's.
+
+**Live, driven by tests, each gated by an env var** (a run without the gate
+reports IGNORED or fails, never passes empty):
+
+| test | gate | what it runs |
+|---|---|---|
+| `tests/plugin_host_live.rs` `plugin_tasks_run_end_to_end_and_no_secret_is_stored` | `EGRET_PLUGIN_HOST_LIVE=1` (`#[ignore]`, `--ignored`) | Docker runner, `egret-plugin-host:dev`: Postgres, Trino 483 and StarRocks 4.1.4 `Query`s; masking; the `workflow.*` scan |
+| `tests/plugin_host_live.rs` `a_timed_out_query_is_cancelled_on_postgres` | `EGRET_PLUGIN_HOST_LIVE=1` | `pg_sleep(600)`, `timeout: PT30S`: query sent, then cancelled (`canceling statement due to user request`) |
+| `tests/container_docker_live.rs` `docker_cancel_with_grace_lets_a_sigterm_trap_run`, `docker_cancel_returns_only_after_the_container_stopped` | Docker daemon present; `EGRET_ALLOW_DOCKER_SKIP=1` opts out | the Docker runner's graceful cancel |
+| `tests/k8s_runner_live.rs` `k8s_cancel_with_grace_waits_for_termination_then_release_deletes` | `EGRET_TEST_KIND=1`, context `kind-egret` | the Kubernetes runner's graceful cancel, as the chart's Role |
+| `plugin-host` `EgretPluginHostTest` (15 tests) | none: `mvn -f plugin-host/pom.xml verify`, Java 25 | the shim's W9 traps, exit codes, the kill switch |
+
+**Not measured, and stated so nobody infers it:**
+
+1. **`kill()` alone on Trino.** The W5b spec promised a live test; it was not
+   built (the plan's live tests time out on Postgres only). Task 1 measured
+   Trino's query ending through Kestra's kill, which also interrupts the
+   thread.
+2. **StarRocks is not cancelled** (spec §7.1, §12), by design of the measured
+   Connector/J lock; not re-measured here.
+3. **The upstream `kill()` window** (spec §12): a SIGTERM between the plugin
+   opening its connection and publishing its statement closes the socket
+   with no cancel. Known, not observed.
+4. **NetworkPolicy was not enforced in this run** (kindnet); the task pods
+   reached Postgres in `e2e-data` through rule 1, which is what W5a measured
+   on Calico.
+5. **The ratchet cannot judge any of this in either direction**, for the
+   reasons above.
+
 ### What this ratchet does **not** prove
 
 Each of these has a section of its own above with the derivation; they are
