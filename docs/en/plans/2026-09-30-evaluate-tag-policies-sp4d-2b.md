@@ -13,6 +13,21 @@ them.
 
 **Spec:** `docs/en/specs/2026-09-30-evaluate-tag-policies-sp4d-2b-design.md`
 
+## Open item for the whole-branch review — raised by Task 5, not closed
+
+**Is the composed ACCESS path finished?** Task 5's gate found **five** defects in
+code that 127 unit tests and three review rounds had passed, and the fifth only
+became visible once the fourth was fixed. Its implementer said plainly it does not
+believe the path is done, and named the one audit it could not close:
+`evaluatePolicyItems`' **`accessTypeResults` map lives in the request context and
+spans evaluators** — which is how the tag phase turned out to arbitrate by
+`policyPriority` after the crate's prose asserted it did not (defect T4). That same
+map is live on the **resource** path too, where the crate models a *different*
+mechanism and is green over 4000 cases. The two coincide because the engine loop
+shuts out lower-priority evaluators first — but that is **one seed at one size, not
+a proof**, and it is the audit to do before anyone models T4 or T5 rather than
+refusing them.
+
 ## Global Constraints
 
 **The frontend gates are part of every task that changes a wire type, not only of
