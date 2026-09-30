@@ -1260,6 +1260,130 @@ fn a_deny_capable_mask_policy_that_yields_is_refused() {
     );
 }
 
+// ── fix round 2: the early return that routed around the refusals ────────
+
+/// An envelope with `extra` merged in, and a `tagPolicies` block carrying
+/// exactly `block_policies` under the captured tag def.
+fn envelope_with(extra: Value, block_policies: Value) -> ServicePolicySet {
+    let mut body = json!({
+        "serviceName": "sp3c2-trino-live",
+        "policies": [],
+        "serviceDef": {"name": "trino"},
+        "tagPolicies": {
+            "serviceName": "sp3c2-trino-live_tag",
+            "serviceDef": live_download_json()["tagPolicies"]["serviceDef"],
+            "policies": block_policies,
+        },
+    });
+    for (k, v) in extra.as_object().expect("extra is an object") {
+        body[k] = v.clone();
+    }
+    serde_json::from_value(body).expect("parse envelope")
+}
+
+/// **FIX ROUND 2.** The envelope sweep used to sit BELOW the
+/// `of_kind.is_empty()` return, so `PolicyDeltas` could not fire in the one
+/// state it exists to catch.
+///
+/// `Unmodelled::PolicyDeltas` means the download is incremental, so `policies`
+/// is "partial (or absent)" — an EMPTY tag block is not an edge case for that
+/// refusal, it is its signature. The refusal was routed around by exactly the
+/// condition it refuses, which is the C1/I1/I2 shape one layer up.
+///
+/// All four constructs are asserted at an empty block, not just the one that
+/// was measured wrong, because the bypass was structural rather than
+/// per-construct.
+#[test]
+fn an_envelope_construct_refuses_even_with_no_tag_policies_to_evaluate() {
+    let cases = [
+        (
+            json!({"policyDeltas": [{"id": 1}]}),
+            Unmodelled::PolicyDeltas,
+        ),
+        (
+            json!({"serviceConfig": {"ranger.plugin.super.users": "root"}}),
+            Unmodelled::ServiceConfig,
+        ),
+        (
+            json!({"securityZones": {"z": {"resources": []}}}),
+            Unmodelled::SecurityZones,
+        ),
+    ];
+    for (extra, expected) in cases {
+        let set = envelope_with(extra, json!([]));
+        assert!(
+            set.tag_policies.is_empty(),
+            "the block must be EMPTY, or this tests the wrong branch"
+        );
+        let d = evaluate_tag_policies(
+            &set,
+            &request("alice", Some(vec![tag("pii", MatchType::Self_)])),
+            &live_tag_def(),
+        );
+        assert_eq!(
+            causes(&d),
+            vec![UndecidableCause::EnvelopeConstruct(expected.clone())],
+            "{expected:?} must refuse with no tag policies present: {d:?}"
+        );
+    }
+}
+
+/// The control the reorder must not cost: a block with zero policies and a
+/// clean envelope is still an ANSWER.
+///
+/// This is the tier every auto-bound Trino profile lands in —
+/// `bind_trino_profile` creates `{name}_tag` with zero policies — so turning it
+/// into a refusal would take an answer away from every such profile and buy
+/// nothing.
+#[test]
+fn an_empty_block_with_a_clean_envelope_is_still_an_answer() {
+    let set = envelope_with(json!({}), json!([]));
+    for tags in [
+        None,
+        Some(Vec::new()),
+        Some(vec![tag("pii", MatchType::Self_)]),
+    ] {
+        let d = evaluate_tag_policies(&set, &request("alice", tags.clone()), &live_tag_def());
+        assert_eq!(d, TagDecision::NotDetermined, "{tags:?} -> {d:?}");
+    }
+}
+
+/// The other half of the reorder's ruling: the pseudo-access-type refusal stays
+/// BELOW the `of_kind` return on purpose.
+///
+/// With no evaluator to run, Ranger's `isAccessTypeAny` branch is unreachable
+/// and neither side determines anything — so refusing there would cost every
+/// tagless download an answer for nothing. Pinned so that "move it up for
+/// symmetry" is a failing test rather than a plausible tidy-up.
+#[test]
+fn a_pseudo_access_type_costs_nothing_when_there_is_nothing_to_evaluate() {
+    let set = envelope_with(json!({}), json!([]));
+    let req = AccessRequest {
+        access_type: "_any".to_string(),
+        ..request("alice", Some(vec![tag("pii", MatchType::Descendant)]))
+    };
+    assert_eq!(
+        evaluate_tag_policies(&set, &req, &live_tag_def()),
+        TagDecision::NotDetermined
+    );
+
+    // ...and it still refuses the moment there IS something to evaluate.
+    let live = envelope_with(
+        json!({}),
+        json!([tag_policy(
+            1,
+            "p",
+            0,
+            json!(["pii"]),
+            deny_select_for_public()
+        )]),
+    );
+    assert_eq!(
+        causes(&evaluate_tag_policies(&live, &req, &live_tag_def())),
+        vec![UndecidableCause::PseudoAccessType("_any".to_string())]
+    );
+}
+
 // ── the tag set is a set, and its identity includes the match type ───────
 
 /// `RangerTagForEval`'s `equals`/`hashCode` include `matchType`, so the tag `a`

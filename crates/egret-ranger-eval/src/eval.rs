@@ -1829,8 +1829,8 @@ struct TagCandidate<'a> {
 /// | `tag_service_def` | via the caller's `tag_service_def` argument | the block's own def is the only one that decides here |
 /// | `unmodelled: TagPolicies(Policies(n))` | no, deliberately | this IS the block being evaluated; refusing it would refuse the feature |
 /// | `unmodelled: TagPolicies(Unreadable)` | **yes → refuses** | `tag_policies` is empty for it, so silence would read as "decided nothing" |
-/// | `unmodelled: SecurityZones` | **yes → refuses** | `evaluateTagPolicies` has its OWN zone gate (2.5.0 offsets 139-155, 207-359): in a non-default zone it evaluates only tag policies whose `zoneName` matches, so a zone-less policy this crate evaluates is one Ranger skips |
-/// | `unmodelled: PolicyDeltas` | **yes → refuses** | incremental download; the block's `policies` is partial in the same way `policies` is |
+/// | `unmodelled: SecurityZones` | **yes → refuses** | `evaluateTagPolicies` has its OWN zone gate, keyed on `isResourceZoneAssociatedWithTagService` (2.5.0 offsets 139-155 and 207-288). When the request's zone is NOT associated — the default zone included — Ranger keeps exactly the zone-LESS tag policies, which is what this crate evaluates, and the two agree; when it IS associated, Ranger keeps only policies whose `zoneName` equals the request's and skips the zone-less ones this crate evaluates. The crate sees neither the zone nor the association, so it cannot tell the arms apart |
+/// | `unmodelled: PolicyDeltas` | **yes → refuses** | incremental download; the block's `policies` is partial — or ABSENT, which is why the sweep must run before the `of_kind.is_empty()` return rather than after it |
 /// | `unmodelled: ServiceConfig` | **yes → refuses** | a super-user short-circuits BEFORE this phase runs (caller offsets 114-165 precede the call at 168), so it cannot corrupt the phase's own answer — refused anyway, as the one guard that stops a caller other than the composed evaluator reading a verdict a super-user would have overridden. **Nothing here narrows it** — see the ⚠ block on [`crate::model::Unmodelled::ServiceConfig`] |
 /// | `policies` | no | `RangerPolicyRepository.init` keeps the three evaluator lists disjoint; a resource policy cannot answer a tag question |
 /// | `service_def` | no | tested: handed the resource def, no hierarchy holds `tag` and everything is `NONE` |
@@ -1866,6 +1866,20 @@ struct TagCandidate<'a> {
 /// | `issues` | **yes** | refuses, like the resource path |
 /// | `has_tag_enricher` | no | whether the enricher would have produced this tag set is the CALLER's soundness obligation, documented on [`AccessRequest::resolved_tags`]; the phase is handed the set |
 /// | `name` | no | there is no engine cross-check on the tag def — its name is always `tag` |
+///
+/// ## Where each early return stands, and what it may skip
+///
+/// FIX ROUND 2. A refusal is only as good as the path that reaches it, and the
+/// round-1 sweep sat below a return that the refused condition itself produces.
+/// The order is now part of the contract:
+///
+/// | early return | skips | ruling |
+/// |---|---|---|
+/// | envelope sweep → `Err` | nothing; it is FIRST | `PolicyDeltas` means "partial **or absent**", so no return may precede it |
+/// | `of_kind.is_empty()` → `Ok` | the pseudo-access-type refusal, `TagsUnresolved`, the per-policy sweep, `collect_causes`, the def's `issues()` | safe: with no evaluator, Ranger's `getLikelyMatchPolicyEvaluators` returns an empty list and nothing downstream of it can run on either side |
+/// | pseudo access type → `Err` | everything below | required: under `_any` the admitted-set rule the code below applies is the wrong one, so it must return BEFORE `admitted` is computed |
+/// | `resolved_tags` is `None` → `Err` | the per-policy sweep, `collect_causes`, `issues()` | safe: the verdict is already `Undecidable`; more causes would add detail, not change it |
+/// | `admitted.is_empty()` → `Ok` | the per-policy sweep, `collect_causes`, `issues()` | safe and MEASURED: Ranger builds candidates for every tag but `evaluate` admits none, so neither side writes anything |
 ///
 /// ## Not an input at all
 ///
@@ -2203,30 +2217,97 @@ fn tag_candidates<'a>(
     request: &AccessRequest,
     tag_service_def: &ServiceDef,
 ) -> Result<Vec<TagCandidate<'a>>, Vec<UndecidableCause>> {
-    // FIX ROUND 1, IMPORTANT 2. `TagPolicyBlock::Unreadable` means the block's
-    // `policies` array did not bind, and `ServicePolicySet::tag_policies` is
-    // then EMPTY — indistinguishable, from `of_kind` alone, from a block that
-    // carries no policies of this type. Reading the flag is the only way the
-    // phase can tell "I could not read them" from "they decided nothing".
-    let block_unreadable = policies.unmodelled.iter().any(|construct| {
-        matches!(
+    let mut why: Vec<UndecidableCause> = Vec::new();
+
+    // ── the envelope constructs, all of them, BEFORE anything can return ──
+    //
+    // FIX ROUND 2, IMPORTANT. This sweep used to sit below the
+    // `of_kind.is_empty()` return, and `PolicyDeltas` — whose whole meaning is
+    // "`policies` is partial **or absent**" — was therefore unreachable in the
+    // one state it exists to catch: an empty `of_kind` is not an edge case for
+    // that refusal, it is its signature. That is the C1/I1/I2 shape one layer
+    // up: a refusal routed around by the very condition it refuses. Nothing may
+    // return before this loop.
+    //
+    // Every construct except the block being evaluated refuses:
+    //
+    // * `TagPolicies(Unreadable)` — `ServicePolicySet::tag_policies` is EMPTY
+    //   for a block whose `policies` array did not bind, so silence here reads
+    //   as "the policies decided nothing". (This is also why the round-1
+    //   `block_unreadable` flag is gone: the sweep now refuses it directly,
+    //   before the `of_kind` return it used to have to reach past.)
+    // * `PolicyDeltas` — an incremental download, so the block's `policies` is
+    //   partial in exactly the way `policies` is.
+    // * `SecurityZones` — see the correction below.
+    // * `ServiceConfig` — a super-user short-circuits at
+    //   `policyPriority = Integer.MAX_VALUE` BEFORE `evaluateTagPolicies` is
+    //   called at all (caller offsets 114-165 precede the call at 168), so it
+    //   cannot corrupt the phase's own answer. Refused anyway, as the one guard
+    //   that stops a caller other than the composed evaluator reading a tag
+    //   verdict a super-user would have overridden. See the ⚠ block on
+    //   `crate::model::Unmodelled::ServiceConfig` — nothing here narrows it.
+    //
+    // # FIX ROUND 2, MINOR: the zone reason, corrected
+    //
+    // Round 1 said "in a non-default zone Ranger evaluates only tag policies
+    // whose `zoneName` matches the request's, so a zone-less policy this crate
+    // evaluates is one Ranger skips". That is the right conclusion off a wrong
+    // reason, and backwards in half the cases. MEASURED (2.5.0 offsets 139-155
+    // for the flag, 207-288 for the two arms; same shape in 2.8.0):
+    //
+    // ```java
+    // boolean isDefaultZone = !policyEngine.isResourceZoneAssociatedWithTagService(zoneName);
+    // ...
+    // if (isDefaultZone) { if (isNotEmpty(policy.getZoneName())) continue; }   // keep zone-LESS
+    // else               { if (!StringUtils.equals(zoneName, policy.getZoneName())) continue; }
+    // ```
+    //
+    // The gate keys on whether the request's zone is ASSOCIATED WITH THE TAG
+    // SERVICE, not on default versus non-default. When it is not — which
+    // includes the default zone, and any other zone that simply is not
+    // associated — Ranger keeps exactly the tag policies with an EMPTY
+    // `zoneName`, which is the set this crate evaluates, and the two AGREE.
+    // The divergence is the other arm: when the zone IS associated, a zone-less
+    // tag policy fails `equals(zoneName, null)` and Ranger skips it while this
+    // crate evaluates it. The crate sees neither the request's zone nor the
+    // association, so it cannot tell the arms apart — and `securityZones` is
+    // the only signal that a zone exists at all. (A policy WITH a `zoneName` is
+    // already refused per policy through `Unmodelled::ZoneName`, which
+    // `collect_causes` reports unconditionally.)
+    for construct in &policies.unmodelled {
+        if matches!(
             construct,
-            Unmodelled::TagPolicies(TagPolicyBlock::Unreadable)
-        )
-    });
+            Unmodelled::TagPolicies(TagPolicyBlock::Policies(_))
+        ) {
+            continue;
+        }
+        why.push(UndecidableCause::EnvelopeConstruct(construct.clone()));
+    }
+    if !why.is_empty() {
+        return Err(why);
+    }
+
     let of_kind: Vec<&'a RangerPolicy> = policies
         .tag_policies
         .iter()
         .filter(|p| p.is_enabled)
         .filter(|p| p.policy_type == kind.policy_type_code())
         .collect();
-    if of_kind.is_empty() && !block_unreadable {
-        // Nothing to evaluate and nothing hidden. This is the tier every
-        // auto-bound Trino profile lands in, so it must stay an ANSWER.
+    if of_kind.is_empty() {
+        // Nothing to evaluate, and — now that the sweep runs above this —
+        // nothing hidden either. This is the tier every auto-bound Trino
+        // profile lands in (`bind_trino_profile` creates `{name}_tag` with zero
+        // policies), so it must stay an ANSWER.
+        //
+        // What this return still skips, and why each is safe: the
+        // pseudo-access-type refusal below (with no evaluator, Ranger's
+        // `isAccessTypeAny` branch is unreachable and neither side determines
+        // anything), `TagsUnresolved` (no evaluator needs a tag set), the
+        // per-policy resource sweep and `collect_causes` (vacuous — there are
+        // no policies), and the tag def's `issues()` (a def this crate cannot
+        // reproduce decides nothing when no policy uses it).
         return Ok(Vec::new());
     }
-
-    let mut why: Vec<UndecidableCause> = Vec::new();
 
     // ── the request-shape refusal this phase owes ──────────────────────
     //
@@ -2244,61 +2325,20 @@ fn tag_candidates<'a>(
     // deliberately does not run, so the phase has to raise it itself. This is
     // not an envelope check the composed evaluator can add later: it is what
     // makes the phase's OWN admitted set correct.
+    //
+    // Deliberately BELOW the `of_kind` return, unlike the envelope sweep: with
+    // no evaluator to run, the access type cannot change an answer, and
+    // refusing it there would cost every tagless download an answer for
+    // nothing.
     if matches!(
         request.access_type.as_str(),
         ANY_ACCESS | ADMIN_ACCESS | SUPER_USER_ACCESS
     ) {
-        why.push(UndecidableCause::PseudoAccessType(
+        // Returned before `admitted` is computed, because under `_any` the
+        // admitted-set rule `admitted` uses is the wrong one.
+        return Err(vec![UndecidableCause::PseudoAccessType(
             request.access_type.clone(),
-        ));
-    }
-
-    // ── the envelope constructs, all of them ───────────────────────────
-    //
-    // FIX ROUND 1, IMPORTANT 2 and two findings of my own. Every
-    // envelope-level construct except the block being evaluated changes what
-    // the TAG phase computes, so the phase refuses on all of them rather than
-    // leaving them to a caller that may not run `request_preamble`:
-    //
-    // * `TagPolicies(Unreadable)` — `ServicePolicySet::tag_policies` is EMPTY
-    //   for a block whose `policies` array did not bind, so without this the
-    //   phase answered `NotDetermined`: "I could not read the policies"
-    //   rendered as "the policies decided nothing".
-    // * `SecurityZones` — `evaluateTagPolicies` has its own zone gate (2.5.0
-    //   offsets 139-155 and 207-359): with a non-default zone it evaluates
-    //   ONLY tag policies whose `zoneName` equals the request's, so a
-    //   zone-less tag policy that this crate evaluates is one Ranger skips.
-    //   (The converse — a policy WITH a `zoneName` — is already refused per
-    //   policy through `Unmodelled::ZoneName`, which `collect_causes` reports
-    //   unconditionally.)
-    // * `PolicyDeltas` — an incremental download, so the block's `policies`
-    //   is partial in exactly the way `policies` is.
-    // * `ServiceConfig` — a super-user short-circuits at
-    //   `policyPriority = Integer.MAX_VALUE` BEFORE `evaluateTagPolicies` is
-    //   called at all (caller offsets 114-165 precede the call at 168), which
-    //   makes the phase's answer irrelevant rather than wrong. Refused here
-    //   anyway: it costs nothing, and it removes the one way a caller other
-    //   than the composed evaluator could read a tag verdict that a super-user
-    //   would have overridden. See the ⚠ block on
-    //   `crate::model::Unmodelled::ServiceConfig` — nothing here narrows it.
-    for construct in &policies.unmodelled {
-        if matches!(
-            construct,
-            Unmodelled::TagPolicies(TagPolicyBlock::Policies(_))
-        ) {
-            continue;
-        }
-        why.push(UndecidableCause::EnvelopeConstruct(construct.clone()));
-    }
-
-    // Returned HERE, before the tag set is looked at, and deliberately without
-    // the empty-tag-set escape that `Unmodelled::TagPolicies` gets: these are
-    // exactly the constructs `request_preamble` refuses unconditionally for
-    // every request, so the phase is no stricter than the rest of the crate —
-    // and a cause raised after the `admitted.is_empty()` return below would be
-    // silently dropped.
-    if !why.is_empty() {
-        return Err(why);
+        )]);
     }
 
     let Some(resolved) = request.resolved_tags.as_ref() else {

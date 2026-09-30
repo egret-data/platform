@@ -17,7 +17,6 @@ import org.apache.ranger.plugin.policyresourcematcher.RangerPolicyResourceMatche
 import org.apache.ranger.plugin.policyresourcematcher.RangerResourceEvaluator;
 import org.apache.ranger.plugin.resourcematcher.RangerResourceMatcher;
 import org.apache.ranger.plugin.util.RangerResourceEvaluatorsRetriever;
-import org.junit.Assume;
 import org.junit.Test;
 
 /**
@@ -103,20 +102,16 @@ public class EgretTagTrieAgreementTest {
             specs.add(Spec.parse(key));
         }
 
+        // No try/catch around this, deliberately. An earlier draft skipped the test on
+        // NoClassDefFoundError, on a belief that turned out to be false: Maven DOES resolve
+        // `ranger-authz-api` for 2.8.0 (2.5.0 does not need it), and `mvn -o test` runs this
+        // on both versions with `Skipped: 0`. The skip was also self-defeating — a future
+        // classpath break would have turned the measurement into a SILENT skip with a green
+        // `mvn test`, which is the unfalsifiable green this file was committed to remove, for
+        // precisely the event (a version bump) it exists to catch. It fails loudly instead.
         List<Ev> evaluators = new ArrayList<>();
-        try {
-            for (int i = 0; i < specs.size(); i++) {
-                evaluators.add(new Ev(i, specs.get(i), def));
-            }
-        } catch (NoClassDefFoundError missing) {
-            // 2.8.0 pulls `ranger-authz-api` into `RangerDefaultPolicyResourceMatcher.init()`,
-            // which this POM does not resolve. Closing that gap is SP4d-2b Task 5's; skipping
-            // here keeps `-Dranger.version=2.8.0` from failing for a missing artifact rather
-            // than for a behaviour change.
-            Assume.assumeNoException(
-                "ranger-plugins-common needs a class this POM does not resolve: " + missing,
-                missing);
-            return;
+        for (int i = 0; i < specs.size(); i++) {
+            evaluators.add(new Ev(i, specs.get(i), def));
         }
 
         RangerResourceTrie<Ev> trie = new RangerResourceTrie<>(def.getResources().get(0), evaluators);
