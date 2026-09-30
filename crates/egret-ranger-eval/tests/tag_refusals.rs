@@ -645,6 +645,115 @@ fn a_tag_policy_whose_tag_value_is_an_expression_refuses() {
     );
 }
 
+/// **FIX ROUND 2, MINOR A — the same conflation as the fail-open above, one
+/// construct over.** `collect_causes`' `always` list means "regardless of
+/// `matched`", and the tag path builds a `PolicyView` only for CANDIDATES, so on
+/// this path it means "regardless of `matched`, among policies whose tag value
+/// already matched". A zoned tag policy naming a tag nobody resolved was
+/// therefore observed and dropped.
+///
+/// Both compositions the re-review measured are here. The first alone answers
+/// `Denied{NoPolicyMatched}`; the second is the one that would matter, because
+/// Ranger's associated-zone arm (offset 285,
+/// `equals(requestZone, policy.getZoneName())`) skips every zone-LESS tag policy
+/// and so would never have reached the allow.
+///
+/// It was not a live fail-open — the associated arm needs a non-empty
+/// `securityZones`, which already refuses at the envelope — and that is exactly
+/// why it is worth a test: the verdict was right through a guard other than the
+/// one the comment credited.
+#[test]
+fn a_zoned_tag_policy_refuses_even_when_no_resolved_tag_reaches_it() {
+    let zoned = |id: i64, name: &str| {
+        let mut p = tag_policy(
+            id,
+            name,
+            0,
+            "denyPolicyItems",
+            json!([{ "users": ["alice"], "accesses": [{"type": "select", "isAllowed": true}] }]),
+        );
+        // `phi`, which the request does NOT carry — so this policy is not a
+        // candidate and `collect_causes` never sees it.
+        p["resources"] = json!({ "tag": {"values": ["phi"]} });
+        p["zoneName"] = json!("z1");
+        p
+    };
+
+    let expected = |name: &str| UndecidableCause::PolicyConstruct {
+        policy_id: Some(80),
+        policy_name: name.to_string(),
+        construct: Unmodelled::ZoneName("z1".to_string()),
+    };
+
+    // 1. The zoned policy alone.
+    let d = evaluate(
+        &envelope(json!([zoned(80, "zoned-deny")])),
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        causes(&d).contains(&expected("zoned-deny")),
+        "a zoned tag policy no resolved tag reaches must still refuse: {d:?}"
+    );
+
+    // 2. Beside a zone-LESS allow the crate would otherwise report. This is the
+    //    composition that shows what the silence cost: Ranger's associated-zone
+    //    arm skips the zone-less policy, so `Allowed{70}` was an answer Ranger
+    //    need not agree with.
+    let allow = tag_policy(
+        70,
+        "zoneless-allow",
+        0,
+        "policyItems",
+        json!([{ "users": ["alice"], "accesses": [{"type": "select", "isAllowed": true}] }]),
+    );
+    let d = evaluate(
+        &envelope(json!([allow, zoned(80, "zoned-deny")])),
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        causes(&d).contains(&expected("zoned-deny")),
+        "a zone-less allow must not be reported while a zoned policy sits unread \
+         beside it: {d:?}"
+    );
+
+    // 3. The control, on the same fixture: with no `zoneName` the second policy
+    //    is an ordinary dormant tag policy and the allow ANSWERS. Without this,
+    //    the two assertions above are satisfied by refusing every download that
+    //    carries a second tag policy at all.
+    let mut unzoned = zoned(80, "zoned-deny");
+    unzoned
+        .as_object_mut()
+        .expect("policy object")
+        .remove("zoneName");
+    let allow = tag_policy(
+        70,
+        "zoneless-allow",
+        0,
+        "policyItems",
+        json!([{ "users": ["alice"], "accesses": [{"type": "select", "isAllowed": true}] }]),
+    );
+    let d = evaluate(
+        &envelope(json!([allow, unzoned])),
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        matches!(
+            &d,
+            Decision::Allowed {
+                policy_id: Some(70),
+                ..
+            }
+        ),
+        "the zone is what refuses, not the presence of a second policy: {d:?}"
+    );
+}
+
 /// The control for the fix above: a LITERAL tag value that does not match the
 /// resolved tag must still be an ANSWER, not a refusal. Without this, reporting
 /// the marker over every policy of the kind would be indistinguishable from

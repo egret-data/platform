@@ -889,7 +889,17 @@ pub enum TagAttachmentProblem {
     ///    (`egret-policy/src/store.rs`) — whose producer
     ///    `resolved_tags_for_resource_via` selects on
     ///    `schema_name = $2 AND table_name = $3` by exact equality, so a row
-    ///    storing `('', '')` cannot be returned for any real resource.
+    ///    storing `('', '')` comes back only for a REQUEST that also names an
+    ///    empty schema and table.
+    ///
+    /// ⚠ FIX ROUND 2 sharpened fact 2, because the earlier wording ("cannot be
+    /// returned for any real resource") credited the QUERY with a guarantee that
+    /// is the REQUEST's: `resolved_tags_for_resource_via(conn, id, "", "", "")`
+    /// returns that row, and nothing in the query stops it. What keeps it out is
+    /// that `explain`'s caller builds the request from a resource an operator
+    /// named. **Task 7 owns that mapping and therefore owns this**: if it can be
+    /// reached with an empty schema or table, a one-level attachment arrives and
+    /// this refusal — not the query — is what answers.
     ///
     /// **The refusal is what protects the verdict, not the schema.** It is
     /// falsified by a producer that reads a `/tags/download` payload instead of
@@ -2025,10 +2035,25 @@ fn tag_phase_input(
 /// findings where there is one.
 /// Drop repeated causes, keeping the first of each and the order of the rest.
 ///
-/// A cause carries the policy it is about, so two EQUAL causes are the same
-/// finding reported twice and never two findings — which is what makes this
-/// safe. `UndecidableCause` is only `PartialEq`, so this is quadratic in the
-/// number of causes; that number is bounded by the policies in one download.
+/// # Why collapsing is safe, per variant that can reach this
+///
+/// FIX ROUND 2, MINOR B. This said "a cause carries the policy it is about", and
+/// two of the variants that arrive here do not:
+///
+/// | variant | keyed on | why an exact duplicate is ONE finding |
+/// |---|---|---|
+/// | [`UndecidableCause::PolicyConstruct`] | the policy | the same construct on the same policy, reported by `collect_tag_resource_causes` and again by `collect_causes` — which is what this function exists for |
+/// | [`UndecidableCause::TagResourceNotReproducible`] | the policy | same |
+/// | [`UndecidableCause::TagAttachmentNotReproducible`] | the **tag**, not a policy | two attachments of one tag that differ only in the service resource are ONE member of Ranger's set (`RangerTagForEval` carries no service resource), so one finding is genuinely being derived twice |
+/// | [`UndecidableCause::ServiceDef`] | the **issue**, not a policy | the def is swept once, so an exact duplicate can only come from a second sweep of the same def |
+///
+/// `distinct_causes_all_survive_and_only_duplicates_collapse` asserts both
+/// directions, because a helper that collapsed two findings into one would leave
+/// the verdict `Undecidable` and hand the operator one reason where there are
+/// two, with nothing to say anything was dropped.
+///
+/// `UndecidableCause` is only `PartialEq`, so this is quadratic in the number of
+/// causes; that number is bounded by the policies in one download.
 fn dedup_causes(why: &mut Vec<UndecidableCause>) {
     let mut kept: Vec<UndecidableCause> = Vec::with_capacity(why.len());
     for cause in why.drain(..) {
@@ -3129,10 +3154,11 @@ struct TagCandidate<'a> {
 /// | field | read | ruling |
 /// |---|---|---|
 /// | `is_enabled`, `policy_type`, `policy_priority`, `is_deny_all_else` | **yes** | filter, comparators, `hasDeny` |
-/// | `resources` / `additional_resources` — `values` | **yes** | candidacy, plus the trie refusal. FIX ROUND 1: **and a `${{ … }}` / `{TOKEN}` marker in a value refuses, from the per-`of_kind` sweep rather than from `collect_causes`** — the marker is what makes candidacy unreliable, so it has to be reported before candidacy is decided. It was a fail-open: the policy matched no tag literally, became no candidate, and its marker was never seen |
+/// | `resources` / `additional_resources` — `values` | **yes** | candidacy, plus the trie refusal. FIX ROUND 1: **and a `${{ … }}` / `{TOKEN}` marker in a value refuses, from the per-`of_kind` sweep as WELL as from `collect_causes`** — reported by both and collapsed by [`dedup_causes`], because only the sweep runs before candidacy is decided and the marker is what makes candidacy unreliable. It was a fail-open: the policy matched no tag literally, became no candidate, and its marker was never seen |
 /// | `resources` — `is_excludes`, `is_recursive` | **yes → refuse** | both widen the trie; see [`TagResourceProblem`] |
 /// | the six item buckets | **yes** | through the same `decide` / `decide_sub` the resource path uses |
-/// | `unmodelled` (conditions, `validitySchedules`, `zoneName`, …) | **yes** | through `collect_causes`; `zoneName` is reported unconditionally, which is what covers the per-policy half of the zone gate |
+/// | `unmodelled` (conditions, `validitySchedules`, …) | **yes** | through `collect_causes`, i.e. for CANDIDATE policies only — which is right for a construct that decides what a policy DOES, since a policy no admitted tag reaches decides nothing |
+/// | `unmodelled: ZoneName` | **yes**, from the per-`of_kind` sweep | FIX ROUND 2, MINOR A: this row used to say "reported unconditionally" through `collect_causes`, which on the TAG path means "among candidates" — so a zoned tag policy matching no admitted tag was dropped silently. It is swept per policy of the kind now, like the resource-value marker, because a zoned policy is evidence that a zone EXISTS and the crate cannot tell Ranger's two zone arms apart |
 /// | `id`, `name` | **yes** | ordering and reporting |
 ///
 /// ## The tag [`ServiceDef`]
@@ -3581,9 +3607,16 @@ fn tag_candidates<'a>(
     // tag policy fails `equals(zoneName, null)` and Ranger skips it while this
     // crate evaluates it. The crate sees neither the request's zone nor the
     // association, so it cannot tell the arms apart — and `securityZones` is
-    // the only signal that a zone exists at all. (A policy WITH a `zoneName` is
-    // already refused per policy through `Unmodelled::ZoneName`, which
-    // `collect_causes` reports unconditionally.)
+    // the only signal that a zone exists at all.
+    //
+    // FIX ROUND 2, MINOR A: this parenthesis used to read "a policy WITH a
+    // `zoneName` is already refused per policy through `Unmodelled::ZoneName`,
+    // which `collect_causes` reports unconditionally". That was FALSE on this
+    // path — `collect_causes` runs only over CANDIDATES here, so a zoned tag
+    // policy whose value matches no admitted tag was never reported. It is now
+    // refused from `collect_tag_resource_causes`, which sweeps every policy of
+    // the kind; see the ⚠ block there for the measurement and for why the
+    // verdict was nonetheless safe before.
     for construct in &policies.unmodelled {
         if matches!(
             construct,
@@ -3957,13 +3990,42 @@ fn collect_tag_resource_causes(
     // resolved PER REQUEST, and the literal comparison this crate does is not
     // the question Ranger asks.
     //
-    // Raised here, in the sweep over EVERY policy of the kind, rather than in
-    // `collect_causes`, because that is the only place candidacy has not been
+    // Raised here, in the sweep over EVERY policy of the kind, rather than ONLY
+    // in `collect_causes`, because this is the only place candidacy has not been
     // decided yet — the same reason the resource path puts it in the `always`
-    // list. `tag_candidates` de-duplicates afterwards, since a policy that IS a
-    // candidate reaches `collect_causes` too.
+    // list. It is reported from BOTH and `tag_candidates` de-duplicates
+    // afterwards, since a policy that IS a candidate reaches `collect_causes`
+    // too.
+    //
+    // ── FIX ROUND 2, MINOR A: `ZoneName` belongs in the same loop ──────────
+    //
+    // `collect_causes`' `always` list means "regardless of `matched`", and on the
+    // RESOURCE path that is enough because `evaluate` builds a `PolicyView` for
+    // EVERY enabled policy of the type. On the TAG path it is not: a view exists
+    // only for a CANDIDATE, so `always` there means "regardless of `matched`,
+    // among policies whose tag value already matched" — which is not
+    // unconditional at all. That conflation is exactly the sentence that produced
+    // this round's fail-open, and the zone comment in `tag_candidates` repeated
+    // it: a zoned tag policy whose value does not match an admitted tag was
+    // observed and dropped on the floor.
+    //
+    // Measured before this fix, tag block `[{80, zoneName: "z1", tag=["phi"],
+    // deny}]` against request tag `pii`: ANSWERED `Denied{NoPolicyMatched}`. With
+    // a zone-LESS allow beside it, `Allowed{70}` — while Ranger's
+    // associated-zone arm (offset 285, `equals(requestZone, policy.getZoneName())`)
+    // skips every zone-less tag policy and would not have reached 70.
+    //
+    // It was not a live fail-open, because that arm needs a non-empty
+    // `securityZones`, which already refuses at the envelope. But the verdict was
+    // protected by a mechanism the comment did not name, which is the
+    // configuration that has hidden two defects in this package. A zoned tag
+    // policy is itself evidence that a zone exists; refusing it here makes the
+    // protection sit where the prose says it does.
     for construct in &policy.unmodelled {
-        if matches!(construct, Unmodelled::ResourceValueExpressionMarker { .. }) {
+        if matches!(
+            construct,
+            Unmodelled::ResourceValueExpressionMarker { .. } | Unmodelled::ZoneName(_)
+        ) {
             why.push(UndecidableCause::PolicyConstruct {
                 policy_id: policy.id,
                 policy_name: policy.name.clone(),

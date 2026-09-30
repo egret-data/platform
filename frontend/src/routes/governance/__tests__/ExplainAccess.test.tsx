@@ -885,6 +885,21 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
                       tag: "pci",
                       problem: { kind: "resource_levels", levels: ["catalog", "schema"] },
                     },
+                    // The other two `resource_levels` lengths, which the
+                    // `BTreeSet` change introduced branches for. Both are LIVE:
+                    // the cause fires only for fewer than three levels, so 1 and
+                    // 0 are the whole remaining domain — and 1 is the shape the
+                    // Rust side went out of its way to pin.
+                    {
+                      kind: "tag_attachment_not_reproducible",
+                      tag: "ssn",
+                      problem: { kind: "resource_levels", levels: ["catalog"] },
+                    },
+                    {
+                      kind: "tag_attachment_not_reproducible",
+                      tag: "iban",
+                      problem: { kind: "resource_levels", levels: [] },
+                    },
                   ],
                 },
                 attribution: null,
@@ -901,7 +916,7 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
 
     const result = await screen.findByTestId("explain-result");
     const causes = within(result).getAllByTestId("undecidable-cause");
-    expect(causes).toHaveLength(3);
+    expect(causes).toHaveLength(5);
 
     for (const cause of causes) {
       expect(cause.textContent?.trim().length ?? 0).toBeGreaterThan(20);
@@ -913,10 +928,20 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(causes[1]).toHaveTextContent(/2 validity periods/);
     expect(causes[2]).toHaveTextContent("pci");
     expect(causes[2]).toHaveTextContent("catalog, schema");
+    // Plural for two levels, SINGULAR for one, and a phrase rather than an empty
+    // gap for none. `tsc` proves the switch is exhaustive and nothing about what
+    // any arm renders — a branch that reads "at the resource levels catalog" or
+    // "at the resource levels " is exhaustive and wrong.
+    expect(causes[2]).toHaveTextContent("resource levels catalog, schema");
+    expect(causes[3]).toHaveTextContent("ssn");
+    expect(causes[3]).toHaveTextContent("resource level catalog");
+    expect(causes[3]).not.toHaveTextContent("resource levels");
+    expect(causes[4]).toHaveTextContent("iban");
+    expect(causes[4]).toHaveTextContent(/none at all/);
 
-    // Three shapes, three sentences. Two that read alike would hide which of
-    // the three remedies applies.
-    expect(new Set(causes.map((c) => c.textContent)).size).toBe(3);
+    // Five shapes, five sentences. Two that read alike would hide which remedy
+    // applies.
+    expect(new Set(causes.map((c) => c.textContent)).size).toBe(5);
   });
 
   test("tags render honestly when the target carries none", async () => {
