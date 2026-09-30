@@ -2217,6 +2217,9 @@ async fn a_refused_kubernetes_configuration_stops_the_process_at_start() {
     let mut cfg = egret_config::Config::default().workflow;
     cfg.container_runner = egret_config::ContainerRunner::Kubernetes;
     cfg.kubernetes.run_as_user = 0;
+    // W5b: an image, so the refusal under test is the uid's and not the
+    // missing plugin host image's (checked first).
+    cfg.plugin_host.image = Some("egret-plugin-host:dev".into());
     let err = egret_workflow::runtime::handlers_for(&cfg, unconnected_pool(), no_secrets())
         .await
         .expect_err("runAsNonRoot pods cannot run as uid 0");
