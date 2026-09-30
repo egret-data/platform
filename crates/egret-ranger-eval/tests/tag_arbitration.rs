@@ -80,11 +80,12 @@
 //! `a_download_with_no_resource_policies_at_all_keeps_the_tag_verdict` pins that
 //! equivalence rather than leaving it as prose.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use egret_ranger_eval::eval::{
     evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, DenyReason,
-    EngineConfig, MaskDecision, ResolvedTag, RowFilterDecision, UndecidableCause,
+    EngineConfig, MaskDecision, ResolvedTag, RowFilterDecision, TagServiceResource,
+    UndecidableCause,
 };
 use egret_ranger_eval::model::ServicePolicySet;
 use egret_ranger_eval::resource::{MatchType, RequestResource};
@@ -158,10 +159,29 @@ fn request() -> AccessRequest {
             .with("table", "orders")
             .with("column", "id"),
         owner: None,
-        resolved_tags: Some(vec![ResolvedTag {
-            name: "pii".to_string(),
-            match_type: MatchType::Self_,
-        }]),
+        resolved_tags: Some(vec![column_tag("pii", MatchType::Self_)]),
+    }
+}
+
+/// One attachment shaped the way `ServiceTags::from_assignments` writes a
+/// COLUMN-level one: four `resourceElements` levels, an enabled service
+/// resource, and none of `attributes` / `options` / `validityPeriods` — the
+/// payload egret itself emits, so every attachment refusal SP4d-2b Task 4 added
+/// is inert for it.
+fn column_tag(name: &str, match_type: MatchType) -> ResolvedTag {
+    ResolvedTag {
+        name: name.to_string(),
+        match_type,
+        attributes: BTreeMap::new(),
+        options: BTreeSet::new(),
+        validity_periods: 0,
+        attached_through: TagServiceResource {
+            levels: ["catalog", "schema", "table", "column"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            is_enabled: true,
+        },
     }
 }
 

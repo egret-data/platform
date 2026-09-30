@@ -30,12 +30,12 @@
 use egret_perm_compile::explain_wire::{
     WireDecision, WireDenyReason, WireEngineType, WireGraphProblem, WireItemBucket,
     WireMaskDecision, WireMaskResult, WirePluginVersion, WirePolicyType, WireRowFilterDecision,
-    WireRowFilterResult, WireServiceDefIssue, WireTagPolicyBlock, WireTagResourceProblem,
-    WireUndecidableCause, WireUnmodelled,
+    WireRowFilterResult, WireServiceDefIssue, WireTagAttachmentProblem, WireTagPolicyBlock,
+    WireTagResourceProblem, WireUndecidableCause, WireUnmodelled,
 };
 use egret_ranger_eval::eval::{
     Decision, DenyReason, EngineType, MaskDecision, MaskResult, PluginVersion, RowFilterDecision,
-    RowFilterResult, TagResourceProblem, UndecidableCause,
+    RowFilterResult, TagAttachmentProblem, TagResourceProblem, UndecidableCause,
 };
 use egret_ranger_eval::model::{ItemBucket, TagPolicyBlock, Unmodelled};
 use egret_ranger_eval::servicedef::{GraphProblem, PolicyType, ServiceDefIssue};
@@ -364,6 +364,55 @@ fn cause_tags_unresolved() {
         serde_json::to_value(wire).unwrap(),
         serde_json::json!({"kind": "tags_unresolved"})
     );
+}
+
+/// SP4d-2b Task 4. All three `TagAttachmentProblem` arms. Each carries a
+/// DIFFERENT payload shape (a list of keys, a count, a list of levels) and the
+/// three would be indistinguishable on the wire if any two collapsed — the
+/// remedies are "drop the tag's validity construct", "the same", and "this
+/// payload did not come from egret's own writer", which is not a remedy at all
+/// but a provenance question.
+#[test]
+fn cause_tag_attachment_not_reproducible_every_problem() {
+    let cases = [
+        (
+            TagAttachmentProblem::Options(vec!["TAG_VALIDITY_PERIODS".to_string()]),
+            WireTagAttachmentProblem::Options {
+                keys: vec!["TAG_VALIDITY_PERIODS".to_string()],
+            },
+            serde_json::json!({"kind": "options", "keys": ["TAG_VALIDITY_PERIODS"]}),
+        ),
+        (
+            TagAttachmentProblem::ValidityPeriods(2),
+            WireTagAttachmentProblem::ValidityPeriods { count: 2 },
+            serde_json::json!({"kind": "validity_periods", "count": 2}),
+        ),
+        (
+            TagAttachmentProblem::ResourceLevels(vec!["catalog".to_string(), "schema".to_string()]),
+            WireTagAttachmentProblem::ResourceLevels {
+                levels: vec!["catalog".to_string(), "schema".to_string()],
+            },
+            serde_json::json!({"kind": "resource_levels", "levels": ["catalog", "schema"]}),
+        ),
+    ];
+    for (problem, expected, expected_json) in cases {
+        assert_eq!(WireTagAttachmentProblem::from(&problem), expected);
+        assert_eq!(
+            serde_json::to_value(WireTagAttachmentProblem::from(&problem)).unwrap(),
+            expected_json
+        );
+        let cause = UndecidableCause::TagAttachmentNotReproducible {
+            tag: "pii".to_string(),
+            problem: problem.clone(),
+        };
+        assert_eq!(
+            WireUndecidableCause::from(&cause),
+            WireUndecidableCause::TagAttachmentNotReproducible {
+                tag: "pii".to_string(),
+                problem: expected,
+            }
+        );
+    }
 }
 
 /// SP4d-2b Task 2. All three `TagResourceProblem` arms, because each names a

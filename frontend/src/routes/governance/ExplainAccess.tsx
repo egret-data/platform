@@ -28,6 +28,7 @@ import type {
   WirePluginVersion,
   WirePolicyType,
   WireServiceDefIssue,
+  WireTagAttachmentProblem,
   WireTagResourceProblem,
   WireUndecidableCause,
   WireUnmodelled,
@@ -206,6 +207,28 @@ function tagResourceProblemPhrase(p: WireTagResourceProblem): string {
   return _never;
 }
 
+/**
+ * What one resolved tag ATTACHMENT carries that egret cannot reproduce. Three
+ * shapes, three different things for a steward to do — see
+ * `UndecidableCause::TagAttachmentNotReproducible`. The first two say the tag
+ * download carries a validity construct egret neither writes nor evaluates; the
+ * third says the download's service resource is not a shape egret's own writer
+ * can produce, which is a question about where the payload came from and not
+ * something to edit in egret.
+ */
+function tagAttachmentProblemPhrase(p: WireTagAttachmentProblem): string {
+  switch (p.kind) {
+    case "options":
+      return `carries the tag option${p.keys.length === 1 ? "" : "s"} ${p.keys.join(", ")}, which can restrict when the tag applies`;
+    case "validity_periods":
+      return `carries ${p.count} validity period${p.count === 1 ? "" : "s"}, which restrict when the tag applies`;
+    case "resource_levels":
+      return `is attached at ${p.levels.length === 0 ? "no resource level at all" : p.levels.join("/")}, which is not a shape egret's own tag download writes`;
+  }
+  const _never: never = p;
+  return _never;
+}
+
 function causeScopeNote(c: WireUndecidableCause): string | null {
   const construct =
     c.kind === "envelope_construct" || c.kind === "policy_construct" ? c.construct : null;
@@ -257,6 +280,8 @@ function causeSentence(c: WireUndecidableCause): string {
       return `Tag policy ${policyRef(c.policy_name, c.policy_id)} produced a mask or row filter and also carries deny items, and Ranger can then report this policy's id with a later policy's mask.`;
     case "resource_candidacy_not_reproducible":
       return `Whether Ranger's policy trie returns ${policyRef(c.policy_name, c.policy_id)} for this resource decides the answer, and egret cannot reproduce that filter for this policy's resource shape.`;
+    case "tag_attachment_not_reproducible":
+      return `The tag “${c.tag}” on this resource ${tagAttachmentProblemPhrase(c.problem)}, so egret cannot tell whether the engine would evaluate its tag policies here.`;
     case "tag_sub_result_split_by_resource_policy":
       return `Tag policy ${policyRef(c.tag_policy_name, c.tag_policy_id)} produced a mask or row filter and the higher-priority Ranger policy ${policyRef(c.resource_policy_name, c.resource_policy_id)} then produced one too, so Ranger reports the tag policy's id with the other policy's mask.`;
   }

@@ -41519,6 +41519,73 @@
         ],
         "description": "Wire mirror of [`ServiceDefIssue`]."
       },
+      "WireTagAttachmentProblem": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "keys",
+              "kind"
+            ],
+            "properties": {
+              "keys": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "options"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "count",
+              "kind"
+            ],
+            "properties": {
+              "count": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "validity_periods"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "levels",
+              "kind"
+            ],
+            "properties": {
+              "levels": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "resource_levels"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`TagAttachmentProblem`]: what one resolved tag ATTACHMENT\ncarries that the evaluator cannot reproduce (SP4d-2b Task 4).\n\nThree `kind`s rather than one sentence, for the same reason\n[`WireTagResourceProblem`] has four: the remedies differ and do not overlap.\n`options` and `validity_periods` say the tag download carries a validity\nconstruct egret neither emits nor evaluates; `resource_levels` says the\ndownload's service resource is not a shape egret's own writer can produce at\nall, which is a question about where the payload came from."
+      },
       "WireTagPolicyBlock": {
         "oneOf": [
           {
@@ -42043,6 +42110,29 @@
                 "type": "string",
                 "enum": [
                   "resource_candidacy_not_reproducible"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "One tag ATTACHMENT in this request's resolved set carries something the\nevaluator cannot reproduce. Named by TAG rather than by policy: the\nconstruct is on the tag download, and it changes every tag policy's\ncandidacy at once.",
+            "required": [
+              "tag",
+              "problem",
+              "kind"
+            ],
+            "properties": {
+              "tag": {
+                "type": "string"
+              },
+              "problem": {
+                "$ref": "#/components/schemas/WireTagAttachmentProblem"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_attachment_not_reproducible"
                 ]
               }
             }

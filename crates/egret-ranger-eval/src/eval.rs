@@ -201,12 +201,13 @@ pub struct AccessRequest {
     /// type). This crate takes a `Vec` because the resolver returns one and
     /// because **the caller's order is not authoritative** — the phase applies
     /// Ranger's three comparators itself — and de-duplicates on
-    /// `(name, match_type)`, which is exactly `RangerTagForEval`'s identity.
+    /// [`ResolvedTag::identity`], which is `RangerTagForEval`'s own.
     pub resolved_tags: Option<Vec<ResolvedTag>>,
 }
 
-/// One tag the caller resolved for [`AccessRequest::resource`]: the wire tag's
-/// `type` and the `MatchType` the enricher stamped on it.
+/// One tag ATTACHMENT the caller resolved for [`AccessRequest::resource`]: one
+/// `(RangerServiceResource, RangerTag)` pair of the tag download, plus the
+/// `MatchType` the enricher stamped on it.
 ///
 /// `name` is the identifier the ENGINE matches — `ServiceTags.tags[].type`,
 /// which `ServiceTags::from_assignments` fills from `tags.name`. It is **not**
@@ -218,10 +219,113 @@ pub struct AccessRequest {
 /// `RangerDefaultPolicyResourceMatcher` per tag service resource and records
 /// what it returned. The policy's own resource is a separate question, asked
 /// separately — see [`evaluate_tag_policies`].
+///
+/// # ⚠ Every field of `RangerTag` that Ranger reads has a row here
+///
+/// **SP4d-2b Task 4.** The type used to carry `name` and `match_type` only, and
+/// that was a COARSENING of `RangerTagForEval` — whose `equals`/`hashCode` read
+/// `type`, `attributes`, `matchType`, `options` AND `validityPeriods` (measured
+/// at offsets 29-130 of `hashCode` and 63-196 of `equals`, identically in 2.5.0
+/// and 2.8.0). Dropping three of the five silently merged two members Ranger
+/// keeps apart. The standing rule: **a field added to `RangerTag`, to
+/// `RangerTagForEval` or to `RangerServiceResource` is a new field here and a
+/// new row in the table below** — there is no `Default`, so a new field is a
+/// compile error at every construction site, which is where the ruling belongs.
+///
+/// | `RangerTag` field | modelled | ruling |
+/// |---|---|---|
+/// | `type` | yes, as `name` | the identifier the wire carries and the engine matches |
+/// | `attributes` | yes | in the identity; a policy REFERENCE to one refuses through the `${{ … }}` / `conditions` sweeps (D8) |
+/// | `options` | keys only | non-empty ⇒ [`TagAttachmentProblem::Options`]; enough to refuse, and nothing here needs more |
+/// | `validityPeriods` | count only | non-empty ⇒ [`TagAttachmentProblem::ValidityPeriods`]; likewise |
+/// | `owner` | no | `RangerTagForEval`'s constructor never reads it (offsets 11-92), so it reaches no decision |
+/// | `id` / `guid` / `createdBy` / … | no | `RangerBaseModelObject` bookkeeping; no evaluator reads it |
+///
+/// | `RangerServiceResource` field | modelled | ruling |
+/// |---|---|---|
+/// | `resourceElements` | keys only, as `attached_through.levels` | the key SET is the whole of what `createRangerServiceResourceMatcher` validates, and the VALUES are already spent — they are what produced `match_type` |
+/// | `isEnabled` | yes, and **never read** | `processServiceTags` never consults it (D9); modelled so that the inertness is assertable rather than a missing field nobody notices |
+/// | `serviceName` / `id` / `resourceSignature` | no | the id keys `resourceToTagIds`, which this shape has already resolved away — one attachment per pair |
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedTag {
     pub name: String,
     pub match_type: MatchType,
+    /// `RangerTag.attributes`, which `RangerTagForEval`'s constructor copies
+    /// verbatim (`emptyMap()` when null) and its `equals` compares with
+    /// `Map.equals` — order-independent, which is why this is a `BTreeMap`.
+    pub attributes: BTreeMap<String, String>,
+    /// The KEYS of `RangerTag.options`. Any key at all refuses: `isApplicable`
+    /// reads `TAG_VALIDITY_PERIODS` out of this map and re-derives the validity
+    /// evaluators from it (offsets 62-128), and the map is also a component of
+    /// the identity, so this crate can neither evaluate it nor drop it.
+    pub options: BTreeSet<String>,
+    /// How many `RangerTag.validityPeriods` the payload carried. Non-zero
+    /// refuses: `RangerTagForEval`'s constructor turns each into a
+    /// `RangerValidityScheduleEvaluator` (offset 88) and
+    /// `getLikelyMatchPolicyEvaluators` then SKIPS the tag when
+    /// `isApplicable(accessTime)` is false (offset 62) — a filter whose answer
+    /// depends on `RangerAccessRequest.getAccessTime()`, which the PLUGIN sets
+    /// (`RangerAccessRequestImpl`'s constructor leaves it null and
+    /// `RangerDefaultRequestProcessor` never writes it) and this crate does not
+    /// model.
+    pub validity_periods: usize,
+    /// The `RangerServiceResource` this attachment came through.
+    pub attached_through: TagServiceResource,
+}
+
+impl ResolvedTag {
+    /// `RangerTagForEval`'s `equals`/`hashCode`, as a comparable key: `type`,
+    /// `attributes`, `matchType`, `options`, `validityPeriods` — all five, in
+    /// the order the bytecode compares them.
+    ///
+    /// `attached_through` is deliberately NOT in it: `RangerTagForEval` carries
+    /// no service resource, so two attachments of one tag at two resources that
+    /// produced the same match type are ONE member of Ranger's set. Putting the
+    /// resource in the key would invent a member Ranger does not have.
+    fn identity(
+        &self,
+    ) -> (
+        &str,
+        &BTreeMap<String, String>,
+        u8,
+        &BTreeSet<String>,
+        usize,
+    ) {
+        (
+            self.name.as_str(),
+            &self.attributes,
+            match_type_rank(self.match_type),
+            &self.options,
+            self.validity_periods,
+        )
+    }
+}
+
+/// The `RangerServiceResource` one [`ResolvedTag`] came through, reduced to
+/// what the enricher reads off it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagServiceResource {
+    /// The `resourceElements` KEYS, in the payload's order.
+    ///
+    /// `createRangerServiceResourceMatcher` validates exactly this set, and
+    /// nothing else about the element map: it asks
+    /// `RangerServiceDefHelper.hierarchyHasAllResources(hierarchy, keySet)` for
+    /// each hierarchy of each of `RangerPolicy.POLICY_TYPES` (`{0, 1, 2}`,
+    /// read from the class's `static {}` block), and that method tests
+    /// `keySet ⊆ hierarchy` — a SUBSET test, not a covering one, so
+    /// `{catalog}` alone validates against Trino's `catalog/schema/table/column`
+    /// chain. See [`enriched_tags`].
+    pub levels: Vec<String>,
+    /// `RangerServiceResource.isEnabled`.
+    ///
+    /// **Modelled so that it can be proven inert, and never read.**
+    /// `processServiceTags` (2.5.0 offsets 100-234, same in 2.8.0) iterates the
+    /// service resources and branches only on whether
+    /// `createRangerServiceResourceMatcher` returned null; `isEnabled` appears
+    /// nowhere in it. A field this crate omitted instead would leave nothing to
+    /// assert, and the next reader would have to re-measure to find out whether
+    /// the omission was a ruling or an oversight.
+    pub is_enabled: bool,
 }
 
 /// Which engine's Ranger plugin a decision is being reproduced for.
@@ -668,6 +772,52 @@ pub enum UndecidableCause {
         declared: PluginVersion,
         measured: PluginVersion,
     },
+    /// One resolved tag ATTACHMENT carries something this crate cannot
+    /// reproduce — see [`TagAttachmentProblem`] for the three shapes and
+    /// [`tag_candidates`] for where each is raised and against which tags.
+    ///
+    /// The tag is named rather than a policy, because the construct is on the
+    /// tag download, not on any policy: the same attachment changes every tag
+    /// policy's candidacy at once.
+    TagAttachmentNotReproducible {
+        tag: String,
+        problem: TagAttachmentProblem,
+    },
+}
+
+/// What a [`ResolvedTag`] carries that stops the tag phase being defensible.
+///
+/// All three are raised ONLY for a tag whose `match_type` the evaluator admits
+/// and only when the block holds a policy of the kind being decided — a tag
+/// Ranger's `evaluate` would not let reach the policy items writes nothing
+/// whatever its payload said, so refusing for it would be pure over-refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagAttachmentProblem {
+    /// `RangerTag.options` is non-empty; the keys, sorted.
+    ///
+    /// `RangerTagForEval.isApplicable` re-reads `TAG_VALIDITY_PERIODS` out of
+    /// this map when it holds anything and the constructor built no evaluators
+    /// (offsets 62-128), so an option key this crate does not recognise still
+    /// sits one branch away from a filter that removes the tag. And the map is
+    /// a component of `equals`/`hashCode`, so it cannot be dropped from the
+    /// identity either.
+    Options(Vec<String>),
+    /// `RangerTag.validityPeriods` is non-empty; how many.
+    ValidityPeriods(usize),
+    /// The attachment's `RangerServiceResource.resourceElements` names fewer
+    /// than three levels — the shape `ServiceTags::from_assignments` cannot
+    /// emit, because `catalog_tag_assignments` stores `schema_name` and
+    /// `table_name` `NOT NULL` with no empty-string convention (only
+    /// `column_name` has one), so every resource egret writes carries at least
+    /// `catalog` / `schema` / `table` (SP4d-2b design, D2).
+    ///
+    /// **This is a refusal by PROVENANCE, not a Ranger rule**: Ranger validates
+    /// the key set as a subset of some hierarchy, and `{catalog}` passes that.
+    /// What it says is that the tag reaching this decision was resolved from a
+    /// payload egret did not author, so the caller's resolution rules — which
+    /// this crate takes on trust, see [`AccessRequest::resolved_tags`] — are
+    /// not the ones that were measured.
+    ResourceLevels(Vec<String>),
 }
 
 /// Why a tag policy's resource map cannot be filtered the way Ranger filters
@@ -921,7 +1071,8 @@ pub enum Decision {
 /// | [`UndecidableCause::EvalOrderAmbiguous`] (from this loop) | a tag DENY plus a `hasDeny` band above its priority holding both an allower and a denier | offset 469's `>=` reading a `policyPriority` an allowing band member just raised | a download where deny-capable resource policies share a priority above a clearance tag policy's — no corpus generates a tag block, so the rate is UNMEASURED |
 /// | [`UndecidableCause::ResourceCandidacyNotReproducible`] | a policy matching `NONE` everywhere whose every declared request level is `isExcludes`, `isRecursive` or a non-prefix wildcard, positioned where 553 fires | the three shapes [`crate::resource::level_excluded_by_trie`] declines to reason from — the ⚠ table on that variant says which of them `grants::level()` forbids and which (the wildcard) **nothing** forbids | `grants::level()` ceasing to pin `is_excludes`/`is_recursive` false, or a scope-content validator arriving |
 /// | [`UndecidableCause::TagSubResultSplitByResourcePolicy`] (from `evaluate_sub`) | a tag mask/filter that yields plus a resource policy Ranger reaches that also yields | offsets 11-88 writing the DATA unconditionally and the identity only `if (!isAllowed)` | nothing today; the shape needs a tag block, which no corpus generates |
-/// | the tag-phase refusals | see the ⚠ tables on [`evaluate_tag_policies`] | — | — |
+/// | [`UndecidableCause::TagAttachmentNotReproducible`] (raised in [`tag_candidates`], on a set THIS function enriched) | a tag ATTACHMENT carrying `options`, `validityPeriods`, or a service resource naming fewer than three levels — and only for a tag whose match type the evaluator admits, in a download whose tag block holds a policy of the kind being decided | `ServiceTags::from_assignments` emits `{"type": …, "owner": 0}` and nothing else, and every resource it writes carries `catalog`/`schema`/`table` because `catalog_tag_assignments` makes `schema_name`/`table_name` `NOT NULL` — so **no code path in this repository reaches it**: the only producer of a [`ResolvedTag`] is `egret_policy::resolved_tags_for_resource_via`, which builds each one from that table and fills the three fields inert. What would reach it is a caller that read a `/tags/download` payload instead | a second producer of `ResolvedTag` (a payload reader, an import, a shim), `catalog_tag_assignments` gaining a nullable level column, or `from_assignments` learning to emit tag `options`/`validityPeriods`/`attributes`. **Stated as unreachable-today on purpose**: this is a refusal built to be inert, and calling it "rare" would hide that nothing exercises it but its own tests |
+/// | the other tag-phase refusals | see the ⚠ tables on [`evaluate_tag_policies`] | — | — |
 ///
 /// **None of these rates is measured on a corpus**, and that is the honest state
 /// rather than an omission being hidden: the differential corpus generates no
@@ -938,8 +1089,15 @@ pub enum Decision {
 /// * **The security zone** — `evaluateTagPolicies` has its own zone gate; the
 ///   resource loop has none. Refused upstream through
 ///   `Unmodelled::SecurityZones`.
-/// * **[`AccessRequest::resolved_tags`]** — read by phase 1 only. The
-///   arbitration sees a verdict, never the tag set.
+/// * **[`AccessRequest::resolved_tags`]** — not an ARBITRATION input: it sees a
+///   verdict, never the tag set. ⚠ **SP4d-2b Task 4 falsified the stronger
+///   claim this row used to make** ("read by phase 1 only"): this function now
+///   reads the tag set itself, through [`enriched_tags`], because
+///   `RangerTagEnricher.processServiceTags` validates each attachment's key set
+///   against the RESOURCE service-def's hierarchies — a def phase 1 is not
+///   handed. The premise was true when written and was falsified by a mechanism
+///   added beside it, with nothing to signal it; the two halves are kept apart
+///   here so the surviving half is not read as covering both.
 pub fn evaluate(
     policies: &ServicePolicySet,
     request: &AccessRequest,
@@ -960,9 +1118,29 @@ pub fn evaluate(
     // After the super-user block at 114-165 and before everything below.
     // `tag_phase_input` is the only gate; a `None` from it is Ranger's own
     // "no evaluator can run", not a narrowing this crate invented.
-    let tag = match tag_phase_input(policies, request, service_def) {
+    //
+    // `enriched` first, and the phase reads only that: Ranger's own order is
+    // `RangerDefaultRequestProcessor.preProcess` → the enricher writes the tag
+    // set into the request context → `evaluateTagPolicies` reads it back out
+    // (`RangerAccessRequestUtil.getRequestTagsFromContext`, offset 104). So
+    // rewriting the request is the data flow, not a workaround for one. It is
+    // held apart from `request` because the RESOURCE phase below must keep
+    // reading the caller's request: it consults no tag set, and a binding that
+    // quietly served both would hide which phase the enrichment can reach.
+    let enriched;
+    let tag_request = match enriched_tags(request, service_def) {
+        None => request,
+        Some(tags) => {
+            enriched = AccessRequest {
+                resolved_tags: Some(tags),
+                ..request.clone()
+            };
+            &enriched
+        }
+    };
+    let tag = match tag_phase_input(policies, tag_request, service_def) {
         None => TagDecision::NotDetermined,
-        Some(tag_service_def) => evaluate_tag_policies(policies, request, &tag_service_def),
+        Some(tag_service_def) => evaluate_tag_policies(policies, tag_request, &tag_service_def),
     };
     if let TagDecision::Undecidable { why: tag_why } = &tag {
         merge_causes(&mut why, tag_why);
@@ -1586,6 +1764,101 @@ fn trie_excludes(
         }
     }
     true
+}
+
+/// `RangerTagEnricher.processServiceTags`' one surviving effect on a decision:
+/// **which attachments exist at all** (SP4d-2b design, D9).
+///
+/// Returns the request's tag set with every attachment Ranger would have
+/// dropped removed, or `None` when [`AccessRequest::resolved_tags`] is `None` —
+/// which stays `None`, because "the caller did not resolve" is not something an
+/// enricher can turn into a set.
+///
+/// # What was measured, and where it is in the bytecode
+///
+/// `processServiceTags` (2.5.0 offsets 91-234, identical shape in 2.8.0) walks
+/// `serviceTags.getServiceResources()` with a `ListIterator` and, for each
+/// resource, calls `createRangerServiceResourceMatcher`. When that returns
+/// **null** it does two things, at offsets 151 and 158-167:
+///
+/// ```java
+/// iter.remove();                                        // 151
+/// serviceTags.getResourceToTagIds().remove(res.getId()); // 158-167
+/// ```
+///
+/// — so the resource AND its tag links go, and no `RangerTagForEval` is ever
+/// built for that pair. Reproduced here by dropping the attachment, which is
+/// the same thing once the payload has been resolved into one entry per
+/// `(resource, tag)` pair.
+///
+/// `createRangerServiceResourceMatcher` returns null exactly when **no** policy
+/// type validates the key set (offsets 57-296): it loops
+/// `RangerPolicy.POLICY_TYPES` — `{0, 1, 2}`, read from that class's `static {}`
+/// block — and for each asks whether any hierarchy of
+/// `RangerServiceDefHelper.getResourceHierarchies(type)` satisfies
+/// `hierarchyHasAllResources(hierarchy, keySet)`. That method (offsets 62-162)
+/// is a **subset** test — every name in `keySet` appears somewhere in the
+/// hierarchy — not a covering one, so `{catalog}` validates against Trino's
+/// `catalog/schema/table/column` chain and an EMPTY key set validates
+/// vacuously. Only a name no hierarchy of any policy type carries drops a
+/// resource.
+///
+/// # ⚠ Which service-def, and why it is not the tag def
+///
+/// The helper is the enricher's own `serviceDefHelper`, built by
+/// `RangerAbstractContextEnricher` from the **enriched service's** def — Trino's
+/// or StarRocks' — not from the `tagPolicies` block's `tag` def. Validating
+/// against the tag def instead would find one resource (`tag`), so every real
+/// attachment would fail every hierarchy and the whole tag set would vanish:
+/// a silent, total fail-CLOSED for masks and fail-OPEN for denies. That is why
+/// this runs in [`evaluate`] / [`evaluate_sub`], which hold the resource def,
+/// and not inside [`tag_candidates`], which is handed the tag def.
+///
+/// # ⚠ `isEnabled` is NOT consulted, and that is measured, not assumed
+///
+/// `RangerServiceResource.isEnabled` appears nowhere in `processServiceTags`;
+/// the only branch is on the matcher being null. [`TagServiceResource`] carries
+/// the field anyway so that `tests/tag_refusals.rs` can assert the inertness
+/// instead of the crate silently not having somewhere to put it.
+///
+/// # Reach
+///
+/// **Nothing reaches the drop through egret's own resolver, by code path.**
+/// `egret_policy::resolved_tags_for_resource_via` builds each attachment from
+/// `catalog_tag_assignments`, whose columns are `schema_name` / `table_name` /
+/// `column_name` — three or four levels, all of them names in Trino's and
+/// StarRocks' access hierarchy — so the subset test cannot fail for a row it
+/// returns. What lands here is an attachment a caller read off a `/tags/download`
+/// payload: a StarRocks `database` level paired with a Trino def, a level a
+/// service-def version dropped, or a hand-written shim. **Falsified by** a
+/// caller constructing [`ResolvedTag`] from a payload rather than from that
+/// query, or by `catalog_tag_assignments` gaining a level column.
+fn enriched_tags(request: &AccessRequest, service_def: &ServiceDef) -> Option<Vec<ResolvedTag>> {
+    let resolved = request.resolved_tags.as_ref()?;
+    Some(
+        resolved
+            .iter()
+            .filter(|tag| service_resource_validates(&tag.attached_through.levels, service_def))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// `createRangerServiceResourceMatcher != null`: some policy type has a
+/// hierarchy containing every level in `levels`. See [`enriched_tags`].
+fn service_resource_validates(levels: &[String], service_def: &ServiceDef) -> bool {
+    [
+        PolicyType::Access,
+        PolicyType::DataMask,
+        PolicyType::RowFilter,
+    ]
+    .into_iter()
+    .any(|policy_type| {
+        service_def
+            .hierarchies(policy_type)
+            .iter()
+            .any(|hierarchy| levels.iter().all(|level| hierarchy.contains(level)))
+    })
 }
 
 /// Phase 1's gate: the tag service-def to evaluate the `tagPolicies` block
@@ -2382,10 +2655,22 @@ fn evaluate_sub(
     // `evaluateTagPolicies` runs for every policy type, so a tag mask decides a
     // mask request exactly as a tag deny decides an access one. The priority
     // comes back with the result because the arbitration below compares it.
-    let tag = match tag_phase_input(policies, request, service_def) {
+    // `enriched_tags` first, for the reason written out in `evaluate`.
+    let enriched;
+    let tag_request = match enriched_tags(request, service_def) {
+        None => request,
+        Some(tags) => {
+            enriched = AccessRequest {
+                resolved_tags: Some(tags),
+                ..request.clone()
+            };
+            &enriched
+        }
+    };
+    let tag = match tag_phase_input(policies, tag_request, service_def) {
         None => None,
         Some(tag_service_def) => {
-            match evaluate_tag_sub(kind, policies, request, &tag_service_def) {
+            match evaluate_tag_sub(kind, policies, tag_request, &tag_service_def) {
                 Err(tag_why) => {
                     merge_causes(&mut why, &tag_why);
                     None
@@ -2701,7 +2986,14 @@ struct TagCandidate<'a> {
 /// | `user`, `groups`, `roles` | **yes** | `RangerTagAccessRequest` copies all three from the outer request |
 /// | `access_type` | **yes**, and a pseudo one **refuses** | `_any` moves `evaluate` to a branch where `DESCENDANT` is admitted, which makes this phase's OWN admitted set wrong rather than merely incomplete |
 /// | `owner` | **yes** | through [`UndecidableCause::ResourceOwnerUnknown`], like the resource path |
-/// | `resolved_tags` | **yes** | `None` refuses; `Some(empty)` is the measured narrowing |
+/// | `resolved_tags` | **yes** | `None` refuses; `Some(empty)` is the measured narrowing. **SP4d-2b Task 4 split this row into the five below**: the entry is no longer a `(name, match_type)` pair and each of its fields needed a ruling of its own |
+/// | `resolved_tags[].name` | **yes** | the value put in the `tag` resource position for the candidacy question, and the `type` half of the identity |
+/// | `resolved_tags[].match_type` | **yes** | admission (`tag_match_is_admitted`), the mask comparator, and the identity |
+/// | `resolved_tags[].attributes` | **yes, for the IDENTITY only** | `RangerTagForEval.equals` compares it, so it separates two members; nothing in this phase READS an attribute's value, because every policy surface that could (a `${{ … }}` expression, a script condition) already refuses (D8) |
+/// | `resolved_tags[].options` | **yes → refuses** | [`TagAttachmentProblem::Options`]; `isApplicable` re-derives the validity evaluators from this map, and the filter it feeds runs before the trie lookup |
+/// | `resolved_tags[].validity_periods` | **yes → refuses** | [`TagAttachmentProblem::ValidityPeriods`]; the constructor builds one evaluator per entry, and the filter's answer depends on an access time this crate does not model |
+/// | `resolved_tags[].attached_through.levels` | **yes → refuses** under three | [`TagAttachmentProblem::ResourceLevels`]. NOT a Ranger rule: `hierarchyHasAllResources` is a subset test and `{catalog}` passes it. It is a PROVENANCE rule (D2) — fewer than three levels is a payload `ServiceTags::from_assignments` cannot write, so the caller's resolution is not the one that was measured. The def-dependent half of the same payload question — the DROP — is [`enriched_tags`]', because it needs the resource def and this phase is handed the tag def |
+/// | `resolved_tags[].attached_through.is_enabled` | **no, and measured** | `processServiceTags` never consults it (D9); `tests/tag_refusals.rs` asserts the two verdicts are identical rather than leaving the omission to be read as an oversight |
 /// | `resource` | **no, correctly** | `RangerTagAccessRequest` REPLACES it with a `RangerTagResource` holding only `{tag: <name>}` |
 ///
 /// ## Each tag [`RangerPolicy`]
@@ -2737,7 +3029,8 @@ struct TagCandidate<'a> {
 /// | `of_kind.is_empty()` → `Ok` | the pseudo-access-type refusal, `TagsUnresolved`, the per-policy sweep, `collect_causes`, the def's `issues()` | safe: with no evaluator, Ranger's `getLikelyMatchPolicyEvaluators` returns an empty list and nothing downstream of it can run on either side |
 /// | pseudo access type → `Err` | everything below | required: under `_any` the admitted-set rule the code below applies is the wrong one, so it must return BEFORE `admitted` is computed |
 /// | `resolved_tags` is `None` → `Err` | the per-policy sweep, `collect_causes`, `issues()` | safe: the verdict is already `Undecidable`; more causes would add detail, not change it |
-/// | `admitted.is_empty()` → `Ok` | the per-policy sweep, `collect_causes`, `issues()` | safe and MEASURED: Ranger builds candidates for every tag but `evaluate` admits none, so neither side writes anything |
+/// | the per-ATTACHMENT sweep (TASK 4) | nothing; it only APPENDS | it sits above `admitted.is_empty()` and so cannot be routed around by it — and it is vacuous there anyway, because it fires only for tags that return says there are none of |
+/// | `admitted.is_empty()` → `Ok` | the per-POLICY sweep, `collect_causes`, `issues()` | safe and MEASURED: Ranger builds candidates for every tag but `evaluate` admits none, so neither side writes anything |
 ///
 /// ## Not an input at all
 ///
@@ -3231,16 +3524,71 @@ fn tag_candidates<'a>(
         return Err(vec![UndecidableCause::TagsUnresolved]);
     };
 
+    // ── the attachment refusals (SP4d-2b Task 4) ──────────────────────
+    //
+    // Raised for every resolved tag the evaluator ADMITS, before the dedup and
+    // independently of it. Two reasons it is written this way rather than
+    // folded into the loop below:
+    //
+    // * **Order independence.** `attached_through` is deliberately NOT in
+    //   `ResolvedTag::identity` (Ranger's `RangerTagForEval` carries no service
+    //   resource), so one tag attached at two resources that produced the same
+    //   match type is ONE member — and inside the dedup loop the refusal would
+    //   then fire or not depending on which attachment the caller happened to
+    //   list first. An answer that depends on the caller's `Vec` order is not
+    //   an answer. The cost is named: where a tag reaches the request through
+    //   BOTH a modelled shape and an unmodelled one, this refuses although
+    //   Ranger's set is the same either way.
+    // * **Only admitted tags.** `RangerDefaultPolicyEvaluator.evaluate` lets a
+    //   tag reach the policy items only at the three match types
+    //   `tag_match_is_admitted` names, and a tag that cannot reach them writes
+    //   nothing whatever its payload carried. `isApplicable` runs earlier than
+    //   admission in Ranger (offset 62, before the trie lookup at 88), so this
+    //   is a deliberate NARROWING of where the refusal fires, not a copy of
+    //   Ranger's filter order: it refuses exactly where the filter could change
+    //   this decision.
+    //
+    // Nothing routes around it. The `admitted.is_empty()` return below is the
+    // only return between here and the `why` check at the end, and it is
+    // reachable only when no tag is admitted — which is precisely the state in
+    // which this sweep has nothing to say.
+    for tag in resolved {
+        if !tag_match_is_admitted(tag.match_type) {
+            continue;
+        }
+        let mut refuse = |problem: TagAttachmentProblem| {
+            why.push(UndecidableCause::TagAttachmentNotReproducible {
+                tag: tag.name.clone(),
+                problem,
+            });
+        };
+        if !tag.options.is_empty() {
+            refuse(TagAttachmentProblem::Options(
+                tag.options.iter().cloned().collect(),
+            ));
+        }
+        if tag.validity_periods > 0 {
+            refuse(TagAttachmentProblem::ValidityPeriods(tag.validity_periods));
+        }
+        if tag.attached_through.levels.len() < 3 {
+            refuse(TagAttachmentProblem::ResourceLevels(
+                tag.attached_through.levels.clone(),
+            ));
+        }
+    }
+
     // `RangerTagForEval`'s `equals`/`hashCode` include `matchType` and the
-    // enricher hands Ranger a `Set`, so this crate keys on `(name, matchType)`
+    // enricher hands Ranger a `Set`, so this crate keys on the tag's identity
     // rather than on the name alone (SP4d-2b design, D4).
     //
-    // FIX ROUND 1, MINOR 2: that is a COARSENING of `RangerTagForEval`'s
-    // identity, not a copy of it — its `equals`/`hashCode` also take
-    // `attributes`, `validityPeriods` and `options`. Harmless while this crate
-    // models none of the three (two tags differing only there evaluate
-    // identically), and it stops being harmless the moment Task 4 models tag
-    // attributes: two members Ranger keeps apart would collapse into one.
+    // FIX ROUND 1, MINOR 2 / SP4d-2b TASK 4: the key used to be
+    // `(name, matchType)`, which was a COARSENING — `equals`/`hashCode` also
+    // read `attributes`, `options` and `validityPeriods`. It was harmless only
+    // while none of the three was modelled. Task 4 models all three, so the key
+    // is now [`ResolvedTag::identity`], all five components, and the two moved
+    // in the SAME commit: had `attributes` arrived alone, two members Ranger
+    // keeps apart would have collapsed into one and the dedup that looks
+    // correct today would have started dropping a member.
     //
     // FIX ROUND 1, MINOR 1: the caller's order is NOT dropped. `admitted`
     // keeps it, candidates are pushed in it, and `sort_by` is stable — so it
@@ -3248,10 +3596,10 @@ fn tag_candidates<'a>(
     // stand-in. It decides nothing today, because a full tie there is the same
     // policy reached through two tags; the comparators are what order anything
     // that differs.
-    let mut seen: BTreeSet<(&str, u8)> = BTreeSet::new();
+    let mut seen: BTreeSet<_> = BTreeSet::new();
     let mut admitted: Vec<&ResolvedTag> = Vec::new();
     for tag in resolved {
-        if !seen.insert((tag.name.as_str(), match_type_rank(tag.match_type))) {
+        if !seen.insert(tag.identity()) {
             continue;
         }
         if tag_match_is_admitted(tag.match_type) {
@@ -3262,8 +3610,12 @@ fn tag_candidates<'a>(
         // Either no tags at all (`getLikelyMatchPolicyEvaluators` returns
         // `EMPTY_LIST` at `isNotEmpty(tags)`) or none the evaluator admits, so
         // no tag policy can write anything — including the ones this crate
-        // could not have filtered, which is why the refusal sweep is below
-        // this return and not above it.
+        // could not have filtered, which is why the per-POLICY refusal sweep
+        // is below this return and not above it.
+        //
+        // TASK 4: the per-ATTACHMENT sweep above is the exception, and it does
+        // not make this return a bypass — it fires only for tags this very
+        // condition says there are none of, so `why` is necessarily empty here.
         return Ok(Vec::new());
     }
 
@@ -3864,5 +4216,92 @@ mod tests {
         assert!(tag_match_is_admitted(MatchType::Ancestor));
         assert!(!tag_match_is_admitted(MatchType::Descendant));
         assert!(!tag_match_is_admitted(MatchType::None));
+    }
+
+    fn bare_tag(name: &str) -> ResolvedTag {
+        ResolvedTag {
+            name: name.to_string(),
+            match_type: MatchType::Self_,
+            attributes: BTreeMap::new(),
+            options: BTreeSet::new(),
+            validity_periods: 0,
+            attached_through: TagServiceResource {
+                levels: ["catalog", "schema", "table", "column"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                is_enabled: true,
+            },
+        }
+    }
+
+    /// `RangerTagForEval`'s identity, component by component.
+    ///
+    /// # ⚠ Why this is a unit test and not an assertion on a verdict
+    ///
+    /// **SP4d-2b Task 4, stated plainly because the alternative is to imply a
+    /// coverage that does not exist.** Widening the dedup key from
+    /// `(name, match_type)` to all five components changes NO decision the
+    /// public API can return today: two members differing only in `attributes`
+    /// produce the same candidate list (the same policies, through the same
+    /// `resources.tag`), the arbitration reads a verdict and never a count, and
+    /// `evaluate_tag_sub`'s ambiguity check already excludes a second candidate
+    /// carrying the same policy by `std::ptr::eq`. So there is no verdict that
+    /// distinguishes the narrow key from the wide one, and an integration test
+    /// claiming to pin this would be measuring something else.
+    ///
+    /// What the widening buys is that the crate cannot start dropping a member
+    /// the moment something DOES read the tag set per member — and what pins it
+    /// is this test, which fails if any component leaves the key.
+    #[test]
+    fn the_tag_identity_is_all_five_components_ranger_compares() {
+        let base = bare_tag("pii");
+
+        let mut other_name = base.clone();
+        other_name.name = "phi".to_string();
+
+        let mut other_match = base.clone();
+        other_match.match_type = MatchType::Ancestor;
+
+        let mut other_attrs = base.clone();
+        other_attrs
+            .attributes
+            .insert("level".to_string(), "3".to_string());
+
+        let mut other_options = base.clone();
+        other_options.options.insert("anything".to_string());
+
+        let mut other_validity = base.clone();
+        other_validity.validity_periods = 1;
+
+        for (component, differing) in [
+            ("type", other_name),
+            ("matchType", other_match),
+            ("attributes", other_attrs),
+            ("options", other_options),
+            ("validityPeriods", other_validity),
+        ] {
+            assert_ne!(
+                base.identity(),
+                differing.identity(),
+                "`RangerTagForEval.equals` compares {component}, so two tags \
+                 differing only there are TWO members of Ranger's set and this \
+                 crate must not collapse them"
+            );
+        }
+
+        // And the resource is NOT in it: Ranger's set member carries no service
+        // resource, so putting one in the key would invent a member.
+        let mut other_resource = base.clone();
+        other_resource.attached_through = TagServiceResource {
+            levels: vec!["catalog".to_string(), "schema".to_string()],
+            is_enabled: false,
+        };
+        assert_eq!(
+            base.identity(),
+            other_resource.identity(),
+            "`RangerTagForEval` carries no service resource, so two attachments \
+             that produced the same match type are ONE member"
+        );
     }
 }

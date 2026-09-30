@@ -91,7 +91,7 @@
 
 use egret_ranger_eval::eval::{
     Decision, DenyReason, EngineType, MaskDecision, MaskResult, PluginVersion, RowFilterDecision,
-    RowFilterResult, TagResourceProblem, UndecidableCause,
+    RowFilterResult, TagAttachmentProblem, TagResourceProblem, UndecidableCause,
 };
 use egret_ranger_eval::model::{ItemBucket, TagPolicyBlock, Unmodelled};
 use egret_ranger_eval::servicedef::{GraphProblem, PolicyType, ServiceDefIssue};
@@ -251,6 +251,44 @@ impl From<&TagResourceProblem> for WireTagResourceProblem {
                 }
             }
             TagResourceProblem::Recursive => WireTagResourceProblem::Recursive,
+        }
+    }
+}
+
+/// Wire mirror of [`TagAttachmentProblem`]: what one resolved tag ATTACHMENT
+/// carries that the evaluator cannot reproduce (SP4d-2b Task 4).
+///
+/// Three `kind`s rather than one sentence, for the same reason
+/// [`WireTagResourceProblem`] has four: the remedies differ and do not overlap.
+/// `options` and `validity_periods` say the tag download carries a validity
+/// construct egret neither emits nor evaluates; `resource_levels` says the
+/// download's service resource is not a shape egret's own writer can produce at
+/// all, which is a question about where the payload came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireTagAttachmentProblem {
+    Options { keys: Vec<String> },
+    ValidityPeriods { count: u32 },
+    ResourceLevels { levels: Vec<String> },
+}
+
+impl From<&TagAttachmentProblem> for WireTagAttachmentProblem {
+    fn from(problem: &TagAttachmentProblem) -> Self {
+        // NO wildcard arm — see `WireUndecidableCause::from`'s doc.
+        match problem {
+            TagAttachmentProblem::Options(keys) => {
+                WireTagAttachmentProblem::Options { keys: keys.clone() }
+            }
+            TagAttachmentProblem::ValidityPeriods(count) => {
+                WireTagAttachmentProblem::ValidityPeriods {
+                    count: *count as u32,
+                }
+            }
+            TagAttachmentProblem::ResourceLevels(levels) => {
+                WireTagAttachmentProblem::ResourceLevels {
+                    levels: levels.clone(),
+                }
+            }
         }
     }
 }
@@ -495,7 +533,13 @@ impl From<&ServiceDefIssue> for WireServiceDefIssue {
     }
 }
 
-// ── UndecidableCause (13 variants as of this task; see the module doc) ──
+// ── UndecidableCause (19 variants; see the module doc) ──────────────────
+//
+// ⚠ This count read `13` until SP4d-2b Task 4 and had been wrong since Task 2
+// added the first tag cause — five variants stale, with nothing to catch it,
+// because the exhaustiveness guard below is on the MATCH and not on any number
+// written beside it. Recount when you add one; a number nobody checks is worse
+// than no number.
 
 /// Wire mirror of [`UndecidableCause`]. `kind` is the discriminator a
 /// frontend switches on; see the module doc for how the constructs each
@@ -583,6 +627,14 @@ pub enum WireUndecidableCause {
     ResourceCandidacyNotReproducible {
         policy_id: Option<i64>,
         policy_name: String,
+    },
+    /// One tag ATTACHMENT in this request's resolved set carries something the
+    /// evaluator cannot reproduce. Named by TAG rather than by policy: the
+    /// construct is on the tag download, and it changes every tag policy's
+    /// candidacy at once.
+    TagAttachmentNotReproducible {
+        tag: String,
+        problem: WireTagAttachmentProblem,
     },
     EngineMismatch {
         declared: WireEngineType,
@@ -714,6 +766,12 @@ impl From<&UndecidableCause> for WireUndecidableCause {
                 policy_name: policy_name.clone(),
                 problem: WireTagResourceProblem::from(problem),
             },
+            UndecidableCause::TagAttachmentNotReproducible { tag, problem } => {
+                WireUndecidableCause::TagAttachmentNotReproducible {
+                    tag: tag.clone(),
+                    problem: WireTagAttachmentProblem::from(problem),
+                }
+            }
             UndecidableCause::EngineMismatch {
                 declared,
                 service_def_name,

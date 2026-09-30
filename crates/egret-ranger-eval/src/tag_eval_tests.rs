@@ -83,12 +83,12 @@
 //!   itself. Those shapes are refused here rather than answered — see
 //!   `a_wildcard_tag_value_is_refused_because_the_trie_is_wider`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::eval::{
     evaluate_tag_data_mask, evaluate_tag_policies, evaluate_tag_row_filter, AccessRequest,
     DenyReason, MaskDecision, ResolvedTag, RowFilterDecision, TagDecision, TagResourceProblem,
-    UndecidableCause,
+    TagServiceResource, UndecidableCause,
 };
 use crate::model::{ServicePolicySet, TagPolicyBlock, Unmodelled};
 use crate::resource::{MatchType, RequestResource};
@@ -221,10 +221,25 @@ fn request(user: &str, tags: Option<Vec<ResolvedTag>>) -> AccessRequest {
     }
 }
 
+/// One attachment shaped the way `ServiceTags::from_assignments` writes a
+/// COLUMN-level one: four `resourceElements` levels, an enabled service
+/// resource, and none of `attributes` / `options` / `validityPeriods` — the
+/// payload egret itself emits, so every attachment refusal SP4d-2b Task 4 added
+/// is inert for it. A test that wants one of those refusals fills the field.
 fn tag(name: &str, match_type: MatchType) -> ResolvedTag {
     ResolvedTag {
         name: name.to_string(),
         match_type,
+        attributes: BTreeMap::new(),
+        options: BTreeSet::new(),
+        validity_periods: 0,
+        attached_through: TagServiceResource {
+            levels: ["catalog", "schema", "table", "column"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            is_enabled: true,
+        },
     }
 }
 
@@ -1404,6 +1419,14 @@ fn a_pseudo_access_type_costs_nothing_when_there_is_nothing_to_evaluate() {
 /// reached at two hierarchy levels is TWO members of Ranger's set — and a
 /// resolution or a phase that collapsed them by NAME would report a different
 /// mask.
+///
+/// **This pins the `matchType` component only, and it is not the whole
+/// identity.** SP4d-2b Task 4 widened the key to all five components Ranger
+/// compares (`type`, `attributes`, `matchType`, `options`, `validityPeriods`);
+/// the other four are pinned in `eval::tests::
+/// the_tag_identity_is_all_five_components_ranger_compares`, as a unit test,
+/// because no verdict this crate can return distinguishes them — see that
+/// test's own doc for why, rather than reading its absence here as a gap.
 ///
 /// The fixture is built so that dropping one of the two `a` members is the only
 /// thing that can change the answer. `z-on-a` is reachable at `SELF` and at

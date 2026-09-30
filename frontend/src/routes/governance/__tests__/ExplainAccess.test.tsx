@@ -846,6 +846,79 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
     expect(causes[7]).toHaveTextContent(/higher-priority/i);
   });
 
+  /**
+   * **SP4d-2b Task 4.** `tsc`'s `const _never: never` proves the switch covers
+   * the new `tag_attachment_not_reproducible` cause and its three problem
+   * shapes; it proves nothing about what any of them renders. All three shapes
+   * here, asserted apart: each must name the TAG (the construct is on the tag
+   * download, not on a policy, so naming a policy would send a steward to the
+   * wrong place), each must carry its own payload, and no two may read alike.
+   */
+  test("the tag attachment cause renders all three shapes, each naming the tag", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "undecidable",
+                  why: [
+                    {
+                      kind: "tag_attachment_not_reproducible",
+                      tag: "pii",
+                      problem: { kind: "options", keys: ["TAG_VALIDITY_PERIODS"] },
+                    },
+                    {
+                      kind: "tag_attachment_not_reproducible",
+                      tag: "phi",
+                      problem: { kind: "validity_periods", count: 2 },
+                    },
+                    {
+                      kind: "tag_attachment_not_reproducible",
+                      tag: "pci",
+                      problem: { kind: "resource_levels", levels: ["catalog", "schema"] },
+                    },
+                  ],
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: ["pii"],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const causes = within(result).getAllByTestId("undecidable-cause");
+    expect(causes).toHaveLength(3);
+
+    for (const cause of causes) {
+      expect(cause.textContent?.trim().length ?? 0).toBeGreaterThan(20);
+    }
+
+    expect(causes[0]).toHaveTextContent("pii");
+    expect(causes[0]).toHaveTextContent("TAG_VALIDITY_PERIODS");
+    expect(causes[1]).toHaveTextContent("phi");
+    expect(causes[1]).toHaveTextContent(/2 validity periods/);
+    expect(causes[2]).toHaveTextContent("pci");
+    expect(causes[2]).toHaveTextContent("catalog/schema");
+
+    // Three shapes, three sentences. Two that read alike would hide which of
+    // the three remedies applies.
+    expect(new Set(causes.map((c) => c.textContent)).size).toBe(3);
+  });
+
   test("tags render honestly when the target carries none", async () => {
     mutateAsync.mockResolvedValueOnce({
       status: 200,

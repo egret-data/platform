@@ -28,6 +28,11 @@
                  getLikelyMatchPolicyEvaluators returns, which offset 553 made
                  outcome-relevant for the first time. -->
             <include>EgretResourceTrieCandidacyTest.java</include>
+            <!-- SP4d-2b Task 4: measures which tag service resources
+                 RangerTagEnricher KEEPS, by running the real
+                 createRangerServiceResourceMatcher. The Rust side's
+                 `service_resource_validates` reproduces this table. -->
+            <include>EgretTagServiceResourceValidationTest.java</include>
           </includes>
         </configuration>
       </plugin>
