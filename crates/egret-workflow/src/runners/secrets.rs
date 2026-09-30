@@ -236,6 +236,57 @@ fn literal_keys(source: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether one string, as the author wrote it, can call `secret()` when it
+/// is rendered (fix round 1: the publish refusals of I2 and the
+/// `workflow:use_secrets` gate of I3).
+///
+/// **The identifier, not the call.** `{% set s = secret %}{{ s('k') }}`
+/// calls it with no `secret(` in the text, so any `secret` that is not an
+/// attribute (`inputs.secret`) or part of a longer name (`mysecret`,
+/// `secret_task`) counts, in a string that holds a `{{` or a `{%` -- a string
+/// with neither renders as itself. The whole string is scanned rather than
+/// the regions between delimiters: `{{ "}}" ~ secret('k') }}` would end a
+/// naive region early. Over-matching (the word inside a string literal of a
+/// template) costs a refusal the author can read, never a secret.
+///
+/// Complete while nothing can look a function up by a computed name:
+/// minijinja has no such lookup, and Kestra's `render()`/`renderOnce()`,
+/// which would render a string built at run time, are refused
+/// (`functions::REFUSED`). If either arrives, this must change with it.
+pub fn text_uses_secret(text: &str) -> bool {
+    static IDENT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    if !(text.contains("{{") || text.contains("{%")) || !text.contains("secret") {
+        return false;
+    }
+    IDENT
+        .get_or_init(|| regex::Regex::new(r"(?:^|[^.\w])secret\b").expect("identifier pattern"))
+        .is_match(text)
+}
+
+/// Whether any string or mapping key of the flow `source` can call
+/// `secret()` ([`text_uses_secret`]), read **as YAML decodes it**: a
+/// double-quoted `"\u0073ecret"` is `secret` to the renderer, and an alias
+/// is its anchor's value. What `routes` gates `workflow:use_secrets` on.
+///
+/// Source that does not parse as YAML is scanned as raw text, so the answer
+/// only errs towards "yes"; the routes never store such a source anyway.
+pub fn source_uses_secret(source: &str) -> bool {
+    fn walk(v: &serde_norway::Value) -> bool {
+        use serde_norway::Value as Y;
+        match v {
+            Y::String(s) => text_uses_secret(s),
+            Y::Sequence(items) => items.iter().any(walk),
+            Y::Mapping(m) => m.iter().any(|(k, v)| walk(k) || walk(v)),
+            Y::Tagged(t) => walk(&t.value),
+            Y::Null | Y::Bool(_) | Y::Number(_) => false,
+        }
+    }
+    match serde_norway::from_str::<serde_norway::Value>(source) {
+        Ok(doc) => walk(&doc),
+        Err(_) => text_uses_secret(source),
+    }
+}
+
 /// One `secret(...)` call's arguments, after the refusals.
 struct Call {
     key: String,
@@ -728,6 +779,61 @@ mod tests {
             .collect();
         assert_eq!(got, want);
         assert!(literal_keys("no call here").is_empty());
+    }
+
+    /// Fix round 1, I3: what counts as "this flow calls secret()". Every
+    /// spelling a render could reach counts, including `secret` bound to
+    /// another name and a YAML escape that decodes to it; `.secret`
+    /// (an attribute) and text outside any `{{ }}`/`{% %}` do not.
+    #[test]
+    fn text_uses_secret_sees_every_spelling_a_render_reaches() {
+        for yes in [
+            "{{ secret('db') }}",
+            "{{secret('db')}}",
+            "{{ secret ('db') }}",
+            "{{- secret(key='db') -}}",
+            "{% set s = secret %}{{ s('db') }}",
+            "{{ (secret)('db') }}",
+            "x {{ 'a' ~ secret('db') }} y",
+            "{% if secret('a') %}1{% endif %}",
+            "{{ \"}}\" ~ secret('db') }}",
+        ] {
+            assert!(text_uses_secret(yes), "{yes}");
+        }
+        for no in [
+            "secret('db')",
+            "select secret from t",
+            "{{ inputs.secret }}",
+            "{{ outputs.secret_task.value }}",
+            "{{ mysecret('x') }}",
+            "{{ secrets('x') }}",
+            "",
+        ] {
+            assert!(!text_uses_secret(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn source_uses_secret_walks_every_string_and_key_as_yaml_decodes_it() {
+        let yes = [
+            "id: f\nnamespace: a\ntasks:\n  - id: t\n    type: x\n    p: \"{{ secret('db') }}\"\n",
+            // A YAML escape the raw text does not show.
+            "id: f\nnamespace: a\ntasks:\n  - id: t\n    type: x\n    p: \"{{ \\u0073ecret('db') }}\"\n",
+            // Inputs, triggers, a key, deep nesting, an anchor's alias.
+            "id: f\nnamespace: a\ninputs:\n  - id: i\n    type: STRING\n    defaults: \"{{ secret('x') }}\"\ntasks: []\n",
+            "id: f\nnamespace: a\ntasks:\n  - id: t\n    type: x\n    m:\n      \"{{ secret('k') }}\": v\n",
+            "id: f\nnamespace: a\nvariables:\n  a: &x \"{% set s = secret %}{{ s('k') }}\"\ntasks:\n  - id: t\n    type: x\n    p: *x\n",
+        ];
+        for src in yes {
+            assert!(source_uses_secret(src), "{src}");
+        }
+        let no = [
+            "id: f\nnamespace: a\ntasks:\n  - id: t\n    type: x\n    p: \"{{ inputs.secret }}\"\n",
+            "id: f\nnamespace: a\ndescription: keep the secret safe\ntasks: []\n",
+        ];
+        for src in no {
+            assert!(!source_uses_secret(src), "{src}");
+        }
     }
 
     /// The shared environment -- the one a script task renders its commands

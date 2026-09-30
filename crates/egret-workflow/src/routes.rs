@@ -40,6 +40,11 @@
 //! egret's permissions never imply one another, so a role holding only
 //! `:read` cannot create, edit, delete, validate, or publish a flow.
 //!
+//! **A third, [`WF_USE_SECRETS`] (W5b fix round 1)**, on top of `:manage`
+//! for the three routes that write a flow's source -- create, update,
+//! publish -- when that source can call `secret()`. See
+//! [`require_secret_use`].
+//!
 //! **`POST .../validate` parses and validates the REQUEST BODY, not the
 //! stored draft** — spec §10's whole reason for the route existing
 //! separately from `PUT`: the editor calls it on every keystroke-pause, and
@@ -84,6 +89,73 @@ pub const WF_READ: &str = "workflow:read";
 /// Create, edit, publish and delete flow drafts. Implies no `:read` — a
 /// role holding only `:manage` could author flows it could never list.
 pub const WF_MANAGE: &str = "workflow:manage";
+
+/// Save or publish a flow whose content can call `secret()` (W5b fix round 1,
+/// I3). Checked on EVERY write of a flow's source -- `create_flow`,
+/// `update_flow` -- and at `publish_flow`, by [`require_secret_use`]: every
+/// execution path runs the stored draft (`workflow.flows.source`), not a
+/// published version, so a gate at publish alone would be walked round by
+/// saving and starting. It is in addition to [`WF_MANAGE`], never instead.
+pub const WF_USE_SECRETS: &str = "workflow:use_secrets";
+
+/// The refusal [`require_secret_use`] answers, naming the permission.
+pub const USE_SECRETS_REFUSAL: &str = "forbidden: this flow calls secret(), which reads the \
+     workspace's secrets; saving or publishing it requires the permission \
+     'workflow:use_secrets' (granted to workspace admins)";
+
+/// The error of the three routes that write a flow's source: every
+/// [`egret_core::Error`], plus a 403 that says which permission is missing
+/// (`egret_core::Error::Forbidden`'s body is the bare word "forbidden").
+#[derive(Debug)]
+pub enum WriteError {
+    Core(Error),
+    /// The source calls `secret()` and the caller lacks [`WF_USE_SECRETS`].
+    SecretsNotAllowed,
+}
+
+impl From<Error> for WriteError {
+    fn from(e: Error) -> Self {
+        WriteError::Core(e)
+    }
+}
+
+impl axum::response::IntoResponse for WriteError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            WriteError::Core(e) => e.into_response(),
+            WriteError::SecretsNotAllowed => (
+                StatusCode::FORBIDDEN,
+                Json(egret_core::http::ErrorBody {
+                    error: USE_SECRETS_REFUSAL.to_string(),
+                    code: None,
+                }),
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// [`WF_USE_SECRETS`] when `source` can call `secret()`
+/// ([`crate::runners::secrets::source_uses_secret`]), through the one PDP
+/// every other gate here uses. A source that cannot is not asked about.
+///
+/// **Any** save of such a source needs it, not only one that adds the call:
+/// an edit elsewhere in a flow that already reads a secret (its `url`, its
+/// `sql`) can redirect the value just as well.
+async fn require_secret_use(
+    st: &WorkflowState,
+    ctx: &impl egret_core::authz::AuthTarget,
+    source: &str,
+) -> std::result::Result<(), WriteError> {
+    if !crate::runners::secrets::source_uses_secret(source) {
+        return Ok(());
+    }
+    match egret_core::authz::require(&*st.pdp, ctx, WF_USE_SECRETS).await {
+        Ok(()) => Ok(()),
+        Err(Error::Forbidden) => Err(WriteError::SecretsNotAllowed),
+        Err(e) => Err(WriteError::Core(e)),
+    }
+}
 
 /// Handler error type. No domain-specific failure mode of its own — every
 /// arm below is already an [`egret_core::Error`], which carries the
@@ -464,7 +536,7 @@ async fn list_flows(
         (status = 201, description = "Draft created, with its validation report", body = FlowDto),
         (status = 400, description = "The YAML does not parse", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
-        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace, or the flow calls secret() and the caller lacks workflow:use_secrets", body = egret_core::http::ErrorBody),
         (status = 409, description = "A flow with this namespace and id already exists in the workspace", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
@@ -473,9 +545,10 @@ async fn create_flow(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Json(body): Json<CreateFlowRequest>,
-) -> EgretResult<(StatusCode, Json<FlowDto>)> {
+) -> std::result::Result<(StatusCode, Json<FlowDto>), WriteError> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     let (namespace, flow_id, plan) = parse_draft(&body.source)?;
+    require_secret_use(&st, &ctx, &body.source).await?;
     // Before the insert, so a refused reference never reaches its FK — and
     // so the answer is a 404 about the folder rather than a 500 about a
     // constraint (whole-branch review, critical finding 1).
@@ -549,7 +622,7 @@ async fn get_flow(
         (status = 200, description = "Draft updated, with its validation report", body = FlowDto),
         (status = 400, description = "The YAML does not parse", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
-        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace, or the flow calls secret() and the caller lacks workflow:use_secrets", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such flow in this workspace", body = egret_core::http::ErrorBody),
         (status = 409, description = "Another flow already claims this namespace and id in the workspace", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
@@ -560,9 +633,10 @@ async fn update_flow(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
     Json(body): Json<UpdateFlowRequest>,
-) -> EgretResult<Json<FlowDto>> {
+) -> std::result::Result<Json<FlowDto>, WriteError> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     let (namespace, flow_id, plan) = parse_draft(&body.source)?;
+    require_secret_use(&st, &ctx, &body.source).await?;
     // Same containment as `create_flow`, and for the identical reason: a PUT
     // may repoint the flow at a different folder, so the reference has to
     // be checked before the write, not after.
@@ -686,7 +760,7 @@ async fn validate_flow(
         (status = 200, description = "A new immutable version was frozen and is now live", body = FlowVersionDto),
         (status = 400, description = "The draft does not parse or validate, a task names an unknown type, or a script task is refused by the container gate (workflow_containers off, no or empty allowed-images for its runner, image not allowed)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
-        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace, or the flow calls secret() and the caller lacks workflow:use_secrets", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such flow in this workspace, or a task references an object that does not exist or belongs to another workspace", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
@@ -696,8 +770,17 @@ async fn publish_flow(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
     body: Option<Json<PublishFlowRequest>>,
-) -> EgretResult<Json<FlowVersionDto>> {
+) -> std::result::Result<Json<FlowVersionDto>, WriteError> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    // I3: the draft `publish_gated` is about to freeze. Read here as well as
+    // there: a draft stored before this gate existed (or by a writer that is
+    // not these routes) must not be published by someone without the
+    // permission. Between this read and `publish_gated`'s, only
+    // `create_flow`/`update_flow` can change the draft, and both run the same
+    // check, so a source that reaches the freeze without having been checked
+    // against SOME holder of the permission cannot exist.
+    let draft = st.repo.get(ctx.workspace_id.0, id).await?;
+    require_secret_use(&st, &ctx, &draft.source).await?;
     let note = body.map(|Json(b)| b.note).unwrap_or_default();
     // W5a: the workspace half of the script-task gate. `disabled_features` is
     // the effective set, so an absent `workflow_containers` row reads as OFF

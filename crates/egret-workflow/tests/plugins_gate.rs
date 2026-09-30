@@ -732,3 +732,218 @@ impl egret_workflow::runners::secrets::SecretSource for NoSecrets {
 fn no_secrets() -> std::sync::Arc<dyn egret_workflow::runners::secrets::SecretSource> {
     std::sync::Arc::new(NoSecrets)
 }
+
+// ---------------------------------------------------------------------------
+// Fix round 1, I3: `workflow:use_secrets`. A flow whose content can call
+// `secret()` is written -- saved (create, update) or published -- only by a
+// principal holding it. Saving is gated too because every execution path
+// runs the DRAFT (`workflow.flows.source`), not a published version.
+// ---------------------------------------------------------------------------
+
+const USE_SECRETS: &str = "workflow:use_secrets";
+
+fn secret_flow(ns: &str) -> String {
+    format!(
+        "id: f\nnamespace: {ns}\ntasks:\n  - id: q\n    type: kestra.{PG_QUERY}\n    \
+         url: jdbc:postgresql://h/db\n    username: u\n    \
+         password: \"{{{{ secret('db', subkey='password') }}}}\"\n    sql: select 1\n"
+    )
+}
+
+async fn another_user(db: &egret_metastore::Db) -> egret_core::UserId {
+    let uid: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, name, provider, status, password_hash) \
+         VALUES ($1, 't', 'local', 'active', 'x') RETURNING id",
+    )
+    .bind(format!("u_{}@t.local", uuid::Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed user");
+    egret_core::UserId(uid)
+}
+
+fn assert_names_the_permission(status: StatusCode, body: &str) {
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains(USE_SECRETS), "{body}");
+    assert!(body.contains("secret()"), "{body}");
+}
+
+#[tokio::test]
+async fn saving_or_publishing_a_flow_that_calls_secret_needs_workflow_use_secrets() {
+    let Some(db) = common::db().await else { return };
+    let (ws, admin) = common::seed_workspace(&db).await;
+    let editor = another_user(&db).await;
+    common::grant(&db, ws, editor, &["workflow:read", "workflow:manage"]).await;
+    common::grant(
+        &db,
+        ws,
+        admin,
+        &["workflow:read", "workflow:manage", USE_SECRETS],
+    )
+    .await;
+    common::enable_feature(&db, ws, scripts::FEATURE_KEY).await;
+    common::enable_feature(&db, ws, plugins::FEATURE_KEY).await;
+    let app = common::app_with_scripts(
+        &db,
+        scripts::ScriptSettings {
+            plugin_configurations: PluginConfigurations(vec![kestra_entry(Some(&[
+                "io.kestra.plugin.jdbc.postgresql.*",
+            ]))]),
+            default_runner: Some(RunnerKind::Docker),
+        },
+    )
+    .await;
+    let flows = format!("/api/ws/{ws}/workflows/flows");
+
+    // 1. The editor cannot CREATE one, and nothing is stored.
+    let res = common::post(
+        &app,
+        &flows,
+        editor,
+        json!({ "source": secret_flow("i3.a") }),
+    )
+    .await;
+    let (s, body) = (res.status(), common::body_text(res).await);
+    assert_names_the_permission(s, &body);
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.flows WHERE workspace_id = $1 AND namespace = 'i3.a'",
+    )
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, 0, "a refused create stores nothing");
+
+    // 2. Nor UPDATE a flow of its own to call one.
+    let plain = common::json(
+        common::post(
+            &app,
+            &flows,
+            editor,
+            json!({ "source": plugin_flow("i3.b", PG_QUERY) }),
+        )
+        .await,
+    )
+    .await;
+    let plain_id = plain["id"].as_str().unwrap().to_string();
+    let res = common::put(
+        &app,
+        &format!("{flows}/{plain_id}"),
+        editor,
+        json!({ "source": secret_flow("i3.b") }),
+    )
+    .await;
+    let (s, body) = (res.status(), common::body_text(res).await);
+    assert_names_the_permission(s, &body);
+
+    // 3. The holder can create, update and publish one.
+    let created = common::json(
+        common::post(
+            &app,
+            &flows,
+            admin,
+            json!({ "source": secret_flow("i3.c") }),
+        )
+        .await,
+    )
+    .await;
+    let id = created["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{created}"))
+        .to_string();
+    let res = common::put(
+        &app,
+        &format!("{flows}/{id}"),
+        admin,
+        json!({ "source": secret_flow("i3.c").replace("select 1", "select 2") }),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "{}",
+        common::body_text(res).await
+    );
+    let res = common::post(&app, &format!("{flows}/{id}/publish"), admin, json!({})).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "{}",
+        common::body_text(res).await
+    );
+
+    // 4. The editor cannot edit the holder's flow while it still calls
+    //    secret() -- the edit could redirect the value -- nor publish it.
+    let res = common::put(
+        &app,
+        &format!("{flows}/{id}"),
+        editor,
+        json!({ "source": secret_flow("i3.c").replace("select 1", "select 3") }),
+    )
+    .await;
+    let (s, body) = (res.status(), common::body_text(res).await);
+    assert_names_the_permission(s, &body);
+    let res = common::post(&app, &format!("{flows}/{id}/publish"), editor, json!({})).await;
+    let (s, body) = (res.status(), common::body_text(res).await);
+    assert_names_the_permission(s, &body);
+
+    // 5. A draft stored without the gate (before this migration, or by a
+    //    writer that bypassed the route) cannot be published by the editor.
+    let seeded = common::seed_flow(&db, ws, editor, &secret_flow("i3.d"), "draft").await;
+    let res = common::post(
+        &app,
+        &format!("{flows}/{seeded}/publish"),
+        editor,
+        json!({}),
+    )
+    .await;
+    let (s, body) = (res.status(), common::body_text(res).await);
+    assert_names_the_permission(s, &body);
+
+    // 6. Removing the call needs nothing more than workflow:manage, and
+    //    validating (which writes nothing) is not gated.
+    let res = common::put(
+        &app,
+        &format!("{flows}/{id}"),
+        editor,
+        json!({ "source": plugin_flow("i3.c", PG_QUERY) }),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "{}",
+        common::body_text(res).await
+    );
+    let res = common::post(
+        &app,
+        &format!("{flows}/{id}/validate"),
+        editor,
+        json!({ "source": secret_flow("i3.c") }),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "{}",
+        common::body_text(res).await
+    );
+}
+
+/// The migration seeds `workflow:use_secrets` to `ws_admin` and to no other
+/// workspace role -- `ws_editor` holds `workflow:manage` but not this.
+#[tokio::test]
+async fn use_secrets_is_seeded_to_ws_admin_only() {
+    let Some(db) = common::db().await else { return };
+    let holders: Vec<String> = sqlx::query_scalar(
+        "SELECT r.name FROM role_permissions rp JOIN roles r ON r.id = rp.role_id \
+         WHERE rp.permission = $1 AND r.name IN ('ws_admin','ws_editor','ws_viewer') \
+         ORDER BY r.name",
+    )
+    .bind(USE_SECRETS)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(holders, vec!["ws_admin".to_string()]);
+    assert!(egret_core::rbac::is_known(USE_SECRETS));
+}
