@@ -47,24 +47,78 @@
 //! every row-filter policy an ANCESTOR match and yields no filter at all —
 //! the corpus would look green while testing nothing.
 //!
+//! ## The tag phase (SP4d-2b Task 5)
+//!
+//! A `tagPolicies` block and a resolved tag set are generated too, so the
+//! phase Tasks 2-4 built and the composition Task 3 built are measured against
+//! the real engine rather than against their authors' reading of it.
+//!
+//! **The enricher is bypassed on BOTH sides, symmetrically.** This crate takes
+//! the resolved tag set as an INPUT ([`AccessRequest::resolved_tags`]) and
+//! documents that producing a sound one is the caller's obligation; the Java
+//! half is handed the identical set through
+//! `RangerAccessRequestUtil.setRequestTagsInContext`, which is precisely what
+//! `RangerTagEnricher.enrich` writes. So the question this corpus asks is what
+//! `evaluateTagPolicies` DOES with a given set — and both sides get the same
+//! one. Two things follow, and the generator honours them rather than papering
+//! over them:
+//!
+//! * neither generated service-def declares `contextEnrichers` (see
+//!   [`load_engine`]), so no enricher can overwrite the seeded set;
+//! * `processServiceTags`' drop of an attachment whose service-resource key
+//!   set no hierarchy admits does NOT run on the Java side, so the generator
+//!   never emits one — a disagreement manufactured by the harness is not a
+//!   finding. `enriched_tags` is covered by `tests/tag_refusals.rs` and by
+//!   `EgretTagServiceResourceValidationTest`, which measures the same table
+//!   off the real `createRangerServiceResourceMatcher`.
+//!
+//! Tag axes: a tag the block's policies can reach and one they cannot; each
+//! admitted match type (`SELF`, `SELF_AND_ALL_DESCENDANTS`, `ANCESTOR`) and
+//! each unadmitted one (`DESCENDANT`, `NONE`); the deny-capable tag ACCESS
+//! policy, the tag MASK and the tag ROW FILTER; several tag policies at one
+//! priority; the same tag name at two match types; the empty tag set (the
+//! measured narrowing); and `tag.json`'s `ignoreCase: false`, which makes
+//! `PII` and `pii` different tags where every resource level is
+//! case-insensitive.
+//!
 //! ## What the corpus deliberately does NOT contain
 //!
 //! Only constructs the evaluator claims to model. A generated `Undecidable`
 //! proves nothing about agreement, so the generator avoids every construct
 //! that produces one (`validitySchedules`, policy/item `conditions`,
-//! `zoneName`, `securityZones`, `tagPolicies`, `policyDeltas`, `serviceConfig`,
+//! `zoneName`, `securityZones`, `policyDeltas`, `serviceConfig`,
 //! `${{ … }}` expressions, `{{ … }}` row filters, `{OWNER}` with no owner, the
-//! `_any`/`_admin`/`_super_user` pseudo access types, and access types that
-//! differ from a policy's only by case) and the test ASSERTS none appear — so
-//! the generator cannot quietly drift into cases the evaluator declines to
-//! answer while the gate reports green.
+//! `_any`/`_admin`/`_super_user` pseudo access types, access types that
+//! differ from a policy's only by case, and — on the tag side — a tag carrying
+//! `options` or `validityPeriods`, a tag policy resource the trie and the
+//! matcher are measured to disagree on, and a deny-capable tag MASK or ROW
+//! FILTER policy) and the test ASSERTS none appear — so the generator cannot
+//! quietly drift into cases the evaluator declines to answer while the gate
+//! reports green.
 //!
-//! The one exception is [`UndecidableCause::EvalOrderAmbiguous`], which is
-//! generated ON PURPOSE: it is Task 6's refusal to guess a mask when two
-//! policies tie inside one `(priority, hasDeny)` band, and whether that
-//! refusal is rare or common is the measurement that decides whether
-//! reproducing `computeEvalOrder()` is worth its risk. Those cases are counted
-//! and reported, not asserted on — this crate has no answer to compare.
+//! The exceptions are the three refusals that are about an ORDER or a
+//! CANDIDACY this crate does not reproduce rather than about a construct it
+//! does not model. They are generated ON PURPOSE, counted and reported, and
+//! never compared — this crate has no answer to compare:
+//!
+//! * [`UndecidableCause::EvalOrderAmbiguous`] — two policies tie inside one
+//!   `(priority, hasDeny)` band and `getEvalOrder()` decides the winner.
+//!   Measured on the RESOURCE path and on the COMPOSED path separately, which
+//!   are different questions: Task 2 established the refusal cannot arise in
+//!   the tag phase alone (both tag comparators are fully reproduced), and Task
+//!   3 found it arises once the phases compose on ACCESS, because under a tag
+//!   DENY an allowing resource policy raises `policyPriority` and offset 469's
+//!   `>=` then shuts out the rest of its own band.
+//! * [`UndecidableCause::ResourceCandidacyNotReproducible`] — offset 553 reads
+//!   `hasDeny()` and not the matcher, so an evaluator Ranger's trie holds and
+//!   this crate's matcher does not can stop the loop. `trie_excludes` proves
+//!   the ordinary case absent; what it cannot prove, this refuses. Its
+//!   population is any download egret did not author, which is exactly what
+//!   `explain` reads off a live plugin, so the RATE is the measurement that
+//!   says whether the refusal is triageable.
+//! * [`UndecidableCause::TagSubResultSplitByResourcePolicy`] — a tag mask or
+//!   row filter whose DATA a reachable resource policy would overwrite while
+//!   Ranger keeps the tag policy's IDENTITY.
 //!
 //! The one measured version divergence — an `_any` request against an
 //! ANCESTOR-matching `isDenyAllElse` policy denies at 2.5.0 and does not at
@@ -78,10 +132,11 @@ use std::process::Command;
 
 use egret_ranger_eval::eval::{
     evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, EngineConfig,
-    EngineType, MaskDecision, PluginVersion, RowFilterDecision, UndecidableCause,
+    EngineType, MaskDecision, PluginVersion, ResolvedTag, RowFilterDecision, TagServiceResource,
+    UndecidableCause,
 };
 use egret_ranger_eval::model::ServicePolicySet;
-use egret_ranger_eval::resource::RequestResource;
+use egret_ranger_eval::resource::{MatchType, RequestResource};
 use egret_ranger_eval::servicedef::ServiceDef;
 use serde_json::{json, Map, Value};
 
@@ -200,6 +255,95 @@ const REQUEST_USERS: &[&str] = &["alice", "bob", "dave"];
 const REQUEST_GROUPS: &[&str] = &["analysts", "admins", "other"];
 const REQUEST_ROLES: &[&str] = &["r_a", "r_c"];
 
+// ── the tag vocabularies (SP4d-2b Task 5) ────────────────────────────────
+
+/// The service-def the generated `tagPolicies` block carries — egret's own
+/// `tag.json`, the file `ranger/api/download.rs` embeds for any engine whose
+/// profile names a `tagService`.
+///
+/// Its `matcherOptions` are `{ wildCard: true, ignoreCase: FALSE }`, where
+/// every resource level of `trino.json` and `starrocks.json` is
+/// case-INSENSITIVE. That difference is the reason `PII` and `pii` are both in
+/// the vocabularies below: on the resource path they are one value, and on the
+/// tag path they are two.
+const TAG_DEF_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../egret-policy/src/service-defs/tag.json"
+);
+
+/// Tag names a request's resolved set can carry. `p` is a PREFIX of `pii` and
+/// `pii_x` has `pii` as a prefix, so a `p*` or `pii*` policy value separates
+/// "covers this tag" from "is a prefix of its name"; `PII` is the case
+/// control.
+const TAG_NAMES: &[&str] = &["pii", "PII", "phi", "pci", "p", "pii_x", "secret"];
+
+/// Values a TAG policy's `resources.tag` level may carry.
+///
+/// **Only the three shapes `trie_reproduces_matcher` admits**: a literal, a
+/// literal with a single trailing `*`, and match-any. Every other shape
+/// (`*ii`, `p*x`, `pi?`, `isExcludes`, `isRecursive`) makes this crate REFUSE
+/// with `TagResourceNotReproducible`, which is a refusal about the policy's
+/// SHAPE and not about an order — it is pinned against the real
+/// `RangerResourceTrie` by `EgretTagTrieAgreementTest` and against the crate's
+/// own table by `trie_agreement_matches_the_measured_table`. Generating it
+/// here would add refusals the gate cannot compare while measuring nothing
+/// those two do not already measure.
+const TAG_POLICY_VALUES: &[&str] = &[
+    "pii", "PII", "phi", "pci", "p", "pii_x", "secret", "*", "**", "p*", "pi*", "pii*", "P*",
+    "PI*", "s*", "ph*", "x*",
+];
+
+/// Every `MatchType` a resolved tag can carry, admitted and not.
+///
+/// `DESCENDANT` and `NONE` are here BECAUSE they are not admitted: at the
+/// default `SELF` scope with a concrete access type Ranger lets a tag reach the
+/// policy items only at `SELF`, `SELF_AND_ALL_DESCENDANTS` and `ANCESTOR`, and
+/// a corpus that never produced the other two could not tell that rule from
+/// "admit everything". Admitting `DESCENDANT` is the fail-OPEN direction, and
+/// the mutation in `tests/ranger/README.md` confirms this gate catches it.
+const TAG_MATCH_TYPES: &[MatchType] = &[
+    MatchType::Self_,
+    MatchType::SelfAndAllDescendants,
+    MatchType::Ancestor,
+    MatchType::Descendant,
+    MatchType::None,
+];
+
+/// The match types the phase ADMITS, for the cases that must decide something.
+const ADMITTED_TAG_MATCH_TYPES: &[MatchType] = &[
+    MatchType::Self_,
+    MatchType::SelfAndAllDescendants,
+    MatchType::Ancestor,
+];
+
+/// `MatchType` as `RangerPolicyResourceMatcher.MatchType.valueOf` spells it.
+fn match_type_name(match_type: MatchType) -> &'static str {
+    match match_type {
+        MatchType::None => "NONE",
+        MatchType::Self_ => "SELF",
+        MatchType::Descendant => "DESCENDANT",
+        MatchType::Ancestor => "ANCESTOR",
+        MatchType::SelfAndAllDescendants => "SELF_AND_ALL_DESCENDANTS",
+    }
+}
+
+/// Tag policy values that COVER `name`, for the same reason
+/// [`covering_values`] exists: a block whose policies reach no tag in the
+/// request's set agrees with Ranger on everything and decides nothing.
+///
+/// `tag.json` sets `ignoreCase: false`, so the name's own case is the only
+/// literal that covers it — there is deliberately no `to_uppercase` row here,
+/// and `TAG_POLICY_VALUES` carries `PII` and `P*` so the NON-covering case
+/// variants are generated too.
+fn covering_tag_values(name: &str) -> Vec<String> {
+    let mut out = vec![name.to_string(), "*".to_string(), "**".to_string()];
+    let chars: Vec<char> = name.chars().collect();
+    for k in 1..=chars.len() {
+        out.push(format!("{}*", chars[..k].iter().collect::<String>()));
+    }
+    out
+}
+
 /// One engine's half of the corpus.
 struct Profile {
     engine: EngineType,
@@ -207,6 +351,12 @@ struct Profile {
     /// The `-Dranger.version=` the Java half runs at.
     ranger_version: &'static str,
     service_name: &'static str,
+    /// The `tagPolicies` block's own `serviceName`. Non-empty is load-bearing:
+    /// `PolicyEngine.<init>` builds the tag repository only when
+    /// `tagPolicies != null && !isEmpty(getServiceName()) && getServiceDef() != null`
+    /// (offsets 471-500, both jars). `bind_trino_profile` names it
+    /// `{service}_tag`, which is the spelling used here.
+    tag_service_name: &'static str,
     def_path: &'static str,
     /// The access / data-mask hierarchy, root first.
     hierarchy: &'static [&'static str],
@@ -223,6 +373,7 @@ fn trino() -> Profile {
         plugin_version: PluginVersion::Ranger2_5_0,
         ranger_version: "2.5.0",
         service_name: "trino_prod",
+        tag_service_name: "trino_prod_tag",
         def_path: concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../egret-policy/src/service-defs/trino.json"
@@ -244,6 +395,7 @@ fn starrocks() -> Profile {
         plugin_version: PluginVersion::Ranger2_8_0,
         ranger_version: "2.8.0",
         service_name: "starrocks_prod",
+        tag_service_name: "starrocks_prod_tag",
         def_path: concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../egret-policy/src/service-defs/starrocks.json"
@@ -277,6 +429,12 @@ struct Case {
     /// separately so "the eval-order claim survived" can be attached to a
     /// number of cases that could actually have falsified it.
     duel: bool,
+    /// …and that duel was issued UNDER a tag verdict, which is the only shape
+    /// in which `getEvalOrder()` can decide an ACCESS outcome. Counted apart
+    /// from `duel` because the two measure different claims: the resource-path
+    /// duel falsifies "order cannot change the outcome", and this one
+    /// falsifies "…and composing the phases does not change that".
+    composed_duel: bool,
     service_policies: Value,
     request: AccessRequest,
 }
@@ -290,20 +448,59 @@ impl Case {
                 Value::String(self.request.resource.get(key).unwrap_or("").to_string()),
             );
         }
+        let mut request = Map::new();
+        request.insert("user".to_string(), json!(self.request.user));
+        request.insert(
+            "groups".to_string(),
+            json!(self.request.groups.iter().collect::<Vec<_>>()),
+        );
+        request.insert(
+            "roles".to_string(),
+            json!(self.request.roles.iter().collect::<Vec<_>>()),
+        );
+        request.insert("accessType".to_string(), json!(self.request.access_type));
+        request.insert("resource".to_string(), Value::Object(resource));
+        // The key is INSERTED, not written as a `null`, because the Java half
+        // switches on `req.has("tags")` and an explicit `null` would pass that
+        // test and then fail as a cast. A case with no tag phase therefore
+        // serialises exactly as it did before Task 5.
+        //
+        // `Some(vec![])` is NOT the same as absent and must survive the round
+        // trip: it is the measured narrowing (an empty tag set makes
+        // `getLikelyMatchPolicyEvaluators` return `EMPTY_LIST` at
+        // `isNotEmpty(tags)`), and `setRequestTagsInContext` reaches that state
+        // by REMOVING the context key — the same state, by the other route.
+        if let Some(tags) = &self.request.resolved_tags {
+            request.insert(
+                "tags".to_string(),
+                Value::Array(tags.iter().map(tag_to_json).collect()),
+            );
+        }
         json!({
             "id": self.id,
             "serviceType": service_type,
             "policyType": self.policy_type,
             "servicePolicies": self.service_policies,
-            "request": {
-                "user": self.request.user,
-                "groups": self.request.groups.iter().collect::<Vec<_>>(),
-                "roles": self.request.roles.iter().collect::<Vec<_>>(),
-                "accessType": self.request.access_type,
-                "resource": Value::Object(resource),
-            }
+            "request": Value::Object(request),
         })
     }
+}
+
+/// One [`ResolvedTag`] as the Java half reads it back into a
+/// `RangerTagForEval`.
+///
+/// `options` and `validityPeriods` have no representation here BECAUSE the
+/// generator never emits one: a tag carrying either is refused by
+/// `tag_candidates` ([`UndecidableCause::TagAttachmentNotReproducible`]), so a
+/// case carrying one could never be compared. `attached_through` likewise has
+/// none — `RangerTagForEval` carries no service resource, and the field's only
+/// effect on this crate is the provenance refusal the generator keeps clear of.
+fn tag_to_json(tag: &ResolvedTag) -> Value {
+    json!({
+        "type": tag.name,
+        "matchType": match_type_name(tag.match_type),
+        "attributes": tag.attributes,
+    })
 }
 
 /// Policy values that COVER `request_value`, so a generated policy has a real
@@ -786,7 +983,26 @@ fn policy(rng: &mut Rng, profile: &Profile, shape: &Shape, id: i64, policy_type:
             if rng.chance(1, 8) {
                 p.insert("isDenyAllElse".to_string(), json!(true));
             }
+            // ⚠ The ASYMMETRY, generated deliberately. `isAuditEnabled: false`
+            // with every item bucket empty is what makes the TAG repository
+            // remove a policy — and `RangerPolicyRepository`'s other three
+            // constructors call `normalizeAndPrunePolicies` at all, so in
+            // `policies` the identical shape is KEPT and its `isDenyAllElse`
+            // denies. A crate that pruned on both paths would look right on the
+            // tag half and be wrong here, and nothing else in the corpus could
+            // tell the two apart.
+            if rng.chance(1, 12) {
+                p.insert("policyItems".to_string(), json!([]));
+                p.insert("denyPolicyItems".to_string(), json!([]));
+                p.remove("allowExceptions");
+                p.remove("denyExceptions");
+                p.insert("isDenyAllElse".to_string(), json!(true));
+                p.insert("isAuditEnabled".to_string(), json!(false));
+            }
         }
+    }
+    if rng.chance(1, 8) {
+        p.insert("isAuditEnabled".to_string(), json!(false));
     }
     Value::Object(p)
 }
@@ -823,7 +1039,7 @@ fn policy(rng: &mut Rng, profile: &Profile, shape: &Shape, id: i64, policy_type:
 /// Both policies also carry deliberately conflicting name and id orders, so a
 /// name-then-id tie-break cannot be right by luck: whichever of the two this
 /// crate would put first, the other is first half the time.
-fn access_order_duel(rng: &mut Rng, profile: &Profile, shape: &Shape) -> Vec<Value> {
+fn access_order_duel(rng: &mut Rng, profile: &Profile, shape: &Shape, priority: i32) -> Vec<Value> {
     // Resources that certainly match: the request's own values, at the
     // request's own depth. The duel is about ORDER, so nothing else may be in
     // doubt.
@@ -840,7 +1056,6 @@ fn access_order_duel(rng: &mut Rng, profile: &Profile, shape: &Shape) -> Vec<Val
             .collect(),
     );
 
-    let priority = if rng.chance(1, 3) { 1 } else { 0 };
     let grant = json!([{
         "users": [shape.user], "groups": [], "roles": [],
         "accesses": [{"type": shape.access_type, "isAllowed": true}],
@@ -886,7 +1101,395 @@ fn access_order_duel(rng: &mut Rng, profile: &Profile, shape: &Shape) -> Vec<Val
     policies
 }
 
-fn generate_case(rng: &mut Rng, profile: &Profile, service_def: &Value, index: usize) -> Case {
+// ── the tag layer (SP4d-2b Task 5) ───────────────────────────────────────
+
+/// A `tagPolicies` block and the resolved tag set it is evaluated against —
+/// the two halves of the tag phase, generated together because neither decides
+/// anything without the other.
+struct TagLayer {
+    /// The whole `tagPolicies` value, ready to be embedded in the envelope.
+    block: Value,
+    /// The request's `resolved_tags`. `Some(vec![])` is generated on purpose —
+    /// it is the measured narrowing, not a degenerate case.
+    tags: Vec<ResolvedTag>,
+}
+
+/// One tag ATTACHMENT, built so that nothing about it refuses.
+///
+/// Three fields are pinned rather than varied, and each for a reason the
+/// generator cannot work around:
+///
+/// * `options` and `validity_periods` — `tag_candidates` REFUSES any admitted
+///   tag carrying either ([`UndecidableCause::TagAttachmentNotReproducible`]),
+///   so a case carrying one could never be compared. They are pinned to the
+///   empty/zero values the Java half's `RangerTag(type, attributes)`
+///   constructor also leaves, so the two sides describe the same
+///   `RangerTagForEval`.
+/// * `attached_through.levels` — always three or four levels of THIS profile's
+///   own hierarchy. Fewer than three is the provenance refusal (D2); a key set
+///   no hierarchy admits is dropped by `processServiceTags` on this crate's
+///   side and NOT on the Java side, because the harness bypasses the enricher.
+///   Either would be a disagreement the harness manufactured.
+///
+/// `is_enabled` varies although nothing reads it: `processServiceTags` never
+/// consults it, and a corpus that only ever emitted `true` could not tell that
+/// ruling from an omission.
+fn resolved_tag(rng: &mut Rng, profile: &Profile, name: &str, match_type: MatchType) -> ResolvedTag {
+    let depth = 3 + rng.below(2);
+    let levels: BTreeSet<String> = profile
+        .hierarchy
+        .iter()
+        .take(depth)
+        .map(|n| (*n).to_string())
+        .collect();
+    // `attributes` is in `RangerTagForEval.equals`, so it SEPARATES two
+    // members Ranger keeps apart — which is the whole reason this crate carries
+    // it. Generated on one tag in four so the dedup is exercised both ways.
+    let mut attributes = BTreeMap::new();
+    if rng.chance(1, 4) {
+        attributes.insert(
+            "sensitivity".to_string(),
+            rng.pick(&["high", "low"]).to_string(),
+        );
+    }
+    ResolvedTag {
+        name: name.to_string(),
+        match_type,
+        attributes,
+        options: BTreeSet::new(),
+        validity_periods: 0,
+        attached_through: TagServiceResource {
+            levels,
+            is_enabled: !rng.chance(1, 5),
+        },
+    }
+}
+
+/// The request's resolved tag set.
+///
+/// `names` comes back alongside so the block's policies can be biased towards
+/// the tags the request actually carries — the same bias, and the same reason,
+/// as [`Shape`]: a block whose policies reach no tag in the set agrees with
+/// Ranger on every case and decides nothing.
+fn resolved_tags(rng: &mut Rng, profile: &Profile) -> Vec<ResolvedTag> {
+    // The measured narrowing: an explicitly EMPTY set makes
+    // `getLikelyMatchPolicyEvaluators` return `EMPTY_LIST` at
+    // `isNotEmpty(tags)`, so no tag policy can write anything however many the
+    // block holds. Both sides must answer from the resource policies alone.
+    if rng.chance(1, 9) {
+        return Vec::new();
+    }
+    let count = 1 + rng.below(3);
+    let mut tags = Vec::new();
+    for _ in 0..count {
+        let name = rng.pick(TAG_NAMES).to_string();
+        // Most attachments are admitted, or the phase decides nothing and the
+        // corpus degenerates into "the resource policies answered".
+        let match_type = if rng.chance(3, 4) {
+            *rng.pick(ADMITTED_TAG_MATCH_TYPES)
+        } else {
+            *rng.pick(TAG_MATCH_TYPES)
+        };
+        tags.push(resolved_tag(rng, profile, &name, match_type));
+    }
+    // The same tag NAME at two match types: two members of Ranger's set, not
+    // one, because `RangerTagForEval.equals` reads `matchType`. Collapsing them
+    // by name would silently reorder masks — the mask comparator IS the match
+    // type — so the shape has to be generated or that claim is untested.
+    if rng.chance(1, 3) {
+        let base = tags[rng.below(tags.len())].clone();
+        let other = *rng.pick(TAG_MATCH_TYPES);
+        if other != base.match_type {
+            tags.push(resolved_tag(rng, profile, &base.name, other));
+        }
+    }
+    tags
+}
+
+/// One tag policy.
+///
+/// The `resources` map names ONLY `tag` and carries neither `isExcludes` nor
+/// `isRecursive`: all three are `TagResourceNotReproducible`, which is a
+/// refusal about a construct rather than about an order — see
+/// [`TAG_POLICY_VALUES`].
+/// A `dataMaskPolicyItems` entry for a TAG policy.
+///
+/// The one thing it may never be is [`mask_item`]'s F2 shape — an item with no
+/// `dataMaskInfo`. In `policies` that is legal and is SP4d-1's pinned finding;
+/// in the TAG block Ranger's model class substitutes an empty
+/// `RangerPolicyItemDataMaskInfo`, `normalizeAndPrunePolicyItems` reads
+/// `dataMaskType.contains(":")` on its null type, and the plugin THROWS while
+/// building its repository. That is not a verdict to compare, it is a crash, and
+/// it is pinned on its own by [`check_measured_tag_crash`] rather than scattered
+/// through the corpus as thousands of uncomparable cases.
+fn tag_mask_item(rng: &mut Rng, profile: &Profile, shape: &Shape) -> Value {
+    let mut item = mask_item(rng, profile, shape);
+    let object = item.as_object_mut().expect("mask_item is an object");
+    let needs_type = match object.get("dataMaskInfo") {
+        None => true,
+        Some(info) => info.get("dataMaskType").is_none_or(Value::is_null),
+    };
+    if needs_type {
+        object.insert(
+            "dataMaskInfo".to_string(),
+            json!({"dataMaskType": rng.pick(profile.mask_types)}),
+        );
+    }
+    item
+}
+
+fn tag_policy(
+    rng: &mut Rng,
+    profile: &Profile,
+    shape: &Shape,
+    names: &[String],
+    id: i64,
+    policy_type: i32,
+    priority: i32,
+) -> Value {
+    let value = match names.is_empty() {
+        false if rng.chance(3, 4) => {
+            let name = &names[rng.below(names.len())];
+            let candidates = covering_tag_values(name);
+            candidates[rng.below(candidates.len())].clone()
+        }
+        _ => rng.pick(TAG_POLICY_VALUES).to_string(),
+    };
+
+    let mut p = Map::new();
+    p.insert("id".to_string(), json!(id));
+    p.insert("name".to_string(), json!(format!("t{id}")));
+    p.insert("service".to_string(), json!(profile.tag_service_name));
+    p.insert("policyType".to_string(), json!(policy_type));
+    p.insert("isEnabled".to_string(), json!(!rng.chance(1, 12)));
+    p.insert("policyPriority".to_string(), json!(priority));
+    p.insert(
+        "resources".to_string(),
+        json!({"tag": {"values": [value]}}),
+    );
+
+    match policy_type {
+        1 => {
+            // ⚠ NO deny bucket and NO `isDenyAllElse` on a tag MASK or ROW
+            // FILTER policy. `evaluate_tag_sub` refuses a yielding
+            // deny-capable one outright
+            // ([`UndecidableCause::TagSubPolicyIsDenyCapable`]) because
+            // Ranger would report the first policy's id with the second's
+            // mask, and `SubResult` cannot express that. It is a refusal about
+            // a construct, so it stays out of the corpus.
+            let count = 1 + rng.below(2);
+            p.insert(
+                "dataMaskPolicyItems".to_string(),
+                Value::Array(
+                    (0..count)
+                        .map(|_| tag_mask_item(rng, profile, shape))
+                        .collect(),
+                ),
+            );
+        }
+        2 => {
+            let count = 1 + rng.below(2);
+            p.insert(
+                "rowFilterPolicyItems".to_string(),
+                Value::Array(
+                    (0..count)
+                        .map(|_| row_filter_item(rng, profile, shape))
+                        .collect(),
+                ),
+            );
+        }
+        // The item-LESS shape, generated on purpose and only for ACCESS: it is
+        // the one shape in which the tag repository's whole-policy prune is
+        // observable, because `isPolicyNeedsPruning` tests the six item buckets
+        // and NOT `isDenyAllElse`. With `isAuditEnabled: false` Ranger removes
+        // the policy and reaches no verdict; with it true the identical policy
+        // denies everything. `tag_policy_is_pruned` reproduces that, and this is
+        // what measures the reproduction against the real engine.
+        0 if rng.chance(1, 9) => {
+            p.insert("isDenyAllElse".to_string(), json!(true));
+        }
+        _ => {
+            let allow = 1 + rng.below(2);
+            p.insert(
+                "policyItems".to_string(),
+                Value::Array(
+                    (0..allow)
+                        .map(|_| access_item(rng, profile, shape))
+                        .collect(),
+                ),
+            );
+            let deny = rng.below(3);
+            p.insert(
+                "denyPolicyItems".to_string(),
+                Value::Array(
+                    (0..deny)
+                        .map(|_| access_item(rng, profile, shape))
+                        .collect(),
+                ),
+            );
+            if rng.chance(1, 5) {
+                p.insert(
+                    "allowExceptions".to_string(),
+                    json!([access_item(rng, profile, shape)]),
+                );
+            }
+            if rng.chance(1, 5) {
+                p.insert(
+                    "denyExceptions".to_string(),
+                    json!([access_item(rng, profile, shape)]),
+                );
+            }
+            if rng.chance(1, 8) {
+                p.insert("isDenyAllElse".to_string(), json!(true));
+            }
+        }
+    }
+    // `isAuditEnabled: false` — the prune's gate. Emitted on every policy type,
+    // not only the item-less one, so that "the prune fires" and "the flag is
+    // present" stay separable: a policy WITH items and auditing off must still
+    // be kept.
+    if rng.chance(1, 4) {
+        p.insert("isAuditEnabled".to_string(), json!(false));
+    }
+    Value::Object(p)
+}
+
+/// The envelope's `tagPolicies` value.
+///
+/// `serviceName` and `serviceDef` are both present and non-empty on every
+/// generated block, and that is not decoration: `PolicyEngine.<init>` builds
+/// the tag repository only when `tagPolicies != null &&
+/// !StringUtils.isEmpty(getServiceName()) && getServiceDef() != null` (offsets
+/// 471-500, identical in 2.5.0 and 2.8.0). A block missing either builds NO
+/// repository, so Ranger runs no tag phase at all — while `tag_phase_input`,
+/// which reads neither field, runs one. That divergence is REAL and is
+/// recorded in `tests/ranger/README.md`; it is held out of the corpus because
+/// a generated case cannot both measure it and be comparable.
+fn tag_block(profile: &Profile, tag_def: &Value, policies: Vec<Value>) -> Value {
+    json!({
+        "serviceName": profile.tag_service_name,
+        "serviceId": 2,
+        "policyVersion": 1,
+        "serviceDef": tag_def,
+        "policies": policies,
+    })
+}
+
+fn tag_layer(
+    rng: &mut Rng,
+    profile: &Profile,
+    shape: &Shape,
+    tag_def: &Value,
+    policy_type: i32,
+) -> TagLayer {
+    let tags = resolved_tags(rng, profile);
+    let names: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
+
+    let count = 1 + rng.below(3);
+    // Several tag policies at ONE priority is the shape the tag phase's own
+    // comparators have to order, so it is the common case rather than a rare
+    // one; the override exists to put one of them above the others.
+    let base_priority = if rng.chance(1, 6) { 1 } else { 0 };
+    let mut policies = Vec::new();
+    for n in 0..count {
+        // A tag policy of a DIFFERENT type must be filed into a different
+        // evaluator list in the TAG repository, exactly as on the resource
+        // side.
+        let this_type = if rng.chance(1, 8) {
+            (policy_type + 1 + rng.below(2) as i32) % 3
+        } else {
+            policy_type
+        };
+        let priority = if rng.chance(1, 8) {
+            base_priority + 1
+        } else {
+            base_priority
+        };
+        policies.push(tag_policy(
+            rng,
+            profile,
+            shape,
+            &names,
+            (n + 1) as i64,
+            this_type,
+            priority,
+        ));
+    }
+    TagLayer {
+        block: tag_block(profile, tag_def, policies),
+        tags,
+    }
+}
+
+/// The ONE shape in which `getEvalOrder()` can decide an ACCESS outcome: a tag
+/// verdict on the result, and a deny-capable resource band strictly above it.
+///
+/// Under a tag DENY, offset 469's `>=` lets a strictly higher-priority
+/// evaluator run; if that evaluator ALLOWS, `updateAccessResult`'s allow branch
+/// raises `policyPriority` to its own, and the `>=` then shuts out the rest of
+/// its own band — including a same-band denier. Which of the two ran first is
+/// `RangerOptimizedPolicyEvaluator.computeEvalOrder()`, which this crate does
+/// not compute, so it refuses.
+///
+/// One case in four is built with a tag ALLOW instead, and that is the
+/// FALSIFIER rather than filler: under an allow, offset 505's `>` lets the
+/// same-priority rival run after the allow, so the deny still wins whichever
+/// ran first and the crate must NOT refuse. A corpus that only built the deny
+/// variant would report a rate with nothing to compare it against.
+fn composed_duel(
+    rng: &mut Rng,
+    profile: &Profile,
+    shape: &Shape,
+    tag_def: &Value,
+) -> (Vec<Value>, TagLayer) {
+    // Strictly above the tag policy's 0, or offset 469 shuts the whole band out
+    // before it runs.
+    let resource_priority = 1 + rng.below(2) as i32;
+    let policies = access_order_duel(rng, profile, shape, resource_priority);
+
+    let name = rng.pick(TAG_NAMES).to_string();
+    let match_type = *rng.pick(ADMITTED_TAG_MATCH_TYPES);
+    let tag = resolved_tag(rng, profile, &name, match_type);
+    let denies = !rng.chance(1, 4);
+    let bucket = if denies {
+        "denyPolicyItems"
+    } else {
+        "policyItems"
+    };
+    let mut tag_policy = Map::new();
+    tag_policy.insert("id".to_string(), json!(90));
+    tag_policy.insert("name".to_string(), json!("t-composed"));
+    tag_policy.insert("service".to_string(), json!(profile.tag_service_name));
+    tag_policy.insert("policyType".to_string(), json!(0));
+    tag_policy.insert("isEnabled".to_string(), json!(true));
+    tag_policy.insert("policyPriority".to_string(), json!(0));
+    tag_policy.insert(
+        "resources".to_string(),
+        json!({"tag": {"values": [name]}}),
+    );
+    tag_policy.insert(
+        bucket.to_string(),
+        json!([{
+            "users": [shape.user], "groups": [], "roles": [],
+            "accesses": [{"type": shape.access_type, "isAllowed": true}],
+        }]),
+    );
+    (
+        policies,
+        TagLayer {
+            block: tag_block(profile, tag_def, vec![Value::Object(tag_policy)]),
+            tags: vec![tag],
+        },
+    )
+}
+
+fn generate_case(
+    rng: &mut Rng,
+    profile: &Profile,
+    service_def: &Value,
+    tag_def: &Value,
+    index: usize,
+) -> Case {
     let policy_type = match rng.below(4) {
         0 | 1 => 0,
         2 => 1,
@@ -894,19 +1497,41 @@ fn generate_case(rng: &mut Rng, profile: &Profile, service_def: &Value, index: u
     };
     let shape = build_shape(rng, profile, policy_type);
 
-    // One ACCESS case in four is the deliberate order duel rather than a
-    // random draw.
-    if policy_type == 0 && rng.chance(1, 4) {
-        let policies = access_order_duel(rng, profile, &shape);
-        return finish_case(
+    // One ACCESS case in six is the deliberate COMPOSED order duel: the tag
+    // phase writes a verdict and a deny-capable resource band sits strictly
+    // above it. Drawn before the resource-only duel so the two are disjoint
+    // populations and each rate has a denominator that means something.
+    if policy_type == 0 && rng.chance(1, 6) {
+        let (policies, tags) = composed_duel(rng, profile, &shape, tag_def);
+        return finish_case(Finish {
             profile,
             service_def,
             policies,
             shape,
             index,
             policy_type,
-            true,
-        );
+            duel: true,
+            composed_duel: true,
+            tags: Some(tags),
+        });
+    }
+
+    // One ACCESS case in four is the deliberate order duel rather than a
+    // random draw.
+    if policy_type == 0 && rng.chance(1, 4) {
+        let priority = if rng.chance(1, 3) { 1 } else { 0 };
+        let policies = access_order_duel(rng, profile, &shape, priority);
+        return finish_case(Finish {
+            profile,
+            service_def,
+            policies,
+            shape,
+            index,
+            policy_type,
+            duel: true,
+            composed_duel: false,
+            tags: None,
+        });
     }
 
     let policy_count = 1 + rng.below(4);
@@ -922,54 +1547,84 @@ fn generate_case(rng: &mut Rng, profile: &Profile, service_def: &Value, index: u
         policies.push(policy(rng, profile, &shape, (n + 1) as i64, this_type));
     }
 
-    finish_case(
+    // Two cases in five carry a tag phase. Not more: the resource-path
+    // measurements this gate already reports — the `EvalOrderAmbiguous` rate
+    // above all — are rates over the cases that have NO tag phase, and
+    // shrinking that population would silently widen their error bars while
+    // the numbers still printed.
+    let tags = rng
+        .chance(2, 5)
+        .then(|| tag_layer(rng, profile, &shape, tag_def, policy_type));
+
+    finish_case(Finish {
         profile,
         service_def,
         policies,
         shape,
         index,
         policy_type,
-        false,
-    )
+        duel: false,
+        composed_duel: false,
+        tags,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn finish_case(
-    profile: &Profile,
-    service_def: &Value,
+/// Everything [`finish_case`] needs, as one struct rather than eight
+/// positional arguments: `duel` and `composed_duel` are both `bool` and
+/// adjacent, and a call site that swapped them would compile and would move
+/// both measured rates onto the wrong denominator.
+struct Finish<'a> {
+    profile: &'a Profile,
+    service_def: &'a Value,
     policies: Vec<Value>,
     shape: Shape,
     index: usize,
     policy_type: i32,
     duel: bool,
-) -> Case {
-    let service_policies = json!({
-        "serviceName": profile.service_name,
-        "serviceId": 1,
-        "policyVersion": 1,
-        "serviceDef": service_def,
-        "policies": policies,
+    composed_duel: bool,
+    tags: Option<TagLayer>,
+}
+
+fn finish_case(f: Finish<'_>) -> Case {
+    let mut envelope = Map::new();
+    envelope.insert(
+        "serviceName".to_string(),
+        json!(f.profile.service_name),
+    );
+    envelope.insert("serviceId".to_string(), json!(1));
+    envelope.insert("policyVersion".to_string(), json!(1));
+    envelope.insert("serviceDef".to_string(), f.service_def.clone());
+    envelope.insert("policies".to_string(), json!(f.policies));
+    // Absent, not null: `ServicePolicies.getTagPolicies()` is null for both
+    // spellings and `classify_tag_policies` treats them alike, but a case with
+    // no tag phase must serialise exactly as it did before Task 5 so that a
+    // reported reproducer from either era still reads.
+    let resolved_tags = f.tags.map(|layer| {
+        envelope.insert("tagPolicies".to_string(), layer.block);
+        layer.tags
     });
+    let service_policies = Value::Object(envelope);
 
     let mut resource = RequestResource::new();
-    for (name, value) in &shape.request_levels {
+    for (name, value) in &f.shape.request_levels {
         resource.insert(name.clone(), value.clone());
     }
 
     Case {
-        id: format!("{}-{index:04}", profile.ranger_version),
-        policy_type,
-        duel,
+        id: format!("{}-{:04}", f.profile.ranger_version, f.index),
+        policy_type: f.policy_type,
+        duel: f.duel,
+        composed_duel: f.composed_duel,
         service_policies,
         request: AccessRequest {
-            user: shape.user,
-            groups: shape.groups,
-            roles: shape.roles,
-            access_type: shape.access_type,
+            user: f.shape.user,
+            groups: f.shape.groups,
+            roles: f.shape.roles,
+            access_type: f.shape.access_type,
             resource,
             // `{OWNER}` is never generated, so no decision depends on this.
             owner: None,
-            resolved_tags: None,
+            resolved_tags,
         },
     }
 }
@@ -991,18 +1646,68 @@ enum Outcome {
     RowFilter {
         filter_expr: Option<String>,
     },
-    /// Refused because the mask/row-filter arbitration ties — the ONE
-    /// refusal the corpus generates on purpose. Counted, not compared.
-    EvalOrderAmbiguous,
+    /// Refused for one of the reasons the corpus generates ON PURPOSE.
+    /// Counted, not compared.
+    Declined(Declined),
     /// Any other refusal: a generator escape, and a hard failure.
     Refused(String),
 }
 
-fn only_eval_order(why: &[UndecidableCause]) -> bool {
-    !why.is_empty()
-        && why
-            .iter()
-            .all(|c| matches!(c, UndecidableCause::EvalOrderAmbiguous { .. }))
+/// The refusals this corpus is allowed to produce.
+///
+/// Each is about an ORDER or a CANDIDACY this crate does not reproduce, not
+/// about a construct it does not model — the module doc draws the line and
+/// says why it is drawn there. A construct refusal would mean the generator
+/// had drifted into shapes the evaluator declines to answer, which is the
+/// silent-green failure this whole file exists to prevent, so anything not
+/// listed here is still an escape and still fails the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Declined {
+    /// [`UndecidableCause::EvalOrderAmbiguous`].
+    EvalOrder,
+    /// [`UndecidableCause::ResourceCandidacyNotReproducible`] — offset 553
+    /// might have stopped the loop at an evaluator this crate cannot place in
+    /// Ranger's candidate list, and the two possibilities disagree.
+    ResourceCandidacy,
+    /// [`UndecidableCause::TagSubResultSplitByResourcePolicy`].
+    TagSubResultSplit,
+}
+
+impl Declined {
+    fn label(self) -> &'static str {
+        match self {
+            Declined::EvalOrder => "EvalOrderAmbiguous",
+            Declined::ResourceCandidacy => "ResourceCandidacyNotReproducible",
+            Declined::TagSubResultSplit => "TagSubResultSplitByResourcePolicy",
+        }
+    }
+}
+
+fn declined_kind(cause: &UndecidableCause) -> Option<Declined> {
+    match cause {
+        UndecidableCause::EvalOrderAmbiguous { .. } => Some(Declined::EvalOrder),
+        UndecidableCause::ResourceCandidacyNotReproducible { .. } => {
+            Some(Declined::ResourceCandidacy)
+        }
+        UndecidableCause::TagSubResultSplitByResourcePolicy { .. } => {
+            Some(Declined::TagSubResultSplit)
+        }
+        _ => None,
+    }
+}
+
+/// `Some` only when EVERY cause is one the corpus generates on purpose.
+///
+/// Deliberately all-or-nothing. A `why` mixing an admitted refusal with a
+/// construct refusal is a generator escape wearing a disguise: reporting it as
+/// the admitted one would retire the escape check for exactly the cases where
+/// it matters most. The kind reported is the first cause's, and a mixed-kind
+/// `why` is counted once — the case declined, whatever it declined for.
+fn only_declined(why: &[UndecidableCause]) -> Option<Declined> {
+    let first = declined_kind(why.first()?)?;
+    why.iter()
+        .all(|c| declined_kind(c).is_some())
+        .then_some(first)
 }
 
 fn rust_outcome(
@@ -1015,7 +1720,10 @@ fn rust_outcome(
         0 => match evaluate(set, &case.request, def, engine) {
             Decision::Allowed { .. } => Outcome::Access { allowed: true },
             Decision::Denied { .. } => Outcome::Access { allowed: false },
-            Decision::Undecidable { why } => Outcome::Refused(format!("{why:?}")),
+            Decision::Undecidable { why } => match only_declined(&why) {
+                Some(kind) => Outcome::Declined(kind),
+                None => Outcome::Refused(format!("{why:?}")),
+            },
         },
         1 => match evaluate_data_mask(set, &case.request, def, engine) {
             MaskDecision::NoMask => Outcome::Mask {
@@ -1028,20 +1736,20 @@ fn rust_outcome(
                 masked_value: m.masked_value,
                 mask_condition: m.mask_condition,
             },
-            MaskDecision::Undecidable { why } if only_eval_order(&why) => {
-                Outcome::EvalOrderAmbiguous
-            }
-            MaskDecision::Undecidable { why } => Outcome::Refused(format!("{why:?}")),
+            MaskDecision::Undecidable { why } => match only_declined(&why) {
+                Some(kind) => Outcome::Declined(kind),
+                None => Outcome::Refused(format!("{why:?}")),
+            },
         },
         _ => match evaluate_row_filter(set, &case.request, def, engine) {
             RowFilterDecision::NoFilter => Outcome::RowFilter { filter_expr: None },
             RowFilterDecision::Filtered(f) => Outcome::RowFilter {
                 filter_expr: Some(f.filter_expr),
             },
-            RowFilterDecision::Undecidable { why } if only_eval_order(&why) => {
-                Outcome::EvalOrderAmbiguous
-            }
-            RowFilterDecision::Undecidable { why } => Outcome::Refused(format!("{why:?}")),
+            RowFilterDecision::Undecidable { why } => match only_declined(&why) {
+                Some(kind) => Outcome::Declined(kind),
+                None => Outcome::Refused(format!("{why:?}")),
+            },
         },
     }
 }
@@ -1338,7 +2046,303 @@ const AXES: &[Axis] = &[
         min_per_mille: 55,
         only: None,
     },
+    // — the tag phase (SP4d-2b Task 5) —
+    //
+    // Every floor here counts cases that REACH the axis, not cases generated
+    // with the ingredient: "a tag the block can reach" needs an ADMITTED tag
+    // AND a policy of THIS case's kind whose `resources.tag` covers it, because
+    // a tag nothing evaluates is not coverage of the tag phase. That
+    // distinction has already produced a false green in this package.
+    Axis {
+        name: "tag: tagPolicies block present",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: a tag the block's policies REACH",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: a tag the block's policies do NOT reach",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: match SELF",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: match SELF_AND_ALL_DESCENDANTS",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: match ANCESTOR",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: match DESCENDANT (NOT admitted)",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: match NONE (NOT admitted)",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: empty resolved set (the narrowing)",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: same NAME at two match types",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: attachment carrying attributes",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: deny-capable ACCESS policy",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: MASK policy of this kind",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: ROW FILTER policy of this kind",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: several policies of this kind at ONE priority",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: policyPriority override",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: policy of a DIFFERENT type in the block",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: policy value is a prefix wildcard",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: value differing from a resolved tag only by CASE",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: composed eval-order duel",
+        min_per_mille: 0,
+        only: None,
+    },
+    // The prune, and its asymmetry. Three axes rather than one: a corpus that
+    // only produced the flag would leave the prune untested, and one that only
+    // produced the tag half would let a crate that pruned BOTH paths look
+    // right.
+    Axis {
+        name: "tag: audit-disabled policy with NO items (pruned)",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "tag: audit-disabled policy WITH items (kept)",
+        min_per_mille: 0,
+        only: None,
+    },
+    Axis {
+        name: "resource policy audit-disabled with NO items (NOT pruned)",
+        min_per_mille: 0,
+        only: None,
+    },
 ];
+
+/// Does a tag policy value cover `name`, under `tag.json`'s
+/// `{ wildCard: true, ignoreCase: FALSE }`?
+///
+/// Only the three shapes [`TAG_POLICY_VALUES`] contains need handling, because
+/// they are the only ones generated. **This is a coverage predicate, never an
+/// oracle**: nothing asserts on it, and the decisions it helps count are taken
+/// by the crate and by Ranger. It exists so that "a tag the block reaches" is a
+/// structural property of the generated JSON rather than a property of the
+/// answer that came back.
+fn tag_value_covers(value: &str, name: &str) -> bool {
+    if !value.is_empty() && value.chars().all(|c| c == '*') {
+        return true;
+    }
+    match value.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => value == name,
+    }
+}
+
+/// Are all SIX item buckets empty — the half of `isPolicyNeedsPruning` that is
+/// not `isAuditEnabled`?
+///
+/// `isDenyAllElse` is deliberately NOT consulted, because Ranger does not
+/// consult it either: that omission is exactly what makes the prune observable
+/// rather than vacuous.
+fn all_item_buckets_empty(policy: &Value) -> bool {
+    [
+        "policyItems",
+        "denyPolicyItems",
+        "allowExceptions",
+        "denyExceptions",
+        "dataMaskPolicyItems",
+        "rowFilterPolicyItems",
+    ]
+    .iter()
+    .all(|bucket| {
+        policy[*bucket]
+            .as_array()
+            .is_none_or(|items| items.is_empty())
+    })
+}
+
+/// Everything the tag axes count, read off the generated JSON and the request.
+#[derive(Default)]
+struct TagFacts {
+    block_present: bool,
+    reached: bool,
+    unreached: bool,
+    /// Indexed by [`TAG_MATCH_TYPES`].
+    match_types: [bool; 5],
+    empty_set: bool,
+    repeated_name: bool,
+    attributes: bool,
+    deny_capable_access: bool,
+    mask_policy: bool,
+    row_filter_policy: bool,
+    several_at_one_priority: bool,
+    priority_override: bool,
+    other_type: bool,
+    prefix_value: bool,
+    case_only_value: bool,
+    /// `isAuditEnabled: false` with every item bucket empty — the shape the TAG
+    /// repository PRUNES and `policies` does not.
+    audit_pruned: bool,
+    /// `isAuditEnabled: false` with items present — the shape it KEEPS. Counted
+    /// apart so that "the flag appears" and "the prune fires" cannot be read off
+    /// one number.
+    audit_kept: bool,
+}
+
+fn tag_facts(case: &Case) -> TagFacts {
+    let mut facts = TagFacts::default();
+    let Some(block) = case.service_policies.get("tagPolicies") else {
+        return facts;
+    };
+    facts.block_present = true;
+
+    let tags = case.request.resolved_tags.as_deref().unwrap_or_default();
+    facts.empty_set = tags.is_empty();
+    for tag in tags {
+        if let Some(index) = TAG_MATCH_TYPES.iter().position(|m| *m == tag.match_type) {
+            facts.match_types[index] = true;
+        }
+        if !tag.attributes.is_empty() {
+            facts.attributes = true;
+        }
+        if tags
+            .iter()
+            .any(|other| other.name == tag.name && other.match_type != tag.match_type)
+        {
+            facts.repeated_name = true;
+        }
+    }
+
+    let policies = block["policies"].as_array().cloned().unwrap_or_default();
+    let mut priorities_of_kind: Vec<i64> = Vec::new();
+    for policy in &policies {
+        if policy["isEnabled"].as_bool() == Some(false) {
+            continue;
+        }
+        let policy_type = policy["policyType"].as_i64().unwrap_or(0);
+        if policy_type != i64::from(case.policy_type) {
+            facts.other_type = true;
+            // Filed into a different evaluator list in the tag repository, so
+            // nothing about it is coverage of THIS decision — the same rule the
+            // resource loop above follows.
+            continue;
+        }
+        if policy["policyPriority"].as_i64().unwrap_or(0) != 0 {
+            facts.priority_override = true;
+        }
+        priorities_of_kind.push(policy["policyPriority"].as_i64().unwrap_or(0));
+        if policy["isAuditEnabled"].as_bool() == Some(false) {
+            if all_item_buckets_empty(policy) {
+                facts.audit_pruned = true;
+            } else {
+                facts.audit_kept = true;
+            }
+        }
+        match policy_type {
+            1 => facts.mask_policy = true,
+            2 => facts.row_filter_policy = true,
+            _ => {
+                if policy["isDenyAllElse"].as_bool() == Some(true)
+                    || policy["denyPolicyItems"]
+                        .as_array()
+                        .is_some_and(|b| !b.is_empty())
+                {
+                    facts.deny_capable_access = true;
+                }
+            }
+        }
+        let values: Vec<&str> = policy["resources"]["tag"]["values"]
+            .as_array()
+            .map(|v| v.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        for value in &values {
+            if value.len() > 1 && value.ends_with('*') && !value.ends_with("**") {
+                facts.prefix_value = true;
+            }
+            for tag in tags {
+                // `ignoreCase: false` on the tag def against `true` on every
+                // resource level: the one place in this corpus where a pure
+                // case difference is a DIFFERENT value rather than the same one.
+                if !tag_value_covers(value, &tag.name)
+                    && value.eq_ignore_ascii_case(&tag.name)
+                    && *value != tag.name
+                {
+                    facts.case_only_value = true;
+                }
+            }
+        }
+        for tag in tags {
+            if !ADMITTED_TAG_MATCH_TYPES.contains(&tag.match_type) {
+                continue;
+            }
+            if values.iter().any(|v| tag_value_covers(v, &tag.name)) {
+                facts.reached = true;
+            } else {
+                facts.unreached = true;
+            }
+        }
+    }
+    priorities_of_kind.sort_unstable();
+    facts.several_at_one_priority = priorities_of_kind
+        .windows(2)
+        .any(|pair| pair[0] == pair[1]);
+    facts
+}
 
 /// Does `value` carry a wildcard in this position?
 fn wildcard_positions(value: &str, hits: &mut [bool; 9]) {
@@ -1427,6 +2431,9 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
     let mut filter_expr_blank = false;
     let mut other_policy_type = false;
     let mut star_then_question = false;
+    // The ASYMMETRY: the same shape the TAG repository prunes, in `policies`,
+    // where no constructor normalises and Ranger therefore KEEPS it.
+    let mut resource_audit_pruneable = false;
     // `checkIndexOf` and its resume point are reached only when a LITERAL
     // token follows a `*`. A value ending in `*` never gets there, which is
     // exactly how the corpus stayed green with the resume point deleted.
@@ -1448,6 +2455,9 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
         }
         if policy["isDenyAllElse"].as_bool() == Some(true) {
             deny_all_else = true;
+        }
+        if policy["isAuditEnabled"].as_bool() == Some(false) && all_item_buckets_empty(policy) {
+            resource_audit_pruneable = true;
         }
 
         let mut maps = vec![&policy["resources"]];
@@ -1583,6 +2593,7 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
         }
     }
 
+    let tags = tag_facts(case);
     let request_star = request_levels.iter().any(|(_, v)| *v == "*");
     let request_empty = request_levels.iter().any(|(_, v)| v.is_empty());
     // A gap: the request names a level whose parent it does not name.
@@ -1666,6 +2677,47 @@ fn axis_hits(case: &Case) -> Vec<(&'static str, bool)> {
         ("mask conditionExpr", condition_expr),
         ("filterExpr explicitly empty or null", filter_expr_blank),
         ("eval-order duel", case.duel),
+        ("tag: tagPolicies block present", tags.block_present),
+        ("tag: a tag the block's policies REACH", tags.reached),
+        ("tag: a tag the block's policies do NOT reach", tags.unreached),
+        ("tag: match SELF", tags.match_types[0]),
+        ("tag: match SELF_AND_ALL_DESCENDANTS", tags.match_types[1]),
+        ("tag: match ANCESTOR", tags.match_types[2]),
+        ("tag: match DESCENDANT (NOT admitted)", tags.match_types[3]),
+        ("tag: match NONE (NOT admitted)", tags.match_types[4]),
+        ("tag: empty resolved set (the narrowing)", tags.empty_set),
+        ("tag: same NAME at two match types", tags.repeated_name),
+        ("tag: attachment carrying attributes", tags.attributes),
+        ("tag: deny-capable ACCESS policy", tags.deny_capable_access),
+        ("tag: MASK policy of this kind", tags.mask_policy),
+        ("tag: ROW FILTER policy of this kind", tags.row_filter_policy),
+        (
+            "tag: several policies of this kind at ONE priority",
+            tags.several_at_one_priority,
+        ),
+        ("tag: policyPriority override", tags.priority_override),
+        (
+            "tag: policy of a DIFFERENT type in the block",
+            tags.other_type,
+        ),
+        ("tag: policy value is a prefix wildcard", tags.prefix_value),
+        (
+            "tag: value differing from a resolved tag only by CASE",
+            tags.case_only_value,
+        ),
+        ("tag: composed eval-order duel", case.composed_duel),
+        (
+            "tag: audit-disabled policy with NO items (pruned)",
+            tags.audit_pruned,
+        ),
+        (
+            "tag: audit-disabled policy WITH items (kept)",
+            tags.audit_kept,
+        ),
+        (
+            "resource policy audit-disabled with NO items (NOT pruned)",
+            resource_audit_pruneable,
+        ),
     ]
 }
 
@@ -1751,13 +2803,86 @@ struct Tally {
     /// number of cases that could have falsified it.
     duels: usize,
     duels_agreeing: usize,
-    eval_order_ambiguous: usize,
+    /// …of which these were issued UNDER a tag verdict.
+    composed_duels: usize,
+    composed_duels_agreeing: usize,
+    /// Cases carrying a `tagPolicies` block. **The denominator of every
+    /// composed rate**, and the complement of the denominator of every
+    /// resource-path rate — which is why the two are counted rather than
+    /// derived from a percentage of the whole.
+    tagged: usize,
+    /// Each admitted refusal, split by whether the case had a tag phase.
+    /// Reporting one number for both would answer neither of the two
+    /// questions this gate is asked: how often the RESOURCE path cannot order
+    /// a band, and how often COMPOSING the phases creates a tie that path
+    /// never had.
+    declined: BTreeMap<(Declined, bool), usize>,
     allowed: usize,
     denied: usize,
     masked: usize,
     no_mask: usize,
     filtered: usize,
     no_filter: usize,
+}
+
+impl Tally {
+    fn declined_count(&self, kind: Declined, tagged: bool) -> usize {
+        self.declined.get(&(kind, tagged)).copied().unwrap_or(0)
+    }
+
+    fn absorb(&mut self, other: &Tally) {
+        self.cases += other.cases;
+        self.compared += other.compared;
+        self.duels += other.duels;
+        self.duels_agreeing += other.duels_agreeing;
+        self.composed_duels += other.composed_duels;
+        self.composed_duels_agreeing += other.composed_duels_agreeing;
+        self.tagged += other.tagged;
+        for (key, count) in &other.declined {
+            *self.declined.entry(*key).or_default() += count;
+        }
+        self.allowed += other.allowed;
+        self.denied += other.denied;
+        self.masked += other.masked;
+        self.no_mask += other.no_mask;
+        self.filtered += other.filtered;
+        self.no_filter += other.no_filter;
+    }
+}
+
+/// The three rates the package owes, each printed with the CASE COUNT behind
+/// it and each against the denominator it actually belongs to.
+///
+/// A percentage with no denominator is the shape in which "unmeasured" and
+/// "measured at zero" look alike, and this file has already been bitten by
+/// exactly that: `EvalOrderAmbiguous` was reported as one number over the whole
+/// corpus while the composed half of it did not exist.
+fn report_rates(label: &str, tally: &Tally) {
+    let untagged = tally.cases - tally.tagged;
+    let pct = |n: usize, d: usize| -> String {
+        if d == 0 {
+            "n/a (no cases in this population)".to_string()
+        } else {
+            format!("{n}/{d} = {:.2}%", 100.0 * n as f64 / d as f64)
+        }
+    };
+    eprintln!("\nmeasured refusal rates — {label}");
+    eprintln!(
+        "  population: {} cases, of which {} carry a tagPolicies block and {untagged} do not",
+        tally.cases, tally.tagged
+    );
+    for kind in [
+        Declined::EvalOrder,
+        Declined::ResourceCandidacy,
+        Declined::TagSubResultSplit,
+    ] {
+        eprintln!(
+            "  {:34}  resource path {:>26}   composed {:>26}",
+            kind.label(),
+            pct(tally.declined_count(kind, false), untagged),
+            pct(tally.declined_count(kind, true), tally.tagged),
+        );
+    }
 }
 
 fn ranger_dir() -> PathBuf {
@@ -1829,6 +2954,7 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
             case: Case {
                 id: "pin-f1-wildcard".to_string(),
                 duel: false,
+                composed_duel: false,
                 policy_type: 0,
                 service_policies: service_policies(json!([{
                     "id": 1, "name": "f1", "service": "trino_prod", "policyType": 0,
@@ -1890,6 +3016,7 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
             case: Case {
                 id: "pin-f2-missing-datamaskinfo".to_string(),
                 duel: false,
+                composed_duel: false,
                 policy_type: 1,
                 service_policies: service_policies(json!([
                     {
@@ -1976,6 +3103,118 @@ fn check_pinned_divergences(def_json: &Value, def: &ServiceDef, engine: &EngineC
             "differential: pinned case {} agrees — {}",
             pin.case.id, pin.finding
         );
+    }
+}
+
+/// The one shape the corpus CANNOT carry, pinned on its own: a tag
+/// `dataMaskPolicyItems` item with no `dataMaskInfo`.
+///
+/// This is not a divergence in a verdict. `RangerPolicyRepository`'s
+/// `ServicePolicies$TagPolicies` constructor — and no other constructor in
+/// either jar — calls `normalizeAndPrunePolicies`, which reads
+/// `dataMaskType.contains(":")` with no null guard on a type Ranger's own model
+/// class has just defaulted to null (finding F2's substitution). The plugin
+/// THROWS while building its repository, so there is no engine and NOTHING it
+/// serves is answered — an incident, not a gap.
+///
+/// Found by this gate on 2026-10-01, at 150 cases, the first time the corpus
+/// generated a `tagPolicies` block at all. Pinned rather than generated because
+/// a case Ranger cannot answer has no verdict to compare: thousands of them in
+/// the corpus would be thousands of uncomparable cases, and one here is the
+/// whole measurement.
+///
+/// **Both plugin versions**, because "identical in 2.8.0" is the claim, and the
+/// crate refuses on the strength of it. The Trino service-def is used at both,
+/// which the corpus itself does not do — `EgretTagServiceResourceValidationTest`
+/// already runs the same def at both versions, and nothing in this claim is
+/// about the resource def at all.
+fn check_measured_tag_crash(def_json: &Value, tag_def_json: &Value, def: &ServiceDef, engine: &EngineConfig) {
+    let case = Case {
+        id: "pin-tag-mask-null-crash".to_string(),
+        policy_type: 1,
+        duel: false,
+        composed_duel: false,
+        service_policies: json!({
+            "serviceName": "trino_prod",
+            "serviceId": 1,
+            "policyVersion": 1,
+            "serviceDef": def_json,
+            "policies": [],
+            "tagPolicies": {
+                "serviceName": "trino_prod_tag",
+                "serviceId": 2,
+                "policyVersion": 1,
+                "serviceDef": tag_def_json,
+                "policies": [{
+                    "id": 8901, "name": "tag-mask-no-info", "service": "trino_prod_tag",
+                    "policyType": 1, "isEnabled": true, "policyPriority": 0,
+                    "resources": {"tag": {"values": ["pii"]}},
+                    // No `dataMaskInfo`. That is the whole fixture.
+                    "dataMaskPolicyItems": [{
+                        "users": ["dave"], "groups": [], "roles": [],
+                        "accesses": [{"type": "select", "isAllowed": true}],
+                    }],
+                }],
+            },
+        }),
+        request: AccessRequest {
+            user: "dave".to_string(),
+            groups: BTreeSet::new(),
+            roles: BTreeSet::new(),
+            access_type: "select".to_string(),
+            resource: RequestResource::new()
+                .with("catalog", "hive")
+                .with("schema", "sales")
+                .with("table", "orders")
+                .with("column", "id"),
+            owner: None,
+            resolved_tags: Some(vec![ResolvedTag {
+                name: "pii".to_string(),
+                match_type: MatchType::Self_,
+                attributes: BTreeMap::new(),
+                options: BTreeSet::new(),
+                validity_periods: 0,
+                attached_through: TagServiceResource {
+                    levels: ["catalog", "schema", "table"]
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect(),
+                    is_enabled: true,
+                },
+            }]),
+        },
+    };
+
+    let set: ServicePolicySet =
+        serde_json::from_value(case.service_policies.clone()).expect("parse crash pin");
+    let mine = rust_outcome(&case, &set, def, engine);
+    // The crate must REFUSE, and refuse for this reason — not merely be
+    // `Undecidable`. `Refused` here is the escape category, which is right: the
+    // corpus is not allowed to contain this shape, and `only_declined` must not
+    // start admitting it.
+    assert!(
+        matches!(&mine, Outcome::Refused(why) if why.contains("MaskTypeAbsent")),
+        "the tag mask crash must refuse with TagPolicyNotNormalisable{{MaskTypeAbsent}}, \
+         not {mine:?} — and it must stay OUTSIDE `only_declined`, or the corpus would be \
+         allowed to generate a shape the real plugin cannot answer at all"
+    );
+
+    for version in ["2.5.0", "2.8.0"] {
+        let verdicts = ask_ranger(std::slice::from_ref(&case), "trino", version, "tagcrash");
+        let error = verdicts[0]
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            error.contains("NullPointerException") && error.contains("normalizeAndPrunePolicyItems"),
+            "ranger {version} was expected to THROW in \
+             RangerPolicyRepository.normalizeAndPrunePolicyItems for a tag mask item with no \
+             dataMaskInfo. It did not, so the refusal this crate now carries is resting on a \
+             measurement that no longer holds — re-measure before narrowing it.\n  \
+             verdict: {}",
+            verdicts[0]
+        );
+        eprintln!("differential: ranger {version} crashes on the null tag mask type, as measured");
     }
 }
 
@@ -2097,12 +3336,51 @@ fn load_engine(profile: &Profile) -> (Value, ServiceDef, EngineConfig) {
     (def_json, def, engine)
 }
 
+/// The `tagPolicies` block's own service-def: egret's shipped `tag.json`,
+/// verbatim but for `contextEnrichers`.
+///
+/// **Stripping the key is what keeps the two sides symmetric, and the
+/// direction matters.** Ranger builds context enrichers from the resource def
+/// AND from the tag block's own def and UNIONS the two lists, and Apache's
+/// stock `ranger-servicedef-tag.json` — bundled inside `ranger-plugins-common`
+/// itself — declares `RangerTagEnricher`. A def that declared one here would
+/// make the Java half try to poll a Ranger admin from the test JVM and would
+/// overwrite the tag set the runner seeds, while this crate read the seeded one:
+/// a disagreement the harness manufactured.
+///
+/// `tag.json` happens to declare none today, so the `remove` is a no-op — and
+/// it is written anyway, because the day it stops being one is the day this
+/// harness would otherwise start measuring the enricher. On the crate's side
+/// the absence reads as `has_tag_enricher() == None` (unknown), which does NOT
+/// narrow: `tag_policies_can_decide` needs an explicit `Some(false)` on BOTH
+/// defs to skip the phase, so the corpus gets the phase rather than a silent
+/// skip.
+fn load_tag_def() -> Value {
+    let mut def_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(TAG_DEF_PATH).expect("read tag service-def"))
+            .expect("parse tag service-def");
+    if let Some(obj) = def_json.as_object_mut() {
+        obj.remove("contextEnrichers");
+    }
+    // The phase refuses on any `ServiceDefIssue` this crate cannot account for,
+    // so a def that did not parse cleanly would show up as an escape hundreds of
+    // cases later with no hint of where it came from.
+    let def = ServiceDef::parse(&def_json);
+    assert!(
+        def.issues().is_empty(),
+        "tag.json has issues the corpus cannot account for: {:?}",
+        def.issues()
+    );
+    def_json
+}
+
 fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
     let (def_json, def, engine) = load_engine(profile);
+    let tag_def_json = load_tag_def();
 
     let mut rng = Rng::new(seed ^ (profile.ranger_version.len() as u64) ^ profile.engine as u64);
     let cases: Vec<Case> = (0..count)
-        .map(|i| generate_case(&mut rng, profile, &def_json, i))
+        .map(|i| generate_case(&mut rng, profile, &def_json, &tag_def_json, i))
         .collect();
 
     // Coverage first, before a JVM is started or a single decision is taken:
@@ -2166,9 +3444,16 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
         if case.duel {
             tally.duels += 1;
         }
+        if case.composed_duel {
+            tally.composed_duels += 1;
+        }
+        let tagged = case.service_policies.get("tagPolicies").is_some();
+        if tagged {
+            tally.tagged += 1;
+        }
 
-        if matches!(mine, Outcome::EvalOrderAmbiguous) {
-            tally.eval_order_ambiguous += 1;
+        if let Outcome::Declined(kind) = mine {
+            *tally.declined.entry((*kind, tagged)).or_default() += 1;
             continue;
         }
 
@@ -2190,12 +3475,15 @@ fn run_profile(profile: &Profile, seed: u64, count: usize) -> Tally {
                     tally.no_filter += 1
                 }
             }
-            Outcome::EvalOrderAmbiguous | Outcome::Refused(_) => unreachable!("handled above"),
+            Outcome::Declined(_) | Outcome::Refused(_) => unreachable!("handled above"),
         }
         tally.compared += 1;
 
         if case.duel && *mine == theirs {
             tally.duels_agreeing += 1;
+        }
+        if case.composed_duel && *mine == theirs {
+            tally.composed_duels_agreeing += 1;
         }
         if *mine != theirs {
             mismatches.push(reproducer(
@@ -2272,21 +3560,25 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
     // reports means what it says.
     let (pin_def_json, pin_def, pin_engine) = load_engine(&trino());
     check_pinned_divergences(&pin_def_json, &pin_def, &pin_engine);
+    // …and the one shape the corpus is forbidden to carry, whose absence from it
+    // would otherwise be indistinguishable from the behaviour having gone away.
+    check_measured_tag_crash(&pin_def_json, &load_tag_def(), &pin_def, &pin_engine);
 
     let mut total = Tally::default();
     for profile in [trino(), starrocks()] {
         let tally = run_profile(&profile, seed, count);
         eprintln!(
-            "differential: ranger {} — {} cases, {} compared and AGREEING, \
-             {} EvalOrderAmbiguous ({:.1}%), {} eval-order duels ({} agreeing); \
+            "differential: ranger {} — {} cases ({} with a tag phase), {} compared and \
+             AGREEING, {} eval-order duels ({} agreeing) of which {} composed ({} agreeing); \
              allowed {} / denied {} / masked {} / no-mask {} / filtered {} / no-filter {}",
             profile.ranger_version,
             tally.cases,
+            tally.tagged,
             tally.compared,
-            tally.eval_order_ambiguous,
-            100.0 * tally.eval_order_ambiguous as f64 / tally.cases as f64,
             tally.duels,
             tally.duels_agreeing,
+            tally.composed_duels,
+            tally.composed_duels_agreeing,
             tally.allowed,
             tally.denied,
             tally.masked,
@@ -2294,29 +3586,22 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
             tally.filtered,
             tally.no_filter,
         );
-        total.cases += tally.cases;
-        total.compared += tally.compared;
-        total.eval_order_ambiguous += tally.eval_order_ambiguous;
-        total.duels += tally.duels;
-        total.duels_agreeing += tally.duels_agreeing;
-        total.allowed += tally.allowed;
-        total.denied += tally.denied;
-        total.masked += tally.masked;
-        total.no_mask += tally.no_mask;
-        total.filtered += tally.filtered;
-        total.no_filter += tally.no_filter;
+        report_rates(&format!("ranger {}", profile.ranger_version), &tally);
+        total.absorb(&tally);
     }
 
     eprintln!(
-        "differential: seed {seed:#x}, {} cases across both engines, {} compared, \
-         {} EvalOrderAmbiguous ({:.1}%), {} eval-order duels of which {} agree",
+        "differential: seed {seed:#x}, {} cases across both engines ({} with a tag phase), \
+         {} compared, {} eval-order duels of which {} agree; {} composed duels of which {} agree",
         total.cases,
+        total.tagged,
         total.compared,
-        total.eval_order_ambiguous,
-        100.0 * total.eval_order_ambiguous as f64 / total.cases as f64,
         total.duels,
         total.duels_agreeing,
+        total.composed_duels,
+        total.composed_duels_agreeing,
     );
+    report_rates("both engines", &total);
 
     // The duels are the only cases that could falsify Task 5's claim that the
     // allow/deny outcome does not depend on `getEvalOrder()` within one band.
@@ -2327,6 +3612,26 @@ fn rust_evaluator_agrees_with_the_real_ranger_engine() {
         "only {} deliberate eval-order duels in {} cases — the shape that could falsify \
          Task 5's eval-order claim has stopped being generated",
         total.duels,
+        total.cases
+    );
+    // …and the COMPOSED duel is the only shape in which `getEvalOrder()` can
+    // decide an ACCESS outcome at all, so the composed rate below is a rate
+    // over a population this floor is what keeps populated.
+    assert!(
+        total.composed_duels * 60 >= total.cases,
+        "only {} composed eval-order duels in {} cases — the one shape in which \
+         getEvalOrder() can decide an ACCESS outcome has stopped being generated, so the \
+         composed EvalOrderAmbiguous rate below is a rate over nothing",
+        total.composed_duels,
+        total.cases
+    );
+    // A corpus with no tag phase reports two composed rates of 0/0 and looks
+    // exactly like one where the tag generator was deleted.
+    assert!(
+        total.tagged * 5 >= total.cases,
+        "only {} of {} cases carry a tagPolicies block — the tag phase has stopped being \
+         generated and every composed measurement below is a rate over nothing",
+        total.tagged,
         total.cases
     );
 

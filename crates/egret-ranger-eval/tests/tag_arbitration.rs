@@ -1083,6 +1083,142 @@ fn a_tag_deny_makes_a_resource_band_s_eval_order_decide_and_that_refuses() {
     );
 }
 
+/// **The SAME band with the two policies' NAMES SWAPPED, and the reason this
+/// test exists at all.**
+///
+/// SP4d-2b Task 5. The sibling test above names the allower `a-allow` and the
+/// denier `b-deny`, so this crate's name tie-break puts the ALLOWER first — and
+/// the refusal used to live in the allow arm of the loop alone. With the names
+/// the other way round the DENIER runs first, the deny arm set `determined` and
+/// broke the loop, and the crate answered `Denied` over a band whose winner
+/// Ranger picks with `getEvalOrder()`. Measured on the real 2.8.0 engine by the
+/// differential gate the first time the corpus generated a composed duel: 6 of
+/// 387 compared cases, every one `egret said Denied / ranger said Allowed`.
+///
+/// So the refusal was not order-independent; only its SCAN was. Reaching the
+/// scan depended on a tie-break, which means exactly half the shape was refused
+/// and which half was decided by the alphabet.
+///
+/// Nothing here is new except two names. That is the point: the test above and
+/// this one differ by the one thing the defect turned on, and the test above
+/// could not have failed. Both must pass, and a fix that only satisfies one of
+/// them has reinstated the blind spot from the other side.
+#[test]
+fn the_same_band_refuses_when_this_crate_s_order_puts_the_denier_first() {
+    let contested = json!([
+        {
+            // `a-deny` now sorts FIRST, where `b-deny` sorted last.
+            "id": 1, "name": "a-deny", "service": "trino", "policyType": 0,
+            "isEnabled": true, "policyPriority": 5,
+            "resources": {
+                "catalog": {"values": ["hive"]}, "schema": {"values": ["sales"]},
+                "table": {"values": ["orders"]}, "column": {"values": ["*"]},
+            },
+            "denyPolicyItems": select_for_alice(),
+        },
+        {
+            "id": 2, "name": "b-allow", "service": "trino", "policyType": 0,
+            "isEnabled": true, "policyPriority": 5,
+            "resources": {
+                "catalog": {"values": ["hive"]}, "schema": {"values": ["sales"]},
+                "table": {"values": ["orders"]}, "column": {"values": ["*"]},
+            },
+            "denyPolicyItems": select_for_bob(),
+            "policyItems": select_for_alice(),
+        },
+    ]);
+
+    let set = envelope(
+        contested.clone(),
+        json!([tag_policy(
+            10,
+            "tag-deny",
+            0,
+            0,
+            "denyPolicyItems",
+            select_for_alice()
+        )]),
+    );
+    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    match &d {
+        Decision::Undecidable { why } => assert!(
+            why.iter().any(|c| matches!(
+                c,
+                UndecidableCause::EvalOrderAmbiguous { policy_ids, .. }
+                    // The DENIER is the member reached first, so it is named
+                    // first — the pair is the same pair, reported from the other
+                    // end.
+                    if policy_ids == &vec![Some(1), Some(2)]
+            )),
+            "{why:?}"
+        ),
+        other => panic!(
+            "the band's order still decides the answer when the denier sorts first, so it \
+             must still refuse — answering {other:?} is the fail this gate measured"
+        ),
+    }
+
+    // The same control as the sibling test: with no tag verdict the `>` arm lets
+    // the allower run after the deny and the answer is stable. Without this, a
+    // "fix" that refused every same-priority band would pass the assertion above
+    // and would refuse the ordinary case too.
+    let untagged = envelope(contested, json!([]));
+    let d = evaluate(&untagged, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(&d, Decision::Denied { policy_name, .. } if policy_name == "a-deny"),
+        "without a tag deny the same band is order-independent: {}",
+        named(&d)
+    );
+}
+
+/// The mirror of the "cannot disagree" control, for the deny side: a band whose
+/// members all DENY gives the same answer in every order, so it must answer.
+///
+/// Written with the fix, and required by it: the check now runs on a deny as
+/// well as on an allow, so "refuses on a denying rival" is no longer the whole
+/// rule and "refuses whenever the band has two deciding members" would pass
+/// every other test in this file.
+#[test]
+fn a_tag_deny_over_a_band_of_two_deniers_still_answers() {
+    let set = envelope(
+        json!([
+            {
+                "id": 1, "name": "a-deny", "service": "trino", "policyType": 0,
+                "isEnabled": true, "policyPriority": 5,
+                "resources": {
+                    "catalog": {"values": ["hive"]}, "schema": {"values": ["sales"]},
+                    "table": {"values": ["orders"]}, "column": {"values": ["*"]},
+                },
+                "denyPolicyItems": select_for_alice(),
+            },
+            {
+                "id": 2, "name": "b-deny", "service": "trino", "policyType": 0,
+                "isEnabled": true, "policyPriority": 5,
+                "resources": {
+                    "catalog": {"values": ["hive"]}, "schema": {"values": ["sales"]},
+                    "table": {"values": ["orders"]}, "column": {"values": ["*"]},
+                },
+                "denyPolicyItems": select_for_alice(),
+            },
+        ]),
+        json!([tag_policy(
+            10,
+            "tag-deny",
+            0,
+            0,
+            "denyPolicyItems",
+            select_for_alice()
+        )]),
+    );
+
+    let d = evaluate(&set, &request(), &trino_def(), &no_superusers());
+    assert!(
+        matches!(&d, Decision::Denied { .. }),
+        "two deniers in one band agree in every order, so this must answer: {}",
+        named(&d)
+    );
+}
+
 /// The refusal is on a DENYING rival, not on the band having more than one
 /// member: a band whose other members allow (or decide nothing) gives the same
 /// answer in every order, so it must still answer.

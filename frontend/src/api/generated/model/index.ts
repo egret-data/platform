@@ -475,6 +475,7 @@ export * from './wirePluginVersion';
 export * from './wirePolicyType';
 export * from './wireServiceDefIssue';
 export * from './wireTagAttachmentProblem';
+export * from './wireTagNormalisationProblem';
 export * from './wireTagPolicyBlock';
 export * from './wireTagResourceProblem';
 export * from './wireUndecidableCause';

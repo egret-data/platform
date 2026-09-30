@@ -122,6 +122,25 @@ pub struct RangerPolicy {
     pub service: String,
     pub policy_type: i32,
     pub is_enabled: bool,
+    /// `isAuditEnabled`, which Ranger's model class defaults to `TRUE` for an
+    /// absent or null value — so only an explicit `false` is observable here.
+    ///
+    /// # Why a field, when nothing audits
+    ///
+    /// It is not read for auditing. It is the gate of a PRUNE that only the TAG
+    /// policy repository performs: `RangerPolicyRepository`'s
+    /// `ServicePolicies$TagPolicies` constructor — and **no other constructor in
+    /// either jar** — calls `normalizeAndPrunePolicies`, whose
+    /// `isPolicyNeedsPruning` removes a policy outright when
+    /// `!getIsAuditEnabled()` and all SIX item buckets are empty (2.5.0 offsets
+    /// 60-133 of `isPolicyNeedsPruning`, identical in 2.8.0).
+    ///
+    /// `isDenyAllElse` is **not** one of the six, which is what makes the prune
+    /// observable rather than vacuous: a tag ACCESS policy with
+    /// `isDenyAllElse: true`, no items and `isAuditEnabled: false` is removed by
+    /// Ranger and DENIES without this field. Found by the differential gate
+    /// (SP4d-2b Task 5); see `crate::eval::tag_policy_is_pruned`.
+    pub is_audit_enabled: bool,
     pub policy_priority: i32,
     pub is_deny_all_else: bool,
     pub resources: BTreeMap<String, ResourceLevel>,
@@ -807,6 +826,12 @@ struct RawRangerPolicy {
     )]
     is_enabled: bool,
     #[serde(
+        default = "default_true",
+        deserialize_with = "null_as_true",
+        rename = "isAuditEnabled"
+    )]
+    is_audit_enabled: bool,
+    #[serde(
         default,
         deserialize_with = "null_as_default",
         rename = "policyPriority"
@@ -966,6 +991,7 @@ impl RangerPolicy {
             service: raw.service,
             policy_type: raw.policy_type,
             is_enabled: raw.is_enabled,
+            is_audit_enabled: raw.is_audit_enabled,
             policy_priority: raw.policy_priority,
             is_deny_all_else: raw.is_deny_all_else,
             resources: raw.resources,

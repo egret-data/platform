@@ -690,6 +690,71 @@ pub enum UndecidableCause {
         policy_id: Option<i64>,
         policy_name: String,
     },
+    /// A tag policy the TAG policy repository would NORMALISE, in a way this
+    /// crate does not reproduce (SP4d-2b Task 5).
+    ///
+    /// # ⚠ Found by the differential gate, and only the TAG path has it
+    ///
+    /// `RangerPolicyRepository`'s `ServicePolicies$TagPolicies` constructor —
+    /// and **no other constructor in either jar**, which is the whole reason
+    /// this was invisible — calls
+    /// `normalizeAndPrunePolicies(tagPolicies.getPolicies(),
+    /// componentServiceDef.getName())` at offsets 90-103, BEFORE `init()` and
+    /// therefore before `skipBuildingPolicyEvaluator` has dropped anything. So
+    /// it runs over EVERY tag policy in the block, disabled ones included.
+    ///
+    /// Measured in 2.5.0 and 2.8.0 (`normalizeAndPrunePolicyItems`, offsets
+    /// 109-177 for the access half and 243-325 for the mask half; the
+    /// `commons-lang` → `commons-lang3` move is the only difference):
+    ///
+    /// ```java
+    /// String prefix = componentType + ":";                 // e.g. "trino:"
+    /// for (RangerPolicyItemAccess access : item.getAccesses()) {
+    ///     String type = access.getType();
+    ///     if (StringUtils.startsWith(type, prefix)) {
+    ///         access.setType(StringUtils.removeStart(type, prefix));   // STRIPPED
+    ///     } else if (type.contains(":")) {
+    ///         toRemove.add(access);                                    // DROPPED
+    ///     }
+    /// }
+    /// // …and the same two arms for a RangerDataMaskPolicyItem's dataMaskType,
+    /// // where the DROP removes the whole ITEM rather than one access.
+    /// ```
+    ///
+    /// The prefix is the component service-DEF name (`componentServiceDef.getName()`
+    /// — `trino`, `starrocks`), **not** the service name: the 4th constructor
+    /// argument is `ServicePolicies.getServiceName()` and is used elsewhere, and
+    /// confusing the two would strip the wrong prefix.
+    ///
+    /// This crate compares a tag policy item's access type to the request's as a
+    /// literal. So a tag DENY policy granting `trino:select` denies a `select`
+    /// request in Ranger and matches nothing here — **fail-open**, and the
+    /// direction that matters.
+    ///
+    /// # Why this REFUSES rather than reproducing the strip
+    ///
+    /// The rule is fully measured and could be modelled. It is refused because
+    /// modelling it correctly means modelling the two prunes it feeds (an item
+    /// whose accesses all dropped, and a policy whose buckets all emptied) and
+    /// their interaction with `hasDeny` and with the tag comparators, and
+    /// because the refusal costs nothing on the population egret actually
+    /// serves: `tests/fixtures/tag-policies-live.json`, the download captured
+    /// from a live plugin's own cache, carries BARE access types
+    /// (`select`, `insert`, `delete`) on all three of its policies, and so does
+    /// everything `egret-perm-compile` emits. The namespaced spelling reaches
+    /// egret only through the raw-JSON policy editor, which is the same
+    /// reachability argument [`UndecidableCause::TagSubPolicyIsDenyCapable`] was
+    /// added under. Modelling it is named as follow-up work in
+    /// `tests/ranger/README.md` rather than guessed at here.
+    ///
+    /// The one arm of the normalisation that IS reproduced is the whole-policy
+    /// prune, because its gate is a plain read of the wire and nothing about it
+    /// is ambiguous — see [`tag_policy_is_pruned`].
+    TagPolicyNotNormalisable {
+        policy_id: Option<i64>,
+        policy_name: String,
+        problem: TagNormalisationProblem,
+    },
     /// The TAG phase produced a mask or row filter and a strictly
     /// higher-priority RESOURCE policy then produced one too, so Ranger
     /// reports the tag policy's id with the resource policy's data.
@@ -972,6 +1037,57 @@ pub enum TagResourceProblem {
     /// see the ⚠ block on [`evaluate_tag_policies`] for why that trade was
     /// taken. `tests/ranger` measures both rows.
     Recursive,
+}
+
+/// What a tag policy carries that the TAG repository's `normalizeAndPrunePolicies`
+/// would change or reject, and this crate does not reproduce.
+///
+/// See [`UndecidableCause::TagPolicyNotNormalisable`] for the disassembly and
+/// for why each is refused rather than modelled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagNormalisationProblem {
+    /// An `accesses[].type`, in any of the six buckets, containing a `:`.
+    ///
+    /// Ranger strips a leading `<componentServiceDefName>:` and DROPS the access
+    /// otherwise. Both arms are refused, not just the strip: this crate is
+    /// handed the tag block's own def and not the component's name, so it cannot
+    /// even tell the two arms apart.
+    NamespacedAccessType(String),
+    /// A `dataMaskPolicyItems[].dataMaskInfo.dataMaskType` containing a `:`.
+    ///
+    /// Same two arms, except that the DROP removes the whole ITEM rather than
+    /// one access entry.
+    NamespacedMaskType(String),
+    /// A `dataMaskPolicyItems` item with **no mask type at all** — the key
+    /// absent, or explicitly null.
+    ///
+    /// ⚠ **This one is not a divergence in the verdict; it is a CRASH.** The
+    /// normalisation reads `dataMaskType.contains(":")` with no null guard
+    /// (offset 293 of `normalizeAndPrunePolicyItems`), and Ranger's model class
+    /// substitutes an empty `RangerPolicyItemDataMaskInfo` — whose
+    /// `dataMaskType` is null — for an absent or null `dataMaskInfo` (finding
+    /// F2). So a tag block carrying such an item makes
+    /// `RangerPolicyRepository`'s constructor throw
+    /// `NullPointerException`, which propagates out of
+    /// `RangerPolicyEngineImpl.<init>`: the plugin cannot build a policy engine
+    /// from that download at all, and **every** request fails, of every policy
+    /// type.
+    ///
+    /// Measured on the real 2.5.0 and 2.8.0 engines by the differential gate:
+    /// `java.lang.NullPointerException: Cannot invoke
+    /// "String.contains(java.lang.CharSequence)" because "maskType" is null
+    /// at RangerPolicyRepository.normalizeAndPrunePolicyItems`.
+    ///
+    /// Note the asymmetry with the RESOURCE path, and that it is the asymmetry
+    /// of Ranger's own code rather than of this crate's: the same item in
+    /// `policies` is perfectly legal there and DETERMINES the result with a null
+    /// mask type, which is SP4d-1's pinned finding F2. Only the tag repository
+    /// normalises, so only the tag repository crashes.
+    ///
+    /// Raised for every tag policy in the block regardless of `isEnabled` and
+    /// regardless of the decision's policy type, because the constructor runs
+    /// before `init()` and the throw is not scoped to either.
+    MaskTypeAbsent,
 }
 
 // ── mask and row-filter results ──────────────────────────────────────────
@@ -1391,6 +1507,82 @@ pub fn evaluate(
         }
 
         if let Some(found) = view.decide(request, &implied) {
+            // ⚠ THE ONE PLACE `getEvalOrder()` DECIDES AN ACCESS OUTCOME, and it
+            // exists only under a tag DENY.
+            //
+            // Once an allowing member of this band has run, `priority` moves to
+            // the band's and offset 469's `>=` shuts out every remaining
+            // evaluator at that priority — including the rest of the band. So in
+            // a `hasDeny` band above the tag deny's priority, whichever of an
+            // allowing and a denying member runs FIRST wins, and which that is
+            // comes from `RangerOptimizedPolicyEvaluator.computeEvalOrder()`, the
+            // resource-specificity score this crate does not compute.
+            //
+            // Neither of the other two arms can reach this shape, which is why
+            // the guard is on `is_denied_by_tags` rather than on the band:
+            //
+            // * with no tag verdict and with a tag ALLOW, offset 505's `>` lets
+            //   the same-priority rival run after the allow, so the deny still
+            //   wins whichever ran first;
+            // * with a tag ALLOW the allow branch of `updateAccessResult` does
+            //   not fire at all (`isAllowed` is already set), so `priority` never
+            //   moves and nothing is shut out.
+            //
+            // And the test is `has_deny` rather than the band as a whole because
+            // `sort_eval_order` puts every `hasDeny` member of a priority ahead
+            // of every non-`hasDeny` one, and nothing in the non-`hasDeny` half
+            // can deny at all (`has_deny` is `isDenyAllElse || !denyPolicyItems`),
+            // so that half holds no rival to be ambiguous with.
+            //
+            // ⚠ FIX (SP4d-2b Task 5): this check used to sit in the ALLOW arm
+            // ALONE, with a comment arguing that *"a rival earlier in this
+            // crate's order would already have denied and broken the loop, so
+            // scanning the whole band is the same scan as the rest of the
+            // band — and it does not depend on this crate's order being
+            // Ranger's, which is the point."*
+            //
+            // The scan did not depend on this crate's order. **Reaching the scan
+            // at all did.** When this crate's name tie-break happened to put the
+            // DENIER first, the deny arm below set `determined` and broke the
+            // loop, the allow arm was never reached, and the crate answered
+            // `Denied` with full confidence over a band whose winner Ranger picks
+            // with a score this crate does not compute. The differential gate
+            // measured it the first time the corpus generated a composed duel:
+            // 6 of 387 compared cases at ranger 2.8.0, every one of them
+            // `egret said Denied / ranger said Allowed` — so exactly half the
+            // shape was being refused, and the half that was not was chosen by a
+            // tie-break, not by a rule.
+            //
+            // The ambiguity is a property of the BAND — it holds a member that
+            // allows and a member that denies — so the check belongs where the
+            // band is observed, before either arm acts on one member's verdict.
+            if is_denied_by_tags && view.has_deny {
+                let band = (view.policy.policy_priority, view.has_deny);
+                let rival = candidates
+                    .iter()
+                    .filter(|other| !std::ptr::eq(other.policy, view.policy))
+                    .filter(|other| (other.policy.policy_priority, other.has_deny) == band)
+                    .find(|other| {
+                        // The OPPOSITE verdict to this member's: two allows
+                        // cannot disagree about the outcome (whichever runs
+                        // first, the band is shut out at an allow) and two denies
+                        // cannot either.
+                        other
+                            .decide(request, &implied)
+                            .is_some_and(|o| o.allowed != found.allowed)
+                    });
+                if let Some(rival) = rival {
+                    return Decision::Undecidable {
+                        why: vec![UndecidableCause::EvalOrderAmbiguous {
+                            policy_ids: vec![view.policy.id, rival.policy.id],
+                            policy_names: vec![
+                                view.policy.name.clone(),
+                                rival.policy.name.clone(),
+                            ],
+                        }],
+                    };
+                }
+            }
             // `RangerDefaultPolicyEvaluator.updateAccessResult`: the deny
             // branch (offsets 83-132) writes id, priority and reason
             // unconditionally; the allow branch (135-184) writes only
@@ -1403,52 +1595,6 @@ pub fn evaluate(
                 outcome = Some(found);
                 determined = true;
             } else if !allowed {
-                // ⚠ THE ONE PLACE `getEvalOrder()` DECIDES AN ACCESS OUTCOME,
-                // and it exists only under a tag DENY.
-                //
-                // `priority` moves to this policy's, and offset 469's `>=` then
-                // shuts out every remaining evaluator at that priority —
-                // including the rest of this policy's own band. So in a
-                // `hasDeny` band above the tag deny's priority, whichever of an
-                // allowing and a denying member runs FIRST wins, and which that
-                // is comes from `RangerOptimizedPolicyEvaluator.computeEvalOrder()`,
-                // the resource-specificity score this crate does not compute.
-                //
-                // Neither of the other two arms can reach this shape, which is
-                // why the guard is on `is_denied_by_tags` rather than on the
-                // band:
-                //
-                // * with no tag verdict and with a tag ALLOW, offset 505's `>`
-                //   lets the same-priority rival run after the allow, so the
-                //   deny still wins whichever ran first;
-                // * with a tag ALLOW the allow branch of `updateAccessResult`
-                //   does not fire at all (`isAllowed` is already set), so
-                //   `priority` never moves and nothing is shut out.
-                //
-                // A rival EARLIER in this crate's order would already have
-                // denied and broken the loop, so scanning the whole band minus
-                // this policy is the same scan as "the rest of the band" — and
-                // it does not depend on this crate's order being Ranger's,
-                // which is the point.
-                if is_denied_by_tags && view.has_deny {
-                    let band = (view.policy.policy_priority, view.has_deny);
-                    let rival = candidates
-                        .iter()
-                        .filter(|other| !std::ptr::eq(other.policy, view.policy))
-                        .filter(|other| (other.policy.policy_priority, other.has_deny) == band)
-                        .find(|other| other.decide(request, &implied).is_some_and(|o| !o.allowed));
-                    if let Some(rival) = rival {
-                        return Decision::Undecidable {
-                            why: vec![UndecidableCause::EvalOrderAmbiguous {
-                                policy_ids: vec![view.policy.id, rival.policy.id],
-                                policy_names: vec![
-                                    view.policy.name.clone(),
-                                    rival.policy.name.clone(),
-                                ],
-                            }],
-                        };
-                    }
-                }
                 allowed = true;
                 priority = found.priority;
                 outcome = Some(found);
@@ -3630,10 +3776,46 @@ fn tag_candidates<'a>(
         return Err(why);
     }
 
+    // ── the TAG repository's constructor CRASH (SP4d-2b Task 5) ───────────
+    //
+    // Above the `of_kind` return, above the access-type refusal, and NOT
+    // filtered by `isEnabled` or by policy type — because
+    // `normalizeAndPrunePolicies` runs in `RangerPolicyRepository`'s
+    // constructor, before `init()` drops a disabled policy, and the
+    // `NullPointerException` it throws on a null `dataMaskType` propagates out
+    // of `RangerPolicyEngineImpl.<init>`. There is no engine afterwards, so
+    // there is no decision of any type to be had. See
+    // [`TagNormalisationProblem::MaskTypeAbsent`].
+    for policy in &policies.tag_policies {
+        for item in &policy.data_mask_policy_items {
+            let absent = match &item.data_mask_info {
+                // The key was absent or null on the wire, which Ranger's model
+                // class turns into an empty object with a null type — the F2
+                // substitution, reaching a caller that does not null-check.
+                None => true,
+                Some(info) => info.mask_type.is_none(),
+            };
+            if absent {
+                why.push(UndecidableCause::TagPolicyNotNormalisable {
+                    policy_id: policy.id,
+                    policy_name: policy.name.clone(),
+                    problem: TagNormalisationProblem::MaskTypeAbsent,
+                });
+                break;
+            }
+        }
+    }
+    if !why.is_empty() {
+        return Err(why);
+    }
+
     let of_kind: Vec<&'a RangerPolicy> = policies
         .tag_policies
         .iter()
         .filter(|p| p.is_enabled)
+        // The one arm of the tag normalisation this crate REPRODUCES rather
+        // than refusing — see [`tag_policy_is_pruned`].
+        .filter(|p| !tag_policy_is_pruned(p))
         .filter(|p| p.policy_type == kind.policy_type_code())
         .collect();
     if of_kind.is_empty() {
@@ -3963,11 +4145,86 @@ fn tag_name_order(a: &TagCandidate<'_>, b: &TagCandidate<'_>) -> Ordering {
 /// Swept over every enabled tag policy of the decision's type, not only the
 /// ones that came out as candidates — a policy whose candidacy is exactly what
 /// cannot be established is not one the crate may quietly leave out.
+/// Whether the TAG policy repository's constructor removes `policy` outright.
+///
+/// The one arm of `normalizeAndPrunePolicies` this crate reproduces instead of
+/// refusing, because its gate is a plain read of the wire with nothing
+/// ambiguous in it: `isPolicyNeedsPruning` returns true when
+/// `!getIsAuditEnabled()` and all SIX item buckets are empty (2.5.0 offsets
+/// 60-133, identical in 2.8.0).
+///
+/// **`isDenyAllElse` is not one of the six**, and that is what makes this
+/// observable rather than vacuous. A tag ACCESS policy with
+/// `isDenyAllElse: true`, no items and `isAuditEnabled: false` decides nothing
+/// in Ranger — it is not in the repository — while without this filter it would
+/// be `has_deny` here and would DENY. Fail-CLOSED, which is why it went
+/// unnoticed, and wrong either way.
+///
+/// The prune is reached only BEHIND the access-type refusal, and deliberately:
+/// `normalizeAndPrunePolicyItems` can also empty a bucket by dropping every
+/// access of an item whose accesses all carried a foreign `:` prefix, and that
+/// path is refused by [`TagNormalisationProblem::NamespacedAccessType`] rather
+/// than reproduced. An item with NO accesses at all is **not** pruned —
+/// `CollectionUtils.isNotEmpty(accesses)` guards the whole inner block at offset
+/// 67 — so an empty-`accesses` item still keeps its bucket non-empty, and this
+/// function must not "helpfully" treat it as absent.
+///
+/// `isEnabled` is a different mechanism (`skipBuildingPolicyEvaluator`, at
+/// `init` time) and is tested separately at every call site.
+fn tag_policy_is_pruned(policy: &RangerPolicy) -> bool {
+    !policy.is_audit_enabled
+        && policy.policy_items.is_empty()
+        && policy.deny_policy_items.is_empty()
+        && policy.allow_exceptions.is_empty()
+        && policy.deny_exceptions.is_empty()
+        && policy.data_mask_policy_items.is_empty()
+        && policy.row_filter_policy_items.is_empty()
+}
+
 fn collect_tag_resource_causes(
     policy: &RangerPolicy,
     tag_service_def: &ServiceDef,
     why: &mut Vec<UndecidableCause>,
 ) {
+    // ── the namespaced access and mask types (SP4d-2b Task 5) ─────────────
+    //
+    // In this sweep rather than in `PolicyView::collect_causes` for the same
+    // reason the expression marker is: candidacy has not been decided yet here,
+    // and a refusal that only fires for policies whose tag value already matched
+    // is not unconditional. Scoped to policies of the KIND, unlike the
+    // constructor crash above, because the normalisation rewrites a policy's own
+    // buckets and cannot reach a decision of another type.
+    //
+    // All six buckets, because `normalizeAndPrunePolicyItems` is called on all
+    // six (offsets 0-59 of `isPolicyNeedsPruning`) and because the crate's own
+    // `accessPerms` model (`checkIfHasAllPerms`) reads all six too.
+    for items in all_buckets(policy) {
+        for item in items {
+            for access in &item.accesses {
+                if access.access_type.contains(':') {
+                    why.push(UndecidableCause::TagPolicyNotNormalisable {
+                        policy_id: policy.id,
+                        policy_name: policy.name.clone(),
+                        problem: TagNormalisationProblem::NamespacedAccessType(
+                            access.access_type.clone(),
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    for item in &policy.data_mask_policy_items {
+        if let Some(mask_type) = item.data_mask_info.as_ref().and_then(|i| i.mask_type.as_ref()) {
+            if mask_type.contains(':') {
+                why.push(UndecidableCause::TagPolicyNotNormalisable {
+                    policy_id: policy.id,
+                    policy_name: policy.name.clone(),
+                    problem: TagNormalisationProblem::NamespacedMaskType(mask_type.clone()),
+                });
+            }
+        }
+    }
+
     // ── FIX ROUND 1: a runtime expression in the tag VALUE ────────────────
     //
     // **This was a fail-open, and it was found by trying to write the test that

@@ -41586,6 +41586,61 @@
         ],
         "description": "Wire mirror of [`TagAttachmentProblem`]: what one resolved tag ATTACHMENT\ncarries that the evaluator cannot reproduce (SP4d-2b Task 4).\n\nThree `kind`s rather than one sentence, for the same reason\n[`WireTagResourceProblem`] has four: the remedies differ and do not overlap.\n`options` and `validity_periods` say the tag download carries a validity\nconstruct egret neither emits nor evaluates; `resource_levels` says the\ndownload's service resource is not a shape egret's own writer can produce at\nall, which is a question about where the payload came from."
       },
+      "WireTagNormalisationProblem": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "access_type",
+              "kind"
+            ],
+            "properties": {
+              "access_type": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "namespaced_access_type"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "mask_type",
+              "kind"
+            ],
+            "properties": {
+              "mask_type": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "namespaced_mask_type"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "mask_type_absent"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`TagNormalisationProblem`]: what a tag policy carries that\nthe TAG policy repository's `normalizeAndPrunePolicies` would rewrite or\nreject (SP4d-2b Task 5).\n\nThree `kind`s, and the third is not a variation on the first two: the two\nnamespaced arms are a WRONG ANSWER this crate declines to give, and\n`mask_type_absent` is a CRASH — the plugin cannot build a policy engine from\nthat download, so nothing it serves is answered. A steward reading\n\"unsupported tag policy\" would have no way to tell \"rename the access type\"\nfrom \"this download breaks the plugin outright\", and the second is an\nincident."
+      },
       "WireTagPolicyBlock": {
         "oneOf": [
           {
@@ -42047,6 +42102,36 @@
                 "type": "string",
                 "enum": [
                   "tag_sub_policy_is_deny_capable"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A tag policy the TAG policy repository would rewrite or remove on the way\nin, in a way the evaluator does not reproduce — or, for\n`mask_type_absent`, one that makes the plugin throw while building its\nrepository so that it serves nothing at all.",
+            "required": [
+              "policy_name",
+              "problem",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "problem": {
+                "$ref": "#/components/schemas/WireTagNormalisationProblem"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_policy_not_normalisable"
                 ]
               }
             }

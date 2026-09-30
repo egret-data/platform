@@ -847,6 +847,89 @@ describe("ExplainAccess — one answer per profile, over the artifact the engine
   });
 
   /**
+   * **SP4d-2b Task 5.** The differential gate found that the TAG policy
+   * repository — and no other — normalises its policies on the way in, which
+   * added `tag_policy_not_normalisable` with three problem shapes. `tsc` proves
+   * the switch reaches them; only this proves each says something different.
+   *
+   * The third shape is the one that must NOT read like the other two. A
+   * namespaced access or mask type is something a steward edits; an absent mask
+   * type makes the engine's plugin fail to load the whole download, so nothing
+   * it serves is being decided. A sentence that said "egret cannot decide this
+   * access" for that would understate an incident as a gap.
+   */
+  test("the tag normalisation cause separates an editable name from a plugin that will not load", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "undecidable",
+                  why: [
+                    {
+                      kind: "tag_policy_not_normalisable",
+                      policy_id: 8901,
+                      policy_name: "clearance-ns-access",
+                      problem: { kind: "namespaced_access_type", access_type: "trino:select" },
+                    },
+                    {
+                      kind: "tag_policy_not_normalisable",
+                      policy_id: 8902,
+                      policy_name: "mask-ns-type",
+                      problem: { kind: "namespaced_mask_type", mask_type: "hive:MASK_HASH" },
+                    },
+                    {
+                      kind: "tag_policy_not_normalisable",
+                      policy_id: 8903,
+                      policy_name: "mask-no-type",
+                      problem: { kind: "mask_type_absent" },
+                    },
+                  ],
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: ["pii"],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const causes = within(result).getAllByTestId("undecidable-cause");
+    expect(causes).toHaveLength(3);
+    for (const cause of causes) {
+      expect(cause.textContent?.trim().length ?? 0).toBeGreaterThan(20);
+    }
+
+    // Each names its own policy and quotes its own offending value, or a steward
+    // cannot find the thing to change.
+    expect(causes[0]).toHaveTextContent("clearance-ns-access");
+    expect(causes[0]).toHaveTextContent("trino:select");
+    expect(causes[1]).toHaveTextContent("mask-ns-type");
+    expect(causes[1]).toHaveTextContent("hive:MASK_HASH");
+    expect(causes[2]).toHaveTextContent("mask-no-type");
+
+    // …and the third says the PLUGIN is failing, not that egret is unsure. This
+    // is the assertion that would fail if someone folded all three onto one
+    // sentence.
+    expect(causes[2]).toHaveTextContent(/fail|not load|loading/i);
+    expect(causes[2]).not.toHaveTextContent(/component-qualified/i);
+    expect(new Set(causes.map((c) => c.textContent)).size).toBe(3);
+  });
+
+  /**
    * **SP4d-2b Task 4.** `tsc`'s `const _never: never` proves the switch covers
    * the new `tag_attachment_not_reproducible` cause and its three problem
    * shapes; it proves nothing about what any of them renders. All three shapes

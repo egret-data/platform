@@ -9,6 +9,7 @@ import type { WireEngineType } from './wireEngineType';
 import type { WirePluginVersion } from './wirePluginVersion';
 import type { WireServiceDefIssue } from './wireServiceDefIssue';
 import type { WireTagAttachmentProblem } from './wireTagAttachmentProblem';
+import type { WireTagNormalisationProblem } from './wireTagNormalisationProblem';
 import type { WireTagResourceProblem } from './wireTagResourceProblem';
 import type { WireUnmodelled } from './wireUnmodelled';
 
@@ -87,6 +88,12 @@ export type WireUndecidableCause = {
   policy_id?: number | null;
   policy_name: string;
   kind: 'tag_sub_policy_is_deny_capable';
+} | {
+  /** @nullable */
+  policy_id?: number | null;
+  policy_name: string;
+  problem: WireTagNormalisationProblem;
+  kind: 'tag_policy_not_normalisable';
 } | {
   /** @nullable */
   tag_policy_id?: number | null;

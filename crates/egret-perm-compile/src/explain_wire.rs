@@ -91,7 +91,8 @@
 
 use egret_ranger_eval::eval::{
     Decision, DenyReason, EngineType, MaskDecision, MaskResult, PluginVersion, RowFilterDecision,
-    RowFilterResult, TagAttachmentProblem, TagResourceProblem, UndecidableCause,
+    RowFilterResult, TagAttachmentProblem, TagNormalisationProblem, TagResourceProblem,
+    UndecidableCause,
 };
 use egret_ranger_eval::model::{ItemBucket, TagPolicyBlock, Unmodelled};
 use egret_ranger_eval::servicedef::{GraphProblem, PolicyType, ServiceDefIssue};
@@ -251,6 +252,46 @@ impl From<&TagResourceProblem> for WireTagResourceProblem {
                 }
             }
             TagResourceProblem::Recursive => WireTagResourceProblem::Recursive,
+        }
+    }
+}
+
+/// Wire mirror of [`TagNormalisationProblem`]: what a tag policy carries that
+/// the TAG policy repository's `normalizeAndPrunePolicies` would rewrite or
+/// reject (SP4d-2b Task 5).
+///
+/// Three `kind`s, and the third is not a variation on the first two: the two
+/// namespaced arms are a WRONG ANSWER this crate declines to give, and
+/// `mask_type_absent` is a CRASH — the plugin cannot build a policy engine from
+/// that download, so nothing it serves is answered. A steward reading
+/// "unsupported tag policy" would have no way to tell "rename the access type"
+/// from "this download breaks the plugin outright", and the second is an
+/// incident.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireTagNormalisationProblem {
+    NamespacedAccessType { access_type: String },
+    NamespacedMaskType { mask_type: String },
+    MaskTypeAbsent,
+}
+
+impl From<&TagNormalisationProblem> for WireTagNormalisationProblem {
+    fn from(problem: &TagNormalisationProblem) -> Self {
+        // NO wildcard arm — see `WireUndecidableCause::from`'s doc.
+        match problem {
+            TagNormalisationProblem::NamespacedAccessType(access_type) => {
+                WireTagNormalisationProblem::NamespacedAccessType {
+                    access_type: access_type.clone(),
+                }
+            }
+            TagNormalisationProblem::NamespacedMaskType(mask_type) => {
+                WireTagNormalisationProblem::NamespacedMaskType {
+                    mask_type: mask_type.clone(),
+                }
+            }
+            TagNormalisationProblem::MaskTypeAbsent => {
+                WireTagNormalisationProblem::MaskTypeAbsent
+            }
         }
     }
 }
@@ -613,6 +654,15 @@ pub enum WireUndecidableCause {
         policy_id: Option<i64>,
         policy_name: String,
     },
+    /// A tag policy the TAG policy repository would rewrite or remove on the way
+    /// in, in a way the evaluator does not reproduce — or, for
+    /// `mask_type_absent`, one that makes the plugin throw while building its
+    /// repository so that it serves nothing at all.
+    TagPolicyNotNormalisable {
+        policy_id: Option<i64>,
+        policy_name: String,
+        problem: WireTagNormalisationProblem,
+    },
     /// A tag mask or row filter was displaced in part by a strictly
     /// higher-priority resource policy: Ranger reports the tag policy's id with
     /// the resource policy's mask.
@@ -765,6 +815,15 @@ impl From<&UndecidableCause> for WireUndecidableCause {
                 policy_id: *policy_id,
                 policy_name: policy_name.clone(),
                 problem: WireTagResourceProblem::from(problem),
+            },
+            UndecidableCause::TagPolicyNotNormalisable {
+                policy_id,
+                policy_name,
+                problem,
+            } => WireUndecidableCause::TagPolicyNotNormalisable {
+                policy_id: *policy_id,
+                policy_name: policy_name.clone(),
+                problem: WireTagNormalisationProblem::from(problem),
             },
             UndecidableCause::TagAttachmentNotReproducible { tag, problem } => {
                 WireUndecidableCause::TagAttachmentNotReproducible {

@@ -49,7 +49,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use egret_ranger_eval::eval::{
     evaluate, evaluate_data_mask, evaluate_row_filter, AccessRequest, Decision, DenyReason,
     EngineConfig, MaskDecision, ResolvedTag, RowFilterDecision, TagAttachmentProblem,
-    TagServiceResource, UndecidableCause,
+    TagNormalisationProblem, TagServiceResource, UndecidableCause,
 };
 use egret_ranger_eval::model::{ServicePolicySet, Unmodelled};
 use egret_ranger_eval::resource::{MatchType, RequestResource};
@@ -1287,5 +1287,256 @@ fn is_enabled_on_a_service_resource_is_never_consulted() {
     assert!(
         matches!(&enabled, Decision::Allowed { policy_name, .. } if policy_name == "tag-allow"),
         "and both must be the tag ALLOW, or the equality is between two nothings: {enabled:?}"
+    );
+}
+
+// ── 5. the TAG repository's own normalisation (SP4d-2b Task 5) ────────────
+//
+// `RangerPolicyRepository`'s `ServicePolicies$TagPolicies` constructor calls
+// `normalizeAndPrunePolicies`, and **no other constructor in either jar does**.
+// Every assertion below was written after the differential gate made the real
+// 2.5.0 and 2.8.0 engines demonstrate the behaviour, not from reading the class:
+// the crash in particular is a measured
+// `NullPointerException ... at RangerPolicyRepository.normalizeAndPrunePolicyItems`.
+
+/// A tag MASK policy whose item carries no `dataMaskInfo` at all.
+///
+/// On the RESOURCE path this is legal and is SP4d-1's pinned finding F2 — the
+/// item DETERMINES with a null mask type. In the TAG block it makes the plugin
+/// throw while building its repository, so there is no engine and no request of
+/// any type is answered. The two paths differ because only one of them
+/// normalises.
+#[test]
+fn a_tag_mask_item_with_no_mask_type_refuses_because_the_plugin_crashes() {
+    let set = envelope(json!([tag_policy(
+        20,
+        "tag-mask-null",
+        1,
+        "dataMaskPolicyItems",
+        json!([{ "users": ["alice"], "accesses": [{"type": "select", "isAllowed": true}] }]),
+    )]));
+
+    let d = evaluate_data_mask(
+        &set,
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert_eq!(
+        d,
+        MaskDecision::Undecidable {
+            why: vec![UndecidableCause::TagPolicyNotNormalisable {
+                policy_id: Some(20),
+                policy_name: "tag-mask-null".to_string(),
+                problem: TagNormalisationProblem::MaskTypeAbsent,
+            }]
+        },
+        "a null dataMaskType in the tag block is a constructor NPE, not a mask"
+    );
+}
+
+/// …and the crash is not scoped to the decision's own policy type, or to an
+/// ENABLED policy. Both halves matter and both are measured: the constructor
+/// runs before `init()` (so `skipBuildingPolicyEvaluator` has dropped nothing
+/// yet) and the throw leaves no engine (so an ACCESS request fails too).
+///
+/// This is the test that would fail if someone "tidied" the sweep by moving it
+/// below the `of_kind` filter or adding `.filter(|p| p.is_enabled)` — both of
+/// which look like obvious cleanups and both of which would restore a confident
+/// answer where the real plugin serves none.
+#[test]
+fn the_tag_mask_crash_refuses_an_access_request_and_a_disabled_policy_too() {
+    let mut policy = tag_policy(
+        21,
+        "tag-mask-null-disabled",
+        1,
+        "dataMaskPolicyItems",
+        json!([{ "users": ["alice"], "accesses": [{"type": "select", "isAllowed": true}] }]),
+    );
+    policy["isEnabled"] = json!(false);
+    // Beside a perfectly good tag ACCESS policy, so "refused" cannot be read as
+    // "nothing was there to decide".
+    let set = envelope(json!([
+        policy,
+        tag_policy(
+            10,
+            "tag-allow",
+            0,
+            "policyItems",
+            json!([{ "users": ["alice"], "accesses": [{"type": "select", "isAllowed": true}] }]),
+        ),
+    ]));
+
+    let d = evaluate(
+        &set,
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert_eq!(
+        causes(&d),
+        vec![UndecidableCause::TagPolicyNotNormalisable {
+            policy_id: Some(21),
+            policy_name: "tag-mask-null-disabled".to_string(),
+            problem: TagNormalisationProblem::MaskTypeAbsent,
+        }],
+        "the constructor throws before init() and for every policy type: {d:?}"
+    );
+}
+
+/// An access type carrying a `:` — the namespaced spelling a Ranger-authored
+/// tag policy uses (`trino:select`).
+///
+/// **This is the fail-open direction.** Ranger strips `"<componentDefName>:"`
+/// and the item then grants `select`; this crate compares the literal
+/// `"trino:select"` against `"select"`, matches nothing, and would answer
+/// `Denied{NoPolicyMatched}` for an ALLOW policy and — the direction that
+/// matters — would MISS a deny.
+#[test]
+fn a_namespaced_access_type_on_a_tag_policy_refuses() {
+    let set = envelope(json!([tag_policy(
+        30,
+        "tag-deny-namespaced",
+        0,
+        "denyPolicyItems",
+        json!([{ "users": ["alice"], "accesses": [{"type": "trino:select", "isAllowed": true}] }]),
+    )]));
+
+    let d = evaluate(
+        &set,
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert_eq!(
+        causes(&d),
+        vec![UndecidableCause::TagPolicyNotNormalisable {
+            policy_id: Some(30),
+            policy_name: "tag-deny-namespaced".to_string(),
+            problem: TagNormalisationProblem::NamespacedAccessType("trino:select".to_string()),
+        }],
+        "a `:` in a tag policy's access type is Ranger's namespace, not a literal: {d:?}"
+    );
+}
+
+/// The same for `dataMaskType`, where Ranger's DROP arm removes the whole ITEM
+/// rather than one access entry.
+#[test]
+fn a_namespaced_mask_type_on_a_tag_policy_refuses() {
+    let set = envelope(json!([tag_policy(
+        31,
+        "tag-mask-namespaced",
+        1,
+        "dataMaskPolicyItems",
+        json!([{
+            "users": ["alice"],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": "hive:MASK_HASH"},
+        }]),
+    )]));
+
+    let d = evaluate_data_mask(
+        &set,
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert_eq!(
+        d,
+        MaskDecision::Undecidable {
+            why: vec![UndecidableCause::TagPolicyNotNormalisable {
+                policy_id: Some(31),
+                policy_name: "tag-mask-namespaced".to_string(),
+                problem: TagNormalisationProblem::NamespacedMaskType("hive:MASK_HASH".to_string()),
+            }]
+        },
+        "a `:` in a tag policy's dataMaskType is Ranger's namespace: {d:?}"
+    );
+}
+
+/// The one arm of the normalisation this crate REPRODUCES: a tag policy with no
+/// items and `isAuditEnabled: false` is not in Ranger's repository at all, so
+/// its `isDenyAllElse` cannot deny.
+///
+/// `isDenyAllElse` is not one of the six buckets `isPolicyNeedsPruning` tests,
+/// which is the whole reason the prune is observable. Without the filter this
+/// answers `Denied{DenyAllElse}` where the real plugin, having pruned the
+/// policy, reaches no tag verdict — fail-CLOSED, which is why nothing noticed.
+#[test]
+fn an_audit_disabled_tag_policy_with_no_items_is_pruned_and_cannot_deny() {
+    let mut policy = tag_policy(40, "tag-deny-all-else", 0, "policyItems", json!([]));
+    policy["isDenyAllElse"] = json!(true);
+    policy["isAuditEnabled"] = json!(false);
+
+    let pruned = evaluate(
+        &envelope(json!([policy.clone()])),
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert_eq!(
+        pruned,
+        Decision::Denied {
+            policy_id: None,
+            policy_name: String::new(),
+            reason: DenyReason::NoPolicyMatched,
+        },
+        "the pruned policy must reach no verdict at all, not deny: {pruned:?}"
+    );
+
+    // The falsifier, on the SAME policy with auditing left at its default: the
+    // prune is about `isAuditEnabled`, not about the policy having no items.
+    // Without this, a bug that dropped every item-less tag policy would pass
+    // the assertion above.
+    let mut audited = policy;
+    audited["isAuditEnabled"] = json!(true);
+    let kept = evaluate(
+        &envelope(json!([audited])),
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        matches!(
+            &kept,
+            Decision::Denied { reason: DenyReason::DenyAllElse, policy_name, .. }
+                if policy_name == "tag-deny-all-else"
+        ),
+        "with auditing on, the identical policy is kept and DOES deny-all-else: {kept:?}"
+    );
+}
+
+/// An item with an EMPTY `accesses` list does NOT empty its bucket, so a policy
+/// carrying one is not pruned however `isAuditEnabled` reads.
+///
+/// `CollectionUtils.isNotEmpty(accesses)` guards the whole item-pruning block at
+/// offset 67 of `normalizeAndPrunePolicyItems`, so such an item survives. The
+/// tempting "an item with no accesses grants nothing, treat the bucket as empty"
+/// shortcut would prune a policy Ranger keeps.
+#[test]
+fn an_item_with_no_accesses_does_not_make_its_bucket_empty() {
+    let mut policy = tag_policy(
+        41,
+        "tag-empty-accesses",
+        0,
+        "policyItems",
+        json!([{ "users": ["alice"], "accesses": [] }]),
+    );
+    policy["isDenyAllElse"] = json!(true);
+    policy["isAuditEnabled"] = json!(false);
+
+    let d = evaluate(
+        &envelope(json!([policy])),
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        matches!(
+            &d,
+            Decision::Denied { reason: DenyReason::DenyAllElse, policy_name, .. }
+                if policy_name == "tag-empty-accesses"
+        ),
+        "the bucket is non-empty, so the policy is NOT pruned and still denies-all-else: {d:?}"
     );
 }

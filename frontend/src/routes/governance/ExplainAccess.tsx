@@ -29,6 +29,7 @@ import type {
   WirePolicyType,
   WireServiceDefIssue,
   WireTagAttachmentProblem,
+  WireTagNormalisationProblem,
   WireTagResourceProblem,
   WireUndecidableCause,
   WireUnmodelled,
@@ -232,6 +233,30 @@ function tagAttachmentProblemPhrase(p: WireTagAttachmentProblem): string {
   return _never;
 }
 
+/**
+ * What a tag policy carries that the engine's TAG policy repository would
+ * rewrite or reject on the way in — see
+ * `UndecidableCause::TagPolicyNotNormalisable`.
+ *
+ * The third shape is not a variation on the first two, and the wording says so:
+ * a namespaced access or mask type is something a steward EDITS, while an
+ * absent mask type makes the plugin fail to build a policy engine from the
+ * download at all. Reporting the second as "egret cannot decide this access"
+ * would understate it — nothing the engine serves is being decided.
+ */
+function tagNormalisationProblemPhrase(p: WireTagNormalisationProblem): string {
+  switch (p.kind) {
+    case "namespaced_access_type":
+      return `names the access type “${p.access_type}”, which the engine's plugin reads as a component-qualified name rather than a literal`;
+    case "namespaced_mask_type":
+      return `names the mask type “${p.mask_type}”, which the engine's plugin reads as a component-qualified name rather than a literal`;
+    case "mask_type_absent":
+      return "has a masking item with no mask type at all, which makes the engine's plugin fail while loading this policy download";
+  }
+  const _never: never = p;
+  return _never;
+}
+
 function causeScopeNote(c: WireUndecidableCause): string | null {
   const construct =
     c.kind === "envelope_construct" || c.kind === "policy_construct" ? c.construct : null;
@@ -287,6 +312,10 @@ function causeSentence(c: WireUndecidableCause): string {
       return `The tag “${c.tag}” on this resource ${tagAttachmentProblemPhrase(c.problem)}, so egret cannot tell whether the engine would evaluate its tag policies here.`;
     case "tag_sub_result_split_by_resource_policy":
       return `Tag policy ${policyRef(c.tag_policy_name, c.tag_policy_id)} produced a mask or row filter and the higher-priority Ranger policy ${policyRef(c.resource_policy_name, c.resource_policy_id)} then produced one too, so Ranger reports the tag policy's id with the other policy's mask.`;
+    case "tag_policy_not_normalisable":
+      return c.problem.kind === "mask_type_absent"
+        ? `Tag policy ${policyRef(c.policy_name, c.policy_id)} ${tagNormalisationProblemPhrase(c.problem)} — so the engine is serving no decisions from this download at all, and this one cannot be answered either.`
+        : `Tag policy ${policyRef(c.policy_name, c.policy_id)} ${tagNormalisationProblemPhrase(c.problem)}, so egret cannot tell what the engine would actually evaluate.`;
   }
   const _never: never = c;
   return _never;
