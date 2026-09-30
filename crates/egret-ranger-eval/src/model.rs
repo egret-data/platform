@@ -73,6 +73,22 @@ pub struct ServicePolicySet {
     /// Dropping it would leave the tag narrowing reading only half of what
     /// decides whether tag policies can run.
     pub tag_service_def: serde_json::Value,
+    /// The `tagPolicies` block's OWN `policies`, read with the same
+    /// [`RangerPolicy`] reader as the resource policies — because they ARE
+    /// the same shape: `ServicePolicies$TagPolicies.getPolicies()` is a
+    /// `List<RangerPolicy>` in both jars, and `RangerPolicyRepository`'s
+    /// tag-service constructor files them through the very same
+    /// `skipBuildingPolicyEvaluator` / `init` path.
+    ///
+    /// Empty when there is no block, when the block carries no policies, or
+    /// when the block's `policies` is a shape this reader could not read —
+    /// and that last case is NOT a silent drop: it is reported as
+    /// [`TagPolicyBlock::Unreadable`], see [`classify_tag_policies`].
+    ///
+    /// SP4d-2b Task 2: [`crate::eval::evaluate_tag_policies`] evaluates these.
+    /// Before it, the block's policies were COUNTED (for the refusal) and
+    /// then dropped.
+    pub tag_policies: Vec<RangerPolicy>,
     /// Envelope-level constructs this reader does not model: a non-empty
     /// `securityZones`, `policyDeltas` or `serviceConfig`, and a `tagPolicies`
     /// block this reader could not show inert ([`TagPolicyBlock`]).
@@ -702,7 +718,13 @@ impl<'de> Deserialize<'de> for ServicePolicySet {
         if !raw.security_zones.is_empty() {
             unmodelled.push(Unmodelled::SecurityZones);
         }
-        if let Some(block) = classify_tag_policies(&raw.tag_policies) {
+        // The block's policies, read rather than counted. `from_value` is
+        // all-or-nothing, so a `policies` array this reader cannot bind comes
+        // back EMPTY — which is why `classify_tag_policies` is handed the
+        // result and reports `Unreadable` rather than "zero policies" for it.
+        let tag_policies: Vec<RangerPolicy> =
+            serde_json::from_value(raw.tag_policies["policies"].clone()).unwrap_or_default();
+        if let Some(block) = classify_tag_policies(&raw.tag_policies, tag_policies.len()) {
             unmodelled.push(Unmodelled::TagPolicies(block));
         }
         if !raw.policy_deltas.is_empty() {
@@ -723,6 +745,7 @@ impl<'de> Deserialize<'de> for ServicePolicySet {
             policies: raw.policies,
             service_def: raw.service_def,
             tag_service_def,
+            tag_policies,
             unmodelled,
         })
     }
@@ -735,7 +758,12 @@ impl<'de> Deserialize<'de> for ServicePolicySet {
 /// asymmetry is deliberate: "absent" and "present with no policies" are the
 /// only shapes this function is willing to call inert, and everything else —
 /// including a shape it simply does not recognise — is reported.
-fn classify_tag_policies(raw: &serde_json::Value) -> Option<TagPolicyBlock> {
+///
+/// `read` is how many of those policies [`ServicePolicySet::tag_policies`]
+/// actually bound. A `policies` array the reader could not bind is a shape it
+/// does not understand, so it is `Unreadable` rather than a count nobody can
+/// evaluate — the same asymmetry one level down.
+fn classify_tag_policies(raw: &serde_json::Value, read: usize) -> Option<TagPolicyBlock> {
     // Absent. `Value::Null` is what `#[serde(default)]` leaves behind for a
     // missing key AND what an explicit `"tagPolicies": null` deserializes to;
     // Ranger's `ServicePolicies.getTagPolicies()` is null for both, so the
@@ -752,7 +780,10 @@ fn classify_tag_policies(raw: &serde_json::Value) -> Option<TagPolicyBlock> {
         // `CollectionUtils.isNotEmpty` is false for null and for empty alike.
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::Array(policies)) if policies.is_empty() => None,
-        Some(serde_json::Value::Array(policies)) => Some(TagPolicyBlock::Policies(policies.len())),
+        Some(serde_json::Value::Array(policies)) if policies.len() == read => {
+            Some(TagPolicyBlock::Policies(policies.len()))
+        }
+        Some(serde_json::Value::Array(_)) => Some(TagPolicyBlock::Unreadable),
         // A `policies` that is not a list is a shape this reader does not
         // understand, so it has not been shown inert.
         Some(_) => Some(TagPolicyBlock::Unreadable),

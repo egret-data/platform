@@ -125,9 +125,11 @@
 
 use std::collections::BTreeSet;
 
-use egret_ranger_eval::eval::{evaluate, AccessRequest, Decision, EngineConfig, UndecidableCause};
+use egret_ranger_eval::eval::{
+    evaluate, AccessRequest, Decision, EngineConfig, ResolvedTag, UndecidableCause,
+};
 use egret_ranger_eval::model::{ServicePolicySet, TagPolicyBlock, Unmodelled};
-use egret_ranger_eval::resource::RequestResource;
+use egret_ranger_eval::resource::{MatchType, RequestResource};
 use egret_ranger_eval::servicedef::ServiceDef;
 use serde_json::{json, Value};
 
@@ -423,7 +425,7 @@ fn the_captured_download_refuses_as_itself() {
 fn an_empty_resolved_tag_set_is_decidable() {
     let set = envelope(json!({"tagPolicies": live_tag_policies()}));
     let req = AccessRequest {
-        resolved_tags: Some(BTreeSet::new()),
+        resolved_tags: Some(Vec::new()),
         ..request()
     };
     let d = evaluate(&set, &req, &trino_def(), &no_superusers());
@@ -462,7 +464,10 @@ fn an_unresolved_tag_set_must_not_take_the_narrowing() {
 fn a_non_empty_resolved_tag_set_still_refuses() {
     let set = envelope(json!({"tagPolicies": live_tag_policies()}));
     let req = AccessRequest {
-        resolved_tags: Some(BTreeSet::from(["pii".to_string()])),
+        resolved_tags: Some(vec![ResolvedTag {
+            name: "pii".to_string(),
+            match_type: MatchType::Self_,
+        }]),
         ..request()
     };
     let d = evaluate(&set, &req, &trino_def(), &no_superusers());
@@ -663,7 +668,7 @@ fn an_empty_resolved_tag_set_narrows_even_with_both_enrichers() {
         ),
     }));
     let req = AccessRequest {
-        resolved_tags: Some(BTreeSet::new()),
+        resolved_tags: Some(Vec::new()),
         ..request()
     };
     let d = evaluate(&set, &req, &trino_def(), &no_superusers());

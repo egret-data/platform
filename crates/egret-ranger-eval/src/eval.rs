@@ -54,8 +54,15 @@
 //! ([`ServiceDef::has_tag_enricher`]), or the request's resolved tag set is
 //! explicitly empty ([`AccessRequest::resolved_tags`]). Anything else — a
 //! non-empty block, an unreadable block, an unknown enricher, an unresolved
-//! tag set — refuses. This module does not EVALUATE tag policies; that is
-//! SP4d-2b.
+//! tag set — refuses.
+//!
+//! SP4d-2b Task 2 added the other half: [`evaluate_tag_policies`],
+//! [`evaluate_tag_data_mask`] and [`evaluate_tag_row_filter`] reproduce
+//! `RangerPolicyEngineImpl.evaluateTagPolicies` against a resolved tag set
+//! ([`AccessRequest::resolved_tags`]) and the block's own service-def. They are
+//! one PHASE, not an answer: composing their verdict with the resource
+//! policies' is the cross-phase arbitration, and the refusal above still
+//! stands in [`evaluate`] until that lands.
 //!
 //! No comparable escape exists for `serviceConfig`, and the resemblance is a
 //! trap: an empty `tagPolicies` is a measured no-op, while an unmodelled
@@ -98,8 +105,10 @@ use crate::model::{
     has_double_brackets, has_request_expression, AccessEntry, ItemBucket, PolicyItem, RangerPolicy,
     ServicePolicySet, TagPolicyBlock, Unmodelled,
 };
-use crate::resource::{match_policy_resources, MatchType, RequestResource};
-use crate::servicedef::{ServiceDef, ServiceDefIssue};
+use crate::resource::{
+    match_policy_resources, trie_reproduces_matcher, MatchType, RequestResource,
+};
+use crate::servicedef::{PolicyType, ServiceDef, ServiceDefIssue};
 
 /// `RangerPolicyEngine.GROUP_PUBLIC`. Verified with
 /// `javap -constants org.apache.ranger.plugin.policyengine.RangerPolicyEngine`
@@ -178,7 +187,39 @@ pub struct AccessRequest {
     /// as empty would ship green and wrong. This crate therefore only
     /// **offers** the narrowing; whether passing `Some` is sound is a property
     /// of the caller, decided in SP4d-2a Task 5, not of this type.
-    pub resolved_tags: Option<BTreeSet<String>>,
+    ///
+    /// # Why each entry carries a [`MatchType`] and why this is not a `Set`
+    ///
+    /// `RangerTagForEval` carries the match type the enricher stamped on the
+    /// attachment, and [`crate::eval::evaluate_tag_policies`] reads it rather
+    /// than matching the policy's own resource — see that function. Its
+    /// `equals`/`hashCode` include `matchType`, so the same tag reached at two
+    /// hierarchy levels is TWO members of Ranger's set, and collapsing them by
+    /// name would silently reorder masks (the mask comparator is the match
+    /// type). This crate takes a `Vec` because the resolver returns one and
+    /// because **the caller's order is not authoritative** — the phase applies
+    /// Ranger's three comparators itself — and de-duplicates on
+    /// `(name, match_type)`, which is exactly `RangerTagForEval`'s identity.
+    pub resolved_tags: Option<Vec<ResolvedTag>>,
+}
+
+/// One tag the caller resolved for [`AccessRequest::resource`]: the wire tag's
+/// `type` and the `MatchType` the enricher stamped on it.
+///
+/// `name` is the identifier the ENGINE matches — `ServiceTags.tags[].type`,
+/// which `ServiceTags::from_assignments` fills from `tags.name`. It is **not**
+/// `tags.key`; live those differ for one of three tags, and reusing the key
+/// here would be a silent fail-open (SP4d-2b design, D3).
+///
+/// `match_type` is a property of the ATTACHMENT, not of any policy:
+/// `RangerTagEnricher.findMatchingTags` builds a real
+/// `RangerDefaultPolicyResourceMatcher` per tag service resource and records
+/// what it returned. The policy's own resource is a separate question, asked
+/// separately — see [`evaluate_tag_policies`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTag {
+    pub name: String,
+    pub match_type: MatchType,
 }
 
 /// Which engine's Ranger plugin a decision is being reproduced for.
@@ -447,6 +488,29 @@ pub enum UndecidableCause {
         declared: EngineType,
         service_def_name: String,
     },
+    /// The envelope's `tagPolicies` block carries policies this decision's
+    /// policy type would evaluate, and [`AccessRequest::resolved_tags`] is
+    /// `None` — the caller did not resolve tags, which is NOT "there are
+    /// none". See the ⚠ block on that field.
+    TagsUnresolved,
+    /// A tag policy's resource map is one whose CANDIDACY this crate cannot
+    /// reproduce. See [`TagResourceProblem`] for the three shapes and the
+    /// measurement behind each.
+    ///
+    /// # Why candidacy is a separate question on the tag path
+    ///
+    /// For a resource request the trie is a pre-filter and
+    /// `RangerDefaultPolicyEvaluator.evaluate` re-asks the matcher, so an
+    /// over-returning trie changes nothing. For a `RangerTagAccessRequest`
+    /// `evaluate` reads the TAG's match type and never touches the policy's
+    /// matcher, so the trie alone decides which tag policies run — and where
+    /// the trie is wider than the matcher, this crate would skip a policy
+    /// Ranger evaluates. For a DENY tag policy that is fail-open.
+    TagResourceNotReproducible {
+        policy_id: Option<i64>,
+        policy_name: String,
+        problem: TagResourceProblem,
+    },
     /// [`EngineConfig::plugin_version`] disagrees with the version measured
     /// for [`EngineConfig::engine`] ([`EngineType::plugin_version`]). The
     /// deployment being described is not one this crate has been read
@@ -456,6 +520,39 @@ pub enum UndecidableCause {
         declared: PluginVersion,
         measured: PluginVersion,
     },
+}
+
+/// Why a tag policy's resource map cannot be filtered the way Ranger filters
+/// it. Each arm was measured against a real `RangerResourceTrie` built from
+/// `ranger-plugins-common` 2.5.0 over the `tag` service-def — see
+/// [`crate::resource::trie_reproduces_matcher`] for the harness and the table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagResourceProblem {
+    /// The map is not exactly `{"tag": …}`.
+    ///
+    /// `RangerResourceEvaluatorsRetriever.getEvaluators` intersects only the
+    /// tries for resource keys the REQUEST carries, and a tag request carries
+    /// exactly one (`RangerTagResource`'s `KEY_TAG = "tag"`). So a policy
+    /// naming an extra level is still returned by the tag trie, while this
+    /// crate's `init` finds no hierarchy containing all the policy's keys and
+    /// answers `NONE`.
+    NotOnlyTheTagResource,
+    /// `isExcludes` is set.
+    ///
+    /// MEASURED: the trie parks an excludes resource in
+    /// `getInheritedEvaluators()`, which the retriever unions into EVERY
+    /// lookup — a policy excluding `pii` came back as a candidate for the tag
+    /// `pii` itself, where the matcher answers `NONE`. (The tag service-def
+    /// declares `excludesSupported: false`, so nothing egret writes can reach
+    /// this; a hand-written payload can.)
+    Excludes,
+    /// A value whose compiled matcher is `EndsWith` or a general wildcard, or
+    /// an empty value.
+    ///
+    /// MEASURED: the trie keys a value by the literal prefix BEFORE its first
+    /// wildcard character, so `*ii` sits at the root and `p*x` at `p` — both
+    /// are returned for tags the matcher rejects.
+    ValueNotTriePrefixExact(String),
 }
 
 // ── mask and row-filter results ──────────────────────────────────────────
@@ -1080,6 +1177,25 @@ impl<'a> PolicyView<'a> {
         }
     }
 
+    /// The same view for a TAG evaluator, where `matched` is not this
+    /// policy's to decide.
+    ///
+    /// `RangerDefaultPolicyEvaluator.evaluate` takes the match type from the
+    /// `RangerTagAccessRequest` — the enricher's verdict on the tag ATTACHMENT
+    /// — and never calls this policy's matcher. Candidacy (does this policy's
+    /// `resources.tag` cover this tag name?) is the trie's separate question,
+    /// answered in [`tag_candidates`] before this is built. Computing
+    /// `matched` here as well would be a second, different rule for the same
+    /// word.
+    fn for_tag(policy: &'a RangerPolicy) -> PolicyView<'a> {
+        PolicyView {
+            policy,
+            has_deny: policy.is_deny_all_else || !policy.deny_policy_items.is_empty(),
+            has_allow: !policy.policy_items.is_empty(),
+            matched: true,
+        }
+    }
+
     /// Everything about this policy that stops the decision being
     /// defensible, appended to `why`.
     fn collect_causes(
@@ -1586,6 +1702,552 @@ fn evaluate_sub(
     }
 }
 
+// ── the tag phase ────────────────────────────────────────────────────────
+//
+// `RangerPolicyEngineImpl.evaluateTagPolicies(request, policyType, zoneName,
+// tagPolicyRepository, result)` — the phase that runs BEFORE the resource
+// policies (offset 176 of `evaluatePoliciesForOneAccessTypeNoAudit`), against
+// the `tagPolicies` block's own policies and its own service-def.
+//
+// Composing this phase's verdict with the resource phase's is SP4d-2b Task 3
+// and is deliberately NOT done here: the functions below answer only "what did
+// the tag policies determine", and the envelope-level refusals
+// (`securityZones`, `policyDeltas`, `serviceConfig`, the superuser
+// short-circuit) stay with [`evaluate`], which is where Ranger runs them too.
+
+/// `RangerTagResource.KEY_TAG`, verified with `javap -constants` on both jars:
+/// the resource key a tag request carries is the literal `"tag"`, hard-coded
+/// in Ranger and not read from the service-def.
+pub const TAG_RESOURCE_KEY: &str = "tag";
+
+/// What the tag phase left on the shared `RangerAccessResult`.
+///
+/// The three non-refusal arms are the only states the phase can exit in.
+/// `setIsAllowed(false)` calls `setIsAccessDetermined(true)` itself, and the
+/// tail of `evaluateTagPolicies` (offsets 582-593) sets it for an allow that no
+/// evaluator had determined — so at exit `isAccessDetermined` holds exactly
+/// when some policy wrote a verdict.
+///
+/// `priority` is `RangerAccessResult.getPolicyPriority()`, which Task 3's
+/// cross-phase arbitration compares against each resource evaluator's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagDecision {
+    /// No tag policy determined anything: `isAllowed` false,
+    /// `isAccessDetermined` false. The resource phase decides alone.
+    NotDetermined,
+    Allowed {
+        policy_id: Option<i64>,
+        policy_name: String,
+        priority: i32,
+    },
+    Denied {
+        policy_id: Option<i64>,
+        policy_name: String,
+        priority: i32,
+        reason: DenyReason,
+    },
+    Undecidable {
+        why: Vec<UndecidableCause>,
+    },
+}
+
+/// One `(evaluator, tag)` pair — Ranger's `PolicyEvaluatorForTag`, which is
+/// what the three comparators actually sort.
+struct TagCandidate<'a> {
+    view: PolicyView<'a>,
+    /// `PolicyEvaluatorForTag.getTag().getMatchType()`, i.e. the ATTACHMENT's
+    /// match type. `MATCH_TYPE_COMPARATOR` is the mask ordering's first key.
+    match_type: MatchType,
+}
+
+/// Evaluate the `tagPolicies` block's ACCESS policies against the request's
+/// resolved tag set.
+///
+/// Pure, like [`evaluate`]. `tag_service_def` is the BLOCK's own def
+/// ([`ServiceDef::parse`] of [`ServicePolicySet::tag_service_def`]), because
+/// that is the def `RangerPolicyRepository`'s tag constructor stores and the
+/// one `RangerTagAccessRequest` is built with — the resource def decides
+/// nothing here.
+///
+/// # ⚠ This is ONE PHASE, not an answer
+///
+/// It does not run [`request_preamble`], so it does not see the superuser
+/// short-circuit or the `securityZones` / `policyDeltas` / `serviceConfig`
+/// refusals, and it does not arbitrate with the resource policies. A caller
+/// wanting a decision calls [`evaluate`]; this exists so Task 3 can compose the
+/// two phases the way `evaluatePoliciesForOneAccessTypeNoAudit` does.
+pub fn evaluate_tag_policies(
+    policies: &ServicePolicySet,
+    request: &AccessRequest,
+    tag_service_def: &ServiceDef,
+) -> TagDecision {
+    let candidates = match tag_candidates(DecisionKind::Access, policies, request, tag_service_def)
+    {
+        Err(why) => return TagDecision::Undecidable { why },
+        Ok(c) => c,
+    };
+    let implied = tag_service_def.implied_access_grants();
+
+    // The loop at offsets 157-579, reduced. Three things make the reduction
+    // exact, and each is a measured branch rather than a simplification:
+    //
+    // * offset 442 `tagEvalResult.setAccessResultFrom(result)` — each
+    //   evaluator starts from the SHARED result, which is why `t_allowed`
+    //   below is seeded from `allowed` rather than from `false`;
+    // * offsets 472-493 `if (tagEvalResult.getIsAllowed() && !hasDeny())
+    //   setIsAccessDetermined(true)` — an allow from a policy that HAS deny
+    //   items is recorded but does not determine, so a later deny still wins;
+    // * offsets 511-557 — the copy back is gated on the shared result not
+    //   being determined, and once it is, no later evaluator can change the
+    //   access outcome. (The loop itself only breaks when auditing is ALSO
+    //   determined, at 560-576; the extra iterations are no-ops for access.)
+    //
+    // Unlike the resource loop this one compares no priorities: the first
+    // evaluator to determine is final, and the order is the comparator's.
+    let mut allowed = false;
+    let mut determined = false;
+    let mut winner: Option<Outcome> = None;
+    for candidate in &candidates {
+        if determined {
+            break;
+        }
+        let mut t_allowed = allowed;
+        let mut t_winner = winner.clone();
+        let mut t_determined = false;
+
+        if let Some(found) = candidate.view.decide(request, &implied) {
+            if found.allowed {
+                // `updateAccessResult(result, matchType, true, reason)` writes
+                // only `if (!result.getIsAllowed())`. In 2.5.0 it also guards
+                // `matchType != ANCESTOR` — unreachable on this path, because
+                // `evaluate` has already REWRITTEN an ANCESTOR tag match to
+                // SELF (offsets 206-219). 2.8.0 dropped the guard instead.
+                // Both versions therefore record an ANCESTOR tag allow.
+                if !t_allowed {
+                    t_allowed = true;
+                    t_winner = Some(found);
+                }
+            } else {
+                // `setIsAllowed(false)` calls `setIsAccessDetermined(true)`.
+                t_allowed = false;
+                t_determined = true;
+                t_winner = Some(found);
+            }
+        }
+
+        if t_allowed && !candidate.view.has_deny {
+            t_determined = true;
+        }
+        if t_determined {
+            allowed = t_allowed;
+            winner = t_winner;
+            determined = true;
+        } else if !allowed && t_allowed {
+            allowed = t_allowed;
+            winner = t_winner;
+        }
+    }
+    // Offsets 582-593: an allow nobody determined is determined here.
+    if allowed {
+        determined = true;
+    }
+
+    match (determined, winner) {
+        (false, _) => TagDecision::NotDetermined,
+        (true, None) => TagDecision::NotDetermined,
+        (true, Some(o)) if allowed => TagDecision::Allowed {
+            policy_id: o.policy_id,
+            policy_name: o.policy_name,
+            priority: o.priority,
+        },
+        (true, Some(o)) => TagDecision::Denied {
+            policy_id: o.policy_id,
+            policy_name: o.policy_name,
+            priority: o.priority,
+            reason: o.reason,
+        },
+    }
+}
+
+/// [`evaluate_tag_policies`] for `policyType` 1. Same loop, same comparator
+/// dispatch — the difference is that the deciding list is the block's MASK
+/// policies and the ordering key is the tag's match type.
+pub fn evaluate_tag_data_mask(
+    policies: &ServicePolicySet,
+    request: &AccessRequest,
+    tag_service_def: &ServiceDef,
+) -> MaskDecision {
+    match evaluate_tag_sub(DecisionKind::DataMask, policies, request, tag_service_def) {
+        Err(why) => MaskDecision::Undecidable { why },
+        Ok(None) => MaskDecision::NoMask,
+        Ok(Some(SubResult::Mask(m))) => MaskDecision::Masked(m),
+        Ok(Some(SubResult::RowFilter(_))) => {
+            unreachable!("DataMask kind yields only SubResult::Mask")
+        }
+    }
+}
+
+/// [`evaluate_tag_policies`] for `policyType` 2.
+pub fn evaluate_tag_row_filter(
+    policies: &ServicePolicySet,
+    request: &AccessRequest,
+    tag_service_def: &ServiceDef,
+) -> RowFilterDecision {
+    match evaluate_tag_sub(DecisionKind::RowFilter, policies, request, tag_service_def) {
+        Err(why) => RowFilterDecision::Undecidable { why },
+        Ok(None) => RowFilterDecision::NoFilter,
+        Ok(Some(SubResult::RowFilter(f))) => RowFilterDecision::Filtered(f),
+        Ok(Some(SubResult::Mask(_))) => {
+            unreachable!("RowFilter kind yields only SubResult::RowFilter")
+        }
+    }
+}
+
+/// The body shared by [`evaluate_tag_data_mask`] and
+/// [`evaluate_tag_row_filter`].
+///
+/// The state machine is [`evaluate_tag_policies`]'s, with `decide_sub` in place
+/// of `decide`: `RangerDefault{DataMask,RowFilter}PolicyItemEvaluator.updateAccessResult`
+/// writes its DATA and then calls `policyEvaluator.updateAccessResult(result,
+/// matchType, true, reason)`, i.e. an allow, so the same "allow determines only
+/// when the policy has no deny items" rule applies.
+///
+/// **There is no [`UndecidableCause::EvalOrderAmbiguous`] here, and its absence
+/// is deliberate.** That refusal exists because the resource path's ordering
+/// needs `RangerOptimizedPolicyEvaluator.getEvalOrder()`, a resource-specificity
+/// score this crate does not compute. `MATCH_TYPE_COMPARATOR` and
+/// `NAME_COMPARATOR` — the two the tag path uses for these policy types — call
+/// no such thing: they are match type, then policy priority, then `hasDeny`,
+/// then the policy name, all of which this crate has. The ordering is
+/// reproduced, so there is nothing to refuse.
+///
+/// # One divergence, in a shape egret cannot emit
+///
+/// Ranger writes the mask FIELDS unconditionally and the policy IDENTITY only
+/// `if (!result.getIsAllowed())`. The two can come apart only when a mask or
+/// row-filter tag policy carries `denyPolicyItems` or `isDenyAllElse` (so
+/// `hasDeny()` is true and its yield does not determine) and a LATER one also
+/// yields: Ranger then reports the first policy's id with the second's mask.
+/// [`SubResult`] carries the two together, so this crate reports the second's
+/// id as well. Neither bucket is read for a mask or row-filter decision, and
+/// egret's compiler emits neither.
+fn evaluate_tag_sub(
+    kind: DecisionKind,
+    policies: &ServicePolicySet,
+    request: &AccessRequest,
+    tag_service_def: &ServiceDef,
+) -> Result<Option<SubResult>, Vec<UndecidableCause>> {
+    let candidates = tag_candidates(kind, policies, request, tag_service_def)?;
+    let implied = tag_service_def.implied_access_grants();
+
+    let mut allowed = false;
+    let mut determined = false;
+    let mut found: Option<SubResult> = None;
+    for candidate in &candidates {
+        if determined {
+            break;
+        }
+        let mut t_allowed = allowed;
+        let mut t_found = found.clone();
+        let mut t_determined = false;
+
+        if let Some(result) = candidate.view.decide_sub(kind, request, &implied) {
+            t_found = Some(result);
+            t_allowed = true;
+        }
+        if t_allowed && !candidate.view.has_deny {
+            t_determined = true;
+        }
+        if t_determined {
+            allowed = t_allowed;
+            found = t_found;
+            determined = true;
+        } else if !allowed && t_allowed {
+            allowed = t_allowed;
+            found = t_found;
+        }
+    }
+    Ok(found)
+}
+
+/// The `PolicyEvaluatorForTag` list `evaluateTagPolicies` iterates:
+/// `RangerPolicyRepository.getLikelyMatchPolicyEvaluators(request, tags,
+/// policyType, accessTime)`, already sorted by this policy type's comparator.
+///
+/// Its four steps, in Ranger's order:
+///
+/// 1. the evaluators that exist at all — `skipBuildingPolicyEvaluator` drops a
+///    disabled policy and `init` files the rest by RAW `policyType` into three
+///    disjoint lists;
+/// 2. one pass per TAG (offsets 28-226), skipping a tag `isApplicable` rejects;
+/// 3. per tag, the trie lookup that decides which evaluators apply — reproduced
+///    here with [`match_policy_resources`] against the TAG service-def, the tag
+///    policy's `resources.tag` in the policy position and `{tag: <name>}` in
+///    the request position. Where the trie and the matcher are measured to
+///    disagree the policy is refused instead
+///    ([`UndecidableCause::TagResourceNotReproducible`]);
+/// 4. the sort (offsets 237-298).
+///
+/// # The admitted set, and why it is the TAG's match type
+///
+/// `RangerDefaultPolicyEvaluator.evaluate` does not ask the policy's matcher
+/// for a `RangerTagAccessRequest`; it reads
+/// `((RangerTagAccessRequest) request).getMatchType()`, which
+/// `RangerTagAccessRequest`'s constructor took from `RangerTagForEval` — the
+/// enricher's verdict on the ATTACHMENT. Step 3 above decides candidacy; this
+/// decides admission, and they are different questions about different
+/// resources.
+///
+/// At the default `SELF` scope with a concrete access type the two versions
+/// admit exactly `SELF`, `SELF_AND_ALL_DESCENDANTS` and `ANCESTOR`, by
+/// different routes that were both read:
+///
+/// * **2.5.0** rewrites `ANCESTOR` to `SELF` at offsets 206-219 and then tests
+///   `matchType == SELF || matchType == SELF_AND_ALL_DESCENDANTS` (317-338).
+///   The rewrite is why `updateAccessResult`'s own `matchType != ANCESTOR`
+///   guard on the allow branch never fires for a tag request.
+/// * **2.8.0** keeps the match type and adds the disjunct
+///   `|| (matchType == ANCESTOR && request instanceof RangerTagAccessRequest)`
+///   (offsets 334-370), having dropped the `updateAccessResult` guard.
+///
+/// `DESCENDANT` and `NONE` are in neither version's set at this scope —
+/// `DESCENDANT` joins it only under `isAccessTypeAny()` or
+/// `SELF_OR_DESCENDANTS`, and `NONE` never does. **This is the opposite of the
+/// resource path**, where `ANCESTOR` is not an allow at all
+/// ([`crate::resource::MatchType::Ancestor`]). Same enum, two rules.
+fn tag_candidates<'a>(
+    kind: DecisionKind,
+    policies: &'a ServicePolicySet,
+    request: &AccessRequest,
+    tag_service_def: &ServiceDef,
+) -> Result<Vec<TagCandidate<'a>>, Vec<UndecidableCause>> {
+    let of_kind: Vec<&'a RangerPolicy> = policies
+        .tag_policies
+        .iter()
+        .filter(|p| p.is_enabled)
+        .filter(|p| p.policy_type == kind.policy_type_code())
+        .collect();
+    if of_kind.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut why: Vec<UndecidableCause> = Vec::new();
+
+    let Some(resolved) = request.resolved_tags.as_ref() else {
+        // A block with policies this decision would evaluate, and no tag set
+        // to evaluate them against. `None` is "the caller did not resolve",
+        // which must not be read as the empty set that narrows.
+        return Err(vec![UndecidableCause::TagsUnresolved]);
+    };
+
+    // `RangerTagForEval`'s `equals`/`hashCode` include `matchType` and the
+    // enricher hands Ranger a `Set`, so `(name, matchType)` is the identity —
+    // never the name alone (SP4d-2b design, D4). The caller's ORDER is dropped
+    // here on purpose: the three comparators below are the only ordering that
+    // decides anything.
+    let mut seen: BTreeSet<(&str, u8)> = BTreeSet::new();
+    let mut admitted: Vec<&ResolvedTag> = Vec::new();
+    for tag in resolved {
+        if !seen.insert((tag.name.as_str(), match_type_rank(tag.match_type))) {
+            continue;
+        }
+        if tag_match_is_admitted(tag.match_type) {
+            admitted.push(tag);
+        }
+    }
+    if admitted.is_empty() {
+        // Either no tags at all (`getLikelyMatchPolicyEvaluators` returns
+        // `EMPTY_LIST` at `isNotEmpty(tags)`) or none the evaluator admits, so
+        // no tag policy can write anything — including the ones this crate
+        // could not have filtered, which is why the refusal sweep is below
+        // this return and not above it.
+        return Ok(Vec::new());
+    }
+
+    for policy in &of_kind {
+        collect_tag_resource_causes(policy, tag_service_def, &mut why);
+    }
+
+    let implied = tag_service_def.implied_access_grants();
+    let all_access_types: BTreeSet<&str> = tag_service_def
+        .access_types()
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect();
+
+    let mut candidates: Vec<TagCandidate<'a>> = Vec::new();
+    for tag in admitted {
+        let tag_resource = RequestResource::new().with(TAG_RESOURCE_KEY, tag.name.as_str());
+        for policy in &of_kind {
+            let in_candidate_set = match_policy_resources(policy, &tag_resource, tag_service_def)
+                .into_iter()
+                .any(|m| m.match_type != MatchType::None);
+            if !in_candidate_set {
+                continue;
+            }
+            candidates.push(TagCandidate {
+                // Admission is the TAG's match type, already tested above, so
+                // this view is matched by construction. Re-deriving `matched`
+                // from the policy's own resource would be the one thing
+                // `evaluate` does NOT do for a tag request.
+                view: PolicyView::for_tag(policy),
+                match_type: tag.match_type,
+            });
+        }
+    }
+
+    for candidate in &candidates {
+        candidate
+            .view
+            .collect_causes(kind, request, &implied, &all_access_types, &mut why);
+    }
+    for issue in tag_service_def.issues() {
+        if issue_affects_access(issue) {
+            why.push(UndecidableCause::ServiceDef(issue.clone()));
+        }
+    }
+    if !why.is_empty() {
+        return Err(why);
+    }
+
+    sort_tag_candidates(kind, &mut candidates);
+    Ok(candidates)
+}
+
+/// Whether `RangerDefaultPolicyEvaluator.evaluate` lets a tag carrying this
+/// match type reach the policy items, at the default `SELF` scope with a
+/// concrete access type. See [`tag_candidates`] for both versions' routes to
+/// this same set.
+fn tag_match_is_admitted(match_type: MatchType) -> bool {
+    matches!(
+        match_type,
+        MatchType::Self_ | MatchType::SelfAndAllDescendants | MatchType::Ancestor
+    )
+}
+
+/// `RangerPolicyResourceMatcher.MATCH_TYPE_COMPARATOR`'s key, ascending.
+///
+/// MEASURED by running the real comparator over every `MatchType` on both
+/// jars, rather than read off the enum's declaration order — which is a
+/// DIFFERENT order (`NONE, SELF, DESCENDANT, ANCESTOR, SELF_AND_ALL_DESCENDANTS`)
+/// and would silently reorder masks if it were used by mistake. That is also
+/// why [`MatchType`] deliberately does not derive `Ord`: there is no ordering
+/// on it that is right in every context, so the one that matters is written
+/// out here.
+///
+/// ```text
+/// SELF < SELF_AND_ALL_DESCENDANTS < ANCESTOR < DESCENDANT < NONE
+/// ```
+fn match_type_rank(match_type: MatchType) -> u8 {
+    match match_type {
+        MatchType::Self_ => 0,
+        MatchType::SelfAndAllDescendants => 1,
+        MatchType::Ancestor => 2,
+        MatchType::Descendant => 3,
+        MatchType::None => 4,
+    }
+}
+
+/// The `Collections.sort` at offsets 237-298 of
+/// `getLikelyMatchPolicyEvaluators`, whose `tableswitch` on `policyType` picks
+/// one of THREE comparators — `0` and `3` (audit) take the first, `1` the
+/// second, `2` the third, and an unknown type is left unsorted with a warning.
+///
+/// All three were disassembled in both jars and are byte-identical there:
+///
+/// * `PolicyEvaluatorForTag.EVAL_ORDER_COMPARATOR` delegates to
+///   `RangerPolicyEvaluator.EVAL_ORDER_COMPARATOR`: priority DESC, `hasDeny`
+///   first, `getEvalOrder()`, then the policy name.
+/// * `MATCH_TYPE_COMPARATOR` compares `getTag().getMatchType()` through
+///   `RangerPolicyResourceMatcher.MATCH_TYPE_COMPARATOR` and, **only on a tie**,
+///   falls through to `NAME_COMPARATOR`.
+/// * `NAME_COMPARATOR` delegates to `RangerPolicyEvaluator.NAME_COMPARATOR`,
+///   which is **not** just the name: `compare` is priority DESC and only then
+///   `compareNormal`, which is `hasDeny` first and then
+///   `compareStrings(policy name)`.
+///
+/// `getEvalOrder()` is `RangerOptimizedPolicyEvaluator.computeEvalOrder()`, a
+/// resource-specificity score this crate does not reproduce (the same gap
+/// [`sort_eval_order`] documents), so the access ordering collapses onto the
+/// name-then-id tie-break and the two comparators are written once here. What
+/// that costs is the same as on the resource path and no more: within one
+/// `(priority, hasDeny)` band the allow/deny OUTCOME cannot depend on order —
+/// in an all-`hasDeny` band an allow never determines, so every evaluator runs
+/// and any deny wins; in an all-non-`hasDeny` band no evaluator can deny at all
+/// (`hasDeny()` is `isDenyAllElse || !denyPolicyItems.isEmpty()`) — only the
+/// reported policy id can differ.
+///
+/// For policy types 1 and 2 nothing is unreproduced, because neither
+/// comparator reads `getEvalOrder()`.
+fn sort_tag_candidates(kind: DecisionKind, candidates: &mut [TagCandidate<'_>]) {
+    match kind {
+        DecisionKind::Access => candidates.sort_by(tag_name_order),
+        DecisionKind::DataMask => candidates.sort_by(|a, b| {
+            match_type_rank(a.match_type)
+                .cmp(&match_type_rank(b.match_type))
+                .then_with(|| tag_name_order(a, b))
+        }),
+        DecisionKind::RowFilter => candidates.sort_by(tag_name_order),
+    }
+}
+
+/// `RangerPolicyEvaluator.NAME_COMPARATOR`, and — with `getEvalOrder()`
+/// unreproduced — `EVAL_ORDER_COMPARATOR` too. The trailing policy-id key is
+/// this crate's own stand-in for the score, exactly as in [`sort_eval_order`].
+fn tag_name_order(a: &TagCandidate<'_>, b: &TagCandidate<'_>) -> std::cmp::Ordering {
+    b.view
+        .policy
+        .policy_priority
+        .cmp(&a.view.policy.policy_priority)
+        .then_with(|| b.view.has_deny.cmp(&a.view.has_deny))
+        .then_with(|| a.view.policy.name.cmp(&b.view.policy.name))
+        .then_with(|| a.view.policy.id.cmp(&b.view.policy.id))
+}
+
+/// Everything about one tag policy's RESOURCE map that stops this crate
+/// filtering the way `RangerResourceEvaluatorsRetriever` does.
+///
+/// Swept over every enabled tag policy of the decision's type, not only the
+/// ones that came out as candidates — a policy whose candidacy is exactly what
+/// cannot be established is not one the crate may quietly leave out.
+fn collect_tag_resource_causes(
+    policy: &RangerPolicy,
+    tag_service_def: &ServiceDef,
+    why: &mut Vec<UndecidableCause>,
+) {
+    let wild_card = tag_service_def
+        .resource(PolicyType::from_code(policy.policy_type), TAG_RESOURCE_KEY)
+        .map(|r| r.matcher_options.wild_card)
+        .unwrap_or(true);
+
+    let maps = std::iter::once(&policy.resources).chain(policy.additional_resources.iter());
+    for map in maps {
+        let mut push = |problem: TagResourceProblem| {
+            why.push(UndecidableCause::TagResourceNotReproducible {
+                policy_id: policy.id,
+                policy_name: policy.name.clone(),
+                problem,
+            });
+        };
+        let mut keys = map.keys();
+        let names_only_tag =
+            matches!(keys.next(), Some(k) if k == TAG_RESOURCE_KEY) && keys.next().is_none();
+        if !names_only_tag {
+            push(TagResourceProblem::NotOnlyTheTagResource);
+            continue;
+        }
+        let level = &map[TAG_RESOURCE_KEY];
+        if level.is_excludes {
+            push(TagResourceProblem::Excludes);
+        }
+        for value in &level.values {
+            if !trie_reproduces_matcher(value, wild_card) {
+                push(TagResourceProblem::ValueNotTriePrefixExact(value.clone()));
+            }
+        }
+    }
+}
+
 /// `RangerDefaultPolicyEvaluator.getMatchingPolicyItem(request, evaluators,
 /// exceptionEvaluators)`: the first matching item in `items`, then vetoed
 /// outright if any item in `exceptions` also matches.
@@ -1908,4 +2570,71 @@ fn construct_affects(kind: DecisionKind, construct: &Unmodelled) -> bool {
 /// own answer.
 fn issue_affects_access(issue: &ServiceDefIssue) -> bool {
     !matches!(issue, ServiceDefIssue::InvalidResourceGraph { .. })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `MATCH_TYPE_COMPARATOR`'s order, pinned against a MEASUREMENT rather
+    /// than against the enum.
+    ///
+    /// Produced by sorting every `MatchType` with the real
+    /// `RangerPolicyResourceMatcher.MATCH_TYPE_COMPARATOR` on the
+    /// `ranger-plugins-common` 2.5.0 and 2.8.0 jars, which agreed:
+    ///
+    /// ```text
+    /// [SELF, SELF_AND_ALL_DESCENDANTS, ANCESTOR, DESCENDANT, NONE]
+    /// ```
+    ///
+    /// The second assertion is the one that earns its place: Java's
+    /// `values()` — i.e. `ordinal()`, the order any "just use the enum"
+    /// shortcut would inherit — is a DIFFERENT order, and using it would put
+    /// `DESCENDANT` ahead of `ANCESTOR` and `NONE` first of all.
+    #[test]
+    fn match_type_rank_is_the_measured_comparator_order() {
+        let mut all = [
+            MatchType::None,
+            MatchType::Self_,
+            MatchType::Descendant,
+            MatchType::Ancestor,
+            MatchType::SelfAndAllDescendants,
+        ];
+        all.sort_by_key(|m| match_type_rank(*m));
+        assert_eq!(
+            all,
+            [
+                MatchType::Self_,
+                MatchType::SelfAndAllDescendants,
+                MatchType::Ancestor,
+                MatchType::Descendant,
+                MatchType::None,
+            ]
+        );
+
+        // Java's declaration order, for contrast — NOT the comparator's.
+        let declaration_order = [
+            MatchType::None,
+            MatchType::Self_,
+            MatchType::Descendant,
+            MatchType::Ancestor,
+            MatchType::SelfAndAllDescendants,
+        ];
+        assert_ne!(
+            all, declaration_order,
+            "the comparator order and the enum's ordinal order differ; a rank \
+             taken from the declaration would reorder masks"
+        );
+    }
+
+    /// The admitted set, stated once as a table so the two versions' routes to
+    /// it cannot drift apart from the predicate.
+    #[test]
+    fn only_self_self_and_all_descendants_and_ancestor_are_admitted() {
+        assert!(tag_match_is_admitted(MatchType::Self_));
+        assert!(tag_match_is_admitted(MatchType::SelfAndAllDescendants));
+        assert!(tag_match_is_admitted(MatchType::Ancestor));
+        assert!(!tag_match_is_admitted(MatchType::Descendant));
+        assert!(!tag_match_is_admitted(MatchType::None));
+    }
 }

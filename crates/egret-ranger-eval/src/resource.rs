@@ -197,6 +197,63 @@ pub fn match_policy_resources(
     out
 }
 
+/// Whether Ranger's `RangerResourceTrie` — for a **tag** request, the ONLY
+/// filter that decides which policies are evaluated — returns the same
+/// evaluator set that [`match_resource_of_type`] does for `policy_value`.
+///
+/// # Why a tag request needs this and a resource request does not
+///
+/// For a resource request the trie is a pre-filter and
+/// `RangerDefaultPolicyEvaluator.evaluate` then asks the matcher itself
+/// (offsets 222-258 in 2.5.0, 207-243 in 2.8.0), so an over-returning trie
+/// costs nothing. For a `RangerTagAccessRequest` that branch is **not taken**:
+/// `evaluate` reads `((RangerTagAccessRequest) request).getMatchType()` and the
+/// policy's own matcher is never consulted. **The trie IS the filter**, so
+/// anywhere it disagrees with the matcher, the matcher is the wrong instrument.
+///
+/// # Measured, not reasoned about
+///
+/// Against the real `ranger-plugins-common` 2.5.0 on the `tag` service-def
+/// (`wildCard: true`, `ignoreCase: false`), building a real
+/// `RangerResourceTrie` over one `RangerDefaultPolicyResourceMatcher` per
+/// policy value and comparing `getEvaluatorsForResource` with `getMatchType`:
+///
+/// | policy value | compiled shape | trie == matcher |
+/// |---|---|---|
+/// | `pii` | [`ValueMatcher::Equals`] | yes |
+/// | `*`, `**` | match-any | yes |
+/// | `p*`, `p**` | [`ValueMatcher::StartsWith`] | yes |
+/// | `*i`, `*ii` | [`ValueMatcher::EndsWith`] | **no** — returned for `p`, `pi`, `pix`, `PII` and `""` |
+/// | `p*x`, `pi?`, `pi*i`, `p?i` | [`ValueMatcher::Wildcard`] | **no** — `p*x` and `pi*i` are returned for `pii` |
+///
+/// The mechanism is one line of `RangerResourceTrie.insert`: a value is keyed
+/// by its literal prefix up to the FIRST wildcard character and parked there as
+/// a wildcard evaluator, collected for every resource whose path runs through
+/// that node. For `Equals` that prefix is the whole value; for `StartsWith` it
+/// is exactly the prefix `starts_with` tests; for a leading `*` it is the empty
+/// string, i.e. the root, i.e. everything.
+///
+/// The direction is the reason this is a refusal and not a footnote: the trie
+/// is WIDER, so a tag policy Ranger evaluates is one this crate would not —
+/// and for a DENY policy that is fail-open.
+pub fn trie_reproduces_matcher(policy_value: &str, wild_card: bool) -> bool {
+    if policy_value.is_empty() {
+        // `RangerAbstractResourceMatcher.init` drops an empty policy value
+        // before any matcher is built, which can make a level match-ANY when
+        // it was the only value. Whether the trie does the same was not
+        // measured, and egret emits no empty tag value, so it is refused
+        // rather than guessed at.
+        return false;
+    }
+    match ValueMatcher::classify(policy_value, wild_card) {
+        // Match-any: the trie parks it at the root and returns it for every
+        // resource, which is exactly `is_match_any`.
+        None => true,
+        Some(ValueMatcher::Equals(_)) | Some(ValueMatcher::StartsWith(_)) => true,
+        Some(ValueMatcher::EndsWith(_)) | Some(ValueMatcher::Wildcard(_)) => false,
+    }
+}
+
 // ── The matcher itself ───────────────────────────────────────────────────
 
 /// One initialised `RangerDefaultPolicyResourceMatcher`.
@@ -1282,6 +1339,50 @@ mod tests {
         assert_eq!(split("?*?"), vec![Token::One, Token::Any, Token::One]);
         // `?` never collapses.
         assert_eq!(split("??"), vec![Token::One, Token::One]);
+    }
+
+    /// [`trie_reproduces_matcher`]'s table, as MEASURED against a real
+    /// `RangerResourceTrie` built over the `tag` service-def on
+    /// `ranger-plugins-common` 2.5.0 — see that function for the harness.
+    ///
+    /// Each row is a policy value; `true` means the trie returned exactly the
+    /// evaluators `getMatchType` accepted, over the request values `pii`,
+    /// `PII`, `p`, `pix`, `pi`, `xii`, `ii` and `""`.
+    #[test]
+    fn trie_agreement_matches_the_measured_table() {
+        let table: &[(&str, bool)] = &[
+            ("pii", true),
+            ("PII", true),
+            ("*", true),
+            ("**", true),
+            ("p*", true),
+            ("p**", true),
+            // The trie parks a leading-`*` value at the ROOT and returns it
+            // for every resource; the matcher tests `ends_with`.
+            ("*i", false),
+            ("*ii", false),
+            // ...and a value with an interior wildcard at its literal prefix:
+            // `p*x` came back for `pii`, which `wildcardMatch` rejects.
+            ("p*x", false),
+            ("pi?", false),
+            ("pi*i", false),
+            ("p?i", false),
+            // An empty value is dropped by the matcher before any matcher is
+            // built; what the trie does with it was not measured.
+            ("", false),
+        ];
+        for (value, expected) in table {
+            assert_eq!(
+                trie_reproduces_matcher(value, true),
+                *expected,
+                "trie_reproduces_matcher({value:?})"
+            );
+        }
+        // With wildcards DISABLED every non-empty value is a literal, so the
+        // trie keys on the whole string and the two always agree.
+        for (value, _) in table {
+            assert_eq!(trie_reproduces_matcher(value, false), !value.is_empty());
+        }
     }
 
     #[test]
