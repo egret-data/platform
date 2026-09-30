@@ -313,7 +313,9 @@ publish. Freezing its value into the version snapshot would store it in
 instead: `secret('NAME')` is looked up only in the execution's own workspace,
 no argument can name another (`namespace=` and `full=` are refused by name),
 it resolves only on `kestra.*` tasks, and a missing secret fails the task
-naming the secret, never a value. See the W5b design spec §6.)*
+naming the secret, never a value. See the W5b design spec §6. W5b fix round 1
+added who may write it: a flow whose source can call `secret()` is saved or
+published only by a holder of `workflow:use_secrets`, seeded to `ws_admin`.)*
 
 ### 6.3 The executor state machine is a pure function
 

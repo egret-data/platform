@@ -304,7 +304,9 @@ phải lúc publish. Đóng băng giá trị của nó vào snapshot phiên bả
 `secret('NAME')` chỉ được tra trong workspace của chính execution, không đối số
 nào chỉ được tới workspace khác (`namespace=` và `full=` bị từ chối có tên), nó
 chỉ giải trên task `kestra.*`, và một secret không tồn tại làm task thất bại,
-nêu tên secret, không bao giờ nêu giá trị. Xem spec thiết kế W5b §6.)*
+nêu tên secret, không bao giờ nêu giá trị. Xem spec thiết kế W5b §6. Vòng sửa 1
+của W5b thêm ai được viết nó: một flow mà nguồn có thể gọi `secret()` chỉ được
+lưu hay publish bởi người có `workflow:use_secrets`, cấp cho `ws_admin`.)*
 
 ### 6.3 Máy trạng thái executor là hàm thuần
 
