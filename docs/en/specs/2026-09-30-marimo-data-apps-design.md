@@ -33,6 +33,7 @@ its edit mode is the authoring surface, its run mode is the published app.
 | D13 | **SQL cells: ship DuckDB, egret engine is the default** (2026-10-01). | DuckDB for SQL over fetched DataFrames, in-pod only; a new SQL cell targets the gateway (§4.4). |
 | D14 | **marimo's per-launch `has_marimo_installed` check is answered by the launcher shim** (2026-10-01). | A hack against private marimo behaviour: pinned marimo, a contract test in the image's CI that fails when the command changes; no upstream change pursued for now (§6.3). |
 | D15 | **P5 start-up acceptance is relative to thread mode** (≤ 0.5 s median, ≤ 1 s for 3 concurrent, Linux, ≥ 5 runs); "< 2 s" is a separate, non-blocking experience goal (2026-10-01). | The ≈ 1.75 s page-load floor is outside the kernel launcher's reach (S0b). |
+| D16 | **The pool shutdown hang is covered by a P5 acceptance test**, not a separate spike (2026-10-01). | Applies to whichever launcher P5 picks; k8s restarts make this order routine. |
 
 ## 2. What the code says
 
@@ -525,7 +526,9 @@ never merged; automated Playwright, single run per case, macOS dev laptop under 
    is at most **0.5 s** slower than same-round thread mode at the median, and three concurrent new
    viewers at most **1 s** slower at the max, measured on a Linux node on kind with ≥ 5 interleaved runs
    per variant. "< 2 s to first render" is tracked as a separate experience goal (frontend assets,
-   caching) and does not block P5.
+   caching) and does not block P5. **Shutdown (D16):** an acceptance test for whichever launcher P5
+   picks — the pod shuts down within its grace period when kernels have already died (S0b saw the pool
+   hang in exactly this order; the fork server was not tried).
 6. **P6 — Remove the notebook.** `egret-notebook`, the Jupyter half of `egret-kernel`, `kernel-image/`,
    the notebook frontend, the notebook tables and `notebook:*`. The workflow task `egret.python`, which
    references a notebook and has no handler, is re-pointed to an app version or marked unsupported —

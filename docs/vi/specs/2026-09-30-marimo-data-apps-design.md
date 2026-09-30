@@ -36,6 +36,7 @@ edit là nơi tác giả viết, chế độ run là app đã publish.
 | D13 | **SQL cell: cài DuckDB, engine egret là mặc định** (2026-10-01). | DuckDB để viết SQL trên DataFrame đã lấy về, chỉ trong pod; SQL cell mới nhắm vào gateway (§4.4). |
 | D14 | **Bước kiểm `has_marimo_installed` mỗi lần khởi chạy của marimo do shim của launcher trả lời** (2026-10-01). | Một mẹo dựa vào hành vi nội bộ của marimo: ghim phiên bản marimo, test hợp đồng trong CI của image sẽ fail khi lệnh đổi; hiện chưa theo hướng sửa upstream (§6.3). |
 | D15 | **Nghiệm thu thời gian khởi động của P5 tính tương đối so với chế độ thread** (≤ 0,5 giây trung vị, ≤ 1 giây cho 3 đồng thời, Linux, ≥ 5 lần chạy); "< 2 giây" là mục tiêu trải nghiệm riêng, không chặn (2026-10-01). | Mức sàn tải trang ≈ 1,75 giây nằm ngoài tầm của launcher kernel (S0b). |
+| D16 | **Việc pool bị treo khi tắt được phủ bằng một test nghiệm thu trong P5**, không làm spike riêng (2026-10-01). | Áp dụng cho launcher mà P5 chọn; trên k8s thứ tự tắt này xảy ra thường xuyên. |
 
 ## 2. Những gì code nói
 
@@ -521,7 +522,9 @@ không bao giờ merge; Playwright tự động, mỗi trường hợp một l�
    pod đã ấm chậm hơn chế độ thread đo cùng lượt tối đa **0,5 giây** ở trung vị, và ba người xem mới đồng
    thời chậm hơn tối đa **1 giây** ở giá trị lớn nhất, đo trên node Linux ở kind với ≥ 5 lần chạy xen kẽ
    mỗi biến thể. "< 2 giây tới lần render đầu" được theo dõi như mục tiêu trải nghiệm riêng (asset
-   frontend, cache) và không chặn P5.
+   frontend, cache) và không chặn P5. **Tắt pod (D16):** một test nghiệm thu cho launcher mà P5 chọn — pod
+   tắt được trong thời gian grace khi các kernel đã chết trước (S0b thấy pool bị treo đúng ở thứ tự này;
+   fork server chưa được thử).
 6. **P6 — Gỡ notebook.** `egret-notebook`, nửa Jupyter của `egret-kernel`, `kernel-image/`, frontend
    notebook, các bảng notebook và `notebook:*`. Task workflow `egret.python` — đang tham chiếu notebook và
    chưa có handler — được trỏ sang một phiên bản app hoặc đánh dấu chưa hỗ trợ, quyết định trong plan P6.
