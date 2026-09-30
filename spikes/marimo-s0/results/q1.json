@@ -1,0 +1,149 @@
+{
+  "alice": {
+    "first": "PY pid=544 viewer=alice sql=SELECT 1 AS n",
+    "after_slider": "PY pid=544 viewer=alice sql=SELECT 4 AS n",
+    "sqlcell": "SQLCELL viewer=alice"
+  },
+  "bob": {
+    "first": "PY pid=544 viewer=bob sql=SELECT 1 AS n",
+    "after_slider": "PY pid=544 viewer=bob sql=SELECT 4 AS n"
+  },
+  "gateway_queries": [
+    {
+      "t": 1790762171.21666,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 1 AS n",
+      "pid": 544
+    },
+    {
+      "t": 1790762171.3093052,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 1 AS n",
+      "pid": 544
+    },
+    {
+      "t": 1790762171.335787,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 1 AS via_sql_cell",
+      "pid": 544
+    },
+    {
+      "t": 1790762171.380533,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 1 AS via_sql_cell",
+      "pid": 544
+    },
+    {
+      "t": 1790762171.96305,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 2 AS n",
+      "pid": 544
+    },
+    {
+      "t": 1790762171.9795341,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 2 AS n",
+      "pid": 544
+    },
+    {
+      "t": 1790762171.988218,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 2 AS via_sql_cell",
+      "pid": 544
+    },
+    {
+      "t": 1790762172.0485718,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 2 AS via_sql_cell",
+      "pid": 544
+    },
+    {
+      "t": 1790762172.113313,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 4 AS n",
+      "pid": 544
+    },
+    {
+      "t": 1790762172.132533,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 4 AS via_sql_cell",
+      "pid": 544
+    },
+    {
+      "t": 1790762172.1706991,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 3 AS n",
+      "pid": 544
+    },
+    {
+      "t": 1790762172.256947,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 3 AS via_sql_cell",
+      "pid": 544
+    },
+    {
+      "t": 1790762172.420922,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 4 AS n",
+      "pid": 544
+    },
+    {
+      "t": 1790762172.480455,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 4 AS via_sql_cell",
+      "pid": 544
+    }
+  ],
+  "every_alice_page_shows_alice": true,
+  "every_bob_page_shows_bob": true,
+  "sql_cell_used_gateway": true,
+  "rejected_queries": [],
+  "q5_dropdown": {
+    "method": "automated headless Playwright (not manual)",
+    "before_cells_run": {
+      "db_listed": false,
+      "options": [
+        "DuckDB (In-Memory)"
+      ],
+      "screenshot": "results/q5-dropdown.png",
+      "note": "edit-mode cells not yet run, so `db` variable did not exist in the kernel"
+    },
+    "after_run_all": {
+      "db_listed": true,
+      "options": [
+        "db",
+        "DuckDB (In-Memory)"
+      ],
+      "screenshot": "results/q5-dropdown-after-run.png",
+      "note": "new SQL cell auto-selected `db` as engine; query returned viewer=alice row. A stray default `SELECT * FROM` cell errored with missing duckdb/sqlglot (not installed in venv) - unrelated to the egret engine."
+    }
+  }
+}
