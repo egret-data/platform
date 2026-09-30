@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 pub use prune::{spawn_pruner, PruneConfig};
 pub use repo::{InsertError, LogQuery, LogRepo, StoredLine};
-pub use run_log::{RunIdentity, RunLog};
+pub use run_log::{mask, RunIdentity, RunLog, MASK};
 pub use writer::{spawn_writer, Barrier, Inserter, PgLogSink, WriterConfig};
 
 /// The longest piece a log line is stored as, in `char`s (D6).

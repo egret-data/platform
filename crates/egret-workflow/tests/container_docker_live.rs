@@ -94,7 +94,8 @@ fn handler(type_id: &str) -> Script {
             plugin_configurations: PluginConfigurations(vec![PluginConfiguration {
                 r#type: RunnerKind::Docker.fqcn().to_string(),
                 values: PluginConfigurationValues {
-                    allowed_images: vec!["*".into(), "*/*".into(), "*/*/*".into()],
+                    allowed_images: Some(vec!["*".into(), "*/*".into(), "*/*/*".into()]),
+                    allowed_types: None,
                 },
             }]),
             features: Arc::new(FixedFeatureState(true)),
@@ -719,6 +720,142 @@ async fn a_dropped_future_leaves_the_container_running_and_cancel_is_what_stops_
         .expect("a container that is not there is nothing to stop, not a refusal");
 }
 
+/// A command whose PID 1 (`/bin/sh -c`, W4's argv) runs `on_term` when it is
+/// sent SIGTERM, prints `ready` once the trap is set, then idles. The trap is
+/// in PID 1 itself, not a child, so `docker stop`'s signal reaches it --
+/// the shape of the plugin host's `exec java …` (W5b spec §7.1).
+fn trapping(on_term: &str) -> TaskCommands {
+    TaskCommands {
+        container_image: SHELL_IMAGE.to_string(),
+        commands: vec![
+            format!("trap '{on_term}' TERM"),
+            "echo ready".into(),
+            "while :; do sleep 1; done".into(),
+        ],
+        ..TaskCommands::default()
+    }
+}
+
+type Running =
+    tokio::task::JoinHandle<egret_core::Result<egret_workflow::worker::commands::CommandsResult>>;
+
+/// Start `cmds` on a real [`DockerRunner`] in the background and wait until
+/// the container printed `ready`.
+async fn start_running(
+    runner: &Arc<DockerRunner>,
+    cmds: TaskCommands,
+) -> (TaskInput, Arc<Recorder>, Running) {
+    let (t, rec) = recorded(container::TYPE_ID, serde_json::json!({}));
+    let (r2, t2) = (runner.clone(), t.clone());
+    let running =
+        tokio::spawn(async move { r2.run(&t2, &cmds, &docker_spec(), &NoObserver).await });
+    for _ in 0..300 {
+        if rec.texts().iter().any(|l| l == "ready") {
+            return (t, rec, running);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the container never printed `ready`: {:?}", rec.lines());
+}
+
+/// Wait for the `run` in flight to return, so every line it read is stored.
+async fn finished(running: Running) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), running)
+        .await
+        .expect("the run in flight returns once its container stopped")
+        .expect("join")
+        .ok();
+}
+
+/// **W5b Task 5: a grace lets the container's SIGTERM handler run; grace 0
+/// does not** -- `docker stop -t <grace>` then `rm --force`, against W5a's
+/// `rm --force` alone. The line is printed by the trap inside the container,
+/// so no fake could produce it.
+async fn docker_cancel_with_grace_lets_a_sigterm_trap_run() {
+    let r = Arc::new(DockerRunner::new());
+
+    let (t, rec, running) = start_running(&r, trapping("echo got-term; exit 0")).await;
+    let name = container_name(&t);
+    r.cancel(&t, std::time::Duration::from_secs(10))
+        .await
+        .expect("cancel with a grace");
+    assert!(
+        !container_exists(&name),
+        "the container is removed after it stopped"
+    );
+    finished(running).await;
+    assert!(
+        rec.texts().iter().any(|l| l == "got-term"),
+        "SIGTERM reached PID 1's trap within the grace: {:?}",
+        rec.lines()
+    );
+    r.cancel(&t, std::time::Duration::from_secs(10))
+        .await
+        .expect("stopping a container that is not there is Ok, as `rm` is");
+
+    let (t, rec, running) = start_running(&r, trapping("echo got-term; exit 0")).await;
+    r.cancel(&t, std::time::Duration::ZERO)
+        .await
+        .expect("cancel with grace 0");
+    assert!(!container_exists(&container_name(&t)));
+    finished(running).await;
+    assert!(
+        !rec.texts().iter().any(|l| l == "got-term"),
+        "grace 0 is W5a's `rm --force`: SIGKILL, no trap: {:?}",
+        rec.lines()
+    );
+}
+
+/// **W5b Task 5: `cancel` returns only once the container has stopped, and
+/// no later than the grace plus the margin.** A trap that takes 3 s holds
+/// `cancel` for those 3 s; a container that ignores SIGTERM is killed at the
+/// grace and `cancel` returns then.
+async fn docker_cancel_returns_only_after_the_container_stopped() {
+    let r = Arc::new(DockerRunner::new());
+
+    let (t, rec, running) = start_running(&r, trapping("sleep 3; echo slow-term; exit 0")).await;
+    let started = std::time::Instant::now();
+    r.cancel(&t, std::time::Duration::from_secs(20))
+        .await
+        .expect("cancel");
+    let took = started.elapsed();
+    eprintln!("graceful cancel returned in {took:?}");
+    assert!(
+        took >= std::time::Duration::from_millis(2900),
+        "cancel returned before the 3 s trap had finished: {took:?}"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(20),
+        "the container stopped at ~3 s; cancel must not sit out the whole grace: {took:?}"
+    );
+    assert!(!container_exists(&container_name(&t)));
+    finished(running).await;
+    assert!(
+        rec.texts().iter().any(|l| l == "slow-term"),
+        "{:?}",
+        rec.lines()
+    );
+
+    // SIGTERM ignored: the daemon kills it at the grace, and cancel is back
+    // then -- within grace + CANCEL_WAIT_MARGIN.
+    let (t, _rec, running) = start_running(&r, trapping("")).await;
+    let started = std::time::Instant::now();
+    r.cancel(&t, std::time::Duration::from_secs(2))
+        .await
+        .expect("cancel");
+    let took = started.elapsed();
+    eprintln!("graceful cancel returned in {took:?}");
+    assert!(
+        took >= std::time::Duration::from_millis(1900)
+            && took
+                < std::time::Duration::from_secs(2)
+                    + egret_workflow::worker::commands::CANCEL_WAIT_MARGIN,
+        "{took:?}"
+    );
+    assert!(!container_exists(&container_name(&t)));
+    finished(running).await;
+}
+
 /// **A new holder of the attempt RE-ATTACHES to the old holder's container
 /// instead of starting a second one** (W5a Task 5, spec §5), and the old
 /// holder's dropped future removed nothing.
@@ -1175,6 +1312,8 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(a_container_runs_and_both_of_its_streams_reach_the_sink),
         case!(a_directory_named_as_an_output_file_does_not_wedge_the_worker),
         case!(a_dropped_future_leaves_the_container_running_and_cancel_is_what_stops_it),
+        case!(docker_cancel_with_grace_lets_a_sigterm_trap_run),
+        case!(docker_cancel_returns_only_after_the_container_stopped),
         case!(a_flood_of_output_markers_is_refused_rather_than_stored),
         case!(a_non_zero_exit_fails_the_task_and_set_e_stops_at_the_first_failure),
         case!(a_parent_and_a_child_declared_together_never_wedges_the_run),

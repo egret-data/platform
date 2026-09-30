@@ -185,6 +185,8 @@ pub(super) mod testing {
         /// The `taskRunner:` spec each run was given.
         pub specs: Mutex<Vec<crate::scripts::RunnerSpec>>,
         pub cancelled: Mutex<Vec<String>>,
+        /// The `grace` every `cancel` was given.
+        pub cancel_graces: Mutex<Vec<std::time::Duration>>,
         /// `(container name, delete)` for every `release`.
         pub released: Mutex<Vec<(String, bool)>>,
         /// What `adopt` answers: `Some` = a started container exists for the
@@ -253,6 +255,7 @@ pub(super) mod testing {
                     usize::MAX,
                     &line,
                     is_err,
+                    commands.host_protocol,
                 )
                 .await;
             }
@@ -263,7 +266,8 @@ pub(super) mod testing {
                 .unwrap_or_else(|| Ok(CommandsResult::default()))
         }
 
-        async fn cancel(&self, task: &TaskInput) -> Result<()> {
+        async fn cancel(&self, task: &TaskInput, grace: std::time::Duration) -> Result<()> {
+            self.cancel_graces.lock().unwrap().push(grace);
             self.cancelled
                 .lock()
                 .unwrap()
@@ -271,15 +275,41 @@ pub(super) mod testing {
             Ok(())
         }
 
+        async fn adoptable(&self, _task: &TaskInput) -> Result<bool> {
+            Ok(self.adoptable.lock().unwrap().is_some())
+        }
+
         async fn adopt(
             &self,
-            _task: &TaskInput,
-            _commands: &TaskCommands,
+            task: &TaskInput,
+            commands: &TaskCommands,
             _spec: &crate::scripts::RunnerSpec,
-            _observer: &dyn crate::worker::commands::LineObserver,
+            observer: &dyn crate::worker::commands::LineObserver,
         ) -> Result<Option<CommandsResult>> {
             *self.adopt_calls.lock().unwrap() += 1;
-            Ok(self.adoptable.lock().unwrap().clone())
+            let adopted = self.adoptable.lock().unwrap().clone();
+            // A real re-attach reads the existing container's lines into
+            // `task.log`; this one streams what the test set with
+            // `streaming`, and nothing when it set nothing.
+            let lines = self.streams.lock().unwrap().clone();
+            if let (Some(_), Some(lines)) = (&adopted, lines) {
+                let mut scratch = CommandsResult::default();
+                let mut state = crate::worker::commands::StreamState::default();
+                for (is_err, line) in lines {
+                    crate::worker::commands::stream_line(
+                        task,
+                        observer,
+                        &mut scratch,
+                        &mut state,
+                        usize::MAX,
+                        &line,
+                        is_err,
+                        commands.host_protocol,
+                    )
+                    .await;
+                }
+            }
+            Ok(adopted)
         }
 
         async fn release(&self, task: &TaskInput, spec: &crate::scripts::RunnerSpec) -> Result<()> {

@@ -28181,7 +28181,7 @@
             }
           },
           "403": {
-            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace, or the flow calls secret() and the caller lacks workflow:use_secrets",
             "content": {
               "application/json": {
                 "schema": {
@@ -28377,7 +28377,7 @@
             }
           },
           "403": {
-            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace, or the flow calls secret() and the caller lacks workflow:use_secrets",
             "content": {
               "application/json": {
                 "schema": {
@@ -28702,7 +28702,7 @@
             }
           },
           "403": {
-            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace",
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace, or the flow calls secret() and the caller lacks workflow:use_secrets",
             "content": {
               "application/json": {
                 "schema": {

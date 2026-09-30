@@ -61,11 +61,18 @@ async fn absent_row_means_enabled() {
 
     assert_eq!(
         disabled,
-        ["workflow_containers".to_string()].into_iter().collect(),
-        "a fresh workspace disables only the feature that is off by default"
+        off_by_default(),
+        "a fresh workspace disables only the features that are off by default"
+    );
+    assert_eq!(
+        disabled,
+        ["workflow_containers", "workflow_kestra_plugins"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
     );
     for key in egret_workspace::features::FEATURE_KEYS {
-        if *key != "workflow_containers" {
+        if !off_by_default().contains(*key) {
             assert!(!disabled.contains(*key), "{key} must stay on with no row");
         }
     }
@@ -87,13 +94,18 @@ async fn workflow_containers_is_turned_on_by_an_explicit_row() {
     repo.set_features(ws, &[("workflow_containers".into(), true)], None)
         .await
         .unwrap();
-    assert!(repo.disabled_features(ws).await.unwrap().is_empty());
-    assert!(repo
-        .disabled_features_for(&[ws.0])
-        .await
-        .unwrap()
-        .get(&ws.0)
-        .is_some_and(|d| d.is_empty()));
+    // W5b's `workflow_kestra_plugins` stays at its own default (off).
+    let only_plugins: std::collections::HashSet<String> = ["workflow_kestra_plugins".to_string()]
+        .into_iter()
+        .collect();
+    assert_eq!(repo.disabled_features(ws).await.unwrap(), only_plugins);
+    assert_eq!(
+        repo.disabled_features_for(&[ws.0])
+            .await
+            .unwrap()
+            .get(&ws.0),
+        Some(&only_plugins)
+    );
 
     let err = repo
         .set_features(ws, &[("workflows".into(), false)], None)

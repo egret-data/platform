@@ -565,7 +565,7 @@ async fn cancel_deletes_the_pod() {
     });
     wait_main_running(&c, &name).await;
     let started = std::time::Instant::now();
-    r.cancel(&t).await.expect("cancel");
+    r.cancel(&t, Duration::ZERO).await.expect("cancel");
     assert!(
         wait_gone(&c, &name, Duration::from_secs(20)).await,
         "cancel deletes the pod"
@@ -580,7 +580,111 @@ async fn cancel_deletes_the_pod() {
     );
     assert!(started.elapsed() < Duration::from_secs(60));
     // A second cancel of a pod that is not there is Ok.
-    r.cancel(&t).await.expect("cancelling nothing is Ok");
+    r.cancel(&t, Duration::ZERO)
+        .await
+        .expect("cancelling nothing is Ok");
+}
+
+/// **W5b Task 5: `cancel` with a grace deletes the pod with that grace and
+/// returns only once `main` has terminated; `release` then removes it.**
+///
+/// `main`'s PID 1 traps SIGTERM and takes 3 s to exit. The grace is 30 s, so
+/// a `cancel` back in under 25 s was ended by `main` stopping and not by the
+/// grace running out; one back in under 3 s did not wait. A plugin pod's
+/// `files-out` stops on SIGTERM (`pod_spec::files_out_script`, gated on
+/// `host_protocol`), which is what lets the pod go
+/// when `main` does: the kubelet reports no container terminated until all
+/// have stopped (measured, see that function).
+async fn k8s_cancel_with_grace_waits_for_termination_then_release_deletes() {
+    let c = client().await;
+    let r = Arc::new(runner().await);
+    let (t, rec) = task();
+    let name = name_of(&t);
+    let (r2, t2) = (r.clone(), t.clone());
+    let running = tokio::spawn(async move {
+        // `host_protocol: true`: a plugin pod, whose `files-out` exits on
+        // SIGTERM. A script pod's does not (W5a's pod, byte for byte).
+        let cmds = TaskCommands {
+            host_protocol: true,
+            ..shell(&[
+                "trap 'sleep 3; echo slow-term; sleep 1; exit 0' TERM",
+                "echo ready",
+                "while :; do sleep 1; done",
+            ])
+        };
+        r2.run(&t2, &cmds, &k8s_spec(), &NoObserver).await
+    });
+    wait_main_running(&c, &name).await;
+    let mut ready = false;
+    for _ in 0..240 {
+        if rec.texts().iter().any(|l| l == "ready") {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(ready, "main never printed `ready`: {:?}", rec.lines());
+
+    let started = std::time::Instant::now();
+    r.cancel(&t, Duration::from_secs(30))
+        .await
+        .expect("cancel with a grace");
+    let took = started.elapsed();
+    eprintln!("graceful cancel returned in {took:?}");
+    assert!(
+        took >= Duration::from_millis(2900),
+        "cancel returned before main's 3 s trap had finished: {took:?}"
+    );
+    assert!(
+        took < Duration::from_secs(25),
+        "main exited at ~3 s; cancel must not sit out the grace: {took:?}"
+    );
+    if let Some(p) = pods(&c).get_opt(&name).await.expect("get pod") {
+        let main_exit = p
+            .status
+            .as_ref()
+            .and_then(|s| s.container_statuses.as_ref())
+            .into_iter()
+            .flatten()
+            .find(|cs| cs.name == "main")
+            .and_then(|cs| cs.state.as_ref())
+            .and_then(|s| s.terminated.as_ref())
+            .map(|t| t.exit_code);
+        assert_eq!(
+            main_exit,
+            Some(0),
+            "when cancel returned the pod was gone, or main had terminated through its \
+             trap's `exit 0`"
+        );
+    }
+
+    let ended = tokio::time::timeout(Duration::from_secs(60), running)
+        .await
+        .expect("the run in flight returns once main terminated")
+        .expect("join");
+    assert!(
+        rec.texts().iter().any(|l| l == "slow-term"),
+        "SIGTERM reached main's trap: {:?} / {ended:?}",
+        rec.lines()
+    );
+
+    let released = std::time::Instant::now();
+    r.release(&t, &k8s_spec()).await.expect("release");
+    let mut gone = false;
+    while released.elapsed() < Duration::from_secs(15) {
+        if pods(&c).get_opt(&name).await.expect("get pod").is_none() {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(
+        gone,
+        "after release the pod is gone well before its 30 s grace would have ended"
+    );
+    r.cancel(&t, Duration::from_secs(30))
+        .await
+        .expect("cancelling a pod that is not there is Ok, with a grace too");
 }
 
 /// The next holder of a lease re-attaches to the pod its predecessor left —
@@ -1315,6 +1419,7 @@ fn cases() -> Vec<(&'static str, Case)> {
         case!(input_and_output_files_round_trip),
         case!(a_nonzero_exit_fails_and_keeps_outputs),
         case!(cancel_deletes_the_pod),
+        case!(k8s_cancel_with_grace_waits_for_termination_then_release_deletes),
         case!(a_second_run_call_for_the_same_attempt_reattaches_not_recreates),
         case!(a_line_written_just_before_the_reclaim_is_not_lost),
         case!(a_non_shell_interpreter_keeps_the_merged_stream_and_says_so),

@@ -989,10 +989,13 @@ pub fn build_plan(source: &str) -> Result<Plan, PlanError> {
     let roots = flatten_list(&mut tasks, &flow.tasks, 1)?;
     let errors = flatten_list(&mut tasks, &flow.errors, 1)?;
 
-    // W1's `validate`, as the third gate. `errors` only: a warning is a
+    // W1's `validate`, as the third gate -- its RUN-TIME half,
+    // `validate_for_run`, which omits the save-only findings (W5b fix round
+    // 1: a version published before W5b with `pluginDefaults:` must still
+    // run, applying nothing; spec §4.1). `errors` only: a warning is a
     // warning, and refusing on one would turn `unknown_task_type` into a ban on
     // every plugin egret has not registered.
-    let report = crate::spec::validate(&flow);
+    let report = crate::spec::validate_for_run(&flow);
     if let Some(first) = report.errors.first() {
         return Err(PlanError {
             message: match report.errors.len() {

@@ -58,6 +58,7 @@ pub const FEATURE_KEYS: &[&str] = &[
     "data_api",
     "workflows",
     "workflow_containers",
+    "workflow_kestra_plugins",
 ];
 
 /// True if `key` names a module in the catalog.
@@ -124,6 +125,14 @@ const DEPENDENCIES: &[(&str, &str, &str)] = &[
         "workflow_containers",
         "workflows",
         "workflow_containers requires workflows to be enabled",
+    ),
+    // W5b: a Kestra plugin task runs in W5a's container runner, so a
+    // workspace may run scripts without plugins, never plugins without
+    // scripts (W5b spec §5).
+    (
+        "workflow_kestra_plugins",
+        "workflow_containers",
+        "workflow_kestra_plugins requires workflow_containers to be enabled",
     ),
 ];
 
@@ -322,6 +331,18 @@ pub const FEATURES: &[Feature] = &[
         rules: &[],
         // W5a, the user's decision of 2026-09-28: the first feature that is
         // OFF until a platform admin turns it on for a workspace.
+        default_enabled: false,
+    },
+    Feature {
+        key: "workflow_kestra_plugins",
+        label: "Workflow Kestra plugins",
+        description: "Run Kestra plugin tasks (kestra.<class>, the JDBC plugins) in the plugin host container. Requires workflow containers.",
+        // Like `workflow_containers`: it gates EXECUTION, not a URL prefix. A
+        // `kestra.*` task is refused at publish and at run by
+        // `egret_workflow::plugins::gate` while it is off.
+        rules: &[],
+        // W5b spec §5: off until a platform admin turns it on, and it
+        // requires `workflow_containers` (see `DEPENDENCIES`).
         default_enabled: false,
     },
 ];
@@ -686,18 +707,21 @@ mod tests {
 
     /// W5a: `workflow_containers` is catalogued, OFF by default, gates no
     /// URL (it gates execution), and requires `workflows`. Every other key
-    /// keeps `default_enabled: true`, so nothing that existed before moved.
+    /// but W5b's `workflow_kestra_plugins` keeps `default_enabled: true`, so
+    /// nothing that existed before moved.
     #[test]
-    fn workflow_containers_is_the_one_feature_off_by_default() {
+    fn workflow_containers_is_off_by_default() {
         assert!(is_known("workflow_containers"));
-        assert_eq!(FEATURE_KEYS.last(), Some(&"workflow_containers"));
         assert_eq!(default_enabled("workflow_containers"), Some(false));
         let off_by_default: Vec<&str> = FEATURES
             .iter()
             .filter(|f| !f.default_enabled)
             .map(|f| f.key)
             .collect();
-        assert_eq!(off_by_default, vec!["workflow_containers"]);
+        assert_eq!(
+            off_by_default,
+            vec!["workflow_containers", "workflow_kestra_plugins"]
+        );
         let f = FEATURES
             .iter()
             .find(|f| f.key == "workflow_containers")
@@ -712,7 +736,42 @@ mod tests {
             Some("workflow_containers requires workflows to be enabled")
         );
         assert_eq!(
-            violates_dependencies(&disabled(&["workflows", "workflow_containers"])),
+            violates_dependencies(&disabled(&[
+                "workflows",
+                "workflow_containers",
+                "workflow_kestra_plugins"
+            ])),
+            None
+        );
+    }
+
+    /// W5b: `workflow_kestra_plugins` is catalogued last, OFF by default,
+    /// gates no URL, and requires `workflow_containers` -- plugins never
+    /// without scripts; scripts without plugins is fine.
+    #[test]
+    fn workflow_kestra_plugins_is_off_by_default_and_requires_containers() {
+        assert_eq!(FEATURE_KEYS.last(), Some(&"workflow_kestra_plugins"));
+        assert_eq!(default_enabled("workflow_kestra_plugins"), Some(false));
+        let f = FEATURES
+            .iter()
+            .find(|f| f.key == "workflow_kestra_plugins")
+            .unwrap();
+        assert!(f.rules.is_empty(), "it gates execution, not a URL prefix");
+
+        let disabled =
+            |keys: &[&str]| -> HashSet<String> { keys.iter().map(|k| k.to_string()).collect() };
+        assert_eq!(
+            violates_dependencies(&disabled(&["workflow_containers"])),
+            Some("workflow_kestra_plugins requires workflow_containers to be enabled")
+        );
+        // The control: scripts on, plugins off is a legal state.
+        assert_eq!(
+            violates_dependencies(&disabled(&["workflow_kestra_plugins"])),
+            None
+        );
+        // And the fresh-workspace default (both off) is legal.
+        assert_eq!(
+            violates_dependencies(&effective_disabled(Vec::<(String, bool)>::new())),
             None
         );
     }
@@ -726,10 +785,16 @@ mod tests {
         let none: Vec<(String, bool)> = Vec::new();
         assert_eq!(
             effective_disabled(none),
-            ["workflow_containers".to_string()].into_iter().collect()
+            [
+                "workflow_containers".to_string(),
+                "workflow_kestra_plugins".to_string()
+            ]
+            .into_iter()
+            .collect()
         );
         let rows = vec![
             ("workflow_containers".to_string(), true),
+            ("workflow_kestra_plugins".to_string(), true),
             ("charts".to_string(), false),
             ("retired_key".to_string(), false),
             ("other_retired".to_string(), true),

@@ -8577,6 +8577,8 @@ impl Registry for Budgets {
 fn one_typed_task(id: &str, task: &str, type_id: &str, extra: &str) -> String {
     let body = if type_id.starts_with("io.kestra.plugin.core") {
         "    message: hi\n".to_string()
+    } else if type_id.starts_with("kestra.") {
+        "    url: jdbc:postgresql://pg/db\n    sql: SELECT 1\n".to_string()
     } else {
         "    commands: [echo hi]\n".to_string()
     };
@@ -8611,6 +8613,12 @@ async fn a_script_task_without_timeout_gets_the_default(pool: sqlx::PgPool) {
             Some(default),
         ),
         ("alias", "egret.container", "", Some(default)),
+        (
+            "plugin",
+            "kestra.io.kestra.plugin.jdbc.postgresql.Query",
+            "",
+            Some(default),
+        ),
         (
             "explicit",
             "io.kestra.plugin.scripts.shell.Commands",

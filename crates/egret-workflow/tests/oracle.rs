@@ -508,6 +508,7 @@ fn declared_test_names() -> BTreeSet<String> {
         include_str!("../src/runners/javare.rs"),
         include_str!("../src/runners/jqsandbox.rs"),
         include_str!("../src/runners/rewrite.rs"),
+        include_str!("../src/runners/secrets.rs"),
         include_str!("../src/runners/yamlfmt.rs"),
     ];
 
@@ -581,7 +582,8 @@ fn every_runners_module_is_scanned_for_declared_tests() {
              `test:` pairing naming one of its tests would be rejected as nonexistent"
         );
     }
-    assert_eq!(on_disk.len(), 10, "a module was added or removed");
+    // 11 since W5b Task 4 added `secrets.rs`.
+    assert_eq!(on_disk.len(), 11, "a module was added or removed");
 }
 
 #[test]

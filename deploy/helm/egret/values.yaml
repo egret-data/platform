@@ -112,6 +112,24 @@ workflow:
   # shape), as the one env value egret reads. Empty allows NO image, e.g.:
   # '[{type="io.kestra.plugin.ee.kubernetes.runner.Kubernetes",values={allowed-images=["python:3.13-slim","ubuntu:*"]}}]'
   pluginConfigurations: ""
+  # W5b: the image and JVM that run Kestra plugin tasks (`type: kestra.<FQCN>`,
+  # built from deploy/docker/plugin-host.Dockerfile). Rendered only with
+  # containerRunner kubernetes, where egret refuses to start without an image.
+  # It is NOT matched against allowed-images: the author cannot choose it.
+  # Running a plugin task also needs the workspace feature
+  # `workflow_kestra_plugins` (off by default, requires workflow_containers).
+  pluginHost:
+    # REQUIRED whenever containerRunner is not `none`, even with no plugin task:
+    # egret refuses to start without it (W5b release note). `egret-plugin-host:dev`
+    # is published nowhere -- set a pullable image built from
+    # deploy/docker/plugin-host.Dockerfile (or `kind load` it for local use).
+    image: egret-plugin-host:dev
+    # The JVM's -Xmx, below the pod's default memory limit (512Mi).
+    jvmMaxHeap: 384m
+    # Seconds between SIGTERM (the host calls the plugin's kill(), which
+    # cancels the query on Postgres/Trino) and SIGKILL on a timeout. Minimum 3
+    # (egret refuses to start below it: the host waits the grace less 2 s).
+    killGraceS: 15
   tasks:
     namespace: egret-tasks
     # deploy/docker/task-helper.Dockerfile; must be pullable from the task

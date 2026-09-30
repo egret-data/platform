@@ -314,13 +314,20 @@ fn is_negative(source: &str) -> bool {
 /// **egret's divergence, not the artifact's**: Kestra runs a script task with
 /// no `timeout:` unbounded. See
 /// [`DEFAULT_CONTAINER_TIMEOUT`](super::DEFAULT_CONTAINER_TIMEOUT) for why.
-/// "Script or container" is [`crate::scripts::kind_of`]: the four script
-/// FQCNs and the aliases `egret.container` and `egret.script.python`.
+/// "Script or container" is [`runs_in_a_container`]: the four script FQCNs,
+/// the aliases `egret.container` and `egret.script.python`, and (W5b) every
+/// Kestra plugin task, `kestra.*`, which runs in the plugin host's container.
 pub(super) fn defaulted(budget: Budget, type_id: &str, script_default: Duration) -> Budget {
     match budget {
-        Budget::Absent if crate::scripts::kind_of(type_id).is_some() => Budget::Of(script_default),
+        Budget::Absent if runs_in_a_container(type_id) => Budget::Of(script_default),
         other => other,
     }
+}
+
+/// The ONE predicate [`defaulted`] reads: a type whose task runs in a
+/// container (W5a's script types, W5b's plugin types).
+fn runs_in_a_container(type_id: &str) -> bool {
+    crate::scripts::kind_of(type_id).is_some() || type_id.starts_with(crate::plugins::PREFIX)
 }
 
 /// Resolve one task's `timeout:` against the context its handler will render
@@ -437,6 +444,41 @@ mod tests {
 
     fn property(source: &str) -> Property<Duration> {
         Property::from_source(source.to_string())
+    }
+
+    /// **W5b: a plugin task with no `timeout:` runs under the container
+    /// default** -- the same predicate as a script task's, not a second rule;
+    /// its explicit `timeout:` wins; a native task stays unbounded.
+    #[test]
+    fn a_plugin_task_without_timeout_runs_under_container_default_timeout() {
+        let d = Duration::from_secs(777);
+        let q = "kestra.io.kestra.plugin.jdbc.postgresql.Query";
+        assert_eq!(defaulted(Budget::Absent, q, d), Budget::Of(d));
+        assert_eq!(
+            defaulted(
+                Budget::Absent,
+                "kestra.io.kestra.plugin.jdbc.trino.Query",
+                d
+            ),
+            Budget::Of(d)
+        );
+        assert_eq!(
+            defaulted(Budget::Of(Duration::from_secs(5)), q, d),
+            Budget::Of(Duration::from_secs(5))
+        );
+        assert_eq!(
+            defaulted(Budget::Absent, "io.kestra.plugin.scripts.shell.Commands", d),
+            Budget::Of(d)
+        );
+        assert_eq!(
+            defaulted(Budget::Absent, "io.kestra.plugin.core.log.Log", d),
+            Budget::Absent
+        );
+        // A bare catalog FQCN is not a plugin task (publish refuses it).
+        assert_eq!(
+            defaulted(Budget::Absent, "io.kestra.plugin.jdbc.postgresql.Query", d),
+            Budget::Absent
+        );
     }
 
     /// The six pairs probed inside the pinned image, by reflection over

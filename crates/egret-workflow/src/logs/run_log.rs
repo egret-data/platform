@@ -13,6 +13,14 @@
 //! (spec §4.4) — because an attempt that hit the cap must still say why it
 //! failed. Both are still split.
 //!
+//! # Masking (W5b)
+//!
+//! [`RunLog::masked`] returns a handle that replaces every value a run's
+//! `secret()` resolved with [`MASK`] in each message **before** it is split,
+//! so a piece boundary can never cut a value in two and leave both halves
+//! readable. The same replace is [`mask`], a pure function, so a caller can
+//! mask a string that never becomes a log line (a plugin's failure reason).
+//!
 //! # Order
 //!
 //! The counters sit behind an async mutex that is held across the sink write,
@@ -21,6 +29,7 @@
 //! summary. A full sink (D3: the writer waits, it never drops) therefore slows
 //! every writer of that attempt, which is the point.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -70,6 +79,9 @@ pub struct RunLog {
     sink: Arc<dyn LogSink>,
     limits: LogLimits,
     counters: Arc<Mutex<Counters>>,
+    /// The values [`mask`] replaces, prepared by [`prepare`]: no empties, no
+    /// duplicates, longest first. Empty on every handle but a masked one.
+    secrets: Arc<[String]>,
 }
 
 impl std::fmt::Debug for RunLog {
@@ -95,6 +107,22 @@ impl RunLog {
             sink,
             limits,
             counters: Arc::new(Mutex::new(Counters::default())),
+            secrets: Arc::from(Vec::new()),
+        }
+    }
+
+    /// This handle, replacing each of `values` (and whatever this handle
+    /// already masked) by [`MASK`] in every line it writes.
+    ///
+    /// **Shares the counters**: a masked handle and the one it came from are
+    /// one attempt, one cap, one summary. A masked line counts toward the cap
+    /// at its masked length, because that is what is stored.
+    pub fn masked(&self, values: &[String]) -> RunLog {
+        let mut all: Vec<String> = self.secrets.to_vec();
+        all.extend(values.iter().cloned());
+        RunLog {
+            secrets: Arc::from(prepare(&all)),
+            ..self.clone()
         }
     }
 
@@ -114,6 +142,19 @@ impl RunLog {
         )
     }
 
+    /// `message` as [`line`](Self::line) would store it, before the split:
+    /// masked, U+0000 removed. What a re-attach compares a re-read line with
+    /// (`k8s::runner::Replayed`, W5b fix round 1 M1), so the comparison is
+    /// with the stored text rather than with the raw line.
+    pub fn stored_form(&self, message: &str) -> String {
+        let masked = mask_prepared(message, &self.secrets);
+        if masked.contains('\0') {
+            masked.replace('\0', "")
+        } else {
+            masked.into_owned()
+        }
+    }
+
     pub fn identity(&self) -> &RunIdentity {
         &self.identity
     }
@@ -121,8 +162,10 @@ impl RunLog {
     /// Write `message` at `level`, split and under the cap.
     pub async fn line(&self, level: LogLevel, message: &str) {
         let ts = Utc::now();
+        // Before the split, never after: see the module doc.
+        let message = mask_prepared(message, &self.secrets);
         let mut c = self.counters.lock().await;
-        for piece in pieces(message) {
+        for piece in pieces(&message) {
             let bytes = piece.len() as u64;
             if !c.withholding
                 && (c.lines + 1 > self.limits.run_max_lines
@@ -149,8 +192,9 @@ impl RunLog {
     /// still split. Written by `claim::run_one` only.
     pub async fn failure(&self, message: &str) {
         let ts = Utc::now();
+        let message = mask_prepared(message, &self.secrets);
         let _c = self.counters.lock().await;
-        for piece in pieces(message) {
+        for piece in pieces(&message) {
             self.sink.write(self.make(LogLevel::Error, ts, piece)).await;
         }
     }
@@ -217,6 +261,59 @@ impl RunLog {
             message,
         }
     }
+}
+
+/// What a masked value is replaced by: Kestra's
+/// `RunContextLogger.BaseAppender.replaceSecret`, measured on the artifact
+/// (`oracle-exec/w5b-plugins.json`, `secret_masking`).
+pub const MASK: &str = "******";
+
+/// `message` with every occurrence of every non-empty value in `values`
+/// replaced by [`MASK`].
+///
+/// One left-to-right scan, taking the **longest** value that matches at each
+/// position, so a value that is a substring of another cannot leave the
+/// longer one's tail readable, and a value made of `*` cannot re-match the
+/// mask it just produced. An empty value masks nothing (replacing `""` would
+/// put a mask between every character).
+pub fn mask<'a>(message: &'a str, values: &[String]) -> Cow<'a, str> {
+    mask_prepared(message, &prepare(values))
+}
+
+/// `values` without empties or duplicates, longest first.
+fn prepare(values: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = values.iter().filter(|v| !v.is_empty()).cloned().collect();
+    out.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    out.dedup();
+    out
+}
+
+/// [`mask`] over values [`prepare`] already ordered.
+///
+/// **Skips an empty value itself**, rather than trusting [`prepare`] to have
+/// dropped it: an empty value matches at every position without advancing,
+/// so it would loop forever and hang the worker (measured, W5b Task 4
+/// mutation `e-empty`: 3.8 GB before it was killed).
+fn mask_prepared<'a>(message: &'a str, prepared: &[String]) -> Cow<'a, str> {
+    let values = prepared.iter().filter(|v| !v.is_empty());
+    if !values.clone().any(|v| message.contains(v.as_str())) {
+        return Cow::Borrowed(message);
+    }
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(c) = rest.chars().next() {
+        match values.clone().find(|v| rest.starts_with(v.as_str())) {
+            Some(v) => {
+                out.push_str(MASK);
+                rest = &rest[v.len()..];
+            }
+            None => {
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// `message` in consecutive pieces of [`LOG_PIECE_CHARS`] `char`s, the last
@@ -568,5 +665,132 @@ mod tests {
                 }
             )
         );
+    }
+
+    // -----------------------------------------------------------------
+    // W5b Task 4: masking
+    // -----------------------------------------------------------------
+
+    fn v(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Every value is masked in every kind of line, the masked handle shares
+    /// the original's counters, and a masked line counts at its masked length.
+    #[tokio::test]
+    async fn masked_run_log_replaces_every_value_and_counts_the_masked_line() {
+        let rec = Recorder::new();
+        let limits = LogLimits {
+            run_max_lines: 3,
+            run_max_bytes: u64::MAX,
+        };
+        let plain = RunLog::new(identity(0), rec.clone(), limits);
+        let log = plain.masked(&v(&["s3cr3t", "hunter2"]));
+
+        log.info("user=admin password=s3cr3t again s3cr3t").await;
+        log.line(LogLevel::Warn, "hunter2|s3cr3t").await;
+        // The unmasked original is the same attempt: this is line 3 of 3.
+        plain.info("third").await;
+        // Over the 3-line cap: withheld, and counted at its MASKED length.
+        log.info("x s3cr3t").await;
+        log.failure("connect failed for s3cr3t").await;
+        log.finish().await;
+
+        let got: Vec<(LogLevel, String)> = rec.texts();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    LogLevel::Info,
+                    "user=admin password=****** again ******".into()
+                ),
+                (LogLevel::Warn, "******|******".into()),
+                (LogLevel::Info, "third".into()),
+                (LogLevel::Error, "connect failed for ******".into()),
+                // "x ******" is 8 bytes; "x s3cr3t" would also be 8, so the
+                // byte count is pinned by the next test, not this one.
+                (LogLevel::Warn, summary(1, 8, limits)),
+            ]
+        );
+        assert!(got
+            .iter()
+            .all(|(_, m)| !m.contains("s3cr3t") && !m.contains("hunter2")));
+    }
+
+    /// A masked line is counted at the length that is STORED.
+    #[tokio::test]
+    async fn a_masked_line_counts_its_masked_bytes() {
+        let rec = Recorder::new();
+        let limits = LogLimits {
+            run_max_lines: 1,
+            run_max_bytes: u64::MAX,
+        };
+        let log = RunLog::new(identity(0), rec.clone(), limits).masked(&v(&["a-long-password"]));
+        log.info("first").await;
+        log.info("a-long-password").await; // withheld: 6 bytes masked, 15 not
+        log.finish().await;
+        assert_eq!(rec.lines()[1].message, summary(1, 6, limits));
+    }
+
+    /// The mask is applied BEFORE the split: a value straddling the
+    /// 15,360-char cut is masked whole, and neither half survives.
+    #[tokio::test]
+    async fn a_value_across_a_piece_boundary_is_masked_whole() {
+        let secret = "ABCDEFGHIJ";
+        // The value starts 5 chars before the cut.
+        let message = format!(
+            "{}{secret}{}",
+            "x".repeat(LOG_PIECE_CHARS - 5),
+            "y".repeat(10)
+        );
+        let rec = Recorder::new();
+        let log = RunLog::new(identity(0), rec.clone(), LogLimits::default()).masked(&v(&[secret]));
+        log.info(&message).await;
+        let joined: String = rec.lines().iter().map(|l| l.message.clone()).collect();
+        assert_eq!(
+            joined,
+            format!(
+                "{}{MASK}{}",
+                "x".repeat(LOG_PIECE_CHARS - 5),
+                "y".repeat(10)
+            )
+        );
+        assert!(
+            !joined.contains("ABCDE") && !joined.contains("FGHIJ"),
+            "a half survived"
+        );
+    }
+
+    /// Longer values first: a value that is a substring of another does not
+    /// leave the longer one's tail readable, and an empty value masks nothing.
+    #[test]
+    fn mask_prefers_the_longer_value_and_ignores_an_empty_one() {
+        // Both orders of the input list: the answer cannot depend on it.
+        for values in [v(&["abc", "abcdef"]), v(&["abcdef", "abc"])] {
+            assert_eq!(mask("x abcdef y abc z", &values), "x ****** y ****** z");
+        }
+        assert_eq!(
+            mask("abc", &v(&[""])),
+            "abc",
+            "an empty value masks nothing"
+        );
+        assert_eq!(mask("abc", &v(&["", "b"])), "a******c");
+        assert!(
+            matches!(mask("nothing here", &v(&["zzz"])), Cow::Borrowed(_)),
+            "an unmatched message is not copied"
+        );
+        // A value made of the mask's own character cannot re-match the mask.
+        assert_eq!(mask("p*q", &v(&["*"])), "p******q");
+        // Multi-byte text around and inside a value.
+        assert_eq!(mask("é密码é", &v(&["密码"])), "é******é");
+    }
+
+    /// `mask_prepared` must not trust its caller to have dropped empties: an
+    /// empty value would match everywhere without advancing.
+    #[test]
+    fn mask_prepared_skips_an_empty_value_itself() {
+        assert_eq!(mask_prepared("abc", &v(&[""])), "abc");
+        assert_eq!(mask_prepared("abc", &v(&["b", ""])), "a******c");
+        assert_eq!(mask_prepared("abc", &v(&["", "b"])), "a******c");
     }
 }

@@ -288,7 +288,187 @@ struct FeaturePresence {
     triggers: bool,
 }
 
+/// **The save-time report**: what a draft shows and what blocks publish
+/// (`routes::draft_dto`, `POST .../validate`, `publish`). It is
+/// [`validate_for_run`] plus the findings that only SAVING a flow may raise
+/// ([`save_only_findings`]).
+///
+/// W5b fix round 1 (user ruling 2A): `pluginDefaults:` is refused here and
+/// NOT at run time. egret dropped the key silently before W5b, so a version
+/// published then may carry it; spec §4.1: *"The refusal shows on a draft and
+/// blocks publish. A draft that runs anyway applies nothing, as Kestra's read
+/// path does."* The run-time gate, `executor::build_plan`, calls
+/// [`validate_for_run`], which cannot raise a save-only finding because it
+/// never calls [`save_only_findings`] -- the separation is in which function
+/// is called, not in a flag a caller must remember to pass.
 pub fn validate(flow: &Flow) -> ValidationReport {
+    let mut report = validate_for_run(flow);
+    save_only_findings(flow, &mut report);
+    report
+}
+
+/// Findings that refuse SAVING a flow but must never stop a stored version
+/// from running (see [`validate`]). Today: a top-level `pluginDefaults:`,
+/// whatever its value, on every flow (W5b spec §4.1) -- Kestra 2.0 removed it
+/// and refuses the key at save.
+fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
+    use crate::plugins;
+    if flow.plugin_defaults.is_some() {
+        report.errors.push(Finding {
+            code: plugins::CODE_REMOVED_PLUGIN_DEFAULTS,
+            message: plugins::REMOVED_PLUGIN_DEFAULTS_MESSAGE.to_string(),
+            path: "pluginDefaults".to_string(),
+        });
+    }
+    secret_findings(flow, report);
+}
+
+/// W5b fix round 1 (I2), spec §6: `secret()` resolves only in a `kestra.*`
+/// task's properties, so a call anywhere else -- a script task's `commands`
+/// or `env`, `runIf`, an input, a `Log`, a trigger, a flowable's own fields --
+/// is an error naming where it is; and on a plugin task, a `namespace=` or
+/// `full=` written in the call is an error naming the argument.
+///
+/// **Save-only**, for [`save_only_findings`]' reason: the render refuses both
+/// at run anyway (`functions::SECRET_REFUSAL`, `secrets::parse_call`), so a
+/// stored draft that carries one still plans and fails at the task, as before.
+///
+/// Walks the flow as it serialises -- every string egret keeps, keys too --
+/// with the plugin tasks (`plugins::plugin_tasks`, which walks `errors:`
+/// children) exempt for their PROPERTIES only: their `id`, `runIf`,
+/// `timeout` and the other keys egret's `Task` model reads are walked like
+/// everything else, because the plugin render never sees them. A task
+/// object is recognised as a plugin task by its (`id`, `type`) pair.
+fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
+    use crate::runners::secrets::{
+        refused_argument_message, text_uses_secret, written_refused_arguments,
+    };
+    use std::collections::HashSet;
+
+    /// What `models::Task` reads itself; everything else on a leaf is its spec.
+    const TASK_KEYS: [&str; 9] = [
+        "id",
+        "type",
+        "description",
+        "retry",
+        "timeout",
+        "disabled",
+        "runIf",
+        "allowFailure",
+        "allowWarning",
+    ];
+
+    fn strings<'a>(v: &'a serde_json::Value, path: String, out: &mut Vec<(String, &'a str)>) {
+        match v {
+            serde_json::Value::String(s) => out.push((path, s)),
+            serde_json::Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    strings(item, format!("{path}[{i}]"), out);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (k, v) in map {
+                    out.push((path.clone(), k));
+                    strings(v, join(&path, k), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn join(path: &str, key: &str) -> String {
+        if path.is_empty() {
+            key.to_string()
+        } else {
+            format!("{path}.{key}")
+        }
+    }
+
+    struct Walk<'a> {
+        plugin: HashSet<(&'a str, &'a str)>,
+        report: &'a mut ValidationReport,
+    }
+
+    impl Walk<'_> {
+        fn outside(&mut self, path: String, text: &str) {
+            if text_uses_secret(text) {
+                self.report.errors.push(Finding {
+                    code: crate::plugins::CODE_SECRET_OUTSIDE_PLUGIN_TASK,
+                    message: format!(
+                        "secret() is refused at {path}: {}",
+                        crate::runners::SECRET_REFUSAL
+                    ),
+                    path,
+                });
+            }
+        }
+
+        fn property(&mut self, path: String, text: &str) {
+            for arg in written_refused_arguments(text) {
+                self.report.errors.push(Finding {
+                    code: crate::plugins::CODE_SECRET_ARGUMENT_REFUSED,
+                    message: refused_argument_message(arg),
+                    path: path.clone(),
+                });
+            }
+        }
+
+        fn value(&mut self, v: &serde_json::Value, path: String) {
+            match v {
+                serde_json::Value::String(s) => self.outside(path, s),
+                serde_json::Value::Array(items) => {
+                    for (i, item) in items.iter().enumerate() {
+                        // A list of tasks (or inputs, triggers) reads by id.
+                        let here = match item.get("id").and_then(serde_json::Value::as_str) {
+                            Some(id) => join(&path, id),
+                            None => format!("{path}[{i}]"),
+                        };
+                        self.value(item, here);
+                    }
+                }
+                serde_json::Value::Object(map) => {
+                    let id = map.get("id").and_then(serde_json::Value::as_str);
+                    let ty = map.get("type").and_then(serde_json::Value::as_str);
+                    let is_plugin =
+                        matches!((id, ty), (Some(i), Some(t)) if self.plugin.contains(&(i, t)));
+                    for (k, v) in map {
+                        let here = join(&path, k);
+                        self.outside(path.clone(), k);
+                        if is_plugin && !TASK_KEYS.contains(&k.as_str()) {
+                            let mut found = Vec::new();
+                            strings(v, here, &mut found);
+                            for (p, text) in found {
+                                self.property(p, text);
+                            }
+                        } else {
+                            self.value(v, here);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let Ok(doc) = serde_json::to_value(flow) else {
+        return;
+    };
+    let tasks = crate::plugins::plugin_tasks(flow);
+    let mut walk = Walk {
+        plugin: tasks
+            .iter()
+            .map(|(_, t, _)| (t.id.as_str(), t.r#type.as_str()))
+            .collect(),
+        report,
+    };
+    walk.value(&doc, String::new());
+}
+
+/// **The run-time gate** (`executor::build_plan`'s third gate): every
+/// structural, semantic and not-yet-enforced finding -- everything
+/// [`validate`] reports except [`save_only_findings`]. A stored version that
+/// passes this runs.
+pub fn validate_for_run(flow: &Flow) -> ValidationReport {
     let mut report = ValidationReport::default();
 
     validate_namespace(flow, &mut report);
@@ -355,6 +535,7 @@ pub fn validate(flow: &Flow) -> ValidationReport {
     }
 
     validate_script_tasks(flow, &mut report);
+    validate_plugin_tasks(flow, &mut report);
 
     validate_inputs(&flow.inputs, &mut report);
 
@@ -392,6 +573,48 @@ fn validate_script_tasks(flow: &Flow, report: &mut ValidationReport) {
                     },
                 });
             }
+        }
+    }
+}
+
+/// W5b: every Kestra plugin task (`crate::plugins`, `type: kestra.<FQCN>`)
+/// is parsed against the embedded catalog, and each refusal is an ERROR
+/// naming it (spec §4). A bare catalog FQCN is an error carrying the prefixed
+/// spelling. Both walk `children()` AND `error_children()`
+/// (`plugins::plugin_tasks`), unlike `walk_task`, so a plugin task inside a
+/// flowable's `errors:` is refused too -- which is also why the bare-FQCN
+/// error is raised here rather than in `walk_task`'s `Leaf` arm.
+///
+/// (`pluginDefaults:` is NOT here: it is a save-only finding, see
+/// [`save_only_findings`].)
+///
+/// The governance gate (features, `allowed-types`, a runner) is NOT here;
+/// `publish::check_plugin_tasks` runs it after this.
+fn validate_plugin_tasks(flow: &Flow, report: &mut ValidationReport) {
+    use crate::plugins;
+    let refused = plugins::plugin_tasks(flow)
+        .into_iter()
+        .filter_map(|(path, task, spec)| {
+            plugins::parse(&task.r#type, spec)
+                .err()
+                .map(|rs| (path, task, rs))
+        })
+        .chain(
+            plugins::bare_plugin_types(flow)
+                .into_iter()
+                .map(|(path, task, r)| (path, task, vec![r])),
+        );
+    for (path, task, refusals) in refused {
+        for r in refusals {
+            report.errors.push(Finding {
+                code: r.code,
+                message: format!("task '{}': {}", task.id, r.message),
+                path: if r.path.is_empty() {
+                    path.clone()
+                } else {
+                    format!("{path}.{}", r.path)
+                },
+            });
         }
     }
 }
@@ -1323,7 +1546,16 @@ fn walk_task(
         // Kestra control-flow aliases -- never reach either warning: the
         // rule is "neither a control-flow variant nor a registered type",
         // not "starts with `core.`".
-        TaskKind::Leaf { .. } if registry::known_type(&task.r#type).is_none() => {
+        // W5b: a `kestra.` type (in the catalog or not) and a bare catalog
+        // FQCN are judged by `validate_plugin_tasks`, which refuses the
+        // ones that cannot run with an ERROR naming them; neither gets the
+        // generic warning below, which would say the opposite ("check for a
+        // typo") of the error's hint.
+        TaskKind::Leaf { .. }
+            if registry::known_type(&task.r#type).is_none()
+                && !task.r#type.starts_with(crate::plugins::PREFIX)
+                && crate::plugins::bare_hint(&task.r#type).is_none() =>
+        {
             if canonical_flow_type(&task.r#type).is_some() {
                 // **No `KESTRA_FLOW_CONTROL` lookup, and the arm that did one
                 // is GONE.** W8 Task 3 fix round 1. It named the package that

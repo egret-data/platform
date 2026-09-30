@@ -286,6 +286,30 @@ impl WorkspaceSecretStore {
         self.secrets.get_typed(secret_ref).await
     }
 
+    /// Decrypt a named secret by its NAME, in `workspace_id` only.
+    ///
+    /// **Workspace-scoped ONLY: never the global (NULL-workspace) fallback.**
+    /// The name comes from a flow author's `{{ secret('NAME') }}` (W5b), so it
+    /// is user-supplied in exactly the sense `resolve_plaintext_ws_or_global`'s
+    /// precondition forbids: a fallback would let any flow read a platform
+    /// secret by guessing its name. Names are `UNIQUE (workspace_id, name)`
+    /// (migration 0032), so this is at most one row.
+    pub async fn resolve_typed_by_name(
+        &self,
+        workspace_id: Uuid,
+        name: &str,
+    ) -> Result<crate::store::TypedSecret, SecretsError> {
+        let secret_ref: Option<Uuid> = sqlx::query_scalar(
+            "SELECT secret_ref FROM workspace_secrets WHERE workspace_id = $1 AND name = $2",
+        )
+        .bind(workspace_id)
+        .bind(name)
+        .fetch_optional(&self.db.pool)
+        .await?;
+        let secret_ref = secret_ref.ok_or(SecretsError::NotFound)?;
+        self.secrets.get_typed(secret_ref).await
+    }
+
     /// Resolve a secret readable from `workspace_id`: its own workspace secret, or a
     /// GLOBAL (workspace_id NULL) secret. Used for platform-provisioned secrets (e.g.
     /// the per-engine delegator credential) that a workspace database references.

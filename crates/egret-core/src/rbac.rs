@@ -228,6 +228,20 @@ pub static PERMISSIONS: &[Permission] = &[
         "Create, edit, publish and delete flow drafts",
         Scope::Workspace
     ),
+    // Workflow W5b fix round 1 (user decision 2026-09-30). `secret()` reads
+    // ANY secret of the workspace -- including engine credentials created
+    // under `workspace:manage_members` -- and a flow's author decides where
+    // the value goes (a query's outputs, a JDBC url of their choosing). So
+    // writing a flow that can call it is its own permission, seeded to
+    // `ws_admin` only (migration 0160), not implied by `workflow:manage`.
+    // Checked on every write of a flow's source (create, update, publish):
+    // executions run the draft, so a publish-only gate would be walked round.
+    perm!(
+        "workflow:use_secrets",
+        "Workflows",
+        "Save and publish flows that call secret(), which reads any secret of the workspace",
+        Scope::Workspace
+    ),
     perm!(
         "policy:read",
         "Policies",

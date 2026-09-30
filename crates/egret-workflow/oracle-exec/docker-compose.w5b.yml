@@ -1,0 +1,39 @@
+# W5b Task 1: the three JDBC plugins on the pinned artifact.
+#
+#   W5B_PLUGIN_JARS=<dir with the three 2.0.0 jars> \
+#     docker compose -p w5boracle -f docker-compose.yml -f docker-compose.w5b.yml up -d
+#
+# The jars are io.kestra.plugin:plugin-jdbc-{postgres,trino,mysql}:2.0.0 from
+# Maven Central (sha256 in w5b-plugins.json `jars`); they are never committed.
+# Each jar is mounted as a FILE, so the image's own /app/plugins jars
+# (plugin-script-shell, plugin-script-python) stay visible.
+#
+# The engines are separate services. `pgtarget` is NOT the artifact's own
+# `postgres` (W13b hazard: never run psql as a child of the artifact's
+# postmaster); every engine-side observation is taken in its own container.
+services:
+  kestra:
+    volumes:
+      - ${W5B_PLUGIN_JARS:?set W5B_PLUGIN_JARS}/plugin-jdbc-postgres-2.0.0.jar:/app/plugins/plugin-jdbc-postgres-2.0.0.jar:ro
+      - ${W5B_PLUGIN_JARS:?set W5B_PLUGIN_JARS}/plugin-jdbc-trino-2.0.0.jar:/app/plugins/plugin-jdbc-trino-2.0.0.jar:ro
+      - ${W5B_PLUGIN_JARS:?set W5B_PLUGIN_JARS}/plugin-jdbc-mysql-2.0.0.jar:/app/plugins/plugin-jdbc-mysql-2.0.0.jar:ro
+    environment:
+      # Kestra OSS env secret backend: SECRET_<NAME> holds base64(value).
+      # base64("w5bSecretPw42") — the pgtarget password below.
+      SECRET_PGPASS: dzViU2VjcmV0UHc0Mg==
+
+  pgtarget:
+    image: postgres:18@sha256:4ef4dbc939d61acea57712655ddb4b4ab27419c913f94cca0cd57cb3ea3c2280
+    environment:
+      POSTGRES_DB: w5b
+      POSTGRES_USER: w5b
+      POSTGRES_PASSWORD: w5bSecretPw42
+
+  trino:
+    # Trino 483; the digest is the one `483` and `latest` pointed at on 2026-09-29.
+    image: trinodb/trino:483@sha256:db58cc93e593a2706553745f276bb119c9810e69918be56ecde088ba7ccb0534
+    mem_limit: 3g
+
+  starrocks:
+    # StarRocks 4.1.4 all-in-one (FE MySQL protocol on 9030, user root, no password).
+    image: starrocks/allin1-ubuntu:4.1.4@sha256:faf7ce9c24d9c29c9431b4e8cbd4bb7a74cd169907c63f0c5ebaacc7f9df276b

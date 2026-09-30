@@ -207,9 +207,38 @@ pub fn main_argv(cmds: &TaskCommands) -> Vec<String> {
 /// log (`tail -F`, from the first line, retried until the file exists), then
 /// wait for [`ENDED_MARKER`]. Nothing else writes to this container's stdout,
 /// so its log IS `main`'s stderr (plus the end sentinel egret appends).
-pub fn files_out_script() -> String {
+///
+/// # A plugin pod's `files-out` exits on SIGTERM (W5b Task 5)
+///
+/// Only when `exit_on_term` -- the task's [`TaskCommands::host_protocol`],
+/// i.e. a `kestra.*` plugin pod. A script pod's helper is W5a's, byte for
+/// byte, and keeps ignoring SIGTERM (a PID 1 without a handler): under an
+/// external graceful delete (a drain, an eviction, `kubectl delete`) it
+/// survives the grace, so an output download in flight and the stderr
+/// `main` writes while handling its own SIGTERM still get through.
+///
+/// A plugin pod needs the opposite. A cancel with a grace deletes the pod
+/// with `gracePeriodSeconds` and waits for it to go
+/// ([`TaskRunner::cancel`]). Measured on kind (Kubernetes 1.33.1): while a
+/// pod terminates, the kubelet reports NO container as terminated until
+/// every container has stopped -- `main` exited at +5 s and showed
+/// `running` until +31 s, when a trap-less helper was SIGKILLed at the
+/// grace. Without the trap every plugin timeout would sit out its whole
+/// grace. **The cost, stated:** in a plugin pod, stderr that `main` writes
+/// during the grace is no longer tailed (the host logs to stdout; its
+/// stderr is the JVM's own), and a graceful delete from outside ends the
+/// helper within ~0.5 s.
+///
+/// [`TaskRunner::cancel`]: crate::worker::commands::TaskRunner::cancel
+pub fn files_out_script(exit_on_term: bool) -> String {
+    let trap = if exit_on_term {
+        "trap 'exit 0' TERM\n"
+    } else {
+        ""
+    };
     format!(
-        "touch {STDERR_FILE}\n\
+        "{trap}\
+         touch {STDERR_FILE}\n\
          tail -n +1 -F {STDERR_FILE} 2>/dev/null &\n\
          while [ ! -f {MARKERS_DIR}/{ENDED_MARKER} ]\n\
          do\n  sleep 0.5\n\
@@ -350,7 +379,7 @@ pub fn build(
             helper(
                 cfg,
                 FILES_OUT,
-                files_out_script(),
+                files_out_script(cmds.host_protocol),
                 &[
                     (WORKING_DIR_VOLUME, WORKING_DIR),
                     (MARKERS_VOLUME, MARKERS_DIR),
@@ -686,6 +715,7 @@ mod tests {
             env: BTreeMap::from([("B".into(), "2".into()), ("A".into(), "1".into())]),
             input_files: BTreeMap::new(),
             output_files: vec![],
+            host_protocol: false,
         }
     }
 
@@ -1229,15 +1259,68 @@ mod tests {
 
     #[test]
     fn files_out_streams_the_stderr_file_and_prints_nothing_else() {
-        let script = files_out_script();
+        let script = files_out_script(false);
         assert!(
             script.contains("tail -n +1 -F /egret/streams/stderr"),
             "{script}"
         );
         assert!(script.contains("/egret/markers/ended"), "{script}");
+        assert!(!script.contains("trap"), "{script}");
         assert!(
             !script.contains("echo"),
             "files-out's log IS main's stderr, so the helper itself prints nothing: {script}"
+        );
+    }
+
+    /// **The SIGTERM trap is the plugin pod's alone** (W5b Task 5 fix round
+    /// 1): a script pod (`host_protocol: false`) is W5a's pod byte for byte
+    /// -- its `files-out` script is W5a's literal -- and a plugin pod differs
+    /// from it ONLY by the trap line leading that script.
+    #[test]
+    fn only_a_plugin_pods_files_out_exits_on_sigterm() {
+        const W5A_FILES_OUT: &str = "touch /egret/streams/stderr\n\
+             tail -n +1 -F /egret/streams/stderr 2>/dev/null &\n\
+             while [ ! -f /egret/markers/ended ]\n\
+             do\n  sleep 0.5\n\
+             done\n";
+        let files_out = |p: &Pod| -> String {
+            p.spec
+                .as_ref()
+                .unwrap()
+                .containers
+                .iter()
+                .find(|c| c.name == FILES_OUT)
+                .and_then(|c| c.command.as_ref())
+                .and_then(|c| c.last())
+                .expect("files-out has a script")
+                .clone()
+        };
+        let script_cmds = cmds();
+        assert!(!script_cmds.host_protocol);
+        let plugin_cmds = TaskCommands {
+            host_protocol: true,
+            ..cmds()
+        };
+        let script = build(&task(), &script_cmds, &k8s(), &cfg()).expect("builds");
+        let plugin = build(&task(), &plugin_cmds, &k8s(), &cfg()).expect("builds");
+
+        assert_eq!(files_out(&script), W5A_FILES_OUT, "a script pod is W5a's");
+        assert_eq!(
+            files_out(&plugin),
+            format!("trap 'exit 0' TERM\n{W5A_FILES_OUT}"),
+            "a plugin pod's files-out stops on SIGTERM"
+        );
+
+        // Everything else is the same pod.
+        let mut plugin_as_script = plugin.clone();
+        for c in &mut plugin_as_script.spec.as_mut().unwrap().containers {
+            if c.name == FILES_OUT {
+                *c.command.as_mut().unwrap().last_mut().unwrap() = W5A_FILES_OUT.to_string();
+            }
+        }
+        assert_eq!(
+            serde_json::to_value(&plugin_as_script).unwrap(),
+            serde_json::to_value(&script).unwrap()
         );
     }
 

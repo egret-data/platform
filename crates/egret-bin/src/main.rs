@@ -1890,10 +1890,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // the claim loop's end, not by the token, so a tick in flight finishes
     // writing before the writer drains; `workflow_runtime.join()` below waits
     // for that at shutdown.
-    let (workflow_handlers, container_runner) =
-        egret_workflow::runtime::handlers_for(&config.workflow, db.pool.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("workflow.container_runner: {e}"))?;
+    let (workflow_handlers, container_runner) = egret_workflow::runtime::handlers_for(
+        &config.workflow,
+        db.pool.clone(),
+        // W5b: `secret()` on `kestra.*` tasks reads the execution's
+        // workspace's secrets, never a global one.
+        std::sync::Arc::new(egret_bin::workflow_secrets::WorkspaceSecretSource::new(
+            workspace_secrets.clone(),
+        )),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("workflow.container_runner: {e}"))?;
     let workflow_runtime = egret_workflow::runtime::spawn_with_logs(
         db.pool.clone(),
         workflow_handlers,

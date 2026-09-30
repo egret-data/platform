@@ -99,6 +99,10 @@ data:
   EGRET_WORKFLOW__KUBERNETES__HELPER_IMAGE: "{{ $t.helperImage }}"
   EGRET_WORKFLOW__KUBERNETES__RUN_AS_USER: "{{ $t.runAsUser }}"
   EGRET_WORKFLOW__KUBERNETES__IMAGE_PULL_SECRETS: {{ $t.imagePullSecrets | toJson | quote }}
+  {{- $h := .Values.workflow.pluginHost }}
+  EGRET_WORKFLOW__PLUGIN_HOST__IMAGE: {{ required "workflow.pluginHost.image is required with containerRunner kubernetes" $h.image | quote }}
+  EGRET_WORKFLOW__PLUGIN_HOST__JVM_MAX_HEAP: {{ $h.jvmMaxHeap | quote }}
+  EGRET_WORKFLOW__PLUGIN_HOST__KILL_GRACE_S: {{ $h.killGraceS | quote }}
   {{- range $key, $res := dict "DEFAULT_RESOURCES" $t.defaultResources "MAX_RESOURCES" $t.maxResources }}
   {{- range $side, $amounts := $res }}
   {{- range $what, $v := $amounts }}

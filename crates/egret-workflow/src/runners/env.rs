@@ -1879,6 +1879,49 @@ pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderEr
     }
 }
 
+/// ONE pass of the renderer, on a copy of the environment that `extend` has
+/// changed: Kestra's `VariableRenderer.render` with `recursiveRendering =
+/// false`, which is its default (`VariableConfiguration.java:16`), i.e.
+/// `renderOnce` followed by `RAW_PATTERN.matcher(x).replaceAll("$2")`.
+///
+/// W5b Task 4, fix round 1 (user ruling 1A): `kestra.*` plugin-task
+/// properties render through this and **not** through [`render_str`]'s
+/// fixpoint loop. With the loop, text that a pass *produced* -- render-context
+/// data (an input, a webhook body, a prior task's output) or a secret's own
+/// value -- was evaluated as a template on the next pass, so an input whose
+/// value was `{{ secret('db') }}` resolved a secret the author never named.
+/// One pass evaluates only the author's source. The recursion of every other
+/// render is unchanged.
+///
+/// `extend` exists because `secret()` is refused on the shared
+/// [`environment`] and resolved only on plugin tasks, so the resolving
+/// `secret` is registered **per render** over the refusal. It runs on the
+/// render thread, after [`environment`] and before the render context's scope
+/// global, so it cannot unbind that global. Everything else [`render_str`]
+/// does is kept: the no-`{` short circuit, the render thread, the rewrite and
+/// the raw-region protection.
+pub(crate) fn render_once_with(
+    template: &str,
+    cx: &RenderContext,
+    extend: &(dyn Fn(&mut Environment<'static>) + Sync),
+) -> Result<String, RenderError> {
+    match render_guarded_with(template, cx, &[], extend, Passes::One)? {
+        GuardedRender::Rendered(text) => Ok(text),
+        GuardedRender::Forbidden(root) => Err(RenderError::Template(format!(
+            "internal: render_once_with refused the root `{root}` with no forbidden list"
+        ))),
+    }
+}
+
+/// How many passes a render makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Passes {
+    /// [`render_once_with`]: `recursiveRendering = false`.
+    One,
+    /// Every other render: until the output stops changing.
+    Fixpoint,
+}
+
 /// What [`render_str_guarded`] answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardedRender {
@@ -1923,6 +1966,17 @@ pub fn render_str_guarded(
     cx: &RenderContext,
     forbidden: &[&str],
 ) -> Result<GuardedRender, RenderError> {
+    render_guarded_with(template, cx, forbidden, &|_| {}, Passes::Fixpoint)
+}
+
+/// [`render_str_guarded`], with [`render_str_with`]'s `extend`.
+fn render_guarded_with(
+    template: &str,
+    cx: &RenderContext,
+    forbidden: &[&str],
+    extend: &(dyn Fn(&mut Environment<'static>) + Sync),
+    passes: Passes,
+) -> Result<GuardedRender, RenderError> {
     // `VariableRenderer.java:76-79`: "it's not a Pebble template so we
     // short-circuit rendering". Note the test is `{`, not `{{` -- a source
     // containing a lone `{` still goes through the engine. Done before the
@@ -1945,7 +1999,9 @@ pub fn render_str_guarded(
         let worker = std::thread::Builder::new()
             .name("egret-render".to_string())
             .stack_size(RENDER_STACK_BYTES)
-            .spawn_scoped(scope, || render_on_this_thread(template, cx, forbidden))
+            .spawn_scoped(scope, || {
+                render_on_this_thread(template, cx, forbidden, extend, passes)
+            })
             .map_err(|e| RenderError::Template(format!("could not start a render thread: {e}")))?;
         match worker.join() {
             Ok(result) => result,
@@ -1989,13 +2045,54 @@ pub fn referenced_roots(template: &str) -> Result<std::collections::BTreeSet<Str
     Ok(tmpl.undeclared_variables(false).into_iter().collect())
 }
 
+/// Whether `name` occurs as CODE in `template` -- anywhere minijinja's lexer
+/// reads it as an identifier, not as template data, a string literal, a
+/// comment or a `{% raw %}` body -- after the same raw-tag protection and
+/// `rewrite` a render applies (W5b fix round 3).
+///
+/// **A probe, not a lexer of our own:** each occurrence of `name` that is not
+/// an attribute (`x.name`) or part of a longer identifier is followed, one at
+/// a time, by `@`, a character minijinja's lexer refuses in code and accepts
+/// everywhere else. If that copy no longer parses, the occurrence was code.
+/// Unlike [`referenced_roots`] this sees assignment targets
+/// (`{% set name = … %}`, `with`, `for`, tuple unpacking) and `{% filter %}`
+/// arguments, which `undeclared_variables` does not report. A template that
+/// does not rewrite or parse at all answers `true`.
+// `let_and_return`: see the binding's comment.
+#[allow(clippy::let_and_return)]
+pub(crate) fn name_in_code(template: &str, name: &str) -> bool {
+    let (protected, _replacers) = replace_raw_tags(template);
+    let Ok(rewritten) = rewrite(&protected) else {
+        return true;
+    };
+    let env = environment();
+    if env.template_from_str(&rewritten).is_err() {
+        return true;
+    }
+    let Ok(pattern) = regex::Regex::new(&format!(r"(?:^|[^.\w]){}\b", regex::escape(name))) else {
+        return true;
+    };
+    let ends: Vec<usize> = pattern.find_iter(&rewritten).map(|m| m.end()).collect();
+    ends.into_iter().any(|end| {
+        let probe = format!("{}@{}", &rewritten[..end], &rewritten[end..]);
+        // Bound first: the template borrows `probe` and `env`, and must be
+        // dropped before either.
+        let refused = env.template_from_str(&probe).is_err();
+        refused
+    })
+}
+
 /// The render loop, on the thread [`render_str`] gave it.
 fn render_on_this_thread(
     template: &str,
     cx: &RenderContext,
     forbidden: &[&str],
+    extend: &(dyn Fn(&mut Environment<'static>) + Sync),
+    passes: Passes,
 ) -> Result<GuardedRender, RenderError> {
     let mut env = environment();
+    // Before the scope global, so an `extend` cannot unbind it.
+    extend(&mut env);
     let variables = cx.to_minijinja();
 
     // The render context's own top-level names, for
@@ -2012,6 +2109,13 @@ fn render_on_this_thread(
     // W2 Task 8 fix round 1: one budget for the whole render, shared by every
     // `replace` call in it. See [`super::filters::MAX_REPLACE_SCAN_BYTES`].
     let _budget = super::filters::ReplaceBudget::install();
+
+    if passes == Passes::One {
+        // Nothing is forbidden on this path (`render_once_with` passes
+        // `&[]`), so there is no guard to run.
+        let once = render_once(&env, template, &variables)?;
+        return Ok(GuardedRender::Rendered(strip_raw_markers(&once)));
+    }
 
     let mut current = template.to_string();
     // Inclusive: see [`MAX_RENDERING_AMOUNT`]'s note on Kestra's off-by-one.
