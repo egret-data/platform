@@ -15,6 +15,18 @@ them.
 
 ## Global Constraints
 
+**The frontend gates are part of every task that changes a wire type, not only of
+the frontend tasks.** `npx tsc --noEmit` and `npx eslint .` in `frontend/` are
+required alongside the Rust gates whenever a task adds or changes an
+`UndecidableCause` (or any other mirrored variant), because the generated client
+changes and `ExplainAccess.tsx`'s `causeSentence` switch is deliberately
+exhaustive — a new variant makes it fail to compile, which is the guard working.
+Task 2 added three causes and shipped with `tsc` red; it went unnoticed because
+`tsc` was not on this plan's verification list, and the controller's own
+hand-verification of that task inherited the same omission. A gate that is not on
+the list is a gate nobody runs. Tasks 6 and 7 touch that page directly and must
+run both.
+
 - **`egret-ranger-eval` stays dependency-pure:** `serde` + `serde_json` only. No
   utoipa, no sqlx, no I/O in library code. Wire DTOs live in the route crate.
 - **The tag set is an INPUT.** The crate never queries a database. The resolution
@@ -246,13 +258,19 @@ at one priority; and the same tag at two levels with different match types.
 existing 45 axes have. A corpus that silently stops producing a shape is a gate
 that silently stops being a gate — and it fails green.
 
-- [ ] **Step 3: RE-MEASURE `EvalOrderAmbiguous` — for the RESOURCE path only.**
-Task 2 answered half of the spec's open question and narrowed this step: the
-refusal **does not apply on the tag path at all**, because both the mask and the
-row-filter tag comparators are fully reproduced, so there is no tie the crate
-cannot order. What is still unmeasured is whether the resource path's rate
-(3.4–4.0%) moves once tag cases are in the corpus. Measure that; do not carry the
-old number forward and do not claim the tag path shares it.
+- [ ] **Step 3: RE-MEASURE `EvalOrderAmbiguous` on the RESOURCE path AND the
+COMPOSED path.** This step has been narrowed once and widened once; here is where
+it stands. Task 2 established the refusal does **not** apply to the tag phase in
+isolation — both tag comparators are fully reproduced, so there is no tie the
+crate cannot order. Task 3 then found it **does** arise once the phases are
+composed on ACCESS: `policyPriority` is live, so under a tag deny an allowing
+resource policy raises the bar and shuts out the rest of its own band, and which
+of an allowing and a denying band member runs first is then decided by
+`getEvalOrder()`, which this crate does not reproduce. So measure two rates, and
+report them separately: the resource-path rate (was 3.4–4.0%) and the rate for
+**tag-carrying composed cases**, which nothing has ever measured because nothing
+in the corpus generates a `tagPolicies` block yet. Generating those cases is part
+of this step, not a precondition for it.
 
 - [ ] **Step 4: Observe the gate failing.** Break one tag rule — admitting
 `DESCENDANT` is the sharpest, since it is the fail-open direction — confirm the
