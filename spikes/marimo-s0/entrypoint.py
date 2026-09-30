@@ -66,7 +66,7 @@ def install_storage_patch() -> None:
     _base.NotebookWorkspace.load = load
 
 
-def install_force_ipc_patch() -> None:
+def install_force_ipc_patch(venv_path: str) -> None:
     """Run mode, one kernel subprocess per session, without a uv sandbox (S0 question 2, variant ipc)."""
     from marimo._session import session as session_mod
     from marimo._session.managers import ipc as ipc_mod
@@ -91,8 +91,10 @@ def install_force_ipc_patch() -> None:
     # real uv sandbox (a configured venv takes precedence, ipc.py:333).
     original_get_venv_config = ipc_mod._get_venv_config
 
+    # S0b: venv_path is sys.prefix for the direct launcher, or the shim/ directory for the pool
+    # (marimo resolves `<venv>/bin/python`, marimo/_session/_venv.py:33-54).
     def get_venv_config(config_manager):
-        return {**original_get_venv_config(config_manager), "path": sys.prefix}
+        return {**original_get_venv_config(config_manager), "path": venv_path}
 
     ipc_mod._get_venv_config = get_venv_config
 
@@ -109,11 +111,44 @@ def install_force_ipc_patch() -> None:
     ipc_mod.IPCKernelManagerImpl.start_kernel = start_kernel
 
 
+def start_kernel_pool() -> str:
+    """S0b variant A: start kernel_pool.py, wait for POOL_READY, return the shim venv path."""
+    import subprocess
+    import threading
+
+    sock = HERE / ".work" / "kernel.sock"
+    sock.parent.mkdir(parents=True, exist_ok=True)
+    # Both survive into the launcher's env: construct_kernel_env copies os.environ and pops only
+    # MARIMO_SANDBOX_MODE/_BACKEND and MARIMO_MANAGE_SCRIPT_METADATA (marimo/_session/managers/ipc.py:215-265).
+    os.environ["S0_REAL_PYTHON"] = sys.executable
+    os.environ["S0_KERNEL_SOCKET"] = str(sock)
+    size = os.environ.get("S0_POOL_SIZE", "3")
+    pool = subprocess.Popen(
+        [sys.executable, str(HERE / "kernel_pool.py"), "--size", size, "--socket", str(sock)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    ready = threading.Event()
+
+    def relay() -> None:
+        for line in pool.stdout:
+            print(f"[pool] {line.rstrip()}", flush=True)
+            if line.strip() == "POOL_READY":
+                ready.set()
+
+    threading.Thread(target=relay, daemon=True).start()
+    if not ready.wait(timeout=120):
+        pool.kill()
+        raise SystemExit("kernel pool not ready within 120 s")
+    print(f"[s0] kernel pool ready (size {size}, pid {pool.pid})", flush=True)
+    return str(HERE / "shim")
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--mode", choices=["edit", "run"], required=True)
     p.add_argument("--process-mode", choices=["thread", "sandbox", "ipc"], default="thread")
     p.add_argument("--app", default="probe")
+    p.add_argument("--kernel-launcher", choices=["direct", "pool"], default="direct")
     a = p.parse_args()
 
     os.environ["XDG_CONFIG_HOME"] = str(HERE / "config")
@@ -141,7 +176,8 @@ def main() -> None:
             argv.append("--sandbox")
         if a.process_mode == "ipc":
             os.environ["S0_VENV"] = sys.prefix
-            install_force_ipc_patch()
+            venv_path = start_kernel_pool() if a.kernel_launcher == "pool" else sys.prefix
+            install_force_ipc_patch(venv_path)
 
     argv += ["--host", "127.0.0.1", "--headless", "--token-password", POD_MARIMO_TOKEN]
     print(f"[s0] marimo {' '.join(argv)}", flush=True)

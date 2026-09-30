@@ -10,7 +10,8 @@ import sys
 def main() -> int:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(os.environ["S0_KERNEL_SOCKET"])
-    env = json.dumps(dict(os.environ)).encode()
+    # the worker pops the cwd key and chdirs, so the kernel runs where marimo launched us
+    env = json.dumps({**os.environ, "__S0_SHIM_CWD__": os.getcwd()}).encode()
     if len(env) > 65536:
         print("shim: environment too large", file=sys.stderr)
         return 70
