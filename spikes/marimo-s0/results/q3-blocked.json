@@ -27,9 +27,11 @@
   "storage_binds": {
     "revisions_bound_before_external_put": [
       1,
+      1,
       1
     ],
     "revisions_bound_total": [
+      1,
       1,
       1
     ],
@@ -38,14 +40,14 @@
   },
   "conflict_events": [
     {
-      "t": 1790772808.5730891,
+      "t": 1790773215.242694,
       "kind": "draft_conflict",
       "app_id": "probe",
       "sent": "2",
       "current": 3
     },
     {
-      "t": 1790772809.464191,
+      "t": 1790773216.22788,
       "kind": "draft_conflict",
       "app_id": "probe",
       "sent": "2",
@@ -56,5 +58,5 @@
     ""
   ],
   "ui_mentions_conflict": true,
-  "ui_text_excerpt": "1\n2\n3\n4\n5\nimport os\n\n\nimport marimo as mo\n\n\nimport egret_marimo as egret\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\n1\ndb = egret.connect(\"trino_prod\")\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\n1\n2\nn = mo.ui.slider(1, 10, value=1, label=\"n\")\nn\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\n1\n2\n3\n4\n\u2304\npy_df = egret.sql(f\"SELECT {n.value} AS n\", database=\"trino_prod\")\nmo.md(\n    f\"PY pid={os.getpid()} viewer={py_df['viewer'][0]} sql={py_df['sql'][0]}\"\n)\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\n1\n2\n3\n4\nsql_df = mo.sql(f\"SELECT {n.value} AS via_sql_cell\", engine=db)\ns0_marker = 12345\ns0_second = 1\nmo.md(f\"SQLCELL viewer={sql_df['viewer'][0]}\")\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\nPYTHON\nMARKDOWN\nSQL\nErrors\nScratchpad\nTracing\nSecrets\nLogs\nTerminal\nSnippets\nKernel\n0\n0\nFailed to save\nThis draft was saved by someone else \u2014 reload."
+  "ui_text_excerpt": "Reconnected\nYou have reconnected to an existing session.\nRestart\n1\n2\n3\n4\n5\nimport os\n\n\nimport marimo as mo\n\n\nimport egret_marimo as egret\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\n1\ndb = egret.connect(\"trino_prod\")\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\n1\n2\nn = mo.ui.slider(1, 10, value=1, label=\"n\")\nn\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\n1\n2\n3\n4\n\u2304\npy_df = egret.sql(f\"SELECT {n.value} AS n\", database=\"trino_prod\")\nmo.md(\n    f\"PY pid={os.getpid()} viewer={py_df['viewer'][0]} sql={py_df['sql'][0]}\"\n)\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\n1\n2\n3\n4\nsql_df = mo.sql(f\"SELECT {n.value} AS via_sql_cell\", engine=db)\ns0_marker = 12345\ns0_second = 1\nmo.md(f\"SQLCELL viewer={sql_df['viewer'][0]}\")\n\nShowing fix\n\nShow prompt\nKeep change\nRevert change\nPYTHON\nMARKDOWN\nSQL\nErrors\nScratchpad\nTracing\nSecrets\nLogs\nTerminal\nSnippets\nKernel\n0\n0\nFailed to save\nThis draft was saved by someone else \u2014 reload."
 }

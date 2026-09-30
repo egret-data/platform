@@ -2,7 +2,9 @@
 
 import asyncio
 import os
+import re
 import secrets
+from urllib.parse import unquote
 
 import httpx
 import websockets
@@ -23,9 +25,24 @@ SESSIONS: dict[str, dict] = {}
 CLIENT = httpx.AsyncClient(timeout=None)
 
 
+_AMBIGUOUS = re.compile(r"%(2e|2f|5c|25|00)|\\", re.I)
+
+
+def forwarded_path(scope) -> str | None:
+    """The one path that is both checked and forwarded, taken from the bytes the client sent.
+    Anything ambiguous (dot segments, empty segments, encoded dots/slashes/percent, backslash, NUL) is rejected (None), never rewritten."""
+    raw = scope["raw_path"].decode("latin-1").split("?", 1)[0]
+    if _AMBIGUOUS.search(raw) or "//" in raw or not raw.startswith("/"):
+        return None
+    decoded = unquote(raw)
+    if any(seg in (".", "..") for seg in decoded.split("/")) or "\x00" in decoded or "\\" in decoded:
+        return None
+    return raw
+
+
 def _blocked(prefix: str, path: str) -> bool:
-    rest = path[len(prefix) + 1:]
-    return any(rest.startswith(b) for b in BLOCKED)
+    rest = unquote(path)[len(prefix) + 1:].lower()
+    return any(rest.startswith(b.lower()) for b in BLOCKED)
 
 
 async def ticket(request: Request) -> Response:
@@ -57,9 +74,12 @@ async def relay(request: Request) -> Response:
     sess = _session(request.cookies, prefix)
     if not sess:
         return PlainTextResponse("no session", status_code=401)
-    if _blocked(prefix, request.url.path):
+    path = forwarded_path(request.scope)
+    if path is None:
+        return PlainTextResponse("ambiguous path rejected", status_code=400)
+    if _blocked(prefix, path):
         return PlainTextResponse("blocked by egret", status_code=403)
-    url = f"http://{UPSTREAMS[prefix]}{request.url.path}"
+    url = f"http://{UPSTREAMS[prefix]}{path}"
     if request.url.query:
         url += f"?{request.url.query}"
     upstream = CLIENT.build_request(
@@ -76,11 +96,12 @@ async def relay(request: Request) -> Response:
 async def ws_relay(ws: WebSocket) -> None:
     prefix = ws.path_params["prefix"]
     sess = _session(ws.cookies, prefix) if prefix in UPSTREAMS else None
-    if not sess or _blocked(prefix, ws.url.path):
+    path = forwarded_path(ws.scope) if sess else None
+    if not sess or path is None or _blocked(prefix, path):
         await ws.close(code=4403)
         return
     await ws.accept()
-    url = f"ws://{UPSTREAMS[prefix]}{ws.url.path}" + (f"?{ws.url.query}" if ws.url.query else "")
+    url = f"ws://{UPSTREAMS[prefix]}{path}" + (f"?{ws.url.query}" if ws.url.query else "")
     headers = forward_headers(ws.headers, sess["session_token"], POD_MARIMO_TOKEN)
     headers.pop("origin", None)
     async with websockets.connect(url, additional_headers=headers, max_size=None) as up:

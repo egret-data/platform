@@ -27,8 +27,10 @@ FETCH_JS = """async (paths) => Object.fromEntries(await Promise.all(paths.map(as
 BLOCKED_SAMPLE = [("GET", "/api/packages/list"), ("POST", "/api/secrets/keys"), ("POST", "/api/files/list_files"),
                   ("POST", "/api/ai/chat"), ("POST", "/api/storage/list_entries"), ("POST", "/api/home/recent_files"),
                   ("POST", "/api/kernel/copy"), ("POST", "/api/kernel/rename"), ("GET", "/api/lsp/health"),
-                  ("POST", "/api/export/auto_export/html"), ("GET", "/terminal/ws")]
-ALLOWED_SAMPLE = [("GET", "/api/kernel/status"), ("GET", "/api/version"), ("GET", "/health")]
+                  ("POST", "/api/export/auto_export/html"), ("GET", "/terminal/ws"),
+                  ("POST", "/api/datasources/discover"), ("POST", "/api/cache/clear"), ("GET", "/auth/token"), ("GET", "/api/environment"),
+                  ("GET", "/api/usage"), ("GET", "/api/sessions"), ("GET", "/api/status"), ("POST", "/api/kernel/save_user_config"), ("GET", "/og/thumbnail")]
+ALLOWED_SAMPLE = [("GET", "/api/kernel/status"), ("GET", "/api/version"), ("GET", "/health"), ("GET", "/api/documentation/snippets")]
 
 
 async def main() -> None:

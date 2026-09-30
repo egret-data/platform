@@ -1,7 +1,7 @@
 {
   "route_count": 107,
-  "routes_covered_by_block_list": 44,
-  "S0_BLOCKED": "/terminal,/api/packages,/api/secrets,/api/files,/api/ai,/api/storage,/api/home,/api/kernel/copy,/api/kernel/rename,/api/kernel/install_missing_packages,/api/export/auto_export,/api/export/requirements,/api/lsp",
+  "routes_covered_by_block_list": 62,
+  "S0_BLOCKED": "/terminal,/api/packages,/api/secrets,/api/files,/api/ai,/api/storage,/api/home,/api/kernel/copy,/api/kernel/rename,/api/kernel/install_missing_packages,/api/kernel/save_user_config,/api/export/auto_export,/api/export/requirements,/api/lsp,/api/datasources,/api/cache,/api/environment,/api/usage,/api/sessions,/api/status,/auth,/og",
   "block_list_reasons": {
     "/terminal": "PTY shell as the pod user (upstream WS opens with the pod token, verified); never for authors",
     "/api/packages": "pip/uv install/remove/sync in the shared pod env; editor only probes /api/packages/sandbox (403, editing unaffected)",
@@ -15,7 +15,16 @@
     "/api/kernel/install_missing_packages": "installs packages from a cell's imports (same as /api/packages)",
     "/api/export/auto_export": "writes html/md/ipynb into __marimo__/ beside the notebook",
     "/api/export/requirements": "installs export dependencies (pip)",
-    "/api/lsp": "restarts/starts language-server subprocesses; editor probes /api/lsp/health (403, editing unaffected)"
+    "/api/lsp": "restarts/starts language-server subprocesses; editor probes /api/lsp/health (403, editing unaffected)",
+    "/api/kernel/save_user_config": "writes the shared marimo.toml under XDG_CONFIG_HOME for every editor on the pod; UX cost: the settings panel cannot persist changes (403)",
+    "/api/datasources": "pod-side DB connections/schema previews; data access must go only through egret's gateway. Editor calls discover on open (403, editing unaffected; the datasource panel is empty)",
+    "/api/cache": "reads/clears the pod's shared cache dir",
+    "/api/environment": "leaks OS, binary and full dependency versions (verified)",
+    "/api/usage": "leaks host memory/CPU totals (verified); the footer bars stop updating",
+    "/api/sessions": "lists every session on the pod, including other viewers'",
+    "/api/status": "server status and /api/status/connections (connection counts of all users)",
+    "/auth": "marimo's own login/token pages; the proxy injects the pod token, so browsers never need them",
+    "/og": "serves notebook thumbnails from __marimo__/ on the pod"
   },
   "kernel_routes_that_create_or_move_files": {
     "blocked": [
@@ -28,12 +37,6 @@
       "/api/kernel/save_user_config": "writes marimo.toml under XDG_CONFIG_HOME, shared by every editor on the pod; left open (not needed to be blocked for editing, but a design point: mount config read-only)"
     }
   },
-  "left_open_but_notable": [
-    "/api/kernel/execute and /api/kernel/scratchpad/run (run code; same power as a cell)",
-    "/api/kernel/shutdown, /api/sessions, /api/status/connections (session mgmt)",
-    "/api/export/{html,ipynb,markdown,script,pdf} (return content, do not write files)",
-    "/api/export/update_cell_outputs (rewrites notebook outputs, inside the draft file)"
-  ],
   "editing_still_works_with_block_list": {
     "q3": "results/q3-blocked.json: same round trip, same 409 conflict as results/q3.json (only timestamps differ; the committed q3.json also carries extra hand annotation keys)",
     "q1": "results/q1-blocked.json: alice/bob each see own viewer, sql cell via gateway, no rejects; only pids/timestamps differ"
@@ -46,5 +49,22 @@
   "run_mode_covered": "results/q6-terminal.json: same prefixes 403 on /r, /r/terminal/ws closed",
   "terminal": "results/q6-terminal.json + q6-terminal.png; method automated Playwright (not manual); proxy log shows `WebSocket /e/terminal/ws` 403 and `GET /e/terminal/ws` 403; browser sees code 1006 (proxy closes before accept, 4403 not visible to the browser); control: the same WS straight to :2718 with the pod token opens. The UI has no discoverable terminal button in the headless page, so the UI attempt was a keyboard fallback, the direct WS from the page is the real evidence.",
   "traffic_cross_check": "results/q6-traffic.json: 260 distinct paths seen in proxy.log, 0 unmatched by build_routes; 234 are /assets/* static files served by the `/{path:path}` catch-all; /e/health, /e/public-files-sw.js, /ws are listed routes",
-  "build_routes_quirk": "/assets is listed as WEBSOCKET only because it is a static Mount without methods; it serves static files"
+  "build_routes_quirk": "/assets is listed as WEBSOCKET only because it is a static Mount without methods; it serves static files",
+  "classification_of_remaining_routes": {
+    "/ (index), /assets/*, /{path:path}, /public-files-sw.js": "allow: the editor/run app bundle itself",
+    "/@file/{...}": "allow: serves virtual files from the kernel's registry (mo.image/pdf/download outputs); marimo gates it on read scope; dot segments now rejected by the proxy. Residual: file names are session-global, unguessable-name only",
+    "/public/{filepath}": "allow: serves files from <notebook dir>/public for markdown images; the pod workdir must hold nothing secret there. Residual noted",
+    "/health, /healthz, /api/version": "allow: liveness/version only",
+    "/api/kernel/ (run, execute, scratchpad/run, function_call, instantiate, interrupt, set_ui_element_value, set_model_value, set_cell_config, code_autocomplete, focus_cell, stdin, pdb/*, restart_session, shutdown, status, takeover, read_code)": "allow: core editing/run; execute and scratchpad run code but that is the same power as a cell",
+    "/api/kernel/format": "allow: formats cell text with the pod's formatter; no file or network side effects beyond running ruff/black on the given code",
+    "/api/kernel/delete": "allow: deletes a CELL from the in-memory document, not a file",
+    "/api/kernel/save, /api/kernel/save_app_config": "allow: needed; save accepts a filename confined to the workspace dir (files.py:152-180)",
+    "/api/document/transaction, /ws, /ws_sync, /sse": "allow: the live document/kernel channel",
+    "/api/documentation/snippets": "allow: static snippet text (raw call without Marimo-Session-Id returns 500 from marimo)",
+    "/api/export/{html,ipynb,markdown,script,pdf,update_cell_outputs}, /api/export/availability": "allow: return the notebook in another format to the requester; no files written",
+    "/api/sql/validate": "allow: parses a SQL string with sqlglot; no connection made",
+    "/auth/*": "BLOCKED (see above)"
+  },
+  "dot_segment_bypass": "see results/q6-bypass.json (before) and q6-bypass-fixed.json (after); proxy.py forwarded_path()",
+  "kernel_status_500": "GET /e/api/kernel/status returned 500 in q6-terminal.json because the raw fetch had no Marimo-Session-Id header: marimo answers 500 {'detail':'Missing Marimo-Session-Id header'} (deps.py require_current_session_id); a bogus id also 500. It reached marimo; not a proxy fault. On /r it is 401 because the route requires edit scope. /api/documentation/snippets behaves the same."
 }

@@ -22,12 +22,22 @@
     "POST /e/api/kernel/rename": 403,
     "GET /e/api/lsp/health": 403,
     "POST /e/api/export/auto_export/html": 403,
-    "GET /e/terminal/ws": 403
+    "GET /e/terminal/ws": 403,
+    "POST /e/api/datasources/discover": 403,
+    "POST /e/api/cache/clear": 403,
+    "GET /e/auth/token": 403,
+    "GET /e/api/environment": 403,
+    "GET /e/api/usage": 403,
+    "GET /e/api/sessions": 403,
+    "GET /e/api/status": 403,
+    "POST /e/api/kernel/save_user_config": 403,
+    "GET /e/og/thumbnail": 403
   },
   "http_allowed_e": {
     "GET /e/api/kernel/status": 500,
     "GET /e/api/version": 200,
-    "GET /e/health": 200
+    "GET /e/health": 200,
+    "GET /e/api/documentation/snippets": 500
   },
   "ws_terminal_r": {
     "state": "closed",
@@ -45,11 +55,21 @@
     "POST /r/api/kernel/rename": 403,
     "GET /r/api/lsp/health": 403,
     "POST /r/api/export/auto_export/html": 403,
-    "GET /r/terminal/ws": 403
+    "GET /r/terminal/ws": 403,
+    "POST /r/api/datasources/discover": 403,
+    "POST /r/api/cache/clear": 403,
+    "GET /r/auth/token": 403,
+    "GET /r/api/environment": 403,
+    "GET /r/api/usage": 403,
+    "GET /r/api/sessions": 403,
+    "GET /r/api/status": 403,
+    "POST /r/api/kernel/save_user_config": 403,
+    "GET /r/og/thumbnail": 403
   },
   "http_allowed_r": {
     "GET /r/api/kernel/status": 401,
     "GET /r/api/version": 200,
-    "GET /r/health": 200
+    "GET /r/health": 200,
+    "GET /r/api/documentation/snippets": 401
   }
 }
