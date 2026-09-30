@@ -236,6 +236,29 @@ pub fn match_policy_resources(
 /// The direction is the reason this is a refusal and not a footnote: the trie
 /// is WIDER, so a tag policy Ranger evaluates is one this crate would not —
 /// and for a DENY policy that is fail-open.
+///
+/// # This classifies a VALUE; the two flags are the caller's
+///
+/// `isExcludes` and `isRecursive` sit on the `RangerPolicyResource`, not on any
+/// one value, and each widens the trie on its own —
+/// `RangerResourceTrie.insert` ends
+/// `if (isWildcard || isRecursive) addWildcardEvaluator(...)`, and an excludes
+/// resource lands in `getInheritedEvaluators()`. They are refused by
+/// [`crate::eval::TagResourceProblem`], which is where the whole resource map
+/// is in view. Reading this function as "the resource is reproducible" rather
+/// than "this value is" is exactly the mistake that let `isRecursive` through
+/// the first time.
+///
+/// # No `ignore_case` parameter, and why that is not an omission
+///
+/// The trie lower-cases both the inserted key and the looked-up value when the
+/// resource's `optIgnoreCase` is set, and the matcher folds both sides too — so
+/// the two move together and the AGREEMENT classification above is the same
+/// either way. (The `tag` def sets `ignoreCase: false`, so on the tag path the
+/// question does not arise at all.) The one place that reasoning could break is
+/// a character whose lowercase form is longer than one code point, where a
+/// folded trie key and a folded request value can disagree on length; no
+/// identifier on either engine admits one — see [`fold`].
 pub fn trie_reproduces_matcher(policy_value: &str, wild_card: bool) -> bool {
     if policy_value.is_empty() {
         // `RangerAbstractResourceMatcher.init` drops an empty policy value
@@ -1341,13 +1364,25 @@ mod tests {
         assert_eq!(split("??"), vec![Token::One, Token::One]);
     }
 
-    /// [`trie_reproduces_matcher`]'s table, as MEASURED against a real
-    /// `RangerResourceTrie` built over the `tag` service-def on
-    /// `ranger-plugins-common` 2.5.0 — see that function for the harness.
+    /// [`trie_reproduces_matcher`]'s table.
     ///
-    /// Each row is a policy value; `true` means the trie returned exactly the
-    /// evaluators `getMatchType` accepted, over the request values `pii`,
-    /// `PII`, `p`, `pix`, `pi`, `xii`, `ii` and `""`.
+    /// # This is HALF of the claim, and the other half is in Java
+    ///
+    /// FIX ROUND 1, IMPORTANT 4: on its own this test asserts a hard-coded
+    /// table against the function that implements that same table, which is a
+    /// correlated oracle — it cannot fail unless someone edits both. The table
+    /// is MEASURED from the real jar by
+    /// `tests/ranger/src/test/java/EgretTagTrieAgreementTest.java`, which
+    /// builds a real `RangerResourceTrie` and a real
+    /// `RangerDefaultPolicyResourceMatcher` per value and compares them over
+    /// the same request list. That one breaks on a `ranger.version` bump; this
+    /// one breaks when the Rust classifier drifts from it. Neither is
+    /// sufficient alone, and they must be edited together.
+    ///
+    /// Measured on 2.5.0 **and** 2.8.0, identically. Each row is a policy
+    /// value; `true` means the trie returned exactly the evaluators
+    /// `getMatchType` accepted, over the request values `pii`, `PII`, `p`,
+    /// `pix`, `pi`, `xii`, `ii`, `""`, `piix` and `pii_x`.
     #[test]
     fn trie_agreement_matches_the_measured_table() {
         let table: &[(&str, bool)] = &[

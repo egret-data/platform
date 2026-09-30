@@ -41605,6 +41605,20 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "recursive"
+                ]
+              }
+            }
           }
         ],
         "description": "Wire mirror of [`TagResourceProblem`]: why a tag policy's resource map is\none the evaluator cannot filter the way Ranger's `RangerResourceTrie` does\n(SP4d-2b Task 2).\n\nCarried as its own `kind`, not a formatted string, for the same reason\n[`WireTagPolicyBlock`] carries a `count`: a steward has to be able to tell\n\"this policy names a second resource level\" from \"this policy's tag value is\na wildcard\", and the remedies differ."
@@ -41940,6 +41954,32 @@
                 "type": "string",
                 "enum": [
                   "tag_resource_not_reproducible"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A tag mask or row-filter policy that produced a result is also\ndeny-capable, so Ranger can report its id with a later policy's mask.",
+            "required": [
+              "policy_name",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_sub_policy_is_deny_capable"
                 ]
               }
             }

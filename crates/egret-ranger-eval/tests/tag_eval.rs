@@ -76,7 +76,7 @@ use egret_ranger_eval::eval::{
     DenyReason, MaskDecision, ResolvedTag, RowFilterDecision, TagDecision, TagResourceProblem,
     UndecidableCause,
 };
-use egret_ranger_eval::model::ServicePolicySet;
+use egret_ranger_eval::model::{ServicePolicySet, TagPolicyBlock, Unmodelled};
 use egret_ranger_eval::resource::{MatchType, RequestResource};
 use egret_ranger_eval::servicedef::ServiceDef;
 use serde_json::{json, Value};
@@ -911,6 +911,353 @@ fn an_unreproducible_policy_of_another_type_costs_no_answer() {
         &live_tag_def(),
     );
     assert_eq!(d, TagDecision::NotDetermined, "{d:?}");
+}
+
+// ── fix round 1: the inputs the phase did not look at ────────────────────
+
+/// **CRITICAL 1.** `isRecursive: true` is the same trie widening as a wildcard
+/// value, through a field the first version of the sweep did not read.
+///
+/// MEASURED, byte-identical in both jars: `RangerResourceTrie.insert` ends
+/// `if (isWildcard || isRecursive) addWildcardEvaluator(...)`, and the caller
+/// passes `resource.getIsRecursive()`. A wildcard evaluator at node `N` is
+/// returned for every request value with prefix `N`, while
+/// `RangerDefaultResourceMatcher` contains zero references to `isRecursive` in
+/// either jar. Live on 2.5.0: a policy on `pii` with `isRecursive: true` is a
+/// candidate for the tag `piix`, where `getMatchType` is `NONE`.
+///
+/// Before the fix this request was `NotDetermined` with **no cause at all**,
+/// which composes into an `Allowed` where Ranger denies.
+#[test]
+fn a_recursive_tag_resource_is_refused() {
+    let mut policy = tag_policy(11, "rec", 0, json!(["pii"]), deny_select_for_public());
+    policy["resources"]["tag"]["isRecursive"] = json!(true);
+    let set = tagged(json!([policy]));
+    let d = evaluate_tag_policies(
+        &set,
+        &request("alice", Some(vec![tag("piix", MatchType::Self_)])),
+        &live_tag_def(),
+    );
+    assert_eq!(
+        causes(&d),
+        vec![UndecidableCause::TagResourceNotReproducible {
+            policy_id: Some(11),
+            policy_name: "rec".to_string(),
+            problem: TagResourceProblem::Recursive,
+        }],
+        "{d:?}"
+    );
+
+    // The tag the policy literally names is refused too — the refusal is the
+    // FLAG, not a per-request comparison. That is the documented over-refusal.
+    let d = evaluate_tag_policies(
+        &set,
+        &request("alice", Some(vec![tag("pii", MatchType::Self_)])),
+        &live_tag_def(),
+    );
+    assert!(matches!(d, TagDecision::Undecidable { .. }), "{d:?}");
+}
+
+/// **IMPORTANT 1.** `tag_match_is_admitted` is written for one request shape —
+/// `SELF` scope, concrete access type. Under `isAccessTypeAny()`
+/// `RangerDefaultPolicyEvaluator.evaluate` takes a different branch where
+/// `DESCENDANT` IS admitted (2.5.0 offsets 260-284, 2.8.0 268-331), so the
+/// phase's own admitted set stops being the right one.
+///
+/// `PseudoAccessType` already existed — but only in `request_preamble`, which
+/// this phase deliberately does not run.
+#[test]
+fn a_pseudo_access_type_refuses_because_it_changes_the_admitted_set() {
+    let set = live_download();
+    for pseudo in ["_any", "_admin", "_super_user"] {
+        let req = AccessRequest {
+            access_type: pseudo.to_string(),
+            ..request("alice", Some(vec![tag("tag", MatchType::Descendant)]))
+        };
+        let d = evaluate_tag_policies(&set, &req, &live_tag_def());
+        assert_eq!(
+            causes(&d),
+            vec![UndecidableCause::PseudoAccessType(pseudo.to_string())],
+            "{pseudo} must refuse: {d:?}"
+        );
+    }
+    // The control: with a concrete access type the same DESCENDANT tag is an
+    // answer, not a refusal — so the refusal is the access type, not the tag.
+    assert_eq!(
+        evaluate_tag_policies(
+            &set,
+            &request("alice", Some(vec![tag("tag", MatchType::Descendant)])),
+            &live_tag_def()
+        ),
+        TagDecision::NotDetermined
+    );
+}
+
+/// **IMPORTANT 2.** An `Unreadable` block leaves `tag_policies` EMPTY, which
+/// from `of_kind` alone is indistinguishable from "carries none of this type".
+/// "I could not read the policies" must never look like "the policies decided
+/// nothing".
+#[test]
+fn an_unreadable_tag_policies_block_refuses() {
+    let set: ServicePolicySet = serde_json::from_value(json!({
+        "serviceName": "sp3c2-trino-live",
+        "policies": [],
+        "serviceDef": {"name": "trino"},
+        // `policies` is an object, not a list — a shape the reader does not
+        // understand, so it has NOT been shown inert.
+        "tagPolicies": {
+            "serviceName": "t", "serviceDef": {"name": "tag"},
+            "policies": {"unexpected": "shape"},
+        },
+    }))
+    .expect("parse envelope");
+    assert!(set.tag_policies.is_empty());
+    assert!(set
+        .unmodelled
+        .contains(&Unmodelled::TagPolicies(TagPolicyBlock::Unreadable)));
+
+    for d in [
+        evaluate_tag_policies(
+            &set,
+            &request("alice", Some(vec![tag("pii", MatchType::Self_)])),
+            &live_tag_def(),
+        ),
+        evaluate_tag_policies(&set, &request("alice", Some(Vec::new())), &live_tag_def()),
+    ] {
+        assert_eq!(
+            causes(&d),
+            vec![UndecidableCause::EnvelopeConstruct(
+                Unmodelled::TagPolicies(TagPolicyBlock::Unreadable)
+            )],
+            "{d:?}"
+        );
+    }
+}
+
+/// The other three envelope constructs, which the first version left to a
+/// caller that may not run `request_preamble`.
+///
+/// `securityZones` is the one that corrupts this phase's own answer:
+/// `evaluateTagPolicies` has its own zone gate, and in a non-default zone it
+/// evaluates ONLY tag policies whose `zoneName` matches the request's — so a
+/// zone-less tag policy this crate evaluates is one Ranger skips.
+#[test]
+fn the_other_envelope_constructs_refuse_too() {
+    let cases = [
+        (
+            json!({"securityZones": {"z": {"resources": []}}}),
+            Unmodelled::SecurityZones,
+        ),
+        (
+            json!({"policyDeltas": [{"id": 1}]}),
+            Unmodelled::PolicyDeltas,
+        ),
+        (
+            json!({"serviceConfig": {"ranger.plugin.super.users": "root"}}),
+            Unmodelled::ServiceConfig,
+        ),
+    ];
+    for (extra, expected) in cases {
+        let mut body = json!({
+            "serviceName": "sp3c2-trino-live",
+            "policies": [],
+            "serviceDef": {"name": "trino"},
+            "tagPolicies": {
+                "serviceName": "t",
+                "serviceDef": live_download_json()["tagPolicies"]["serviceDef"],
+                "policies": [tag_policy(1, "p", 0, json!(["pii"]), deny_select_for_public())],
+            },
+        });
+        for (k, v) in extra.as_object().expect("object") {
+            body[k] = v.clone();
+        }
+        let set: ServicePolicySet = serde_json::from_value(body).expect("parse envelope");
+        let d = evaluate_tag_policies(
+            &set,
+            &request("alice", Some(vec![tag("pii", MatchType::Self_)])),
+            &live_tag_def(),
+        );
+        assert!(
+            causes(&d).contains(&UndecidableCause::EnvelopeConstruct(expected.clone())),
+            "{expected:?} must refuse: {d:?}"
+        );
+    }
+}
+
+/// **MINOR 3.** `NAME_COMPARATOR` has no policy-id key, so two distinct
+/// policies tying on (match type, priority, hasDeny, name) are ordered by
+/// Ranger's repository order and by this crate's id stand-in — which need not
+/// agree. The tie is representable: `policy.authz_policies` is
+/// `UNIQUE (service_id, name)` on the COLUMN, while the download's `name` comes
+/// from the stored body, which `enabled_policies_for_service` never rewrites.
+#[test]
+fn two_mask_policies_tied_on_every_key_ranger_has_refuse() {
+    let set = tagged(json!([
+        tag_policy(
+            1,
+            "same-name",
+            1,
+            json!(["a"]),
+            mask_for_public("MASK_HASH")
+        ),
+        tag_policy(
+            2,
+            "same-name",
+            1,
+            json!(["b"]),
+            mask_for_public("MASK_NULL")
+        ),
+    ]));
+    let d = evaluate_tag_data_mask(
+        &set,
+        &request(
+            "alice",
+            Some(vec![tag("a", MatchType::Self_), tag("b", MatchType::Self_)]),
+        ),
+        &live_tag_def(),
+    );
+    assert_eq!(
+        d,
+        MaskDecision::Undecidable {
+            why: vec![UndecidableCause::EvalOrderAmbiguous {
+                policy_ids: vec![Some(1), Some(2)],
+                policy_names: vec!["same-name".to_string(), "same-name".to_string()],
+            }]
+        },
+        "{d:?}"
+    );
+
+    // The control: give them different names and the comparator orders them,
+    // so the refusal is the TIE and not the pair.
+    let named = tagged(json!([
+        tag_policy(1, "a-first", 1, json!(["a"]), mask_for_public("MASK_HASH")),
+        tag_policy(2, "z-second", 1, json!(["b"]), mask_for_public("MASK_NULL")),
+    ]));
+    let d = evaluate_tag_data_mask(
+        &named,
+        &request(
+            "alice",
+            Some(vec![tag("a", MatchType::Self_), tag("b", MatchType::Self_)]),
+        ),
+        &live_tag_def(),
+    );
+    assert!(
+        matches!(d, MaskDecision::Masked(ref m) if m.policy_id == Some(1)),
+        "{d:?}"
+    );
+
+    // ...and the SAME policy reached through two tags of the same match type
+    // ties with itself, which is not an ambiguity.
+    let one = tagged(json!([tag_policy(
+        1,
+        "only",
+        1,
+        json!(["a", "b"]),
+        mask_for_public("MASK")
+    )]));
+    let d = evaluate_tag_data_mask(
+        &one,
+        &request(
+            "alice",
+            Some(vec![tag("a", MatchType::Self_), tag("b", MatchType::Self_)]),
+        ),
+        &live_tag_def(),
+    );
+    assert!(
+        matches!(d, MaskDecision::Masked(ref m) if m.policy_id == Some(1)),
+        "one policy under two tags is not a tie: {d:?}"
+    );
+}
+
+/// **Review question 3.** A deny-capable mask policy that yields is the point
+/// where Ranger can start reporting one policy's id with another's mask, because
+/// its `updateAccessResult` writes the mask fields unconditionally and the
+/// identity only `if (!result.getIsAllowed())`.
+///
+/// The first version documented this instead of refusing it, because egret's
+/// compiler emits neither bucket. Nothing ENFORCES that: `create_policy` /
+/// `update_policy` take `Json<Value>` and `enabled_policies_for_service`
+/// re-serves the stored body verbatim.
+#[test]
+fn a_deny_capable_mask_policy_that_yields_is_refused() {
+    let mut policy = tag_policy(
+        3,
+        "mask-with-deny",
+        1,
+        json!(["pii"]),
+        mask_for_public("MASK"),
+    );
+    policy["denyPolicyItems"] = json!([{
+        "users": ["nobody"],
+        "accesses": [{"type": "select", "isAllowed": true}],
+    }]);
+    let set = tagged(json!([policy]));
+    let d = evaluate_tag_data_mask(
+        &set,
+        &request("alice", Some(vec![tag("pii", MatchType::Self_)])),
+        &live_tag_def(),
+    );
+    assert_eq!(
+        d,
+        MaskDecision::Undecidable {
+            why: vec![UndecidableCause::TagSubPolicyIsDenyCapable {
+                policy_id: Some(3),
+                policy_name: "mask-with-deny".to_string(),
+            }]
+        },
+        "{d:?}"
+    );
+
+    // `isDenyAllElse` reaches `hasDeny()` by the other arm.
+    let mut policy = tag_policy(
+        4,
+        "mask-deny-all",
+        1,
+        json!(["pii"]),
+        mask_for_public("MASK"),
+    );
+    policy["isDenyAllElse"] = json!(true);
+    let set = tagged(json!([policy]));
+    assert!(
+        matches!(
+            evaluate_tag_data_mask(
+                &set,
+                &request("alice", Some(vec![tag("pii", MatchType::Self_)])),
+                &live_tag_def()
+            ),
+            MaskDecision::Undecidable { .. }
+        ),
+        "isDenyAllElse must reach hasDeny() too"
+    );
+
+    // The control: a deny-capable mask policy that does NOT yield cannot start
+    // the split, so it is not refused.
+    let mut policy = tag_policy(
+        5,
+        "mask-with-deny",
+        1,
+        json!(["pii"]),
+        mask_for_public("MASK"),
+    );
+    policy["denyPolicyItems"] = json!([{
+        "users": ["nobody"],
+        "accesses": [{"type": "select", "isAllowed": true}],
+    }]);
+    policy["dataMaskPolicyItems"] = json!([{
+        "users": ["someone-else"],
+        "accesses": [{"type": "select", "isAllowed": true}],
+        "dataMaskInfo": {"dataMaskType": "MASK"},
+    }]);
+    let set = tagged(json!([policy]));
+    assert_eq!(
+        evaluate_tag_data_mask(
+            &set,
+            &request("alice", Some(vec![tag("pii", MatchType::Self_)])),
+            &live_tag_def()
+        ),
+        MaskDecision::NoMask,
+        "a deny-capable policy whose item does not match cannot split anything"
+    );
 }
 
 // ── the tag set is a set, and its identity includes the match type ───────

@@ -138,7 +138,7 @@ fn plugin_version_both_variants() {
     );
 }
 
-// ── UndecidableCause (15 variants) ───────────────────────────────────────
+// ── UndecidableCause (16 variants) ───────────────────────────────────────
 
 #[test]
 fn cause_envelope_construct_carries_the_full_typed_construct() {
@@ -389,6 +389,11 @@ fn cause_tag_resource_not_reproducible_every_problem() {
             },
             serde_json::json!({"kind": "value_not_trie_prefix_exact", "value": "p*x"}),
         ),
+        (
+            TagResourceProblem::Recursive,
+            WireTagResourceProblem::Recursive,
+            serde_json::json!({"kind": "recursive"}),
+        ),
     ];
     for (problem, expected, expected_json) in cases {
         assert_eq!(WireTagResourceProblem::from(&problem), expected);
@@ -410,6 +415,31 @@ fn cause_tag_resource_not_reproducible_every_problem() {
             }
         );
     }
+}
+
+/// SP4d-2b fix round 1, review question 3.
+#[test]
+fn cause_tag_sub_policy_is_deny_capable() {
+    let cause = UndecidableCause::TagSubPolicyIsDenyCapable {
+        policy_id: Some(8799),
+        policy_name: "mask-with-deny".to_string(),
+    };
+    let wire = WireUndecidableCause::from(&cause);
+    assert_eq!(
+        wire,
+        WireUndecidableCause::TagSubPolicyIsDenyCapable {
+            policy_id: Some(8799),
+            policy_name: "mask-with-deny".to_string(),
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(wire).unwrap(),
+        serde_json::json!({
+            "kind": "tag_sub_policy_is_deny_capable",
+            "policy_id": 8799,
+            "policy_name": "mask-with-deny"
+        })
+    );
 }
 
 // ── Decision (3 variants) — and the Vec<why> is not collapsed ───────────

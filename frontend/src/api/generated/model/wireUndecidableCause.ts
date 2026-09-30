@@ -82,6 +82,11 @@ export type WireUndecidableCause = {
   problem: WireTagResourceProblem;
   kind: 'tag_resource_not_reproducible';
 } | {
+  /** @nullable */
+  policy_id?: number | null;
+  policy_name: string;
+  kind: 'tag_sub_policy_is_deny_capable';
+} | {
   declared: WireEngineType;
   service_def_name: string;
   kind: 'engine_mismatch';

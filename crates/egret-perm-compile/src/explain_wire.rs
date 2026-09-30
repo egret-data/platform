@@ -234,6 +234,7 @@ pub enum WireTagResourceProblem {
     NotOnlyTheTagResource,
     Excludes,
     ValueNotTriePrefixExact { value: String },
+    Recursive,
 }
 
 impl From<&TagResourceProblem> for WireTagResourceProblem {
@@ -249,6 +250,7 @@ impl From<&TagResourceProblem> for WireTagResourceProblem {
                     value: value.clone(),
                 }
             }
+            TagResourceProblem::Recursive => WireTagResourceProblem::Recursive,
         }
     }
 }
@@ -561,6 +563,12 @@ pub enum WireUndecidableCause {
         policy_name: String,
         problem: WireTagResourceProblem,
     },
+    /// A tag mask or row-filter policy that produced a result is also
+    /// deny-capable, so Ranger can report its id with a later policy's mask.
+    TagSubPolicyIsDenyCapable {
+        policy_id: Option<i64>,
+        policy_name: String,
+    },
     EngineMismatch {
         declared: WireEngineType,
         service_def_name: String,
@@ -657,6 +665,13 @@ impl From<&UndecidableCause> for WireUndecidableCause {
                 policy_names: policy_names.clone(),
             },
             UndecidableCause::TagsUnresolved => WireUndecidableCause::TagsUnresolved,
+            UndecidableCause::TagSubPolicyIsDenyCapable {
+                policy_id,
+                policy_name,
+            } => WireUndecidableCause::TagSubPolicyIsDenyCapable {
+                policy_id: *policy_id,
+                policy_name: policy_name.clone(),
+            },
             UndecidableCause::TagResourceNotReproducible {
                 policy_id,
                 policy_name,

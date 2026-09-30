@@ -23,4 +23,6 @@ export type WireTagResourceProblem = {
 } | {
   value: string;
   kind: 'value_not_trie_prefix_exact';
+} | {
+  kind: 'recursive';
 };
