@@ -3,4 +3,11 @@
 if [ "$1" = "-m" ] && [ "$2" = "marimo._ipc.launch_kernel" ]; then
   exec "$S0_REAL_PYTHON" "$(dirname "$0")/../../shim_client.py"
 fi
+# Optional (S0b T3): marimo runs this exact probe before EVERY ipc kernel launch
+# (marimo/_session/_venv.py has_marimo_installed); it re-imports marimo in a fresh interpreter.
+# The pool's workers have already imported marimo, so answer it without an interpreter.
+if [ -n "$S0_SHIM_SKIP_CHECK" ] && [ "$1" = "-c" ] && [ "$2" = "import marimo, msgspec, zmq; print(marimo.__version__)" ]; then
+  echo "$S0_SHIM_SKIP_CHECK"
+  exit 0
+fi
 exec "$S0_REAL_PYTHON" "$@"

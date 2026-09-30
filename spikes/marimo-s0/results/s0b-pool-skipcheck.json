@@ -1,0 +1,66 @@
+{
+  "variant": "pool-skipcheck",
+  "first": {
+    "user": "c0",
+    "pid": 43024,
+    "viewer_ok": true,
+    "seconds": 3.84
+  },
+  "sequential": [
+    {
+      "user": "s0",
+      "pid": 43025,
+      "viewer_ok": true,
+      "seconds": 4.09
+    },
+    {
+      "user": "s1",
+      "pid": 43026,
+      "viewer_ok": true,
+      "seconds": 2.67
+    },
+    {
+      "user": "s2",
+      "pid": 43033,
+      "viewer_ok": true,
+      "seconds": 2.95
+    },
+    {
+      "user": "s3",
+      "pid": 43082,
+      "viewer_ok": true,
+      "seconds": 2.77
+    },
+    {
+      "user": "s4",
+      "pid": 43102,
+      "viewer_ok": true,
+      "seconds": 2.96
+    }
+  ],
+  "sequential_p50_s": 2.95,
+  "concurrent": [
+    {
+      "user": "k0",
+      "pid": 43144,
+      "viewer_ok": true,
+      "seconds": 8.56
+    },
+    {
+      "user": "k1",
+      "pid": 43133,
+      "viewer_ok": true,
+      "seconds": 8.35
+    },
+    {
+      "user": "k2",
+      "pid": 43117,
+      "viewer_ok": true,
+      "seconds": 8.14
+    }
+  ],
+  "concurrent_max_s": 8.56,
+  "distinct_pids": 9,
+  "sessions": 9,
+  "every_viewer_ok": true
+}

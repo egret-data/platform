@@ -87,3 +87,17 @@ def test_shim_python_diverts_only_the_kernel_launch():
         assert p.wait(timeout=10) == 7
         t.join(timeout=10)
         assert seen["stdin"] == b"hi"
+
+
+def test_shim_python_answers_marimos_venv_check_only_when_asked():
+    shim = HERE / "shim" / "bin" / "python"
+    check = "import marimo, msgspec, zmq; print(marimo.__version__)"
+    env = {**os.environ, "S0_REAL_PYTHON": sys.executable}
+    real = subprocess.run([str(shim), "-c", check], env=env, capture_output=True, text=True, timeout=60)
+    fast = subprocess.run([str(shim), "-c", check], env={**env, "S0_SHIM_SKIP_CHECK": "9.9.9"},
+                          capture_output=True, text=True, timeout=60)
+    other = subprocess.run([str(shim), "-c", "print('other')"], env={**env, "S0_SHIM_SKIP_CHECK": "9.9.9"},
+                           capture_output=True, text=True, timeout=60)
+    assert real.stdout.strip() == "0.25.0"  # default: the real interpreter answers
+    assert fast.stdout.strip() == "9.9.9"
+    assert other.stdout.strip() == "other"  # only that exact command is short-circuited

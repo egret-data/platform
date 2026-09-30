@@ -1,0 +1,32 @@
+# S0b T3 pool rss: ps -o pid,ppid,rss,command (rss in KiB). macOS laptop, S0_POOL_SIZE=3, automated probes, host under heavy unrelated load.
+# The pool keeps size+1 warm workers: 3 idle + 1 'armed' (the one that will accept the next connection).
+
+## Snapshot A — 23:13, idle pool only (the 9 viewers' kernels had exited after the 120 s session TTL); load avg 113.82 73.66 48.66
+  PID  PPID    RSS COMMAND
+70391 70390   9184 python ./kernel_pool.py --size 3 --socket ./.work/kernel.sock
+72421 70391  64488 python ./kernel_worker.py 8 3
+75854 70391  70116 python ./kernel_worker.py 8 3
+75881 70391  70344 python ./kernel_worker.py 8 3
+75882 70391  70292 python ./kernel_worker.py 8 3
+
+## Snapshot B — 23:55:39, after s0b_startup (9) + s0b_breakdown (3) on pool-skipcheck; 12 claimed kernels still inside the session TTL + 4 idle/armed; load avg 14.44 22.74 35.82
+  PID  PPID    RSS COMMAND
+43023 43017  13164 python ./kernel_pool.py --size 3 --socket ./.work/kernel.sock
+43024 43023  81180 python ./kernel_worker.py 8 3
+43025 43023  81448 python ./kernel_worker.py 5 3
+43026 43023  81452 python ./kernel_worker.py 11 3
+43033 43023  81368 python ./kernel_worker.py 6 3
+43082 43023  80908 python ./kernel_worker.py 7 3
+43102 43023  81620 python ./kernel_worker.py 7 3
+43117 43023  81676 python ./kernel_worker.py 8 3
+43133 43023  81292 python ./kernel_worker.py 8 3
+43144 43023  81676 python ./kernel_worker.py 8 3
+43156 43023  81296 python ./kernel_worker.py 8 3
+43219 43023  81304 python ./kernel_worker.py 8 3
+43226 43023  69848 python ./kernel_worker.py 8 3
+43228 43023  81180 python ./kernel_worker.py 8 3
+43334 43023  70036 python ./kernel_worker.py 8 3
+43353 43023  70304 python ./kernel_worker.py 8 3
+43370 43023  69684 python ./kernel_worker.py 8 3
+
+# Reading: an idle warm worker costs ~62-70 MB (A: 64.5, 70.1, 70.3, 70.3 MB; B: 69.7-70.3 MB); a claimed worker running the probe kernel ~81 MB (vs ~80 MB for a direct ipc kernel, T4 Q2); the pool process itself 9-13 MB.

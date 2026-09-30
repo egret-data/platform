@@ -15,12 +15,13 @@ run)
   for i in $(seq 300); do pgrep -f "entrypoint.py --mode run" >/dev/null || { echo run server died; break; }; curl -s -o /dev/null http://127.0.0.1:2719/ && echo run up after ${i}s && break; sleep 1; done ;;
 stop-run)
   # LISTEN-only: a bare `lsof -ti :2719` also matches the proxy's pooled client/WS sockets and kills the proxy
-  pkill -f "entrypoint.py --mode run"; sleep 2; pkill -f kernel_pool.py; pkill -f kernel_worker.py; lsof -ti tcp:2719 -sTCP:LISTEN | xargs kill 2>/dev/null; sleep 1; lsof -i tcp:2719 -sTCP:LISTEN || echo 2719 free ;;
+  pkill -f "entrypoint.py --mode run"; for i in $(seq 15); do pgrep -f "entrypoint.py --mode run" >/dev/null || break; sleep 1; done; pkill -f kernel_pool.py; pkill -f kernel_worker.py; lsof -ti tcp:2719 -sTCP:LISTEN | xargs kill 2>/dev/null; sleep 1; lsof -i tcp:2719 -sTCP:LISTEN || echo 2719 free ;;
 restart-egret)
   # usage: servers.sh restart-egret [ENV=..]   (e.g. COOKIE_PREFIX=__Host-); kills only the :8700 LISTENER
   shift; lsof -ti tcp:8700 -sTCP:LISTEN | xargs kill 2>/dev/null; sleep 2
   nohup env "$@" uv run uvicorn fake_egret:app --host 127.0.0.1 --port 8700 > .work/logs/egret.log 2>&1 &
   for i in $(seq 30); do curl -sf http://127.0.0.1:8700/_events >/dev/null && echo egret up && break; sleep 1; done ;;
 down)
-  pkill -f "entrypoint.py"; pkill -f kernel_pool.py; pkill -f kernel_worker.py; pkill -f "uvicorn fake_egret"; pkill -f "uvicorn proxy"; sleep 2; lsof -i :8700 -i :8701 -i :2718 -i :2719 || echo all free ;;
+  # pool leftovers only AFTER the server has exited: killing kernels under a live server hung its shutdown (S0b T3)
+  pkill -f "entrypoint.py"; for i in $(seq 15); do pgrep -f "entrypoint.py" >/dev/null || break; sleep 1; done; pkill -f kernel_pool.py; pkill -f kernel_worker.py; pkill -f "uvicorn fake_egret"; pkill -f "uvicorn proxy"; sleep 2; lsof -i :8700 -i :8701 -i :2718 -i :2719 || echo all free ;;
 esac

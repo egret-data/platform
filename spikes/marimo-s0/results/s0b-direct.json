@@ -1,0 +1,66 @@
+{
+  "variant": "direct",
+  "first": {
+    "user": "c0",
+    "pid": 40314,
+    "viewer_ok": true,
+    "seconds": 4.79
+  },
+  "sequential": [
+    {
+      "user": "s0",
+      "pid": 40335,
+      "viewer_ok": true,
+      "seconds": 4.61
+    },
+    {
+      "user": "s1",
+      "pid": 40548,
+      "viewer_ok": true,
+      "seconds": 7.48
+    },
+    {
+      "user": "s2",
+      "pid": 40574,
+      "viewer_ok": true,
+      "seconds": 6.25
+    },
+    {
+      "user": "s3",
+      "pid": 40599,
+      "viewer_ok": true,
+      "seconds": 9.33
+    },
+    {
+      "user": "s4",
+      "pid": 40637,
+      "viewer_ok": true,
+      "seconds": 8.64
+    }
+  ],
+  "sequential_p50_s": 7.48,
+  "concurrent": [
+    {
+      "user": "k0",
+      "pid": 40696,
+      "viewer_ok": true,
+      "seconds": 10.87
+    },
+    {
+      "user": "k1",
+      "pid": 40698,
+      "viewer_ok": true,
+      "seconds": 10.54
+    },
+    {
+      "user": "k2",
+      "pid": 40697,
+      "viewer_ok": true,
+      "seconds": 10.76
+    }
+  ],
+  "concurrent_max_s": 10.87,
+  "distinct_pids": 9,
+  "sessions": 9,
+  "every_viewer_ok": true
+}

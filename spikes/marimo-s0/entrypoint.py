@@ -122,6 +122,10 @@ def start_kernel_pool() -> str:
     # MARIMO_SANDBOX_MODE/_BACKEND and MARIMO_MANAGE_SCRIPT_METADATA (marimo/_session/managers/ipc.py:215-265).
     os.environ["S0_REAL_PYTHON"] = sys.executable
     os.environ["S0_KERNEL_SOCKET"] = str(sock)
+    if os.environ.get("S0_SHIM_SKIP_CHECK") == "1":  # opt-in; the shim echoes this version back
+        import marimo
+
+        os.environ["S0_SHIM_SKIP_CHECK"] = marimo.__version__
     size = os.environ.get("S0_POOL_SIZE", "3")
     pool = subprocess.Popen(
         [sys.executable, str(HERE / "kernel_pool.py"), "--size", size, "--socket", str(sock)],

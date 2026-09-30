@@ -1,0 +1,129 @@
+{
+  "alice": {
+    "first": "PY pid=72421 viewer=alice sql=SELECT 1 AS n",
+    "after_slider": "PY pid=72421 viewer=alice sql=SELECT 4 AS n",
+    "sqlcell": "SQLCELL viewer=alice"
+  },
+  "bob": {
+    "first": "PY pid=75854 viewer=bob sql=SELECT 1 AS n",
+    "after_slider": "PY pid=75854 viewer=bob sql=SELECT 4 AS n"
+  },
+  "gateway_queries": [
+    {
+      "t": 1790784846.1626182,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 1 AS n",
+      "pid": 72421
+    },
+    {
+      "t": 1790784846.2760441,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 1 AS n",
+      "pid": 75854
+    },
+    {
+      "t": 1790784846.277338,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 1 AS via_sql_cell",
+      "pid": 72421
+    },
+    {
+      "t": 1790784846.415871,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 1 AS via_sql_cell",
+      "pid": 75854
+    },
+    {
+      "t": 1790784846.759833,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 2 AS n",
+      "pid": 72421
+    },
+    {
+      "t": 1790784846.790117,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 2 AS via_sql_cell",
+      "pid": 72421
+    },
+    {
+      "t": 1790784846.826151,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 2 AS n",
+      "pid": 75854
+    },
+    {
+      "t": 1790784846.94147,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 2 AS via_sql_cell",
+      "pid": 75854
+    },
+    {
+      "t": 1790784847.023905,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 3 AS n",
+      "pid": 72421
+    },
+    {
+      "t": 1790784847.121878,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 4 AS n",
+      "pid": 75854
+    },
+    {
+      "t": 1790784847.144902,
+      "kind": "query",
+      "user": "bob",
+      "app_id": "probe",
+      "sql": "SELECT 4 AS via_sql_cell",
+      "pid": 75854
+    },
+    {
+      "t": 1790784847.172767,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 3 AS via_sql_cell",
+      "pid": 72421
+    },
+    {
+      "t": 1790784847.289981,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 4 AS n",
+      "pid": 72421
+    },
+    {
+      "t": 1790784847.411828,
+      "kind": "query",
+      "user": "alice",
+      "app_id": "probe",
+      "sql": "SELECT 4 AS via_sql_cell",
+      "pid": 72421
+    }
+  ],
+  "every_alice_page_shows_alice": true,
+  "every_bob_page_shows_bob": true,
+  "sql_cell_used_gateway": true,
+  "rejected_queries": []
+}
