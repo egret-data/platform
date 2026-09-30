@@ -18,11 +18,15 @@
 //!    ([`FeatureState`]);
 //! 4. **build** the [`TaskCommands`] ([`KestraRuntime::commands`]): the
 //!    configured host image, `/bin/sh -c "exec java …"`, the one input file
-//!    `task.json` (`{"type": FQCN, "properties": {…rendered…}}`), no output
-//!    files, `host_protocol: true`;
-//! 5. **mask**: the runner is handed a [`TaskInput`] whose log is
-//!    `task.log.masked(values)`, so every line the host prints reaches
-//!    `RunLog` with each resolved value replaced by `******`;
+//!    `task.json` (`{"type": FQCN, "properties": {…rendered…}, "mask":
+//!    [values]}`), no output files, `host_protocol: true`;
+//! 5. **mask**, twice (fix round 1, I1): the host masks every line of its
+//!    own stdout and stderr (but the outputs marker) with `task.json`'s
+//!    `mask` before it leaves the JVM -- which is what `kubectl logs`, a
+//!    node's log shipper and Docker's json-file driver keep -- and the
+//!    runner is handed a [`TaskInput`]
+//!    whose log is `task.log.masked(values)`, so egret masks again before
+//!    `RunLog`;
 //! 6. **run** -- or, when the gate refused, **adopt** a container or pod that
 //!    already exists for this (run, attempt), exactly as the script handler
 //!    does; `adopt` never creates;
@@ -30,7 +34,7 @@
 //!
 //! # Where a secret's value goes, and where it does not
 //!
-//! Into `task.json`'s `properties` only -- an input file, `docker cp` from a
+//! Into `task.json`'s `properties` and `mask` only -- an input file, `docker cp` from a
 //! 0700 staging directory that removes itself however its scope ends
 //! (`commands::StagingDir`), or an in-memory tar over `pods/exec` on
 //! Kubernetes (`k8s::transfer::pack`). **Never** into the argv, the env,
@@ -38,7 +42,9 @@
 //! `$WORKING_DIR`. Every FAILED reason this handler writes is passed
 //! through [`crate::logs::mask`] with the resolved values: the host's
 //! `egretFailure` message can echo a connection string. **Outputs are not
-//! masked** (spec §12, as Kestra): a query that selects a secret returns it.
+//! masked** (spec §12, as Kestra): a query that selects a secret returns it,
+//! and the host's `::{"outputs": …}::` marker is the one line of its stdout
+//! it leaves as it is (fix round 1, I1).
 //!
 //! # The exit codes (`EgretPluginHost`)
 //!
@@ -150,11 +156,20 @@ impl KestraRuntime {
     }
 
     /// Step 4 of the module doc. `properties` is the RENDERED map; it goes
-    /// into `task.json` and nowhere else.
-    pub fn commands(&self, fqcn: &str, properties: Map<String, Value>) -> TaskCommands {
+    /// into `task.json` and nowhere else. `mask` is every secret value the
+    /// render handed out: the host replaces each by `******` on its own
+    /// stdout and stderr (fix round 1, I1). The file already holds them in
+    /// `properties`, so listing them again adds no place a value is.
+    pub fn commands(
+        &self,
+        fqcn: &str,
+        properties: Map<String, Value>,
+        mask: &[String],
+    ) -> TaskCommands {
         let task_json = serde_json::json!({
             "type": fqcn,
             "properties": Value::Object(properties),
+            "mask": mask,
         });
         TaskCommands {
             container_image: self.host.image.clone().unwrap_or_default(),
@@ -281,7 +296,7 @@ impl TaskHandler for Kestra {
         .err();
 
         // 4. the commands; 5. the masked log.
-        let cmds = self.rt.commands(parsed.fqcn, rendered);
+        let cmds = self.rt.commands(parsed.fqcn, rendered, &secrets);
         let masked = TaskInput {
             log: task.log.masked(&secrets),
             ..task.clone()
@@ -640,6 +655,9 @@ mod tests {
         // and nothing egret's Task model consumes.
         let doc = task_json(&cmds);
         assert_eq!(doc["type"], FQCN);
+        let mut keys: Vec<&String> = doc.as_object().expect("a map").keys().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["mask", "properties", "type"]);
         assert_eq!(
             doc["properties"],
             serde_json::json!({
@@ -715,6 +733,9 @@ mod tests {
             .iter()
             .all(|(k, v)| !k.contains(PASSWORD) && !v.contains(PASSWORD)));
         assert!(!cmds.container_image.contains(PASSWORD));
+        // Fix round 1, I1: the host is told which values to mask on its own
+        // stdout -- the same file, so no new place holds them.
+        assert_eq!(task_json(&cmds)["mask"], serde_json::json!([PASSWORD]));
 
         assert_eq!(
             rec.texts(),

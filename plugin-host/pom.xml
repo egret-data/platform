@@ -48,6 +48,15 @@
       <version>8.0.2.Final</version>
     </dependency>
 
+    <!-- W5b fix round 1 (I1): MaskingLayout extends logback's PatternLayout. io.kestra:core already
+         resolves this exact version (runtime scope); compile scope here only because the host names
+         the class. No new jar. -->
+    <dependency>
+      <groupId>ch.qos.logback</groupId>
+      <artifactId>logback-classic</artifactId>
+      <version>1.5.37</version>
+    </dependency>
+
     <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>

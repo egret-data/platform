@@ -1,7 +1,10 @@
 package io.kestra.core.runners;
 
+import java.io.FileDescriptor;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -40,7 +43,7 @@ import jakarta.validation.ConstraintViolationException;
  * <pre>
  * java -Xmx&lt;heap&gt; -cp '/opt/egret-plugin-host/lib/*:/opt/egret-plugin-host/plugins/*' \
  *      io.kestra.core.runners.EgretPluginHost run &lt;path-to-task.json&gt;
- * task.json = {"type": "&lt;FQCN without kestra.&gt;", "properties": {…rendered…}}
+ * task.json = {"type": "&lt;FQCN without kestra.&gt;", "properties": {…rendered…}, "mask": ["…"]}
  * stdout    = "&lt;LEVEL&gt; &lt;message&gt;" lines; one "::{"outputs": {…}}::" on success;
  *             one "::{"egretFailure": {"code": n, "message": "…"}}::" before a non-zero exit
  * exit      = 0 ok | 2 refused/invalid | 3 plugin threw | 4 needs W9
@@ -48,6 +51,13 @@ import jakarta.validation.ConstraintViolationException;
  *
  * java … EgretPluginHost describe &lt;plugins-dir&gt;   -&gt; catalog.json on stdout
  * </pre>
+ *
+ * <p><b>Masking</b> (W5b fix round 1, I1): {@code run} replaces stdout and stderr with
+ * {@link MaskingOutputStream}s before it reads {@code task.json}, and {@code mask} lists the secret
+ * values egret resolved into the properties. Every line either stream carries -- the plugin's log, a
+ * stack trace, the {@code egretFailure} marker -- has each of them replaced by {@code ******} before
+ * it leaves the JVM; the failure message is masked before it is JSON-encoded. The outputs marker is
+ * the one line left as it is ({@link #outputsLine}).
  */
 public final class EgretPluginHost {
     static final String KESTRA_VERSION = "2.0.0-rc13";
@@ -98,7 +108,15 @@ public final class EgretPluginHost {
 
     public static void main(String[] args) {
         if (args.length == 2 && args[0].equals("run")) {
-            System.exit(execute(Path.of(args[1]), System.out, killWaitMs()));
+            MaskingOutputStream stdout = new MaskingOutputStream(new FileOutputStream(FileDescriptor.out));
+            MaskingOutputStream stderr = new MaskingOutputStream(new FileOutputStream(FileDescriptor.err));
+            System.setOut(maskingPrintStream(stdout));
+            System.setErr(maskingPrintStream(stderr));
+            PrintStream outputs = maskingPrintStream(stdout.unmasked());
+            int code = execute(Path.of(args[1]), System.out, outputs, killWaitMs());
+            finish(stdout);
+            finish(stderr);
+            System.exit(code);
         } else if (args.length == 2 && args[0].equals("describe")) {
             try {
                 Map<String, Object> catalog = describe(Path.of(args[1]));
@@ -113,6 +131,19 @@ public final class EgretPluginHost {
         } else {
             System.err.println("usage: EgretPluginHost run <task.json> | describe <plugins-dir>");
             System.exit(EXIT_REFUSED);
+        }
+    }
+
+    /** A UTF-8 autoflushing {@code PrintStream} over {@code sink} (a {@link MaskingOutputStream}, or its unmasked side). */
+    static PrintStream maskingPrintStream(OutputStream sink) {
+        return new PrintStream(sink, true, StandardCharsets.UTF_8);
+    }
+
+    private static void finish(MaskingOutputStream stream) {
+        try {
+            stream.finish();
+        } catch (IOException e) {
+            // Nothing is left to report it on.
         }
     }
 
@@ -133,10 +164,11 @@ public final class EgretPluginHost {
 
     /** Test seam: runs {@code task.json} with no shutdown hook and never calls {@code System.exit}. */
     static int execute(Path taskJson, PrintStream out) {
-        return execute(taskJson, out, null);
+        return execute(taskJson, out, out, null);
     }
 
-    private static int execute(Path taskJson, PrintStream out, Long killWaitMs) {
+    /** {@code outputs} carries the success marker only; everything else goes to {@code out}. */
+    private static int execute(Path taskJson, PrintStream out, PrintStream outputs, Long killWaitMs) {
         Task task;
         try {
             task = load(taskJson);
@@ -177,14 +209,25 @@ public final class EgretPluginHost {
             runContext.cleanup();
         }
 
-        Map<String, Object> outputs = output == null ? Map.of() : JacksonMapper.toMap(output);
+        Map<String, Object> result = output == null ? Map.of() : JacksonMapper.toMap(output);
         try {
-            out.println("::" + MAPPER.writeValueAsString(Map.of("outputs", outputs)) + "::");
-            out.flush();
+            outputs.println(outputsLine(result));
+            outputs.flush();
         } catch (IOException e) {
             return fail(out, EXIT_PLUGIN_THREW, "the outputs could not be serialized: " + e.getMessage(), e);
         }
         return EXIT_OK;
+    }
+
+    /**
+     * The success marker, <b>the one line the host does not mask</b> (W5b fix round 1, I1): outputs are
+     * not masked, as in Kestra (spec §6, §12). Masking them was measured to corrupt real results: the
+     * live test's username secret {@code w5b} turned the returned {@code 'w5b-t6'} into
+     * {@code '******-t6'}. A value reaches this line only when the task returns it -- a query that
+     * selects a secret -- and egret stores the same outputs on the task run.
+     */
+    static String outputsLine(Map<String, Object> outputs) throws IOException {
+        return "::" + MAPPER.writeValueAsString(Map.of("outputs", outputs)) + "::";
     }
 
     static final class Refused extends Exception {
@@ -199,6 +242,10 @@ public final class EgretPluginHost {
             doc = MAPPER.readValue(Files.readAllBytes(taskJson), MAP);
         } catch (IOException e) {
             throw new Refused("cannot read " + taskJson + ": " + e.getMessage());
+        }
+        // First, before anything below can log a property: the values to mask.
+        if (doc.get("mask") instanceof List<?> mask) {
+            Masker.set(mask.stream().filter(String.class::isInstance).map(String.class::cast).toList());
         }
         if (!(doc.get("type") instanceof String type) || type.isBlank()) {
             throw new Refused("task.json has no \"type\"");
@@ -292,7 +339,10 @@ public final class EgretPluginHost {
         return sb.toString();
     }
 
-    private static int fail(PrintStream out, int code, String message, Throwable t) {
+    static int fail(PrintStream out, int code, String rawMessage, Throwable t) {
+        // Masked before it is logged, truncated or JSON-encoded: an exception's text can echo a
+        // connection string, and a value JSON escapes would not match on the encoded line.
+        String message = Masker.mask(rawMessage);
         if (t != null) {
             HOST_LOG.error(message, t);
         } else {

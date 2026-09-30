@@ -75,6 +75,46 @@ async fn docker(args: &[&str]) -> (bool, String) {
     (out.status.success(), text)
 }
 
+/// The raw output of the first container labelled with `exec`, followed from
+/// the moment it appears until it stops (`docker logs -f`). Empty if none
+/// appeared within two minutes -- the caller asserts on content, so an empty
+/// capture fails it rather than passing vacuously.
+async fn container_output(exec: Uuid) -> String {
+    let label = format!("label=egret.io/execution-id={exec}");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let (_, ids) = docker(&["ps", "-aq", "--filter", &label]).await;
+        let id = ids
+            .lines()
+            .next()
+            .filter(|l| !l.is_empty())
+            .map(str::to_string);
+        // Not while it is only `created`: `docker logs -f` on a container that
+        // has not started returns at once, empty.
+        let started = match &id {
+            Some(id) => {
+                let (_, status) = docker(&["inspect", "-f", "{{.State.Status}}", id]).await;
+                status != "created"
+            }
+            None => false,
+        };
+        if let (Some(id), true) = (id.as_deref(), started) {
+            let out = Command::new("docker")
+                .args(["logs", "-f", id])
+                .output()
+                .await
+                .expect("docker logs");
+            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&out.stderr));
+            return text;
+        }
+        if Instant::now() > deadline {
+            return String::new();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// A container removed on drop.
 struct Engine {
     name: String,
@@ -264,9 +304,26 @@ impl Fx {
     /// Run `source` to a terminal state through `spawn_with_logs`, then stop
     /// the runtime (its join drains the log writer).
     async fn run(&self, source: &str, kill_grace_s: u64, within: Duration) -> Uuid {
+        self.run_capturing(source, kill_grace_s, within, false)
+            .await
+            .0
+    }
+
+    /// [`Fx::run`], and with `capture`, what the plugin container printed as
+    /// Docker keeps it (`docker logs -f`, stdout and stderr, read while the
+    /// container exists): the text `kubectl logs` or a log shipper would see
+    /// (fix round 1, I1).
+    async fn run_capturing(
+        &self,
+        source: &str,
+        kill_grace_s: u64,
+        within: Duration,
+        capture: bool,
+    ) -> (Uuid, Option<String>) {
         let exec = start_execution(&self.db.pool, self.ws, None, source, serde_json::json!({}))
             .await
             .expect("start execution");
+        let captured = capture.then(|| tokio::spawn(container_output(exec)));
         let cancel = CancellationToken::new();
         let rt = spawn_with_logs(
             self.db.pool.clone(),
@@ -306,7 +363,16 @@ impl Fx {
         tokio::time::timeout(Duration::from_secs(60), rt.join())
             .await
             .expect("the runtime stops");
-        exec
+        let output = match captured {
+            Some(h) => Some(
+                tokio::time::timeout(Duration::from_secs(60), h)
+                    .await
+                    .expect("docker logs ends")
+                    .expect("the capture task"),
+            ),
+            None => None,
+        };
+        (exec, output)
     }
 
     async fn task_run(
@@ -446,16 +512,37 @@ async fn plugin_tasks_run_end_to_end_and_no_secret_is_stored(pool: sqlx::PgPool)
         .await;
 
     // The comment makes the plugin's own DEBUG `Starting query: …` line echo
-    // the secret; the result holds no secret (outputs are not masked, §12).
+    // the secret; the result holds no secret (outputs are not masked, §12 --
+    // and the username secret `w5b` is inside the returned tag, which the
+    // outputs must keep).
     let sql =
         "SELECT 41 + 1 AS answer, 'w5b-t6' AS tag /* {{ secret('pg', subkey='password') }} */";
-    let exec = fx
-        .run(
+    let (exec, raw) = fx
+        .run_capturing(
             &pg_flow("pg_e2e", pg.port, sql, "    fetchType: FETCH_ONE\n"),
             15,
             Duration::from_secs(120),
+            true,
         )
         .await;
+    // Fix round 1, I1: the container's own stdout -- what `kubectl logs`,
+    // a node's log shipper and Docker's json-file driver keep -- carries the
+    // masked line and never the value.
+    let raw = raw.expect("captured");
+    println!("CONTAINER STDOUT: {raw}");
+    assert!(
+        raw.contains("/* ****** */"),
+        "the capture saw the host's masked line: {raw}"
+    );
+    assert!(
+        raw.contains(r#""tag":"w5b-t6""#),
+        "the outputs marker is the one line the host leaves as it is: {raw}"
+    );
+    assert_eq!(
+        raw.matches(PG_PASSWORD).count(),
+        0,
+        "the password reached the container's stdout: {raw}"
+    );
     let (state, outputs, message) = fx.task_run(exec, "q").await;
     assert_eq!(state, "SUCCESS", "{message:?}");
     assert_eq!(

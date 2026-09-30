@@ -244,6 +244,116 @@ class EgretPluginHostTest {
         assertFalse(killed.get());
     }
 
+    // --- masking (W5b fix round 1, I1) -----------------------------------------------------
+
+    /** A host name that cannot resolve, so the driver's exception carries it. */
+    private static final String SECRET = "s3cr3t-pw-zq9.invalid";
+
+    /**
+     * What the container's stdout would hold: the host's own masking streams over a buffer, installed
+     * as {@code System.out} and {@code System.err} exactly as {@code main} installs them.
+     */
+    private String capturedStdout(ThrowingRunnable body) throws Exception {
+        ByteArrayOutputStream raw = new ByteArrayOutputStream();
+        MaskingOutputStream masking = new MaskingOutputStream(raw);
+        PrintStream stream = EgretPluginHost.maskingPrintStream(masking);
+        PrintStream prevOut = System.out;
+        PrintStream prevErr = System.err;
+        System.setOut(stream);
+        System.setErr(stream);
+        try {
+            body.run();
+        } finally {
+            System.out.flush();
+            System.setOut(prevOut);
+            System.setErr(prevErr);
+            masking.finish();
+            Masker.set(List.of());
+        }
+        return raw.toString(StandardCharsets.UTF_8);
+    }
+
+    interface ThrowingRunnable {
+        void run() throws Exception;
+    }
+
+    @Test
+    void a_secret_never_reaches_stdout_from_a_plugin_log_an_exception_or_a_marker() throws Exception {
+        Path file = tmp.resolve("task.json");
+        Files.writeString(file, "{\"type\":\"io.kestra.plugin.jdbc.postgresql.Query\",\"properties\":"
+            + "{\"url\":\"jdbc:postgresql://" + SECRET + ":5432/x\",\"sql\":\"SELECT 1\"},"
+            + "\"mask\":[\"" + SECRET + "\"]}");
+        int[] exit = new int[1];
+        String stdout = capturedStdout(() -> {
+            exit[0] = EgretPluginHost.execute(file, System.out);
+            // The plugin's own logger, a logged exception, and a line written in two pieces.
+            ShimRunContext.TASK_LOG.info("connecting to {}", SECRET);
+            ShimRunContext.TASK_LOG.error("it failed", new IllegalStateException("cannot reach " + SECRET));
+            System.out.print("split " + SECRET.substring(0, 7));
+            System.out.println(SECRET.substring(7) + " end");
+        });
+
+        assertEquals(3, exit[0], stdout);
+        assertFalse(stdout.contains(SECRET), stdout);
+        // And none of its pieces long enough to identify it survives around the mask.
+        assertFalse(stdout.contains("zq9.invalid"), stdout);
+        assertTrue(stdout.contains("INFO connecting to ******"), stdout);
+        assertTrue(stdout.contains("cannot reach ******"), stdout);
+        assertTrue(stdout.contains("split ****** end"), stdout);
+        // The driver's exception named the host: its text reached the marker, masked.
+        String marker = stdout.lines().filter(l -> l.startsWith("::{\"egretFailure\"")).findFirst().orElseThrow();
+        assertTrue(marker.contains("******"), marker);
+    }
+
+    @Test
+    void a_value_json_escapes_is_masked_in_the_failure_marker() throws Exception {
+        String value = "pa\"ss\\word";
+        String stdout = capturedStdout(() -> {
+            Masker.set(List.of(value));
+            EgretPluginHost.fail(System.out, 3, "login as u/" + value + " failed", null);
+        });
+        assertFalse(stdout.contains("pa\\\"ss"), stdout);
+        assertFalse(stdout.contains("pa\"ss"), stdout);
+        assertTrue(stdout.contains("login as u/****** failed"), stdout);
+    }
+
+    /**
+     * The outputs marker is the one line left as it is (outputs are not masked, spec §6): written
+     * through the masking stream's unmasked side, in order with the masked lines around it.
+     */
+    @Test
+    void the_outputs_marker_is_the_one_line_the_host_does_not_mask() throws Exception {
+        ByteArrayOutputStream raw = new ByteArrayOutputStream();
+        MaskingOutputStream masking = new MaskingOutputStream(raw);
+        PrintStream masked = EgretPluginHost.maskingPrintStream(masking);
+        PrintStream outputs = EgretPluginHost.maskingPrintStream(masking.unmasked());
+        try {
+            Masker.set(List.of("w5b"));
+            masked.print("before w5b");
+            outputs.println(EgretPluginHost.outputsLine(Map.of("tag", "w5b-t6")));
+            masked.println("after w5b");
+            masking.finish();
+        } finally {
+            Masker.set(List.of());
+        }
+        assertEquals(
+            "before ******::{\"outputs\":{\"tag\":\"w5b-t6\"}}::\nafter ******\n",
+            raw.toString(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void masking_takes_the_longest_value_and_never_rematches_the_mask() {
+        try {
+            Masker.set(List.of("abc", "abcdef", "", "***"));
+            assertEquals("x ****** y ****** z", Masker.mask("x abcdef y abc z"));
+            assertEquals("******", Masker.mask("***"));
+            assertEquals("nothing", Masker.mask("nothing"));
+        } finally {
+            Masker.set(List.of());
+        }
+        assertEquals("abc", Masker.mask("abc"), "no values, no masking");
+    }
+
     // --- describe ------------------------------------------------------------------------
 
     @Test
