@@ -266,6 +266,40 @@ fn an_unadmitted_tag_carrying_options_does_not_refuse() {
     );
 }
 
+/// **The mutation that found this test.** Removing the admission guard from the
+/// attachment sweep SURVIVED the whole suite, because the only case then
+/// covered was a request whose tags are ALL unadmitted — and in that case
+/// `tag_candidates` returns at `admitted.is_empty()` before it ever looks at
+/// `why`, so the extra causes are silently discarded and the verdict is
+/// unchanged. The narrowing is only observable in a MIXED request, which is the
+/// one nothing exercised.
+///
+/// It is also the shape this package keeps producing, one turn further on: a
+/// refusal that a return routes around, where the routing is invisible because
+/// the guard above it happens to make the refusal empty.
+#[test]
+fn an_unadmitted_tag_does_not_refuse_beside_an_admitted_one() {
+    let mut descendant = column_tag("pii");
+    descendant.match_type = MatchType::Descendant;
+    descendant
+        .options
+        .insert("TAG_VALIDITY_PERIODS".to_string());
+    descendant.validity_periods = 3;
+    descendant.attached_through.levels = levels(&["catalog", "schema"]);
+
+    let d = evaluate(
+        &tag_allow(),
+        &request(vec![column_tag("pii"), descendant]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        matches!(&d, Decision::Allowed { policy_name, .. } if policy_name == "tag-allow"),
+        "an attachment Ranger's `evaluate` never lets reach the policy items cannot \
+         make this decision undecidable, however loaded its payload: {d:?}"
+    );
+}
+
 // ── 2. a tag policy referencing a tag ATTRIBUTE ──────────────────────────
 
 /// A tag attribute is reachable from a policy through exactly two doors, and
@@ -688,6 +722,48 @@ fn the_drop_table_matches_the_one_measured_on_the_jar() {
              {reached} — {d:?}"
         );
     }
+}
+
+/// The MASK path runs the enricher too, and it is a second call site rather
+/// than the same one: `evaluate` and `evaluate_sub` each hold the resource def
+/// and each rewrites the request for its own phase-1 call. A test only on the
+/// ACCESS path would leave the sub path free to skip the drop entirely — which
+/// is the shape this package keeps finding, two guards that must agree written
+/// in two places.
+#[test]
+fn the_mask_path_drops_the_same_service_resources() {
+    let set = envelope(json!([tag_policy(
+        11,
+        "tag-mask",
+        1,
+        "dataMaskPolicyItems",
+        json!([{
+            "users": ["alice"],
+            "accesses": [{"type": "select", "isAllowed": true}],
+            "dataMaskInfo": {"dataMaskType": "MASK"},
+        }]),
+    )]));
+
+    // Control first: the attachment egret writes reaches the tag mask.
+    let d = evaluate_data_mask(
+        &set,
+        &request(vec![column_tag("pii")]),
+        &trino_def(),
+        &no_superusers(),
+    );
+    assert!(
+        matches!(&d, MaskDecision::Masked(m) if m.policy_name == "tag-mask"),
+        "the control must MASK, or the assertion below measures nothing: {d:?}"
+    );
+
+    let mut tag = column_tag("pii");
+    tag.attached_through.levels = levels(&["catalog", "database", "table", "column"]);
+    let d = evaluate_data_mask(&set, &request(vec![tag]), &trino_def(), &no_superusers());
+    assert_eq!(
+        d,
+        MaskDecision::NoMask,
+        "a dropped attachment reaches no tag mask either: {d:?}"
+    );
 }
 
 /// `isEnabled` appears nowhere in `processServiceTags`: the loop branches only
