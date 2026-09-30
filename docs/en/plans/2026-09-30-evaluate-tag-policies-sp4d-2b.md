@@ -260,11 +260,18 @@ that silently stops being a gate — and it fails green.
 
 - [ ] **Step 3c: Measure the `trie_excludes` over-refusal rate.** Task 3 added a
 three-valued candidate rule, and its third value refuses. It will over-refuse on
-hand-written downloads that use mid-name wildcards, or place `isExcludes` where it
-decides. egret's own compiler emits literal values, so nothing egret authored
-reaches it — but Task 3 could not measure the rate, because the differential corpus
-generates no `tagPolicies` block, so `allowed` is never seeded before the loop and
-the rule is **unreachable in the corpus as it stands**. Once this step's tag cases
+downloads whose resources it cannot prove candidacy for.
+
+**Do not carry forward Task 3's stated bound — a re-review falsified it.** The
+report claimed "egret's compiler emits literal values, so nothing egret authored
+reaches it". That holds only by accident: `scope_to_resources`'s `Access` arm fills
+unnamed levels with `*`, and its `Mask` arm does not. Any download egret did **not**
+author — an ordinary table-level grant, which is exactly what `explain` reads off a
+live plugin — lands in the refusing branch. So the population that hits this is not
+exotic hand-written policy; it is ordinary policy from live engines, which makes the
+rate matter more, not less. Task 3 could not measure it because the differential
+corpus generates no `tagPolicies` block, so `allowed` is never seeded before the
+loop and the rule is **unreachable in the corpus as it stands**. Once this step's tag cases
 exist the rule becomes reachable; measure how often it fires, and report it beside
 the two `EvalOrderAmbiguous` rates. A refusal nobody has ever measured the cost of
 is a refusal nobody can triage.
