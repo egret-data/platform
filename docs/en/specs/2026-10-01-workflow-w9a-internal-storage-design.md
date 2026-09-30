@@ -1,18 +1,19 @@
 # W9a — Internal storage: `kestra://` files for executions, tasks, plugins and the file functions
 
-**Status:** design, awaiting review
+**Status:** design, revised 2026-10-01 to match the plan (`docs/en/plans/2026-10-01-workflow-w9a-internal-storage.md`)
 **Depends on:** W4 (lease fence, `apply_outcome`), W5a (task runners, input/output file transfer), W5b (plugin host, catalog, `task.json`), W6/W13 (`trigger_execution_id`), W10 (execution routes), W11 (the pruner pattern) — all merged. Base `ecdf4868`.
 **Programme spec:** `docs/{en,vi}/specs/2026-09-01-workflow-programme-design.md` §3 finding 4 (`StorageInterface`), §9 (row W9), §11 open question 1
 **Decided with the user, 2026-10-01:**
+- **(Added 2026-10-01, the user's ruling on the plan's item 1.) Files are looked up in a snapshot taken before the render; there is no second lookup at render.** A URI assembled at render (string concatenation) that is not in the snapshot is an error naming it (§4.4, §7.2).
 - **W9 is split into three packages:** W9a internal storage (this spec), then W9b namespace files, then W9c the KV store.
 - **egret moves files for the pod.** A task pod holds no storage credential and opens no connection to the object store. egret stages every file a task may read into its working directory and collects every file it writes, through W5a's existing transfer (§5).
 - **Streamed, with large configurable caps.** `egret-storage` gains streaming; no file is ever held whole in egret's memory (§4.1).
-- **A running flow reads its own execution's files and its trigger execution's**, never another workspace's, and never an unrelated execution's in the same workspace (§4.4). This is narrower than Kestra OSS on purpose (§2).
+- **A running flow reads its own execution's files and its trigger execution's** (and a replay its source's, §4.4), never another workspace's, and never an unrelated execution's in the same workspace (§4.4). This is narrower than Kestra OSS on purpose (§2).
 - **Retention of its own, 30 days by default**, by a pruner modelled on W11's (§10).
 - **`outputFiles` becomes a map of name → `kestra://` URI, as in Kestra.** This breaks egret flows that read W5a's name → contents map (§6.2).
-- **In scope:** FILE inputs and the file functions (§7), the execution file API (§8), the storage bridge for Kestra plugins (§9.1), `egret.sql` with `fetchType: STORE` (§9.2), and the core storage tasks with `ForEach` over a file (§9.3).
+- **In scope:** FILE inputs and the file functions (§7), the execution file API (§8), the storage bridge for Kestra plugins (§9.1), `egret.sql` with `fetch: STORE` (§9.2), and the core storage tasks with `Loop` over a file (§9.3; the programme's name `ForEach` is Kestra's `io.kestra.plugin.core.flow.Loop` in this checkout).
 
-**Delivery:** one PR (docs and code), tasks in §12.
+**Delivery:** one PR (docs and code), fourteen tasks in §12, implemented by the plan `docs/en/plans/2026-10-01-workflow-w9a-internal-storage.md`.
 
 ## 1. What exists and what does not
 
@@ -24,10 +25,10 @@
 | `outputFiles` | a map of name → **contents** (UTF-8, ≤ 1 MiB each, `MAX_OUTPUT_FILE_BYTES`), documented as a departure from Kestra (`handlers/container.rs:46-58`) |
 | file transfer | W5a: Docker `docker cp` of a staging directory; Kubernetes exec `tar -x` in and `tar -c` out, with an **in-memory** ustar packer (`worker/k8s/transfer.rs`) |
 | plugins | W5b's catalog leaves out `postgresql.CopyIn`, `postgresql.CopyOut`, `postgresql.Batch`, `mysql.Batch` (`EgretPluginHost.NEEDS_STORAGE`), and refuses `fetchType: STORE` at publish (`plugins/mod.rs`) |
-| `egret.sql` | `Fetch` leaves `STORE` out on purpose (`worker/handlers/sql.rs:143`) |
-| `ForEach` over a file | a named hole in `advance()` (`executor/flowable/loop_.rs:171`): a rendered `kestra:///….ion` arrives as a plain string |
-| ION | `runners::ionfmt` writes ION exactly as Kestra's `FileSerde` does; `ion-rs` is excluded as a writer (`Cargo.toml:173`) |
-| execution links | `trigger_execution_id` (0138, workspace-scoped composite FK): set for a `Subflow` child and a `Flow`-trigger-fired execution. `parent_execution_id` (0135): a loop iteration's sub-execution |
+| `egret.sql` | `Fetch` leaves `STORE` out on purpose (`worker/handlers/sql.rs:143`). `QueryExecPort::execute_as_with_params` returns a whole `TabularResult`, capped by `Sql::max_rows` (`MAX_FETCH_ROWS`, 10 000). **`egret.sql` is registered in no production registry** (`Handlers::with_core_tasks` and `runtime::handlers_for` do not add it; `worker/registry.rs:90-120` says so) |
+| `Loop` over a file | a named hole in `advance()` (`executor/flowable/loop_.rs:171`): a rendered `kestra:///….ion` arrives as a plain string. There is no loop-width limit in the code |
+| ION | `runners::ionfmt` writes ION exactly as Kestra's `FileSerde` does; `ion-rs` is excluded as a writer (`Cargo.toml:173`) and is not in `Cargo.lock`. `ionfmt::read_ion` (behind `fromIon`) refuses timestamps and blobs |
+| execution links | `trigger_execution_id` (0138, workspace-scoped composite FK): set for a `Subflow` child and a `Flow`-trigger-fired execution. `parent_execution_id` (0135): a loop iteration's sub-execution, **and** a retry (`CREATE_NEW_EXECUTION`) replay's source, told apart by `loop_index` (NULL for the replay, 0138). A **manual** replay (`POST …/executions/{id}/replay`) records no link (`routes.rs` `replay_execution`'s own doc) |
 | retention | W11's pruner (`logs/prune.rs`): hourly, batches, a per-pass budget, `log_retention_days` default 30, 0 = forever |
 
 ## 2. What Kestra does, and where egret differs
@@ -47,14 +48,18 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 | files are kept forever | pruned 30 days after the execution ends (configurable, 0 = forever) | the user's choice (§10). A flow that reads a file of an execution older than the window fails, naming the URI and the window |
 | `read()` has no cap | `workflow.storage.max_read_bytes`, default 10 MiB | the result is spliced into a rendered string |
 | the file API redirects to the owning execution | 404 | a viewer asks the owning execution by its own id |
+| a file function reads any URI a template computes | a URI must be in the snapshot taken before the render: in the flow source, or in a JSON value of the render context (inputs, outputs, execution, loop item). One assembled by string concatenation is an error naming it | the user's ruling (header): inside `settle` the render thread cannot use the transaction's connection, and a pool would not see the rows that transaction just wrote (§4.4) |
+| `Loop` reads an ION file in batches of `concurrencyLimit`, with no cap | the worker reads the whole file before `advance()`, capped by `workflow.storage.max_read_bytes` | `advance()` stays pure; no loop-width limit exists to reuse (§9.3) |
+| an output file is `IdUtils.from(<absolute path in a random temp dir>) + "-" + name` | the same scheme over egret's fixed `/egret/working-dir/<rel>` | the name scheme matches; the hash cannot, because Kestra's directory is random |
+| a replay reads what its `trigger` variable names | a replay also reads its source's files, transitively along the replay chain | a replay copies its source's `inputs` verbatim, so a FILE input's URI names the original execution (§4.4) |
 | `file://`, multipart webhook bodies, `nsfile://` | refused | out of scope; `nsfile://` and `fileURI` are W9b |
 
 ## 3. Storage layout and URIs
 
 - **Object key:** `{workflow.storage.prefix}{workspace_id}/{ns-as-path}/{flow}/executions/{exec}/{tail}` in the `[storage]` bucket. `workflow.storage.prefix` defaults to `workflow/`.
 - **URI a flow sees:** `kestra:///{ns-as-path}/{flow}/executions/{exec}/{tail}` — Kestra's form. **It carries no workspace**: egret maps a URI to a key by prefixing the workspace **of the running execution**, never a value read from the URI, so nothing in a URI can name another workspace.
-- `tail` is Kestra's: `inputs/{input}/{file}`, `tasks/{taskId}/{taskRunId}/{file}`, `trigger/{triggerId}/{file}`. Slugify and the output file name follow Kestra exactly; Task 1 measures both on Kestra and pins them in a fixture (§11).
-- **`{exec}` is the loop root.** egret runs a loop iteration as a sub-execution (`parent_execution_id`); Kestra runs it inside the one execution. A file written inside an iteration therefore uses the id at the top of the `parent_execution_id` chain, so its URI is the one Kestra would give.
+- `tail` is Kestra's: `inputs/{input}/{file}`, `tasks/{taskId}/{taskRunId}/{file}`, `trigger/{triggerId}/{file}`. Slugify and the output file name **scheme** follow Kestra exactly; Task 1 measures both on Kestra and pins them in a fixture (`oracle-exec/w9a-storage.json`). The output name hashes the file's absolute path in the pod, `/egret/working-dir/<rel>`; Kestra's working directory is random, so the hash cannot match Kestra's, only the scheme.
+- **`{exec}` is the loop root.** egret runs a loop iteration as a sub-execution (`parent_execution_id`); Kestra runs it inside the one execution. A file written inside an iteration therefore uses the id at the top of the chain of **loop iterations**, so its URI is the one Kestra would give. The walk follows `parent_execution_id` only while the row has a `loop_index`: a retry replay also sets `parent_execution_id` (with `loop_index` NULL) and the walk stops there.
 - A URI is refused if its scheme is not `kestra`, if it holds `..`, or if it does not parse into the layout above.
 
 ## 4. Core
@@ -65,7 +70,7 @@ Kestra (checkout `96893b589`, artifact `2.0.0-rc13`):
 
 ### 4.2 The index
 
-`workflow.execution_files`: `workspace_id`, `execution_id` (the loop root; composite FK with `workspace_id`, `ON DELETE CASCADE`), `task_run_id` (nullable), `uri`, `size`, `created_at`; unique `(workspace_id, uri)`.
+`workflow.execution_files` (migration 0161): `workspace_id`, `execution_id` (the loop root; composite FK with `workspace_id`, `ON DELETE CASCADE`), `task_run_id` (nullable, no FK, as `task_logs.task_run_id`), `uri`, `size`, `created_at`; unique `(workspace_id, uri)`. The same migration adds `workflow.executions.replayed_from_execution_id` (composite FK with `workspace_id`, no `ON DELETE` action as 0138's `trigger_execution_id`, never the row itself, never beside `parent_execution_id`), written by the manual replay route.
 
 **A file exists for a flow only once its index row exists.** Every write is: stream to the store, `head` for the real size, insert the index row. `fileExists`, `fileSize` and `isFileEmpty` answer from the index; every read looks the index up first.
 
@@ -75,16 +80,22 @@ Task files are uploaded before the outcome commits, and their index rows are ins
 
 ### 4.4 Who may read a URI
 
-One function, `storage::resolve_readable(workspace, current_execution, uri) -> Result<IndexedFile>`, used by the file functions, staging (§5) and the plugin bridge (§9.1). It allows a URI whose index row belongs, in the running execution's workspace, to:
-1. the running execution's loop root; or
-2. the loop root's `trigger_execution_id` (one level, Kestra's `trigger` rule); or
-3. for a replay, the execution it was replayed from — Task 2 measures how a W6 replay records its source and adds the link if none exists.
+One function, `storage::resolve_readable_many(conn, workspace, readable, uris)`, decides; `resolve_readable(workspace, current_execution, uri)` is its one-element form. The file functions, staging (§5), the plugin bridge (§9.1), FILE inputs given as JSON (§7.1) and the file API (§8) all reach it. The **readable set** of an execution, in its own workspace, is:
+1. its loop root `R` (the walk of §3); and
+2. the replay chain from `R`: the source of each replay, transitively — a retry replay's `parent_execution_id` (`loop_index` NULL) or a manual replay's `replayed_from_execution_id`; and
+3. the `trigger_execution_id` of every execution in 1 and 2 (one level each, Kestra's `trigger` rule; a replay copies its source's inputs and, in Kestra, its trigger).
 
-Anything else is an error naming the URI, never `false` or empty.
+A URI whose `{exec}` is outside the set is refused **without reading any row of that execution**, so the answer never says whether the file exists. A URI in the set with no row is *missing* (what `fileExists` answers is Task 1's measurement). Anything else unreadable is an error naming the URI, never `false` or empty.
+
+**The snapshot (the user's ruling, header).** A render runs on its own thread and cannot query the database: inside `settle` the only connection is the transaction's, and a pool would not see the index rows that transaction has just inserted for the task that finished. So before every render with an execution, egret collects every `kestra://` string in the flow source and in every JSON value of the render context (inputs, outputs of every terminated task, execution, loop item) and resolves them at once on the connection that renders. The four functions, staging and the plugin bridge answer from that snapshot. **A URI assembled at render that is not in the snapshot is an error naming it; there is no second lookup.**
 
 ### 4.5 Caps
 
 `workflow.storage.max_file_bytes` (default 1 GiB) per file and `workflow.storage.max_task_bytes` (default 5 GiB) per task run. Crossing either fails the task, naming the cap.
+
+### 4.6 Where the object store lives
+
+The object store is **process-wide**: `egret-bin` installs one `FileStore` (the `S3Store` it already builds for query results, the `[storage]` bucket, `workflow.storage.prefix`, the caps) once at start, and `storage::current()` returns it. `read()` runs inside `settle`, which is reached from about eight entry points (the worker, a start, `resume`, the scheduler, the Flow-trigger processor, the webhook, every spawn), none of which holds a store handle. **Index lookups never go through it**: they run on the caller's connection (§4.4). Every function that decides anything takes the store as a parameter; only the wiring reads `current()`. With no store installed, the four functions, FILE inputs and `outputFiles` fail naming `[storage]`, and `container_runner` other than `none` requires `[storage]` at boot.
 
 ## 5. Moving files in and out of a pod
 
@@ -92,11 +103,11 @@ W5a's transfer becomes streamed: `get_stream` feeds a streaming tar writer into 
 
 **In.**
 - **Script tasks:** an `inputFiles` value that is a `kestra://` URI is staged under that file name, as Kestra does; any other value stays contents, as in W5a.
-- **Plugin tasks:** egret scans the rendered `task.json` for `kestra://` strings and stages each at `.egret/storage/<n>`; `task.json` gains `storage: {uri → path}` and `baseUri` (the task run's URI prefix).
-- **A URI that `resolve_readable` refuses fails the task at render, before any container exists**, naming the URI.
+- **Plugin tasks:** egret stages every rendered property value that is **a whole `kestra://` URI** (a string leaf, not a substring: a URI quoted inside SQL text is not a file read) at `.egret/storage/<n>`; `task.json` gains `storage: {uri → path}`, `baseUri` (the task run's URI prefix), `maxTaskBytes` and the storage context (namespace, flow, loop root, task, task run).
+- **A URI the snapshot refuses fails the task at render, before any container exists**, naming the URI.
 
 **Out.**
-- **Script tasks:** `outputFiles` accepts globs, as Kestra does, and `outputDirectory: true` is supported; matches are streamed to `tasks/{taskId}/{taskRunId}/{Kestra name}` and `outputs.outputFiles.<relative path>` is the URI.
+- **Script tasks:** `outputFiles` keeps W5a's rule — literal names and non-recursive globs (`*`, `?` in the file name, within one directory); `**`, `[...]` and a wildcard directory are refused by name — and `outputDirectory: true` is supported; matches are streamed to `tasks/{taskId}/{taskRunId}/{Kestra name}` and `outputs.outputFiles.<relative path>` is the URI.
 - **Plugins:** the host's `putFile` writes under `.egret/out/`, computes the URI from `baseUri` and returns it in the plugin's outputs; egret collects `.egret/out/` and indexes exactly those URIs.
 - After collection, **every URI under this task run's prefix that appears in the outputs must have been collected**, or the task fails: no output points at nothing.
 
@@ -119,7 +130,7 @@ As §5. The W5a contents form is unchanged.
 - The start route accepts `multipart/form-data`: each part is named by an input id, a file part is that FILE input's value (Kestra's shape). JSON stays.
 - egret generates the execution id, streams each file to `inputs/{input}/{file}`, and inserts the execution row and the index rows in one transaction.
 - `allowedFileExtensions` is enforced; the route's body limit follows `max_file_bytes`.
-- In JSON, a FILE input may only be a `kestra://` URI readable (§4.4) from the execution being created: the `Subflow` and `Flow`-trigger cases. Any other string is refused, naming the input.
+- In JSON, a FILE input may only be a `kestra://` URI readable (§4.4) from the execution being created: the `Subflow` and `Flow`-trigger cases (and a replay's or loop iteration's copied inputs). Any other string is refused, naming the input. The check runs at every place an execution is created (the start, a `Subflow` child, a loop iteration, a replay), after the row exists and in its transaction.
 
 ### 7.2 The functions
 
@@ -130,9 +141,9 @@ As §5. The W5a contents form is unchanged.
 | `fileExists(uri)` | from the index; an unreadable URI is an error (Task 1 measures Kestra's answer and the spec follows it) |
 | `isFileEmpty(uri)` | from the index (`size == 0`) |
 
-- All four go through `resolve_readable`. `fileURI` stays refused, now naming W9b.
+- All four answer from the snapshot (§4.4). `fileURI` stays refused, now naming W9b; `kv` names W9c.
 - They exist in every render with an execution (task properties, `runIf`, `Log`, outputs); a render with none (a trigger's conditions, publish) refuses them by name.
-- Rendering is synchronous and already on its own thread (`render_on_this_thread`): index lookups are prefetched for every `kestra://` literal in the text and looked up again for one assembled at render; `read` blocks on the runtime handle for one capped read.
+- Rendering is synchronous and already on its own thread (`render_on_this_thread`, and `bind_on_this_thread` for `egret.sql`): the functions answer from the snapshot taken before the render; **a URI assembled at render is an error naming it** (the user's ruling); `read` blocks on the runtime handle for one capped read, so a render that reads a file needs the multi-thread runtime (production's).
 
 ## 8. The execution file API
 
@@ -140,9 +151,9 @@ As §5. The W5a contents form is unchanged.
 |---|---|
 | `GET /api/ws/{ws}/workflows/executions/{id}/file?path=kestra:///…` | the raw bytes, streamed |
 | `GET …/executions/{id}/file/metas?path=…` | `{size}` from the index |
-| `GET …/executions/{id}/file/preview?path=…&maxRows=100` | up to `maxRows` (max 5000): `.ion` as JSON rows (read with `ion-rs`, whose reader is not affected by its writer's format), `.csv`/`.jsonl`/`.json`/text as lines, else `{previewable: false}`; stops reading once full |
+| `GET …/executions/{id}/file/preview?path=…&maxRows=100` | up to `maxRows` (max 5000): `.ion` as JSON rows (read with `ion-rs` 1.0.1 as a **reader**, one value per line: its writer's format is irrelevant here, and `ionfmt::read_ion` refuses the timestamps and blobs that plugin STORE files hold), `.csv`/`.jsonl`/`.json`/text as lines, else `{previewable: false}`; stops reading once full |
 
-- Permission `workflow:read`; `path` must be an index row **of execution `{id}`** in workspace `{ws}` (its loop root), else 404 — no redirect.
+- Permission `workflow:read`; `path` must be an index row belonging to **`loop_root({id})`** in workspace `{ws}` (so an iteration's id serves its root's files), else 404 — no redirect. The check is `resolve_readable_many` with the readable set narrowed to that root.
 - Downloads are `application/octet-stream`, `Content-Disposition: attachment` with a sanitised name, `X-Content-Type-Options: nosniff`.
 - utoipa-documented; the frontend client is regenerated with `npm run gen:api`. The UI is W7's.
 
@@ -162,15 +173,15 @@ In the host, `EgretStorage implements StorageInterface`, wrapped in Kestra's pub
 
 The catalog re-admits `postgresql.CopyIn`, `postgresql.CopyOut`, `postgresql.Batch`, `mysql.Batch`, and publish stops refusing `fetchType: STORE`. Every property Task 1 of W5b measured as needing storage is re-measured and un-refused one by one. Each W5b test asserting "refused, needs storage" flips, and each flip has a replacement test proving the plugin runs. Files a plugin writes are not masked, as outputs are not (W5b §12).
 
-### 9.2 `egret.sql` with `fetchType: STORE`
+### 9.2 `egret.sql` with `fetch: STORE`
 
-`Fetch` gains `Store`. The handler runs in egret, so it streams rows through `runners::ionfmt` into `put_stream` at `tasks/{taskId}/{taskRunId}/{name}.ion`, and its outputs are `{uri, size}` with `size` the row count — the shape of Kestra's `AbstractJdbcQuery` STORE outputs (Task 1 pins it). **Memory:** STORE only bounds memory if the connector yields rows as a stream; Task 1 measures Trino and StarRocks and the spec records which do. A connector that buffers still produces the right output shape, under its existing row limit.
+`Fetch` gains `Store` (`egret.sql`'s own key is `fetch:`). The handler runs in egret, so it writes rows through `runners::ionfmt` into `put_stream` at `tasks/{taskId}/{taskRunId}/{name}.ion`, and its outputs are `{uri, size}` with `size` the row count — the shape of Kestra's `AbstractJdbcQuery` STORE outputs (Task 1 pins it). `{name}` is Kestra's if Task 1 finds it deterministic, else a fixed `result.ion` (§4.3 needs a re-claim to overwrite its own object). **Memory:** `QueryExecPort::execute_as_with_params` returns a whole `TabularResult`, so nothing streams through the port whatever the connector does (Task 1 records each connector's internal behaviour); STORE is capped by `Sql::max_rows` (`MAX_FETCH_ROWS`, 10 000) and fails at the cap exactly as `FETCH` does. **`egret.sql` is in no production registry** (§1): W9a tests the handler directly and on live StarRocks, and does not wire it.
 
-### 9.3 Core storage tasks and `ForEach` over a file
+### 9.3 Core storage tasks and `Loop` over a file
 
 Native handlers for `io.kestra.plugin.core.storage.{Write, Concat, Split, Size, Delete, Reverse, DeduplicateItems, FilterItems, PurgeCurrentExecutionFiles}`, each following its Kestra class's properties and outputs (Task 1 extracts them). `Delete` and `PurgeCurrentExecutionFiles` delete only files of the running execution's loop root, index row first. `PurgeStorage` is out of scope (an administrative task across executions).
 
-`ForEach` with `values` a `kestra://` URI: **the worker** resolves and reads the file (ION, one value per record, as Kestra) **before** it calls `advance()`, and hands `advance()` the list; `advance()` stays pure. The list is capped by the existing loop-width limit. The corpus flows `valids/loop-values-from-uri` and `valids/loop-outputs-auto` are the target.
+`io.kestra.plugin.core.flow.Loop` (the programme's `ForEach`) with `values` a `kestra://` URI: **the worker** resolves the URI through the snapshot and reads the file (ION with `ion-rs`, one value per line, each coalesced as Kestra's `FlowableUtils.ionValueToString`: a string as itself, a number's text, `null` an error, anything else JSON) **before** it calls `advance()`, and puts the JSON array in the run's `rendered`; `advance()` stays pure. **There is no loop-width limit in the code** to reuse, so the file is capped by `workflow.storage.max_read_bytes`, the same cap as `read()`. The corpus flows `valids/loop-values-from-uri` and `valids/loop-outputs-auto` are the target.
 
 ## 10. Retention and orphans
 
@@ -185,20 +196,26 @@ Every storage error names the URI and never a secret value. An unreachable store
 
 ## 12. Tasks
 
-1. **Measure Kestra** (fixture under `oracle-exec/`): slugify; output file names; `fileExists` on an unreadable URI; STORE outputs; the core storage tasks' properties and outputs; `ForEach` over an ION URI; Trino and StarRocks row streaming in egret's connectors.
-2. **`egret-storage` streaming; the index; URIs; `resolve_readable`** (migration: `workflow.execution_files`, and the replay link if missing).
-3. **Streamed pod transfer; `inputFiles` URIs; `outputFiles` as URIs.**
-4. **FILE inputs; the file functions.**
-5. **The execution file API.**
-6. **The plugin storage bridge and catalog.**
-7. **`egret.sql` STORE.**
-8. **Core storage tasks and `ForEach` over a file.**
-9. **The pruner.**
-10. **End to end on a temporary kind cluster; coverage; docs; full local CI.**
+Fourteen tasks, in this order; the plan (`docs/en/plans/2026-10-01-workflow-w9a-internal-storage.md`) gives each one's files, interfaces, tests and mutations, and the reason for each split of the first draft's ten.
+
+1. **Measure Kestra** (`oracle-exec/w9a-storage.json`): slugify; `IdUtils.from`; output file names; `outputDirectory`; the file functions on own, trigger, unrelated, missing and malformed URIs; FILE inputs; the file API; plugin storage; STORE outputs and ION per type; the core storage tasks; `Loop` over an ION URI; egret's connectors' row streaming. Plus the baselines (tests, ratchet, clippy).
+2. **`egret-storage` streaming** (`put_stream`, `get_stream`, `head`, `delete_prefix`; a `MemStore` for tests).
+3. **The index, URIs, `resolve_readable_many`, the process-wide `FileStore`** (migration 0161: `workflow.execution_files`, `executions.replayed_from_execution_id`).
+4. **The file functions on the pre-render snapshot.**
+5. **Streamed transfer into a container; `inputFiles` URIs.**
+6. **Collection out; `outputFiles` as URIs; indexing at commit.**
+7. **FILE inputs.**
+8. **The execution file API.**
+9. **The plugin storage bridge and catalog.**
+10. **`egret.sql` STORE.**
+11. **`Write`, `Size`, `Delete`, `PurgeCurrentExecutionFiles`; `Loop` over a file.**
+12. **`Concat`, `Split`, `Reverse`, `DeduplicateItems`, `FilterItems`.**
+13. **The pruner** (migration 0162: `files_pruned_at`, `files_swept_at`).
+14. **End to end on a temporary kind cluster; coverage; docs; full local CI.**
 
 ## 13. Testing
 
-- Unit: URI ↔ key, slugify, `resolve_readable` (own, loop root, trigger, replay, other execution, other workspace), the function table.
+- Unit: URI ↔ key, slugify, `IdUtils.from`, `resolve_readable_many` (own, loop root, trigger, retry replay, manual replay chain, other execution, other workspace), the snapshot (a URI assembled at render is an error), the function table.
 - MinIO: streaming beyond one part, memory measured flat.
 - Live Docker and Kubernetes: `outputFiles` globs, `inputFiles` URIs, streamed tar.
 - Live plugins: `Query` STORE → `CopyIn` of that URI → `read()`.
@@ -213,9 +230,12 @@ Namespace files, `nsfile://` and `fileURI` (W9b); the KV store (W9c); `PurgeStor
 
 ## 15. Known limits
 
-- A flow reads only its own execution's, its loop root's and its trigger execution's files (§2).
-- A plugin reads only URIs present in its rendered properties (§2).
+- A flow reads only its own execution's, its loop root's and its trigger execution's files, and a replay its source chain's (§2, §4.4).
+- A URI assembled at render by string concatenation is an error; a URI must appear in the flow source or reach the render through inputs or outputs (§4.4, the user's ruling).
+- A plugin reads only URIs that are a whole property value in its rendered properties (§2, §5).
+- `Loop` over a file reads it whole, capped by `max_read_bytes` (§9.3).
+- An output file's name follows Kestra's scheme; its hash differs from Kestra's (§3).
 - Files are pruned 30 days after the execution ends by default; Kestra keeps them.
 - `outputFiles` changed from contents to URIs (§6.2).
-- STORE bounds memory only on connectors that stream rows (§9.2).
+- `egret.sql` STORE holds the whole result in memory, capped at 10 000 rows, because the port returns a whole `TabularResult`; and `egret.sql` is not wired into any production registry (§9.2).
 - Every deployment that runs workflow containers needs a reachable S3 or MinIO bucket.
