@@ -266,8 +266,11 @@ pub struct TaskCommands {
     ///   marker into [`CommandsResult::host_failure`].
     ///
     /// stderr stays ERROR, and the debug bracket and the `outputs` marker
-    /// rules are unchanged. Not part of the container: the argv, env and pod
-    /// are built the same way whatever this says.
+    /// rules are unchanged. The argv and env are built the same way whatever
+    /// this says; **the pod differs in one line**: a plugin pod's `files-out`
+    /// helper exits on SIGTERM, so a graceful cancel ends when `main` does
+    /// ([`files_out_script`](super::k8s::pod_spec::files_out_script)). A
+    /// script pod (`false`) is W5a's byte for byte.
     pub host_protocol: bool,
 }
 
@@ -1584,7 +1587,16 @@ impl TaskRunner for DockerRunner {
     async fn cancel(&self, task: &TaskInput, grace: std::time::Duration) -> Result<()> {
         let name = container_name(task);
         if !grace.is_zero() {
-            self.stop(task, &name, grace).await?;
+            // A stop that failed must not leave the container running: log
+            // it and remove anyway. `rm --force` surfaces its own error if
+            // the daemon is really gone.
+            if let Err(e) = self.stop(task, &name, grace).await {
+                tracing::warn!(
+                    run = %task.run_id,
+                    container = %name,
+                    "`docker stop` failed, removing the task container anyway: {e}"
+                );
+            }
         }
         let out = self.cli(&["rm", "--force", &name]).await?;
         if out.status.success() {
@@ -4068,6 +4080,59 @@ mod tests {
     /// `with_binary` seam, so it needs no daemon and cannot pass by the copy
     /// happening to be small. A run that copied `…/working-dir/.` would put that
     /// path in the log and fail here.
+    /// **A `docker stop` that fails still removes the container** (W5b Task
+    /// 5 fix round 1): the shim's daemon answers, the container is running,
+    /// and `stop` refuses; `cancel` must still reach `rm --force`, in that
+    /// order, and report `rm`'s answer.
+    #[tokio::test]
+    async fn a_failed_stop_still_removes_the_container() {
+        let dir = staging("stop-fails");
+        let log = dir.join("argv.log");
+        let shim = dir.join("docker-shim.sh");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\n\
+                 echo \"$@\" >> {log}\n\
+                 case \"$1\" in\n\
+                 \x20 stop) echo 'Error response from daemon: boom' >&2; exit 1 ;;\n\
+                 \x20 inspect) echo running ;;\n\
+                 esac\n\
+                 exit 0\n",
+                log = log.display()
+            ),
+        )
+        .expect("write shim");
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o700);
+        }
+        std::fs::set_permissions(&shim, perms).expect("chmod");
+
+        let runner = DockerRunner::with_binary(shim.display().to_string());
+        let task = leased(1_700_000_000);
+        runner
+            .cancel(&task, std::time::Duration::from_secs(1))
+            .await
+            .expect("rm --force succeeded, so the cancel did");
+        let argv = std::fs::read_to_string(&log).expect("the shim logged");
+        let name = container_name(&task);
+        let calls: Vec<&str> = argv.lines().collect();
+        let stop = calls
+            .iter()
+            .position(|l| *l == format!("stop -t 1 {name}"))
+            .unwrap_or_else(|| panic!("stop was asked: {calls:?}"));
+        let rm = calls
+            .iter()
+            .position(|l| *l == format!("rm --force {name}"))
+            .unwrap_or_else(|| {
+                panic!("the container was removed after the failed stop: {calls:?}")
+            });
+        assert!(stop < rm, "{calls:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn only_the_declared_output_files_are_copied_out_of_the_container() {
         let dir = staging("argv");

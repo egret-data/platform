@@ -590,8 +590,9 @@ async fn cancel_deletes_the_pod() {
 ///
 /// `main`'s PID 1 traps SIGTERM and takes 3 s to exit. The grace is 30 s, so
 /// a `cancel` back in under 25 s was ended by `main` stopping and not by the
-/// grace running out; one back in under 3 s did not wait. `files-out` stops
-/// on SIGTERM (`pod_spec::files_out_script`), which is what lets the pod go
+/// grace running out; one back in under 3 s did not wait. A plugin pod's
+/// `files-out` stops on SIGTERM (`pod_spec::files_out_script`, gated on
+/// `host_protocol`), which is what lets the pod go
 /// when `main` does: the kubelet reports no container terminated until all
 /// have stopped (measured, see that function).
 async fn k8s_cancel_with_grace_waits_for_termination_then_release_deletes() {
@@ -601,17 +602,17 @@ async fn k8s_cancel_with_grace_waits_for_termination_then_release_deletes() {
     let name = name_of(&t);
     let (r2, t2) = (r.clone(), t.clone());
     let running = tokio::spawn(async move {
-        r2.run(
-            &t2,
-            &shell(&[
+        // `host_protocol: true`: a plugin pod, whose `files-out` exits on
+        // SIGTERM. A script pod's does not (W5a's pod, byte for byte).
+        let cmds = TaskCommands {
+            host_protocol: true,
+            ..shell(&[
                 "trap 'sleep 3; echo slow-term; sleep 1; exit 0' TERM",
                 "echo ready",
                 "while :; do sleep 1; done",
-            ]),
-            &k8s_spec(),
-            &NoObserver,
-        )
-        .await
+            ])
+        };
+        r2.run(&t2, &cmds, &k8s_spec(), &NoObserver).await
     });
     wait_main_running(&c, &name).await;
     let mut ready = false;

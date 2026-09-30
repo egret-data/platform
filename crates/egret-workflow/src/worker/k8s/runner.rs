@@ -213,31 +213,34 @@ impl KubernetesRunner {
         }
     }
 
-    /// Poll `name` until it is gone or `main` has terminated, for at most
-    /// `bound`; past it, a WARN. A read that fails is retried until the
-    /// bound: the delete has been issued, and an early return would let
-    /// `release`'s grace-0 delete cut the grace short.
-    async fn wait_main_stopped(&self, task: &TaskInput, name: &str, bound: Duration) {
-        let deadline = tokio::time::Instant::now() + bound;
+    /// The graceful half of [`TaskRunner::cancel`]: delete `name` with
+    /// `gracePeriodSeconds = secs`, then poll until it is gone or `main` has
+    /// terminated. **Unbounded here; the caller bounds the whole of it**, so
+    /// that no single API call -- a delete or a read the API server never
+    /// answers, which the kube client would wait out for its own read
+    /// timeout -- can hold `cancel` past `grace` + [`CANCEL_WAIT_MARGIN`]. A
+    /// read that fails is retried: the delete has been issued, and an early
+    /// return would let `release`'s grace-0 delete cut the grace short.
+    async fn delete_and_wait(&self, name: &str, secs: u32) -> Result<()> {
+        match self
+            .pods()
+            .delete(name, &DeleteParams::default().grace_period(secs))
+            .await
+        {
+            Ok(_) => {}
+            Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(()),
+            Err(e) => return Err(internal("deleting the task pod", e)),
+        }
         loop {
             match self.pods().get_opt(name).await {
-                Ok(None) => return,
+                Ok(None) => return Ok(()),
                 Ok(Some(p)) if matches!(phase(status_of(&p, MAIN)), Phase::Terminated { .. }) => {
-                    return
+                    return Ok(())
                 }
                 Ok(Some(_)) => {}
                 Err(e) => {
                     tracing::debug!(pod = %name, "waiting for the cancelled task pod to stop: {e}")
                 }
-            }
-            if tokio::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    run = %task.run_id,
-                    pod = %name,
-                    "the task pod had not stopped {bound:?} after it was deleted with a \
-                     grace; it is left to the kubelet's SIGKILL"
-                );
-                return;
             }
             tokio::time::sleep(self.poll).await;
         }
@@ -1214,10 +1217,13 @@ impl TaskRunner for KubernetesRunner {
     /// container and SIGKILL at the grace. Then this waits, polling the pod,
     /// until it is gone or `main` shows terminated. **In practice that is the
     /// pod gone**: measured on kind (1.33.1), the kubelet reports no
-    /// container terminated until all of them have stopped, which is why
-    /// `files-out` exits on SIGTERM ([`pod_spec::files_out_script`]) -- the
-    /// pod then goes when `main` does. The wait is bounded by `grace` +
-    /// [`CANCEL_WAIT_MARGIN`]; a pod still there then is a WARN and
+    /// container terminated until all of them have stopped, which is why a
+    /// plugin pod's `files-out` exits on SIGTERM
+    /// ([`pod_spec::files_out_script`]) -- the pod then goes when `main`
+    /// does. A script pod's does not, so a graceful cancel of one would wait
+    /// out its grace; the script handler passes 0. The delete AND the wait
+    /// are bounded together by `grace` + [`CANCEL_WAIT_MARGIN`]; a pod still
+    /// there then (or an API server that never answered) is a WARN and
     /// `Ok(())`, since the outcome is the budget's either way (`cancel.rs`
     /// fact 2). [`release`](TaskRunner::release) then deletes with grace 0.
     async fn cancel(&self, task: &TaskInput, grace: Duration) -> Result<()> {
@@ -1227,18 +1233,19 @@ impl TaskRunner for KubernetesRunner {
         }
         let secs = grace.as_secs() + u64::from(grace.subsec_nanos() > 0);
         let secs = u32::try_from(secs).unwrap_or(u32::MAX);
-        match self
-            .pods()
-            .delete(&name, &DeleteParams::default().grace_period(secs))
-            .await
-        {
-            Ok(_) => {}
-            Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(()),
-            Err(e) => return Err(internal("deleting the task pod", e)),
+        let bound = grace + CANCEL_WAIT_MARGIN;
+        match tokio::time::timeout(bound, self.delete_and_wait(&name, secs)).await {
+            Ok(done) => done,
+            Err(_) => {
+                tracing::warn!(
+                    run = %task.run_id,
+                    pod = %name,
+                    "the task pod had not stopped {bound:?} after it was deleted with a \
+                     grace (or the API server did not answer); it is left to the kubelet"
+                );
+                Ok(())
+            }
         }
-        self.wait_main_stopped(task, &name, grace + CANCEL_WAIT_MARGIN)
-            .await;
-        Ok(())
     }
 
     /// After the commit: delete the pod (grace 0) when `spec.delete`, else
@@ -1770,5 +1777,50 @@ mod tests {
         );
         assert!(eviction_of(&pod(None, None)).is_none());
         assert!(eviction_of(&pod(Some("DeadlineExceeded"), Some("x"))).is_none());
+    }
+
+    /// **The whole graceful cancel is bounded by `grace` + the margin, even
+    /// against an API server that never answers** (W5b Task 5 fix round 1):
+    /// the kube client would otherwise wait out its own read timeout (295 s)
+    /// on the delete or on any one read.
+    #[tokio::test]
+    async fn a_graceful_cancel_is_bounded_even_when_the_api_server_never_answers() {
+        // kube 2 and axum share `http` 1.x.
+        use axum::http;
+        let silent = tower::service_fn(|_req: http::Request<kube::client::Body>| async {
+            std::future::pending::<
+                std::result::Result<http::Response<kube::client::Body>, std::convert::Infallible>,
+            >()
+            .await
+        });
+        let client = kube::Client::new(silent, "egret-tasks");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://nobody@localhost:1/none")
+            .expect("a lazy pool never connects");
+        let runner = KubernetesRunner::new(
+            client,
+            PodConfig {
+                namespace: "egret-tasks".into(),
+                run_as_user: 1000,
+                helper_image: "h".into(),
+                default_resources: Default::default(),
+                max_resources: Default::default(),
+                image_pull_secrets: vec![],
+            },
+            LogRepo::new(pool),
+        );
+        let task = crate::worker::handlers::testing::input("t", serde_json::Value::Null);
+        let grace = Duration::from_secs(1);
+        let started = tokio::time::Instant::now();
+        let out = tokio::time::timeout(Duration::from_secs(30), runner.cancel(&task, grace))
+            .await
+            .expect("cancel returned: it is bounded, not the kube client's 295 s");
+        let took = started.elapsed();
+        assert!(out.is_ok(), "past the bound it is a WARN and Ok: {out:?}");
+        assert!(
+            took >= grace + CANCEL_WAIT_MARGIN - Duration::from_millis(100)
+                && took < grace + CANCEL_WAIT_MARGIN + Duration::from_secs(2),
+            "{took:?}"
+        );
     }
 }
