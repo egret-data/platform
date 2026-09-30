@@ -201,6 +201,19 @@ reaches them without it".
 
 ### Task 4: The refusals that keep this honest
 
+> **Correction recorded after implementation (2026-10-01).** This task's brief
+> placed D2's "fewer than three elements" rule beside D9's drop as though they
+> were one thing. They are **different rules**, and the jar says so:
+> `hierarchyHasAllResources` is a **SUBSET** test, not a covering one, so Ranger
+> **KEEPS** `{catalog}` and `{catalog,schema}`. Conflating them would make the
+> crate answer where Ranger drops and drop where Ranger answers. The distinction
+> is pinned on the real `trino.json` by `EgretTagServiceResourceValidationTest`
+> (ten key sets, identical at both versions) and mirrored by ten rows in
+> `tests/tag_refusals.rs`. Item 2 of the brief also needed no new mechanism: tag
+> attributes reach a decision only through `${{ … }}` expressions and
+> `conditions`, and every one of those surfaces already refused — what was
+> missing was an assertion that those refusals reach the tag path.
+
 **Inherited dependency — read before you model tag attributes.** The crate's tag
 identity is `(name, match_type)`. That is a **coarsening** of Ranger's
 `RangerTagForEval`, whose `equals`/`hashCode` also take in `attributes`,
@@ -339,8 +352,26 @@ express; pass it, and keep the shape refusal for anything else.
 
 - [ ] **Step 2: Write the failing test that matters most:** a profile whose tag
 service carries a real policy now **answers** instead of refusing. Use the
-two-profile fixture. Then the sibling: a payload whose shape egret could not have
-produced still refuses.
+two-profile fixture.
+
+**Then the sibling — and read this before you write it, because the obvious
+version is a lie.** Task 4 measured that two of its refusals, and the D9 drop,
+are **unreachable by any code path today, and stay unreachable after this task**.
+The only producer of a `ResolvedTag` in the repo is
+`egret_policy::resolved_tags_for_resource_via`, which reads
+`catalog_tag_assignments`: no `options`, no `validityPeriods`, no `attributes`,
+always three or four valid levels. So a test that drives the handler end-to-end
+**cannot** produce a payload whose shape egret could not have produced — it will
+pass while exercising nothing, and it will look like the strongest test in the
+package.
+
+Write it instead as a unit test on the handler's
+`egret_policy::ResolvedTag → egret_ranger_eval::ResolvedTag` mapping, or on a
+hand-built attachment, and **say in the test's name or its comment that the input
+cannot arise from the live path today**. Making these refusals genuinely live
+means giving the crate a reader for the `/tags/download` payload; that is a
+feature package, not this step. Do not quietly widen scope to reach them, and do
+not write a green that implies coverage this code path does not have.
 
 - [ ] **Step 3: The page's copy changes meaning.** SP4d-2a's blast-radius sentence
 said a tag policy anywhere makes every verdict `Undecidable` installation-wide.
