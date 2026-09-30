@@ -339,6 +339,17 @@ and a reader needs to know which is which.
 
 ### Task 8: Ask the engine that is actually enforcing
 
+**Ruling carried from Task 3 — go through the composed evaluator, not the phase.**
+`evaluate_tag_data_mask` and `evaluate_tag_row_filter` are `#[cfg(test)]`, and they
+stay that way. Task 3 tightened that boundary because the phase functions do not
+run `request_preamble`, so a caller reaching them directly gets no super-user
+short-circuit and no envelope refusals — which is the fail-open Task 2's hand-off
+predicted and Task 3 found live, at 48 call sites. Do **not** un-`cfg` them to make
+a live case easier to drive: compare the engine against `evaluate` / `evaluate_sub`,
+the same entry point the explain route uses, so what you measure is what an operator
+is shown. If a live case genuinely cannot be expressed through the composed entry
+point, that is a finding about the entry point — report it, do not route around it.
+
 **Files:**
 - Create: `docs/en/plans/2026-09-30-sp4d-2b-live-result.md`
 
