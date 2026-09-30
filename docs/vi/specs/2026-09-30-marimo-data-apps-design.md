@@ -33,6 +33,7 @@ edit là nơi tác giả viết, chế độ run là app đã publish.
 | D10 | **"Notebooks" đổi thành "Apps"** trong menu Explore; quyền `app:read`, `app:write`, `app:manage`. | Bỏ `notebook:*`. |
 | D11 | **Dùng UI của chính marimo trong iframe**, phục vụ qua reverse proxy của egret. Không fork frontend, không tự viết UI trên giao thức của nó. | Iframe không theo design OKLCH của egret; theme sáng/tối truyền qua query param. |
 | D12 | **Origin apps là một subdomain anh em** (`apps.<host egret>`), same-site với egret (2026-10-01). | P4 phải có cookie `__Host-` (kiểm trên HTTPS), GET không có tác dụng phụ, CSRF dựa trên header, không cho phép CORS cho origin apps (§6.1). |
+| D13 | **SQL cell: cài DuckDB, engine egret là mặc định** (2026-10-01). | DuckDB để viết SQL trên DataFrame đã lấy về, chỉ trong pod; SQL cell mới nhắm vào gateway (§4.4). |
 
 ## 2. Những gì code nói
 
@@ -198,10 +199,11 @@ Cài trong image `egret-apps`:
   engine của SQL cell được dựng từ các biến đang sống trong kernel, nên kết nối chỉ hiện ở đó **sau khi
   cell định nghĩa nó đã chạy**; trước đó dropdown chỉ có "DuckDB (In-Memory)".
 - **Engine SQL mặc định của marimo là DuckDB**, và một SQL cell không chọn engine sẽ lỗi nếu chưa cài
-  `duckdb` và `sqlglot` (`marimo/_sql/sql.py:112-118`). **Điểm thiết kế còn mở cho P3:** hoặc image cài
-  `duckdb` + `sqlglot` (SQL cell mới khi đó chạy trên DuckDB trong pod cho tới khi tác giả chọn engine
-  egret), hoặc `egret_marimo` đặt engine egret làm mặc định để SQL cell mới nhắm vào gateway. S0 chưa đo
-  phương án nào.
+  `duckdb` và `sqlglot` (`marimo/_sql/sql.py:112-118`). **Đã quyết với người dùng (2026-10-01, D13): cả hai.** Image
+  cài `duckdb` + `sqlglot`, để tác giả viết SQL trên các DataFrame đã lấy về (chỉ trong pod; egress đã
+  đóng), **và** `egret_marimo` đặt engine egret làm mặc định cho SQL cell mới, để nó nhắm vào gateway bằng
+  danh tính người xem. Chưa đo: marimo có cho một thư viện đặt engine SQL mặc định không; P3 tìm hiểu, và
+  nếu không được thì mẫu app mới tạo sẵn cell kết nối để engine egret có trong dropdown và được chọn ngay.
 - `egret.sql("SELECT …", database="trino_prod")` → polars DataFrame, cho code Python.
 - `egret.databases()` → các tên người xem được phép truy vấn, dùng cho picker.
 - Database được tham chiếu **theo tên**, nên app không mang UUID nội bộ nào.
@@ -481,7 +483,7 @@ Không phương án lùi nào bị kích hoạt; kiến trúc được giữ. Ha
 | 2 | Chế độ run có chạy mỗi session một tiến trình được không — `--sandbox` offline, hoặc entrypoint ép nhánh IPC — và tốn bao nhiêu thời gian khởi động? | Mỗi (app × người xem) một pod | `--sandbox`: **không** (1 pid cho 4 session). Ép IPC: **có** (4 pid), ≈ 80 MB mỗi kernel, 13,2 giây cho session đầu tiên và 32,9 giây cho ba session đồng thời, trên laptop. Không kích hoạt; D7 dựa vào patch của egret (§2, §6.3). |
 | 3 | Load đã patch + `EgretStorage` có đi trọn vòng một draft không, và tác giả thấy gì khi 409? | Agent đồng bộ theo dõi file; header egret hiển thị 409 | **Có**; marimo hiện toast "Failed to save" với nội dung của egret. Không cái nào kích hoạt (§5.1). Yêu cầu mới: lấy lại khi load không được đặt lại revision của editor đang mở. |
 | 4 | marimo có chạy được sau proxy với base URL và WebSocket, trên origin riêng, với ticket → cookie không? | Không có — xem lại kiến trúc | **Có**. Không kích hoạt. JS của tác giả chạy được (anywidget); cookie Lax của egret đi theo request của nó và cookie bị tung vào tới egret; `__Host-` chưa đo được trên http → yêu cầu cho P4 và một câu hỏi mở (§6.1). |
-| 5 | SQL cell có nhận kết nối DB-API của `egret_marimo` làm engine không? | Một lớp engine marimo riêng | **Có**; chỉ hiện trong dropdown sau khi cell của nó đã chạy. Không kích hoạt. DuckDB mặc định là điểm mở cho P3 (§4.4). |
+| 5 | SQL cell có nhận kết nối DB-API của `egret_marimo` làm engine không? | Một lớp engine marimo riêng | **Có**; chỉ hiện trong dropdown sau khi cell của nó đã chạy. Không kích hoạt. Đã quyết: cài DuckDB, engine egret mặc định (D13, §4.4). |
 | 6 | Proxy phải chặn những route nào (terminal, package, secrets, file browser) mà không làm hỏng edit và lưu? | — (đây là phép đo; proxy chặn dù thế nào) | 22 prefix; phát hiện và sửa một lỗ vượt qua bằng dot-segment; ưu tiên allow-list (§6.2). |
 
 ### S0b — spike độ trễ khởi động kernel — **đã xong**

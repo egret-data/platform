@@ -30,6 +30,7 @@ its edit mode is the authoring surface, its run mode is the published app.
 | D10 | **"Notebooks" becomes "Apps"** in the Explore menu; permissions `app:read`, `app:write`, `app:manage`. | `notebook:*` is removed. |
 | D11 | **marimo's own UI in an iframe**, served by an egret reverse proxy. Not a fork of its frontend, not a custom UI over its protocol. | The iframe does not use egret's OKLCH design; theme (light/dark) is passed by query param. |
 | D12 | **The apps origin is a sibling subdomain** (`apps.<egret host>`), same-site with egret (2026-10-01). | P4 must ship `__Host-` cookies (verified over HTTPS), side-effect-free GETs, header-based CSRF, no CORS for the apps origin (§6.1). |
+| D13 | **SQL cells: ship DuckDB, egret engine is the default** (2026-10-01). | DuckDB for SQL over fetched DataFrames, in-pod only; a new SQL cell targets the gateway (§4.4). |
 
 ## 2. What the code says
 
@@ -198,10 +199,12 @@ Installed in the `egret-apps` image:
   there **only after the cell that defines it has run**; before that the dropdown offers only "DuckDB
   (In-Memory)".
 - **marimo's default SQL engine is DuckDB**, and a SQL cell with no engine errors unless `duckdb` and
-  `sqlglot` are installed (`marimo/_sql/sql.py:112-118`). **Open design point for P3:** either the image
-  ships `duckdb` + `sqlglot` (a new SQL cell then runs on an in-pod DuckDB until the author picks the
-  egret engine), or `egret_marimo` makes the egret engine the default so a new SQL cell targets the
-  gateway. S0 did not measure either option.
+  `sqlglot` are installed (`marimo/_sql/sql.py:112-118`). **Decided with the user (2026-10-01, D13): both.** The
+  image ships `duckdb` + `sqlglot`, so authors can run SQL over DataFrames already fetched (in-pod only;
+  egress is closed), **and** `egret_marimo` makes the egret engine the default for a new SQL cell, so it
+  targets the gateway under the viewer's identity. Unmeasured: whether marimo lets a library set the
+  default SQL engine; P3 finds out, and if it cannot, the new-app template pre-creates the connection
+  cell so the egret engine is listed and selected from the start.
 - `egret.sql("SELECT …", database="trino_prod")` → a polars DataFrame, for Python code.
 - `egret.databases()` → the names the viewer may query, for pickers.
 - Databases are referenced **by name**, so an app carries no internal UUIDs.
@@ -483,7 +486,7 @@ No fallback triggered; the architecture stands. Two open questions for the user 
 | 2 | Can run mode run each session in its own process — `--sandbox` offline, or the IPC branch forced by the entrypoint — and at what start-up cost? | One pod per (app × viewer) | `--sandbox`: **no** (1 pid for 4 sessions). Forced IPC: **yes** (4 pids), ≈ 80 MB per kernel, 13.2 s for the first session and 32.9 s for three concurrent, on a laptop. Not triggered; D7 rests on egret's patch (§2, §6.3). |
 | 3 | Does the patched load + `EgretStorage` round-trip a draft, and what does the author see on 409? | File-watching sync agent; 409 shown by the egret header | **Yes**; marimo shows a "Failed to save" toast with egret's text. Neither triggered (§5.1). New requirement: re-fetch on load must not reset a live editor's revision. |
 | 4 | Does marimo work behind the proxy with a base URL and WebSockets, on a separate origin, with ticket → cookie? | None — revisit the architecture | **Yes**. Not triggered. Author JS runs (anywidget); egret's Lax cookies ride its requests and a tossed cookie reaches egret; `__Host-` unmeasured on http → P4 requirements and one open question (§6.1). |
-| 5 | Does a SQL cell accept `egret_marimo`'s DB-API connection as an engine? | A custom marimo engine class | **Yes**; listed in the dropdown only after its cell ran. Not triggered. DuckDB default is an open P3 point (§4.4). |
+| 5 | Does a SQL cell accept `egret_marimo`'s DB-API connection as an engine? | A custom marimo engine class | **Yes**; listed in the dropdown only after its cell ran. Not triggered. DuckDB default decided: ship DuckDB, egret engine default (D13, §4.4). |
 | 6 | Which routes must the proxy block (terminal, packages, secrets, file browser) without breaking edit and save? | — (this is a measurement, the proxy blocks regardless) | 22 prefixes; a dot-segment bypass found and fixed; allow-list preferred (§6.2). |
 
 ### S0b — kernel start-up latency spike — **done**
