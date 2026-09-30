@@ -42,6 +42,18 @@ egret-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 utoipa.workspace = true
+# SP4d-2a Task 4: hand-written wire DTOs mirroring `egret-ranger-eval`'s
+# `Decision`/`DenyReason`/`UndecidableCause` and mask/row-filter results,
+# because that crate stays `serde`+`serde_json`-only by discipline (see its
+# own `Cargo.toml` and module doc) and does not carry `utoipa` itself.
+egret-ranger-eval.workspace = true
+# SP4d-2a Task 5: `explain` now evaluates the policy download each engine
+# receives, and it assembles that envelope with the SAME `ServicePolicies`
+# type `egret-policy`'s `/service/plugins/policies/download/{service}` handler
+# serialises — not a second hand-written copy of the shape. Two copies would
+# be free to drift, and the whole point of this route is that "what explain
+# evaluated" and "what the engine received" cannot.
+egret-policy-api.workspace = true
 
 [dev-dependencies]
 egret-metastore.workspace = true
@@ -55,3 +67,9 @@ egret-events.workspace = true
 egret-secrets.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
+# SP4d-2a Task 5 review (I3): `tests/wire_dtos.rs` asserts that
+# `WireEngineType` and `egret_query_api::Engine` serialise StarRocks to the
+# SAME string, so the two published spellings on one API surface cannot drift
+# apart independently. A leaf contract crate (no sqlx/axum), and dev-only —
+# nothing in `src/` depends on it.
+egret-query-api.workspace = true

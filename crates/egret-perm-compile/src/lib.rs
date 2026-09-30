@@ -41,6 +41,16 @@
 //! why a `WorkspaceMembers`-only refusal is skipped rather than aborting the
 //! whole recompile.
 
+// SP4d-2a Task 3: mapping a compiled Ranger policy NAME back to the `perm`
+// model object that minted it — pure, no DB, no evaluator. See that module's
+// own doc comment for the four live no-model-object shapes it must not choke
+// on.
+pub mod attribution;
+// SP4d-2a Task 4: hand-written wire DTOs mirroring `egret-ranger-eval`'s
+// `Decision`/`DenyReason`/`UndecidableCause` and mask/row-filter results —
+// see that module's own doc comment for why they are hand-written and not
+// derived on the source types.
+pub mod explain_wire;
 // SP4c Task 2: compiling a classification's clearance into a tag-service DENY
 // — the one place egret emits a tag ACCESS policy, which AMENDS SP4a's D2. The
 // argument is in that module's own doc comment, at the site.
@@ -52,6 +62,7 @@ pub mod routes;
 pub mod rules;
 pub mod trigger;
 
+pub use attribution::{attribute_policy_name, PolicyAttribution};
 pub use grants::{compile_grant, validate_grant_shape};
 pub use role_membership::{
     assign_platform_role_and_recompile, delete_platform_role_and_recompile,

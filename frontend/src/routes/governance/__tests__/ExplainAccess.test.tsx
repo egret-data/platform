@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -8,9 +8,14 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
  * `ExplainAccess` reads the generated perm client directly (`usePermExplain`),
  * matching `Catalogs.test.tsx`'s pattern for the newest list pages. `ScopePicker`
  * is mocked to a dumb controlled stand-in — its own behavior (progressive
- * narrowing, row-filter mode) is covered by `ScopePicker.test.tsx`; this file
- * is about D9: the reason CLASS renders distinguishably, a `grant_id`/`rule_id`
- * links to that row, and the three honest limits are stated on the result.
+ * narrowing, row-filter mode) is covered by `ScopePicker.test.tsx`.
+ *
+ * **SP4d-2a Task 8.** `explain` no longer evaluates egret's own model: it
+ * evaluates the policy set each engine actually downloads and answers once per
+ * PROFILE, three-valued. So this file is about that shape — two profiles are two
+ * results, "no profile serves this catalog" is its own state and not a denial, an
+ * `Undecidable` names every cause it carries, and a policy egret's compiler does
+ * not own is reported rather than dropped.
  */
 vi.mock("@/api/generated/perm/perm");
 vi.mock("@/api/generated/policy-admin/policy-admin");
@@ -31,15 +36,59 @@ import { ApiError } from "@/api/client";
 import type { ExplainResponse } from "@/api/generated/model";
 import ExplainAccess from "@/routes/governance/ExplainAccess";
 
-const ALL_KINDS_RESULT: ExplainResponse = {
-  allowed: true,
-  reasons: [
-    { kind: "allowed_by_grant", grant_id: "grant-1" },
-    { kind: "allowed_by_group_only", grant_id: "grant-3" },
-    { kind: "explicit_deny", grant_id: "grant-2" },
-    { kind: "no_grant_matched" },
-    { kind: "masked_by_rule", rule_id: "rule-1", mask_type: "MASK_HASH" },
-    { kind: "filtered_by_rule", rule_id: "rule-2", filter_expr: "ws = 'eng'" },
+/**
+ * Two profiles serving one catalog — the ordinary case on a cluster running
+ * both engines, and the one a single aggregate verdict cannot describe. The
+ * StarRocks profile also carries TWO access types for one `write`, which is
+ * why they are never collapsed.
+ */
+const TWO_PROFILES: ExplainResponse = {
+  outcome: "per_profile",
+  profiles: [
+    {
+      service_id: 11,
+      service_name: "egret-trino-prod",
+      engine: "trino",
+      accesses: [
+        {
+          access_type: "select",
+          decision: {
+            kind: "allowed",
+            policy_id: 7,
+            policy_name: "perm-grant-11111111-1111-4111-8111-111111111111",
+          },
+          attribution: { kind: "grant", grant_id: "grant-1" },
+        },
+      ],
+    },
+    {
+      service_id: 12,
+      service_name: "egret-starrocks-prod",
+      engine: "starrocks",
+      accesses: [
+        {
+          access_type: "insert",
+          decision: {
+            kind: "denied",
+            policy_id: 9,
+            policy_name: "perm-rule-22222222-2222-4222-8222-222222222222-sales.public.orders.ssn",
+            reason: "deny_policy_item",
+          },
+          attribution: { kind: "rule", rule_id: "rule-1", locator: "sales.public.orders.ssn" },
+        },
+        {
+          access_type: "delete",
+          // **`""`, because that is what the server sends.** `eval.rs:759-763`
+          // returns `policy_name: String::new()` and `policy_id: None` for this
+          // reason by construction — there IS no deciding policy, that is what
+          // the verdict means. This fixture used to say `"unnamed"`, a value
+          // `explain` cannot produce, and that invention is the whole reason the
+          // browser gate found Finding 1 and these tests did not.
+          decision: { kind: "denied", policy_id: null, policy_name: "", reason: "no_policy_matched" },
+          attribution: null,
+        },
+      ],
+    },
   ],
   tags: ["pii"],
 };
@@ -65,7 +114,7 @@ async function submit(user: ReturnType<typeof userEvent.setup>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mutateAsync = vi.fn().mockResolvedValue({ status: 200, data: ALL_KINDS_RESULT });
+  mutateAsync = vi.fn().mockResolvedValue({ status: 200, data: TWO_PROFILES });
   vi.mocked(permApi.usePermExplain).mockReturnValue({
     mutateAsync,
     isPending: false,
@@ -77,77 +126,598 @@ beforeEach(() => {
   } as Awaited<ReturnType<typeof policyAdminListPrincipals>>);
 });
 
-describe("ExplainAccess — the reason class is the answer (D9)", () => {
-  test("each reason class renders with its own distinguishable label", async () => {
+describe("ExplainAccess — one answer per profile, over the artifact the engine downloads", () => {
+  /** Item 1. Two profiles are two results, each naming itself and its engine. */
+  test("two profiles render as two results, each naming its profile and engine", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    await screen.findByTestId("explain-result");
+    const profiles = screen.getAllByTestId("explain-profile");
+    expect(profiles).toHaveLength(2);
+
+    expect(profiles[0]).toHaveTextContent("egret-trino-prod");
+    expect(profiles[0]).toHaveTextContent("Trino");
+    expect(profiles[1]).toHaveTextContent("egret-starrocks-prod");
+    expect(profiles[1]).toHaveTextContent("StarRocks");
+
+    // Every access type keeps its own verdict: the StarRocks profile answers
+    // `insert` and `delete` separately, because Ranger has no `write`.
+    expect(within(profiles[0]).getAllByTestId("explain-access")).toHaveLength(1);
+    const srAccesses = within(profiles[1]).getAllByTestId("explain-access");
+    expect(srAccesses).toHaveLength(2);
+    expect(srAccesses[0]).toHaveTextContent("insert");
+    expect(srAccesses[1]).toHaveTextContent("delete");
+  });
+
+  /**
+   * Item 1's other half: the old single summary badge is REMOVED, not
+   * recoloured. There is no honest aggregate over {allowed, denied,
+   * undecidable} × N profiles, and one badge reading "Allowed" above a profile
+   * that refuses would be the most misleading pixel on the page.
+   */
+  test("no aggregate verdict is claimed above the per-profile answers", async () => {
     const user = userEvent.setup();
     renderPage();
     await submit(user);
 
     const result = await screen.findByTestId("explain-result");
-    expect(result).toHaveTextContent("Allowed by grant");
-    expect(result).toHaveTextContent("Explicit deny");
-    expect(result).toHaveTextContent("No grant matched");
-    expect(result).toHaveTextContent("Masked by rule");
-    expect(result).toHaveTextContent("Filtered by rule");
-
-    // SP4c review: an allow the DATA PLANE will refuse must not read like an
-    // enforceable one. It carries its own class on the wire now
-    // (`allowed_by_group_only`), so it must carry its own SENTENCE here.
-    expect(result).toHaveTextContent("Allowed by group only — the engine will refuse");
-    expect(
-      screen.getByText(
-        /a grant matches this subject only through a group.*no engine can see that membership/i,
-      ),
-    ).toBeInTheDocument();
-
-    // no_grant_matched and explicit_deny are different administrative
-    // problems and must not collapse into the same rendered sentence.
-    const noGrantHint = screen.getByText(/Nobody granted this/);
-    const denyHint = screen.getByText(/Somebody forbade this/);
-    expect(noGrantHint.textContent).not.toEqual(denyHint.textContent);
+    expect(result).not.toHaveTextContent(/only a summary/i);
+    expect(result).not.toHaveTextContent("Not allowed");
+    // One decision badge per access, and not one more.
+    expect(screen.getAllByTestId("decision-badge")).toHaveLength(3);
   });
 
-  test("a reason carrying a grant_id links to that grant, and a rule_id to that rule", async () => {
+  /** Item 1's deep links, which now live on the per-profile rows. */
+  test("a grant attribution links to that grant, and a rule attribution to that rule", async () => {
     const user = userEvent.setup();
     renderPage();
     await submit(user);
 
     await screen.findByTestId("explain-result");
 
-    const grantLink = screen.getByRole("link", { name: "View grant grant-1" });
-    expect(grantLink).toHaveAttribute("href", "/governance/data-permissions?grant=grant-1");
-
+    expect(screen.getByRole("link", { name: "View grant grant-1" })).toHaveAttribute(
+      "href",
+      "/governance/data-permissions?grant=grant-1",
+    );
     const ruleLink = screen.getByRole("link", { name: "View rule rule-1" });
     expect(ruleLink).toHaveAttribute("href", "/governance/mask-filter-rules?rule=rule-1");
+    // A per-column StarRocks rule expands ONE row into N policies; the locator
+    // is the only thing that says which expansion decided.
+    expect(screen.getByTestId("rule-locator")).toHaveTextContent("sales.public.orders.ssn");
   });
 
-  test("the three honest limits are stated on the result, not tucked in a help page", async () => {
+  /** Item 2. Nothing enforcing is a different fact from something refusing. */
+  test("a catalog no profile serves is its own state, not a denial", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: { outcome: "no_profile_serves_the_catalog", profiles: [], tags: [] },
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const state = within(result).getByTestId("no-profile-state");
+    expect(state).toHaveTextContent(/nothing is enforcing/i);
+    expect(state).toHaveTextContent(/not a denial/i);
+
+    // It must not borrow a denial's vocabulary or its colour.
+    expect(screen.queryAllByTestId("explain-profile")).toHaveLength(0);
+    expect(screen.queryAllByTestId("decision-badge")).toHaveLength(0);
+    expect(result).not.toHaveTextContent("Denied");
+  });
+
+  /**
+   * Item 3. `why` is a Vec: a profile can carry several causes, and collapsing
+   * it to the first throws away exactly what the three-valued contract exists
+   * to say. `Unmodelled::TagPolicies` carries its count as a JSON number, so
+   * it renders as a sentence with a number in it, never a Debug string.
+   */
+  test("an undecidable verdict names every cause it carries, tag-policy count included", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "undecidable",
+                  why: [
+                    {
+                      kind: "envelope_construct",
+                      construct: { kind: "tag_policies", block: { kind: "policies", count: 3 } },
+                    },
+                    { kind: "super_users_unknown" },
+                    {
+                      kind: "policy_construct",
+                      policy_id: 5,
+                      policy_name: "ops-time-boxed",
+                      construct: { kind: "validity_schedules" },
+                    },
+                  ],
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    expect(within(result).getByTestId("decision-badge")).toHaveTextContent("Undecidable");
+
+    const causes = within(result).getAllByTestId("undecidable-cause");
+    expect(causes).toHaveLength(3);
+
+    // The number is a number, in a real sentence.
+    expect(causes[0]).toHaveTextContent(/3 tag policies/);
+    expect(causes[0]).not.toHaveTextContent(/TagPolicies|Unmodelled|\{/);
+    expect(causes[1]).toHaveTextContent(/super-user/i);
+    expect(causes[2]).toHaveTextContent("ops-time-boxed");
+    expect(causes[2]).toHaveTextContent(/validity schedule/i);
+  });
+
+  /**
+   * Item 4. A policy egret's compiler does not own still decides real
+   * requests — operator-written raw JSON, the delegator plumbing, Ranger's own
+   * superuser short-circuit. Dropping it would recreate, inside the new
+   * mechanism, the blindness this package removes. There is no governance page
+   * for it, so there is no link.
+   */
+  test("a policy with no model attribution renders its Ranger name and id, unlinked", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: { kind: "allowed", policy_id: 404, policy_name: "ops-written-select" },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const raw = within(result).getByTestId("raw-policy");
+    expect(raw).toHaveAttribute("data-kind", "unowned");
+    expect(raw).toHaveTextContent("ops-written-select");
+    expect(raw).toHaveTextContent("404");
+    expect(raw).toHaveTextContent(/outside the permission model/i);
+    expect(within(raw).queryByRole("link")).not.toBeInTheDocument();
+  });
+
+  /**
+   * Item 5. Auto-bind seeds thirteen `egret-admin` hierarchies granting `*` on
+   * everything onto every generated profile. For an administrator this is the
+   * EXPECTED explanation — the old page could not see it at all and answered
+   * "no grant matched" while the engine allowed.
+   */
+  test("a seeded egret-admin policy reads as the expected explanation, not an alarm", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "allowed",
+                  policy_id: 2,
+                  policy_name: "egret-admin - catalog, schema, table, column",
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const raw = within(result).getByTestId("raw-policy");
+    expect(raw).toHaveAttribute("data-kind", "seeded-admin");
+    expect(raw).toHaveTextContent("egret-admin - catalog, schema, table, column");
+    expect(raw).toHaveTextContent(/expected/i);
+    expect(raw).toHaveTextContent(/every generated profile/i);
+    // Reassuring, not an alarm: it is not dressed as a misconfiguration.
+    expect(raw).not.toHaveTextContent(/unexpected|misconfigured/i);
+    expect(within(result).getByTestId("decision-badge")).toHaveTextContent("Allowed");
+  });
+
+  /**
+   * Item 6 — the pre-existing D10 defect. Before this task a clearance denial
+   * hit no entry in the reason map at all, so it rendered the raw wire string
+   * with "Unrecognized reason class." and dropped both the gating tag and the
+   * clearing roles: the two facts a steward most needs. `required_roles` is
+   * OR across roles — holding any one clears the gate.
+   */
+  test("a clearance decision renders a real label, its tag, and the clearing roles", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "denied",
+                  policy_id: 31,
+                  policy_name: "perm-clearance-33333333-3333-4333-8333-333333333333",
+                  reason: "deny_policy_item",
+                },
+                attribution: {
+                  kind: "clearance",
+                  tag_id: "33333333-3333-4333-8333-333333333333",
+                  tag: "pii",
+                  required_roles: ["pii_cleared", "auditor"],
+                  locator: null,
+                },
+              },
+            ],
+          },
+        ],
+        tags: ["pii"],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const clearance = within(result).getByTestId("clearance-attribution");
+    expect(clearance).toHaveTextContent(/clearance required/i);
+    expect(clearance).not.toHaveTextContent(/Unrecognized reason class/);
+    expect(clearance).toHaveTextContent("pii");
+    expect(clearance).toHaveTextContent("pii_cleared");
+    expect(clearance).toHaveTextContent("auditor");
+    // OR across roles, stated: any ONE of them clears the gate.
+    expect(clearance).toHaveTextContent(/any one/i);
+  });
+
+  /**
+   * Item 7. The dissolved paragraph. `explain` now evaluates the downloaded
+   * artifact, so it DOES see hand-written Ranger policy; a limit that no longer
+   * holds is worse than no limit, because it teaches a reader to discount the
+   * ones that still do. What replaces the groups paragraph is what is true now:
+   * a role- or group-granted policy matches nobody on these engines, so
+   * `explain` sends neither.
+   */
+  test("the honest limits no longer claim explain cannot see hand-written policy", async () => {
     const user = userEvent.setup();
     renderPage();
 
-    // Not shown before there is a result to attach them to.
-    expect(screen.queryByText(/cannot see hand-written Ranger policy/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("honest-limits")).not.toBeInTheDocument();
 
     await submit(user);
     const result = await screen.findByTestId("explain-result");
+    const limits = within(result).getByTestId("honest-limits");
 
-    expect(result).toHaveTextContent(/cannot see hand-written Ranger policy/);
-    expect(result).toHaveTextContent(/seeded admin policy/);
-    expect(result).toHaveTextContent(/Tags populate only when the target names both a schema and a table/);
-    // SP4b-2 review I-2: the limit that makes this tool too PERMISSIVE, which
-    // matters most on the page whose whole job is to be truthful about the
-    // engine. Stated on EVERY result, not only when a group was named — this
-    // run named none.
-    expect(result).toHaveTextContent(
-      /A group in the subject is matched here but not by the engine/,
-    );
-    expect(result).toHaveTextContent(/no\s+group provider or usersync/);
+    expect(limits).not.toHaveTextContent(/cannot see hand-written Ranger policy/i);
+    expect(limits).not.toHaveTextContent(/seeded admin policy.*not allowed/i);
+    // And the replacement, which is true: neither roles nor groups are sent,
+    // because no engine egret provisions can match either.
+    expect(limits).toHaveTextContent(/no roles download/i);
+    expect(limits).toHaveTextContent(/usersync/i);
+    expect(limits).toHaveTextContent(/sends neither/i);
+    // The tag limit still holds and stays.
+    expect(limits).toHaveTextContent(/names both a schema and a table/i);
   });
 
-  test("tags populate only when the target names a schema and a table — none renders honestly", async () => {
+  /**
+   * **Browser-gate Finding 1 (Major), measured 2026-09-29.** `no_policy_matched`
+   * means NOTHING matched, so `egret-ranger-eval` sends `policy_name: ""` and
+   * `policy_id: None` by construction. The page used to route every
+   * non-`Undecidable` decision through the raw-policy block, so it printed
+   * "Outside the permission model … because it decided this access. / Ranger
+   * policy , id unknown" — two untruths and a hole where the name goes, and it
+   * sends a steward into raw Ranger hunting for a policy that does not exist.
+   *
+   * The same CLASS as D10's `clearance_required` defect: a decision variant
+   * falling into a branch written for a different variant.
+   */
+  test("no_policy_matched names no deciding policy, because there is none", async () => {
     mutateAsync.mockResolvedValueOnce({
       status: 200,
-      data: { allowed: false, reasons: [{ kind: "no_grant_matched" }], tags: [] },
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 12,
+            service_name: "egret-starrocks-prod",
+            engine: "starrocks",
+            accesses: [
+              {
+                access_type: "select",
+                // Exactly the payload the browser gate captured.
+                decision: {
+                  kind: "denied",
+                  policy_id: null,
+                  policy_name: "",
+                  reason: "no_policy_matched",
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const row = within(result).getByTestId("explain-access");
+    expect(within(row).getByTestId("decision-badge")).toHaveTextContent("No policy matched");
+
+    // No decider block at all, and none of its claims.
+    expect(within(result).queryByTestId("raw-policy")).not.toBeInTheDocument();
+    expect(row).not.toHaveTextContent(/outside the permission model/i);
+    expect(row).not.toHaveTextContent(/because it decided this access/i);
+    expect(row).not.toHaveTextContent(/Ranger policy/);
+    expect(row).not.toHaveTextContent(/id unknown/);
+    // And it says so, so nobody goes looking in raw Ranger.
+    expect(row).toHaveTextContent(/no deciding policy to open/i);
+  });
+
+  /**
+   * **Browser-gate Finding 2 (Major), forced live by deleting the `tags` row
+   * while the compiled clearance policy survived** — a state this page's own
+   * copy says occurs. The payload was `tag: null, required_roles: []`, and the
+   * page rendered "Gating tag unknown — the tag row is gone" beside "No role
+   * clears this gate: it declares only groups": two sentences that contradict
+   * each other, the second FALSE (the gate declared `['sp4d2a_cleared']`), and
+   * the clearing role — the fact D10 exists to surface — silently absent rather
+   * than reported as unknown.
+   *
+   * `required_roles: []` has two causes on this wire (`routes.rs:1659-1667`
+   * returns `Vec::new()` whenever `tag` is `None`), so the empty list may only
+   * be read as "the gate says no roles" when the tag DID resolve.
+   */
+  test("an unresolved clearance reports its roles as unknown, not as groups-only", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "denied",
+                  policy_id: 30,
+                  policy_name:
+                    "perm-clearance-88888888-8888-4888-8888-888888888888-sp4d2a_wh.sales.orders.ssn",
+                  reason: "deny_policy_item",
+                },
+                attribution: {
+                  kind: "clearance",
+                  tag_id: "88888888-8888-4888-8888-888888888888",
+                  tag: null,
+                  required_roles: [],
+                  locator: "sp4d2a_wh.sales.orders.ssn",
+                },
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const clearance = within(result).getByTestId("clearance-attribution");
+    expect(clearance).toHaveTextContent(/the tag row is gone/i);
+    // The false half must be gone: nothing is known about this gate.
+    expect(clearance).not.toHaveTextContent(/declares only groups/i);
+    // And the missing fact is reported as unknown rather than omitted.
+    expect(clearance).toHaveTextContent(/clearing roles are unknown/i);
+  });
+
+  /** Finding 2's other half — the case where the empty list IS readable. With
+   *  the tag resolved, no clearing role recorded is a fact about the gate, and
+   *  it must not be reported as unknown either. Both branches are pinned so the
+   *  two cannot be confused again. */
+  test("a resolved clearance with no roles states that, without claiming it is unknown", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "denied",
+                  policy_id: 30,
+                  policy_name: "perm-clearance-88888888-8888-4888-8888-888888888888",
+                  reason: "deny_policy_item",
+                },
+                attribution: {
+                  kind: "clearance",
+                  tag_id: "88888888-8888-4888-8888-888888888888",
+                  tag: "sp4d2a_ssn",
+                  required_roles: [],
+                  locator: null,
+                },
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const clearance = within(result).getByTestId("clearance-attribution");
+    expect(clearance).toHaveTextContent("sp4d2a_ssn");
+    expect(clearance).toHaveTextContent(/no clearing role is recorded/i);
+    expect(clearance).not.toHaveTextContent(/clearing roles are unknown/i);
+    expect(clearance).not.toHaveTextContent(/the tag row is gone/i);
+  });
+
+  /**
+   * **The blast radius, which the gate measured and asked to be stated rather
+   * than changed.** `explain` passes `resolved_tags: None` unconditionally, so a
+   * single tag-addressed rule or clearance anywhere turns EVERY verdict on every
+   * catalog the profile serves into `Undecidable` — in the gate's fixture, all
+   * seven Trino answers. The refusal is sound (the alternative fails open); the
+   * scale is what a steward needs to know, so it is said where they read it, and
+   * only on the cause it is true of.
+   */
+  test("a tag-policy refusal says its scope, and other causes do not borrow it", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "undecidable",
+                  why: [
+                    {
+                      kind: "envelope_construct",
+                      construct: { kind: "tag_policies", block: { kind: "policies", count: 2 } },
+                    },
+                    { kind: "super_users_unknown" },
+                  ],
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const causes = within(result).getAllByTestId("undecidable-cause");
+    expect(causes[0]).toHaveTextContent(/2 tag policies/);
+    expect(causes[0]).toHaveTextContent(/every catalog this profile serves/i);
+    expect(causes[0]).toHaveTextContent(/installation/i);
+    // Content-derived, not stapled onto every undecidable cause.
+    expect(causes[1]).not.toHaveTextContent(/every catalog this profile serves/i);
+  });
+
+  /**
+   * **The count is content-derived, and a count of ONE is the case the suite
+   * did not hold** (whole-branch review, the surviving mutant). Every other
+   * fixture here carries 2 or 3 tag policies, so replacing
+   * `count === 1 ? "policy" : "policies"` with a bare `"policies"` left all
+   * nineteen tests green. The browser gate falsified it live — deleting one of
+   * two tag policies moved the sentence to "1 tag policy" — but nothing in the
+   * suite could have caught the regression, and a count that reads "1 tag
+   * policies" is the shape a hard-coded number wears.
+   */
+  test("one tag policy is named in the singular", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        outcome: "per_profile",
+        profiles: [
+          {
+            service_id: 11,
+            service_name: "egret-trino-prod",
+            engine: "trino",
+            accesses: [
+              {
+                access_type: "select",
+                decision: {
+                  kind: "undecidable",
+                  why: [
+                    {
+                      kind: "envelope_construct",
+                      construct: { kind: "tag_policies", block: { kind: "policies", count: 1 } },
+                    },
+                  ],
+                },
+                attribution: null,
+              },
+            ],
+          },
+        ],
+        tags: [],
+      } satisfies ExplainResponse,
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await submit(user);
+
+    const result = await screen.findByTestId("explain-result");
+    const causes = within(result).getAllByTestId("undecidable-cause");
+    expect(causes[0]).toHaveTextContent(/\b1 tag policy\b/);
+    expect(causes[0]).not.toHaveTextContent(/1 tag policies/);
+  });
+
+  test("tags render honestly when the target carries none", async () => {
+    mutateAsync.mockResolvedValueOnce({
+      status: 200,
+      data: { outcome: "no_profile_serves_the_catalog", profiles: [], tags: [] },
     });
     const user = userEvent.setup();
     renderPage();
@@ -191,69 +761,40 @@ describe("ExplainAccess — a disabled Explain button says what it is waiting fo
   });
 });
 
-describe("ExplainAccess — a group in the subject is a permissive-direction lie (D3, review I-2)", () => {
+describe("ExplainAccess — the subject is a user and nothing else", () => {
   /**
-   * **THE DISCRIMINATING CASE.** `explain` evaluates the stored model, where a
-   * group principal matches; Trino has no group provider, egret writes none and
-   * there is no usersync, so the engine cannot see that membership. The page
-   * therefore answers `Allowed by grant` for access the engine refuses. The
-   * warning is at the point of choice — beside the field, the way
-   * `PrincipalPicker` carries the same fact — and appears only once a group is
-   * actually named, so an unused field is not nagging.
+   * **SP4d-2a Task 5 removed `groups` from `ExplainSubject`** — the third field
+   * removed from that struct for the third version of one reason: a
+   * caller-supplied value cannot stand in for a fact only egret can verify.
+   * `roles` and `groups` reach the evaluator EMPTY because egret serves no
+   * roles download and runs no usersync, so a policy item naming a role, or a
+   * group OTHER THAN `public`, matches nobody on any engine egret provisions.
+   * A field whose value can change no answer lies about what the endpoint
+   * does, so the input is gone and the request carries neither key.
+   *
+   * **`public` is the exception, and the reason removing the field loses
+   * nothing.** `egret-ranger-eval` matches `public` by NAME, independently of
+   * what the request carries, because Ranger does — so a policy granting to
+   * `public` decides here either way, and a caller could never have changed
+   * that by naming it. Every other group name is a value only egret could
+   * verify and egret cannot.
    */
-  test("warns beside the Groups field, but only once a group is named", async () => {
+  test("offers no Groups or Roles field and sends neither key", async () => {
     const user = userEvent.setup();
     renderPage();
 
-    expect(screen.queryByText(/no group provider or usersync/)).not.toBeInTheDocument();
-
-    await user.type(screen.getByLabelText("Groups"), "contractors{Enter}");
-
-    expect(screen.getByText(/no group provider or usersync/)).toBeInTheDocument();
-    expect(screen.getByText(/can read Allowed while the engine refuses/)).toBeInTheDocument();
-  });
-
-  /**
-   * **SP4c Task 7.** There is no Roles field to warn about any more, and its
-   * absence is the control. The live gate measured `{user: "analyst", roles:
-   * ["sp4c_cleared"]}` answering `allowed` for the user both engines refuse —
-   * a caller asserting a role the subject does not hold was believed — so the
-   * field left the wire (`ExplainSubject.roles`) exactly as SP4b-1 removed
-   * `workspaces`, and `explain` resolves the subject's roles from
-   * `access_grants` itself. Asserted on BOTH halves: the input is gone, and
-   * the request body carries no `roles` key, because a page that kept sending
-   * one against a server that ignores it would look like it still worked.
-   */
-  test("offers no Roles field and sends no roles — explain resolves them server-side", async () => {
-    const user = userEvent.setup();
-    renderPage();
-
+    expect(screen.queryByLabelText("Groups")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Roles")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/add a group/i)).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText(/add a role/i)).not.toBeInTheDocument();
 
     await submit(user);
 
     expect(mutateAsync).toHaveBeenCalledTimes(1);
     const sent = mutateAsync.mock.calls[0][0].data.subject;
+    expect(sent).not.toHaveProperty("groups");
     expect(sent).not.toHaveProperty("roles");
     expect(sent.user).toBe("alice-doe");
-  });
-
-  /**
-   * And the page says so where the answer is read: this tool reports why a
-   * subject IS allowed or refused (D9), not what would happen if they held
-   * some other role. A "what-if" tool would be a different product.
-   */
-  test("states that the subject's roles are resolved, not asserted", async () => {
-    const user = userEvent.setup();
-    renderPage();
-    await submit(user);
-
-    expect(
-      await screen.findByText(
-        /the subject.s roles are resolved here, not asserted: this answers why a subject is allowed or refused as they are, not what would happen if they held some other role/i,
-      ),
-    ).toBeInTheDocument();
   });
 });
 
@@ -261,7 +802,7 @@ describe("ExplainAccess — the subject's ref is the allocated username (fact 5/
   /**
    * **THE DISCRIMINATING CASE (review M-2).** The engine sees a bare
    * `username`; `list_principals` returns an email as well, and a page that
-   * stored the email would get `no_grant_matched` — a wrong answer that looks
+   * stored the email would get "no policy matched" — a wrong answer that looks
    * exactly like a real one, on the page built to explain why. The suggestion
    * shows `stored as …` so the operator can see which value is kept, and the
    * explain request carries that value.

@@ -339,7 +339,11 @@ fn db_err<E: std::fmt::Display>(e: E) -> CompileError {
 /// means "nothing here for this compiler," not "something is broken" —
 /// treating it as a hard error would fail an entire tag write's recompile
 /// pass over a service this compiler was never asked to produce policies for.
-fn engine_type_for(service_type: &str) -> Option<EngineType> {
+// `pub(crate)`: SP4d-2a Task 5's `explain` asks the same question of a
+// `policy.authz_services` row — which engine's plugin, if any, downloads this
+// profile — and a second copy of the match would be free to disagree with the
+// compiler about which profiles are in scope at all.
+pub(crate) fn engine_type_for(service_type: &str) -> Option<EngineType> {
     match service_type {
         "trino" => Some(EngineType::Trino),
         "starrocks" => Some(EngineType::StarRocks),
@@ -1086,7 +1090,7 @@ pub async fn recompile_service_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     service_id: i64,
 ) -> Result<CompileSummary, CompileError> {
-    let Some(compiled) = compile_desired(&mut **tx, service_id).await? else {
+    let Some(compiled) = compile_desired(tx, service_id).await? else {
         return Ok(CompileSummary::default());
     };
     apply_diff_in_tx(
@@ -1483,7 +1487,7 @@ pub async fn lock_services_in_tx(
     // the same pair ascending: the exact opposed order two transactions
     // deadlock on. Locking the expanded, sorted set here keeps every path's
     // acquisition order ascending over the same universe.
-    let expanded = services_and_tag_services_via(&mut **tx, service_ids)
+    let expanded = services_and_tag_services_via(tx, service_ids)
         .await
         .map_err(db_err)?;
     // One statement per id rather than `WHERE id = ANY(...) ORDER BY id FOR

@@ -969,6 +969,7 @@ fn finish_case(
             resource,
             // `{OWNER}` is never generated, so no decision depends on this.
             owner: None,
+            resolved_tags: None,
         },
     }
 }
@@ -1852,6 +1853,7 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
                         .with("schema", "hive")
                         .with("table", "ab"),
                     owner: None,
+                    resolved_tags: None,
                 },
             },
         },
@@ -1935,6 +1937,7 @@ fn pinned_divergences(def_json: &Value) -> Vec<Pinned> {
                         .with("table", "orders")
                         .with("column", "id"),
                     owner: None,
+                    resolved_tags: None,
                 },
             },
         },
@@ -2067,8 +2070,13 @@ fn load_engine(profile: &Profile) -> (Value, ServiceDef, EngineConfig) {
     // carries no `contextEnrichers`, and the only one either def declares is a
     // tag enricher that would try to poll a Ranger admin from the test JVM.
     // Dropping it keeps the harness hermetic without changing any decision the
-    // corpus takes: this crate reports `tagPolicies` as unmodelled and the
-    // corpus never generates one.
+    // corpus takes: the corpus never generates a `tagPolicies` block, so the
+    // one thing the key now feeds — `ServiceDef::has_tag_enricher`, which
+    // gates the SP4d-2a tag narrowing — is never consulted. Note the direction
+    // if that ever changes: removing the key yields `None` (unknown), which
+    // REFUSES rather than narrows, so a future corpus that did generate a tag
+    // block would get the conservative answer here, not a silently permissive
+    // one.
     if let Some(obj) = def_json.as_object_mut() {
         obj.remove("contextEnrichers");
     }

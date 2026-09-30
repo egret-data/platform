@@ -85,6 +85,7 @@ fn trino_request(user: &str) -> AccessRequest {
             .with("table", "orders")
             .with("column", "ssn"),
         owner: None,
+        resolved_tags: None,
     }
 }
 
@@ -103,6 +104,7 @@ fn trino_table_request(user: &str) -> AccessRequest {
             .with("schema", "sales")
             .with("table", "orders"),
         owner: None,
+        resolved_tags: None,
     }
 }
 
@@ -118,6 +120,7 @@ fn starrocks_request(user: &str) -> AccessRequest {
             .with("table", "orders")
             .with("column", "ssn"),
         owner: None,
+        resolved_tags: None,
     }
 }
 
@@ -1181,11 +1184,18 @@ fn a_disabled_mask_policy_is_dropped() {
 /// poisons an access one: `evaluateTagPolicies` runs for policy types 1 and
 /// 2 too (offset 168, before the type is branched on), so a tag policy can
 /// decide a mask.
+///
+/// The block needs a policy in it — SP4d-2a Task 1 measured an EMPTY block
+/// inert for every policy type, since the `isNotEmpty(evaluators)` branch it
+/// exits at precedes the type split. `tests/tag_tiers.rs` owns the tiers.
 #[test]
 fn envelope_constructs_poison_a_mask_decision() {
     let set: ServicePolicySet = serde_json::from_value(json!({
         "serviceName": "trino",
-        "tagPolicies": {"serviceName": "tag", "policies": []},
+        "tagPolicies": {
+            "serviceName": "tag",
+            "policies": [{"id": 70, "name": "pii", "policyType": 1}],
+        },
         "policies": [mask_policy(
             1,
             "mask ssn",

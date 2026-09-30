@@ -32,7 +32,9 @@
 //!   this reader does not implement: a policy-wide validity window, a
 //!   policy- or item-level condition, security-zone scoping, an explicit
 //!   per-access deny sitting inside an "allow" bucket, `delegateAdmin`, a
-//!   non-empty `tagPolicies` (a whole second, DENY-capable policy set),
+//!   a `tagPolicies` block carrying policies (a whole second, DENY-capable
+//!   policy set — but see [`TagPolicyBlock`]: an EMPTY block is measured
+//!   inert and is not reported),
 //!   `policyDeltas` (an incremental update, meaning `policies` is partial),
 //!   a non-empty `serviceConfig`, and a resource value / mask-or-row-filter
 //!   expression / item principal containing a Ranger runtime expression.
@@ -61,8 +63,19 @@ pub struct ServicePolicySet {
     /// dropped, not yet typed — see the module doc). `Value::Null` when
     /// the envelope omitted it.
     pub service_def: serde_json::Value,
+    /// The `tagPolicies` block's OWN `serviceDef`, round-tripped verbatim.
+    /// `Value::Null` when there is no block or the block carried no def.
+    ///
+    /// This is a SECOND def, and it is not decoration: Ranger builds context
+    /// enrichers from both defs and unions the two lists, so this one can
+    /// supply a `RangerTagEnricher` that the top-level def does not — see
+    /// `tag_policies_can_decide` in [`crate::eval`] for the measured chain.
+    /// Dropping it would leave the tag narrowing reading only half of what
+    /// decides whether tag policies can run.
+    pub tag_service_def: serde_json::Value,
     /// Envelope-level constructs this reader does not model: a non-empty
-    /// `securityZones`, `tagPolicies`, `policyDeltas`, or `serviceConfig`.
+    /// `securityZones`, `policyDeltas` or `serviceConfig`, and a `tagPolicies`
+    /// block this reader could not show inert ([`TagPolicyBlock`]).
     /// Per-policy constructs live on each [`RangerPolicy::unmodelled`]
     /// instead — use [`ServicePolicySet::all_unmodelled`] to see both.
     pub unmodelled: Vec<Unmodelled>,
@@ -251,6 +264,90 @@ pub enum ItemBucket {
     RowFilterPolicyItems,
 }
 
+/// What the envelope's `tagPolicies` block was measured to carry, for the
+/// tiers that are NOT provably inert.
+///
+/// # The tier this enum cannot express, and why
+///
+/// A block present with an **empty** `policies` list is inert, so it is not
+/// an [`Unmodelled`] construct at all and there is no variant for it here.
+/// Measured with `javap -c` on `ranger-plugins-common` 2.5.0 and 2.8.0. Both
+/// `RangerPolicyEngineImpl.evaluateTagPolicies` bodies are 256 instructions
+/// and agree on every offset and branch target up to 604. Exactly three
+/// differences, none behavioural: the `commons-lang` → `commons-lang3` move in
+/// `StringUtils.isNotEmpty`/`equals` at offsets 214 and 285, and an `ldc` →
+/// `ldc_w` at 617 inside the trailing debug-log block, which shifts the tail
+/// one byte so the final `ifeq`/`return` land at 668 in 2.8.0 against 667 in
+/// 2.5.0. Every offset cited below is therefore identical in both jars:
+///
+/// * Offsets 109-129 compute `evaluators`:
+///   `RangerPolicyRepository.getLikelyMatchPolicyEvaluators(request, tags,
+///   policyType, accessTime)`, or `null` if the tag repository itself is null.
+///   **For a realistic empty block the repository IS built and the live path
+///   is the empty LIST, not the null repository.** `PolicyEngine.<init>`
+///   builds it whenever `tagPolicies != null`, `getServiceName()` is non-empty
+///   and `getServiceDef() != null` (offsets 471-500) — there is no
+///   `getPolicies()` call in that gate — so the null-repository path is
+///   reached only by a block that also omits its service name or its def.
+/// * Offsets 131-136 branch on `CollectionUtils.isNotEmpty(evaluators)` with
+///   `ifeq 582`, jumping past the whole loop. `isNotEmpty` is false for the
+///   empty list and for null alike, so both paths land here.
+/// * Every write to the SHARED result — `setAuditResultFrom` at 508,
+///   `setAccessResultFrom` at 531 and 557, `incrementEvaluatedPoliciesCount`
+///   at 458 — is inside that loop.
+///
+/// One precision that matters if anyone re-derives this: offset 582 is not a
+/// bare `return`. It reads `result.getIsAllowed()`, branches `ifeq 596` at
+/// 587, and on the fall-through calls `setIsAccessDetermined(true)` — the
+/// `invokevirtual` at **593** (590 is the `aload 5` that begins the guarded
+/// block). That write cannot change anything on this path. The result is the
+/// one `createAccessResult` produced at caller offset 112 with `isAllowed`
+/// false, and the only block that can flip it before the call — the super-user
+/// short-circuit at caller offsets 133-165 — already calls
+/// `setIsAccessDetermined(true)` itself at 143. So the write is either
+/// unreached or idempotent, and the block is inert either way.
+///
+/// The block's own `serviceConfig` is also safely ignored here.
+/// `ServicePolicies$TagPolicies` does carry a `serviceConfig` map in both
+/// jars, so an otherwise-empty block could in principle smuggle one — but its
+/// single call site is `RangerPolicyRepository` offset 279, feeding
+/// `buildAuditPolicyEvaluators(Map)` at 282 and nothing else. The super-user
+/// `RangerPolicyEngineImpl$ServiceConfig` is built from the TOP-LEVEL
+/// `ServicePolicies.getServiceConfig()` (offsets 125-136), never from the tag
+/// block — which is why [`Unmodelled::ServiceConfig`] guards the envelope's map
+/// and this tier need not guard the block's.
+///
+/// This tier is the whole point of the distinction: `bind_trino_profile`
+/// creates `{name}_tag` with **zero** policies and egret's
+/// `/service/plugins/policies/download` embeds the block whenever the profile
+/// names a `tagService`, so every auto-bound Trino profile lands there.
+/// Refusing it would cost each of them an answer and buy nothing.
+///
+/// # Both remaining tiers can decide
+///
+/// [`TagPolicyBlock::Policies`] is the live case: `evaluateTagPolicies` runs
+/// at offset 176 of `evaluatePoliciesForOneAccessTypeNoAudit`, BEFORE the
+/// resource-policy loop that starts at 343/401, calls the full
+/// `RangerPolicyEvaluator.evaluate` at 467 and copies a determined result onto
+/// the shared result at 531. A tag policy can therefore DENY before any
+/// policy in `policies` is consulted. As of 2026-09-29 exactly one live
+/// profile is in this tier (service 52, `sp3c2-trino-live`), and its plugin
+/// has ingested the block — `tests/fixtures/tag-policies-live.json` is that
+/// download, captured from the pod's own policy cache.
+///
+/// [`TagPolicyBlock::Unreadable`] is the fail-safe: a block whose shape this
+/// reader cannot count policies in has NOT been shown inert, and reporting it
+/// as "zero policies" would fail open on any future wire change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagPolicyBlock {
+    /// The block's `policies` list has this many entries, and the count is
+    /// at least 1 — an empty list is inert and is not reported at all.
+    Policies(usize),
+    /// The block is present but is not an object carrying a `policies` array
+    /// (or a null/absent one), so its policy count could not be established.
+    Unreadable,
+}
+
 /// A construct this reader detected in a policy or envelope body but does
 /// not model. Each variant names the field, and (where applicable) exactly
 /// where it was found, so a caller — today, a human; a later task, the
@@ -270,11 +367,16 @@ pub enum Unmodelled {
     ZoneName(String),
     /// The envelope's `securityZones` map is non-empty.
     SecurityZones,
-    /// The envelope's `tagPolicies` is present: a whole second policy set,
-    /// bound to the service's tag service, that CAN deny independently of
-    /// every policy in `policies`. Dropping it would produce a confident
-    /// allow that a live tag policy actually denies.
-    TagPolicies,
+    /// The envelope's `tagPolicies` carries something this reader cannot
+    /// show inert: a whole second policy set, bound to the service's tag
+    /// service, that CAN deny independently of every policy in `policies`.
+    /// Dropping it would produce a confident allow that a live tag policy
+    /// actually denies.
+    ///
+    /// **Not reported for every block that is present** — see
+    /// [`TagPolicyBlock`] for the tier this variant does NOT fire on and the
+    /// measurement behind that.
+    TagPolicies(TagPolicyBlock),
     /// The envelope's `policyDeltas` is non-empty: this download is an
     /// INCREMENTAL update, so `policies` alone is partial (or absent).
     /// Evaluating `policies` as if it were the full set would fail open —
@@ -600,8 +702,8 @@ impl<'de> Deserialize<'de> for ServicePolicySet {
         if !raw.security_zones.is_empty() {
             unmodelled.push(Unmodelled::SecurityZones);
         }
-        if !raw.tag_policies.is_null() {
-            unmodelled.push(Unmodelled::TagPolicies);
+        if let Some(block) = classify_tag_policies(&raw.tag_policies) {
+            unmodelled.push(Unmodelled::TagPolicies(block));
         }
         if !raw.policy_deltas.is_empty() {
             unmodelled.push(Unmodelled::PolicyDeltas);
@@ -609,14 +711,51 @@ impl<'de> Deserialize<'de> for ServicePolicySet {
         if !raw.service_config.is_empty() {
             unmodelled.push(Unmodelled::ServiceConfig);
         }
+        // The block's own `serviceDef`, kept rather than dropped. `Value`
+        // indexing yields `Null` for a non-object or a missing key, which is
+        // exactly the "the envelope did not say" signal the enricher gate
+        // treats as unknown.
+        let tag_service_def = raw.tag_policies["serviceDef"].clone();
         Ok(ServicePolicySet {
             service_name: raw.service_name,
             service_id: raw.service_id,
             policy_version: raw.policy_version,
             policies: raw.policies,
             service_def: raw.service_def,
+            tag_service_def,
             unmodelled,
         })
+    }
+}
+
+/// Classify an envelope's raw `tagPolicies` value into the tier it belongs
+/// to, returning `None` for the one tier that is provably inert.
+///
+/// See [`TagPolicyBlock`] for the `javap` measurement behind each arm. The
+/// asymmetry is deliberate: "absent" and "present with no policies" are the
+/// only shapes this function is willing to call inert, and everything else —
+/// including a shape it simply does not recognise — is reported.
+fn classify_tag_policies(raw: &serde_json::Value) -> Option<TagPolicyBlock> {
+    // Absent. `Value::Null` is what `#[serde(default)]` leaves behind for a
+    // missing key AND what an explicit `"tagPolicies": null` deserializes to;
+    // Ranger's `ServicePolicies.getTagPolicies()` is null for both, so the
+    // plugin builds no tag repository and `evaluators` is null at offset 115.
+    if raw.is_null() {
+        return None;
+    }
+    let Some(obj) = raw.as_object() else {
+        return Some(TagPolicyBlock::Unreadable);
+    };
+    match obj.get("policies") {
+        // Present with an empty (or absent, or null) policy list: the inert
+        // tier. `getLikelyMatchPolicyEvaluators` has nothing to return and
+        // `CollectionUtils.isNotEmpty` is false for null and for empty alike.
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Array(policies)) if policies.is_empty() => None,
+        Some(serde_json::Value::Array(policies)) => Some(TagPolicyBlock::Policies(policies.len())),
+        // A `policies` that is not a list is a shape this reader does not
+        // understand, so it has not been shown inert.
+        Some(_) => Some(TagPolicyBlock::Unreadable),
     }
 }
 

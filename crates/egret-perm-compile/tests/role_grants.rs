@@ -19,7 +19,7 @@
 //! role" passed against the defect, because the body was correct Ranger — it
 //! just named a principal nothing resolves. So the assertions here are which
 //! USERNAMES the policy names, that the role name appears NOWHERE in the body,
-//! and that `evaluate` (what `explain` answers with) and the compiled policy
+//! and that `evaluate` (egret's own model oracle) and the compiled policy
 //! agree about the same subject.
 //!
 //! Its own test binary, so `egret-test-db` gives it a private database: a role
@@ -31,8 +31,9 @@
 //!   env -u EGRET_ALLOW_DB_SKIP cargo test -p egret-perm-compile --test role_grants
 
 use egret_metastore::Db;
+use egret_perm::eval::evaluate;
 use egret_perm::{
-    evaluate, Action, Decision, Effect, Grant, GrantOrigin, PermStore, Principal, PrincipalKind,
+    Action, Decision, Effect, Grant, GrantOrigin, PermStore, Principal, PrincipalKind,
     PrincipalSet, Reason, Scope, Subject as EvalSubject,
 };
 use egret_perm_compile::recompile_service;
@@ -302,14 +303,21 @@ async fn a_role_grant_names_its_holders_usernames_and_never_a_roles_bucket() {
     );
 }
 
-/// **The agreement test.** egret's own oracle (`evaluate`, what `explain`
-/// answers with) matches a `role` principal against `Subject::roles` by name;
-/// the compiler matches it by naming usernames. Before Task 2b those two
-/// disagreed — the oracle allowed, the engine denied, and `explain` reported an
-/// access nobody had. They must now say the SAME thing, for a holder and for a
-/// non-holder.
+/// **The agreement test.** egret's own oracle
+/// (`egret_perm::eval::evaluate`) matches a `role` principal against
+/// `Subject::roles` by name; the compiler matches it by naming usernames.
+/// Before Task 2b those two disagreed — the oracle allowed, the engine denied,
+/// and `explain` reported an access nobody had. They must now say the SAME
+/// thing, for a holder and for a non-holder.
+///
+/// **Renamed in SP4d-2a Task 5 (was
+/// `explain_and_the_compiled_policy_agree_about_a_role_granted_subject`).**
+/// `explain` no longer answers with `evaluate` — it evaluates the compiled
+/// artifact, where a role has already been expanded into usernames — so the
+/// old name named a relationship that no longer exists. The property does not
+/// change: the model's own answer and the compiled policy must not diverge.
 #[tokio::test]
-async fn explain_and_the_compiled_policy_agree_about_a_role_granted_subject() {
+async fn the_oracle_and_the_compiled_policy_agree_about_a_role_granted_subject() {
     let Some(db) = test_db().await else { return };
     let f = seed(&db).await;
 

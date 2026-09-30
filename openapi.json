@@ -6156,6 +6156,7 @@
           "perm"
         ],
         "summary": "POST because the request carries a subject, an action and a whole target\nscope — a body, not a query string. **It is nonetheless read-only**: it\nopens no transaction and issues no write. It gates on `policy:read`, not\n`policy:update`, precisely so the method does not decide the permission.",
+        "description": "# What this answers with, and why it changed (SP4d-2a)\n\nUntil SP4d-2a this handler evaluated egret's OWN permission model\n(`egret_perm::eval::evaluate`) and never read `policy.authz_policies` at\nall. The engine evaluates the compiled artifact it downloads from egret.\nThose were two implementations of one question, and they had already been\nmeasured disagreeing in production — a predecessor package caught `explain`\nreporting a decision the engine did not make. So there is now ONE answer\nand it is the engine's: the disagreement class disappears instead of\nbecoming visible.\n\nIt also removes a real blindness. Auto-bind seeds thirteen `egret-admin`\nhierarchies granting `*` on everything onto every generated profile\n(`egret_policy::default_policies`), and the model-only evaluator could not\nsee one of them: an operator asking \"why can this person read that?\" got\n`no_grant_matched` while the engine allowed.\n\nFour properties of the implementation below are load-bearing:\n\n1. **The artifact is assembled by [`artifact_for`], which mirrors\n   `download_policies` field for field and loads each profile's policy set\n   through `enabled_policies_for_service` — the same assembler the download\n   route uses, not `list_policies`.** \"What explain evaluated\" and \"what the\n   engine received\" must not be able to drift.\n2. **`roles` and `groups` are empty** — see [`ExplainSubject`].\n3. **`resolved_tags` is `None`, deliberately.** See the block at the call\n   site: egret cannot establish the antecedent the narrowing needs, so a\n   profile whose `tagPolicies` block could decide comes back `Undecidable`\n   naming that block, rather than answering confidently from a tag set\n   narrower than `RangerTagEnricher`'s.\n4. **A `write` explain is several evaluations**, one per Ranger access type\n   the action maps to on that engine, reported separately.",
         "operationId": "explain",
         "requestBody": {
           "content": {
@@ -6169,11 +6170,21 @@
         },
         "responses": {
           "200": {
-            "description": "The decision and the reasons behind it",
+            "description": "One verdict per profile over the artifact each engine downloads",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ExplainResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The target skips a resource level (a column implies a table implies a schema)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -34549,59 +34560,160 @@
           }
         }
       },
-      "ExplainReason": {
+      "ExplainAccess": {
         "type": "object",
-        "description": "One reason, with its CLASS on the wire.\n\nThe class is the deliverable. Ranger's own Access audit shows `-` for the\nmost common denial — nothing matched — so a response that carried only\n`allowed: false` would reproduce exactly the blindness `explain` exists to\nremove. `no_grant_matched` and `explicit_deny` are different facts about\nthe model and stay different here: a subject a grant's `exclude` subtracted\nmatched no grant at all, which is not the same as being denied by one.",
+        "description": "One Ranger ACCESS TYPE's verdict inside one profile.\n\n**A `write` explain is several of these, and they are never collapsed.**\nRanger has no `write`: `AccessRequest.access_type` is one string, and\n`egret_perm::engine_accesses` maps `write` to `insert,delete` on Trino and\n`insert,update,delete` on StarRocks. An operator who can insert but not\ndelete has to be able to see that, which one merged verdict cannot say.",
         "required": [
-          "kind"
+          "access_type",
+          "decision"
         ],
         "properties": {
-          "kind": {
+          "access_type": {
             "type": "string",
-            "description": "`allowed_by_grant` | `allowed_by_group_only` | `explicit_deny` |\n`no_grant_matched` | `masked_by_rule` | `filtered_by_rule` |\n`clearance_required`.\n\n`allowed_by_group_only` is an allow the DATA PLANE will refuse: the\ngrant matched only through a `group` principal, and no engine egret\nprovisions can see a group (D7). It is its own string because a caller\nparsing `kind` never sees the prose the page shows beside it."
+            "description": "The Ranger access type evaluated, verbatim — `select`, `insert`,\n`update`, `delete`."
           },
-          "grant_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
+          "decision": {
+            "$ref": "#/components/schemas/WireDecision",
+            "description": "What `egret-ranger-eval` answered for the artifact this profile serves.\nThree-valued on purpose: `Undecidable` names what stands between the\nevaluator and a defensible answer rather than guessing in either\ndirection."
           },
-          "rule_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "mask_type": {
-            "type": [
-              "string",
-              "null"
+          "attribution": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ExplainAttribution",
+                "description": "The deciding policy's `perm` model object, or `None` — see\n[`ExplainAttribution`]. Always `None` for `Undecidable`, which has no\nsingle deciding policy."
+              }
             ]
-          },
-          "filter_expr": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "tag": {
-            "type": [
-              "string",
-              "null"
+          }
+        }
+      },
+      "ExplainAttribution": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "`perm-grant-{uuid}`.",
+            "required": [
+              "grant_id",
+              "kind"
             ],
-            "description": "`clearance_required` only: the gating tag's key."
+            "properties": {
+              "grant_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "grant"
+                ]
+              }
+            }
           },
-          "required_roles": {
-            "type": [
-              "array",
-              "null"
+          {
+            "type": "object",
+            "description": "`perm-rule-{uuid}`, or `perm-rule-{uuid}-{locator}` for StarRocks'\nper-column expansion, where ONE `perm.rules` row becomes N policies and\nthe locator is the only thing that says which expansion decided.",
+            "required": [
+              "rule_id",
+              "kind"
             ],
+            "properties": {
+              "rule_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "locator": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "rule"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "`perm-clearance-{tag_id}[-{locator}]`. A clearance has no Ranger\nanalogue on the wire, so `tag` and `required_roles` are reconstructed\nhere from the `tags` row the name points at (`tags.key`, not\n`tags.name`) and from `classification_policies`. `tag` is `None` when\nthe tag row is gone — a compiled clearance can outlive its gate until\nthe next recompile, and inventing a name for it would be worse than\nsaying none is known.\n\n**`required_roles` is empty under THREE different facts, and the wire\ncannot tell them apart.** (1) The `tags` row is gone, so `tag` is\n`None` and there was no key to look a gate up by. (2) The gate declares\nonly `required_groups`, which compiles to no engine deny at all\n(D2/D7). (3) There is no `classification_policies` row for the tag at\nall — `clearance_gates_for_tags_via` filters on\n`cardinality(cp.required_roles) > 0` and the lookup here\n`.unwrap_or_default()`s, so a DELETED gate whose compiled clearance\npolicy is still being served reads exactly like an empty one. The page\nstates all three; this doc is the only place a Rust reader learns the\nfield is ambiguous, so it has to state them too.",
+            "required": [
+              "tag_id",
+              "required_roles",
+              "kind"
+            ],
+            "properties": {
+              "tag_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "tag": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "required_roles": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "locator": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "clearance"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "The `perm` model object the DECIDING policy's Ranger NAME maps back to —\n[`crate::attribute_policy_name`], resolved per decision.\n\n**`None` on the owning [`ExplainAccess`] is a real answer, not a gap.**\nFour live categories of policy have no model object at all — the\n`egret-admin`/`all` hierarchies auto-bind seeds onto every generated\nprofile, `egret-engine-mgmt`'s delegator plumbing, operator-written raw\nJSON, and Ranger's own `superuser` short-circuit — and every one of them\ncan decide a real request. They are reported by their Ranger name and id on\nthe decision itself and never dropped: dropping what egret's compiler does\nnot own is exactly the blindness this endpoint was rerouted to remove."
+      },
+      "ExplainOutcome": {
+        "type": "string",
+        "description": "Which of `explain`'s two shapes a response carries.\n\n**\"No engine serves this catalog\" is not a refusal.** Collapsing it into a\n`Denied` would tell a steward the model is withholding an access when in\nfact no plugin is ever consulted about the resource — nothing is enforcing,\nwhich is a different fact. `profiles` is empty for exactly this outcome,\nand this discriminator exists so a client never has to infer a\nsecurity-relevant fact from the absence of data (an empty list also reads\nas \"we did not look\").",
+        "enum": [
+          "per_profile",
+          "no_profile_serves_the_catalog"
+        ]
+      },
+      "ExplainProfile": {
+        "type": "object",
+        "description": "One policy profile's answer: the artifact ITS plugin downloads, evaluated\nfor its own engine.\n\nPer profile rather than once overall because a single answer cannot be\nright for two: the same `perm` grant compiles into two different policy\nsets, the two engines do not share the resource-level vocabulary the\nrequest is built from (`schema` vs `database`), and their access-type\nvocabularies are only partly the same.",
+        "required": [
+          "service_id",
+          "service_name",
+          "engine",
+          "accesses"
+        ],
+        "properties": {
+          "service_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`policy.authz_services.id`."
+          },
+          "service_name": {
+            "type": "string",
+            "description": "`policy.authz_services.name` — the name the plugin polls\n`/service/plugins/policies/download/{service}` with."
+          },
+          "engine": {
+            "$ref": "#/components/schemas/WireEngineType"
+          },
+          "accesses": {
+            "type": "array",
             "items": {
-              "type": "string"
-            },
-            "description": "`clearance_required` only: the role(s) that would clear it — holding\nany ONE is enough (`egret_perm_compile::clearance`'s \"OR across\nroles\" semantics)."
+              "$ref": "#/components/schemas/ExplainAccess"
+            }
           }
         }
       },
@@ -34626,45 +34738,41 @@
       },
       "ExplainResponse": {
         "type": "object",
+        "description": "What `explain` answers with: one verdict block per profile serving the\ntarget's catalog, over the SERVED ARTIFACT.",
         "required": [
-          "allowed",
-          "reasons",
+          "outcome",
+          "profiles",
           "tags"
         ],
         "properties": {
-          "allowed": {
-            "type": "boolean"
+          "outcome": {
+            "$ref": "#/components/schemas/ExplainOutcome"
           },
-          "reasons": {
+          "profiles": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/ExplainReason"
-            }
+              "$ref": "#/components/schemas/ExplainProfile"
+            },
+            "description": "Empty exactly when `outcome` is `no_profile_serves_the_catalog`."
           },
           "tags": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "The tag keys egret resolved as present on `target` — the input the\nrule selectors were matched against. Returned so a steward can see\nWHY a mask did or did not apply, rather than having to guess whether\nthe tag resolution or the rule was at fault."
+            "description": "The tag keys **egret** resolved as attached to `target`, for the\nsteward's information only.\n\n**This is no longer an input to anything, and it is not a complete tag\nset.** It used to be what the retired model evaluator matched rule\nselectors against. Today the engine's own tags come from\n`RangerTagEnricher`, which walks the resource hierarchy and emits\nANCESTOR tags, while `tag_keys_for_resource_via` matches\nschema/table/column by exact equality with no roll-up. So this field\nanswers \"what has egret got recorded on exactly this resource\" — useful\nwhen asking why a mask did or did not apply — and deliberately does NOT\nreach `AccessRequest::resolved_tags`, whose narrowing would be unsound\ngiven a set narrower than the enricher's. See the handler."
           }
         }
       },
       "ExplainSubject": {
         "type": "object",
-        "description": "The caller `explain` decides about.\n\n**No `workspaces` field (SP4a Task 15, D3 defect 2 — removed, not just\nignored).** It used to be caller-supplied, `#[serde(default)]` to\n`vec![]`, and the evaluator trusted it verbatim — so a caller naming just\na `user` (the natural way to call this endpoint) silently got `denied`\nfor every `workspace_members` grant, however real the compiled Ranger\npolicy made that access: the live gate measured exactly that. `explain`\nnow resolves `user`'s CURRENT workspace memberships itself\n(`crate::members::workspaces_for_username`), off the same\n`access_grants`/`users.username` truth the compiler's own expansion reads\n— a caller-supplied list is a second, driftable copy of a fact the\ndatabase already answers, and keeping the field would let a caller\noverride that fact when what it should be describing is the caller's\nprincipal, not a value only egret can verify.\n\n**And no `roles` field either (SP4c Task 7 — the same defect, on the field\nnext to it, removed for the same reason).** The SP4c live gate\n(`docs/en/plans/2026-09-28-sp4c-live-result.md`) measured both directions\nof it: naming only a `user` returned `clearance_required` for the subject\nthe engine had just served the classified column to, and\n`{\"user\":\"analyst\",\"roles\":[\"sp4c_cleared\"]}` returned `allowed` for the\nsubject the engine refuses — a caller asserting a role it does not hold was\nbelieved, so the diagnostic could be told a lie and would repeat it.\n`explain` now reads the subject's roles from `access_grants`\n(`crate::members::roles_for_username`) through the same live/`allow`/\nunexpired predicate the clearance compiler's own expansion uses. **This is\nnot a \"what-if\" endpoint**: D9 (SP4b) defines it as answering why a subject\n**is** allowed or refused, and a field that let a caller invent the\nsubject's clearance would answer a different question while looking\nauthoritative.\n\n`groups` remains caller-supplied and is deliberately left so: egret runs no\nusersync and no group provider, so a group name reaches no engine at all\n(D7/D2) and the UI already says the field is matched here and nowhere else.\nResolving it server-side would give the field an authority the data plane\ndoes not honour, which is the opposite of the fix above.",
+        "description": "The caller `explain` decides about.\n\n**It carries a `user` and nothing else**, and each of the three fields it\nhas lost was removed — never merely ignored — for one version of one\nreason: a caller-supplied value cannot be allowed to stand in for a fact\nonly egret can verify.\n\n**No `workspaces` field (SP4a Task 15, D3 defect 2).** It used to be\ncaller-supplied, `#[serde(default)]` to `vec![]`, and the retired model\nevaluator trusted it verbatim — so a caller naming just a `user` (the\nnatural way to call this endpoint) silently got `denied` for every\n`workspace_members` grant, however real the compiled Ranger policy made\nthat access; the live gate measured exactly that. SP4a's fix was for\n`explain` to resolve the memberships itself. Under SP4d-2a there is nothing\nleft to resolve: a `workspace_members` grant reaches the artifact already\nexpanded into usernames by `crate::members::expand_enumerated_principals`,\nso the subject's memberships are not an input to the answer at all.\n\n**And no `roles` field either (SP4c Task 7 — the same defect, on the field\nnext to it).** The SP4c live gate\n(`docs/en/plans/2026-09-28-sp4c-live-result.md`) measured both directions of\nit: naming only a `user` returned `clearance_required` for the subject the\nengine had just served the classified column to, and\n`{\"user\":\"analyst\",\"roles\":[\"sp4c_cleared\"]}` returned `allowed` for the\nsubject the engine refuses — a caller asserting a role it does not hold was\nbelieved, so the diagnostic could be told a lie and would repeat it. SP4c\nfixed it by reading the subject's roles from `access_grants`. SP4d-2a keeps\nthe same rule by a stronger means: the evaluator is sent NO roles at all\n(see below), so there is nothing to assert and nothing to filter. **This is\nnot a \"what-if\" endpoint**: D9 (SP4b) defines it as answering why a subject\n**is** allowed or refused, and a field that let a caller invent the\nsubject's clearance would answer a different question while looking\nauthoritative.\n\n**And no `groups` field either, as of SP4d-2a Task 5 — the third field\nremoved from this struct for the third version of one reason.** Until this\ntask `groups` was caller-supplied and matched by the model evaluator, on\nthe argument that the UI said so. `explain` now answers with the artifact\nthe engine downloads, and `roles` and `groups` reach that evaluator EMPTY:\negret serves no `/service/roles/download` and runs no usersync, so a Ranger\npolicy item naming a role or a group matches nobody on any engine egret\nprovisions (D0/D7), and Ranger's `public` — the one group name that DOES\nmatch everybody — matches whatever the request carries. A field whose value\ncan change no answer is a field that lies about what the endpoint does, so\nit is gone rather than ignored, exactly as `workspaces` and `roles` were.\n\nSending no roles at all is also the strongest available form of SP4c's rule\nthat a caller may not assert a role the subject does not hold: there is no\nrole to assert. A request that still carries `groups` is accepted and the\nkey ignored (nothing here sets `deny_unknown_fields`), so an older client\nkeeps working while answering the same question everyone else gets.",
         "required": [
           "user"
         ],
         "properties": {
           "user": {
             "type": "string"
-          },
-          "groups": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
           }
         }
       },
@@ -41139,6 +41247,983 @@
             }
           }
         }
+      },
+      "WireDecision": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "policy_name",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "allowed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "policy_name",
+              "reason",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/components/schemas/WireDenyReason"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "denied"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "See the module doc: `why` stays a `Vec`, never collapsed to one\ncause.",
+            "required": [
+              "why",
+              "kind"
+            ],
+            "properties": {
+              "why": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/WireUndecidableCause"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "undecidable"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`Decision`]."
+      },
+      "WireDenyReason": {
+        "type": "string",
+        "description": "Wire mirror of [`DenyReason`].",
+        "enum": [
+          "deny_policy_item",
+          "deny_all_else",
+          "no_policy_matched"
+        ]
+      },
+      "WireEngineType": {
+        "type": "string",
+        "description": "Wire mirror of [`EngineType`].\n\n**`lowercase`, not `snake_case`, and that is the whole point (SP4d-2a\nTask 5 review, I3).** `rename_all = \"snake_case\"` renders `StarRocks` as\n`star_rocks`, and this API surface already publishes the other spelling:\n`egret_query_api::Engine` is `rename_all = \"lowercase\"` and serialises\n`starrocks`, which is also the literal stored in\n`policy.authz_services.type` and matched by\n`egret_perm_compile::trigger::engine_type_for`. A client correlating an\n`ExplainProfile`'s `engine` with a profile's service type would otherwise\nhave to translate between two spellings of one word inside one document.\n`lowercase` gives `trino` / `starrocks` and makes them the same string.",
+        "enum": [
+          "trino",
+          "starrocks"
+        ]
+      },
+      "WireGraphProblem": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "no_sources_or_sinks"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "resource",
+              "kind"
+            ],
+            "properties": {
+              "resource": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "sink_is_not_a_valid_leaf"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "resource",
+              "kind"
+            ],
+            "properties": {
+              "resource": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "broken_parent_chain"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`GraphProblem`]."
+      },
+      "WireItemBucket": {
+        "type": "string",
+        "description": "Wire mirror of [`ItemBucket`].",
+        "enum": [
+          "policy_items",
+          "deny_policy_items",
+          "allow_exceptions",
+          "deny_exceptions",
+          "data_mask_policy_items",
+          "row_filter_policy_items"
+        ]
+      },
+      "WirePluginVersion": {
+        "type": "string",
+        "description": "Wire mirror of [`PluginVersion`]. Renamed explicitly rather than through\n`rename_all`: the source identifiers (`Ranger2_5_0`) already embed\ndigits and underscores, and `rename_all`'s case-boundary heuristic has no\ngood answer for that shape.",
+        "enum": [
+          "ranger_2_5_0",
+          "ranger_2_8_0"
+        ]
+      },
+      "WirePolicyType": {
+        "type": "string",
+        "description": "Wire mirror of [`PolicyType`].",
+        "enum": [
+          "access",
+          "data_mask",
+          "row_filter"
+        ]
+      },
+      "WireServiceDefIssue": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "resource",
+              "matcher",
+              "kind"
+            ],
+            "properties": {
+              "resource": {
+                "type": "string"
+              },
+              "matcher": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "unmodelled_matcher_class"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "resource",
+              "kind"
+            ],
+            "properties": {
+              "resource": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "quoted_case_sensitive"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "implying",
+              "implied",
+              "kind"
+            ],
+            "properties": {
+              "implying": {
+                "type": "string"
+              },
+              "implied": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "chained_implied_grants"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "policy_type",
+              "reason",
+              "kind"
+            ],
+            "properties": {
+              "policy_type": {
+                "$ref": "#/components/schemas/WirePolicyType"
+              },
+              "reason": {
+                "$ref": "#/components/schemas/WireGraphProblem"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "invalid_resource_graph"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`ServiceDefIssue`]."
+      },
+      "WireTagPolicyBlock": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "count",
+              "kind"
+            ],
+            "properties": {
+              "count": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "policies"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "unreadable"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`TagPolicyBlock`]. `Policies` carries its count as a\nJSON number (`count`), never folded into a formatted string — Task 8's\nsteward UI renders it, and SP4d-2b changes what it means."
+      },
+      "WireUndecidableCause": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "construct",
+              "kind"
+            ],
+            "properties": {
+              "construct": {
+                "$ref": "#/components/schemas/WireUnmodelled"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "envelope_construct"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "policy_name",
+              "construct",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "construct": {
+                "$ref": "#/components/schemas/WireUnmodelled"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "policy_construct"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "issue",
+              "kind"
+            ],
+            "properties": {
+              "issue": {
+                "$ref": "#/components/schemas/WireServiceDefIssue"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "service_def"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "policy_name",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "resource_owner_unknown"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "super_users_unknown"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "access_type",
+              "kind"
+            ],
+            "properties": {
+              "access_type": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "pseudo_access_type"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "policy_name",
+              "access_type",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "access_type": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "access_type_case_mismatch"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "policy_name",
+              "item_index",
+              "expr",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "item_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "expr": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "mask_expression"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "policy_name",
+              "item_index",
+              "expr",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "item_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "expr": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "row_filter_expression"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "policy_name",
+              "item_index",
+              "expr",
+              "kind"
+            ],
+            "properties": {
+              "policy_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              },
+              "policy_name": {
+                "type": "string"
+              },
+              "item_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "expr": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "row_filter_double_brackets"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "`policy_ids`/`policy_names` are the FULL tied set — see\n[`UndecidableCause::EvalOrderAmbiguous`]'s own doc for why collapsing\nthis to one id would misreport a tie this crate cannot order.",
+            "required": [
+              "policy_ids",
+              "policy_names",
+              "kind"
+            ],
+            "properties": {
+              "policy_ids": {
+                "type": "array",
+                "items": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int64"
+                }
+              },
+              "policy_names": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "eval_order_ambiguous"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "declared",
+              "service_def_name",
+              "kind"
+            ],
+            "properties": {
+              "declared": {
+                "$ref": "#/components/schemas/WireEngineType"
+              },
+              "service_def_name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "engine_mismatch"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "engine",
+              "declared",
+              "measured",
+              "kind"
+            ],
+            "properties": {
+              "engine": {
+                "$ref": "#/components/schemas/WireEngineType"
+              },
+              "declared": {
+                "$ref": "#/components/schemas/WirePluginVersion"
+              },
+              "measured": {
+                "$ref": "#/components/schemas/WirePluginVersion"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "plugin_version_mismatch"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`UndecidableCause`]. `kind` is the discriminator a\nfrontend switches on; see the module doc for how the constructs each\ncause names (`Unmodelled`, `ServiceDefIssue`) are mirrored just as\nexhaustively, one level deeper."
+      },
+      "WireUnmodelled": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "validity_schedules"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "policy_conditions"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "bucket",
+              "index",
+              "kind"
+            ],
+            "properties": {
+              "bucket": {
+                "$ref": "#/components/schemas/WireItemBucket"
+              },
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "item_conditions"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "zone_name",
+              "kind"
+            ],
+            "properties": {
+              "zone_name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "zone_name"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "security_zones"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "block",
+              "kind"
+            ],
+            "properties": {
+              "block": {
+                "$ref": "#/components/schemas/WireTagPolicyBlock"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "tag_policies"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "policy_deltas"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "service_config"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "bucket",
+              "item_index",
+              "expr",
+              "kind"
+            ],
+            "properties": {
+              "bucket": {
+                "$ref": "#/components/schemas/WireItemBucket"
+              },
+              "item_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "expr": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "mask_expression_marker"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "bucket",
+              "item_index",
+              "kind"
+            ],
+            "properties": {
+              "bucket": {
+                "$ref": "#/components/schemas/WireItemBucket"
+              },
+              "item_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "mask_condition_expr"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "bucket",
+              "item_index",
+              "expr",
+              "kind"
+            ],
+            "properties": {
+              "bucket": {
+                "$ref": "#/components/schemas/WireItemBucket"
+              },
+              "item_index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "expr": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "row_filter_expression_marker"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "resource_type",
+              "value",
+              "kind"
+            ],
+            "properties": {
+              "additional_index": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "minimum": 0
+              },
+              "resource_type": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "resource_value_expression_marker"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "bucket",
+              "index",
+              "user",
+              "kind"
+            ],
+            "properties": {
+              "bucket": {
+                "$ref": "#/components/schemas/WireItemBucket"
+              },
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "user": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "user_expression_marker"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "bucket",
+              "index",
+              "access_type",
+              "kind"
+            ],
+            "properties": {
+              "bucket": {
+                "$ref": "#/components/schemas/WireItemBucket"
+              },
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "access_type": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "explicit_deny"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "bucket",
+              "index",
+              "kind"
+            ],
+            "properties": {
+              "bucket": {
+                "$ref": "#/components/schemas/WireItemBucket"
+              },
+              "index": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "delegate_admin"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Wire mirror of [`Unmodelled`] — the construct a policy or envelope body\ncarries that this reader detected but does not model. See the module\ndoc for why this is mirrored exhaustively rather than rendered as a\n`Debug` string."
       },
       "WorkspaceDto": {
         "type": "object",

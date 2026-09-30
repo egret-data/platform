@@ -774,11 +774,27 @@ pub async fn compiler_targeted_services_via(
 }
 
 /// The `tags.key`s carried by ONE exact resource (`column = ""` means the
-/// table itself), resolved through the catalog's warehouse. SP4a Task 9's
-/// `explain` needs it: `egret_perm::evaluate` takes the tags already resolved
-/// as present on the target (it does no I/O — see `eval::selector_hits`), and
-/// an `explain` that made the caller supply them would answer a question the
-/// caller had already decided the answer to.
+/// table itself), resolved through the catalog's warehouse.
+///
+/// # ⚠ EXACT, not hierarchy-complete — do not feed this to an evaluator
+///
+/// `schema_name` / `table_name` / `column_name` are matched by string
+/// EQUALITY, so asked about `report.country` this does not return a tag
+/// attached to the table `report`. Ranger's `RangerTagEnricher` does the
+/// opposite: it walks the hierarchy and emits ancestor tags, which Ranger
+/// admits for a tag request. Every live assignment today is column-level, so
+/// the difference is invisible in current data and would ship green.
+///
+/// SP4a Task 9 added this so `explain` could hand the resolved set to
+/// `egret_perm::eval::evaluate`, which does no I/O of its own. **SP4d-2a Task 5
+/// stopped doing that.** `explain` now evaluates the artifact each engine
+/// downloads and passes `AccessRequest::resolved_tags: None`, because the
+/// narrowing that field licenses is sound only for a resolution at least as
+/// broad as the enricher's and this one is not. What `explain` still uses this
+/// for is the response's informational `tags` list — "what has egret got
+/// recorded on exactly this resource" — and nothing else. A future caller
+/// wanting a tag set an evaluator may act on needs a different, roll-up-aware
+/// query, not this one.
 pub async fn tag_keys_for_resource_via(
     conn: &mut sqlx::PgConnection,
     catalog_id: uuid::Uuid,
@@ -801,6 +817,37 @@ pub async fn tag_keys_for_resource_via(
     .bind(column)
     .fetch_all(&mut *conn)
     .await?)
+}
+
+/// `tags.key` for each of `tag_ids`, as `(id, key)` pairs — the reverse of the
+/// lookup every other reader here needs.
+///
+/// **SP4d-2a Task 5.** A compiled clearance policy's NAME carries the
+/// `tags.id` it was minted from (`perm-clearance-{tag_id}[-{locator}]`), and
+/// `egret_perm_compile::attribute_policy_name` hands that bare uuid back
+/// without touching the database. `explain` has to turn it into something a
+/// steward recognises, and into the `required_roles` the gate declares — which
+/// [`clearance_gates_for_tags_via`] answers by KEY, not by id. So this is the
+/// one hop between them.
+///
+/// It returns `tags.key`, not `tags.name`: `key` is the stable identifier the
+/// rest of this module's tag surface is addressed by
+/// ([`tag_keys_for_resource_via`], [`clearance_gates_for_tags_via`]), and the
+/// two columns are different values — `tag_name_for_key_via` exists precisely
+/// because the display name has to be looked up separately.
+pub async fn tag_keys_by_ids_via(
+    conn: &mut sqlx::PgConnection,
+    tag_ids: &[uuid::Uuid],
+) -> Result<Vec<(uuid::Uuid, String)>, PolicyStoreError> {
+    if tag_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(
+        sqlx::query_as::<_, (uuid::Uuid, String)>(r#"SELECT id, key FROM tags WHERE id = ANY($1)"#)
+            .bind(tag_ids)
+            .fetch_all(&mut *conn)
+            .await?,
+    )
 }
 
 /// The clearance gate for each of `tag_keys` that `egret_perm::evaluate` can

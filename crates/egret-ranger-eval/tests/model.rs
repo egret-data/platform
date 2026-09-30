@@ -11,7 +11,9 @@
 //! resource-value and item-user expression-marker detection (I2), and
 //! `ServicePolicySet::all_unmodelled` (I3).
 
-use egret_ranger_eval::model::{ItemBucket, RangerPolicy, ServicePolicySet, Unmodelled};
+use egret_ranger_eval::model::{
+    ItemBucket, RangerPolicy, ServicePolicySet, TagPolicyBlock, Unmodelled,
+};
 use serde_json::{json, Value};
 
 /// `tests/ranger/fixtures/service-policies.json` — a captured real Ranger
@@ -348,18 +350,28 @@ fn security_zones_at_envelope_level_are_reported() {
 /// policyDeltas (an incremental update, meaning `policies` is partial) must
 /// not be silently dropped. serviceConfig is metadata, but a defensible
 /// fourth reported construct — included per review.
+///
+/// SP4d-2a Task 1 narrowed the `tagPolicies` half: a block whose `policies`
+/// list is EMPTY is measured inert and is no longer reported, so this test now
+/// carries a block with a policy in it. The tier boundaries, the `javap`
+/// measurement behind them and the real captured block live in
+/// `tests/tag_tiers.rs`.
 #[test]
 fn tag_policies_policy_deltas_and_service_config_are_reported() {
     let body = serde_json::json!({
         "serviceName": "trino_prod", "serviceId": 1, "policyVersion": 6,
-        "tagPolicies": {"serviceName": "trino_prod_tag", "policies": []},
+        "tagPolicies": {
+            "serviceName": "trino_prod_tag",
+            "policies": [{"id": 70, "name": "pii", "policyType": 0}],
+        },
         "policyDeltas": [{"id": 99, "changeType": 1, "policy": {"id": 99}}],
         "serviceConfig": {"username": "admin"},
         "policies": []
     });
     let set: ServicePolicySet = serde_json::from_value(body).expect("parses");
     assert!(
-        set.unmodelled.contains(&Unmodelled::TagPolicies),
+        set.unmodelled
+            .contains(&Unmodelled::TagPolicies(TagPolicyBlock::Policies(1))),
         "{:?}",
         set.unmodelled
     );
